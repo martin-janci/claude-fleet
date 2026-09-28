@@ -180,11 +180,19 @@ pub fn read_local_host(s: &Store) -> bool {
 /// Set once `hub.local_host` is off: every explicit `local` target is refused.
 static LOCAL_HOST_DISABLED: AtomicBool = AtomicBool::new(false);
 
-/// The refusal for a `local` target on a hub without a local host.
-const LOCAL_DISABLED_MESSAGE: &str = "host local is disabled on this hub (hub.local_host=false)";
+/// The refusal for a `local` target where there is no local host: a hub
+/// started with `hub.local_host=false`, or a Windows desktop, which is a
+/// client only (docs/windows.md) and says so rather than naming a hub.
+pub const LOCAL_DISABLED_MESSAGE: &str = if cfg!(windows) {
+    "host local does not exist on Windows: this desktop is a client for your \
+     Linux and macOS hosts (see docs/windows.md)"
+} else {
+    "host local is disabled on this hub (hub.local_host=false)"
+};
 
 /// Turn the `local` host off for this process. Called once by `fleet-hub
-/// serve` when `hub.local_host` is false; the desktop never calls it.
+/// serve` when `hub.local_host` is false, and by the Windows desktop at
+/// startup.
 /// Idempotent, and there is no way back: a process that disabled `local`
 /// never runs anything on its own machine as a fleet host.
 pub fn disable_local_host() {
@@ -210,6 +218,39 @@ pub fn check_local_allowed(alias: &str, local_enabled: bool) -> Result<(), IpcEr
 /// again before doing so.
 pub fn ensure_local_allowed(alias: &str) -> Result<(), IpcError> {
     check_local_allowed(alias, local_host_enabled())
+}
+
+/// Put the `local` row of a process without a local host (a hub with
+/// `hub.local_host=false`, a Windows desktop) out of sight, and ghost its
+/// sessions. Returns how many sessions were retired. Idempotent.
+///
+/// The row is there because every `state.db` is seeded with one (and a hub's
+/// may be a desktop's copy). Hidden, nothing lists it; marked unreachable,
+/// nothing counts or polls it either (fleet_health, the account-usage tick);
+/// reconcile skips it regardless. `update_host_probe` is the only
+/// reachability setter, so the row's versions and last ping are written back
+/// unchanged. Its sessions would stay live forever, since nothing probes
+/// `local` here, and every click on one would hit the refusal: they are
+/// ghosted instead (dismissable, reaped by the routine prune).
+pub fn retire_local_host(s: &Store, now: i64) -> Result<usize, String> {
+    let local_host = crate::service::projects::LOCAL_HOST;
+    let hosts = s.list_hosts().map_err(|e| format!("list hosts: {e}"))?;
+    if let Some(local) = hosts.iter().find(|h| h.alias == local_host) {
+        s.set_host_hidden(local_host, true)
+            .map_err(|e| format!("hide the local host: {e}"))?;
+        if local.reachable {
+            s.update_host_probe(
+                local_host,
+                false,
+                local.claude_version.as_deref(),
+                local.tmux_version.as_deref(),
+                local.last_pinged_at.unwrap_or(0),
+            )
+            .map_err(|e| format!("mark the local host unreachable: {e}"))?;
+        }
+    }
+    retire_local_sessions(s, now)
+        .map_err(|e| format!("retire the local host's sessions: {}", e.message))
 }
 
 /// The `lost_reason` of a session a hub without a local host retired.
@@ -354,6 +395,8 @@ mod tests {
     fn check_local_allowed_refuses_only_local_when_disabled() {
         let e = check_local_allowed("local", false).unwrap_err();
         assert_eq!(e.code, crate::ipc_error::codes::E_NOTFOUND);
+        assert_eq!(e.message, LOCAL_DISABLED_MESSAGE);
+        #[cfg(unix)]
         assert_eq!(
             e.message,
             "host local is disabled on this hub (hub.local_host=false)"

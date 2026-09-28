@@ -93,6 +93,17 @@ pub struct TrackerConfig {
     /// confirms goes to `TrackerSettings::section_map`, which wins.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub section_map: std::collections::BTreeMap<String, String>,
+    /// Asana: the section names (lower case, trimmed, deduplicated, at most
+    /// `asana::MAX_UNMAPPED_SECTIONS`) the keyword rule could NOT classify —
+    /// today's `todo`. What the `status_map` decision adapter may propose a
+    /// category for (docs/decisions.md). Older rows parse without it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmapped_sections: Vec<String>,
+    /// Asana: each project's section names in board order (lower case),
+    /// as `(project gid, names)`, at most `asana::MAX_SECTIONS_PER_PROJECT`
+    /// per project. A section's position is a strong hint of its stage.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_sections: Vec<(String, Vec<String>)>,
 }
 
 /// What the ADMIN set for a tracker (migration 050, work graph M6), kept
@@ -760,7 +771,9 @@ pub fn is_allowed_tracker_host(host: &str) -> bool {
 }
 
 /// Validate a credential reference: `env:NAME` (`[A-Za-z_][A-Za-z0-9_]*`) or
-/// `file:/absolute/path` (no `..`, no control characters).
+/// `file:/absolute/path` (no `..`, no control characters). Absolute by this
+/// machine's rules: the file is read here, so on a Windows desktop that is
+/// `file:C:\\…`.
 pub fn validate_credential_ref(r: &str) -> Result<(), IpcError> {
     let bad = |why: &str| {
         IpcError::new(
@@ -779,8 +792,14 @@ pub fn validate_credential_ref(r: &str) -> Result<(), IpcError> {
         return Ok(());
     }
     if let Some(path) = r.strip_prefix("file:") {
-        if !path.starts_with('/')
-            || path.split('/').any(|c| c == "..")
+        let p = std::path::Path::new(path);
+        // A Windows UNC path (`\\server\share`) is absolute too, but
+        // reading it opens an SMB session that hands the server the user's
+        // NTLM credentials. A credential file is local.
+        let unc = cfg!(windows) && (path.starts_with("\\\\") || path.starts_with("//"));
+        if unc
+            || !p.is_absolute()
+            || p.components().any(|c| c == std::path::Component::ParentDir)
             || path.chars().any(char::is_control)
         {
             return Err(bad("must name an absolute path without .."));
@@ -793,14 +812,14 @@ pub fn validate_credential_ref(r: &str) -> Result<(), IpcError> {
 /// Read a credential reference. `None` when it cannot be read (unset
 /// variable, missing file, empty value); the reason is logged without the
 /// value.
-fn read_credential_ref(r: &str) -> Option<String> {
+pub(super) fn read_credential_ref(r: &str) -> Option<String> {
     let value = if let Some(name) = r.strip_prefix("env:") {
         std::env::var(name).ok()
     } else if let Some(path) = r.strip_prefix("file:") {
         match std::fs::read_to_string(path) {
             Ok(v) => Some(v),
             Err(e) => {
-                tracing::warn!("tracker credential file {path} unreadable: {}", e.kind());
+                tracing::warn!("credential file {path} unreadable: {}", e.kind());
                 None
             }
         }

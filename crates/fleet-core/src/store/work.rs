@@ -19,8 +19,102 @@ use rusqlite::OptionalExtension;
 use std::collections::HashMap;
 
 /// Why a link exists, as far as this slice can set it. Detection sources
-/// (branch, pr, url, prompt …) arrive with roadmap M4.
-pub const WORK_LINK_SOURCES: &[&str] = &["manual", "started", "agent"];
+/// (branch, pr, url, prompt …) arrive with roadmap M4. `agent_started` is
+/// a ticket start an agent made (D34): the same start as `started`, but
+/// not a person's decision.
+pub const WORK_LINK_SOURCES: &[&str] = &["manual", "started", "agent", "agent_started"];
+
+/// The sources that record a PERSON's decision: `manual` (a person linked,
+/// confirmed or rejected it) and `started` (a person started the session
+/// for it). Every other source is fleet's or an agent's (`agent`,
+/// `agent_started`). Only a person may overturn a person's rejection, and
+/// only these count as a person's in usage, auto-trust and write-back.
+pub const PERSON_SOURCES: &[&str] = &["manual", "started"];
+
+/// The state signals a person's unlink holds a target against (R9u,
+/// migration 070): `branch` (a branch name: the session's, or its pull
+/// request's head) and `pr` (a pull request, for its closing references).
+pub const WORK_UNLINK_SIGNALS: &[&str] = &["branch", "pr"];
+
+/// The most `work_unlinks` rows one participant keeps (the newest).
+pub const WORK_UNLINKS_MAX: i64 = 50;
+
+/// Who makes a link decision. The decider, not what a caller claims,
+/// decides the `source` a decision records: work-link labels must say
+/// whether a person or an agent decided. The default is a person: the
+/// desktop's commands are always a person's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Decider {
+    /// A person: the desktop, the master token, a paired person's client.
+    /// Records `manual`.
+    #[default]
+    Person,
+    /// An agent: a per-host token (the host's own Claude) or the operator
+    /// (the UX agent's client). Records `agent`.
+    Agent,
+}
+
+impl Decider {
+    /// The `source` a decision by this decider records.
+    pub fn source(self) -> &'static str {
+        match self {
+            Decider::Person => "manual",
+            Decider::Agent => "agent",
+        }
+    }
+
+    /// The `source` a ticket start by this decider records: `started` for
+    /// a person, `agent_started` for an agent — the same start, but never a
+    /// person's decision (usage, auto-trust, write-back).
+    pub fn start_source(self) -> &'static str {
+        match self {
+            Decider::Person => "started",
+            Decider::Agent => "agent_started",
+        }
+    }
+}
+
+/// What an agent's decision does to a live link a decision already settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AgentOver {
+    /// Nothing a person decided is in the way: write the agent's decision.
+    Write,
+    /// A person already decided the same way: keep their decision (its
+    /// source and time) — a confirm only makes it primary again.
+    KeepPersons,
+}
+
+/// An AGENT deciding `new_state` over the live link `link_id` (now
+/// `old_state` by `old_source`): `E_FORBIDDEN` when that would turn a
+/// person's rejection ("Not this") into a link, [`AgentOver::KeepPersons`]
+/// when a person already decided the same way. The one rule both decision
+/// paths share (`decide_session_work`, `decide_work_link`).
+pub(super) fn agent_over_decision(
+    session_id: i64,
+    link_id: i64,
+    old_state: &str,
+    old_source: &str,
+    new_state: &str,
+) -> Result<AgentOver, IpcError> {
+    if !PERSON_SOURCES.contains(&old_source) {
+        return Ok(AgentOver::Write);
+    }
+    if old_state == "rejected" && new_state == "confirmed" {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!(
+                "a person rejected this work for session {session_id} (work link {link_id}); \
+                 an agent cannot overturn a person's rejection — ask the person to link it"
+            ),
+        )
+        .with_details(serde_json::json!({ "link_id": link_id, "reason": "rejected_by_person" })));
+    }
+    Ok(if old_state == new_state {
+        AgentOver::KeepPersons
+    } else {
+        AgentOver::Write
+    })
+}
 
 /// Longest accepted work key / free-form work reference.
 pub const WORK_REF_MAX_CHARS: usize = 64;
@@ -103,7 +197,7 @@ pub struct WorkLinkRow {
     pub ref_key: Option<String>,
     #[serde(default)]
     pub participant_id: Option<i64>,
-    /// `confirmed` | `rejected`.
+    /// `confirmed` | `suggested` | `rejected`.
     pub state: String,
     pub source: String,
     #[serde(default)]
@@ -588,6 +682,12 @@ impl Store {
     /// primary). Idempotent per (session, target): re-deciding updates the
     /// one live link instead of adding another. Emits `session_updated`, so
     /// the row's `work` follows.
+    ///
+    /// A person's rejection is overturned only by a person: confirming a
+    /// target whose live link a person rejected, with a source outside
+    /// [`PERSON_SOURCES`] (an agent's `link`), is `E_FORBIDDEN` and writes
+    /// nothing. Such a decision the same way a person already decided keeps
+    /// the person's (a confirm only makes it primary again).
     fn decide_session_work(
         &self,
         session_id: i64,
@@ -636,22 +736,22 @@ impl Store {
         let primary = state == "confirmed" && (take_primary || !has_primary);
 
         let tx = self.conn.unchecked_transaction()?;
-        let existing: Option<(i64, i64)> = self
+        let existing: Option<(i64, String, String, i64)> = self
             .conn
             .query_row(
-                "SELECT id, version FROM work_links \
+                "SELECT id, state, source, version FROM work_links \
                  WHERE participant_id = ?1 AND ended_at IS NULL \
                    AND ((item_id IS ?2 AND ref_key IS ?3) OR (?2 IS NOT NULL AND item_id = ?2)) \
                  ORDER BY id LIMIT 1",
                 rusqlite::params![participant, item_id, ref_key],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
         if let Some(want) = expected {
-            let have = existing.map_or(0, |(_, v)| v);
+            let have = existing.as_ref().map_or(0, |(_, _, _, v)| *v);
             if have != want {
-                return Err(match existing {
-                    Some((id, _)) => self.link_conflict(id)?,
+                return Err(match &existing {
+                    Some((id, _, _, _)) => self.link_conflict(*id)?,
                     None => super::work_view::version_conflict(
                         "this session's link to that work",
                         0,
@@ -660,7 +760,20 @@ impl Store {
                 });
             }
         }
-        let existing = existing.map(|(id, _)| id);
+        let mut keep = AgentOver::Write;
+        if let Some((id, old_state, old_source, _)) = &existing {
+            if !PERSON_SOURCES.contains(&source) {
+                keep = agent_over_decision(session_id, *id, old_state, old_source, state)?;
+            }
+        }
+        let existing = existing.map(|(id, _, _, _)| id);
+        if let (AgentOver::KeepPersons, Some(id), false) = (keep, existing, primary) {
+            // A person rejected it already (or confirmed it, and this
+            // confirm takes no primary): nothing to write.
+            return self
+                .get_work_link(id)?
+                .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished"));
+        }
         if primary {
             self.conn.execute(
                 "UPDATE work_links SET is_primary = 0 \
@@ -669,6 +782,15 @@ impl Store {
             )?;
         }
         let id = match existing {
+            // A person confirmed it already: it becomes primary again, and
+            // stays the person's decision.
+            Some(id) if keep == AgentOver::KeepPersons => {
+                self.conn.execute(
+                    "UPDATE work_links SET is_primary = 1 WHERE id = ?1",
+                    rusqlite::params![id],
+                )?;
+                id
+            }
             // A decision over a suggestion keeps its evidence and rule, so
             // the link can still say what proposed it. Re-linking as a
             // secondary leaves `is_primary` as it is: a secondary stays one,
@@ -724,8 +846,11 @@ impl Store {
     }
 
     /// Say that `session_id` works on `target`; it becomes the session's
-    /// primary work. `source`: `manual` (a person), `started` (the session
-    /// was created for it), `agent` (the in-session agent declared it).
+    /// primary work. `source`: `manual` (a person), `started` (a person
+    /// created the session for it), `agent` (an agent declared it),
+    /// `agent_started` (an agent created the session for it). An agent's
+    /// link never overturns a person's rejection of the same target
+    /// (`E_FORBIDDEN`).
     pub fn link_session_work(
         &self,
         session_id: i64,
@@ -750,14 +875,23 @@ impl Store {
         self.decide_session_work_as(session_id, target, "confirmed", source, primary, expected)
     }
 
-    /// [`Self::reject_session_work`] as a compare-and-set (M14.1c).
+    /// [`Self::reject_session_work`] recorded as `decider`'s decision and as
+    /// a compare-and-set (M14.1c) when `expected` is given.
     pub fn reject_session_work_as(
         &self,
         session_id: i64,
         target: WorkTarget<'_>,
+        decider: Decider,
         expected: Option<i64>,
     ) -> Result<WorkLinkRow, IpcError> {
-        self.decide_session_work_as(session_id, target, "rejected", "manual", true, expected)
+        self.decide_session_work_as(
+            session_id,
+            target,
+            "rejected",
+            decider.source(),
+            true,
+            expected,
+        )
     }
 
     /// `E_CONFLICT` naming link `link_id`'s current state (work graph
@@ -905,19 +1039,26 @@ impl Store {
     /// rejected link that detection had proposed goes back to a suggestion,
     /// keeping its evidence. A link made by hand, with nothing that proposed
     /// it, is refused — remove it instead (`unlink`). A suggestion is left
-    /// as it is (idempotent).
-    pub fn reconsider_work_link(&self, session_id: i64, link_id: i64) -> Result<(), IpcError> {
+    /// as it is (idempotent). An agent never undoes a person's decision
+    /// (D34): undo, then confirm, would overturn a person's rejection in two
+    /// steps.
+    pub fn reconsider_work_link(
+        &self,
+        session_id: i64,
+        link_id: i64,
+        decider: Decider,
+    ) -> Result<(), IpcError> {
         let participant = self.work_participant(session_id)?;
-        let row: Option<(String, Option<String>, Option<String>)> = self
+        let row: Option<(String, String, Option<String>, Option<String>)> = self
             .conn
             .query_row(
-                "SELECT state, rule, evidence FROM work_links \
+                "SELECT state, source, rule, evidence FROM work_links \
                  WHERE id = ?1 AND participant_id = ?2 AND ended_at IS NULL",
                 rusqlite::params![link_id, participant],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        let Some((state, rule, evidence)) = row else {
+        let Some((state, source, rule, evidence)) = row else {
             return Err(IpcError::new(
                 codes::E_NOTFOUND,
                 format!("session {session_id} has no live work link {link_id}"),
@@ -934,6 +1075,18 @@ impl Store {
                     "work link {link_id} was made by hand, not proposed: remove it (unlink) \
                      instead of undoing it"
                 ),
+            ));
+        }
+        if decider == Decider::Agent && PERSON_SOURCES.contains(&source.as_str()) {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                format!(
+                    "a person decided work link {link_id} for session {session_id}; an agent \
+                     cannot undo a person's decision — ask the person"
+                ),
+            )
+            .with_details(
+                serde_json::json!({ "link_id": link_id, "reason": "decided_by_person" }),
             ));
         }
         let tx = self.conn.unchecked_transaction()?;
@@ -973,26 +1126,96 @@ impl Store {
         Ok(())
     }
 
-    /// Say that `session_id` does NOT work on `target`. Sticky: detection
-    /// must never re-propose it; only a later explicit link overrides it.
+    /// Say that `session_id` does NOT work on `target` (a person's "Not
+    /// this"). Sticky: detection must never re-propose it; only a later
+    /// explicit link by a person overrides it. Test shorthand for a
+    /// person's reject: every production path names its decider
+    /// ([`Self::reject_session_work_as`]).
+    #[cfg(test)]
     pub fn reject_session_work(
         &self,
         session_id: i64,
         target: WorkTarget<'_>,
     ) -> Result<WorkLinkRow, IpcError> {
-        self.decide_session_work(session_id, target, "rejected", "manual")
+        self.reject_session_work_by(session_id, target, Decider::Person)
+    }
+
+    /// [`Self::reject_session_work`] recorded as `decider`'s decision.
+    pub fn reject_session_work_by(
+        &self,
+        session_id: i64,
+        target: WorkTarget<'_>,
+        decider: Decider,
+    ) -> Result<WorkLinkRow, IpcError> {
+        self.decide_session_work(session_id, target, "rejected", decider.source())
     }
 
     /// Remove one live link of `session_id` (a mistaken link, not a
     /// rejection: the target may be proposed again). `false` when the link
     /// does not exist, is not this session's, or has already ended — ended
-    /// links are history and are never removed here.
+    /// links are history and are never removed here. An agent's unlink; a
+    /// person's goes through [`Self::unlink_session_work_held`].
     pub fn unlink_session_work(&self, session_id: i64, link_id: i64) -> Result<bool, IpcError> {
-        let n = self.conn.execute(
-            "DELETE FROM work_links WHERE id = ?1 AND ended_at IS NULL AND participant_id = \
-               (SELECT id FROM participants WHERE session_id = ?2 AND retired_at IS NULL)",
-            rusqlite::params![link_id, session_id],
-        )?;
+        self.unlink_session_work_held(session_id, link_id, &[])
+    }
+
+    /// [`Self::unlink_session_work`] by a PERSON whose correction must hold
+    /// against the unchanged state signal that named the link's target
+    /// (R9u, D34): with the delete, in one savepoint, write one
+    /// `work_unlinks` row per `(signal, value)` in `holds` (`branch` or
+    /// `pr`, see [`WORK_UNLINK_SIGNALS`]) for the link's target. Detection
+    /// then drops a state candidate for that target while the signal's
+    /// value is the same. Nothing is written when the link is not removed.
+    /// A participant keeps its newest [`WORK_UNLINKS_MAX`] rows.
+    pub fn unlink_session_work_held(
+        &self,
+        session_id: i64,
+        link_id: i64,
+        holds: &[(&str, String)],
+    ) -> Result<bool, IpcError> {
+        if let Some((signal, _)) = holds.iter().find(|(s, _)| !WORK_UNLINK_SIGNALS.contains(s)) {
+            return Err(IpcError::new(
+                codes::E_INTERNAL,
+                format!("unknown unlink signal {signal:?}"),
+            ));
+        }
+        let n = self.in_savepoint("unlink_session_work", |c| -> Result<usize, IpcError> {
+            let link: Option<(i64, Option<i64>, Option<String>)> = c
+                .query_row(
+                    "SELECT participant_id, item_id, ref_key FROM work_links \
+                     WHERE id = ?1 AND ended_at IS NULL AND participant_id = \
+                       (SELECT id FROM participants WHERE session_id = ?2 \
+                          AND retired_at IS NULL)",
+                    rusqlite::params![link_id, session_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let Some((participant, item_id, ref_key)) = link else {
+                return Ok(0);
+            };
+            let now = now_unix();
+            for (signal, value) in holds {
+                c.execute(
+                    "INSERT INTO work_unlinks (participant_id, item_id, ref_key, signal, value, at) \
+                     SELECT ?1, ?2, ?3, ?4, ?5, ?6 WHERE NOT EXISTS ( \
+                       SELECT 1 FROM work_unlinks WHERE participant_id = ?1 \
+                         AND item_id IS ?2 AND ref_key IS ?3 AND signal = ?4 AND value = ?5)",
+                    rusqlite::params![participant, item_id, ref_key, signal, value, now],
+                )?;
+            }
+            if !holds.is_empty() {
+                c.execute(
+                    "DELETE FROM work_unlinks WHERE participant_id = ?1 AND id NOT IN \
+                       (SELECT id FROM work_unlinks WHERE participant_id = ?1 \
+                         ORDER BY id DESC LIMIT ?2)",
+                    rusqlite::params![participant, WORK_UNLINKS_MAX],
+                )?;
+            }
+            Ok(c.execute(
+                "DELETE FROM work_links WHERE id = ?1",
+                rusqlite::params![link_id],
+            )?)
+        })?;
         if n > 0 {
             self.bump_session_for_work(session_id)?;
             self.emit_session(session_id)?;
@@ -1060,9 +1283,11 @@ impl Store {
     /// unless it already has a live link to that target — a confirmed one
     /// means the work is carried already, a rejected one is sticky. It
     /// becomes primary only when the participant has no primary work yet.
-    /// `true` when a link was written.
+    /// `true` when a link was written. `session_id` is the participant's
+    /// session, which a settled suggestion's timeline event goes to.
     fn carry_link(
         &self,
+        session_id: i64,
         participant: i64,
         item_id: Option<i64>,
         ref_key: Option<&str>,
@@ -1072,13 +1297,40 @@ impl Store {
         // A carry is a decision fleet makes for the person: it settles a
         // live suggestion of the same target rather than sitting beside it.
         // The same target is the same item however it was spelled (by id,
-        // or by its key), as `decide_session_work` matches it.
-        self.conn.execute(
-            "DELETE FROM work_links WHERE participant_id = ?1 AND ended_at IS NULL \
-               AND state = 'suggested' \
-               AND ((item_id IS ?2 AND ref_key IS ?3) OR (?2 IS NOT NULL AND item_id = ?2))",
-            rusqlite::params![participant, item_id, ref_key],
-        )?;
+        // or by its key), as `decide_session_work` matches it. The
+        // suggestion's row goes, but its outcome stays as a
+        // `work_suggestion_withdrawn` event, reason `carried` (D34).
+        let settled: Vec<i64> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT id FROM work_links WHERE participant_id = ?1 AND ended_at IS NULL \
+                   AND state = 'suggested' \
+                   AND ((item_id IS ?2 AND ref_key IS ?3) OR (?2 IS NOT NULL AND item_id = ?2)) \
+                 ORDER BY id",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![participant, item_id, ref_key], |r| {
+                r.get(0)
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if !settled.is_empty() {
+            let conversation: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT claude_session_id FROM sessions WHERE id = ?1",
+                    rusqlite::params![session_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            for link_id in settled {
+                self.withdraw_suggestion(
+                    session_id,
+                    conversation.as_deref(),
+                    link_id,
+                    super::work_detect::WITHDRAWN_CARRIED,
+                )?;
+            }
+        }
         let exists: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM work_links WHERE participant_id = ?1 \
                AND ended_at IS NULL \
@@ -1143,7 +1395,14 @@ impl Store {
         let participant = self.ensure_participant_for_session(session_id)?;
         let mut n = 0;
         for (item_id, ref_key, role) in targets {
-            if self.carry_link(participant, item_id, ref_key.as_deref(), "resumed", &role)? {
+            if self.carry_link(
+                session_id,
+                participant,
+                item_id,
+                ref_key.as_deref(),
+                "resumed",
+                &role,
+            )? {
                 n += 1;
             }
         }
@@ -1171,6 +1430,7 @@ impl Store {
         // Primary first, so the fork's primary is the source's.
         for l in &links {
             if self.carry_link(
+                to_session,
                 participant,
                 l.item_id,
                 l.ref_key.as_deref(),
@@ -1195,7 +1455,14 @@ impl Store {
     pub fn link_resumed_work(&self, session_id: i64, key: &str) -> Result<bool, IpcError> {
         let (item_id, ref_key) = self.resolve_work_target(WorkTarget::Key(key))?;
         let participant = self.work_participant(session_id)?;
-        let wrote = self.carry_link(participant, item_id, ref_key.as_deref(), "resumed", "work")?;
+        let wrote = self.carry_link(
+            session_id,
+            participant,
+            item_id,
+            ref_key.as_deref(),
+            "resumed",
+            "work",
+        )?;
         if wrote {
             self.bump_session_for_work(session_id)?;
             self.emit_session(session_id)?;
@@ -1240,6 +1507,7 @@ impl Store {
         }
         let participant = self.work_participant(child_session)?;
         let wrote = self.carry_link(
+            child_session,
             participant,
             primary.item_id,
             primary.ref_key.as_deref(),
@@ -1512,6 +1780,53 @@ mod tests {
             .unwrap();
         assert_eq!(back.id, r.id);
         assert_eq!(back.state, "confirmed");
+    }
+
+    /// D34 label hygiene: an in-session agent's `link` must not turn a
+    /// person's "Not this" into the session's primary work. A person (and
+    /// only a person) may still correct their own rejection.
+    #[test]
+    fn an_agent_cannot_overturn_a_persons_rejection() {
+        let s = Store::open_in_memory().unwrap();
+        let sid = seed(&s, "dev");
+        let r = s
+            .reject_session_work(sid, WorkTarget::Key("ABC-1"))
+            .unwrap();
+
+        let err = s
+            .link_session_work(sid, WorkTarget::Key("abc-1"), "agent")
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_FORBIDDEN, "{}", err.message);
+        assert!(err.message.contains("person rejected"), "{}", err.message);
+        let links = s.session_work_links(sid).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            (
+                links[0].id,
+                links[0].state.as_str(),
+                links[0].source.as_str()
+            ),
+            (r.id, "rejected", "manual"),
+            "nothing written"
+        );
+        assert!(!links[0].is_primary);
+
+        // An agent's link to OTHER work is unaffected, and its refusal left
+        // no primary cleared behind it.
+        let other = s
+            .link_session_work(sid, WorkTarget::Key("DEF-2"), "agent")
+            .unwrap();
+        assert!(other.is_primary);
+        assert!(s
+            .link_session_work(sid, WorkTarget::Key("ABC-1"), "agent")
+            .is_err());
+        assert!(s.get_work_link(other.id).unwrap().unwrap().is_primary);
+
+        // The person's correction still wins.
+        let back = s
+            .link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        assert_eq!((back.id, back.state.as_str()), (r.id, "confirmed"));
     }
 
     #[test]

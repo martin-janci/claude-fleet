@@ -11,7 +11,7 @@
 //! | Rule | Condition | Outcome |
 //! |---|---|---|
 //! | R1 | a person's `confirmed` / `rejected` decision | final: never touched |
-//! | R2 | `explicit` (`started`, `agent`, carried links) | confirmed (not made here) |
+//! | R2 | `explicit` (`started`, `agent`, `agent_started`, carried links) | confirmed (not made here) |
 //! | R3 | exactly one strong state candidate, trusted project | confirmed, auto |
 //! | R3b | the same, untrusted project | a pre-selected suggestion |
 //! | R3u | the same, but no tracker can resolve it (`owner/repo#n` without a GitHub tracker) | a pre-selected suggestion, even when trusted |
@@ -21,6 +21,7 @@
 //! | R7 | a state signal's value changes | the auto link it made ENDS; suggestions it made go |
 //! | R8 | a key two trackers claim | never automatic: a suggestion |
 //! | R9 | a rejected (participant, target) pair | never proposed again, from any signal |
+//! | R9u | a person cleared (unlinked) a link a state signal named, and that signal's value is unchanged | the state candidate is dropped before resolving (`detect`, not here; migration 070): not re-made from the same branch / PR; events still count |
 //!
 //! | R11 | an agent's inference, answering the classification nudge (`agent_inferred`, M4.6) | a pre-selected suggestion, never confirmed; decays at the next conversation boundary |
 //!
@@ -98,11 +99,6 @@ impl Signal {
             Signal::PromptKey | Signal::PromptIssue => "prompt",
             Signal::AgentInferred => "agent_inferred",
         }
-    }
-
-    /// A state signal: only its present value is a candidate (C10).
-    pub fn is_state(self) -> bool {
-        matches!(self, Signal::Branch | Signal::PrHead | Signal::PrClosing)
     }
 }
 

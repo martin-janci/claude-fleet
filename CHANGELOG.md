@@ -8,6 +8,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.3.3] - 2026-09-28
+
+### Added
+- **work:** D31's switch on the desktop and in fleet-hub org set
+- **hub:** fleet-hub decide proposals apply|reject <run>
+- **work:** Jev's section proposals in Settings → Work (assist)
+- **desktop:** status_map_proposals and decide_status_map_proposal commands
+- **decide:** a person applies, corrects or rejects one status_map proposal
+- **work:** the Work view's desktop commands and work:changed (work graph M14.1d)
+- **hub:** decide bench --provider haiku --haiku-host ALIAS
+- **decide:** haiku provider in the work_link bench, J1 haiku line judged
+- **decide:** haiku provider in the status_map bench, J3 haiku line judged
+- **decide:** claude -p haiku baseline over SSH (D33)
+- **hub:** fleet-hub decide bench status-map and work-link --shape
+- **decide:** J1 bench acceptance, calibration and the choice+noul shape
+- **decide:** offline status_map benchmark (J3 phase 0) and calibration
+- **work:** the Work view's writes and compare-and-set (work graph M14.1c)
+- **usage:** book tokens to the transcript's UTC day, keep first-read backfill apart, and label the report's two populations
+- **desktop:** draw the context chip at the hub's context_red_pct instead of a local 70/90
+- **hub:** fleet-hub decide bench work-link
+- **decide:** offline work_link benchmark, J1 phase 0
+- **store:** read-only queries for the work_link benchmark
+- **hub:** fleet-hub decide proposals and tracker section-map
+- **decide:** status_map adapter for Asana sections, shadow/assist only (J3)
+- **asana:** keep unclassified section names and board order at probe
+- **attention:** stop_failed, context_full, stale_working and ci_failing reasons; one context threshold (health.context_red_pct)
+- **work:** the Work view's reads and org-bound clients (work graph M14.1b)
+- **reconcile:** a stale working row ages out to idle (stale_working_at, reconcile.stale_working_secs)
+- **hub:** fleet-hub decide set-key|clear-key|status|runs, org set --jev
+- **orgs:** per-org Jev consent in Organisations (D31)
+- **decide:** the decision envelope and Jev client, off by default (D35, D36)
+- **desktop:** resume the hub event stream with Last-Event-ID, re-list only on resumed:false, and refetch projects and work after a gap
+- **store:** decision_runs, decision_secrets and org Jev consent (D31, D37)
+- **hub:** fleet_health.hub tick stats, /metrics reconcile and fleet gauges, tunnels_mode and peer_links_total, and WARN/INFO lines for usage failures and stuck transitions
+- **hub:** local language census for the Jev evaluation (D40)
+- **hub:** warn on a routable plaintext bind, throttle repeated bad bearers per address, and put the behind-proxy compose on the proxy network
+- **work:** the Work view's backend (work graph M14)
+- **deploy:** hub backup and upgrade scripts, the .env-pinned behind-proxy compose, and the backup/restore runbook
+- **ui:** fork sheet — choose the new session's worktree
+- **ui:** reply action row — copy, quote, retry, fork, rewind
+- route rewind_conversation from the desktop
+- **mcp:** rewind_conversation tool
+- **rewind:** one engine for fork, rewind and retry
+- **rewind:** host-side script that truncates a transcript into a new id
+- **transcript:** carry each turn's prompt uuid as a truncation anchor
+
+### Changed
+- **hub-e2e:** space the bad-bearer checks by AUTH_FAIL_INTERVAL
+- **decide:** status_map exposes question_for for the benchmark
+- **reconcile:** write each host's rows as its probe completes instead of after the slowest host
+- **work:** the Work view end to end on a real hub; tracker state wording
+- **release:** sign macOS bundles with the Apple Development Team ID
+- **work:** desktop Work view UI checkpoint (review fix pass in progress)
+- **rewind:** cover the no-project and no-claude-id refusals
+- **rewind:** harden the gsub-trap and shell-quoting tests
+
+### Fixed
+- **store:** migration 071 records version 71, not 68
+- **decide:** collapse the local-item guard into its match arm (clippy 1.98)
+- **decide:** haiku stays inside the org boundary and sends its prompt on stdin
+- **work:** a person's "Clear work" holds against the unchanged branch or PR
+- **timeline:** one status_change per transition from either writer, one stuck event per episode
+- **work:** fence fleet_health totals for org-bound clients
+- **work:** keep a suggestion a carry settles as a timeline event
+- **work:** an agent's ticket start or named work is never a person's link
+- **work:** auto-trust counts only confirmed branch suggestions
+- **startup:** log the backend-resolve steps and bound the keychain read to 10 s
+- **work:** keep withdrawn and decayed suggestions as timeline events
+- **work:** record who decided a work link, person or agent
+- **work:** an agent's link cannot overturn a person's rejection
+- **hooks:** a StopFailure marks the turn failed, classed rate_limit/auth/other, until the next prompt
+- **work:** claim the ticket key before a start spawns
+- **sessions:** loss clears pane-derived state, external ghosts get a one-hour grace, shells carry no claude_status
+- **work:** Work view review findings on the desktop
+- **pane-intel:** oom needs a dead process (heap block, or a kill verdict with the shell back), never a word
+- **work:** fence fleet_health for org-bound clients
+- **playbooks:** oom recreate refuses a live turn, keeps a budget, and does not restart the episode on a resume re-render
+- **ui:** surface rewind refusals, wait for the REPL, gate Retry and the viewed conversation
+- **rewind:** refuse an empty prefix, label a fork `fork`, locate the transcript as everyone else does
+- **rewind:** check the pane pre-conditions before the rebind commits
+- **mcp:** fence rewind_conversation to the caller's host
+- **ui,docs:** fork sheet defaults to same worktree; regenerate stale MCP reference
+- **transcript:** cover the tenth ConvTurn site and regen the hub contract golden
+
+### Documentation
+- **claude-md:** 185 commands carry a hub verdict
+- **jev:** deciding status_map proposals in the desktop and the CLI
+- regenerate the control API reference for the Work view's commands (M14.1d)
+- **plans:** preserve the 2026-09-15 terminal hardening plan
+- **claude-md:** phase 0, D33 and D34 in the Jev status paragraph
+- **jev:** status of phase 0, D33 and D34 in CLAUDE.md and the specs
+- **jev:** the haiku baseline's org boundary and prompt on stdin
+- **jev:** the claude -p haiku baseline (D33) and its CLI
+- **jev:** benchmarking status_map, J1 acceptance, phase-0 checklist
+- **jev:** D32 and D34 as decided and built
+- **jev:** benchmarking work_link; J1 components built
+- **jev:** status_map (J3) guide, hub CLI lines, test map card
+- **work:** the Work view spec's M14.1b revisions
+- **jev:** record D35-D37 as built; hub guide section on decisions
+- **jev:** the test map — cards, datasets, metrics, gates, demotion
+- **jev:** record D47, keep the language models in fleet-hub
+- **work-graph:** M14.0, the Work view spec on main and the M13 truth pass
+- **work-graph:** M14 plan, the owner's answers to D31-D36
+- **work-graph:** plan M14, landing the Work view
+- **plan:** Task 7 must place the forked transcript under the NEW cwd
+- **plan:** the MCP budget is 56,660, not 71,658
+- **plan:** rewind_conversation takes a CancellationRegistry
+- **plan:** Task 3 uses run_shell and maps the script's sentinels
+- **plan:** fix five defects the pre-flight scan found
+- **plan:** reply actions, one plan per repo
+- **spec:** one anchor per turn, not two
+- **spec:** reply actions — Copy, Quote, Retry, Fork here, Rewind here
 ## [0.3.2] - 2026-09-27
 
 The work graph's M13 (live use): what real use showed, and the decided-against
@@ -1911,6 +2023,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.3.3]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.3
 [0.3.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.2
 [0.3.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.1
 [0.3.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.0

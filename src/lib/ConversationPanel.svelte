@@ -20,7 +20,7 @@
   import AnswerPrompt from './AnswerPrompt.svelte';
   import { pendingInputFor } from './pending_input';
   import { hintAnchor } from './hints';
-  import { composerPresets, type ComposerPreset } from './composer_presets';
+  import { composerPresets, presetSendsNow, type ComposerPreset } from './composer_presets';
   import { needsMore, wrapsPastOneLine } from './composer_overflow';
   import { contextLevel } from './attention';
   import { timeAgo } from './session_status';
@@ -30,6 +30,9 @@
   import ToolLine from './ToolLine.svelte';
   import SubagentBlock from './SubagentBlock.svelte';
   import CopyButton from './CopyButton.svelte';
+  import ReplyActions from './ReplyActions.svelte';
+  import ForkSheet from './ForkSheet.svelte';
+  import { finalizeBranchSlug } from './branch-slug';
   import {
     findMatches,
     turnIndex,
@@ -1148,8 +1151,9 @@
     if (slashIndex >= slashMatches.length) slashIndex = 0;
   });
 
-  /** A chip fills the box (Shift+click sends at once). A filled command does
-   *  not pop the slash menu: the user picked it already. */
+  /** A chip fills the box, or sends at once when it is an auto-send chip;
+   *  Shift+click does the other one. A filled command does not pop the slash
+   *  menu: the user picked it already. */
   function usePreset(p: ComposerPreset, sendNow: boolean) {
     // A gated composer (see `blockWhileBusy`) degrades Shift+click to a
     // plain click rather than swallowing it: the chip still fills the box,
@@ -1677,6 +1681,25 @@
     else next.add(key);
     expanded = next;
   }
+
+  // The fork worktree sheet (Task 7): records the anchor and opens
+  // <ForkSheet>, which calls the backend itself. `anchor` is the fork's
+  // truncation anchor: `null` keeps the whole transcript.
+  let forkAnchor = $state<string | null>(null);
+  let forkOpen = $state(false);
+
+  function openForkSheet(anchor: string | null) {
+    forkAnchor = anchor;
+    forkOpen = true;
+  }
+
+  /** `fork-of-<branch>`, slugified for use as a new worktree's name — the
+   *  branch/worktree's name when this session has one, else its tmux name,
+   *  which is what a `main`-checkout session forks from. */
+  function suggestedForkName(s: SessionRow): string {
+    const base = s.friendly_name?.trim() || s.tmux_name;
+    return finalizeBranchSlug(`fork-of-${base}`) || 'fork';
+  }
 </script>
 
 <div class="conversation-panel" data-testid="conversation-panel" bind:this={root}>
@@ -1837,7 +1860,31 @@
                   {#if g.kind === 'text'}
                     <div class="text" data-testid="conv-text">
                       <Markdown source={g.text} />
-                      <span class="copy-slot text-copy"><CopyButton text={g.text} label="Copy reply" /></span>
+                      <span class="copy-slot text-copy">
+                        <!-- Fork / Rewind / Retry always act on the session's
+                             CURRENT conversation, but `conv` here is the one
+                             being viewed (`viewing ?? session.claude_session_id`).
+                             While an earlier conversation is on screen the
+                             anchors are read off the wrong transcript — Fork
+                             would fork the current one in full, Rewind would
+                             either miss the anchor or find the same uuid in the
+                             current transcript and rewind it at a point read
+                             off another conversation. So the three backend
+                             actions are unsupported here, exactly as the
+                             composer is disabled; `replyActionsFor` leaves Copy
+                             and Quote, which are about the text on screen. -->
+                        <ReplyActions
+                          turns={conv.turns}
+                          index={i}
+                          truncated={conv.truncated}
+                          text={g.text}
+                          sessionId={session.id}
+                          hostAlias={session.host_alias}
+                          tmuxName={session.tmux_name}
+                          supported={viewing === null}
+                          onFork={(anchor) => openForkSheet(anchor)}
+                        />
+                      </span>
                     </div>
                   {:else if g.kind === 'tools'}
                     <!-- One structure for a lone call and a folded group, so a
@@ -2123,11 +2170,15 @@
               class:btn--warn={suggested}
               data-testid="conv-chip"
               data-suggested={suggested || undefined}
-              title={suggested
-                ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.\n\nClick fills the box; Shift+click sends now.`
-                : `${p.text}\n\nClick fills the box; Shift+click sends now.`}
+              data-auto-send={p.auto_send || undefined}
+              title={`${suggested
+                ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.`
+                : p.text}\n\n${p.auto_send
+                ? 'Click sends now; Shift+click fills the box.'
+                : 'Click fills the box; Shift+click sends now.'}`}
               disabled={viewing !== null}
-              onclick={(e) => usePreset(p, e.shiftKey)}>{p.label}</button
+              onclick={(e) => usePreset(p, presetSendsNow(p, e.shiftKey))}
+              >{p.label}{#if p.auto_send}<span class="chip-send" aria-hidden="true">&nbsp;↵</span>{/if}</button
             >
           {/if}
         {/each}
@@ -2236,6 +2287,15 @@
   {/if}
 </div>
 
+{#if forkOpen}
+  <ForkSheet
+    sessionId={session.id}
+    anchor={forkAnchor}
+    suggestedName={suggestedForkName(session)}
+    onclose={() => (forkOpen = false)}
+  />
+{/if}
+
 <style>
   .composer-above {
     display: flex;
@@ -2325,6 +2385,10 @@
     /* One row by default; growth is a deliberate toggle, not a reflow. */
     flex-wrap: nowrap;
     overflow: hidden;
+  }
+  /* Marks an auto-send chip: a click sends rather than fills. */
+  .chip-send {
+    opacity: 0.6;
   }
   .chips[data-expanded='true'] {
     flex-wrap: wrap;

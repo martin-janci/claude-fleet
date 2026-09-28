@@ -1,6 +1,9 @@
 use super::*;
 use crate::ipc_error::codes;
-use crate::store::{CursorRow, StartSource};
+use crate::service::add_project::{AddProjectArgs, AddProjectSource};
+use crate::store::CursorRow;
+#[cfg(unix)]
+use crate::store::StartSource;
 use std::time::Duration;
 
 fn text_of(c: &Content) -> &str {
@@ -1157,6 +1160,63 @@ fn test_tools(store: Store) -> FleetTools {
     )
 }
 
+#[tokio::test]
+async fn rewind_conversation_rejects_an_unknown_mode() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h1").unwrap();
+    let id = s
+        .upsert_session("sess", "h1", None, None, 0, 0, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    let err = t
+        .rewind_conversation(
+            Extension(Caller::master()),
+            Parameters(RewindConversationParams {
+                session_id: id,
+                anchor_uuid: None,
+                mode: "sideways".into(),
+                new_worktree: None,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .expect_err("mode is a closed set");
+    assert!(format!("{err:?}").contains("mode"));
+}
+
+#[tokio::test]
+async fn a_master_caller_is_not_confirm_gated_for_a_rewind() {
+    // `confirm: false` + OPERATOR_CONFIRMS means a person at the desktop is
+    // ungated — the desktop shows its own dialog. So this must NOT fail for
+    // the confirmation; it fails later, for an unreachable host.
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h1").unwrap();
+    let id = s
+        .upsert_session("sess", "h1", None, None, 0, 0, "running", None)
+        .unwrap();
+    s.set_claude_session_id(id, "11111111-1111-1111-1111-111111111111")
+        .unwrap();
+    let t = test_tools(s);
+    let err = t
+        .rewind_conversation(
+            Extension(Caller::master()),
+            Parameters(RewindConversationParams {
+                session_id: id,
+                anchor_uuid: None,
+                mode: "rewind".into(),
+                new_worktree: None,
+                confirm_nonce: None,
+            }),
+        )
+        .await
+        .expect_err("no reachable host in a unit test");
+    let text = format!("{err:?}").to_lowercase();
+    assert!(
+        !text.contains("confirm"),
+        "a master caller must not be confirm-gated: {text}"
+    );
+}
+
 fn two_host_store() -> (Store, i64, i64) {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("hosta").unwrap();
@@ -1607,6 +1667,48 @@ async fn per_host_callers_cannot_recreate_or_dismiss_on_another_host() {
         .is_none());
 }
 
+/// `rewind_conversation` truncates a transcript, rebinds a row and restarts
+/// a pane — a session-addressed WRITE, so it must be fenced to the caller's
+/// host exactly as `restart_session` and `recreate_session` above are. The
+/// service layer is caller-agnostic, so the fence lives in the handler.
+#[tokio::test]
+async fn per_host_callers_cannot_rewind_another_hosts_session() {
+    let (s, _pid, on_b) = two_host_store();
+    s.set_claude_session_id(on_b, "0f8fad5b-d9cb-469f-a165-70867728950e")
+        .unwrap();
+    let t = test_tools(s);
+    let a = host_caller("hosta", TokenMode::Full);
+    for mode in ["rewind", "fork"] {
+        forbidden(
+            t.rewind_conversation(
+                Extension(a.clone()),
+                Parameters(RewindConversationParams {
+                    session_id: on_b,
+                    anchor_uuid: None,
+                    mode: mode.into(),
+                    new_worktree: None,
+                    confirm_nonce: None,
+                }),
+            )
+            .await
+            .unwrap_err(),
+        );
+    }
+    // The row still names the original conversation: the refusal landed
+    // before the engine could rebind anything.
+    assert_eq!(
+        t.store
+            .lock()
+            .unwrap()
+            .get_session_by_id(on_b)
+            .unwrap()
+            .unwrap()
+            .claude_session_id
+            .as_deref(),
+        Some("0f8fad5b-d9cb-469f-a165-70867728950e")
+    );
+}
+
 #[tokio::test]
 async fn per_host_callers_cannot_capture_or_read_another_hosts_session() {
     let (s, _pid, on_b) = two_host_store();
@@ -1707,6 +1809,16 @@ async fn run_prompt_refuses_a_session_that_is_not_between_turns() {
     s.record_stop_hook("uuid-w").unwrap();
     let row = s.get_session_by_id(id).unwrap().unwrap();
     assert!(run_prompt_ready(&row).is_ok());
+    // A turn that ended in an API error has ended: re-prompt it.
+    let failed = crate::store::SessionRow {
+        claude_status: Some("failed".into()),
+        ..row
+    };
+    assert!(run_prompt_ready(&failed).is_ok());
+    assert!(crate::service::tasks::session_satisfies(
+        &failed,
+        crate::service::tasks::WaitCond::Idle
+    ));
 }
 
 #[tokio::test]
@@ -1914,7 +2026,8 @@ fn capture_default_cap_matches_docs() {
 /// addressing and delivery branch added `wait_for_reply` concurrently, so
 /// the merged count is 81, 83 with the work graph's `work` / `work_link`,
 /// 84 with `work_admin`; hub federation adds `peer_exchange` and
-/// `list_peer_links`: 86; `get_settings` / `set_setting`: 88.)
+/// `list_peer_links`: 86; `get_settings` / `set_setting`: 88; `quick_replies`:
+/// 89; `rewind_conversation`: 90; `add_project` / `list_github_repos`: 92.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1935,7 +2048,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 89);
+    assert_eq!(served, 92);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3133,354 +3246,17 @@ fn list_host_worktrees_is_open_to_a_paired_client_in_either_mode() {
 fn the_served_definition_budget_stays_bounded() {
     /// Definition bytes served to the master token (the widest surface),
     /// counted the way a model pays for them: name + description + schema,
-    /// summed over the tools. ~3.7 chars per token, so this caps the surface
-    /// at roughly 15k tokens. It was 64,265 bytes before scoping, slimming
-    /// and the description diet.
+    /// summed over the tools; ~3.7 chars per token.
     ///
-    /// Raised from 56,000 to 57,000 when the operator tools
-    /// (`ensure_operator` / `operator_status`) met the Conversations
-    /// background work on main: two branches each added to the surface
-    /// independently, and together they landed at 56,121. Trimming was tried
-    /// first and is not available — the two operator descriptions are 139
-    /// bytes between them, so cutting them to nothing would still not free
-    /// the 121 needed, and would cost every client the one line that says
-    /// what those tools do. The headroom is deliberately small so the next
-    /// addition trips this again.
-    ///
-    /// `resolve_move` then landed on top of that, a three-field tool
-    /// (`session_id`, `action`, `confirm_nonce`) whose per-field descriptions
-    /// `every_tool_parameter_is_documented` makes mandatory. Its own branch
-    /// had measured the pre-`resolve_move` surface at 55,755 with 245 bytes
-    /// of headroom, and a degenerate version of it — empty tool description,
-    /// single-character field docs — still measured 56,026, so trimming text
-    /// could never have paid for it. `clean_target` is documented on the
-    /// parameter rather than in `move_session`'s description for the same
-    /// reason.
-    ///
-    /// Raised from 57,000 to 57,700 for `set_client_trust` and the `trusted`
-    /// pairing flag. The surface before them measured 56,988 — twelve bytes
-    /// of headroom — and the two together, already cut to a one-sentence
-    /// description and one-line field docs, add 615 for a total of 57,603.
-    /// Headroom is again deliberately small.
-    ///
-    /// Raised from 57,700 to 57,900 for `send_prompt { keys }`: one clause
-    /// on the tool description plus the `keys` field's one-line doc measured
-    /// 57,870, 170 over budget.
-    ///
-    /// Raised from 57,900 to 58,000 for the one-clause addition to
-    /// `submit`'s doc comment (fix round 1: "ignored when `keys` is set"),
-    /// which measured 57,935, 35 over budget.
-    ///
-    /// Raised from 58,000 to 58,113 when main's `send_prompt { keys }` raise
-    /// met Transfer 3b's `dry_run` parameter: both were measured against
-    /// 57,700, so the merged surface came to 58,013; raised to that plus 100
-    /// bytes of headroom.
-    ///
-    /// Raised from 57,700 to 58,034 for Transfer 3c Task 4's `when` parameter
-    /// on `move_session` (`now` | `idle` | `cancel`, one short clause per
-    /// value in its own field doc — the tool's own description was left
-    /// alone, per the same "document on the parameter" rule `clean_target`
-    /// set above). The surface before it measured 57,673 — 27 bytes of
-    /// headroom, an enum parameter was never going to fit in.
-    ///
-    /// A first measurement came in at 58,655: `When` derives `JsonSchema` on
-    /// its own type (`service::move_session::When`, not just the
-    /// `MoveSessionParams::when` field), and schemars had serialised that
-    /// whole enum's Rustdoc — several sentences of maintainer-facing
-    /// implementation reasoning, never meant for a client — into
-    /// `$defs.When.description`, at a cost of 982 bytes for one field.
-    /// `#[schemars(description = "now, idle, or cancel a wait")]` on `When`
-    /// overrides that, the same way the parameter's own field doc stays
-    /// short; trimming the served surface only after measuring it dropped
-    /// the real cost to 261 bytes (57,673 to 57,934), so the constant is
-    /// raised to that plus 100 bytes of headroom rather than to the
-    /// unslimmed number.
-    ///
-    /// Raised from 58,113 to 58,382 when 3c met main's `send_prompt { keys }`
-    /// raise through 3b: the `when` raise above was measured against 57,700,
-    /// so the merged surface came to 58,282; raised to that plus 100 bytes
-    /// of headroom.
-    ///
-    /// Raised by 600 (57,700 to 58,300 on its own branch) for `send_prompt`'s `force` and
-    /// `client_msg_id` (device-communication phase 1, task 3): two new
-    /// fields on an already-served tool, each paying the JSON-schema
-    /// structural cost (`"default"`, `"type"`, the property wrapper) on top
-    /// of its description, which trimming cannot touch. A degenerate pass —
-    /// the tool description cut to a fragment, both field docs to a few
-    /// words — still measured 57,892, 192 over the old budget, so text
-    /// could not have paid for it either; the two fields plus the three
-    /// required sentences of tool description measure 58,217.
-    ///
-    /// Raised from 58,382 to 59,057 when device-communication phase 1 met
-    /// main's `keys` and `when` raises: each side was measured without the
-    /// other, so the merged surface came to 58,957; raised to that plus 100
-    /// bytes of headroom.
-    // Raised deliberately from 59_057 when `session_activity` joined the
-    // router: a hub client had no live indicator at all without it (the
-    // command was local-only, so a remote desktop saw nothing move for the
-    // length of a turn). The budget is a ratchet against description creep,
-    // not against tools that earn their place — so it moves with a reason
-    // written down, and only that far.
-    //
-    // Raised from 59,400 to 60,018 for `wait_for_reply` (a whole new tool:
-    // name, description and its own `WaitForReplyParams` schema) and
-    // `send_message`'s two new fields (`to_addr`, `client_msg_id`),
-    // fleet-mesh addressing and delivery task 11. Both tool descriptions
-    // and every new field doc were cut to one short clause first, matching
-    // the `force` / `client_msg_id` precedent above: a new tool's name plus
-    // its params schema, and each added field's `"default"` / `"type"` /
-    // property-wrapper cost, is structural and text cannot pay it off.
-    // Measured at 59,918; raised to that plus 100 bytes of headroom.
-    //
-    // Raised from 60,018 to 60,200 for `send_message`'s `wake` field
-    // (fleet-mesh addressing and delivery task 12) — the same structural
-    // cost as task 11's two fields, one field's worth. Measured at 60,100;
-    // raised to that plus 100 bytes of headroom.
-    //
-    // Raised again from 59_400 for host-reboot recovery's two tools,
-    // `restore_host_sessions` and `discover_lost_sessions`: after a reboot
-    // there is no other way back to a host's conversations, and every
-    // alternative is worse than 2.3 KB — `recreate_session` one row at a
-    // time cannot find a conversation fleet has no row for at all. Both
-    // descriptions were cut to the operational minimum first (889 bytes),
-    // with the prose kept in `docs/control-api.md` and the control skill;
-    // what is left is the part a caller gets wrong without it, above all
-    // that resuming outside the transcript's own cwd silently starts an
-    // EMPTY conversation. 61_746 measured, plus ~100 bytes of headroom.
-    //
-    // Raised from 59_400 to 59_500, on its own branch, when `keys` grew the
-    // `1`-`9` digits that answer a `pending_input` dialog: that surface had
-    // 11 bytes of headroom left, so no wording could have paid for it (the
-    // clause is a fragment in both places it appears), and a client that can
-    // see a dialog's options but not press one is the state it replaced.
-    //
-    // NOT raised again where the digits met main's reboot-recovery raise,
-    // though each side was measured without the other: the digits' clause is
-    // 66 bytes and the raise above already carried ~100 of headroom, so the
-    // merged surface fits inside it. 61,826 measured; 24 bytes left. The next
-    // clause to land here has to pay for itself.
-    //
-    // Raised again on 2026-09-23 (code-review round 20, F18) — not for new
-    // surface, but because the headroom had been inherited instead of
-    // measured twice running, leaving 14 and then 24 bytes. A budget that
-    // tight fails CI on a single added word, which is a ratchet against
-    // wording rather than against creep. The merged surface is re-measured
-    // below and the constant is that plus the customary 100 bytes; the run
-    // prints both numbers so the next person raises it from a measurement.
-    //
-    // Raised again merging the fleet-mesh addressing and delivery branch
-    // (60,200: `wait_for_reply` plus `send_message`'s `to_addr` /
-    // `client_msg_id` / `wake`) into main (61,926: host-reboot recovery's
-    // two tools plus the `keys` digits) — each side was measured without
-    // the other, so neither figure covers the merged surface. Measured
-    // together at 62,540; raised to that plus the customary 100 bytes of
-    // headroom.
-    //
-    // Raised from 62_640 to 62_927 for `session_conversation`'s `since_turn`:
-    // one optional field, whose schema property plus `"default"`/`"type"`
-    // wrappers is structural and no wording pays it off — that surface had
-    // exactly 100 bytes of headroom left. Both texts were cut to a clause
-    // first (the tool's to "since_turn narrows the window to what came after
-    // that turn_seq", the field's to three lines), measuring 62_827; raised
-    // to that plus the customary 100 bytes. What it buys: the call the
-    // Conversation panel makes every 5 s and the phone makes on every row
-    // change re-read and re-rendered the last ten turns every time, nine of
-    // which the caller already had.
-    //
-    // Raised on 2026-09-23 for `list_sessions.view` — 324 bytes of schema
-    // and parameter doc that buy back, for the one client that asks,
-    // 30 257 B of every `list_sessions` answer, measured on a 56-row live
-    // fleet. The definition surface is paid once per connection; that answer
-    // is paid on every resync, so this is the cheap side of the trade. The
-    // tool's own description was cut back to what it said before, and the
-    // parameter doc to two sentences, before raising anything: 62,864
-    // measured, plus the customary 100 bytes.
-    //
-    // Raised again, same day, for `list_projects.has_sessions` — 206 bytes,
-    // against 5 746 B off every `list_projects` answer on that same fleet
-    // (78 projects listed to name the 8 its sessions carried). Its parameter
-    // doc is two lines and the tool description was left alone. 63,070
-    // measured, plus the customary 100 bytes.
-    //
-    // Re-measured when `since_turn` and the two view parameters met on main:
-    // each was measured without the others, so the merged surface is 63,357
-    // rather than either branch's figure. Raised to that plus the customary
-    // 100 bytes. Nothing was added here — this is the arithmetic of two
-    // raises landing together.
-    //
-    // Raised from 62_640 to 62_885 for `list_sessions`'s `needs_attention`:
-    // the filter's schema property and its two short clauses. That surface
-    // had exactly 100 bytes of headroom, so no wording could have paid for
-    // it. Measured at 62_785; raised to that plus the customary 100. What it
-    // buys is the question a phone is opened to ask: 51 968 B of rows to
-    // find the three that want an answer becomes 1 668 B.
-    //
-    // Re-measured when `needs_attention` met the two view parameters and
-    // `since_turn` on main: each was measured without the others, so the
-    // merged surface is 63,630 rather than any branch's own figure. Raised to
-    // that plus the customary 100 bytes. Nothing was added here — this is the
-    // arithmetic of four raises landing together.
-    //
-    // Raised for smart caching (cycle 2): one `fresh_for` on each of five
-    // fetch tools (list_sessions, session_history, inbox, session_transcript,
-    // repo_diff), plus repo_diff's own `RepoDiffParams` replacing the shared
-    // `RepoFileArgs` schema it used to serve. The field's doc comment was cut
-    // to one short clause first — first measured at 64,792 (1,062 B over
-    // budget, over the ~1 KB guideline), trimmed to "Your session id: only
-    // what's new since your last read." on all five, re-measured at 64,732.
-    // Raised to that plus the customary 100.
-    //
-    // Raised for hub federation, task 9: `list_peer_links` joined the master
-    // surface (`peer_exchange` alone does not count — it is peer-only, see
-    // the `peer` entry logged below). Measured at 64,929; raised to that plus
-    // the customary 100.
-    //
-    // Raised for the work graph (roadmap M1b.2, review C21): two tools,
-    // `work` (read) and `work_link` (link / reject / unlink), with one-line
-    // descriptions and one-clause parameter docs. The surface had 100 bytes
-    // of headroom and two new tools cannot fit in that whatever the wording.
-    // Measured at 65,687 on 2026-09-24; raised to that plus the customary
-    // 100. M0.6 (tighten the existing descriptions) is still open and is
-    // where this is paid back.
-    //
-    // Raised again for work graph M2.4: the `work` read actions (context,
-    // resume_plan, purge_impact) and `work_link { action: resume }` go on
-    // the two existing tools (no new tool), but their eight parameters cost
-    // schema bytes whatever the wording; descriptions stay one clause.
-    // Measured at 66,421 on 2026-09-24; raised to that plus 100.
-    // Raised for work graph M3.1: `work_admin`, the one new tool the M3 plan
-    // allows (trackers and credentials, master only), ten parameters of
-    // one clause each. Measured at 67,312 on 2026-09-24; plus 100.
-    // Raised for work graph M3.4: `work` gains tickets / lookup / trackers
-    // (tracker_id, view, query, limit, url) and `work_link` gains start
-    // (url, project_id, with_brief) — eight parameters on the two existing
-    // tools, no new tool. Measured at 68,066 on 2026-09-24; plus 100.
-    // M3.5: start's `name` / `worktree`, so the New-session dialog's edits
-    // reach a ticket start. Measured at 68,213 on 2026-09-24; plus 100.
-    // Work graph M4.4: `work_link` gains confirm / reject-by-link_id /
-    // trust_project (one new parameter, `on`, and a longer description);
-    // no new tool. Measured at 68,385 on 2026-09-24 (+172); plus 100.
-    // Work graph M5.1 + M5.2: `work` gains scopes / orgs / org_suggestions
-    // (no parameter) and `work_admin` gains the org actions with eight
-    // one-word parameters (org_id, color, isolate_sessions, owner, repo,
-    // path_prefix, host_alias, rule_id); its description was cut to "see
-    // action" to pay part of it. No new tool. Measured at 69,012 on
-    // 2026-09-24 (+627); plus 100.
-    // Work graph M5.3: `work_link` gains `force_cross_org` (the cross-org
-    // integrity override). Measured at 69,099 on 2026-09-24 (+87); plus 100.
-    // Work graph M7.2 (merged onto M5): `work` gains tidy / reopened,
-    // `work_link` gains archive / unarchive / snooze / never / dismiss /
-    // tidy_apply (three new parameters: days, items, confirm_nonce), and is
-    // now confirm-gated for tidy_apply's kills; no new tool. M7 alone
-    // measured +639; with M5's `work_admin` gaining `auto_tidy` (the per-org
-    // override), measured at 69,759 on 2026-09-24 (+660).
-    // Work graph M6.1: `work_admin` gains `transport` (direct | via_host |
-    // via_cli, so GitHub is read through `gh` on a host) and `settings`
-    // (the provider's admin settings object); `provider` lists the five
-    // providers. No new tool. Measured at 68,553 on the M4 base (+168);
-    // merged over M5, 69,288 on 2026-09-24 (+189 over M5's 69,099); plus
-    // 100.
-    // Work graph M8.0: `work` / `work_link` `action` became a schema `enum`
-    // generated from the tables the parser and the dispatch read
-    // (`WORK_ACTIONS`, `WORK_LINK_ACTIONS`), so the phone draws a button only
-    // for an action the hub serves; the two doc lines that listed them by
-    // hand were cut to "Default links." / "The decision.". Measured at 69,171
-    // on 2026-09-24 on top of M5 alone (+72).
-    // M7 merged with M8.0 (M7's actions now in the enums): measured at
-    // 70,020 on 2026-09-24 (+261 over M7-on-M5; the enums list M7's eight
-    // actions too).
-    // M6.1 and M8.0 merged (main): measured at 69,360 on 2026-09-24 (M5's
-    // 69,099 + 189 for M6.1 + 72 for M8.0).
-    // M6 (main, #266) merged into M7: `work_admin` carries both M6's
-    // `transport` / `settings` and M7's `auto_tidy`, the enums M7's actions.
-    // Measured at 70,209 on 2026-09-25 (M7-on-M8.0 70,020 + 189 for M6.1);
-    // plus 100.
-    // Work graph M9.1: `work` gains `today` (the Today view's digest) and
-    // one parameter, `since`. No new tool. Measured at 69,265 on 2026-09-25
-    // (+94); plus 100.
-    // Work graph M9.2: `work` gains `card` (the ticket context card; no
-    // parameter). Measured at 69,284 on 2026-09-25 (+19): inside the
-    // headroom, so the constant was not raised.
-    // M9.1 + M9.2 merged over M6: measured at 69,473 on 2026-09-25 (M6's
-    // 69,360 + 113); plus 100.
-    // Work graph M9.7 (decision D12): `confirm_nonce` on new_session,
-    // new_shell_session, safe_kill_session and work_link, so the operator's
-    // starts and kills can carry an approval. Measured at 69,801 on
-    // 2026-09-25 (+328); plus 100.
-    // Work graph M9.3: `work_link` gains `handover` (one enum value and a
-    // clause of description). Measured at 69,865 on 2026-09-25 (+64): inside
-    // the headroom, not raised.
-    // Work graph M9.6: `work_link` start gains `project_ids` (a multi-repo
-    // start). Measured at 69,998 on 2026-09-25 (+133); plus 100.
-    // M7 (main, #267) merged into M9: measured at 70,765 on 2026-09-25
-    // (M7-on-M6's 70,209 + 556 for M9.1-M9.7; M7 had already added
-    // `confirm_nonce` to `work_link`); plus 100.
-    // Hub federation merged onto M9 (main): `list_peer_links` and the
-    // federation clauses on the messaging tools. Measured at 71,066 on
-    // 2026-09-25 (+301 over M9's 70,765); plus 100.
-    // M9.7 review fix: the operator gate covers every start and restart, so
-    // `confirm_nonce` on new_bg_session, spawn_review, dispatch_task,
-    // restore_host_sessions, recreate_session and restart_session (no new
-    // tool, no description change). Measured at 71,558 on 2026-09-25 (+492);
-    // plus 100.
-    // M11.5: paid back 16,944 B (M0.6). Descriptions and parameter docs
-    // reworded, no tool, action or parameter renamed and no schema shape
-    // changed: prose that restated a schema default, a parameter's own doc,
-    // or a vocabulary listed twice was cut; every confirm gate, untrusted
-    // marker, host fence and "never" clause kept. Measured at 71,590 before
-    // and 54,646 after on 2026-09-25; plus 100. Re-measure when the M11.1 /
-    // M11.3 / M11.4 branches land: whichever lands second merges and
-    // re-measures.
-    // Merged over main (#285: `inbox` gains the hub-link from_addr
-    // untrusted clause): measured at 54,700 (+54), inside the headroom.
-    // Review follow-up: `move_session { force_cross_org }` (work graph M5 —
-    // a move whose live links would cross the org boundary is refused
-    // unless forced), one flag with a one-line doc plus a clause on the
-    // errors list. Measured at 54,927 on 2026-09-25 (+227); plus 100.
-    // M11.4 (`work_admin` `status`), 2026-09-25: measured at 54,934; plus 100.
-    // M11.1: +96 B for work_link name / work local_items (`work_link` gains
-    // `name` and a `title` parameter, `work` gains `local_items`; no
-    // description change). Merged over M11.2 / M11.4: measured at 55,030 on
-    // 2026-09-25; plus 100.
-    // M11.3 merged over M11.1: `keep` on `tidy_apply`'s item action, nothing
-    // else. Measured at 55,035 on 2026-09-25 (+5); plus 100.
-    // get_settings/set_setting: +580 B (two master-only tools, M11.5's
-    // terse style). Measured at 55,610 on 2026-09-25; plus 100.
-    // M11.3 merged over get_settings/set_setting: `keep` on `tidy_apply`'s
-    // item action. Measured at 55,615 on 2026-09-26 (+5); plus 100.
-    // Work graph M12.3 (`work_admin` `sweep_now`, "retention" in the
-    // description; `set_setting`'s example key now `work.recent_days`),
-    // merged over M11.3: measured at 55,635 on 2026-09-26 (+20); plus 100.
-    // Work graph M12.4 (`fleet_health` names its `trackers` roll-up and
-    // the org scope of a per-host token's): measured at 55,804 on
-    // 2026-09-26 (+169); plus 100.
-    // `quick_replies` (the composer's shared chip row): one tool that both
-    // reads and replaces the fleet's list, so the desktop and the phone stop
-    // keeping private copies of the same buttons. A second, read-only tool
-    // would have cost another definition for a list of at most 24 short
-    // strings, so the read is this tool with `set` omitted. Written in
-    // M11.5's terse style from the start: 825 B over that baseline, measured
-    // at 56,560 on 2026-09-26 (55,735 before, after M12.3); plus 100.
-    // Merged with M12.4 (+169): measured at 56,729 on 2026-09-26; plus 100.
-    // Work graph M13.2 (`work_admin` `usage` and its `days` window, "usage
-    // counts" in the description): measured at 56,873 on 2026-09-26
-    // (+144); plus 100.
-    // Merged with M13.4c (`work_link` `summarize`): measured at 56,950 on
-    // 2026-09-27; plus 100.
-    // Work graph M14.1b (the Work view's reads): 8 `work` actions and their
-    // parameters (the nested `filters` / `rule` served as a bare object),
-    // `pair_client`'s `org_id` and `work_admin`'s `bound_sees_unassigned`
-    // (D31); no new tool. Measured at 57,859 on 2026-09-27; plus 100.
-    // Work graph M14.1c (the Work view's writes): 10 `work_link` actions,
-    // 14 optional parameters (the nested `rule` / `view` / `decisions`
-    // served as a bare object / array) and one description clause; no new
-    // tool. Measured at 58,977 on 2026-09-27; plus 100.
-    // Task 5 of visible-truncation-and-describe: `work` gains `describe`
-    // (one action, no new parameter — `key` already existed) and one clause
-    // on the tool description. Measured at 59,046 on 2026-09-28: inside the
-    // headroom (31 bytes left), so the constant was not raised — the next
-    // addition here has to pay for itself.
-    const BUDGET_BYTES: usize = 59_077;
+    /// Raise it only from a measurement: the run prints the merged surface,
+    /// and the constant is that plus 100 bytes of headroom. Two branches
+    /// measured apart never cover the merged surface, so a merge that trips
+    /// this re-measures. The why of each raise belongs in its commit
+    /// message (`git log -L` on this constant), not here: a log in this
+    /// comment conflicted on every merge. Measured at 62,269 on 2026-09-28
+    /// (#352's `add_project` / `list_github_repos` over #348, plan D, reply
+    /// actions and M14).
+    const BUDGET_BYTES: usize = 62_522;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -3533,7 +3309,7 @@ fn the_served_definition_budget_stays_bounded() {
         "the tool surface grew to {bytes} bytes, over the {BUDGET_BYTES} budget: \
          trim a description, or raise the constant on purpose — to {} (the \
          measurement plus the customary 100 bytes of headroom), and say in the \
-         constant's doc comment what was measured and when",
+         commit message what was measured and when",
         bytes + 100
     );
     assert!(
@@ -4991,6 +4767,7 @@ async fn an_unknown_fresh_for_still_attempts_the_read_but_writes_no_cursor() {
 /// host `local` runs bash locally (`ssh::run_shell_bounded`, enabled by
 /// default), so `fresh_for`'s anchor positioning is exercised through an
 /// actual read, not asserted only at the decision level.
+#[cfg(unix)]
 fn transcript_fixture(path: &std::path::Path, jsonl: &str) -> (Store, i64, i64) {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
@@ -5014,6 +4791,7 @@ fn transcript_fixture(path: &std::path::Path, jsonl: &str) -> (Store, i64, i64) 
 
 /// One JSONL turn: a `user` prompt followed by its `assistant` reply, with
 /// distinct `timestamp`s so `ConvTurn::at`/`ended_at` are both real values.
+#[cfg(unix)]
 fn jsonl_turn(prompt: &str, reply: &str, at: &str, ended_at: &str) -> String {
     format!(
         "{}\n{}\n",
@@ -5022,6 +4800,7 @@ fn jsonl_turn(prompt: &str, reply: &str, at: &str, ended_at: &str) -> String {
     )
 }
 
+#[cfg(unix)]
 async fn read_transcript(
     t: &FleetTools,
     target: i64,
@@ -5051,6 +4830,7 @@ async fn read_transcript(
 /// "last (turn_seq − watermark) turns" arithmetic takes the last ONE
 /// file-turn — turn C, still in progress — and turn B, the actual new
 /// completed turn, is never served.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_in_progress_turn_does_not_hide_the_completed_turn_before_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -5098,6 +4878,7 @@ async fn an_in_progress_turn_does_not_hide_the_completed_turn_before_it() {
 
 /// A turn re-read through the SAME anchor `at` (its fingerprint differs
 /// from what was stored) is re-served whole — never left half-delivered.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_grown_in_progress_turn_is_re_served_not_skipped() {
     let dir = tempfile::tempdir().unwrap();
@@ -5143,6 +4924,7 @@ async fn a_grown_in_progress_turn_is_re_served_not_skipped() {
 /// Oldest-first paging: a small `max_chars` forces one turn per page, and
 /// every new turn must still be seen exactly once, in order, with `more`
 /// on every page but the last.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_transcript_delta_pages_oldest_first_with_more_and_skips_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -5203,6 +4985,7 @@ async fn a_transcript_delta_pages_oldest_first_with_more_and_skips_nothing() {
 
 /// A turn whose opening prompt carries no `timestamp` — `ConvTurn::at` is
 /// `None`, so it cannot be an anchor.
+#[cfg(unix)]
 fn jsonl_turn_without_at(prompt: &str, reply: &str, ended_at: &str) -> String {
     format!(
         "{}\n{}\n",
@@ -5214,6 +4997,7 @@ fn jsonl_turn_without_at(prompt: &str, reply: &str, ended_at: &str) -> String {
 /// Seed-read a transcript, append `turns` (each already one-or-more JSONL
 /// lines), record `stops` Stop hooks, then page with `max_chars` until
 /// `unchanged` (at most 8 calls). Returns every page's text.
+#[cfg(unix)]
 async fn page_transcript_until_unchanged(
     appended: &[String],
     stops: usize,
@@ -5263,6 +5047,7 @@ async fn page_transcript_until_unchanged(
 /// last anchorable turn, and the cut turn opens the next page. Here the
 /// budget fits B + C (C has no `at`) but not D, so page 1 is B alone, page
 /// 2 is C + D, and every turn is served exactly once — no reset needed.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_transcript_page_ending_on_an_unanchorable_turn_is_cut_back_not_looped() {
     let long_e = format!("{}EEEE_4", "x".repeat(40));
@@ -5310,6 +5095,7 @@ async fn a_transcript_page_ending_on_an_unanchorable_turn_is_cut_back_not_looped
 /// not fit with the next one cannot advance by cutting back. It is
 /// answered as a visible `too_far_behind` reset (the default window,
 /// `more: false`) — it terminates, and says so, never a silent loop.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_transcript_page_with_no_anchorable_turn_resets_visibly_and_terminates() {
     let long_d = format!("{}DDDD_3", "y".repeat(40));
@@ -5345,6 +5131,7 @@ async fn a_transcript_page_with_no_anchorable_turn_resets_visibly_and_terminates
 /// An anchor the read cannot locate (the file was replaced out from under
 /// it — log rotation, or simply too far behind the tail window) resets
 /// full with `too_far_behind`, never a guess at what to serve.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_transcript_anchor_the_read_cannot_locate_resets_too_far_behind() {
     let dir = tempfile::tempdir().unwrap();
@@ -5399,6 +5186,7 @@ async fn a_transcript_anchor_the_read_cannot_locate_resets_too_far_behind() {
 
 /// A conversation boundary (e.g. `/clear`) resets full with
 /// `conversation_changed`, even though the watermark alone looked current.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_transcript_conversation_change_resets_full_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
@@ -5446,6 +5234,7 @@ async fn a_transcript_conversation_change_resets_full_end_to_end() {
 /// skip-the-cursor-write guard would go unnoticed. This one uses a REAL,
 /// readable transcript: the read succeeds, and only the guard stops a
 /// cursor row from being written for a reader that does not exist.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_unknown_fresh_for_with_a_readable_transcript_answers_full_and_writes_no_cursor() {
     let dir = tempfile::tempdir().unwrap();
@@ -5492,6 +5281,7 @@ async fn an_unknown_fresh_for_with_a_readable_transcript_answers_full_and_writes
 /// FIRST instead, misreads it as "grown", and re-serves `[A, B]` on every
 /// call — a page that never reaches the real new content and never
 /// advances, because `more` stays true and the watermark stays held.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_duplicate_at_between_two_turns_does_not_loop_forever() {
     let dir = tempfile::tempdir().unwrap();
@@ -5564,6 +5354,7 @@ async fn a_duplicate_at_between_two_turns_does_not_loop_forever() {
 /// landed, with no reply yet, must not be mistaken for "the last turn" —
 /// that would both hide the real last reply behind it and anchor on
 /// content that never renders to anything.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_just_landed_empty_prompt_does_not_hide_the_reply_before_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -5611,6 +5402,7 @@ async fn a_just_landed_empty_prompt_does_not_hide_the_reply_before_it() {
 /// merged notification) adds rendered text to an anchored turn without
 /// touching it, so growth detection must key on the turn's rendered
 /// CONTENT, not `ended_at`.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_anchored_turn_that_gains_an_interrupt_with_no_new_assistant_entry_is_re_served() {
     let dir = tempfile::tempdir().unwrap();
@@ -5657,6 +5449,7 @@ async fn an_anchored_turn_that_gains_an_interrupt_with_no_new_assistant_entry_is
 
 // ---- Fix round 3 -------------------------------------------------------------
 
+#[cfg(unix)]
 fn notification_jsonl(at: &str, summary: &str) -> String {
     format!(
         "{}\n",
@@ -5670,6 +5463,7 @@ fn notification_jsonl(at: &str, summary: &str) -> String {
     )
 }
 
+#[cfg(unix)]
 fn bash_input_jsonl(at: &str, command: &str) -> String {
     format!(
         "{}\n",
@@ -5687,6 +5481,7 @@ fn bash_input_jsonl(at: &str, command: &str) -> String {
 /// `ended_at` change — and a turn C opens next, stamped the SAME `at` as A.
 /// A latest-match grown tier jumps straight to C and never serves A's
 /// growth.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_grown_tier_finds_the_earliest_same_at_turn_not_the_latest() {
     let dir = tempfile::tempdir().unwrap();
@@ -5727,6 +5522,7 @@ async fn the_grown_tier_finds_the_earliest_same_at_turn_not_the_latest() {
 /// so it must still anchor on that turn (the last PARSED one) rather than
 /// store no anchor at all — otherwise the next `After` read has nothing to
 /// position from and answers a needless `too_far_behind` reset.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_first_read_of_only_an_empty_prompt_does_not_spuriously_reset_the_next_read() {
     let dir = tempfile::tempdir().unwrap();
@@ -7106,6 +6902,7 @@ fn the_operator_must_confirm_starts_kills_and_every_confirm_tool() {
         "restore_host_sessions",
         "recreate_session",
         "restart_session",
+        "rewind_conversation",
         "safe_kill_session",
         "work_link",
         "kill_session",
@@ -7994,4 +7791,80 @@ async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
     );
     assert_eq!(s.get_setting("mcp.confirm_destructive").unwrap(), None);
     assert_eq!(s.get_setting("hub.allow_plaintext").unwrap(), None);
+}
+
+// ---- add_project / list_github_repos (a hub client adds a project) --------
+
+#[test]
+fn add_project_tools_are_client_reachable_with_the_right_flags() {
+    let add = guard::policy("add_project").expect("add_project has a TOOL_POLICIES row");
+    assert!(
+        guard::is_client_tool("add_project"),
+        "a full client adds projects"
+    );
+    assert!(!guard::is_admin_tool("add_project"));
+    assert!(!add.readonly, "it writes a project row");
+    assert!(!add.confirm, "it has its own create_remote confirm token");
+    assert_eq!(
+        crate::mcp::tool_deadline("add_project"),
+        LONG_POLL_CAP,
+        "a clone's wall clock is 600 s; the lifecycle cap (300 s) would cut it"
+    );
+    let ls = guard::policy("list_github_repos").expect("list_github_repos has a row");
+    assert!(guard::is_client_tool("list_github_repos"));
+    assert!(ls.readonly, "gh repo list observes");
+    assert!(guard::is_readonly_tool("list_github_repos"));
+    assert!(!guard::is_readonly_tool("add_project"));
+}
+
+#[test]
+fn a_readonly_client_may_browse_repos_but_not_add_a_project() {
+    let ro = client_caller("phone", TokenMode::Readonly);
+    assert!(enforce_mode(&ro, "list_github_repos").is_ok());
+    assert!(enforce_mode(&ro, "add_project").is_err());
+    let full = client_caller("laptop", TokenMode::Full);
+    assert!(enforce_mode(&full, "add_project").is_ok());
+}
+
+#[tokio::test]
+async fn add_project_refuses_a_hostile_alias_before_any_ssh() {
+    let t = test_tools(Store::open_in_memory().unwrap());
+    let err = t
+        .add_project(Parameters(AddProjectArgs {
+            host_alias: "-oProxyCommand=x".into(),
+            source: AddProjectSource::Clone {
+                url: "https://github.com/o/r".into(),
+            },
+            call_id: None,
+        }))
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_"), "{}", err.message);
+    let err = t
+        .list_github_repos(Parameters(ListGithubReposParams {
+            host_alias: "-oProxyCommand=x".into(),
+        }))
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_"), "{}", err.message);
+}
+
+#[test]
+fn add_project_serves_the_source_variants_and_no_call_id() {
+    let tools = FleetTools::tool_router_for_doc().list_all();
+    let t = tools
+        .iter()
+        .find(|t| t.name == "add_project")
+        .expect("add_project is served");
+    let props = t.input_schema["properties"].as_object().unwrap();
+    assert!(props.contains_key("host_alias"));
+    assert!(props.contains_key("source"));
+    assert!(!props.contains_key("call_id"));
+    let text = serde_json::to_string(&t.input_schema).unwrap();
+    for kind in ["clone", "folder", "new"] {
+        assert!(
+            text.contains(&format!("\"{kind}\"")),
+            "source kind {kind} missing: {text}"
+        );
+    }
 }

@@ -177,6 +177,11 @@ const REASONS = {
     'trackers and their credentials are fleet administration, and a client is never the fleet’s administrator — use `fleet-hub tracker remove`',
   tracker_sync_metrics:
     'sync metrics live in the hub’s memory, and a client is never the fleet’s administrator — use `fleet-hub tracker status`',
+  // Jev's Asana section proposals: applying one is `work_admin update`.
+  status_map_proposals:
+    'section proposals are tracker administration, and a client is never the fleet’s administrator — use `fleet-hub decide proposals`',
+  decide_status_map_proposal:
+    'applying a section proposal writes the tracker’s section map, and a client is never the fleet’s administrator — use `fleet-hub decide proposals apply|reject`',
   // Work graph M13.2: `work_admin { usage }` is master-only on the hub.
   work_usage:
     'the work graph’s usage counts are the hub’s administration, and a client is never the fleet’s administrator — use `fleet-hub work usage`',
@@ -222,8 +227,6 @@ const REASONS = {
   // --- acted out over this machine's SSH, and the hub has no tool for it ---
   repo_write:
     'the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session',
-  add_project:
-    'it clones or adopts a checkout using this machine’s SSH and GitHub credentials',
   purge_project:
     'it deletes Claude Code state on every host over this machine’s SSH connections, and the hub exposes no tool for it',
   inspect_safe_kill:
@@ -303,6 +306,7 @@ export const ROUTED_ACTIONS = [
   'rename_session',
   'set_friendly_name',
   'restart_session',
+  'rewind_conversation',
   'spawn_review',
   'recreate_session',
   'dismiss_ghost_session',
@@ -330,6 +334,19 @@ export const ROUTED_ACTIONS = [
   'dismiss_reopened',
   'name_session_work',
   'rename_work_item',
+  // The Work view (work graph M14): every write is `work_link { … }` on the
+  // hub, so a paired desktop sends them while the link is up.
+  'set_primary_work',
+  'reconsider_work_link',
+  'ack_work_link',
+  'decide_work_batch',
+  'place_work',
+  'assign_work_org',
+  'save_work_rule',
+  'delete_work_rule',
+  'save_work_view',
+  'delete_work_view',
+  'add_project',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];

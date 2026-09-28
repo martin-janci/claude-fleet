@@ -252,6 +252,35 @@ pub const WORK_AUTO_TIDY_REASONS: &str = "work.auto_tidy_reasons";
 /// never killed, so neither is automatic.
 pub const AUTO_TIDY_REASONS: &[&str] = &["done_idle", "pr_merged_idle", "not_planned"];
 
+// ── decisions (Jev evaluation, D35-D37; `service::decide`) ──
+/// The kill switch: with it off no decision-model call is ever made. Off by
+/// default; the Settings dialog's "Decisions (Jev)" toggle.
+pub const DECIDE_JEV_ENABLED: &str = "decide.jev.enabled";
+/// `status_map`'s mode (Asana section → status category proposals).
+pub const DECIDE_JEV_STATUS_MAP: &str = "decide.jev.status_map";
+/// `work_link`'s mode (choosing a work item for an unlinked session).
+pub const DECIDE_JEV_WORK_LINK: &str = "decide.jev.work_link";
+/// What a feature's mode may be. `auto` is not offered: no feature has
+/// passed acceptance (D36).
+pub const DECIDE_MODES: &[&str] = &["off", "shadow", "assist"];
+/// Sessions and items with no org may be sent too (D31). Off by default.
+pub const DECIDE_JEV_UNASSIGNED: &str = "decide.jev.unassigned";
+/// One call's whole budget, in milliseconds.
+pub const DECIDE_JEV_TIMEOUT_MS: &str = "decide.jev.timeout_ms";
+/// Consecutive failed calls that open the circuit breaker.
+pub const DECIDE_JEV_BREAKER_FAILURES: &str = "decide.jev.breaker_failures";
+/// How long an open breaker refuses calls, in seconds.
+pub const DECIDE_JEV_BREAKER_OPEN_SECS: &str = "decide.jev.breaker_open_secs";
+/// Input tokens the decision model may be sent per UTC day (`0` = none).
+pub const DECIDE_JEV_DAILY_TOKEN_BUDGET: &str = "decide.jev.daily_token_budget";
+/// The model version a request names. Pinned by default: TypeSafe advises
+/// pinning when thresholds are tuned against a version.
+pub const DECIDE_JEV_MODEL: &str = "decide.jev.model";
+/// What [`DECIDE_JEV_MODEL`] may be (never free text: it goes on the wire).
+pub const DECIDE_JEV_MODELS: &[&str] = &["jev-1.13.0", "jev-latest"];
+/// Days a `decision_runs` row is kept (`0` = forever).
+pub const DECIDE_RETENTION_DAYS: &str = "decide.retention_days";
+
 /// Every editable setting. Order is the display order.
 pub const SPECS: &[Spec] = &[
     Spec {
@@ -509,6 +538,65 @@ pub const SPECS: &[Spec] = &[
         key: WORK_AUTO_TIDY_REASONS,
         default: "done_idle,pr_merged_idle",
         kind: Kind::ChoiceSet(AUTO_TIDY_REASONS),
+    },
+    Spec {
+        key: DECIDE_JEV_ENABLED,
+        default: "false",
+        kind: Kind::Bool,
+    },
+    Spec {
+        key: DECIDE_JEV_STATUS_MAP,
+        default: "off",
+        kind: Kind::Choice(DECIDE_MODES),
+    },
+    Spec {
+        key: DECIDE_JEV_WORK_LINK,
+        default: "off",
+        kind: Kind::Choice(DECIDE_MODES),
+    },
+    Spec {
+        key: DECIDE_JEV_UNASSIGNED,
+        default: "false",
+        kind: Kind::Bool,
+    },
+    Spec {
+        key: DECIDE_JEV_TIMEOUT_MS,
+        default: "1500",
+        kind: Kind::Int {
+            min: 100,
+            max: 30_000,
+        },
+    },
+    Spec {
+        key: DECIDE_JEV_BREAKER_FAILURES,
+        default: "5",
+        kind: Kind::Int { min: 1, max: 100 },
+    },
+    Spec {
+        key: DECIDE_JEV_BREAKER_OPEN_SECS,
+        default: "300",
+        kind: Kind::Int {
+            min: 10,
+            max: 86_400,
+        },
+    },
+    Spec {
+        key: DECIDE_JEV_DAILY_TOKEN_BUDGET,
+        default: "2000000",
+        kind: Kind::Int {
+            min: 0,
+            max: 1_000_000_000,
+        },
+    },
+    Spec {
+        key: DECIDE_JEV_MODEL,
+        default: "jev-1.13.0",
+        kind: Kind::Choice(DECIDE_JEV_MODELS),
+    },
+    Spec {
+        key: DECIDE_RETENTION_DAYS,
+        default: "90",
+        kind: Kind::Int { min: 0, max: 3650 },
     },
 ];
 
@@ -1167,6 +1255,65 @@ mod tests {
         }
         assert!(validate(REPAIR_TICK_INTERVAL_SECS, &MAX_SECS.to_string()).is_ok());
         assert_eq!(resolve(REPAIR_TICK_INTERVAL_SECS, Some("0")), "600");
+    }
+
+    #[test]
+    fn decide_settings_default_to_off() {
+        assert_eq!(resolve(DECIDE_JEV_ENABLED, None), "false");
+        assert_eq!(resolve(DECIDE_JEV_UNASSIGNED, None), "false");
+        assert_eq!(resolve(DECIDE_JEV_STATUS_MAP, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_WORK_LINK, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_MODEL, None), "jev-1.13.0");
+        assert_eq!(resolve(DECIDE_RETENTION_DAYS, None), "90");
+        // `auto` is not offered yet (D36), nor is a free-text model.
+        assert!(validate(DECIDE_JEV_WORK_LINK, "auto").is_err());
+        assert!(validate(DECIDE_JEV_STATUS_MAP, "shadow").is_ok());
+        assert!(validate(DECIDE_JEV_MODEL, "jev-9; rm -rf").is_err());
+        assert!(validate(DECIDE_JEV_TIMEOUT_MS, "50").is_err());
+        assert!(validate(DECIDE_JEV_DAILY_TOKEN_BUDGET, "0").is_ok());
+    }
+
+    /// The decisions guide (`docs/decisions.md`): its settings table names
+    /// every registered `decide.*` setting with its default, and nothing
+    /// else, like [`work_settings_are_in_the_user_guide`].
+    #[test]
+    fn decide_settings_are_in_the_user_guide() {
+        const GUIDE: &str = include_str!("../../../../docs/decisions.md");
+        let rows: BTreeMap<&str, &str> = GUIDE
+            .lines()
+            .filter_map(|l| {
+                let rest = l.strip_prefix("| `decide.")?;
+                let key_len = rest.find('`')?;
+                Some((&l[3..3 + "decide.".len() + key_len], l))
+            })
+            .collect();
+        let specs: Vec<&Spec> = SPECS
+            .iter()
+            .filter(|s| s.key.starts_with("decide."))
+            .collect();
+        assert!(!specs.is_empty(), "no decide.* settings registered");
+        for spec in &specs {
+            let row = rows.get(spec.key).unwrap_or_else(|| {
+                panic!(
+                    "docs/decisions.md → Settings has no row for `{}` (default `{}`); add one",
+                    spec.key, spec.default
+                )
+            });
+            let cells: Vec<&str> = row.split('|').map(str::trim).collect();
+            assert_eq!(
+                cells.get(2).copied(),
+                Some(format!("`{}`", spec.default).as_str()),
+                "docs/decisions.md: the default of `{}` is `{}` in code",
+                spec.key,
+                spec.default
+            );
+        }
+        for key in rows.keys() {
+            assert!(
+                specs.iter().any(|s| s.key == *key),
+                "docs/decisions.md lists `{key}`, which is not a registered setting"
+            );
+        }
     }
 
     /// The user guide (`docs/work-graph.md`), compiled in like

@@ -129,7 +129,7 @@ a tier the most recent decision. Nothing is learned.
 | Rule | Condition | Outcome |
 |---|---|---|
 | R1 | a person's `confirmed` / `rejected` decision | final: the resolver never changes it |
-| R2 | `explicit` (`started`, `agent`, and fleet's carries `resumed` / `forked` / `inherited`) | confirmed (written by those paths, not the resolver) |
+| R2 | `explicit` (`started`, `agent`, `agent_started`, and fleet's carries `resumed` / `forked` / `inherited`) | confirmed (written by those paths, not the resolver) |
 | R3 | exactly one strong STATE candidate (branch key, PR head key, PR closing ref) in a trusted project | confirmed, auto (source `branch` / `pr`), Undo toast |
 | R3b | the same in an untrusted project | a pre-selected suggestion |
 | R3u | the same, but no tracker can resolve it (a GitHub `owner/repo#n` closing ref before a GitHub tracker exists, M6) | a pre-selected suggestion, even in a trusted project |
@@ -139,6 +139,7 @@ a tier the most recent decision. Nothing is learned.
 | R7 | a state signal's value changes | the confirmed auto link it made ENDS (`end_reason` `branch_changed` / `pr_changed`, snapshotted as past work); a suggestion it made is withdrawn; manual / started / agent links stay |
 | R8 | a key whose prefix two trackers claim (a URL's host settles it) | never automatic: a suggestion |
 | R9 | a rejected (participant, target) pair | never proposed again, from any signal |
+| R9u | a PERSON cleared (unlinked) a link that a current state signal named — the branch, the PR head, a PR closing ref (D34, migration 070 `work_unlinks`) | that state candidate is dropped while the signal keeps the same value (the same branch name; the same PR for a closing ref), so the correction is not undone by the next run; another value detects normally, the same value again stays cleared; events (prompts, URLs, PR text, trailers) are never held; an agent's unlink holds nothing. Applied by `detect` when it builds the input, not by the pure resolver |
 | R11 | Claude's answer to the classification nudge (`work_link { source: agent_inferred }`, M4.6; strength `inferred`, between `strong` and `weak`) | a pre-selected suggestion, never confirmed — not even as a sole candidate in a trusted project |
 | decay | an EVENT suggestion (prompt, URL, trailer, agent inference) from an earlier conversation, not seen in this one | removed at the boundary |
 | primary | live confirmed links ranked by (decided in the current conversation, explicit > strong > inferred > weak, most recent decision) | it moves only when a run loses its primary or confirms a link — never re-ranks decisions |

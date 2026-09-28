@@ -1,0 +1,67 @@
+{
+  "links": [
+    {
+      "archived": false,
+      "created_at": 1790599681,
+      "cross_org": false,
+      "decided_at": 1790599681,
+      "host": "h1",
+      "link_id": 1,
+      "link_version": 1,
+      "name": "one",
+      "needs_you": false,
+      "other_tasks": 1,
+      "primary": true,
+      "resumable": true,
+      "session_id": 1,
+      "source": "manual",
+      "state": "active",
+      "strength": "explicit",
+      "task": {
+        "key": "TK-1",
+        "kind": "tracker",
+        "org_id": 1,
+        "status_category": "in_progress",
+        "status_name": "In Progress",
+        "task_id": "item:1",
+        "title": "Login fails",
+        "tracker_name": "Jira (acme)",
+        "unavailable": false
+      },
+      "why": "linked by a person"
+    },
+    {
+      "archived": false,
+      "created_at": 1790599681,
+      "cross_org": false,
+      "decided_at": 1790599681,
+      "host": "h1",
+      "link_id": 2,
+      "link_version": 1,
+      "name": "one",
+      "needs_you": false,
+      "other_tasks": 1,
+      "primary": false,
+      "resumable": true,
+      "session_id": 1,
+      "source": "manual",
+      "state": "active",
+      "strength": "explicit",
+      "task": {
+        "key": "TK-2",
+        "kind": "tracker",
+        "org_id": 1,
+        "status_category": "in_progress",
+        "status_name": "In Progress",
+        "task_id": "item:2",
+        "title": "Audit log",
+        "tracker_name": "Jira (acme)",
+        "unavailable": false
+      },
+      "why": "linked by a person"
+    }
+  ],
+  "org_id": 1,
+  "primary_link_id": 1,
+  "session_id": 1
+}

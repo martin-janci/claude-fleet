@@ -294,10 +294,14 @@ pub async fn spawn_author_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::cancel::CancellationRegistry;
+    #[cfg(unix)]
     use crate::ssh::SshClient;
+    #[cfg(unix)]
     use std::path::{Path, PathBuf};
 
+    #[cfg(unix)]
     fn tmp(tag: &str) -> PathBuf {
         let p =
             std::env::temp_dir().join(format!("fleet-author-session-{tag}-{}", std::process::id()));
@@ -306,6 +310,7 @@ mod tests {
         p
     }
 
+    #[cfg(unix)]
     fn git(dir: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
             .args(args)
@@ -323,6 +328,7 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
+    #[cfg(unix)]
     fn init_repo(tag: &str) -> PathBuf {
         let root = tmp(tag);
         std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
@@ -404,6 +410,7 @@ mod tests {
 
     // -------------------------------------------------- project adoption
 
+    #[cfg(unix)]
     #[test]
     fn ensure_catalog_project_is_idempotent() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -434,6 +441,7 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn ensure_catalog_project_matches_an_uncanonicalised_path() {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -460,6 +468,7 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn ensure_catalog_project_explains_an_origin_already_adopted_elsewhere() {
         let rt = tokio::runtime::Runtime::new().unwrap();

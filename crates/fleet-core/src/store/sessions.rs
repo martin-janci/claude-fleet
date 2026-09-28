@@ -340,9 +340,7 @@ impl Store {
                 .query_map(params.as_slice(), |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let sql = format!(
-                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2,
-                     claude_status=NULL, stuck_kind=NULL, stuck_since=NULL,
-                     current_activity=NULL, pending_input=NULL
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2, {LOSS_CLEARS}
                  WHERE host_alias=?3 AND status!='ghost' AND {kind_filter}
                    AND COALESCE(last_reconciled_at, 0) < ?4{not_in}
                  RETURNING id"
@@ -414,10 +412,10 @@ impl Store {
         now: i64,
     ) -> Result<Option<SessionRow>, rusqlite::Error> {
         let changed = self.conn.execute(
-            "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='killed',
-                 claude_status=NULL, stuck_kind=NULL, stuck_since=NULL,
-                 current_activity=NULL, pending_input=NULL
-             WHERE id=?2 AND status!='ghost'",
+            &format!(
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='killed', \
+                 {LOSS_CLEARS} WHERE id=?2 AND status!='ghost'"
+            ),
             rusqlite::params![now, id],
         )?;
         let row = fetch_session_by_id(&self.conn, id)?;

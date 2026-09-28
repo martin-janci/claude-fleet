@@ -19,6 +19,8 @@ pub mod pairing;
 pub mod report_route;
 pub mod settings;
 #[cfg(test)]
+mod tests_auth_limit;
+#[cfg(test)]
 mod tests_token_cache;
 mod token_cache;
 mod tools;
@@ -155,6 +157,14 @@ pub fn generate_token() -> String {
     s
 }
 
+/// A failed bearer from one address is answered once per this interval; a
+/// repeat inside it gets 429 and a `debug` line instead of a `warn`, so a
+/// guessing loop costs the hub a hash-map probe and cannot flood the log.
+/// Keyed like `/pair` (`pairing::limiter_key`): the peer, or the last
+/// `X-Forwarded-For` hop when the peer is a trusted front end. Successful
+/// requests never touch the bucket.
+pub const AUTH_FAIL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// What the auth middleware needs per request: the master token and a way
 /// to read the current per-host tokens (they change on provision/rotate
 /// without a server restart).
@@ -170,6 +180,9 @@ struct AuthState {
     /// tests, a store without a read pool — reads the tables through the
     /// writer per request, as before.
     tokens: Option<Arc<TokenCache>>,
+    /// The shared limiter (`McpGuards::rate`), keyed `auth:<address>` for
+    /// failed bearers. See [`AUTH_FAIL_INTERVAL`].
+    rate: Arc<RateLimiter>,
 }
 
 /// Pull `token=<v>` out of a raw query string. Tokens are hex, so no
@@ -257,8 +270,32 @@ async fn authorize(
                 })?
         }
         Err(status) => {
+            let peer = pairing::limiter_key(
+                request
+                    .extensions()
+                    .get::<axum::extract::ConnectInfo<SocketAddr>>()
+                    .map(|c| c.0.ip()),
+                request.headers(),
+            );
+            // The throttle is the log's, not the answer's: a repeat inside
+            // the interval is still `401` (a client reads 401 as "pair
+            // again" and 429 as "the hub is busy, retry" — a revoked desktop
+            // must see the first), logged at debug instead of warn.
+            if status == StatusCode::UNAUTHORIZED
+                && state
+                    .rate
+                    .check(&format!("auth:{peer}"), AUTH_FAIL_INTERVAL)
+                    .is_err()
+            {
+                tracing::debug!(
+                    %peer,
+                    path = %request.uri().path(),
+                    "[mcp] rejected request (repeat, not logged at warn)"
+                );
+                return Err(status);
+            }
             // The path only: the URI / query can carry the legacy `?token=`.
-            tracing::warn!(%status, path = %request.uri().path(), "[mcp] rejected request");
+            tracing::warn!(%status, %peer, path = %request.uri().path(), "[mcp] rejected request");
             return Err(status);
         }
     };
@@ -450,6 +487,8 @@ pub(crate) fn test_app(
         metrics::MetricsState {
             metrics: Arc::new(metrics::Metrics::new()),
             streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+            store: Arc::clone(&store),
+            stats: crate::service::tick::tick_stats(),
         },
         axum::routing::any(|| async { "MCP_OK" }),
         None,
@@ -462,6 +501,7 @@ pub(crate) fn test_app(
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec![]),
             tokens: None,
+            rate: Arc::new(RateLimiter::new()),
         },
         pairing::PairState::new(
             Arc::clone(&store),
@@ -718,6 +758,7 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(allowed_hosts.clone()),
             tokens,
+            rate: Arc::clone(&guards.rate),
         };
         let pair_state = pairing::PairState::new(
             Arc::clone(&store),
@@ -728,6 +769,9 @@ pub async fn start_with_listener<A: TlsAcceptor>(
         // Cloned before `guards` moves into `FleetTools`: the route and the
         // tool router must write and read the same counters.
         let metrics_for_route = Arc::clone(&guards.metrics);
+        // Same reason, for the `/metrics` process gauges (`HubGauges::read`):
+        // the writer `Arc` moves into `FleetTools` just below.
+        let store_for_metrics = Arc::clone(&store);
         let events_state =
             EventsState::new(events, events_store).with_shutdown(serve_shutdown.child_token());
         let tools = FleetTools::new(store, ssh, reg, tunnels, guards).with_read_pool(read_pool);
@@ -747,6 +791,8 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             metrics::MetricsState {
                 metrics: Arc::clone(&metrics_for_route),
                 streams: events_state.stream_limiter(),
+                store: store_for_metrics,
+                stats: crate::service::tick::tick_stats(),
             },
             axum::routing::any_service(service),
             Some(axum::routing::any_service(json_service)),
@@ -864,6 +910,7 @@ mod tests {
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec![]),
             tokens: None,
+            rate: Arc::new(RateLimiter::new()),
         };
         // The pairing registry the test mints into and `/pair` redeems from.
         let pairings = Arc::new(pairing::PendingPairings::new());
@@ -881,6 +928,8 @@ mod tests {
             metrics::MetricsState {
                 metrics: Arc::new(metrics::Metrics::new()),
                 streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+                store: Arc::clone(&store),
+                stats: crate::service::tick::tick_stats(),
             },
             any(|| async { "MCP_OK" }),
             None,
@@ -1145,6 +1194,7 @@ mod tests {
             unauth.contains("401"),
             "expected 401 without token, got:\n{unauth}"
         );
+        auth_bucket_refilled().await;
         let wrong = round_trip(addr, &post("/mcp", Some("nope"), None, "{}")).await;
         assert!(
             wrong.contains("401"),
@@ -1199,6 +1249,7 @@ mod tests {
             );
         }
         // …a revoked one never does (the store filters it out)…
+        auth_bucket_refilled().await;
         let revoked = round_trip(addr, &post("/mcp", Some("revoked-tok"), None, "{}")).await;
         assert!(
             revoked.contains("401"),
@@ -1217,6 +1268,7 @@ mod tests {
             "a client token must not authorize via query:\n{hook_cq}"
         );
         // …and /mcp never accepts a query token.
+        auth_bucket_refilled().await;
         let mcp_q = round_trip(addr, &post("/mcp?token=s3cret", None, None, "{}")).await;
         assert!(
             mcp_q.contains("401"),
@@ -1251,11 +1303,14 @@ mod tests {
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec!["fleet.example.com".to_string()]),
             tokens: None,
+            rate: Arc::new(RateLimiter::new()),
         };
         let app2 = build_app(
             metrics::MetricsState {
                 metrics: Arc::new(metrics::Metrics::new()),
                 streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+                store: Arc::clone(&store),
+                stats: crate::service::tick::tick_stats(),
             },
             any(|| async { "MCP_OK" }),
             None,
@@ -1313,6 +1368,7 @@ mod tests {
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec![]),
             tokens: None,
+            rate: Arc::new(RateLimiter::new()),
         };
         let limited_pairings = Arc::new(pairing::PendingPairings::new());
         let report_state3 = report_route::ReportState::new(Arc::clone(&store));
@@ -1320,6 +1376,8 @@ mod tests {
             metrics::MetricsState {
                 metrics: Arc::new(metrics::Metrics::new()),
                 streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+                store: Arc::clone(&store),
+                stats: crate::service::tick::tick_stats(),
             },
             any(|| async { "MCP_OK" }),
             None,
@@ -1426,6 +1484,7 @@ mod tests {
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(allowed_hosts.clone()),
             tokens: None,
+            rate: Arc::new(RateLimiter::new()),
         };
         let guards = McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {}));
         let pair_state = pairing::PairState::new(
@@ -1436,7 +1495,7 @@ mod tests {
         );
         let report_state = report_route::ReportState::new(Arc::clone(&store));
         let tools = FleetTools::new(
-            store,
+            Arc::clone(&store),
             Arc::new(SshClient::new()),
             crate::cancel::CancellationRegistry::new(),
             Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
@@ -1461,6 +1520,8 @@ mod tests {
             metrics::MetricsState {
                 metrics: Arc::new(metrics::Metrics::new()),
                 streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+                store: Arc::clone(&store),
+                stats: crate::service::tick::tick_stats(),
             },
             axum::routing::any_service(service),
             Some(axum::routing::any_service(json_service)),
@@ -1488,6 +1549,14 @@ mod tests {
     }
 
     /// One raw HTTP/1.1 exchange; reads until the server closes or 800 ms.
+    /// A second bad bearer from one address inside [`AUTH_FAIL_INTERVAL`] is
+    /// answered 429, not 401 (`tests_auth_limit`). A test that asserts the
+    /// refusal itself — every request here comes from loopback, one bucket —
+    /// waits the interval out before its next bad bearer.
+    async fn auth_bucket_refilled() {
+        tokio::time::sleep(AUTH_FAIL_INTERVAL + std::time::Duration::from_millis(50)).await;
+    }
+
     async fn raw_round_trip(addr: std::net::SocketAddr, req: &str) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -1881,6 +1950,7 @@ mod tests {
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(vec![]),
             tokens: None,
+            rate: Arc::new(RateLimiter::new()),
         };
         let pair_state = pairing::PairState::new(
             Arc::clone(&store),
@@ -1897,6 +1967,8 @@ mod tests {
             metrics::MetricsState {
                 metrics: Arc::new(metrics::Metrics::new()),
                 streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
+                store: Arc::clone(&store),
+                stats: crate::service::tick::tick_stats(),
             },
             any(|| async { "MCP_OK" }),
             None,
@@ -2180,6 +2252,7 @@ mod tests {
             "expected 401 without a token:\n{unauth}"
         );
         // Nor does a token in the URL open one (it would land in proxy logs).
+        auth_bucket_refilled().await;
         let via_query = raw_round_trip(addr, &get_events(None, "?token=s3cret")).await;
         assert!(
             via_query.contains("401"),
@@ -2384,6 +2457,7 @@ mod tests {
         let public = serve_real_tools_with(vec!["fleet.example.com".to_string()]).await;
         let r = raw_round_trip(public, &hook_q("fleet.example.com")).await;
         assert!(r.contains("401"), "public hub refuses ?token=:\n{r}");
+        auth_bucket_refilled().await;
         let r = raw_round_trip(public, &hook_q("127.0.0.1")).await;
         assert!(r.contains("401"), "even over loopback:\n{r}");
     }

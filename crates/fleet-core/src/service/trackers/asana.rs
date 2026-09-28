@@ -19,7 +19,12 @@
 //! * **Status.** `completed` is authoritative (done / completed). Otherwise
 //!   the task's section in its first project decides, through the section
 //!   map a person confirmed (`settings.section_map`), else the one the probe
-//!   inferred from section names (`config.section_map`), else todo.
+//!   inferred from section names (`config.section_map`), else todo. The
+//!   probe also keeps the names the rule could not classify
+//!   (`config.unmapped_sections`) and each board's section order
+//!   (`config.project_sections`) — what the `status_map` decision adapter
+//!   (`service::decide::status_map`) may PROPOSE a category for; a person
+//!   applies a proposal, nothing writes the map by itself.
 //! * **Containers** are the task's project gids (memberships).
 //! * **Rate limits**: 429 with `Retry-After`; `opt_fields` everywhere, never
 //!   `opt_expand`.
@@ -45,6 +50,24 @@ pub const MAX_PROJECT_VIEWS: usize = 10;
 pub const MAX_CHANGED: usize = 20;
 /// `/batch` actions per call (Asana's limit).
 pub const BATCH_MAX: usize = 10;
+/// Unclassified section names the probe keeps (`config.unmapped_sections`).
+pub const MAX_UNMAPPED_SECTIONS: usize = 200;
+/// Section names the probe keeps per project, in board order.
+pub const MAX_SECTIONS_PER_PROJECT: usize = 50;
+/// Longest section name kept (a person's map takes at most 120 characters).
+pub const MAX_SECTION_NAME_CHARS: usize = 120;
+
+/// PURE: a section name as the maps key it (trimmed, lower case), or `None`
+/// for the placeholder "Untitled section", an empty name, or one too long
+/// for a person's map.
+pub fn section_key(name: &str) -> Option<String> {
+    let k = name.trim().to_lowercase();
+    (!k.is_empty()
+        && k != "untitled section"
+        && k.chars().count() <= MAX_SECTION_NAME_CHARS
+        && !k.chars().any(char::is_control))
+    .then_some(k)
+}
 
 /// The task fields fleet reads, and nothing else.
 pub const TASK_FIELDS: &str = "gid,name,completed,modified_at,notes,permalink_url,\
@@ -431,6 +454,10 @@ impl TrackerProvider for Asana {
             }
         }
         let mut section_map = BTreeMap::new();
+        // What the keyword rule leaves to `todo`, and each board's order:
+        // what the `status_map` decision adapter reads (docs/decisions.md).
+        let mut unmapped_sections: Vec<String> = Vec::new();
+        let mut project_sections: Vec<(String, Vec<String>)> = Vec::new();
         for (p, _) in &projects {
             let secs = match self
                 .get(
@@ -445,12 +472,29 @@ impl TrackerProvider for Asana {
                 }
                 Err(_) => continue,
             };
+            let mut order: Vec<String> = Vec::new();
             for s in secs["data"].as_array().into_iter().flatten() {
                 if let Some(name) = s["name"].as_str() {
-                    if let Some(c) = infer_section(name) {
+                    let inferred = infer_section(name);
+                    if let Some(c) = inferred {
                         section_map.insert(name.trim().to_lowercase(), c.to_string());
                     }
+                    let Some(key) = section_key(name) else {
+                        continue;
+                    };
+                    if order.len() < MAX_SECTIONS_PER_PROJECT && !order.contains(&key) {
+                        order.push(key.clone());
+                    }
+                    if inferred.is_none()
+                        && unmapped_sections.len() < MAX_UNMAPPED_SECTIONS
+                        && !unmapped_sections.contains(&key)
+                    {
+                        unmapped_sections.push(key);
+                    }
                 }
+            }
+            if !order.is_empty() {
+                project_sections.push((p.clone(), order));
             }
         }
         // Search is a Premium feature: 402 / 403 means no `recent` view.
@@ -475,6 +519,8 @@ impl TrackerProvider for Asana {
                 projects,
                 search,
                 section_map,
+                unmapped_sections,
+                project_sections,
                 ..Default::default()
             },
         })

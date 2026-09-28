@@ -11,6 +11,16 @@
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import { todayOpen } from './lib/today';
+  import {
+    bumpWorkChanged,
+    cycleWorkOrg,
+    noteWorkChanged,
+    noteWorkEvents,
+    sessionEventsTouchWork,
+    sidebarView,
+    toggleSidebarView,
+  } from './lib/work_view';
+  import type { SessionEvent } from './lib/sessions';
   import { composerInsert } from './lib/conversation';
   import { tidyRequest } from './lib/tidy';
   import TerminalView from './lib/TerminalView.svelte';
@@ -66,7 +76,7 @@
   import { loadComposerPresets } from './lib/composer_presets';
   import { hubStatus, loadHubStatus } from './lib/hub';
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
-  import { startHubConnection } from './lib/hub_connection';
+  import { startHubConnection, setGapHandler } from './lib/hub_connection';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
   import { get } from 'svelte/store';
 
@@ -177,6 +187,8 @@
   // its FIRST sync, the sessions whose keys it owns just got titles and
   // status (retro-binding); say how many, and offer the Group-by-Work view.
   function onWorkEvents(events: WorkEvent[]) {
+    // The Work view (M14) re-reads what it shows when an item moved.
+    noteWorkEvents(events);
     for (const t of applyWorkEvents(events)) {
       const keys = get(sessions).map((s) => s.work?.key ?? null);
       const { count, prefixes } = sessionsMentioning(t, keys);
@@ -184,9 +196,23 @@
       push({
         kind: 'info',
         message: `${count} session${count === 1 ? '' : 's'} mention ${prefixes.map((p) => `${p}-*`).join(', ')}`,
-        action: { label: 'Review', run: () => sidebarGroupBy.set('work') },
+        action: {
+          label: 'Review',
+          run: () => {
+            sidebarView.set('sessions');
+            sidebarGroupBy.set('work');
+          },
+        },
       });
     }
+  }
+
+  // Session events that move a session's work (or the attention of one the
+  // Work view shows) refresh the Work view too; compared before the store
+  // takes them.
+  function onSessionEvents(events: SessionEvent[]) {
+    if (sessionEventsTouchWork(events)) bumpWorkChanged();
+    applySessionEvents(events);
   }
 
   onMount(async () => {
@@ -227,7 +253,7 @@
     // the list is in flight would otherwise be emitted to no listener and
     // lost until the row changes again.
     unlistenEvents = await subscribeToRowEvents({
-      onSessionEvents: applySessionEvents,
+      onSessionEvents: onSessionEvents,
       onHostEvents: applyHostEvents,
       onAccountEvents: applyAccountEvents,
       onProjectEvents: applyProjectEvents,
@@ -241,6 +267,8 @@
       onSyncProgress: (p) => syncProgress.set(p),
       onMoveProgress: applyMoveProgress,
       onWorkEvents: onWorkEvents,
+      // `work:changed` (M14): the Work view re-reads.
+      onWorkChanged: noteWorkChanged,
     });
     const [pr, sr, hr, ar] = await Promise.all([
       loadProjects(),
@@ -275,6 +303,13 @@
     // Trackers (work graph M3): their state badges, chip staleness and the
     // quick switcher's tickets. A hub older than M3 has no answer.
     void loadTrackers();
+    // A hub reconnect the hub could not replay: the backend re-lists rows
+    // itself; projects/worktrees and trackers/work have list shapes their
+    // events cannot carry, so this window re-fetches them here.
+    setGapHandler(() => {
+      void loadProjects();
+      void loadTrackers();
+    });
     // The composer's chip row. Fleet state since it moved off `localStorage`
     // (so the phone and this window share one list), and never on the
     // critical path: the cached copy is already on screen, and a failed read
@@ -348,6 +383,7 @@
     if (get(hubStatus).unavailable) return;
     if (outcomeRefreshInFlight) return;
     outcomeRefreshInFlight = true;
+    bumpWorkChanged();
     void Promise.all([loadProjects(), loadSessions()]).finally(() => {
       outcomeRefreshInFlight = false;
     });
@@ -389,6 +425,7 @@
     unsubOpened();
     unsubHostsClose();
     unlistenEvents?.();
+    setGapHandler(null);
   });
 
   function onResizeSidebar(delta: number) {
@@ -614,8 +651,13 @@
     else if (chord === 'session-view') flipSessionView();
     else if (chord === 'settings') settingsOpen.set(true);
     else if (chord === 'agent') void toggleAgent();
-    else if (chord === 'scope') cycleScope();
+    // The Work view has its own org filter: the chord cycles that one there.
+    else if (chord === 'scope') (get(sidebarView) === 'work' ? cycleWorkOrg : cycleScope)();
     else if (chord === 'today') todayOpen.update((v) => !v);
+    else if (chord === 'work-view') {
+      sidebarCollapsed = false;
+      toggleSidebarView();
+    }
   }
 
   function onKeydown(e: KeyboardEvent) {

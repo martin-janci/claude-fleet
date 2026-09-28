@@ -692,6 +692,77 @@ fn spawn_on(
     }
 }
 
+/// D34: the caller decides whose start it is. A person's start links
+/// `started` (and so may write back the PR link); an agent's start (a
+/// per-host token, the operator) links `agent_started`: the same start,
+/// but no tracker write, and the usage summary never reads it as a
+/// person's.
+#[tokio::test]
+async fn an_agents_start_is_recorded_as_the_agents_and_never_writes_back() {
+    use crate::service::work::{start_args_as, WorkLinkArgs};
+    use crate::store::{Decider, TrackerSettings, WriteBack};
+    const PR: &str = "https://github.com/acme/app/pull/7";
+    for (decider, source, queued) in [
+        (Decider::Person, "started", 1),
+        (Decider::Agent, "agent_started", 0),
+    ] {
+        let fx = Fx::new();
+        {
+            let s = fx.store.lock().unwrap();
+            let t = s.list_trackers().unwrap()[0].id;
+            s.set_tracker_settings(
+                t,
+                &TrackerSettings {
+                    write_back: WriteBack {
+                        pr_remote_link: true,
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        // The MCP tool's start arguments carry the caller's decider.
+        let args = StartArgs {
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            ..start_args_as(
+                &WorkLinkArgs {
+                    action: "start".into(),
+                    key: Some("ABC-1".into()),
+                    ..Default::default()
+                },
+                decider,
+            )
+        };
+        assert_eq!(args.decider, decider);
+        let plan = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
+            .await
+            .unwrap();
+        let (row, _) = start_with(&fx.store, &plan, None, &OrgScope::All, spawn_on(&fx.store))
+            .await
+            .unwrap();
+        let w = row.work.expect("linked");
+        assert_eq!(
+            (w.key.as_deref(), w.source.as_str()),
+            (Some("ABC-1"), source),
+            "{decider:?}"
+        );
+        let s = fx.store.lock().unwrap();
+        assert_eq!(
+            crate::service::trackers::write_back::on_pr(&s, row.id, PR).unwrap(),
+            queued,
+            "{decider:?}"
+        );
+        let now = crate::service::catalog::now_secs();
+        let u = crate::service::work::usage::usage(&s, 1, now, &|_| Vec::new()).unwrap();
+        assert_eq!(
+            u.links.by_source.keys().collect::<Vec<_>>(),
+            vec![source],
+            "{decider:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn start_resolves_project_and_host_from_past_work_and_links_started() {
     let fx = Fx::new();

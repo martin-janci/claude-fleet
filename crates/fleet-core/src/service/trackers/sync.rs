@@ -973,6 +973,12 @@ pub fn spawn_tracker_sync(
     };
     tracing::info!("tracker sync every {}s", period.as_secs());
     let sync = Arc::new(TrackerSync::new(net).with_metrics(process_metrics()));
+    // J3 (docs/decisions.md): after a clean pass, an Asana tracker's
+    // sections may be put to the decision model — gated (off by default),
+    // at most daily, in a task of its own; it never touches the pass.
+    let status_map = crate::service::decide::status_map::StatusMapTrigger::new(
+        crate::service::decide::DecideCtx::jev(Arc::clone(&store)),
+    );
     Some(crate::rt::spawn(async move {
         let mut ticker = tokio::time::interval(period);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -982,7 +988,9 @@ pub fn spawn_tracker_sync(
                 _ = token.cancelled() => break,
                 _ = ticker.tick() => {}
             }
-            let _ = sync.run_pass(&store).await;
+            if let Some(passes) = sync.run_pass(&store).await {
+                let _ = status_map.after_pass(&passes);
+            }
         }
     }))
 }

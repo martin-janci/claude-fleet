@@ -35,8 +35,19 @@
     ghesHostname,
     trackerSyncMetrics,
     describeSyncMetrics,
+    statusMapProposals,
+    decideStatusMapProposal,
+    pendingProposals,
+    proposalWhy,
+    formatConfidence,
+    categoryLabel,
+    shadowAgreement,
+    SECTION_CATEGORIES,
+    type ProposalAction,
     type ProviderId,
+    type SectionProposal,
     type SyncMetrics,
+    type TrackerProposals,
     type TrackerRow,
   } from './trackers';
   import { hosts } from './hosts';
@@ -98,7 +109,9 @@
   });
 
   onMount(() => {
-    void loadTrackers();
+    void loadTrackers().then(() => {
+      if (owns) void loadProposals();
+    });
     if (owns) void loadMetrics();
     if (initialUrl) connecting = true;
   });
@@ -253,6 +266,36 @@
     await loadTrackers();
     push({ kind: 'success', message: `${t.name}: statuses follow your section map from the next sync.` });
   }
+
+  // --- Jev `status_map` in assist: proposals for the Asana sections the
+  // keyword rule could not classify. A person applies one, applies another
+  // category, or says "not this"; nothing is applied by itself. Only the
+  // owner of the fleet reads them (tracker administration).
+  let proposals = $state<Record<number, TrackerProposals>>({});
+  let deciding = $state<number | null>(null);
+
+  /** Quiet when there is no Asana tracker, or this process cannot say. */
+  async function loadProposals() {
+    if (!$trackers.some((t) => t.provider === 'asana')) return;
+    const r = await statusMapProposals();
+    if (!r.ok || !Array.isArray(r.value)) return;
+    proposals = Object.fromEntries(r.value.map((p) => [p.tracker_id, p]));
+  }
+
+  async function decideProposal(t: TrackerRow, p: SectionProposal, action: ProposalAction, category?: string) {
+    if (deciding !== null) return;
+    deciding = p.run_id;
+    const r = await decideStatusMapProposal(p.run_id, action, category);
+    deciding = null;
+    if (!r.ok) pushError(r.error, 'Deciding the proposal failed');
+    else if (action !== 'reject')
+      push({
+        kind: 'success',
+        message: `${t.name}: “${p.section}” is ${categoryLabel(r.value.category)} in your section map from the next sync.`,
+      });
+    await loadTrackers();
+    await loadProposals();
+  }
 </script>
 
 <section class="block" data-testid="work-section">
@@ -360,6 +403,68 @@
             >
           </li>
         {/if}
+        {#if t.provider === 'asana' && owns && pendingProposals(proposals[t.id]).length > 0}
+          {@const agreement = shadowAgreement(proposals[t.id])}
+          <li class="sections" data-testid="jev-proposals">
+            <span class="hint"
+              >Proposed by Jev (assist) for sections the keyword rule could not classify. Nothing is
+              applied until you choose; applying one confirms your section map.</span
+            >
+            {#if agreement}
+              <span class="hint" data-testid="jev-shadow-agreement"
+                >In shadow, Jev agreed with the keyword rule on {agreement.agreed} of {agreement.compared}
+                sections the rule classified.</span
+              >
+            {/if}
+            {#each pendingProposals(proposals[t.id]) as p (p.run_id)}
+              <div class="section-row" data-testid="jev-proposal">
+                <span data-testid="jev-proposal-section">{p.section}</span>
+                <span data-testid="jev-proposal-category"
+                  >→ {categoryLabel(p.answer)}{p.applies_as && p.applies_as !== p.answer
+                    ? ` (applies as ${categoryLabel(p.applies_as)})`
+                    : ''}</span
+                >
+                <span class="conf" data-testid="jev-proposal-confidence" title="confidence"
+                  >{formatConfidence(p.confidence)}</span
+                >
+                {#if proposalWhy(p)}
+                  <span class="why" data-testid="jev-proposal-why">why: {proposalWhy(p)}</span>
+                {/if}
+                {#if p.applies_as}
+                  <button
+                    class="btn"
+                    data-testid="jev-apply"
+                    disabled={deciding !== null}
+                    onclick={() => void decideProposal(t, p, 'apply')}>Apply</button
+                  >
+                {/if}
+                <select
+                  data-testid="jev-apply-as"
+                  aria-label="Apply as…"
+                  disabled={deciding !== null}
+                  value=""
+                  onchange={(e) => {
+                    const sel = e.currentTarget as HTMLSelectElement;
+                    const c = sel.value;
+                    sel.value = '';
+                    if (c) void decideProposal(t, p, 'apply_as', c);
+                  }}
+                >
+                  <option value="">Apply as…</option>
+                  {#each SECTION_CATEGORIES as c (c)}
+                    <option value={c}>{categoryLabel(c)}</option>
+                  {/each}
+                </select>
+                <button
+                  class="btn"
+                  data-testid="jev-reject"
+                  disabled={deciding !== null}
+                  onclick={() => void decideProposal(t, p, 'reject')}>Not this</button
+                >
+              </div>
+            {/each}
+          </li>
+        {/if}
       {/each}
     </ul>
   {/if}
@@ -370,7 +475,8 @@
       <code>fleet-hub tracker add &lt;ticket-url&gt;</code> (GitHub:
       <code>--via-cli &lt;host with gh&gt;</code>; Enterprise: also
       <code>--hostname &lt;host[:port]&gt;</code>), then
-      <code>fleet-hub tracker set-credential &lt;id&gt; [--email &lt;you&gt;] &lt; token.txt</code>.
+      <code>fleet-hub tracker set-credential &lt;id&gt; [--email &lt;you&gt;] &lt; token.txt</code>. Jev's
+      Asana section proposals: <code>fleet-hub decide proposals</code>.
     </p>
   {:else if !connecting}
     <button class="btn" data-testid="connect-jira" onclick={() => (connecting = true)}
@@ -572,8 +678,14 @@
   }
   .section-row {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.5rem;
     align-items: center;
+  }
+  .conf,
+  .why {
+    color: var(--fg-muted);
+    font-size: 0.72rem;
   }
   .connect select,
   .connect textarea {

@@ -470,8 +470,10 @@ describe('safe remove and discard-kill on a hub client', () => {
 });
 
 // #147: Add project and Purge project. Neither has a hub tool
-// (`commands/projects.rs`, `commands/sessions.rs`): both act over this
-// machine's SSH (and, for Add project, GitHub credentials).
+// (`commands/projects.rs`, `commands/sessions.rs`). Add project ROUTES since
+// contract revision 5 (the clone runs on the host through the hub), so it is
+// enabled while the live link is up and disabled with the offline sentence
+// while it is not; Purge still acts over this machine's SSH and is refused.
 describe('add and purge project on a hub client', () => {
   const project: ProjectTreeRow = {
     project: { id: 1, owner: 'martin-janci', repo: 'claude-fleet', base_path: '/r/cf', last_session_at: 1, adopted: false, system: false },
@@ -482,14 +484,28 @@ describe('add and purge project on a hub client', () => {
     claude_status: null, turn_seq: 0, last_stop_at: null,
   });
 
-  it('+ Add project… is disabled with the reason', async () => {
+  it('+ Add project… is enabled on a connected hub client (it routes)', async () => {
     hubStatus.set(remote);
+    hubConnection.set({ state: 'connected' });
+    projects.set([project]);
+    sessionsStore.set([projectSession]);
+    render(Sidebar, { props: {} as never });
+    await fireEvent.click(await screen.findByTestId('new-session-footer'));
+    const btn = await screen.findByTestId('add-project-row');
+    expect(btn).not.toBeDisabled();
+    expect((btn as HTMLButtonElement).title).toBe('');
+  });
+
+  it('+ Add project… is disabled with the offline sentence while the link is down', async () => {
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'offline', attempt: 3, retry_in_secs: 8, reason: 'connection refused' });
     projects.set([project]);
     sessionsStore.set([projectSession]);
     render(Sidebar, { props: {} as never });
     await fireEvent.click(await screen.findByTestId('new-session-footer'));
     const btn = await screen.findByTestId('add-project-row');
     expect(btn).toBeDisabled();
+    expect((btn as HTMLButtonElement).title).toContain('unreachable');
     expect((btn as HTMLButtonElement).title).toContain('fleet.example.com');
   });
 

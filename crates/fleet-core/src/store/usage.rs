@@ -283,52 +283,81 @@ impl Store {
                 d.last_msg_usage
             ],
         )?;
-        if !daily.is_zero() {
-            self.conn.execute(
-                "INSERT INTO usage_daily (day, host_alias, input_tokens, output_tokens, \
-                 cache_write_tokens, cache_read_tokens, cost_micros) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
-                 ON CONFLICT(day, host_alias) DO UPDATE SET \
-                 input_tokens = input_tokens + excluded.input_tokens, \
-                 output_tokens = output_tokens + excluded.output_tokens, \
-                 cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens, \
-                 cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens, \
-                 cost_micros = cost_micros + excluded.cost_micros",
-                rusqlite::params![
-                    d.now.div_euclid(86_400),
-                    host_alias,
-                    daily.input_tokens,
-                    daily.output_tokens,
-                    daily.cache_write_tokens,
-                    daily.cache_read_tokens,
-                    daily.cost_micros
-                ],
-            )?;
+        // A rewritten file (`reset`) has one growth figure that cannot be
+        // split by day; a reader without `D` lines has none — both book to
+        // the day of `now`, as before. Otherwise each day's slice goes to
+        // its own row, history from a fresh cursor to the backfill row.
+        if d.reset || d.by_day.is_empty() {
+            if !daily.is_zero() {
+                self.add_usage_daily(d.now.div_euclid(86_400), host_alias, false, &daily)?;
+            }
+        } else {
+            for slice in &d.by_day {
+                if !slice.totals.is_zero() {
+                    self.add_usage_daily(slice.day, host_alias, slice.backfill, &slice.totals)?;
+                }
+            }
         }
         Ok(changed)
     }
 
+    /// Add `t` to one `usage_daily` row, keyed `(day, host_alias, backfill)`.
+    fn add_usage_daily(
+        &self,
+        day: i64,
+        host_alias: &str,
+        backfill: bool,
+        t: &UsageTotals,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO usage_daily (day, host_alias, backfill, input_tokens, output_tokens, \
+             cache_write_tokens, cache_read_tokens, cost_micros) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+             ON CONFLICT(day, host_alias, backfill) DO UPDATE SET \
+             input_tokens = input_tokens + excluded.input_tokens, \
+             output_tokens = output_tokens + excluded.output_tokens, \
+             cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens, \
+             cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens, \
+             cost_micros = cost_micros + excluded.cost_micros",
+            rusqlite::params![
+                day,
+                host_alias,
+                backfill as i64,
+                t.input_tokens,
+                t.output_tokens,
+                t.cache_write_tokens,
+                t.cache_read_tokens,
+                t.cost_micros
+            ],
+        )?;
+        Ok(())
+    }
+
     /// `usage_daily` rows with `day >= since_day` (UTC day numbers),
-    /// optionally for one host, oldest first.
+    /// optionally for one host, oldest first: `(day, host_alias, backfill,
+    /// totals)`, the live row (`backfill = false`) and the backfill row of a
+    /// day beside each other.
     pub fn usage_daily_since(
         &self,
         since_day: i64,
         host_alias: Option<&str>,
-    ) -> Result<Vec<(i64, String, UsageTotals)>, rusqlite::Error> {
+    ) -> Result<Vec<(i64, String, bool, UsageTotals)>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT day, host_alias, input_tokens, output_tokens, cache_write_tokens, \
+            "SELECT day, host_alias, backfill, input_tokens, output_tokens, cache_write_tokens, \
              cache_read_tokens, cost_micros FROM usage_daily \
-             WHERE day >= ?1 AND (?2 IS NULL OR host_alias = ?2) ORDER BY day, host_alias",
+             WHERE day >= ?1 AND (?2 IS NULL OR host_alias = ?2) \
+             ORDER BY day, host_alias, backfill",
         )?;
         let rows = stmt.query_map(rusqlite::params![since_day, host_alias], |r| {
             Ok((
                 r.get(0)?,
                 r.get(1)?,
+                r.get::<_, i64>(2)? != 0,
                 UsageTotals {
-                    input_tokens: r.get(2)?,
-                    output_tokens: r.get(3)?,
-                    cache_write_tokens: r.get(4)?,
-                    cache_read_tokens: r.get(5)?,
-                    cost_micros: r.get(6)?,
+                    input_tokens: r.get(3)?,
+                    output_tokens: r.get(4)?,
+                    cache_write_tokens: r.get(5)?,
+                    cache_read_tokens: r.get(6)?,
+                    cost_micros: r.get(7)?,
                 },
             ))
         })?;
@@ -371,6 +400,7 @@ mod tests {
                 last_msg_id: Some("msg_9".into()),
                 last_msg_usage: Some("40,4,0,0,0".into()),
                 now: 86_400,
+                by_day: Vec::new(),
             },
         )
         .unwrap();
@@ -438,6 +468,7 @@ mod tests {
             source: "uuid-w.jsonl".into(),
             last_msg_id: Some(last.into()),
             last_msg_usage: Some("1,0,0,0,0".into()),
+            by_day: Vec::new(),
             now: 1,
         };
         s.apply_usage(src, "a", &pass(100, "msg_a")).unwrap();
@@ -500,6 +531,7 @@ mod tests {
             last_msg_id: Some("msg_1".into()),
             last_msg_usage: Some("1,1,2,3,0".into()),
             now,
+            by_day: Vec::new(),
         };
         let _ = bus.take();
         let day0 = 20_000 * 86_400;
@@ -552,9 +584,9 @@ mod tests {
         assert_eq!(row.usage.usage_cost_micros, 100);
         let days = s.usage_daily_since(20_000, None).unwrap();
         assert_eq!(days.len(), 2);
-        assert_eq!((days[0].0, days[0].2.cost_micros), (20_000, 50));
-        assert_eq!(days[1].2.cost_micros, 25 + 25);
-        assert_eq!(days[1].2.input_tokens, 5 + 5);
+        assert_eq!((days[0].0, days[0].3.cost_micros), (20_000, 50));
+        assert_eq!(days[1].3.cost_micros, 25 + 25);
+        assert_eq!(days[1].3.input_tokens, 5 + 5);
         assert!(s.usage_daily_since(20_002, None).unwrap().is_empty());
         assert!(s.usage_daily_since(0, Some("other")).unwrap().is_empty());
         assert_eq!(s.usage_daily_since(0, Some("vps")).unwrap().len(), 2);
@@ -568,5 +600,79 @@ mod tests {
             .execute("UPDATE sessions SET lost_at = 1 WHERE id = ?1", [id])
             .unwrap();
         assert!(s.list_usage_cursors("vps").unwrap().is_empty());
+    }
+
+    #[test]
+    fn apply_usage_books_each_transcript_day_and_keeps_backfill_apart() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("vps").unwrap();
+        s.upsert_session("a", "vps", None, None, 1, 1, "running", None)
+            .unwrap();
+        let id = s.get_session("a", "vps").unwrap().unwrap().id;
+        let t = |cost: i64| UsageTotals {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_write_tokens: 0,
+            cache_read_tokens: 0,
+            cost_micros: cost,
+        };
+        let mut all = t(100);
+        all.add(&t(7));
+        let d = UsageDelta {
+            reset: false,
+            totals: all,
+            model: Some("claude-opus-5".into()),
+            offset: 10,
+            source: "x.jsonl".into(),
+            last_msg_id: None,
+            last_msg_usage: None,
+            now: 20_716 * 86_400 + 5,
+            by_day: vec![
+                DayDelta {
+                    day: 20_714,
+                    totals: t(100),
+                    backfill: true,
+                },
+                DayDelta {
+                    day: 20_716,
+                    totals: t(7),
+                    backfill: false,
+                },
+            ],
+        };
+        assert!(s.apply_usage(id, "vps", &d).unwrap());
+        let rows: Vec<(i64, bool, i64)> = s
+            .usage_daily_since(0, Some("vps"))
+            .unwrap()
+            .into_iter()
+            .map(|(day, _, backfill, t)| (day, backfill, t.cost_micros))
+            .collect();
+        assert_eq!(rows, vec![(20_714, true, 100), (20_716, false, 7)]);
+        let days = crate::service::usage::daily_totals(&s, 0, Some("vps")).unwrap();
+        assert_eq!(days[0].day, "2026-09-18");
+        assert_eq!(days[0].backfill_cost_micros, 100);
+        assert_eq!(
+            days[0].totals.cost_micros, 0,
+            "backfill never inflates the live day"
+        );
+        assert_eq!(days[1].totals.cost_micros, 7);
+        assert_eq!(days[1].backfill_cost_micros, 0);
+        // A delta without day slices books to the day of `now`, as before.
+        let plain = UsageDelta {
+            by_day: Vec::new(),
+            totals: t(1),
+            offset: 11,
+            ..d.clone()
+        };
+        assert!(s.apply_usage(id, "vps", &plain).unwrap());
+        let live_today = s
+            .usage_daily_since(20_716, Some("vps"))
+            .unwrap()
+            .into_iter()
+            .find(|(_, _, b, _)| !b)
+            .unwrap()
+            .3
+            .cost_micros;
+        assert_eq!(live_today, 8);
     }
 }

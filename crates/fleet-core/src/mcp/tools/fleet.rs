@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::ipc_error::lock;
+use crate::service::orgs::OrgScope;
 
 #[tool_router(router = fleet_router, vis = "pub(super)")]
 impl FleetTools {
@@ -12,7 +13,9 @@ impl FleetTools {
         (micro-USD) per host and UTC day for 7 days, and trackers (each \
         ok/degraded/failing, failures in a row, last error and success; \
         detection_backlog: suggestions undecided for detection_backlog_days). \
-        A per-host token sees its own host's usage and its org's trackers.")]
+        A per-host token sees its own host's usage and its org's trackers. \
+        hub: uptime and last reconcile pass; tunnels_mode none|reverse; \
+        peer_links_total.")]
     pub(super) async fn fleet_health(
         &self,
         Extension(caller): Extension<Caller>,
@@ -55,6 +58,15 @@ impl FleetTools {
                 Err(_) => health::blank_rollups(&mut h),
             }
         }
+        // The last reconcile error is the hub's own text about any host —
+        // another org's too; a scoped caller gets that it failed, not why.
+        if caller.is_scoped() {
+            if let Some(r) = h.hub.as_mut().map(|hub| &mut hub.reconcile) {
+                if r.last_error.is_some() {
+                    r.last_error = Some("reconcile failed (details on the hub)".into());
+                }
+            }
+        }
         // An agent reads it: a tracker's error is the tracker's text.
         h.trackers.fence_errors();
         ok_json_compact(&h)
@@ -66,7 +78,8 @@ impl FleetTools {
         table (usage.prices_json), not a bill. total and by_host sum live \
         rows over their lifetime; by_day is the durable daily roll-up \
         (killed sessions included). Sessions sorted by cost, at most 200. A \
-        per-host token only sees its own host.")]
+        per-host token only sees its own host. by_day.backfill_cost_micros: \
+        history a first read booked, apart from live cost.")]
     pub(super) async fn usage_report(
         &self,
         Extension(caller): Extension<Caller>,
@@ -83,7 +96,24 @@ impl FleetTools {
             .unwrap_or(0);
         let report = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            usage::report(&s, host.as_deref(), p.since_secs, now).map_err(to_mcp_err)?
+            // Work graph M14: a client bound to an org sees its org's sessions
+            // and hosts only, as in `fleet_health`; a host outside them
+            // answers as an unknown one. (A per-host token is pinned to its
+            // host by `usage_scope`.)
+            let scope = if caller.is_scoped() && caller.host_alias.is_none() {
+                caller.org_scope(&s).map_err(to_mcp_err)?
+            } else {
+                OrgScope::All
+            };
+            if let (Some(h), false) = (host.as_deref(), scope.is_all()) {
+                if !health::hosts_in_scope(&s, &scope)
+                    .iter()
+                    .any(|x| x.alias == h)
+                {
+                    return Err(mcp_err("E_NOTFOUND", format!("no host {h:?}"), None));
+                }
+            }
+            usage::report_on(&s, host.as_deref(), p.since_secs, now, &scope).map_err(to_mcp_err)?
         };
         ok_json_compact(&report)
     }
@@ -123,8 +153,9 @@ impl FleetTools {
 
     #[tool(description = "Read or replace the fleet's quick replies: the \
         chip row the desktop and phone composers draw above the prompt box, \
-        as [{label, text}]. No arguments reads; `set` replaces the whole \
-        list (max 24, [] restores the defaults). Errors: E_INVALID.")]
+        as [{label, text, auto_send}] in order. No arguments reads; `set` \
+        replaces the whole list (max 24, [] restores the defaults). \
+        Errors: E_INVALID.")]
     pub(super) async fn quick_replies(
         &self,
         Parameters(p): Parameters<QuickRepliesParams>,

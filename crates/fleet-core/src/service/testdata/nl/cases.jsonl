@@ -1,0 +1,203 @@
+{"text": "Fix the flaky login test in CI, it fails about one run in five.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Can you refactor the session list so it stops re-fetching on every event?", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Please add pagination to the tickets endpoint and update the docs.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Why does the reconcile pass take eight seconds on the big host?", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Look at the failing migration and tell me what went wrong before touching anything.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Write unit tests for the date parser, including leap years and time zones.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "The build is broken on main after the last merge, can you take a look?", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Rename the settings key and keep the old one working for one release.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Investigate why the mobile app drops the event stream after the phone sleeps.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Summarise what changed in the tracker sync since last week.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Bump the dependency and check that nothing else breaks.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "We need a dark mode toggle in the settings dialog.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Move the hub config parsing into its own module and add tests.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Make the error message friendlier when the token has expired.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Check whether the worktree cleanup still leaves stale branches behind.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Implement retry with exponential backoff for the webhook sender.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "The sidebar grouping looks wrong when a session has two tickets.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Add a health check endpoint that does not open the database.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Please review this PR and point out anything risky.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Continue where you left off yesterday with the export feature.", "expect": "en", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Login page times out on slow networks", "expect": "en", "folded": false, "kind": "title", "note": ""}
+{"text": "Add CSV export to the monthly report", "expect": "en", "folded": false, "kind": "title", "note": ""}
+{"text": "Crash when opening an empty project", "expect": "en", "folded": false, "kind": "title", "note": ""}
+{"text": "Payment webhook retries forever", "expect": "en", "folded": false, "kind": "title", "note": ""}
+{"text": "Upgrade the Android build to the new SDK", "expect": "en", "folded": false, "kind": "title", "note": ""}
+{"text": "Improve onboarding copy for first-time users", "expect": "en", "folded": false, "kind": "title", "note": ""}
+{"text": "Search results ignore the date filter", "expect": "en", "folded": false, "kind": "title", "note": ""}
+{"text": "Duplicate notifications after reconnect", "expect": "en", "folded": false, "kind": "title", "note": ""}
+{"text": "Dark mode colours are unreadable in the editor", "expect": "en", "folded": false, "kind": "title", "note": ""}
+{"text": "Document the release process for the mobile app", "expect": "en", "folded": false, "kind": "title", "note": ""}
+{"text": "Fix `parse_since` so that `--since 3d` works:\n```rust\nlet (num, unit) = s.split_at(s.len() - 1);\n```\nIt panics on an empty string.", "expect": "en", "folded": false, "kind": "prompt", "note": "code-dense, prose is English"}
+{"text": "Run `cargo clippy --workspace -- -D warnings` and fix whatever it reports in fleet-core.", "expect": "en", "folded": false, "kind": "prompt", "note": "inline code"}
+{"text": "Oprav prosím ten nestabilný test prihlásenia, v CI padá asi každý piaty beh.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Pozri sa, prečo reconcile na veľkom hostiteľovi trvá osem sekúnd.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Pridaj stránkovanie do endpointu pre tikety a aktualizuj dokumentáciu.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Najprv mi vysvetli, čo sa pokazilo pri migrácii, a až potom niečo meň.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Napíš unit testy pre parser dátumov vrátane priestupných rokov.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Po poslednom merge je build na main rozbitý, môžeš sa na to pozrieť?", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Premenuj kľúč v nastaveniach a starý nechaj ešte jednu verziu fungovať.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Zisti, prečo mobilná aplikácia stratí stream udalostí, keď telefón zaspí.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Zhrň mi, čo sa zmenilo v synchronizácii trackera za posledný týždeň.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Treba pridať prepínač tmavého režimu do nastavení.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Presuň parsovanie konfigurácie hubu do samostatného modulu a dopíš testy.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Chybová hláška pri expirovanom tokene by mala byť zrozumiteľnejšia.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Skontroluj, či upratovanie worktree ešte nenecháva staré vetvy.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Implementuj opakovanie s exponenciálnym čakaním pre odosielanie webhookov.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Pokračuj tam, kde si včera skončil s exportom.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Sprav code review tohto PR a upozorni ma na všetko rizikové.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Keď má session dva tikety, zoskupenie v bočnom paneli vyzerá zle.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Potrebujem, aby sa health check nedotýkal databázy.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Uprav deployment skript tak, aby fungoval aj na ARM serveroch.", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Prečo sa mi v Jire nezobrazuje stav tiketu po synchronizácii?", "expect": "sk", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Prihlasovacia stránka nereaguje na pomalej sieti", "expect": "sk", "folded": false, "kind": "title", "note": ""}
+{"text": "Pridať export do CSV k mesačnému reportu", "expect": "sk", "folded": false, "kind": "title", "note": ""}
+{"text": "Pád aplikácie pri otvorení prázdneho projektu", "expect": "sk", "folded": false, "kind": "title", "note": ""}
+{"text": "Duplicitné notifikácie po opätovnom pripojení", "expect": "sk", "folded": false, "kind": "title", "note": ""}
+{"text": "Vylepšiť texty pri prvom spustení aplikácie", "expect": "sk", "folded": false, "kind": "title", "note": ""}
+{"text": "Vyhľadávanie ignoruje filter dátumu", "expect": "sk", "folded": false, "kind": "title", "note": ""}
+{"text": "Zdokumentovať proces vydania mobilnej aplikácie", "expect": "sk", "folded": false, "kind": "title", "note": ""}
+{"text": "Aktualizovať Android build na nové SDK", "expect": "sk", "folded": false, "kind": "title", "note": ""}
+{"text": "Oprav `parse_since`, aby fungovalo `--since 3d`:\n```rust\nlet (num, unit) = s.split_at(s.len() - 1);\n```\nPri prázdnom reťazci to spadne.", "expect": "sk", "folded": false, "kind": "prompt", "note": "code-dense, prose is Slovak"}
+{"text": "Spusti `cargo test -p fleet-core` a oprav všetko, čo zlyhá v module orgs.", "expect": "sk", "folded": false, "kind": "prompt", "note": "inline code + EN terms"}
+{"text": "Refaktoruj ten React komponent, lebo useEffect sa volá pri každom renderi a robí zbytočné requesty na backend.", "expect": "sk", "folded": false, "kind": "prompt", "note": "Slovak with many English tech terms"}
+{"text": "Mergni feature branch do develop a pushni to, ale najprv rebase na aktuálny main.", "expect": "sk", "folded": false, "kind": "prompt", "note": "Slovak dev slang"}
+{"text": "Oprav prosim ten nestabilny test prihlasenia, v CI pada asi kazdy piaty beh.", "expect": "sk", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Pozri sa preco reconcile na velkom hostitelovi trva osem sekund.", "expect": "sk", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Pridaj strankovanie do endpointu pre tikety a aktualizuj dokumentaciu.", "expect": "sk", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Najprv mi vysvetli co sa pokazilo pri migracii a az potom nieco men.", "expect": "sk", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Po poslednom merge je build na main rozbity, mozes sa na to pozriet?", "expect": "sk", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Zisti preco mobilna aplikacia strati stream udalosti ked telefon zaspi.", "expect": "sk", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Treba pridat prepinac tmaveho rezimu do nastaveni.", "expect": "sk", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Skontroluj ci upratovanie worktree este nenechava stare vetvy.", "expect": "sk", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Pokracuj tam kde si vcera skoncil s exportom.", "expect": "sk", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Ked ma session dva tikety, zoskupenie v bocnom paneli vyzera zle.", "expect": "sk", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Potrebujem aby sa health check nedotykal databazy.", "expect": "sk", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Preco sa mi v Jire nezobrazuje stav tiketu po synchronizacii?", "expect": "sk", "folded": true, "kind": "prompt", "note": ""}
+{"text": "nefunguje mi prihlasenie na staging, pozri logy prosim", "expect": "sk", "folded": true, "kind": "prompt", "note": ""}
+{"text": "sprav z toho samostatny modul a dopis k tomu testy", "expect": "sk", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Prihlasovacia stranka nereaguje na pomalej sieti", "expect": "sk", "folded": true, "kind": "title", "note": ""}
+{"text": "Duplicitne notifikacie po opatovnom pripojeni", "expect": "sk", "folded": true, "kind": "title", "note": ""}
+{"text": "Vyhladavanie ignoruje filter datumu", "expect": "sk", "folded": true, "kind": "title", "note": ""}
+{"text": "Pad aplikacie pri otvoreni prazdneho projektu", "expect": "sk", "folded": true, "kind": "title", "note": ""}
+{"text": "Oprav prosím ten nestabilní test přihlášení, v CI padá zhruba každý pátý běh.", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Podívej se, proč reconcile na velkém hostiteli trvá osm sekund.", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Přidej stránkování do endpointu pro tikety a aktualizuj dokumentaci.", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Nejdřív mi vysvětli, co se pokazilo při migraci, a teprve potom něco měň.", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Napiš unit testy pro parser datumů včetně přestupných let.", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Po posledním merge je build na main rozbitý, můžeš se na to podívat?", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Přejmenuj klíč v nastavení a starý nech ještě jednu verzi fungovat.", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Zjisti, proč mobilní aplikace ztratí stream událostí, když telefon usne.", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Shrň mi, co se změnilo v synchronizaci trackeru za poslední týden.", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Je potřeba přidat přepínač tmavého režimu do nastavení.", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Chybová hláška při expirovaném tokenu by měla být srozumitelnější.", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Zkontroluj, jestli úklid worktree ještě nenechává staré větve.", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Pokračuj tam, kde jsi včera skončil s exportem.", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Udělej code review tohohle PR a upozorni mě na všechno rizikové.", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Když má session dva tikety, seskupení v bočním panelu vypadá špatně.", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Potřebuju, aby se health check nedotýkal databáze.", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Uprav deployment skript tak, aby fungoval i na ARM serverech.", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Proč se mi v Jiře nezobrazuje stav tiketu po synchronizaci?", "expect": "cs", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Přihlašovací stránka nereaguje na pomalé síti", "expect": "cs", "folded": false, "kind": "title", "note": ""}
+{"text": "Přidat export do CSV k měsíčnímu reportu", "expect": "cs", "folded": false, "kind": "title", "note": ""}
+{"text": "Pád aplikace při otevření prázdného projektu", "expect": "cs", "folded": false, "kind": "title", "note": ""}
+{"text": "Duplicitní notifikace po opětovném připojení", "expect": "cs", "folded": false, "kind": "title", "note": ""}
+{"text": "Vyhledávání ignoruje filtr data", "expect": "cs", "folded": false, "kind": "title", "note": ""}
+{"text": "Zdokumentovat proces vydání mobilní aplikace", "expect": "cs", "folded": false, "kind": "title", "note": ""}
+{"text": "Refaktoruj ten React komponent, protože useEffect se volá při každém renderu a dělá zbytečné requesty na backend.", "expect": "cs", "folded": false, "kind": "prompt", "note": "Czech with many English tech terms"}
+{"text": "Spusť `cargo test -p fleet-core` a oprav všechno, co selže v modulu orgs.", "expect": "cs", "folded": false, "kind": "prompt", "note": "inline code"}
+{"text": "Oprav prosim ten nestabilni test prihlaseni, v CI pada zhruba kazdy paty beh.", "expect": "cs", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Podivej se proc reconcile na velkem hostiteli trva osm sekund.", "expect": "cs", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Nejdriv mi vysvetli co se pokazilo pri migraci a teprve potom neco men.", "expect": "cs", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Po poslednim merge je build na main rozbity, muzes se na to podivat?", "expect": "cs", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Zjisti proc mobilni aplikace ztrati stream udalosti kdyz telefon usne.", "expect": "cs", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Je potreba pridat prepinac tmaveho rezimu do nastaveni.", "expect": "cs", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Zkontroluj jestli uklid worktree jeste nenechava stare vetve.", "expect": "cs", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Pokracuj tam kde jsi vcera skoncil s exportem.", "expect": "cs", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Kdyz ma session dva tikety, seskupeni v bocnim panelu vypada spatne.", "expect": "cs", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Potrebuju aby se health check nedotykal databaze.", "expect": "cs", "folded": true, "kind": "prompt", "note": ""}
+{"text": "nefunguje mi prihlaseni na staging, mrkni do logu prosim", "expect": "cs", "folded": true, "kind": "prompt", "note": ""}
+{"text": "udelej z toho samostatny modul a dopis k tomu testy", "expect": "cs", "folded": true, "kind": "prompt", "note": ""}
+{"text": "Prihlasovaci stranka nereaguje na pomale siti", "expect": "cs", "folded": true, "kind": "title", "note": ""}
+{"text": "Duplicitni notifikace po opetovnem pripojeni", "expect": "cs", "folded": true, "kind": "title", "note": ""}
+{"text": "Bitte behebe den instabilen Login-Test, er schlägt in der CI etwa jedes fünfte Mal fehl.", "expect": "de", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Schau dir an, warum der Abgleich auf dem großen Host acht Sekunden dauert.", "expect": "de", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Füge Paginierung zum Ticket-Endpunkt hinzu und aktualisiere die Dokumentation.", "expect": "de", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Erklär mir zuerst, was bei der Migration schiefgelaufen ist, bevor du etwas änderst.", "expect": "de", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Schreib Unit-Tests für den Datumsparser, auch für Schaltjahre.", "expect": "de", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Nach dem letzten Merge ist der Build auf main kaputt, kannst du dir das ansehen?", "expect": "de", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Benenne den Einstellungsschlüssel um und lass den alten noch eine Version lang funktionieren.", "expect": "de", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Finde heraus, warum die mobile App den Ereignisstrom verliert, wenn das Telefon schläft.", "expect": "de", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Wir brauchen einen Schalter für den Dunkelmodus in den Einstellungen.", "expect": "de", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Die Fehlermeldung bei abgelaufenem Token sollte verständlicher sein.", "expect": "de", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Mach weiter, wo du gestern beim Export aufgehört hast.", "expect": "de", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Bitte prüfe diesen PR und weise mich auf alles Riskante hin.", "expect": "de", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Das Deployment-Skript muss auch auf ARM-Servern laufen.", "expect": "de", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Warum wird der Ticketstatus nach der Synchronisation in Jira nicht angezeigt?", "expect": "de", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Refaktoriere die React-Komponente, weil useEffect bei jedem Render unnötige Requests an das Backend schickt.", "expect": "de", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Anmeldeseite reagiert nicht bei langsamem Netz", "expect": "de", "folded": false, "kind": "title", "note": ""}
+{"text": "CSV-Export zum Monatsbericht hinzufügen", "expect": "de", "folded": false, "kind": "title", "note": ""}
+{"text": "Absturz beim Öffnen eines leeren Projekts", "expect": "de", "folded": false, "kind": "title", "note": ""}
+{"text": "Doppelte Benachrichtigungen nach erneuter Verbindung", "expect": "de", "folded": false, "kind": "title", "note": ""}
+{"text": "Suche ignoriert den Datumsfilter", "expect": "de", "folded": false, "kind": "title", "note": ""}
+{"text": "Freigabeprozess der mobilen App dokumentieren", "expect": "de", "folded": false, "kind": "title", "note": ""}
+{"text": "Android-Build auf das neue SDK aktualisieren", "expect": "de", "folded": false, "kind": "title", "note": ""}
+{"text": "Zahlungs-Webhook wiederholt endlos", "expect": "de", "folded": false, "kind": "title", "note": ""}
+{"text": "Napraw proszę niestabilny test logowania, w CI pada mniej więcej co piąty raz.", "expect": "pl", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Sprawdź, dlaczego synchronizacja na dużym hoście trwa osiem sekund.", "expect": "pl", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Dodaj stronicowanie do endpointu zgłoszeń i zaktualizuj dokumentację.", "expect": "pl", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Najpierw wyjaśnij mi, co poszło nie tak przy migracji, a dopiero potem coś zmieniaj.", "expect": "pl", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Po ostatnim merge build na main jest zepsuty, możesz na to spojrzeć?", "expect": "pl", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Potrzebujemy przełącznika trybu ciemnego w ustawieniach.", "expect": "pl", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Kontynuuj tam, gdzie wczoraj skończyłeś z eksportem.", "expect": "pl", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Dlaczego status zgłoszenia nie wyświetla się po synchronizacji?", "expect": "pl", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Komunikat błędu przy wygasłym tokenie powinien być bardziej zrozumiały.", "expect": "pl", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Zrób przegląd tego PR i wskaż wszystko, co ryzykowne.", "expect": "pl", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Strona logowania nie odpowiada przy wolnej sieci", "expect": "pl", "folded": false, "kind": "title", "note": ""}
+{"text": "Dodać eksport CSV do raportu miesięcznego", "expect": "pl", "folded": false, "kind": "title", "note": ""}
+{"text": "Awaria przy otwieraniu pustego projektu", "expect": "pl", "folded": false, "kind": "title", "note": ""}
+{"text": "Zduplikowane powiadomienia po ponownym połączeniu", "expect": "pl", "folded": false, "kind": "title", "note": ""}
+{"text": "Javítsd ki kérlek az instabil bejelentkezési tesztet, a CI-ban nagyjából minden ötödik futás elbukik.", "expect": "hu", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Nézd meg, miért tart nyolc másodpercig a szinkronizálás a nagy gépen.", "expect": "hu", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Adj lapozást a jegyek végpontjához, és frissítsd a dokumentációt.", "expect": "hu", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Először magyarázd el, mi romlott el a migrációnál, és csak utána változtass bármit.", "expect": "hu", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Az utolsó merge után eltört a build a main ágon, megnéznéd?", "expect": "hu", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Szükségünk van egy sötét mód kapcsolóra a beállításokban.", "expect": "hu", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Folytasd ott, ahol tegnap abbahagytad az exportot.", "expect": "hu", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Miért nem jelenik meg a jegy állapota a szinkronizálás után?", "expect": "hu", "folded": false, "kind": "prompt", "note": ""}
+{"text": "A lejárt tokennél megjelenő hibaüzenet legyen érthetőbb.", "expect": "hu", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Nézd át ezt a PR-t, és jelezz mindent, ami kockázatos.", "expect": "hu", "folded": false, "kind": "prompt", "note": ""}
+{"text": "A bejelentkezési oldal nem válaszol lassú hálózaton", "expect": "hu", "folded": false, "kind": "title", "note": ""}
+{"text": "CSV export hozzáadása a havi jelentéshez", "expect": "hu", "folded": false, "kind": "title", "note": ""}
+{"text": "Összeomlás üres projekt megnyitásakor", "expect": "hu", "folded": false, "kind": "title", "note": ""}
+{"text": "Dupla értesítések újracsatlakozás után", "expect": "hu", "folded": false, "kind": "title", "note": ""}
+{"text": "Oprav prosím ten failing test v CI. Also make sure the linter passes before you push anything.", "expect": "mixed", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Please check the migration first. Potom mi napíš, čo presne sa zmenilo v schéme a prečo.", "expect": "mixed", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Zákazník hlási, že export nefunguje. The Jira ticket says it started after the last release.", "expect": "mixed", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Bitte prüfe die Logs vom Server. Then write a short summary of what you found in English.", "expect": "mixed", "folded": false, "kind": "prompt", "note": ""}
+{"text": "The build fails on ARM. Podívej se prosím do logu a zjisti, která závislost chybí.", "expect": "mixed", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Zhrň to prosím po slovensky pre klienta. The technical details can stay in English in the PR description.", "expect": "mixed", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Der Kunde meldet doppelte Benachrichtigungen. Can you reproduce it locally and write a failing test?", "expect": "mixed", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Najprv spusti testy a pozri, čo padá. After that open a draft PR and link it to the ticket.", "expect": "mixed", "folded": false, "kind": "prompt", "note": ""}
+{"text": "I think the sync is broken for Asana. Zkontroluj prosím mapování sekcí a pošli mi výsledek.", "expect": "mixed", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Ticket je po nemecky, ale komentáre sú po anglicky. Please translate the acceptance criteria and implement them.", "expect": "mixed", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Opravte chybu v platbách co najskôr. This is blocking the release for the whole team tomorrow morning.", "expect": "mixed", "folded": false, "kind": "prompt", "note": ""}
+{"text": "Please keep the public API unchanged. Interné funkcie môžeš premenovať, ako uznáš za vhodné.", "expect": "mixed", "folded": false, "kind": "prompt", "note": ""}
+{"text": "ok", "expect": "unknown", "folded": false, "kind": "prompt", "note": "too short or no natural-language prose"}
+{"text": "PROJ-123", "expect": "unknown", "folded": false, "kind": "prompt", "note": "too short or no natural-language prose"}
+{"text": "fix", "expect": "unknown", "folded": false, "kind": "prompt", "note": "too short or no natural-language prose"}
+{"text": "ano", "expect": "unknown", "folded": false, "kind": "prompt", "note": "too short or no natural-language prose"}
+{"text": "LGTM", "expect": "unknown", "folded": false, "kind": "prompt", "note": "too short or no natural-language prose"}
+{"text": "y", "expect": "unknown", "folded": false, "kind": "prompt", "note": "too short or no natural-language prose"}
+{"text": "continue", "expect": "unknown", "folded": false, "kind": "prompt", "note": "too short or no natural-language prose"}
+{"text": "áno", "expect": "unknown", "folded": false, "kind": "prompt", "note": "too short or no natural-language prose"}
+{"text": "`cargo test`", "expect": "unknown", "folded": false, "kind": "prompt", "note": "too short or no natural-language prose"}
+{"text": "https://example.atlassian.net/browse/ABC-42", "expect": "unknown", "folded": false, "kind": "prompt", "note": "too short or no natural-language prose"}
+{"text": "```\nfn main() { println!(\"hi\"); }\n```", "expect": "unknown", "folded": false, "kind": "prompt", "note": "too short or no natural-language prose"}
+{"text": "👍", "expect": "unknown", "folded": false, "kind": "prompt", "note": "too short or no natural-language prose"}
+{"text": "2", "expect": "unknown", "folded": false, "kind": "prompt", "note": "too short or no natural-language prose"}
+{"text": "PROJ-7 PROJ-8", "expect": "unknown", "folded": false, "kind": "prompt", "note": "too short or no natural-language prose"}
+{"text": "Исправь, пожалуйста, нестабильный тест входа, он падает в CI.", "expect": "other", "folded": false, "kind": "prompt", "note": "Cyrillic"}
+{"text": "请修复登录测试，它在持续集成中经常失败。", "expect": "other", "folded": false, "kind": "prompt", "note": "CJK"}
+{"text": "يرجى إصلاح اختبار تسجيل الدخول لأنه يفشل في التكامل المستمر.", "expect": "other", "folded": false, "kind": "prompt", "note": "Arabic"}
+{"text": "Διόρθωσε το ασταθές τεστ σύνδεσης, αποτυγχάνει στο CI.", "expect": "other", "folded": false, "kind": "prompt", "note": "Greek"}

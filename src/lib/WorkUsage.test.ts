@@ -23,8 +23,11 @@ function summary(days = 30): UsageSummary {
     detection: {
       suggested: 4,
       confirmed_by_person: 1,
+      confirmed_by_agent: 2,
       promoted: 1,
       rejected: 1,
+      withdrawn: 3,
+      carried: 2,
       expired: 1,
       median_decision_secs: 600,
       nudges: 1,
@@ -43,7 +46,7 @@ describe('usage text (pure)', () => {
     expect(usageText(summary()).split('\n')).toEqual([
       'work graph usage, last 30 d',
       'links: 7 made (branch 1, manual 3, started 1)',
-      'detection: 4 suggested, 1 confirmed by a person, 1 promoted, 1 rejected, 1 expired; median decision 10 min; 1 nudges',
+      'detection: 4 suggested, 1 confirmed by a person, 2 confirmed by an agent, 1 promoted, 1 rejected, 3 withdrawn, 2 carried, 1 expired; median decision 10 min; 1 nudges',
       'handover: 2 requested, 1 written, 0 missing, 1 send failed',
       'resume: 3 (1 with a brief, 2 without)',
       'journal: 3 briefs queued, 1 delivered; 1 compaction summaries',

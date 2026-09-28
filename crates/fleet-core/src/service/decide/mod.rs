@@ -1,0 +1,966 @@
+//! The decision envelope (Jev evaluation, decisions D31 and D35–D37): the one
+//! path by which fleet may ask a decision model — TypeSafe AI's Jev — a
+//! closed-set question. The guide is `docs/decisions.md`; the decisions are
+//! in `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
+//!
+//! **Off by default, twice over.** With the default settings no call can
+//! happen: [`gate`] refuses with [`Fallback::FlagOff`] (and every feature's
+//! mode is `off`, every org's consent is off, no key is set).
+//!
+//! What the envelope does, for every use case alike (D35); a use case is a
+//! thin adapter that builds a [`JevRequest`] and reads the [`DecisionOutcome`]:
+//!
+//! 1. **Gate** ([`gate`]): only the process that owns the fleet (a hub or a
+//!    standalone desktop — never a desktop paired to a hub); the kill switch
+//!    `decide.jev.enabled`; the feature's mode `decide.jev.<feature>`
+//!    (`off | shadow | assist`); the org's consent (`orgs.jev_allowed`, or
+//!    `decide.jev.unassigned` for a subject with no org); a configured key;
+//!    the circuit breaker; the daily token budget.
+//! 2. **Redact** ([`redact_state`] on every text value of the state and the
+//!    question) — what is fingerprinted and what is sent.
+//! 3. **Call** once, bounded by `decide.jev.timeout_ms`, never retried on
+//!    the caller's path; the answer is checked against the question
+//!    ([`jev::validate_answer`]) and, if the adapter asked, against its
+//!    confidence floor.
+//! 4. **Record** one `decision_runs` row in EVERY case, fallbacks included,
+//!    so a shadow comparison sees coverage. Ids, vocabulary words, numbers
+//!    and an HMAC fingerprint only — never raw text.
+//!
+//! A model answer never grants a permission and never runs a risky action:
+//! in `shadow` the adapter only records; in `assist` it may *propose*
+//! (pre-select, suggest) and a person confirms. `auto` is not offered.
+//!
+//! No `.await` holds the store lock: the gate and the record each take it
+//! briefly; the call runs without it.
+
+#[cfg(feature = "nl-detect")]
+pub mod bench;
+pub mod haiku;
+pub mod jev;
+pub mod status_map;
+#[cfg(test)]
+mod tests;
+
+pub use jev::{
+    Answer, BackendError, DecisionBackend, JevBackend, JevRequest, JevResponse, NoulCriteria,
+    Question, Usage, ValidAnswer, JEV_HOST, JEV_URL, PROVIDER_JEV,
+};
+
+use crate::ipc_error::{lock, IpcError};
+use crate::service::settings;
+use crate::store::{
+    is_decision_word, DecisionKeyStatus, DecisionStatRow, NewDecisionRun, Secret, Store,
+};
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
+
+/// The setting a desktop paired to a hub carries (`src-tauri`'s
+/// `backend::REMOTE_URL_KEY`): such a process is a window onto someone
+/// else's fleet and never calls out (D35).
+pub const HUB_REMOTE_URL_KEY: &str = "hub.remote_url";
+
+/// Rows the retention sweep deletes per lock, and per sweep.
+pub const RETENTION_BATCH: usize = 500;
+pub const RETENTION_TICK_CAP: usize = 5_000;
+
+/// A use case of the envelope. Each has its own mode setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Feature {
+    /// Proposing a status category for an Asana section.
+    StatusMap,
+    /// Choosing a work item for a session no rule could link.
+    WorkLink,
+}
+
+impl Feature {
+    pub const ALL: [Feature; 2] = [Feature::StatusMap, Feature::WorkLink];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Feature::StatusMap => "status_map",
+            Feature::WorkLink => "work_link",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Feature> {
+        Feature::ALL.into_iter().find(|f| f.as_str() == s)
+    }
+
+    /// `decide.jev.<feature>`.
+    pub fn setting_key(self) -> &'static str {
+        match self {
+            Feature::StatusMap => settings::DECIDE_JEV_STATUS_MAP,
+            Feature::WorkLink => settings::DECIDE_JEV_WORK_LINK,
+        }
+    }
+}
+
+/// A feature's configured mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureMode {
+    Off,
+    Shadow,
+    Assist,
+}
+
+impl FeatureMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FeatureMode::Off => "off",
+            FeatureMode::Shadow => "shadow",
+            FeatureMode::Assist => "assist",
+        }
+    }
+
+    /// Anything but `shadow` / `assist` is `off`.
+    pub fn parse(s: &str) -> FeatureMode {
+        match s.trim() {
+            "shadow" => FeatureMode::Shadow,
+            "assist" => FeatureMode::Assist,
+            _ => FeatureMode::Off,
+        }
+    }
+
+    pub fn of(s: &Store, feature: Feature) -> FeatureMode {
+        FeatureMode::parse(&settings::get_string(s, feature.setting_key()))
+    }
+}
+
+/// The mode a call is made in (what [`gate`] lets through).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    /// Ask and record; the adapter acts on the rule's answer only.
+    Shadow,
+    /// Ask and record; the adapter may PROPOSE the answer to a person.
+    Assist,
+}
+
+impl Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Shadow => "shadow",
+            Mode::Assist => "assist",
+        }
+    }
+}
+
+/// Why a decision is not (or not only) the model's. The closed vocabulary
+/// of `decision_runs.fallback` ([`crate::store::DECISION_FALLBACKS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Fallback {
+    /// This process is a window onto a hub, not the fleet's owner.
+    NotOwner,
+    /// `decide.jev.enabled` is off.
+    FlagOff,
+    /// The subject's org has not consented (or it has no org and
+    /// `decide.jev.unassigned` is off).
+    OrgOff,
+    /// The feature's mode is `off`.
+    ModeOff,
+    /// No API key is configured (or its reference cannot be read).
+    NoKey,
+    /// The circuit breaker is open.
+    BreakerOpen,
+    /// Today's input-token budget is spent.
+    Budget,
+    /// The call outlived `decide.jev.timeout_ms`.
+    Timeout,
+    /// The API refused (401, 422, 5xx), the request failed a local check the
+    /// API would refuse, or the connection failed.
+    HttpError,
+    /// 429 or 529.
+    RateLimited,
+    /// An answer that does not fit the question (an option not offered,
+    /// probabilities that are not a distribution, an unreadable body).
+    InvalidAnswer,
+    /// A valid answer below the adapter's confidence floor (recorded; not
+    /// to be acted on).
+    LowConfidence,
+}
+
+impl Fallback {
+    pub const ALL: [Fallback; 12] = [
+        Fallback::NotOwner,
+        Fallback::FlagOff,
+        Fallback::OrgOff,
+        Fallback::ModeOff,
+        Fallback::NoKey,
+        Fallback::BreakerOpen,
+        Fallback::Budget,
+        Fallback::Timeout,
+        Fallback::HttpError,
+        Fallback::RateLimited,
+        Fallback::InvalidAnswer,
+        Fallback::LowConfidence,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Fallback::NotOwner => "not_owner",
+            Fallback::FlagOff => "flag_off",
+            Fallback::OrgOff => "org_off",
+            Fallback::ModeOff => "mode_off",
+            Fallback::NoKey => "no_key",
+            Fallback::BreakerOpen => "breaker_open",
+            Fallback::Budget => "budget",
+            Fallback::Timeout => "timeout",
+            Fallback::HttpError => "http_error",
+            Fallback::RateLimited => "rate_limited",
+            Fallback::InvalidAnswer => "invalid_answer",
+            Fallback::LowConfidence => "low_confidence",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Fallback> {
+        Fallback::ALL.into_iter().find(|f| f.as_str() == s)
+    }
+}
+
+/// The settings one call reads, resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallSettings {
+    pub timeout: Duration,
+    pub breaker_failures: u32,
+    pub breaker_open_secs: i64,
+    pub daily_token_budget: i64,
+    pub model: String,
+}
+
+fn int_setting(s: &Store, key: &str) -> i64 {
+    settings::get_string(s, key).parse().unwrap_or_default()
+}
+
+impl CallSettings {
+    pub fn read(s: &Store) -> CallSettings {
+        CallSettings {
+            timeout: Duration::from_millis(
+                int_setting(s, settings::DECIDE_JEV_TIMEOUT_MS).max(1) as u64
+            ),
+            breaker_failures: int_setting(s, settings::DECIDE_JEV_BREAKER_FAILURES).max(1) as u32,
+            breaker_open_secs: int_setting(s, settings::DECIDE_JEV_BREAKER_OPEN_SECS),
+            daily_token_budget: int_setting(s, settings::DECIDE_JEV_DAILY_TOKEN_BUDGET),
+            model: settings::get_string(s, settings::DECIDE_JEV_MODEL),
+        }
+    }
+}
+
+/// Whether this process owns the fleet: its store names no hub it is a
+/// window onto.
+pub fn owns_the_fleet(s: &Store) -> bool {
+    s.get_setting(HUB_REMOTE_URL_KEY)
+        .ok()
+        .flatten()
+        .is_none_or(|v| v.trim().is_empty())
+}
+
+/// PURE: the start of `now`'s UTC day (the budget's window).
+pub fn day_start(now: i64) -> i64 {
+    now - now.rem_euclid(86_400)
+}
+
+/// The circuit breaker, as the record shows it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BreakerState {
+    pub open: bool,
+    /// Failed calls in a row (up to the threshold).
+    pub consecutive_failures: u32,
+    /// While open: when it lets a call through again.
+    pub open_until: Option<i64>,
+}
+
+/// The breaker of `provider` at `now`: open once `failures` calls in a row
+/// failed, for `open_secs` after the newest of them. After that one call
+/// goes through (half-open); another failure opens it again.
+pub fn breaker_state(
+    s: &Store,
+    provider: &str,
+    failures: u32,
+    open_secs: i64,
+    now: i64,
+) -> Result<BreakerState, IpcError> {
+    let (streak, newest) = s.decision_failure_streak(provider, failures)?;
+    let until = newest.map(|at| at + open_secs);
+    let open = streak >= failures && until.is_some_and(|u| now < u);
+    Ok(BreakerState {
+        open,
+        consecutive_failures: streak,
+        open_until: until.filter(|_| open),
+    })
+}
+
+/// What the gate hands [`decide`] when a call may be made.
+struct Cleared {
+    mode: Mode,
+    key: Secret,
+    cfg: CallSettings,
+}
+
+/// The gate, at `now`, with the key it cleared. Order: owner, flag, mode,
+/// org, key, breaker, budget — the first refusal wins.
+fn clear(
+    s: &Store,
+    feature: Feature,
+    org_id: Option<i64>,
+    provider: &str,
+    now: i64,
+) -> Result<Cleared, Fallback> {
+    if !owns_the_fleet(s) {
+        return Err(Fallback::NotOwner);
+    }
+    if !settings::get_bool(s, settings::DECIDE_JEV_ENABLED) {
+        return Err(Fallback::FlagOff);
+    }
+    let mode = match FeatureMode::of(s, feature) {
+        FeatureMode::Off => return Err(Fallback::ModeOff),
+        FeatureMode::Shadow => Mode::Shadow,
+        FeatureMode::Assist => Mode::Assist,
+    };
+    let consented = match org_id {
+        Some(id) => s.org_jev_allowed(id).unwrap_or(false),
+        None => settings::get_bool(s, settings::DECIDE_JEV_UNASSIGNED),
+    };
+    if !consented {
+        return Err(Fallback::OrgOff);
+    }
+    let key = match s.resolve_decision_credential() {
+        Ok(Some(k)) => k,
+        _ => return Err(Fallback::NoKey),
+    };
+    let cfg = CallSettings::read(s);
+    // A record that cannot be read is treated as the conservative answer:
+    // no call.
+    match breaker_state(
+        s,
+        provider,
+        cfg.breaker_failures,
+        cfg.breaker_open_secs,
+        now,
+    ) {
+        Ok(b) if !b.open => {}
+        _ => return Err(Fallback::BreakerOpen),
+    }
+    match s.decision_usage_since(provider, day_start(now)) {
+        Ok((used, _)) if used < cfg.daily_token_budget => {}
+        _ => return Err(Fallback::Budget),
+    }
+    Ok(Cleared { mode, key, cfg })
+}
+
+/// May `feature` ask the decision model about a subject of `org_id` now?
+/// `Ok(mode)` or the fallback a run would record. Sync and short: the
+/// caller holds the store lock only for it.
+pub fn gate(s: &Store, feature: Feature, org_id: Option<i64>) -> Result<Mode, Fallback> {
+    gate_at(s, feature, org_id, crate::store::now_unix())
+}
+
+/// [`gate`] at a given time (tests, the CLI).
+pub fn gate_at(
+    s: &Store,
+    feature: Feature,
+    org_id: Option<i64>,
+    now: i64,
+) -> Result<Mode, Fallback> {
+    clear(s, feature, org_id, PROVIDER_JEV, now).map(|c| c.mode)
+}
+
+static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)\b(?:https?|ftp|ssh|git|wss?)://[^\s<>()\[\]{}'"`]+"#)
+        .expect("URL pattern compiles")
+});
+static EMAIL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)[a-z0-9._%+\-]+@[a-z0-9\-]+(?:\.[a-z0-9\-]+)+")
+        .expect("email pattern compiles")
+});
+
+/// The redaction hook: URLs become `[url]`, email addresses `[email]`, and
+/// whatever [`crate::logging::redact`] masks (tokens, keys) `[REDACTED]`.
+/// The envelope runs every text value of a request through it before the
+/// request is fingerprinted or sent; an adapter may redact more first.
+pub fn redact_state(text: &str) -> String {
+    let t = URL_RE.replace_all(text, "[url]");
+    let t = EMAIL_RE.replace_all(&t, "[email]");
+    crate::logging::redact(&t).into_owned()
+}
+
+/// PURE: `v` as JSON with every object's keys sorted, whatever map the
+/// build's `serde_json` uses — the fingerprint's canonical form.
+pub fn canonical_json(v: &serde_json::Value) -> String {
+    fn sorted(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(o) => {
+                let m: BTreeMap<&String, serde_json::Value> =
+                    o.iter().map(|(k, x)| (k, sorted(x))).collect();
+                let mut out = serde_json::Map::new();
+                for (k, x) in m {
+                    out.insert(k.clone(), x);
+                }
+                serde_json::Value::Object(out)
+            }
+            serde_json::Value::Array(a) => serde_json::Value::Array(a.iter().map(sorted).collect()),
+            other => other.clone(),
+        }
+    }
+    // With `preserve_order` the map keeps insertion order, which `sorted`
+    // made sorted; without it the map sorts. Either way: sorted.
+    sorted(v).to_string()
+}
+
+/// PURE: lower-case hex HMAC-SHA256 of `msg` under `key` (any key length).
+/// The decision record's fingerprints ([`fingerprint`],
+/// `status_map::section_id`) are keyed hashes on purpose: without the local
+/// key, a guessed input cannot be confirmed from the record.
+pub(crate) fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac =
+        Hmac::<sha2::Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+    mac.update(msg);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// PURE: the run's `input_fp` — HMAC-SHA256 under the local fingerprint key
+/// of the canonical redacted request (state and question). Not a plain
+/// hash: without the key, a guessed prompt cannot be confirmed from it.
+pub fn fingerprint(fp_key: &Secret, redacted: &JevRequest) -> String {
+    let v = serde_json::json!({ "state": redacted.state, "question": redacted.question });
+    hmac_sha256_hex(fp_key.expose().as_bytes(), canonical_json(&v).as_bytes())
+}
+
+/// What an adapter asks the envelope.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecideRequest {
+    pub feature: Feature,
+    /// What is decided about: `session`, `tracker`, `section`, … (a word).
+    pub subject_kind: String,
+    /// Its id (a word).
+    pub subject_id: String,
+    /// The subject's org (its consent is checked); `None` when it has none.
+    pub org_id: Option<i64>,
+    pub request: JevRequest,
+    /// What the current rule decided (an id or word), for the shadow
+    /// comparison; recorded as is.
+    pub baseline: Option<String>,
+    /// The adapter's question version, a constant bumped when its
+    /// question changes.
+    pub question_version: String,
+    /// Below this confidence a valid answer is recorded with
+    /// [`Fallback::LowConfidence`]. `None`: no floor.
+    pub min_confidence: Option<f64>,
+}
+
+/// The model's answer, checked.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecisionAnswer {
+    /// A choice's option, or a noul / score value (`0.95`).
+    pub value: String,
+    pub probabilities: Option<BTreeMap<String, f64>>,
+    pub confidence: Option<f64>,
+    /// The model version that answered.
+    pub model_version: Option<String>,
+}
+
+/// What [`decide`] returns. A run is recorded in every case; `run_id` is
+/// `None` only when the store refused the record (logged).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecisionOutcome {
+    pub run_id: Option<i64>,
+    /// The mode the call was made in; `None` when the gate refused.
+    pub mode: Option<Mode>,
+    /// The checked answer — also with [`Fallback::LowConfidence`], for the
+    /// record; act on it only through [`Self::usable`].
+    pub answer: Option<DecisionAnswer>,
+    pub fallback: Option<Fallback>,
+}
+
+impl DecisionOutcome {
+    /// The answer an adapter may act on: a valid answer with no fallback.
+    /// In `shadow` it may only be compared, in `assist` proposed.
+    pub fn usable(&self) -> Option<&DecisionAnswer> {
+        self.answer.as_ref().filter(|_| self.fallback.is_none())
+    }
+
+    /// [`Self::usable`] in `assist` mode only: what an adapter may propose.
+    pub fn proposal(&self) -> Option<&DecisionAnswer> {
+        self.usable().filter(|_| self.mode == Some(Mode::Assist))
+    }
+}
+
+/// The envelope's context: the store, the backend, the clock.
+#[derive(Clone)]
+pub struct DecideCtx {
+    pub store: Arc<Mutex<Store>>,
+    pub backend: Arc<dyn DecisionBackend>,
+    clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+}
+
+impl DecideCtx {
+    pub fn new(store: Arc<Mutex<Store>>, backend: Arc<dyn DecisionBackend>) -> Self {
+        DecideCtx {
+            store,
+            backend,
+            clock: Arc::new(crate::store::now_unix),
+        }
+    }
+
+    /// The real thing: Jev over HTTPS from this process.
+    pub fn jev(store: Arc<Mutex<Store>>) -> Self {
+        DecideCtx::new(store, Arc::new(JevBackend::direct()))
+    }
+
+    /// A fixed or scripted clock (tests).
+    pub fn with_clock(mut self, clock: Arc<dyn Fn() -> i64 + Send + Sync>) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    fn now(&self) -> i64 {
+        (self.clock)()
+    }
+}
+
+/// Ask. Gate, redact, call once, check, and record — see the module docs.
+/// Never errors: every failure is a [`Fallback`] on the outcome and on the
+/// recorded run.
+pub async fn decide(ctx: &DecideCtx, req: DecideRequest) -> DecisionOutcome {
+    let now = ctx.now();
+    let provider = ctx.backend.provider();
+    let redacted = req.request.redacted();
+    let candidates: Vec<String> = match req.request.question.check() {
+        Ok(()) => req.request.question.candidates(),
+        Err(_) => Vec::new(),
+    };
+    let baseline = req.baseline.clone().filter(|b| {
+        let ok = is_decision_word(b);
+        if !ok {
+            tracing::warn!(
+                feature = req.feature.as_str(),
+                "[decide] a baseline that is not an id or word was not recorded"
+            );
+        }
+        ok
+    });
+    let mut run = NewDecisionRun {
+        at: now,
+        feature: req.feature.as_str().into(),
+        org_id: req.org_id,
+        subject_kind: req.subject_kind.clone(),
+        subject_id: req.subject_id.clone(),
+        mode: FeatureMode::Off.as_str().into(),
+        provider: provider.into(),
+        model_version: None,
+        question_version: req.question_version.clone(),
+        input_fp: None,
+        candidates,
+        answer: None,
+        probabilities: None,
+        confidence: None,
+        fallback: None,
+        baseline_answer: baseline,
+        called: false,
+        latency_ms: None,
+        input_tokens: 0,
+        cost_microusd: 0,
+    };
+
+    // 0. A run that cannot be recorded is never sent: the budget and the
+    //    breaker read `decision_runs`, so an unrecorded call escapes both.
+    if let Err(e) = run.validate() {
+        tracing::warn!(
+            feature = req.feature.as_str(),
+            "[decide] request not sent, its run would not record: {}",
+            e.message
+        );
+        return DecisionOutcome {
+            run_id: None,
+            mode: None,
+            answer: None,
+            fallback: Some(Fallback::HttpError),
+        };
+    }
+
+    // 1. The gate, the fingerprint and the configured mode: one short lock.
+    let gated = match lock(&ctx.store) {
+        Ok(s) => {
+            run.mode = FeatureMode::of(&s, req.feature).as_str().into();
+            run.input_fp = s.decision_fp_key().ok().map(|k| fingerprint(&k, &redacted));
+            clear(&s, req.feature, req.org_id, provider, now)
+        }
+        Err(_) => Err(Fallback::FlagOff),
+    };
+    let cleared = match gated {
+        Ok(c) => c,
+        Err(f) => return record(ctx, run, None, None, Some(f)),
+    };
+
+    // 2. The checks the API would refuse, before anything is sent.
+    if let Err(why) = redacted.check(&cleared.cfg.model) {
+        tracing::warn!(
+            feature = req.feature.as_str(),
+            "[decide] request not sent: {why}"
+        );
+        return record(
+            ctx,
+            run,
+            Some(cleared.mode),
+            None,
+            Some(Fallback::HttpError),
+        );
+    }
+
+    // 3. One call, no lock held, bounded by the timeout (also around the
+    //    backend, so a fake or a stuck transport cannot outlive it).
+    run.called = true;
+    // tokio's clock: the same as std's in production, and it moves with a
+    // paused test clock.
+    let t0 = tokio::time::Instant::now();
+    let answered = tokio::time::timeout(
+        cleared.cfg.timeout,
+        ctx.backend.ask(
+            &cleared.key,
+            &cleared.cfg.model,
+            &redacted,
+            cleared.cfg.timeout,
+        ),
+    )
+    .await;
+    run.latency_ms = Some(t0.elapsed().as_millis().min(i64::MAX as u128) as i64);
+    let resp = match answered {
+        Err(_) => Err(BackendError::Timeout),
+        Ok(r) => r,
+    };
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            match &e {
+                BackendError::RateLimited { retry_after } => tracing::warn!(
+                    feature = req.feature.as_str(),
+                    retry_after = ?retry_after,
+                    "[decide] rate limited"
+                ),
+                BackendError::Http { status } => tracing::warn!(
+                    feature = req.feature.as_str(),
+                    status,
+                    "[decide] the decision model refused"
+                ),
+                other => tracing::warn!(
+                    feature = req.feature.as_str(),
+                    "[decide] no answer: {}",
+                    crate::logging::redact_secrets(
+                        &format!("{other:?}"),
+                        &[cleared.key.expose().to_string()]
+                    )
+                ),
+            }
+            let f = e.fallback();
+            return record(ctx, run, Some(cleared.mode), None, Some(f));
+        }
+    };
+
+    // 4. Check the answer.
+    run.input_tokens = resp.usage.input_tokens.min(i64::MAX as u64) as i64;
+    run.cost_microusd = jev::cost_microusd(run.input_tokens);
+    run.model_version = Some(resp.model.clone()).filter(|m| is_decision_word(m));
+    let checked = resp
+        .answers
+        .get(jev::QUESTION_ID)
+        .ok_or_else(|| "no answer to the question".to_string())
+        .and_then(|a| jev::validate_answer(&redacted.question, a));
+    let valid = match checked {
+        Ok(v) => v,
+        Err(why) => {
+            tracing::warn!(
+                feature = req.feature.as_str(),
+                "[decide] invalid answer: {why}"
+            );
+            return record(
+                ctx,
+                run,
+                Some(cleared.mode),
+                None,
+                Some(Fallback::InvalidAnswer),
+            );
+        }
+    };
+    let answer = DecisionAnswer {
+        value: valid.value,
+        probabilities: valid.probabilities,
+        confidence: valid.confidence,
+        model_version: run.model_version.clone(),
+    };
+    let low = match (req.min_confidence, answer.confidence) {
+        (Some(floor), Some(c)) => c < floor,
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+    let fallback = low.then_some(Fallback::LowConfidence);
+    record(ctx, run, Some(cleared.mode), Some(answer), fallback)
+}
+
+/// Write the run (with its answer and fallback) and build the outcome.
+fn record(
+    ctx: &DecideCtx,
+    mut run: NewDecisionRun,
+    mode: Option<Mode>,
+    answer: Option<DecisionAnswer>,
+    fallback: Option<Fallback>,
+) -> DecisionOutcome {
+    if let Some(a) = &answer {
+        run.answer = Some(a.value.clone());
+        run.probabilities = a.probabilities.clone();
+        run.confidence = a.confidence;
+    }
+    run.fallback = fallback.map(|f| f.as_str().to_string());
+    let run_id = match lock(&ctx.store).and_then(|s| s.insert_decision_run(&run)) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!(
+                feature = %run.feature,
+                "[decide] the decision was not recorded: {}",
+                e.message
+            );
+            None
+        }
+    };
+    DecisionOutcome {
+        run_id,
+        mode,
+        answer,
+        fallback,
+    }
+}
+
+/// Delete runs older than `decide.retention_days` (`0` keeps them), in
+/// batches, at most [`RETENTION_TICK_CAP`] per call. The GC tick runs it;
+/// ungated like the work retention sweep. Returns the rows deleted.
+pub fn sweep_runs(store: &Mutex<Store>, now: i64) -> usize {
+    let days = match store.lock() {
+        Ok(s) => int_setting(&s, settings::DECIDE_RETENTION_DAYS),
+        Err(_) => return 0,
+    };
+    if days <= 0 {
+        return 0;
+    }
+    let cutoff = now - days * 86_400;
+    let mut done = 0;
+    while done < RETENTION_TICK_CAP {
+        let want = RETENTION_BATCH.min(RETENTION_TICK_CAP - done);
+        let n = match store.lock() {
+            Ok(s) => s.sweep_decision_runs(cutoff, want),
+            Err(_) => break,
+        };
+        match n {
+            Ok(n) => {
+                done += n;
+                if n < want {
+                    break;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "[gc] decision_runs retention sweep failed");
+                break;
+            }
+        }
+    }
+    done
+}
+
+/// Today's spend.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodayUsage {
+    /// The UTC day's start.
+    pub since: i64,
+    pub input_tokens: i64,
+    pub cost_microusd: i64,
+    pub budget: i64,
+}
+
+/// An org that consented.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgConsent {
+    pub id: i64,
+    pub name: String,
+}
+
+/// Everything `fleet-hub decide status` shows — never the key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecideStatus {
+    pub enabled: bool,
+    pub owns_the_fleet: bool,
+    /// feature → `off | shadow | assist`.
+    pub modes: BTreeMap<String, String>,
+    pub unassigned: bool,
+    pub model: String,
+    pub key: DecisionKeyStatus,
+    pub orgs_allowed: Vec<OrgConsent>,
+    pub breaker: BreakerState,
+    pub today: TodayUsage,
+    pub retention_days: i64,
+    pub runs_kept: i64,
+    /// The window of `stats`, in days.
+    pub window_days: i64,
+    pub stats: Vec<DecisionStatRow>,
+}
+
+/// Read-only: the flag, modes, consent, key (configured or not), breaker,
+/// today's spend and the runs of the last `days` days per feature, provider,
+/// fallback and org.
+pub fn status(s: &Store, now: i64, days: i64) -> Result<DecideStatus, IpcError> {
+    let cfg = CallSettings::read(s);
+    let (input_tokens, cost_microusd) = s.decision_usage_since(PROVIDER_JEV, day_start(now))?;
+    Ok(DecideStatus {
+        enabled: settings::get_bool(s, settings::DECIDE_JEV_ENABLED),
+        owns_the_fleet: owns_the_fleet(s),
+        modes: Feature::ALL
+            .into_iter()
+            .map(|f| {
+                (
+                    f.as_str().to_string(),
+                    FeatureMode::of(s, f).as_str().to_string(),
+                )
+            })
+            .collect(),
+        unassigned: settings::get_bool(s, settings::DECIDE_JEV_UNASSIGNED),
+        model: cfg.model.clone(),
+        key: s.decision_credential_status()?,
+        orgs_allowed: s
+            .list_orgs()?
+            .into_iter()
+            .filter(|o| o.jev_allowed)
+            .map(|o| OrgConsent {
+                id: o.id,
+                name: o.name,
+            })
+            .collect(),
+        breaker: breaker_state(
+            s,
+            PROVIDER_JEV,
+            cfg.breaker_failures,
+            cfg.breaker_open_secs,
+            now,
+        )?,
+        today: TodayUsage {
+            since: day_start(now),
+            input_tokens,
+            cost_microusd,
+            budget: cfg.daily_token_budget,
+        },
+        retention_days: int_setting(s, settings::DECIDE_RETENTION_DAYS),
+        runs_kept: s.decision_run_count()?,
+        window_days: days,
+        stats: s.decision_stats(now - days.max(0) * 86_400)?,
+    })
+}
+
+/// PURE: micro-USD as dollars (`$0.000021`).
+pub fn fmt_usd(micro: i64) -> String {
+    format!("${}.{:06}", micro / 1_000_000, micro % 1_000_000)
+}
+
+impl DecideStatus {
+    /// The CLI's lines.
+    pub fn lines(&self) -> Vec<String> {
+        let on = |b: bool| if b { "on" } else { "off" };
+        let mut out = vec![
+            format!(
+                "decisions (Jev): {}{}",
+                on(self.enabled),
+                if self.owns_the_fleet {
+                    ""
+                } else {
+                    "  [this store is a window onto a hub: it never calls out]"
+                }
+            ),
+            format!(
+                "modes: {}",
+                self.modes
+                    .iter()
+                    .map(|(f, m)| format!("{f}={m}"))
+                    .collect::<Vec<_>>()
+                    .join("  ")
+            ),
+            format!(
+                "orgs that consented: {}   rows with no org: {}",
+                if self.orgs_allowed.is_empty() {
+                    "none".to_string()
+                } else {
+                    self.orgs_allowed
+                        .iter()
+                        .map(|o| format!("{} (#{})", o.name, o.id))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                on(self.unassigned)
+            ),
+            format!(
+                "key: {}   model: {}",
+                match (self.key.configured, self.key.by_reference) {
+                    (false, _) => "not configured".to_string(),
+                    (true, true) => "configured (reference)".to_string(),
+                    (true, false) => "configured".to_string(),
+                },
+                self.model
+            ),
+            format!(
+                "breaker: {}",
+                if self.breaker.open {
+                    format!(
+                        "OPEN after {} failed calls, until {}",
+                        self.breaker.consecutive_failures,
+                        self.breaker.open_until.unwrap_or_default()
+                    )
+                } else {
+                    format!(
+                        "closed ({} failed call(s) in a row)",
+                        self.breaker.consecutive_failures
+                    )
+                }
+            ),
+            format!(
+                "today (UTC): {} of {} input tokens, {}",
+                self.today.input_tokens,
+                self.today.budget,
+                fmt_usd(self.today.cost_microusd)
+            ),
+            format!(
+                "runs kept: {}   retention: {}",
+                self.runs_kept,
+                if self.retention_days == 0 {
+                    "forever".to_string()
+                } else {
+                    format!("{} days", self.retention_days)
+                }
+            ),
+        ];
+        if self.stats.is_empty() {
+            out.push(format!("no runs in the last {} days", self.window_days));
+        } else {
+            out.push(format!("runs in the last {} days:", self.window_days));
+            for r in &self.stats {
+                out.push(format!(
+                    "  {:<11} {:<6} {:<15} org {:<5} runs {:>6}  calls {:>6}  tokens {:>9}  {}  agreed {}/{}  followups c{} r{} x{} i{}",
+                    r.feature,
+                    r.provider,
+                    r.fallback.as_deref().unwrap_or("answered"),
+                    r.org_id.map(|o| o.to_string()).unwrap_or_else(|| "-".into()),
+                    r.runs,
+                    r.called,
+                    r.input_tokens,
+                    fmt_usd(r.cost_microusd),
+                    r.agreed,
+                    r.compared,
+                    r.confirmed,
+                    r.rejected,
+                    r.corrected,
+                    r.ignored,
+                ));
+            }
+        }
+        out
+    }
+}

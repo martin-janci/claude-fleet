@@ -13,6 +13,12 @@ Register a host. transport "ssh" (default) is probed first and persisted only if
 
 Parameters: `alias`, `ssh_alias`, `transport`
 
+### `add_project`
+
+Add a project on a host: clone a GitHub URL, adopt a folder (the hub's local host only) or create a new repository (create_remote is refused once with a confirm token to send back). git and gh run on the host with its own credentials. Returns the project row.
+
+Parameters: `host_alias`, `source`
+
 ### `agent_status`
 
 Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false where no agents are accepted (the desktop).
@@ -75,7 +81,7 @@ Ensure the UX agent's operator session exists; returns its row.
 
 ### `fleet_health`
 
-Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers.
+Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers. hub: uptime and last reconcile pass; tunnels_mode none|reverse; peer_links_total.
 
 ### `get_clipboard`
 
@@ -124,6 +130,12 @@ The asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each as
 Paired client devices and what each token may do. The token digest is never returned: a token exists in plaintext only in the /pair response that minted it. Read-only but master token only (it names every paired device). Rows: { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at }.
 
 Parameters: `include_revoked`
+
+### `list_github_repos`
+
+Repositories gh on the host can see, for choosing what to clone with add_project.
+
+Parameters: `host_alias`
 
 ### `list_host_worktrees`
 
@@ -237,7 +249,7 @@ Parameters: `rotate`
 
 ### `quick_replies`
 
-Read or replace the fleet's quick replies: the chip row the desktop and phone composers draw above the prompt box, as [{label, text}]. No arguments reads; `set` replaces the whole list (max 24, [] restores the defaults). Errors: E_INVALID.
+Read or replace the fleet's quick replies: the chip row the desktop and phone composers draw above the prompt box, as [{label, text, auto_send}] in order. No arguments reads; `set` replaces the whole list (max 24, [] restores the defaults). Errors: E_INVALID.
 
 Parameters: `set`
 
@@ -359,6 +371,12 @@ Revoke a paired client's token by name: its next request is refused and the name
 
 Parameters: `name`
 
+### `rewind_conversation`
+
+Truncate a session's transcript into a new conversation: "fork" starts a new session there, "rewind" restarts this one. The original is unchanged. Returns the row (a fork's is the new session).
+
+Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
+
 ### `run_prompt`
 
 send_prompt + wait_for_session(turn_gt) + session_transcript in one call. Returns { turn_seq, status: satisfied | timeout, transcript } (the reply as plain text; null with transcript_error when unreadable). Marked untrusted unless raw=true (master token only).
@@ -469,7 +487,7 @@ Parameters: `confirm_nonce`, `prompt`, `source_session_id`
 
 ### `usage_report`
 
-ESTIMATED token usage and cost per session, host and UTC day, from each session's transcript (collected every usage.interval_secs). Costs are micro-USD from a built-in price table (usage.prices_json), not a bill. total and by_host sum live rows over their lifetime; by_day is the durable daily roll-up (killed sessions included). Sessions sorted by cost, at most 200. A per-host token only sees its own host.
+ESTIMATED token usage and cost per session, host and UTC day, from each session's transcript (collected every usage.interval_secs). Costs are micro-USD from a built-in price table (usage.prices_json), not a bill. total and by_host sum live rows over their lifetime; by_day is the durable daily roll-up (killed sessions included). Sessions sorted by cost, at most 200. A per-host token only sees its own host. by_day.backfill_cost_micros: history a first read booked, apart from live cost.
 
 Parameters: `host_alias`, `since_secs`
 
@@ -507,7 +525,7 @@ Parameters: `action`, `cursor`, `filters`, `host_alias`, `host_aliases`, `key`, 
 
 Trackers, orgs, retention and usage counts; see action. Never returns a secret.
 
-Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `color`, `confirm_nonce`, `credential_ref`, `days`, `host_alias`, `isolate_sessions`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `site_url`, `tracker_id`, `transport`, `username`
+Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `color`, `confirm_nonce`, `credential_ref`, `days`, `host_alias`, `isolate_sessions`, `jev`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `site_url`, `tracker_id`, `transport`, `username`
 
 ### `work_link`
 
@@ -587,6 +605,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::trackers::test_tracker`
 - `commands::trackers::remove_tracker`
 - `commands::trackers::tracker_sync_metrics`
+- `commands::trackers::status_map_proposals`
+- `commands::trackers::decide_status_map_proposal`
 - `commands::trackers::work_retention_status`
 - `commands::trackers::work_retention_sweep`
 - `commands::trackers::work_usage`
@@ -611,6 +631,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::session_tool_detail`
 - `commands::sessions::session_activity`
 - `commands::sessions::restart_session`
+- `commands::sessions::rewind_conversation`
 - `commands::sessions::send_prompt`
 - `commands::sessions::spawn_review`
 - `commands::sessions::recreate_session`

@@ -1,0 +1,25 @@
+{
+  "allowed": true,
+  "bound_clients_gaining": 0,
+  "bound_clients_losing": 0,
+  "hosts_gaining": [],
+  "hosts_losing": [
+    "h1"
+  ],
+  "impact_token": "4597236def2aa34e7ec49568",
+  "journal_entries": 0,
+  "links": [
+    {
+      "becomes_cross_org": true,
+      "host": "h1",
+      "link_id": 4,
+      "name": "two",
+      "session_id": 2,
+      "session_org": 1,
+      "state": "active"
+    }
+  ],
+  "summaries": 0,
+  "task_id": "item:4",
+  "to_org": 2
+}

@@ -1081,6 +1081,22 @@ describe('ConversationPanel quick actions', () => {
     expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).value).toBe('');
   });
 
+  it('an auto-send chip sends on a plain click; Shift+click only fills the box', async () => {
+    composerPresets.set([{ label: 'Go on', text: 'go on', auto_send: true }]);
+    await mount({ host_alias: 'trn', tmux_name: 'dev-x' });
+    const chip = screen.getByTestId('conv-chip');
+    expect(chip.dataset.autoSend).toBe('true');
+    await fireEvent.click(chip, { shiftKey: true });
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    expect(box.value).toBe('go on');
+    expect(mockedSend).not.toHaveBeenCalled();
+    box.value = '';
+    await fireEvent.input(box);
+    await fireEvent.click(chip);
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('trn', 'dev-x', 'go on');
+  });
+
   it('a session stuck on press_enter gets a chip that sends a bare Enter', async () => {
     await mount({ claude_status: 'blocked', stuck_kind: 'press_enter' });
     await fireEvent.click(screen.getByTestId('conv-chip-enter'));
@@ -2962,6 +2978,24 @@ describe('ConversationPanel find, copy and turn index', () => {
     await fireEvent.click(btn);
     await settle();
     expect(mockedCopy).toHaveBeenCalledWith('see **this**');
+  });
+
+  it('renders an action row per reply text group', async () => {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          truncated: false,
+          turns: [
+            { prompt: 'first', at: null, ended_at: null, items: [{ kind: 'text', text: 'reply one' }], prompt_uuid: 'a1' },
+            { prompt: 'second', at: null, ended_at: null, items: [{ kind: 'text', text: 'reply two' }], prompt_uuid: 'a2' },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect(screen.getAllByTestId('reply-quote').length).toBe(2);
+    expect(screen.queryAllByTestId('reply-rewind').length).toBe(1); // the second turn only
   });
 
   it('the turn index lists prompts and jumps', async () => {

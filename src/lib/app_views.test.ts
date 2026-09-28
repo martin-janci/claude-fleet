@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { appChord, hostsChordLabel, sessionViewChordLabel, agentChordLabel, todayChordLabel } from './app_views';
+import {
+  appChord,
+  hostsChordLabel,
+  sessionViewChordLabel,
+  agentChordLabel,
+  todayChordLabel,
+  workViewChordLabel,
+} from './app_views';
 
 const ev = (key: string, mods: Partial<{ metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean }> = {}) => ({
   key,
@@ -79,5 +86,28 @@ describe('the Today chord (work graph M9.1)', () => {
     expect(appChord(ev('T', { ctrlKey: true, shiftKey: true }), true)).toBeNull();
     expect(todayChordLabel(true)).toBe('⌘⇧T');
     expect(todayChordLabel(false)).toBe('Ctrl+Shift+T');
+  });
+});
+
+describe('the Work-view chord (work graph M14)', () => {
+  it('⌘⇧W on macOS, Ctrl+Shift+W elsewhere; never without Shift, and plain ⌘W / Ctrl+W are not it', () => {
+    expect(appChord(ev('W', { metaKey: true, shiftKey: true }), true)).toBe('work-view');
+    expect(appChord(ev('w', { ctrlKey: true, shiftKey: true }), false)).toBe('work-view');
+    expect(appChord(ev('W', { ctrlKey: true, shiftKey: true }), false)).toBe('work-view');
+    // ⌘W closes a window and Ctrl+W deletes a word in the terminal.
+    expect(appChord(ev('w', { metaKey: true }), true)).toBeNull();
+    expect(appChord(ev('w', { ctrlKey: true }), false)).toBeNull();
+    expect(appChord(ev('W', { ctrlKey: true, shiftKey: true }), true)).toBeNull();
+    expect(appChord(ev('W', { metaKey: true, shiftKey: true, altKey: true }), true)).toBeNull();
+    expect(workViewChordLabel(true)).toBe('⌘⇧W');
+    expect(workViewChordLabel(false)).toBe('Ctrl+Shift+W');
+  });
+
+  it('does not collide with any other app chord', () => {
+    const others = ['i', 'j', 'e', ',', 'o', 't', 'h'];
+    for (const k of others) {
+      expect(appChord(ev(k, { metaKey: true, shiftKey: true }), true)).not.toBe('work-view');
+      expect(appChord(ev(k.toUpperCase(), { ctrlKey: true, shiftKey: true }), false)).not.toBe('work-view');
+    }
   });
 });

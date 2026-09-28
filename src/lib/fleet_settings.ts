@@ -54,7 +54,24 @@ export const SETTING_KEYS = {
   workTidyIdleUnlinkedDays: 'work.tidy_idle_unlinked_days',
   workAutoTidy: 'work.auto_tidy',
   workAutoTidyReasons: 'work.auto_tidy_reasons',
+  decideJevEnabled: 'decide.jev.enabled',
+  decideJevStatusMap: 'decide.jev.status_map',
+  decideJevWorkLink: 'decide.jev.work_link',
+  decideJevUnassigned: 'decide.jev.unassigned',
+  decideJevTimeoutMs: 'decide.jev.timeout_ms',
+  decideJevBreakerFailures: 'decide.jev.breaker_failures',
+  decideJevBreakerOpenSecs: 'decide.jev.breaker_open_secs',
+  decideJevDailyTokenBudget: 'decide.jev.daily_token_budget',
+  decideJevModel: 'decide.jev.model',
+  decideRetentionDays: 'decide.retention_days',
 } as const;
+
+/** Mirror of `settings::DECIDE_MODES`: what a decision feature's mode may be
+ *  (`auto` is not offered, decision D36). */
+export const DECIDE_MODES = ['off', 'shadow', 'assist'] as const;
+
+/** Mirror of `settings::DECIDE_JEV_MODELS`. */
+export const DECIDE_JEV_MODELS = ['jev-1.13.0', 'jev-latest'] as const;
 
 /** Mirror of `settings::AUTO_TIDY_REASONS`: the tidy reasons auto-tidy may
  *  act on (the ones whose action is a safe kill). */
@@ -169,6 +186,16 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'work.tidy_idle_unlinked_days': '7',
   'work.auto_tidy': 'false',
   'work.auto_tidy_reasons': 'done_idle,pr_merged_idle',
+  'decide.jev.enabled': 'false',
+  'decide.jev.status_map': 'off',
+  'decide.jev.work_link': 'off',
+  'decide.jev.unassigned': 'false',
+  'decide.jev.timeout_ms': '1500',
+  'decide.jev.breaker_failures': '5',
+  'decide.jev.breaker_open_secs': '300',
+  'decide.jev.daily_token_budget': '2000000',
+  'decide.jev.model': 'jev-1.13.0',
+  'decide.retention_days': '90',
 };
 
 export type FleetSettings = Record<string, string>;

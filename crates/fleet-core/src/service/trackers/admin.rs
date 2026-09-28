@@ -82,6 +82,9 @@ pub struct WorkAdminArgs {
     /// on|off|inherit
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_tidy: Option<String>,
+    /// Org Jev consent: on|off
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev: Option<String>,
     /// D31: bound clients see unassigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_sees_unassigned: Option<bool>,
@@ -116,6 +119,7 @@ impl fmt::Debug for WorkAdminArgs {
             .field("host_alias", &self.host_alias)
             .field("rule_id", &self.rule_id)
             .field("auto_tidy", &self.auto_tidy)
+            .field("jev", &self.jev)
             .field("bound_sees_unassigned", &self.bound_sees_unassigned)
             .field("days", &self.days)
             .finish()
@@ -129,7 +133,7 @@ impl WorkAdminArgs {
             "action={} tracker_id={:?} provider={:?} site_url={:?} auth_kind={:?} \
              credential_ref={:?} transport={:?} settings={} secret={} org_id={:?} \
              rule_id={:?} host_alias={:?} owner={:?} repo={:?} path_prefix={:?} \
-             isolate_sessions={:?} auto_tidy={:?} bound_sees_unassigned={:?} days={:?}",
+             isolate_sessions={:?} auto_tidy={:?} jev={:?} bound_sees_unassigned={:?} days={:?}",
             self.action,
             self.tracker_id,
             self.provider,
@@ -155,6 +159,7 @@ impl WorkAdminArgs {
             self.path_prefix,
             self.isolate_sessions,
             self.auto_tidy,
+            self.jev,
             self.bound_sees_unassigned,
             self.days,
         )
@@ -521,11 +526,29 @@ pub fn admin_sync(
                 check_host_transport(&s, &t)?;
                 s.set_tracker_transport(id, &t)?;
             }
+            let changed_settings = settings.is_some();
             if let Some(st) = settings {
                 s.set_tracker_settings(id, &st)?;
             }
             s.emit_tracker(id)?;
-            json(&s.require_tracker(id)?)
+            let updated = s.require_tracker(id)?;
+            if changed_settings {
+                // J3: a person's section map is the reference the
+                // `status_map` proposals are measured against. Never fails
+                // the update.
+                if let Err(e) = crate::service::decide::status_map::record_followups(
+                    &s,
+                    &updated,
+                    crate::store::now_unix(),
+                ) {
+                    tracing::debug!(
+                        tracker_id = id,
+                        "[decide] status_map follow-up not recorded: {}",
+                        e.message
+                    );
+                }
+            }
+            json(&updated)
         }
         AdminAction::SetCredential => {
             let id = args.tracker()?;

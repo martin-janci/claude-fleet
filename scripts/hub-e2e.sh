@@ -192,6 +192,10 @@ check "/healthz needs no token and no allowlisted Host" '[ "$(code "http://127.0
 check "/healthz answers the liveness body and nothing else" 'curl -s -m 10 "http://127.0.0.1:$PA/healthz" | grep -qx "fleet-hub ok"' "$(curl -s -m 10 "http://127.0.0.1:$PA/healthz")"
 check "/healthz refuses a non-GET with 405" '[ "$(code -X POST "http://127.0.0.1:$PA/healthz")" = 405 ]' "$(code -X POST "http://127.0.0.1:$PA/healthz")"
 check "no token -> 401" '[ "$(code -X POST "http://127.0.0.1:$PA/mcp" -H "Host: $PUB")" = 401 ]' ""
+# A second bad bearer from one address inside AUTH_FAIL_INTERVAL (1 s) is
+# 429, not 401 (mcp::tests_auth_limit); these checks assert the 401 itself,
+# so each waits the interval out after the previous refusal.
+sleep 1.1
 check "wrong token -> 401" '[ "$(code -X POST "http://127.0.0.1:$PA/mcp" -H "Host: $PUB" -H "Authorization: Bearer nope")" = 401 ]' ""
 check "foreign Host -> 403" '[ "$(code -X POST "http://127.0.0.1:$PA/mcp" -H "Host: evil.example.com" -H "Authorization: Bearer $TOKA")" = 403 ]' ""
 init=$(rpc "$PA" "$PUB" "$TOKA" initialize '{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}')
@@ -325,7 +329,11 @@ gs_c=$(tool "$PA" "$PUB" "$CTOK" get_settings '{}')
 check "a client is refused set_setting and get_settings" 'echo "$ss_c" | grep -q E_FORBIDDEN && echo "$gs_c" | grep -q E_FORBIDDEN' "${ss_c:0:300} / ${gs_c:0:300}"
 
 # --- GET /events -------------------------------------------------------------
-check "/events needs a token like /mcp" '[ "$(code "http://127.0.0.1:$PA/events" -H "Host: $PUB")" = 401 ]' "$(code "http://127.0.0.1:$PA/events" -H "Host: $PUB")"
+# One request, captured once: a second one inside AUTH_FAIL_INTERVAL would be
+# the 429 the failed-bearer limiter answers, not the 401 under test.
+sleep 1.1
+ev_code="$(code "http://127.0.0.1:$PA/events" -H "Host: $PUB")"
+check "/events needs a token like /mcp" '[ "$ev_code" = 401 ]' "$ev_code"
 SSE="$ROOT/events.sse"
 # `-m` only bounds a stream nothing ever closes; every wait below is its own
 # bounded poll, and the subscriber is killed as soon as the checks are done.
@@ -369,7 +377,9 @@ tbl=$("$BIN" client list --data-dir "$ROOT/a" --port "$PA" 2>&1)
 check "fleet-hub client list shows both paired clients and no digest" 'echo "$tbl" | grep -q "e2e phone" && echo "$tbl" | grep -q "e2e kiosk" && ! echo "$tbl" | grep -qi token' "$tbl"
 rev=$("$BIN" client revoke "e2e phone" --data-dir "$ROOT/a" --port "$PA" 2>&1); rc=$?
 check "fleet-hub client revoke reports the revoked client" '[ $rc -eq 0 ] && echo "$rev" | grep -q "e2e phone"' "$rev"
-check "a revoked client's token is refused -> 401" '[ "$(code -X POST "http://127.0.0.1:$PA/mcp" -H "Host: $PUB" -H "Authorization: Bearer $CTOK")" = 401 ]' "$(code -X POST "http://127.0.0.1:$PA/mcp" -H "Host: $PUB" -H "Authorization: Bearer $CTOK")"
+sleep 1.1
+revoked_code="$(code -X POST "http://127.0.0.1:$PA/mcp" -H "Host: $PUB" -H "Authorization: Bearer $CTOK")"
+check "a revoked client's token is refused -> 401" '[ "$revoked_code" = 401 ]' "$revoked_code"
 check "the other client still works" '[ "$(code -X POST "http://127.0.0.1:$PA/mcp" -H "Host: $PUB" -H "Authorization: Bearer $RTOK" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}")" = 200 ]' ""
 tbl2=$("$BIN" client list --include-revoked --data-dir "$ROOT/a" --port "$PA" 2>&1)
 check "a revoked client stays listed for the audit trail" 'echo "$tbl2" | grep -q "e2e phone"' "$tbl2"
@@ -1001,6 +1011,60 @@ else
   check "fleet-hub work usage prints the same counts" 'echo "$ucli" | grep -q "^work graph usage, last 7 d" && echo "$ucli" | grep -q "^links: " && ! echo "$ucli" | grep -qE "E2E-[0-9]"' "${ucli:0:600}"
   ujs=$("$WBIN" work usage --days 7 --json --data-dir "$ROOT/w" --port "$PW" 2>&1)
   check "and --json is the tool's answer" '[ "$(printf "%s" "$ujs" | jq -r .days)" = 7 ] && [ "$(printf "%s" "$ujs" | jq -r .links.created)" = "$(jt "$us" .links.created)" ]' "${ujs:0:400}"
+
+  # --- 10. the Work view (M14) ---------------------------------------------
+  # SWEB is on E2E-2 (primary) and the local item LID (section 8): one
+  # session under two tasks, read, re-primaried and placed through a real hub.
+  echo "-- 10. the Work view"
+  tr=$(wcall "$TOKW" work '{"action":"tree","limit":200}')
+  check "work { tree } lists SWEB under E2E-2 and under the local item, one id, one primary" '[ "$(jt "$tr" "[.tasks[] | select(.key == \"E2E-2\" or .task_id == \"item:${LID:-0}\") | .sessions[] | select(.session_id == ${SWEB:-0})] | length")" = 2 ] && [ "$(jt "$tr" "[.tasks[] | .sessions[] | select(.session_id == ${SWEB:-0} and .primary)] | length")" = 1 ]' "${tr:0:800}"
+  st=$(wcall "$TOKW" work "{\"action\":\"session_tasks\",\"session_id\":${SWEB:-0}}")
+  LP=$(jt "$st" '.primary_link_id')
+  LL=$(jt "$st" ".links[] | select(.task.task_id == \"item:${LID:-0}\") | .link_id")
+  check "work { session_tasks } names both links and which is primary" '[ "$(jt "$st" ".links | length")" -ge 2 ] && [ "$(jt "$st" ".links[] | select(.primary) | .task.key")" = E2E-2 ] && [ -n "$LL" ]' "${st:0:800}"
+  sp=$(wcall "$TOKW" work_link "{\"action\":\"set_primary\",\"session_id\":${SWEB:-0},\"link_id\":${LL:-0},\"expected_primary\":${LP:-0}}")
+  st2=$(wcall "$TOKW" work "{\"action\":\"session_tasks\",\"session_id\":${SWEB:-0}}")
+  check "set_primary moves the primary to the local item and keeps E2E-2 linked" '[ "$(jt "$st2" .primary_link_id)" = "$LL" ] && [ "$(jt "$st2" "[.links[] | select(.link_id == ${LP:-0})] | length")" = 1 ]' "${sp:0:400} | ${st2:0:600}"
+  stale=$(wcall "$TOKW" work_link "{\"action\":\"set_primary\",\"session_id\":${SWEB:-0},\"link_id\":${LP:-0},\"expected_primary\":${LP:-0}}")
+  check "a second device acting on the old primary gets E_CONFLICT, and nothing moves" 'echo "$stale" | grep -q E_CONFLICT && [ "$(jt "$(wcall "$TOKW" work "{\"action\":\"session_tasks\",\"session_id\":${SWEB:-0}}")" .primary_link_id)" = "$LL" ]' "${stale:0:400}"
+  back=$(wcall "$TOKW" work_link "{\"action\":\"set_primary\",\"session_id\":${SWEB:-0},\"link_id\":${LP:-0},\"expected_primary\":${LL:-0}}")
+  check "and with the current primary named it moves back" '[ "$(jt "$back" .work.key)" = E2E-2 ]' "${back:0:400}"
+  SSEV="$ROOT/w-events-view.sse"
+  curl -sN -m 30 "http://127.0.0.1:$PW/events" -H "Host: $PUB" -H "Authorization: Bearer $TOKW" >"$SSEV" 2>/dev/null &
+  EVV=$!; WEV_PIDS="$EVV"
+  until_ok 50 'grep -q "^event: ready" "$SSEV"'
+  pl=$(wcall "$TOKW" work_link "{\"action\":\"place\",\"task_id\":\"item:${LID:-0}\",\"group\":\"Security\",\"note\":\"e2e\",\"expected_version\":0}")
+  check "place puts the local item in a group of its own, marked manual" '[ "$(jt "$pl" .group.label)" = Security ] && [ "$(jt "$pl" .group.source)" = manual ]' "${pl:0:600}"
+  pl2=$(wcall "$TOKW" work_link "{\"action\":\"place\",\"task_id\":\"item:${LID:-0}\",\"group\":\"Other\",\"expected_version\":0}")
+  check "a placement over a version someone else changed is E_CONFLICT" 'echo "$pl2" | grep -q E_CONFLICT' "${pl2:0:400}"
+  until_ok 50 'grep -q "^event: work:changed" "$SSEV"'
+  check "the master's /events carries work:changed with ids only" 'grep -A1 "^event: work:changed" "$SSEV" | grep -q "\"what\":\"placement\"" && ! grep -A1 "^event: work:changed" "$SSEV" | grep -q "Security"' "$(grep -A1 "^event: work" "$SSEV" | head -6)"
+  kill $EVV 2>/dev/null; wait $EVV 2>/dev/null; WEV_PIDS=""
+  # Org-bound paired clients (pair_client { org_id }): Acme's reads Acme's
+  # work; Beta's reads none of it, not even on the session they share a hub with.
+  # /pair allows one attempt per address every 6 s; from loopback the hub
+  # believes X-Forwarded-For's last hop, so each pairing here is its own
+  # "phone" and the operator section below keeps its own budget.
+  redeem_as() { # code address -> token
+    curl -s -m 10 -X POST "http://127.0.0.1:$PW/pair" -H "Host: $PUB" -H "X-Forwarded-For: $2" \
+      -H 'Content-Type: application/json' -d "{\"code\":\"$1\"}" | jq -r .token 2>/dev/null
+  }
+  pair_org() { # name org address -> token
+    redeem_as "$(jt "$(wcall "$TOKW" pair_client "{\"name\":\"$1\",\"mode\":\"full\",\"org_id\":$2}")" .code)" "$3"
+  }
+  TOKBA=$(pair_org e2e-acme "${OA:-0}" 10.99.0.1); TOKBB=$(pair_org e2e-beta "${OB:-0}" 10.99.0.2)
+  ta=$(wcall "$TOKBA" work '{"action":"tree","limit":200}')
+  check "a client bound to Acme reads Acme's tasks in the tree" '[ -n "$TOKBA" ] && [ "$TOKBA" != null ] && [ "$(jt "$ta" "[.tasks[] | select(.key == \"E2E-2\")] | length")" = 1 ]' "${ta:0:600}"
+  tb=$(wcall "$TOKBB" work '{"action":"tree","limit":200}')
+  sb=$(wcall "$TOKBB" work "{\"action\":\"session_tasks\",\"session_id\":${SWEB:-0}}")
+  check "a client bound to Beta reads none of Acme's tasks, titles or sessions" '[ -n "$(jt "$tb" .total)" ] && ! echo "$tb$sb" | grep -qE "E2E-[0-9]|E2E local cleanup|Security" && echo "$sb" | grep -q E_NOTFOUND' "${tb:0:400} | ${sb:0:300}"
+  pb=$(wcall "$TOKBB" work_link "{\"action\":\"place\",\"task_id\":\"item:${LID:-0}\",\"group\":\"Beta\",\"expected_version\":1}")
+  check "nor may it place Acme's task" 'echo "$pb" | grep -qE "E_NOTFOUND|E_FORBIDDEN"' "${pb:0:300}"
+  rc=$(jt "$(wcall "$TOKW" pair_client '{"name":"e2e-ro","mode":"readonly"}')" .code)
+  TOKRO=$(redeem_as "$rc" 10.99.0.3)
+  ro=$(wcall "$TOKRO" work '{"action":"tree","limit":5}')
+  rw=$(wcall "$TOKRO" work_link "{\"action\":\"place\",\"task_id\":\"item:${LID:-0}\",\"group\":\"RO\",\"expected_version\":1}")
+  check "a readonly client reads the tree and may not place" '[ -n "$(jt "$ro" .total)" ] && echo "$rw" | grep -qE "E_FORBIDDEN|readonly|read-only"' "${ro:0:300} | ${rw:0:300}"
 
   # --- operator confirm (M9.7): no approver on a hub -------------------------
   echo "-- operator"

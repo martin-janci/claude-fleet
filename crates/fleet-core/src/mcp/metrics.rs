@@ -71,12 +71,13 @@ impl Metrics {
         self.by_caller.lock().map(|m| m.clone()).unwrap_or_default()
     }
 
-    /// The Prometheus text exposition, given the streams each caller holds.
+    /// The Prometheus text exposition, given the streams each caller holds
+    /// and the process gauges.
     ///
-    /// Written by hand rather than through a client library: three series and
+    /// Written by hand rather than through a client library: a few series and
     /// no histograms do not justify a dependency, and the format is four
     /// lines of rules.
-    pub fn expose(&self, streams: &BTreeMap<String, usize>) -> String {
+    pub fn expose(&self, streams: &BTreeMap<String, usize>, hub: &HubGauges) -> String {
         let calls = self.snapshot();
         let mut out = String::new();
         out.push_str("# HELP fleet_tool_calls_total Control-API tool calls, by caller.\n");
@@ -108,7 +109,73 @@ impl Metrics {
                 n
             ));
         }
+        out.push_str("# HELP fleet_reconcile_duration_ms Wall time of the last reconcile pass.\n");
+        out.push_str("# TYPE fleet_reconcile_duration_ms gauge\n");
+        if let Some(ms) = hub.reconcile_duration_ms {
+            out.push_str(&format!("fleet_reconcile_duration_ms {ms}\n"));
+        }
+        out.push_str(
+            "# HELP fleet_reconcile_failures_total Reconcile passes that failed since start.\n",
+        );
+        out.push_str("# TYPE fleet_reconcile_failures_total counter\n");
+        out.push_str(&format!(
+            "fleet_reconcile_failures_total {}\n",
+            hub.reconcile_failures_total
+        ));
+        out.push_str(
+            "# HELP fleet_sessions Fleet sessions by claude_status (external rows excluded).\n",
+        );
+        out.push_str("# TYPE fleet_sessions gauge\n");
+        for (status, n) in &hub.sessions_by_status {
+            out.push_str(&format!(
+                "fleet_sessions{{status=\"{}\"}} {n}\n",
+                escape(status)
+            ));
+        }
+        out.push_str("# HELP fleet_hosts_reachable Hosts whose last probe succeeded.\n");
+        out.push_str("# TYPE fleet_hosts_reachable gauge\n");
+        out.push_str(&format!("fleet_hosts_reachable {}\n", hub.hosts_reachable));
         out
+    }
+}
+
+/// Process-level gauges beside the per-caller counters (perf-logs §5:
+/// `/metrics` could not answer "is reconcile healthy"). Read from the
+/// cached rows and the tick stats — no network, one short lock.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct HubGauges {
+    pub reconcile_duration_ms: Option<i64>,
+    pub reconcile_failures_total: u64,
+    pub sessions_by_status: BTreeMap<String, u32>,
+    pub hosts_reachable: u32,
+}
+
+impl HubGauges {
+    pub fn read(
+        store: &Mutex<crate::store::Store>,
+        stats: &crate::service::tick::TickStats,
+    ) -> Self {
+        let r = stats.reconcile();
+        let (sessions_by_status, hosts_reachable) = match store.lock() {
+            Ok(s) => {
+                // The same threshold `fleet_health` uses, so the gauges and
+                // the roll-up count the same red sessions.
+                let red = crate::service::health::context_red_pct(&s);
+                let summary = crate::service::health::summarize(
+                    &s.list_all_sessions().unwrap_or_default(),
+                    &s.list_hosts().unwrap_or_default(),
+                    red,
+                );
+                (summary.by_status, summary.hosts_reachable)
+            }
+            Err(_) => (BTreeMap::new(), 0),
+        };
+        Self {
+            reconcile_duration_ms: r.last_duration_ms,
+            reconcile_failures_total: r.failures_total,
+            sessions_by_status,
+            hosts_reachable,
+        }
     }
 }
 
@@ -132,12 +199,14 @@ fn escape(v: &str) -> String {
     out
 }
 
-/// State for `GET /metrics`: the counters, and the stream limiter the gauge
-/// reads.
+/// State for `GET /metrics`: the counters, the stream limiter the gauge
+/// reads, and — for [`HubGauges`] — the store and the tick stats.
 #[derive(Clone)]
 pub struct MetricsState {
     pub metrics: std::sync::Arc<Metrics>,
     pub streams: std::sync::Arc<super::guard::LongPollLimiter>,
+    pub store: std::sync::Arc<Mutex<crate::store::Store>>,
+    pub stats: std::sync::Arc<crate::service::tick::TickStats>,
 }
 
 /// `GET /metrics` — the Prometheus text exposition.
@@ -160,12 +229,13 @@ pub async fn handle_metrics(
             .into_response();
     }
     let streams = state.streams.active_by_key();
+    let hub = HubGauges::read(&state.store, &state.stats);
     (
         [(
             axum::http::header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
-        state.metrics.expose(&streams),
+        state.metrics.expose(&streams, &hub),
     )
         .into_response()
 }
@@ -204,12 +274,13 @@ mod tests {
         m.record_call("client:phone", true);
         let streams = BTreeMap::from([("client:phone".to_string(), 2usize)]);
 
-        let text = m.expose(&streams);
+        let text = m.expose(&streams, &HubGauges::default());
         assert!(text.contains("fleet_tool_calls_total{caller=\"client:phone\"} 1"));
         assert!(text.contains("fleet_tool_errors_total{caller=\"client:phone\"} 1"));
         assert!(text.contains("fleet_event_streams_open{caller=\"client:phone\"} 2"));
-        // Prometheus requires a TYPE line per metric family.
-        assert_eq!(text.matches("# TYPE ").count(), 3);
+        // Prometheus requires a TYPE line per metric family: three per-caller
+        // series plus the four process gauges.
+        assert_eq!(text.matches("# TYPE ").count(), 7);
     }
 
     /// A client's name is the one part of a caller label this fleet did not
@@ -223,7 +294,7 @@ mod tests {
             false,
         );
 
-        let text = m.expose(&BTreeMap::new());
+        let text = m.expose(&BTreeMap::new(), &HubGauges::default());
         // Counted by LINE, not by substring: the injected text is still
         // present — inside the quoted, escaped label value, which is exactly
         // where it is harmless. What must not exist is a second series line.
@@ -247,6 +318,46 @@ mod tests {
         for name in ["client:phone", "master", "host:alpha", "client:tablet"] {
             m.record_call(name, false);
         }
-        assert_eq!(m.expose(&BTreeMap::new()), m.expose(&BTreeMap::new()));
+        let none = HubGauges::default();
+        assert_eq!(
+            m.expose(&BTreeMap::new(), &none),
+            m.expose(&BTreeMap::new(), &none)
+        );
+    }
+
+    #[test]
+    fn expose_adds_the_hub_gauges() {
+        let m = Metrics::new();
+        let mut by_status = BTreeMap::new();
+        by_status.insert("working".to_string(), 12u32);
+        by_status.insert("idle".to_string(), 3u32);
+        let hub = HubGauges {
+            reconcile_duration_ms: Some(812),
+            reconcile_failures_total: 2,
+            sessions_by_status: by_status,
+            hosts_reachable: 5,
+        };
+        let out = m.expose(&BTreeMap::new(), &hub);
+        for line in [
+            "# TYPE fleet_reconcile_duration_ms gauge",
+            "fleet_reconcile_duration_ms 812",
+            "# TYPE fleet_reconcile_failures_total counter",
+            "fleet_reconcile_failures_total 2",
+            "# TYPE fleet_sessions gauge",
+            "fleet_sessions{status=\"idle\"} 3",
+            "fleet_sessions{status=\"working\"} 12",
+            "# TYPE fleet_hosts_reachable gauge",
+            "fleet_hosts_reachable 5",
+        ] {
+            assert!(out.contains(line), "missing {line:?} in:\n{out}");
+        }
+        let none = m.expose(&BTreeMap::new(), &HubGauges::default());
+        assert!(
+            !none
+                .lines()
+                .any(|l| l.starts_with("fleet_reconcile_duration_ms")),
+            "no pass yet: HELP/TYPE only, no sample:\n{none}"
+        );
+        assert!(none.contains("# TYPE fleet_reconcile_duration_ms gauge"));
     }
 }

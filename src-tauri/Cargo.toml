@@ -1,6 +1,6 @@
 [package]
 name = "claude-fleet"
-version = "0.3.2"
+version = "0.3.3"
 description = "Desktop app for managing Claude Code sessions across hosts"
 authors = ["martin-janci"]
 edition = "2021"
@@ -42,7 +42,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 directories = "5"
 portable-pty = "0.9"
-libc = "0.2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
@@ -59,8 +58,19 @@ base64 = "0.22"
 # argv (which EDR/EndpointSecurity capture and retain). macOS-only: Linux's
 # and Windows' dependency sets are untouched, which is what separates this
 # from the cross-platform `keyring` crate that was rejected at Task 1.
+# SIGKILL for the PTY teardown (`pty.rs` `kill_hard`); Windows uses
+# portable-pty's own `TerminateProcess` there.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
+
+# Windows Credential Manager for the same token (`backend/token_store.rs`),
+# through the raw Win32 bindings: the version already in the lockfile, and
+# only the two API families it calls.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Credentials"] }
 
 [dev-dependencies]
 tempfile = "3"

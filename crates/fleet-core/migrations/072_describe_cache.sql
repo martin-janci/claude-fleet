@@ -24,4 +24,4 @@ CREATE TABLE IF NOT EXISTS work_item_descriptions (
 CREATE INDEX IF NOT EXISTS idx_work_item_descriptions_fetched
   ON work_item_descriptions(fetched_at);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (68);
+INSERT OR IGNORE INTO schema_version (version) VALUES (72);

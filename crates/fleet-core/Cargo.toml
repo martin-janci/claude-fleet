@@ -20,6 +20,12 @@ default = []
 # with it on, a build without debug assertions (`--release`) refuses the
 # override. Never add it to `default`.
 e2e = []
+# The natural-language detector (`service::nl`, Jev evaluation decisions
+# D40/D44): lingua with the six language models the census names — en, sk,
+# cs, de, and pl / hu as controls that keep Slovak from being guessed as
+# its neighbours. The models add about 45 MB to a binary, so only
+# `fleet-hub` turns this on; the desktop bundle never carries them.
+nl-detect = ["dep:lingua"]
 
 [dependencies]
 sysinfo = "0.33"
@@ -75,6 +81,18 @@ rustls-native-certs = "0.8"
 # Asset catalog (docs/superpowers/specs/2026-09-14-asset-catalog-design.md)
 serde_yaml = "0.9"
 sha2 = "0.10"
+# The `nl-detect` feature's language detector (see `[features]`).
+lingua = { version = "1.8", optional = true, default-features = false, features = [
+  "english",
+  "slovak",
+  "czech",
+  "german",
+  "polish",
+  "hungarian",
+] }
+# HMAC-SHA256 for the decision record's fingerprints (`service::decide`,
+# D37): `decision_runs.input_fp` and status_map section ids.
+hmac = "0.12"
 hex = "0.4"
 base64 = "0.22"
 toml = "0.8"
@@ -104,7 +122,10 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 # `ws` feature already pulls in for the server half, so it adds no package to
 # `Cargo.lock` — keep the two in step when axum moves.
 tokio-tungstenite = "0.29"
+
 # The REAL agent, for agent::e2e: the hub and a fleet-agent talking over a
 # loopback socket in one process. A dev-dependency only, and in this
-# direction only — fleet-agent never depends on fleet-core.
+# direction only — fleet-agent never depends on fleet-core. Unix only, like
+# the agent itself and the e2e module that uses it.
+[target.'cfg(unix)'.dev-dependencies]
 fleet-agent = { path = "../fleet-agent" }

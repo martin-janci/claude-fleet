@@ -358,6 +358,16 @@ pub async fn run_with(
                 "[playbook] action failed"
             );
         }
+        if let Ok(outcome) = &result {
+            tracing::info!(
+                host = %p.host_alias,
+                session = %p.tmux_name,
+                kind = %p.stuck_kind,
+                action = %p.action.as_str(),
+                outcome = ?outcome,
+                "[playbook] applied"
+            );
+        }
         if let Ok(s) = store.lock() {
             match s.mark_playbook_applied(p.session_id, now, &detail) {
                 Ok(_) => applied += 1,
@@ -447,6 +457,7 @@ mod tests {
             turn_seq: 0,
             last_stop_at: None,
             stale_working_at: None,
+            work_rev: 0,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
@@ -833,5 +844,34 @@ mod tests {
         assert!(events.iter().any(
             |e| e.kind == "playbook_applied" && e.detail.as_deref() == Some("auth_menu:notify")
         ));
+    }
+
+    /// perf-logs §5: "applied 1 stuck playbook(s)" named no host, session or
+    /// kind — the oom loop on 21480 was invisible in the log.
+    #[tokio::test]
+    async fn an_applied_playbook_logs_host_session_kind_and_action_at_info() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        seed_stuck(&store, "dev-log", "press_enter");
+        let exec = FakeExec {
+            enters: AtomicUsize::new(0),
+            recreates: AtomicUsize::new(0),
+            fail: false,
+            attached: false,
+        };
+        let log = crate::logging::capture::start();
+        assert_eq!(run_with(&store, &exec, &ALL_ON, now_unix() + 10).await, 1);
+        let text = log.text();
+        assert!(
+            text.contains("INFO") && text.contains("[playbook] applied"),
+            "{text}"
+        );
+        for field in [
+            "host=local",
+            "session=dev-log",
+            "kind=press_enter",
+            "action=press_enter",
+        ] {
+            assert!(text.contains(field), "missing {field} in:\n{text}");
+        }
     }
 }

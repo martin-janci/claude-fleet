@@ -142,6 +142,23 @@ curl -s https://fleet.example.com/mcp \
 
 A healthy hub answers with `db_ready: true` and the running version.
 
+`hub` is this process: `started_at`, `uptime_secs` and `reconcile`
+(`last_started_at`, `last_finished_at`, `last_duration_ms`,
+`consecutive_failures`, `failures_total`, `last_error`) — alert on
+`consecutive_failures >= 3`. `tunnels_mode` is `none` on a public hub (hooks
+post directly; the `tunnels` map is empty because nothing applies) and
+`reverse` otherwise. `peer_links_total` tells `peer_links_down: 0` from "no
+peers configured".
+
+`usage_by_day` books each token to the UTC day of the transcript line that
+produced it. The first time a transcript is read (a new host, a hub takeover)
+its history before that day lands in `backfill_cost_micros`, apart from the
+day's live `cost_micros`, so a takeover never reads as an $850 day.
+`usage_report` says what each figure counts: `by_host_population: live_rows`
+(session rows that still exist, over their lifetime — ghosts included) and
+`by_day_population: durable` (the daily roll-up, killed sessions included);
+the two need not agree.
+
 The image carries a Docker `HEALTHCHECK` that runs `fleet-hub healthcheck`
 every 30 s, so `docker compose ps` shows the hub as `healthy` (or
 `unhealthy`) in its STATUS column. The check sends one `GET /healthz` to
@@ -273,6 +290,133 @@ the spelling and, above all, that you did not write the `v`: the image tag for
 `v0.3.0` is `0.3.0`. `no matching manifest for linux/arm64` means that
 version's arm64 leg failed and the tag carries an amd64-only manifest (see
 *Platforms* above); pin the previous version, or a later one, instead.
+
+### Upgrade with the script
+
+`deploy/hub/upgrade.sh <version>` does the sequence above for a deployment
+whose tag lives in `.env` (the `deploy/hub/behind-proxy` compose): it pulls
+first (a tag ghcr does not have stops it with the hub untouched), takes a
+consistent online backup (`backup.sh`, kept as `backups/pre-<version>-*.db`,
+the newest three *of that version*), `docker compose stop`s the hub so the
+30 s grace applies, moves `FLEET_HUB_TAG`, starts it, waits for the image's
+own healthcheck, and checks `fleet-hub --version`. With a readonly client
+token in `readonly.token` beside the compose file (`fleet-hub pair --mode
+readonly upgrade-check`) it also asks `fleet_health` over the public URL —
+never the master token, and passed to `curl` on stdin, not its command line.
+On any failure after the stop it prints the rollback.
+
+The image pulled is the compose file's own `image:` line at the new tag, and
+every `docker compose` call reads `FLEET_HUB_ENV_FILE` (default `.env`
+beside the compose file) through `--env-file`. The tag must match
+`[0-9A-Za-z._-]+`. On a fresh copy of `.env.example` (`FLEET_HUB_TAG=`
+empty) there is nothing to stop and no `state.db` to back up: the script
+says so and skips those steps, so the same command is also the first
+install. With a tag set, a missing `state.db` stops the upgrade before the
+hub is touched (point `FLEET_HUB_DATA` at the right directory) — it never
+migrates without a backup. An upgrade never prunes an older
+version's `pre-<version>-*.db` (see *Backups*).
+
+**Order across the three binaries.** Today (contract 4 on both sides,
+proto 1 on both sides) the order is a habit: hub, then desktop, then the
+agents. When a release bumps `CONTRACT_REVISION`, upgrade the **hub first,
+then the desktop in the same window** — there is no mixed window, the desktop
+refuses with `E_HUB_CONTRACT` until it is updated, hooks and the phone keep
+working meanwhile. When a release bumps `PROTO_VERSION`, upgrade the **hub
+first**; the release holds `MIN_SUPPORTED_PROTO` at the previous value so an
+older `fleet-agent` keeps connecting until it is reinstalled. A hub upgrade
+never needs the agents restarted.
+
+## Backups
+
+`state.db` carries the master token, every host, every session and the
+usage roll-ups. The hub keeps it in WAL mode, so a `cp` of the file from a
+running hub is a stale database (pages still in `state.db-wal` are missing)
+and a `cp` of the `state.db*` triple can be torn. Use SQLite's online backup
+API instead — one self-contained file, no stop:
+
+```bash
+sudo FLEET_HUB_DATA=/volume1/docker/fleet-hub/data deploy/hub/backup.sh
+# keeps 14 dailies in <FLEET_HUB_DATA>/../backups (FLEET_HUB_BACKUPS overrides)
+```
+
+`FLEET_HUB_DATA` defaults to `/volume1/docker/fleet-hub/data` (the Synology
+layout below); point it at the compose directory's `data/` anywhere else.
+
+It runs `.backup`, then `PRAGMA integrity_check` on the copy (a failed check
+removes it and exits 1; a run killed mid-copy removes its `.part`), then
+prunes to the newest `KEEP` files of its own `PREFIX` — other prefixes are
+never touched. On a
+Synology: Control Panel → Task Scheduler → user `root`, daily 03:30,
+`bash /volume1/docker/fleet-hub/backup.sh`; add `backups/` to Hyper Backup
+or any off-box target. `upgrade.sh` calls the same script with
+`PREFIX=pre-<version> KEEP=3` before it stops the hub, so each version
+keeps its own three and older versions' `pre-*` files stay until you delete
+them.
+
+**Restore drill** (rehearse it once; a backup nobody restored is a hope):
+
+```bash
+docker compose stop fleet-hub
+mkdir -p data.aside && mv data/state.db data/state.db-wal data/state.db-shm data.aside/ 2>/dev/null
+cp backups/state-<stamp>.db data/state.db && chown 1000 data/state.db
+docker compose up -d fleet-hub
+curl -s https://fleet.example.com/mcp/json -H "Authorization: Bearer <readonly token>" ... # fleet_health.schema_version
+```
+
+Restoring a copy taken before a migration onto a newer image re-runs the
+migrations (fine). Never restore a *newer* copy onto an *older* image: the
+hub refuses a database a newer build has migrated (see *Roll back* above).
+Sessions that ran between the copy and the restore are not in it.
+
+## Behind an existing reverse proxy
+
+`deploy/hub/behind-proxy/docker-compose.yml` is the shape for a box that
+already runs a reverse proxy (a NAS with its own Caddy): no bundled caddy, the
+image tag in `.env` (`FLEET_HUB_TAG=…`, moved by `upgrade.sh`), and
+`state.db` in a bind mount `./data` the host's `sqlite3` can back up. Set
+`FLEET_HUB_PUBLIC_URL=https://…` in `fleet-hub.env` as usual: it is what
+permits the `0.0.0.0` bind without `--allow-plaintext`. Files: `.env`,
+`fleet-hub.env`, `docker-compose.yml`, `backup.sh`, `upgrade.sh`, `data/`,
+`ssh/`, `backups/`.
+
+The variant publishes **no** port: the hub joins your proxy's docker network
+(`FLEET_HUB_PROXY_NETWORK` in `.env`, `caddy_default` for a compose project
+named `caddy`) and the proxy forwards by service name:
+
+```
+fleet.example.com {
+    reverse_proxy fleet-hub:4180 {
+        flush_interval -1
+    }
+}
+```
+
+The bare site address lets your Caddy obtain the certificate and terminate
+TLS for the `https://` public URL; an `http://` prefix would switch that off
+and serve the hub in plaintext. The https:// public URL permits the
+`0.0.0.0` bind, and the hub logs at startup that plaintext 4180 is reachable
+by anything that can route to it —
+on the proxy network, that is the proxy. Publishing `4180:4180` on the host
+instead makes it the whole LAN and every VPN peer; the warning says so.
+
+**Logs without sudo.** The variant mounts `./logs` as the hub's log directory
+(`FLEET_HUB_LOG_DIR`); create it as `install -d -o 1000 -g users -m 2750 logs`
+so hourly files stay group-readable. Docker's own capture of the same lines
+is capped at 3 × 10 MB. **Watching it.** Uptime Kuma: an HTTP keyword monitor
+on `/healthz` (`fleet-hub ok`) and a JSON-query monitor posting `tools/call
+fleet_health` to `/mcp/json` with a readonly client token (`fleet-hub pair
+--mode readonly kuma`) — never the master — on `db_ready`, `hosts_reachable`,
+`tunnels_flapping` and `hub.reconcile.consecutive_failures`.
+
+**Tidying a hand-upgraded deployment.** A directory upgraded by hand tends to
+collect `docker-compose.yml.<version>` copies (the `image:` line was the only
+difference), `data.pre-<version>` directory copies and `backup-<version>-<ts>`
+`cp` triples. With the script in place: keep the live compose and `.env`;
+verify each old copy once (`sqlite3 <copy>/state.db 'PRAGMA integrity_check'`
+as root — the triples are only valid as the triple), move the ones that pass
+into `backups/legacy/`, delete the rest and the `._docker-compose.yml`
+AppleDouble sidecar a Mac copy leaves; `chmod 0640 fleet-hub.env`. Nothing in
+the repository does this for you — it is the operator's directory.
 
 ## Add and provision hosts
 
@@ -739,7 +883,9 @@ What a client may do:
   classified as a write: a `full` client may call it and a `readonly` one is
   not shown it (a readonly device draws no chip row to begin with). The list
   itself is fleet state in the hub's database, not a device preference, so a
-  chip written on the laptop is on the phone and the other way round.
+  chip written on the laptop is on the phone and the other way round — its
+  order and each chip's `auto_send` (a tap sends at once instead of only
+  filling the box) included.
 - **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
   `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `set_host_layers`,
   `pair_client`, `revoke_client`, `set_client_trust` and `list_clients` are
@@ -771,9 +917,11 @@ What a client may do:
   session-addressed tool, `fleet_health`'s trackers, spend and counts, and
   every `/events` frame. Whether it also sees *unassigned* work and sessions
   (no org) is the org's switch `bound_sees_unassigned` (decision D31): on by
-  default, as a host sees them; `fleet-hub`'s master turns it off with
-  `work_admin { action: "update_org", org_id, bound_sees_unassigned: false }`
-  (or Settings → Work → Organisations), and the org's bound clients then see
+  default, as a host sees them; the master turns it off with `fleet-hub org
+  set <id> --bound-sees-unassigned off` (`work_admin { action: "update_org",
+  org_id, bound_sees_unassigned: false }`; on a standalone desktop, Settings →
+  Work → Organisations → *bound devices see unassigned*), and `org list`
+  marks such an org *bound devices: own org only*. The org's bound clients then see
   only rows assigned to it. Another org's session or task answers exactly as
   one that does not exist, whatever `isolate_sessions` says (a bound client
   asked to be restricted, so the session fence is always on for it), and
@@ -953,6 +1101,7 @@ fleet-hub tracker list
 fleet-hub tracker status          # each tracker's last sync pass, and retention
 fleet-hub work usage --days 30    # how the work graph is used, counts only
 fleet-hub tracker remove 1        # its items stay, marked unavailable
+fleet-hub tracker section-map 2 --set 'ideas=todo'   # Asana: set sections' categories and confirm the map
 ```
 
 A token is read from **stdin**, from an environment variable of that command
@@ -997,7 +1146,11 @@ docker compose exec fleet-hub fleet-hub tracker set-credential 1 \
   Which **sections** mean *in progress* is inferred on the first test from
   their names (progress / doing / review → in progress, done / shipped →
   done) and shown in Settings → Work with a Confirm button; once confirmed,
-  your map wins (`work_admin update` with `settings.section_map`).
+  your map wins (`work_admin update` with `settings.section_map`, or
+  `fleet-hub tracker section-map <id> --set 'name=category'`). The names the
+  rule cannot classify stay *to do*; with the `status_map` decision feature
+  on (off by default, [`decisions.md`](decisions.md#status_map--asana-section-proposals-j3))
+  the hub can propose a category for them, which you apply the same way.
 - **Linear vs Jira keys:** `ENG-123` belongs to the tracker whose probed
   prefixes (Jira projects, Linear team keys) include `ENG`. A prefix two
   trackers claim is never bound automatically.
@@ -1141,6 +1294,7 @@ fleet-hub org rule add 1 --path /home/me/work/acme     # by where the worktree l
 fleet-hub org assign-host hetzner-a 1                  # the boundary for that host's token
 fleet-hub org assign-tracker 2 1                       # its tickets are Company A's
 fleet-hub org set 1 --isolate-sessions on              # see below
+fleet-hub org set 1 --bound-sees-unassigned off        # its bound phones: its own only (D31)
 fleet-hub org list
 ```
 
@@ -1222,6 +1376,144 @@ sessions: `fleet-hub org set 1 --auto-tidy on|off|inherit` (or `work_admin
 fleet-wide setting. The allowed reasons and thresholds stay fleet-wide. A
 per-host token sees and applies only its own host's candidates of its org.
 
+## Language census (Jev evaluation)
+
+Before any decision model is tried in fleet (the Jev evaluation,
+`docs/superpowers/specs/2026-09-27-jev-language-census-design.md`), the
+census measures which languages the texts such a model would see are
+written in, per organisation. It is local and read-only: it opens
+`state.db` directly (no running hub needed), never writes it, sends
+nothing anywhere, and prints counts only — a count from 1 to 4 shows as
+`<5`.
+
+```bash
+fleet-hub census languages                      # last 90 days, every org
+fleet-hub census languages --days 30 --org 2 --json
+fleet-hub census languages --db ~/path/to/desktop/state.db   # a desktop's store
+```
+
+What it reads, per org:
+
+| Source | What | Stands for |
+|---|---|---|
+| `prompt` | each conversation's first prompt (the 200 characters the hook keeps) | the input of a work-link decision |
+| `title:<provider>`, `description:<provider>` | work items' titles and cached descriptions | the candidates of that decision |
+| `journal:<kind>` | journal notes, summaries and handovers written by a person or Claude, never fleet's own rows | the language of Claude's replies |
+| pairs | confirmed links: the prompt that opened the conversation × the item's title | how often the match is across languages |
+
+Prompts fleet typed itself — a ticket start or resume, a handover or
+safe-kill request, a quick-reply chip, anything `[claude-fleet`-marked —
+are counted as `fleet-typed` and left out. Each text is read as one of `en
+sk cs de pl hu other mixed unknown`, with Slovak and Czech written without
+diacritics flagged, and how much of it is code (`none`, `low`, `high`).
+The output lists what it cannot count (later prompts, Claude's replies as
+such, commit subjects) instead of guessing.
+
+**Checking the detector on your own texts.** `--export-sample N --out
+FILE` writes N distinct first prompts, spread over the window, with the
+detector's guess, to a new file created `0600` — the one path that writes
+text, so keep the file on the hub machine. Correct each `expect`, set
+`checked` to `true`, then `--labels FILE` prints how often the detector was
+right and which languages it confused. The same `--labels` runs the
+fixtures in `crates/fleet-core/src/service/testdata/nl/`.
+
+The detector's language models add about 45 MB to `fleet-hub` (cargo
+feature `nl-detect` of `fleet-core`, which only the hub turns on; the
+desktop app is built without it).
+
+## Decisions (Jev) — experimental, off
+
+The hub is the one place a decision model may be called from (a desktop
+paired to it, a phone and an agent host never call out). Everything is
+**off by default**: the kill switch `decide.jev.enabled`, each feature's
+mode (`decide.jev.status_map`, `decide.jev.work_link`: `off | shadow |
+assist`), each org's consent, and the global `decide.jev.unassigned` for
+rows with no org. With the defaults no request can leave the hub. The
+first use case is `status_map` (J3): after a clean sync, at most daily, an
+Asana tracker's section names the keyword rule could not classify are put
+to the model; in `assist` its answers are **proposals** a person applies
+(`fleet-hub tracker section-map`), never written by themselves. The full
+guide — what is sent, what is recorded (never raw text), the fallbacks,
+retention, how to turn it off — is [`decisions.md`](decisions.md).
+
+```bash
+fleet-hub decide set-key < jev-key.txt          # or --from-env NAME / --ref file:/run/secrets/jev
+fleet-hub org set 2 --jev on                    # this org consents
+fleet-hub decide status                         # read-only: flag, modes, consent, breaker, spend
+fleet-hub decide runs --feature work_link --limit 20
+fleet-hub decide proposals [--tracker 3] [--json] [--db FILE]   # status_map: section → category (confidence)
+fleet-hub tracker section-map 3 --set 'ideas=todo' --set 'parked=done'   # a person applies them
+fleet-hub decide proposals apply 812 [--as in_progress]   # or one at a time, by its run
+fleet-hub decide proposals reject 814                    # "not this": stays unmapped
+```
+
+The `decide.*` settings are set like the `work.*` ones, with `set_setting`
+(master token). `set-key` and `clear-key` write `state.db` directly, like
+`fleet-hub tracker webhook`; `status`, `runs` and `proposals` open it
+read-only and print ids, words and numbers — never the key; the section
+names `proposals` shows come from the trackers' stored config, never from
+the record. `tracker section-map` is a `work_admin update` over loopback
+(master token) that confirms the section map with your entries on top;
+`proposals apply <run>` is the same call for one proposal (`not_planned`
+applies as done; `--as` corrects it) and marks its run confirmed or
+corrected. `proposals reject <run>` writes only the run's follow-up
+(`rejected`) in `state.db`, like `set-key`: the section stays unmapped and
+the answer is not proposed again until a new one exists (another input,
+question version or model). A paired desktop refuses both (tracker
+administration); a standalone desktop decides them in Settings → Work.
+
+The offline `work_link` benchmark (test map card J1, phase 0) measures a
+provider against the links people confirmed, before anything is turned on:
+
+```bash
+fleet-hub decide bench work-link                       # test split, none + bm25, read-only, offline
+fleet-hub decide bench work-link --split all --json
+fleet-hub decide bench work-link --export-unlinked 150 --out h.jsonl   # D39: a person labels it
+fleet-hub decide bench work-link --labels h.jsonl      # adds the labels as dataset H
+fleet-hub decide bench work-link --split all --provider bm25 --provider jev --max-calls 200
+fleet-hub decide bench work-link --split all --provider bm25 --provider jev --shape choice+noul
+fleet-hub decide bench work-link --split all --provider bm25 --provider jev \
+    --provider haiku --haiku-host gpu1 [--haiku-model haiku] [--haiku-timeout 120]   # D33 baseline
+```
+
+Both reports end in the card's acceptance lines (PASS / FAIL / NOT JUDGED
+against the thresholds the test map registered) and carry Jev's
+calibration (ECE, Brier). The `status_map` benchmark (card J3) reads
+labeled Asana sections — the owner's file, or the built-in synthetic set
+(LLM-written, not yet spot-checked) — and opens no database unless
+`--provider jev`:
+
+```bash
+fleet-hub decide bench status-map --fixture                      # todo + rule, offline
+fleet-hub decide bench status-map --labels sections.jsonl --provider rule --provider jev
+fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host gpu1
+```
+
+Without `--provider jev` or `--provider haiku` neither sends anything
+(`work-link` opens the database read-only). `--provider haiku` (decision
+D33) asks the same question — the same redacted state and options — of
+`claude -p --model haiku` (no tools, no MCP, no hooks, no transcript) on
+the host `--haiku-host` names, which is required: each case leaves the hub
+over SSH for that host — the prompt on stdin, never in argv — and reaches
+Anthropic through its Claude account, a note on stderr says so before the
+first call, and nothing is recorded in `decision_runs`. It never crosses
+the org boundary: the host's org is read from the database, and a case of
+any other org (a case with no org counts as one, unless the host has none
+either) is skipped as `other_org` — so `--fixture`, which has no org,
+needs a host with no org. One call at a time, `--haiku-timeout` each, `--max-calls`
+at most; with it the haiku lines of the acceptance are judged. With it, each case goes through the envelope's gate
+(so only orgs that consented — or, for a row with no org,
+`decide.jev.unassigned` — with the flag on and `decide.jev.work_link` /
+`decide.jev.status_map` at `shadow` or `assist`) and every call is recorded
+in `decision_runs` (subject `bench`), which is why that run opens the
+database for writing. They print counts, rates, thresholds, latency and
+cost — never a prompt, a title or a section name; `--export-unlinked`
+writes the one file that holds text (`0600`,
+never over an existing file). What it measures and approximates:
+[`decisions.md`](decisions.md) → *Benchmarking work_link* and
+*Benchmarking status_map*; the order to run it all in is *How to run
+phase 0* there.
+
 ## `/mcp/json` — the same tools, a body a proxy can compress
 
 `POST /mcp` answers `text/event-stream`: the JSON-RPC reply arrives on a
@@ -1288,7 +1580,11 @@ same reason: it carries the dialog a blocked session is waiting on and its
 options, and without it the view is a list a phone can read but not act on —
 answering that dialog is the one thing a pager exists for. `needs_attention`
 is there for the mirror of that reason: projected away, the view would hand a
-phone the columns to re-derive the answer instead of the answer. `tags`
+phone the columns to re-derive the answer instead of the answer. Its reasons,
+most urgent first (`service/attention.rs`): `waiting`, `stuck`, `stop_failed`,
+`failed`, `context_full` (at or past `health.context_red_pct`),
+`stale_working` (a `working` row demoted after `reconcile.stale_working_secs`
+with no activity), `ci_failing` and `lifecycle`. `tags`
 is there because the phone's tag editor starts from them and
 `set_session_tags` replaces the whole list: without them a phone that added
 one tag deleted the rest. `work` (the primary work link: key, title) is the
@@ -1313,7 +1609,17 @@ curl -s https://fleet.example.com/metrics -H "Authorization: Bearer <master toke
 fleet_tool_calls_total{caller="client:phone"} 412
 fleet_tool_errors_total{caller="client:phone"} 3
 fleet_event_streams_open{caller="client:phone"} 1
+fleet_reconcile_duration_ms 812
+fleet_reconcile_failures_total 0
+fleet_sessions{status="working"} 12
+fleet_hosts_reachable 5
 ```
+
+Besides the per-caller counters the exposition carries four process gauges:
+`fleet_reconcile_duration_ms` (the last pass's wall time),
+`fleet_reconcile_failures_total`, `fleet_sessions{status="…"}` (by
+`claude_status`, external rows excluded, the same roll-up
+`fleet_health.by_status` uses) and `fleet_hosts_reachable`.
 
 Prometheus text format, **master token only** — a per-host token and a paired
 phone are both callers this reports on, and letting one read the others'
@@ -1378,6 +1684,10 @@ because the gap was longer than the history kept (512 events, roughly thirteen
 minutes of a busy fleet's churn) or because the hub has restarted since the id
 was minted, which the `generation` half is there to catch. `false` means
 re-list; it is never a reason to assume continuity.
+
+The desktop does this: it sends the last row frame id it applied, re-lists
+only when `ready` says `resumed: false`, and then also re-fetches projects,
+worktrees and work in the window.
 
 `?fields=id,claude_status,…` keeps only those keys in each frame's payload.
 There is no fixed vocabulary — a field is whatever the row type serialises,
@@ -1641,7 +1951,7 @@ it is ended or done, older than its window, and nothing live points at it.
   keeps forever and an old window longer than 365 still stands.
 - `tracker_items_days`: cached tickets in `done`. Kept while any link, live
   or ended, names one, and while it is the parent of a kept ticket.
-- `timeline_work_events_days`: handover, nudge and tidy events. The newest
+- `timeline_work_events_days`: handover, nudge, tidy and withdrawn-suggestion events. The newest
   of each kind per session stays.
 
 At most 2,000 rows per table per tick, 200 per store lock.
@@ -1771,6 +2081,10 @@ at whichever one provisioned it last.
 
 ## Point a desktop at the hub
 
+On Windows this is the recommended setup: Windows' `ssh` cannot multiplex,
+so a standalone Windows desktop pays a fresh SSH connection per command. See
+[windows.md](windows.md).
+
 Settings → **Hub**. On the hub, mint a code and paste it:
 
 ```bash
@@ -1778,8 +2092,9 @@ fleet-hub pair --name laptop     # prints a code; it dies on first use
 ```
 
 The desktop pairs as an ordinary client — the hub cannot tell it from a phone
-and should not. It stores the client token in the OS keychain (macOS) or an
-owner-only 0600 file (elsewhere), never in `state.db` and never in a log
+and should not. It stores the client token in the OS keychain (macOS),
+Windows Credential Manager, or an owner-only 0600 file (Linux), never in
+`state.db` and never in a log
 line. Off macOS that file is *not* an OS secret store: anything running as
 your user can read it, so treat that machine's account as holding a fleet
 credential. Which fleet the app is a window onto is decided **once, at startup**, so
@@ -1824,6 +2139,10 @@ causes are:
 - no client token is stored;
 - the token cannot be read, for example because the macOS keychain was locked
   at launch or its prompt was denied;
+- the client token could not be read in time — the keychain was locked and
+  its prompt did not answer within 10 s. The app logs `startup: resolving
+  backend` … `startup: backend resolved elapsed_ms=…` around this step;
+  unlock the keychain and relaunch;
 - the URL is plain `http://` to a host that is not loopback, and
   `hub.client_plaintext_token` is not set;
 - `hub.remote_url` does not parse;
@@ -1850,13 +2169,20 @@ standalone exactly as before.
   produced, so the window updates itself. When that stream drops it reconnects
   with backoff, re-lists sessions, hosts, tasks and accounts once, and shows a
   banner — "what you see may be out of date", the attempt number and the
-  reason — until it is back. A stream that goes silent (not even the hub's
+  reason — until it is back. After a dropped stream the app resumes from the
+  last event it applied when the hub still has it (the last 512 events, roughly thirteen minutes of a busy fleet);
+  otherwise it re-lists. A stream that goes silent (not even the hub's
   15-second keep-alive) for about 40 seconds is treated as dead, which is what
   a laptop that slept and woke on another network looks like.
 - **The fleet is the hub's.** No reconcile tick, no account-usage poll and no
   embedded control API in the desktop; two brains for one fleet is the failure
   this mode exists to prevent. The footer's version, database and schema are
   the hub's too — the badge beside them says whose.
+- **Projects are added through the hub.** "＋ Add project…" clones or
+  creates the repository on the host you pick, with that host's `git` and
+  `gh`; the new row arrives like any other change. Cancel stops the desktop
+  waiting, not the run on the host. The *Existing folder* source is absent
+  here, because it would mean a folder on the hub's machine.
 - **Its errors reach the hub.** Error-level events and frontend crashes are
   queued and posted to the hub's `/report` every few seconds — see *Error
   reports*; `CLAUDE_FLEET_HUB_REPORTS=0` turns it off.
@@ -1919,14 +2245,13 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 201 commands, 96 route to a hub tool, 1 routes except for one argument shape, 83 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 204 commands, 99 route to a hub tool, 1 routes except for one argument shape, 83 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
 | `add_host` | registering a host is fleet administration, which the hub reserves for its own operator — add it there with `fleet-hub` |
 | `add_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `add_org_rule` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
-| `add_project` | it clones or adopts a checkout using this machine's SSH and GitHub credentials; add the project on the hub, then it appears here |
 | `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `assets_inventory` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `assign_host_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
@@ -1962,6 +2287,7 @@ Of the 201 commands, 96 route to a hub tool, 1 routes except for one argument sh
 | `catalog_update_asset` | the asset catalog is a git checkout on the machine that owns the fleet, and the hub has no tool for this; work on the catalog there |
 | `catalog_write_layer` | writing a layer edits a file in the catalog's git checkout, which only the machine that owns the fleet has, and the hub exposes no layer-authoring tool; author on that machine |
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
+| `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
 | `discard_kill_session` | the hub exposes no tool that discards a worktree and kills in one step; use safe_kill_session, or do it from the hub |
 | `discover_hosts` | it reads this machine's ~/.ssh/config, not the hub's — register hosts on the hub itself with `fleet-hub` or a standalone app |
 | `dismiss_agent_session` | use Kill instead: the hub's kill_session removes an inactive agent from the list exactly as this would. It is not routed here because the two differ on a WORKING agent, which this refuses and kill_session stops |
@@ -1970,7 +2296,6 @@ Of the 201 commands, 96 route to a hub tool, 1 routes except for one argument sh
 | `inspect_safe_kill` | it inspects the worktree over this machine's SSH connection and the hub exposes no tool for it; retire the session from the hub |
 | `install_fleet_hook` | the hook it installs points at this app's control API, which is not running; install it from the hub |
 | `list_account_usage` | this app does not poll account usage while a hub owns the fleet, so the cache is empty; read usage on the hub |
-| `list_github_repos` | it runs `gh` over this machine's SSH connection to the host; browse repositories from the hub or a standalone app |
 | `list_host_tokens` | these are this app's own per-host tokens, not the hub's; list them on the hub |
 | `mcp_configure` | starting a second control API against a fleet the hub already owns is the failure remote mode exists to prevent; configure the hub's |
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
@@ -1999,6 +2324,7 @@ Of the 201 commands, 96 route to a hub tool, 1 routes except for one argument sh
 | `set_fleet_setting` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub with set_setting (master token) |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `status_map_proposals` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
 | `test_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `tracker_sync_metrics` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |
@@ -2154,6 +2480,13 @@ deliberately.
   and `POST /pair`, the one unauthenticated route besides `/healthz`, is
   rate-limited to one attempt per address every six seconds. See *Pair a
   phone* and *Clients* above.
+- **Failed bearers are logged once per address.** A bad or missing token on
+  any authenticated route is answered `401`, every time — a client reads
+  `401` as "pair again", never as a busy hub. The `[mcp] rejected request`
+  warn line, which names the address, is written once per second per source
+  address (the peer, or the last `X-Forwarded-For` hop when the peer is a
+  private or loopback proxy — the same rule `/pair` uses); repeats inside
+  that second are logged at debug. Successes do not touch the bucket.
 - **Peer tokens.** A linked hub holds a fourth kind of token, mode `peer`: it
   reaches the `peer_exchange` tool only — every other tool answers
   `E_FORBIDDEN` and `/events` answers `403` — and it is never trusted; there
@@ -2300,3 +2633,26 @@ deliberately.
   logs `no /report route` once), the desktop was started with
   `CLAUDE_FLEET_HUB_REPORTS=0`, the agent's config has
   `report_errors: false`, or the sender's `RUST_LOG` silences `error`.
+
+**One host is slow; everything looks stale.** A reconcile pass probes every
+host in parallel and writes each host's rows the moment its probe answers, so
+a host that takes the full 65 s probe budget delays only its own freshness;
+`fleet_health.hub.reconcile.last_duration_ms` still shows the pass as slow,
+and the host's `[reconcile] host probe exceeded its wall clock` line names it.
+
+### When a host's SSH key changes
+
+A reinstalled host, or a rotated host key, shows up as `Host key verification
+failed` → `reachable: false` → one `E_SSH` row in `GET /reports`. The hub's
+`known_hosts` is the bind-mounted `./ssh/known_hosts` (uid 1000, so `sudo` on
+a NAS): `ssh-keyscan <host> | sudo tee -a ssh/known_hosts`, remove the stale
+line for that host, then `probe_host` with the master token. No restart.
+
+### Rotate the hub's SSH key
+
+`fleet-hub ssh-key` never overwrites an existing pair, so rotation is manual:
+`ssh-keygen -t ed25519 -f ssh/id_ed25519.new -N ''`; append
+`ssh/id_ed25519.new.pub` to `~/.ssh/authorized_keys` on every host; stop the
+hub; `mv` the new pair over `ssh/id_ed25519{,.pub}`; start the hub;
+`probe_host` every host; then remove the old public key from each host's
+`authorized_keys`. Everything under `./ssh` is uid 1000: `sudo` throughout.

@@ -26,7 +26,7 @@ pub mod view;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
-use crate::store::{SessionRow, Store, WorkLinkRow, WorkTarget};
+use crate::store::{Decider, SessionRow, Store, WorkLinkRow, WorkTarget, PERSON_SOURCES};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -576,9 +576,20 @@ pub fn lookup_reference(args: &WorkArgs) -> Result<&str, IpcError> {
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "lookup needs key or url"))
 }
 
-/// The start half of [`WorkLinkArgs`] (work graph M3.4).
+/// The start half of [`WorkLinkArgs`] (work graph M3.4): a PERSON's start
+/// (the desktop's); an agent's goes through [`start_args_as`].
 pub fn start_args(args: &WorkLinkArgs) -> crate::service::trackers::tickets::StartArgs {
+    start_args_as(args, Decider::Person)
+}
+
+/// [`start_args`] started by `decider`, which decides the link's source:
+/// `started` for a person, `agent_started` for an agent (D34).
+pub fn start_args_as(
+    args: &WorkLinkArgs,
+    decider: Decider,
+) -> crate::service::trackers::tickets::StartArgs {
     crate::service::trackers::tickets::StartArgs {
+        decider,
         reference: args.url.clone().or(args.key.clone()),
         item_id: args.item_id,
         project_id: args.project_id,
@@ -659,10 +670,27 @@ fn work_unscoped(args: &WorkArgs, s: &Store) -> Result<Vec<WorkLinkRow>, IpcErro
 /// a key as a key nothing is linked to. For every caller, linking or
 /// confirming work of one org on a session of another is refused unless
 /// `force_cross_org` ([`orgs::check_cross_org`]).
-pub fn work_link<'a>(
+///
+/// A PERSON's decision (the desktop's commands); an agent's goes through
+/// [`work_link_as`].
+pub fn work_link(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+) -> Result<SessionRow, IpcError> {
+    work_link_as(args, store, scope, Decider::Person)
+}
+
+/// [`work_link`] decided by `decider`, which decides the source a link,
+/// confirm or reject records: an agent's is `agent` whatever `source` it
+/// passed (only `agent_inferred`, a suggestion, is kept), so it never reads
+/// as a person's decision; a person's `link` keeps its `source` (default
+/// `manual`). An agent cannot overturn a person's rejection (`E_FORBIDDEN`).
+pub fn work_link_as<'a>(
     args: &'a WorkLinkArgs,
     store: &Mutex<Store>,
     scope: &OrgScope,
+    decider: Decider,
 ) -> Result<SessionRow, IpcError> {
     if matches!(
         args.action.as_str(),
@@ -867,7 +895,7 @@ pub fn work_link<'a>(
                 .link_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "reconsider needs link_id"))?;
             checked_link(link_id)?;
-            s.reconsider_work_link(session_id, link_id)?;
+            s.reconsider_work_link(session_id, link_id, decider)?;
         }
         _ => {}
     }
@@ -883,7 +911,7 @@ pub fn work_link<'a>(
     };
     match args.action.as_str() {
         "link" => {
-            let source = args.source.as_deref().unwrap_or("manual");
+            let source = link_source(args.source.as_deref(), decider)?;
             let (t, org) = visible_target(target()?)?;
             orgs::check_cross_org(org, s.session_org(session_id)?, &target_name(t), force)?;
             if source == AGENT_INFERRED {
@@ -902,11 +930,11 @@ pub fn work_link<'a>(
             if !scope.is_all() || args.expected_version.is_some() {
                 checked_link(link_id)?;
             }
-            detect::decide(&s, session_id, link_id, false)?;
+            detect::decide(&s, session_id, link_id, false, decider)?;
         }
         "reject" => {
             let (t, _) = visible_target(target()?)?;
-            s.reject_session_work_as(session_id, t, args.expected_version)?;
+            s.reject_session_work_as(session_id, t, decider, args.expected_version)?;
         }
         "confirm" => {
             let link_id = args
@@ -927,7 +955,7 @@ pub fn work_link<'a>(
             if args.expected_version.is_some() {
                 checked_link(link_id)?;
             }
-            detect::decide_as(&s, session_id, link_id, true, take_primary)?;
+            detect::decide_as(&s, session_id, link_id, true, take_primary, decider)?;
         }
         "unlink" => {
             let link_id = args
@@ -936,7 +964,36 @@ pub fn work_link<'a>(
             if !scope.is_all() || args.expected_version.is_some() {
                 checked_link(link_id)?;
             }
-            if !s.unlink_session_work(session_id, link_id)? {
+            // A person's "Clear work" holds against the unchanged branch /
+            // PR that named the target, or the re-resolve below would make
+            // the same link again (R9u). An agent's unlink stays a plain
+            // unlink: it never writes a hold a person did not ask for.
+            let holds = match decider {
+                Decider::Person => detect::unlink_holds(&s, session_id, link_id)?,
+                Decider::Agent => Vec::new(),
+            };
+            // D34: removing a person's rejection ("Not this") would let the
+            // agent's next link — or detection — make it again: unlink, then
+            // link, is the two-step overturn `confirm` already refuses.
+            if decider == Decider::Agent {
+                let own = s.session_work_links(session_id)?;
+                if let Some(l) = own.iter().find(|l| l.id == link_id) {
+                    if l.state == "rejected" && PERSON_SOURCES.contains(&l.source.as_str()) {
+                        return Err(IpcError::new(
+                            codes::E_FORBIDDEN,
+                            format!(
+                                "a person rejected this work for session {session_id} (work \
+                                 link {link_id}); an agent cannot remove a person's rejection"
+                            ),
+                        )
+                        .with_details(serde_json::json!({
+                            "link_id": link_id,
+                            "reason": "rejected_by_person",
+                        })));
+                    }
+                }
+            }
+            if !s.unlink_session_work_held(session_id, link_id, &holds)? {
                 return Err(IpcError::new(
                     codes::E_NOTFOUND,
                     format!("session {session_id} has no live work link {link_id}"),
@@ -971,6 +1028,31 @@ fn lifecycle_row(s: &Store, session_id: i64) -> Result<SessionRow, IpcError> {
 /// `work_link { action: link, source }`'s value for the agent's answer to
 /// the classification nudge (work graph M4.6).
 pub const AGENT_INFERRED: &str = "agent_inferred";
+
+/// The source a `link` records. A person's `source` is kept (default
+/// `manual`); an agent's is `agent` whatever it claimed — `manual` or
+/// `started` would read as a person's decision (usage, write-back) —
+/// except `agent_inferred`, which is a suggestion, not a link. An unknown
+/// source is refused either way.
+fn link_source(requested: Option<&str>, decider: Decider) -> Result<&str, IpcError> {
+    let requested = requested.unwrap_or(decider.source());
+    if requested == AGENT_INFERRED {
+        return Ok(AGENT_INFERRED);
+    }
+    if !crate::store::WORK_LINK_SOURCES.contains(&requested) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "unknown work link source {requested:?}; one of {}, {AGENT_INFERRED}",
+                crate::store::WORK_LINK_SOURCES.join(", ")
+            ),
+        ));
+    }
+    Ok(match decider {
+        Decider::Person => requested,
+        Decider::Agent => Decider::Agent.source(),
+    })
+}
 
 /// The resolver target an agent inference names: the key (normalised) and,
 /// for an item, its tracker. A keyless item cannot be one — the resolver
@@ -1108,6 +1190,135 @@ mod tests {
         )
         .unwrap();
         assert_eq!(links[0].state, "rejected");
+    }
+
+    /// D34: the decider, not the `source` a caller passes, decides what a
+    /// link, confirm or reject records. An agent's is `agent` (its
+    /// `agent_inferred` stays a suggestion); a person's keeps its source.
+    #[test]
+    fn the_decider_decides_the_recorded_source() {
+        let (st, sid) = store();
+        let key = |k: &str, action: &str, source: Option<&str>| WorkLinkArgs {
+            key: Some(k.into()),
+            source: source.map(String::from),
+            ..link(sid, action)
+        };
+        let src = |row: SessionRow| row.work.map(|w| w.source).unwrap_or_default();
+        // An agent claiming a person's source is still an agent.
+        for claimed in [None, Some("manual"), Some("started"), Some("agent")] {
+            let row = work_link_as(
+                &key("ABC-1", "link", claimed),
+                &st,
+                &OrgScope::All,
+                Decider::Agent,
+            )
+            .unwrap();
+            assert_eq!(src(row), "agent", "{claimed:?}");
+        }
+        // An unknown source is refused for an agent too.
+        let err = work_link_as(
+            &key("ABC-1", "link", Some("branch")),
+            &st,
+            &OrgScope::All,
+            Decider::Agent,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        // A person's source is kept (default manual).
+        for (claimed, want) in [(None, "manual"), (Some("started"), "started")] {
+            let row = work_link(&key("DEF-2", "link", claimed), &st, &OrgScope::All).unwrap();
+            assert_eq!(src(row), want, "{claimed:?}");
+        }
+        // An agent's rejection by key is the agent's.
+        work_link_as(
+            &key("GHI-3", "reject", None),
+            &st,
+            &OrgScope::All,
+            Decider::Agent,
+        )
+        .unwrap();
+        let links = st.lock().unwrap().session_work_links(sid).unwrap();
+        let ghi = links
+            .iter()
+            .find(|l| l.ref_key.as_deref() == Some("GHI-3"))
+            .unwrap();
+        assert_eq!(
+            (ghi.state.as_str(), ghi.source.as_str()),
+            ("rejected", "agent")
+        );
+    }
+
+    /// D34: by link id, an agent's confirm is recorded as the agent's, it
+    /// cannot confirm what a person rejected, and deciding the way a person
+    /// already did keeps the person's decision.
+    #[test]
+    fn an_agent_decides_a_suggestion_as_an_agent_and_never_over_a_person() {
+        let (st, sid) = store();
+        let suggestion = |key: &str| -> i64 {
+            let s = st.lock().unwrap();
+            let l = s
+                .link_session_work(sid, WorkTarget::Key(key), "manual")
+                .unwrap();
+            s.conn_for_test()
+                .execute(
+                    "UPDATE work_links SET state = 'suggested', source = 'prompt', \
+                       rule = 'R6', is_primary = 0, decided_at = NULL WHERE id = ?1",
+                    [l.id],
+                )
+                .unwrap();
+            l.id
+        };
+        let by_id = |id: i64, action: &str| WorkLinkArgs {
+            link_id: Some(id),
+            ..link(sid, action)
+        };
+        let get = |id: i64| st.lock().unwrap().get_work_link(id).unwrap().unwrap();
+
+        // An agent's confirm reads as the agent's.
+        let a = suggestion("ABC-1");
+        let row = work_link_as(&by_id(a, "confirm"), &st, &OrgScope::All, Decider::Agent).unwrap();
+        assert_eq!(row.work.map(|w| w.source).as_deref(), Some("agent"));
+        assert_eq!(get(a).rule.as_deref(), Some("R6"), "the why is kept");
+
+        // A person's "Not this" stands against an agent's confirm…
+        let b = suggestion("DEF-2");
+        work_link(&by_id(b, "reject"), &st, &OrgScope::All).unwrap();
+        let err =
+            work_link_as(&by_id(b, "confirm"), &st, &OrgScope::All, Decider::Agent).unwrap_err();
+        assert_eq!(err.code, codes::E_FORBIDDEN);
+        // …and an agent rejecting it again leaves it the person's.
+        let before = get(b);
+        work_link_as(&by_id(b, "reject"), &st, &OrgScope::All, Decider::Agent).unwrap();
+        assert_eq!(get(b), before);
+        // So does an agent's link by key.
+        let err = work_link_as(
+            &WorkLinkArgs {
+                key: Some("DEF-2".into()),
+                ..link(sid, "link")
+            },
+            &st,
+            &OrgScope::All,
+            Decider::Agent,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_FORBIDDEN);
+
+        // A person confirmed it: an agent's confirm makes it primary again
+        // and leaves it the person's decision.
+        let c = suggestion("GHI-3");
+        work_link(&by_id(c, "confirm"), &st, &OrgScope::All).unwrap();
+        let person = get(c);
+        assert_eq!(person.source, "manual");
+        work_link_as(&by_id(a, "confirm"), &st, &OrgScope::All, Decider::Agent).unwrap();
+        assert!(!get(c).is_primary);
+        let row = work_link_as(&by_id(c, "confirm"), &st, &OrgScope::All, Decider::Agent).unwrap();
+        let w = row.work.expect("primary");
+        assert_eq!((w.link_id, w.source.as_str()), (c, "manual"));
+        assert_eq!(get(c).decided_at, person.decided_at);
+
+        // A person may still correct their own rejection.
+        work_link(&by_id(b, "confirm"), &st, &OrgScope::All).unwrap();
+        assert_eq!(get(b).state, "confirmed");
     }
 
     /// Work graph M4.6: an agent's answer to the classification nudge is a

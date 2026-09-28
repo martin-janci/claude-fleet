@@ -275,6 +275,18 @@ pub struct SessionRow {
     /// and emitted rows agree. Absent from an older hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// A checksum of the session's live links — their ids and versions
+    /// (work graph M14). `work` / `work_suggested` show only the primary and
+    /// the top guess; this moves on every link change, a secondary's too, so
+    /// a client knows when to re-read the session's tasks. Opaque; `0` (and
+    /// absent) when the session has no live link. Never sent to a scoped
+    /// caller (`OrgScope::redact_row`): another org's link would move it.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub work_rev: i64,
+}
+
+fn is_zero_i64(n: &i64) -> bool {
+    *n == 0
 }
 
 impl SessionRow {
@@ -300,6 +312,12 @@ impl SessionRow {
         } == *other
     }
 }
+
+/// What losing a session clears, in every path that loses one (a host's
+/// sessions lost, a kill, a reconcile ghosting): the pane-derived state and
+/// the stale-working stamp, none of which a dead row can act on.
+pub(super) const LOSS_CLEARS: &str = "claude_status=NULL, stuck_kind=NULL, stuck_since=NULL, \
+     current_activity=NULL, pending_input=NULL, stale_working_at=NULL";
 
 /// The `sessions` column list every `SessionRow` read shares, in the order
 /// `map_session_row` consumes it. One definition so a new column is added in
@@ -374,7 +392,10 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                 COALESCE(l.decided_at, l.created_at) DESC, l.id DESC \
        LIMIT 1) AS work_suggested, ",
     crate::session_org_sql!("sessions"),
-    " AS org_id, prompt_submit_seq, stale_working_at"
+    " AS org_id, prompt_submit_seq, stale_working_at, \
+     (SELECT COALESCE(SUM(l.version * 1000003 + l.id), 0) FROM work_links l \
+        JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+       WHERE p.session_id = sessions.id AND l.ended_at IS NULL) AS work_rev"
 );
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
@@ -467,6 +488,7 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         org_id: row.get(57)?,
         prompt_submit_seq: row.get(58)?,
         stale_working_at: row.get(59)?,
+        work_rev: row.get(60)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
@@ -630,6 +652,16 @@ pub(super) fn map_usage_cursor(row: &rusqlite::Row<'_>) -> rusqlite::Result<Usag
     })
 }
 
+/// One UTC day's slice of a [`UsageDelta`], priced. `backfill` marks history
+/// a fresh cursor read in one go (perf-logs §6a): kept apart in
+/// `usage_daily` so a takeover day never reads as a $850 day.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DayDelta {
+    pub day: i64,
+    pub totals: UsageTotals,
+    pub backfill: bool,
+}
+
 /// One usage pass's result for a session, applied by `Store::apply_usage`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageDelta {
@@ -642,11 +674,22 @@ pub struct UsageDelta {
     pub last_msg_id: Option<String>,
     pub last_msg_usage: Option<String>,
     pub now: i64,
+    /// Per-day slices of `totals`; empty means "book everything to the day
+    /// of `now`" (a reader without `D` lines).
+    pub by_day: Vec<DayDelta>,
 }
 
 /// `claude_status` values that mean "no turn in progress" — the states
 /// `idle_since` is stamped on (see migration 019).
 pub const IDLE_STATUSES: [&str; 3] = ["idle", "completed", "stopped"];
+
+/// A `claude_status` whose turn is over: an idle status, or `failed` (a turn
+/// that ended in an error). What `wait_for_session { until: idle }`,
+/// `run_prompt` and a move's source check all wait for — one set, so a new
+/// terminal status cannot reach one and not the others.
+pub fn turn_over(status: Option<&str>) -> bool {
+    status.is_some_and(|s| IDLE_STATUSES.contains(&s) || s == "failed")
+}
 
 /// SQL fragment: the new `idle_since` given the OLD row's `idle_since` and the
 /// status expression `{st}` (which must resolve to the post-write status).

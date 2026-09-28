@@ -10,10 +10,17 @@
 //! `work_lookup`) routes to the hub's `work` tool, and `start_work` to
 //! `work_link { action: start }`, so a paired desktop starts work on the hub
 //! exactly as a standalone one does here (M3.4).
+//!
+//! Jev's `status_map` proposals (`status_map_proposals`,
+//! `decide_status_map_proposal`) are tracker administration too — an apply
+//! writes the section map through `work_admin update` — so they are
+//! `LocalOnly` on a paired desktop; the hub's operator has `fleet-hub decide
+//! proposals`.
 
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
+use fleet_core::service::decide::status_map;
 use fleet_core::service::trackers::admin::{self, TestReport, WorkAdminArgs};
 use fleet_core::service::trackers::sync::SyncMetrics;
 use fleet_core::service::trackers::tickets::{MultiStart, Ticket};
@@ -201,6 +208,56 @@ pub fn tracker_sync_metrics(
     )?;
     serde_json::from_value(v)
         .map_err(|e| IpcError::new(fleet_core::ipc_error::codes::E_SERIALIZE, e.to_string()))
+}
+
+// --- Jev J3 `status_map` in assist: a person decides the proposals --------------
+
+#[derive(Deserialize, Default)]
+pub struct StatusMapProposalsArgs {
+    /// Only this tracker; every Asana tracker when absent.
+    #[serde(default)]
+    pub tracker_id: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct DecideStatusMapProposalArgs {
+    /// The proposal's decision run.
+    pub run_id: i64,
+    /// apply | apply_as | reject.
+    pub action: String,
+    /// todo | in_progress | done, with `apply_as` only.
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
+/// The `status_map` proposals (Jev J3) per Asana tracker: the latest assist
+/// answer per section, the shadow comparisons, and the mode. Tracker
+/// administration: `LocalOnly` like `update_tracker` (the hub's operator
+/// reads them with `fleet-hub decide proposals`).
+#[tauri::command]
+pub fn status_map_proposals(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: StatusMapProposalsArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<status_map::TrackerProposals>, IpcError> {
+    backend.refuse_local_only("status_map_proposals")?;
+    let s = fleet_core::ipc_error::lock(&store)?;
+    status_map::proposals(&s, args.tracker_id)
+}
+
+/// A person applies, applies as another category, or rejects one proposal,
+/// named by its decision run. An apply writes the tracker's section map
+/// through `work_admin update`, as `update_tracker` does; `LocalOnly` like
+/// it (the hub's operator has `fleet-hub decide proposals apply|reject`).
+#[tauri::command]
+pub fn decide_status_map_proposal(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: DecideStatusMapProposalArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<status_map::ProposalOutcome, IpcError> {
+    backend.refuse_local_only("decide_status_map_proposal")?;
+    let action = status_map::ProposalAction::parse(&args.action, args.category.as_deref())?;
+    status_map::decide_proposal(&store, args.run_id, &action, fleet_core::store::now_unix())
 }
 
 // --- retention (work graph M12.3) ---------------------------------------------

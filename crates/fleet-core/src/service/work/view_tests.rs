@@ -1099,3 +1099,154 @@ fn a_whole_description_reaches_the_task_detail_without_a_notice() {
 
 #[path = "view_write_tests.rs"]
 mod writes;
+
+/// A ticket in a done state (`status_category: done`).
+fn done_item(w: &W, ext: &str, key: &str) -> i64 {
+    w.st.lock()
+        .unwrap()
+        .upsert_tracker_item(
+            w.tracker,
+            &TrackerItemWrite {
+                external_id: ext.into(),
+                key: Some(key.into()),
+                title: format!("{key} shipped"),
+                status_name: "Done".into(),
+                status_category: "done".into(),
+                containers: vec!["TP".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .id
+}
+
+fn keys(p: &TreePage) -> Vec<String> {
+    p.tasks.iter().filter_map(|t| t.key.clone()).collect()
+}
+
+/// Archived tasks: a done task with no active session is out of the tree
+/// by default (counted in `archived_hidden`), in it with `archived: true`
+/// or `status: done`, and still answered by a direct read.
+#[test]
+fn a_done_task_without_an_active_session_is_archived() {
+    let w = world();
+    let t9 = done_item(&w, "9", "TK-9");
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert!(!keys(&p).contains(&"TK-9".to_string()), "{:?}", keys(&p));
+    assert_eq!(p.archived_hidden, 1);
+    assert!(p.tasks.iter().all(|t| !t.archived));
+
+    let shown = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            archived: Some(true),
+            ..Default::default()
+        },
+    );
+    assert!(task_of(&shown, "TK-9").archived);
+    assert_eq!(shown.archived_hidden, 0);
+    assert_eq!(shown.total, p.total + 1);
+
+    let done = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            status: Some("done".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(keys(&done), vec!["TK-9".to_string()]);
+    assert_eq!(done.archived_hidden, 0);
+
+    // Only the tree hides it.
+    let d = task(&w.st, &OrgScope::All, &format!("item:{t9}")).unwrap();
+    assert!(d.task.archived);
+}
+
+/// A done task someone is still working in is not archived.
+#[test]
+fn a_done_task_with_an_active_session_stays_in_the_tree() {
+    let w = world();
+    let t9 = done_item(&w, "9", "TK-9");
+    link(&w, w.s1, t9, true);
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let t = task_of(&p, "TK-9");
+    assert!(!t.archived);
+    assert_eq!(t.counts.active, 1);
+    assert_eq!(p.archived_hidden, 0);
+}
+
+/// A task whose every link is archived (one of them ended) and that has no
+/// active session is archived; one un-archived link keeps it in the tree.
+#[test]
+fn a_task_with_every_link_archived_is_hidden() {
+    let w = world();
+    link(&w, w.s2, w.t2, true);
+    work_link(&wl(&w, "archive", w.s2), &w.st, &OrgScope::All).unwrap();
+    // Still live (active): not archived.
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert!(!task_of(&p, "TK-2").archived);
+    w.st.lock().unwrap().delete_session(w.s2).unwrap();
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert!(!keys(&p).contains(&"TK-2".to_string()), "{:?}", keys(&p));
+    assert_eq!(p.archived_hidden, 1);
+    // `has: past_only` narrows to it, and still hides it by default.
+    let past = |archived: Option<bool>| WorkTreeFilters {
+        has: Some("past_only".into()),
+        archived,
+        ..Default::default()
+    };
+    let hidden = page(&w, &OrgScope::All, past(None));
+    assert!(hidden.tasks.is_empty());
+    assert_eq!(hidden.archived_hidden, 1);
+    let shown = page(&w, &OrgScope::All, past(Some(true)));
+    assert!(task_of(&shown, "TK-2").archived);
+
+    // A second, un-archived past session: not every link is archived.
+    link(&w, w.s1, w.t2, true);
+    w.st.lock().unwrap().delete_session(w.s1).unwrap();
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert!(!task_of(&p, "TK-2").archived);
+    assert_eq!(p.archived_hidden, 0);
+}
+
+/// `archived_hidden` counts over the whole result, not the page, and
+/// honours the other filters.
+#[test]
+fn archived_hidden_counts_the_whole_result() {
+    let w = world();
+    for n in 0..3 {
+        done_item(&w, &format!("d{n}"), &format!("TK-{}", 10 + n));
+    }
+    let p = tree(
+        &w.st,
+        &OrgScope::All,
+        &TreeArgs {
+            limit: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(p.tasks.len(), 1);
+    assert_eq!(p.archived_hidden, 3);
+    let q = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            query: Some("TK-11".into()),
+            ..Default::default()
+        },
+    );
+    assert!(q.tasks.is_empty());
+    assert_eq!(q.archived_hidden, 1);
+    let open = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            status: Some("open".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(open.archived_hidden, 0, "open already excludes done");
+}

@@ -839,12 +839,12 @@ mod flow {
 /// [`FakeTransport`] as `gh api --include` prints it.
 mod ghes {
     use super::*;
+    use crate::agent::transport::exit_status;
     use crate::ipc_error::IpcError;
     use crate::net::https::Request;
     use crate::net::via_host::GhCliTransport;
-    use std::os::unix::process::ExitStatusExt;
     use std::path::Path;
-    use std::process::{ExitStatus, Output};
+    use std::process::Output;
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
@@ -861,7 +861,7 @@ mod ghes {
 
     fn output(code: i32, stdout: Vec<u8>, stderr: &str) -> Output {
         Output {
-            status: ExitStatus::from_raw(code << 8),
+            status: exit_status(code),
             stdout,
             stderr: stderr.as_bytes().to_vec(),
         }

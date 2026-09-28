@@ -22,11 +22,23 @@ export type HubConnection =
 
 export const hubConnection = writable<HubConnection>({ state: 'standalone' });
 
+/** Runs after the backend's event bridge re-listed sessions, hosts, tasks
+ * and accounts following a gap it could not replay (`hub:resynced`). The
+ * app installs the loaders for the stores whose list tools answer a
+ * different shape than their events: projects (with worktrees) and
+ * trackers (with work items). */
+export type GapHandler = () => void;
+let onGap: GapHandler | null = null;
+export function setGapHandler(fn: GapHandler | null): void {
+  onGap = fn;
+}
+
 /** Start following the link. Only a hub client calls this. */
 export async function startHubConnection(): Promise<void> {
   // Listen first, then ask: an event landing between the two is then applied
   // on top of the answer rather than overwritten by it.
   await listen<HubConnection>('hub:connection', (e) => hubConnection.set(e.payload));
+  await listen('hub:resynced', () => onGap?.());
   const r = await invokeCmd<HubConnection>('hub_connection');
   // A failed query keeps what we had; inventing "connected" would hide the
   // one banner this exists to show.

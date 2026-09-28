@@ -436,6 +436,11 @@ pub fn install_hook_at_with(
 /// Skipped when `~/.claude` does not exist, i.e. Claude Code was never run
 /// on this machine, so fleet does not create a config dir nobody uses.
 pub fn auto_install_local_hook(store: &Mutex<Store>, base: &HubBase) {
+    // No local host (a Windows desktop, a hub without one): the Claude Code
+    // on this machine is not a fleet host, and its settings are not ours.
+    if !crate::service::hub::local_host_enabled() {
+        return;
+    }
     let result = (|| -> Result<Option<HookInstall>, IpcError> {
         let path = local_settings_path()?;
         if !path.parent().is_some_and(std::path::Path::is_dir) {

@@ -1718,6 +1718,7 @@ mod tests {
 
     /// The generated script run against a real directory tree, as `local`
     /// runs it: present when the file is there, absent when it is not.
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_probe_script_answers_on_a_real_tree() {
         let home = tempfile::tempdir().unwrap();
@@ -1872,6 +1873,7 @@ mod tests {
             worktree_id: None,
             name: "ABC-1".into(),
             per_project: false,
+            decider: crate::store::Decider::Person,
         };
         let start = async {
             at_spawn.await.unwrap();

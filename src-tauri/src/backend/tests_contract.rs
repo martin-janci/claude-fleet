@@ -1,11 +1,13 @@
 //! The field-name contract tests. See [`super`] for why they exist.
 
 use super::*;
-use fleet_core::service::health::{Health, TrackerHealth, TrackersHealth};
+use fleet_core::service::add_project::GithubRepo;
+use fleet_core::service::health::{Health, HubHealth, TrackerHealth, TrackersHealth};
 use fleet_core::service::projects::ProjectTreeRow;
 use fleet_core::service::repo_read::{
     Branch, ChangedFile, Commit, CommitDetail, FileContent, FileDiff, GitRef, RepoTree,
 };
+use fleet_core::service::tick::ReconcileStats;
 use fleet_core::service::transcript::{ContextView, ConvItem, ConvTurn, Conversation};
 use fleet_core::service::tunnel::TunnelHealth;
 use fleet_core::service::usage::DayUsage;
@@ -77,6 +79,7 @@ pub(crate) fn sample_session() -> SessionRow {
         turn_seq: 7,
         last_stop_at: Some(1_725_000_900),
         stale_working_at: Some(1_790_500_000),
+        work_rev: 17,
         parent_session_id: Some(5),
         tags: vec!["tag-a".into(), "tag-b".into()],
         row_version: 12,
@@ -234,6 +237,15 @@ fn sample_host_worktrees() -> HostWorktrees {
     }
 }
 
+fn sample_github_repo() -> GithubRepo {
+    GithubRepo {
+        name_with_owner: "acme/widget".into(),
+        description: Some("w".into()),
+        is_private: true,
+        updated_at: Some("2026-09-01T10:00:00Z".into()),
+    }
+}
+
 fn sample_totals() -> UsageTotals {
     UsageTotals {
         input_tokens: 1,
@@ -261,6 +273,7 @@ fn sample_health() -> Health {
         usage_by_day: vec![DayUsage {
             day: "2026-09-18".into(),
             totals: sample_totals(),
+            backfill_cost_micros: 0,
         }],
         // A flapping tunnel is the case worth pinning on the wire: it is how a
         // remote operator learns the Control API is unreachable from a host.
@@ -280,6 +293,26 @@ fn sample_health() -> Health {
         tunnels_flapping: 1,
         peer_links_down: 1,
         trackers: sample_trackers_health(),
+        hub: Some(sample_hub_health()),
+        tunnels_mode: Some("none".into()),
+        peer_links_total: 2,
+    }
+}
+
+/// `Health.hub` (plan D, Task 3): this process's uptime and its last
+/// reconcile pass — what an operator alerts on (`consecutive_failures`).
+fn sample_hub_health() -> HubHealth {
+    HubHealth {
+        started_at: 1_790_000_000,
+        uptime_secs: 3_600,
+        reconcile: ReconcileStats {
+            last_started_at: Some(1_790_003_580),
+            last_finished_at: Some(1_790_003_581),
+            last_duration_ms: Some(812),
+            consecutive_failures: 0,
+            failures_total: 2,
+            last_error: Some("E_SSH: boom".into()),
+        },
     }
 }
 
@@ -339,6 +372,7 @@ fn sample_conversation() -> Conversation {
             at: Some("2026-09-18T10:00:00Z".into()),
             ended_at: Some("2026-09-18T10:00:05Z".into()),
             reminders: vec!["the harness stapled this on".into()],
+            prompt_uuid: None,
             items: vec![
                 ConvItem::Text {
                     text: "hi back".into(),
@@ -501,6 +535,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     put("WorktreeRow", wire_keys(&sample_worktree_row()));
     put("WorktreeOccupancy", wire_keys(&sample_occupancy()));
     put("HostWorktrees", wire_keys(&sample_host_worktrees()));
+    put("GithubRepo", wire_keys(&sample_github_repo()));
     put(
         "WorktreeOccupant",
         wire_keys(&WorktreeOccupant {
@@ -512,12 +547,16 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     let trackers = sample_trackers_health();
     put("Health.trackers", wire_keys(&trackers));
     put("Health.trackers.trackers", wire_keys(&trackers.trackers[0]));
+    let hub = sample_hub_health();
+    put("Health.hub", wire_keys(&hub));
+    put("Health.hub.reconcile", wire_keys(&hub.reconcile));
     put("UsageTotals", wire_keys(&sample_totals()));
     put(
         "DayUsage",
         wire_keys(&DayUsage {
             day: "2026-09-18".into(),
             totals: sample_totals(),
+            backfill_cost_micros: 0,
         }),
     );
     put("Conversation", wire_keys(&sample_conversation()));
@@ -795,11 +834,11 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 }
 
 /// `SessionRow` is the type the whole sidebar is made of, and the one whose
-/// sixty keys nothing else would notice losing. Its list is a literal here,
+/// sixty-one keys nothing else would notice losing. Its list is a literal here,
 /// not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_sixty() {
+fn a_session_rows_wire_names_are_these_exact_sixty_one() {
     let expected = [
         "account_uuid",
         "ci_status",
@@ -858,12 +897,13 @@ fn a_session_rows_wire_names_are_these_exact_sixty() {
         "usage_updated_at",
         "work",
         "work_rejected",
+        "work_rev",
         "work_suggested",
         "worktree_id",
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 60, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 61, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

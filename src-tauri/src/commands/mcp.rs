@@ -362,6 +362,7 @@ pub fn install_fleet_hook(
     runtime: State<'_, Mutex<McpRuntime>>,
 ) -> Result<String, IpcError> {
     backend.refuse_local_only("install_fleet_hook")?;
+    fleet_core::service::hub::ensure_local_allowed("local")?;
     if host_alias != "local" {
         return Err(IpcError::new(
             codes::E_UNSUPPORTED,

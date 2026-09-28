@@ -93,6 +93,10 @@ pub struct WorkTreeFilters {
     /// One group id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Include archived tasks (done, or every session link archived, with
+    /// no active session). Absent/false hides them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
 }
 
 /// Where a task sits and why.
@@ -226,6 +230,11 @@ pub struct WorkTask {
     pub placement_version: i64,
     pub sessions: Vec<TaskLink>,
     pub sessions_more: u32,
+    /// No active session, and the task is done or every one of its links
+    /// (at least one of them ended) is archived: the tree hides it unless
+    /// `filters.archived` (or `status: done`) asks for it.
+    #[serde(default)]
+    pub archived: bool,
 }
 
 /// A section header of a page: one org's group and how many tasks match.
@@ -267,6 +276,10 @@ pub struct TreePage {
     pub orgs: Vec<OrgBrief>,
     pub trackers: Vec<TrackerBrief>,
     pub total: u32,
+    /// Tasks that passed every other filter but were hidden as archived
+    /// (over the whole result, not the page).
+    #[serde(default)]
+    pub archived_hidden: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     pub generated_at: i64,
@@ -412,6 +425,8 @@ pub(crate) struct Graph {
     pub(crate) projects: HashMap<i64, ProjectRow>,
     pub(crate) placements: HashMap<String, Placement>,
     pub(crate) rules: Vec<WorkRule>,
+    /// `health.context_red_pct`: `needs_you` agrees with `list_sessions`.
+    pub(crate) context_red_pct: f64,
 }
 
 impl Graph {
@@ -438,6 +453,7 @@ impl Graph {
                 .map(|p| (p.task_id.clone(), p))
                 .collect(),
             rules: s.work_rules()?,
+            context_red_pct: crate::service::health::context_red_pct(s),
         })
     }
 
@@ -927,7 +943,8 @@ fn task_link(
         ended_at: l.link.ended_at,
         end_reason: l.link.end_reason.clone(),
         claude_status: row.and_then(|r| r.claude_status.clone()),
-        needs_you: row.is_some_and(|r| attention::needs_attention(r).is_some()),
+        needs_you: row
+            .is_some_and(|r| attention::needs_attention_with(r, g.context_red_pct).is_some()),
         archived: l.archived_at.is_some(),
         resumable: l.link.resumable,
         branch: l.link.snap_branch.clone().filter(|_| row.is_none()),
@@ -1023,7 +1040,9 @@ fn to_task(
             continue;
         }
         let row = g.session_of(l);
-        if *st == "active" && row.is_some_and(|r| attention::needs_attention(r).is_some()) {
+        if *st == "active"
+            && row.is_some_and(|r| attention::needs_attention_with(r, g.context_red_pct).is_some())
+        {
             needs_you = true;
         }
         if needs_review(g, l, st) {
@@ -1044,6 +1063,11 @@ fn to_task(
         }
     }
     counts.active = active_sessions.len() as u32;
+    let status_category = item
+        .map(|i| i.item.status_category.clone())
+        .filter(|c| !c.is_empty());
+    let archived = counts.active == 0
+        && (status_category.as_deref() == Some("done") || all_links_archived(&b.visible));
     if let Some(i) = item {
         let ext = i.item.updated_ext.unwrap_or(i.item.updated_at);
         last = Some(last.map_or(ext, |x| x.max(ext)));
@@ -1094,9 +1118,7 @@ fn to_task(
         tracker_name: tracker.map(|t| t.name.clone()),
         provider: tracker.map(|t| t.provider.clone()),
         tracker_state: tracker.map(|t| t.state.clone()),
-        status_category: item
-            .map(|i| i.item.status_category.clone())
-            .filter(|c| !c.is_empty()),
+        status_category,
         status_name: item.and_then(|i| i.item.status_name.clone()),
         resolution: item.and_then(|i| i.item.resolution.clone()),
         unavailable: item.is_some_and(|i| i.item.unavailable_at.is_some()),
@@ -1116,7 +1138,25 @@ fn to_task(
         placement_version: g.placements.get(&b.task_id).map_or(0, |p| p.version),
         sessions_more: total_links.saturating_sub(shown.len()) as u32,
         sessions: shown,
+        archived,
     }
+}
+
+/// At least one ended link, and every link but a rejected one archived
+/// (the UI-only archive of work graph M7).
+fn all_links_archived(visible: &[(&ViewLink, &str)]) -> bool {
+    let mut ended = false;
+    for (l, st) in visible {
+        match *st {
+            "rejected" => continue,
+            "ended" => ended = true,
+            _ => {}
+        }
+        if l.archived_at.is_none() {
+            return false;
+        }
+    }
+    ended
 }
 
 // ---------------------------------------------------------------------------
@@ -1216,7 +1256,15 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
             }
         }
     }
-    true
+    !hidden_as_archived(t, f)
+}
+
+/// An archived task stays out of a tree listing unless the filters ask for
+/// archived tasks, or for done ones (an explicit Done filter shows them).
+/// Only the tree hides: a direct read (`task`, `session_tasks`, `review`)
+/// answers archived tasks as any other.
+fn hidden_as_archived(t: &WorkTask, f: &WorkTreeFilters) -> bool {
+    t.archived && f.archived != Some(true) && f.status.as_deref() != Some("done")
 }
 
 /// A task's place in the order: named orgs by name then unassigned, groups
@@ -1348,12 +1396,30 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
     let per_task = args.per_task.unwrap_or(PER_TASK_DEFAULT).min(PER_TASK_MAX);
     let org_names: HashMap<i64, String> = g.orgs.iter().map(|o| (o.id, o.name.clone())).collect();
     let all = all_tasks(g, scope, per_task);
+    // Every filter but the archived one: what it hides is counted, so the
+    // view can say how many archived tasks are out of sight.
+    let with_archived = WorkTreeFilters {
+        archived: Some(true),
+        ..args.filters.clone()
+    };
+    let mut archived_hidden = 0u32;
     // Section headers count every task under the filters but the group
     // one, so every section of the view has its header and count.
     let mut groups: BTreeMap<(Option<i64>, String), (GroupRef, u32, SortKey)> = BTreeMap::new();
     let mut matching: Vec<(SortKey, WorkTask)> = Vec::new();
     for t in all {
-        if !matches_filters(&t, &args.filters, false) {
+        if !matches_filters(&t, &with_archived, false) {
+            continue;
+        }
+        if hidden_as_archived(&t, &args.filters) {
+            if args
+                .filters
+                .group
+                .as_deref()
+                .is_none_or(|gid| gid == t.group.id)
+            {
+                archived_hidden += 1;
+            }
             continue;
         }
         let key = sort_key(&t, &org_names);
@@ -1414,6 +1480,7 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
         orgs: visible_orgs(g, scope),
         trackers,
         total,
+        archived_hidden,
         next_cursor,
         generated_at: g.now,
     })

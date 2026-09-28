@@ -77,9 +77,44 @@ export function sessionWorkLinks(sessionId: number): Promise<Result<WorkLink[]>>
   return invokeCmd<WorkLink[]>('session_work_links', { args: { session_id: sessionId } });
 }
 
+/** Bumped after every work write this window makes, and by `work:changed`
+ *  and session events that touch work; the Work view, the task detail and
+ *  the session's Tasks re-read what they show (debounced) when it moves.
+ *  (Re-exported by `work_view.ts`, where its readers live.) */
+export const workChanged = writable(0);
+
+export function bumpWorkChanged(): void {
+  workChanged.update((n) => n + 1);
+}
+
+/** Run `fn` once `workChanged` has been quiet for `ms()` after a bump — one
+ *  re-read for a burst (a write's own bump, then its `session:updated`),
+ *  never for the subscription's initial call. `ms` is read per bump, so a
+ *  component can pass its prop. The returned unsubscriber also cancels a
+ *  pending run. */
+export function onWorkChangedDebounced(fn: () => void, ms: () => number): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let first = true;
+  const off = workChanged.subscribe(() => {
+    if (first) {
+      first = false;
+      return;
+    }
+    clearTimeout(timer);
+    timer = setTimeout(fn, ms());
+  });
+  return () => {
+    off();
+    clearTimeout(timer);
+  };
+}
+
 async function decide(cmd: string, args: Record<string, unknown>): Promise<Result<SessionRow>> {
   const r = await invokeCmd<SessionRow>(cmd, { args });
-  if (r.ok) acceptCommandRow(r.value);
+  if (r.ok) {
+    acceptCommandRow(r.value);
+    bumpWorkChanged();
+  }
   return r;
 }
 
@@ -198,6 +233,7 @@ const SOURCE_LABEL: Record<string, string> = {
   manual: 'linked by you',
   started: 'started for it',
   agent: 'declared by Claude',
+  agent_started: 'started for it by Claude',
   resumed: 'resumed',
   forked: 'forked',
   inherited: 'inherited',
@@ -270,7 +306,8 @@ export function newAutoLinks(prev: ReadonlyMap<number, number>, rows: readonly S
   return rows.filter((r) => r.work && isAutoLink(r.work) && prev.get(r.id) !== r.work.link_id);
 }
 
-/** Remove a mistaken link (not a rejection: the key may come back). */
+/** Remove a mistaken link (not a rejection: the key may come back — but not
+ *  from the unchanged branch or pull request that named it, rule R9u). */
 export function unlinkSessionWork(
   sessionId: number,
   linkId: number,
@@ -304,10 +341,6 @@ export interface LocalWorkItem {
   updated_at?: number;
   /** Live sessions linked to it (a per-host view counts its host's only). */
   live_sessions?: number;
-}
-
-export function listLocalWorkItems(): Promise<Result<LocalWorkItem[]>> {
-  return invokeCmd<LocalWorkItem[]>('list_local_work_items');
 }
 
 /** Name new local work (a title, an optional key) and link the session to
@@ -373,7 +406,10 @@ export async function renameWorkItem(itemId: number, title: string): Promise<Res
   const r = await invokeCmd<WorkItemRow>('rename_work_item', {
     args: { item_id: itemId, title: title.trim() },
   });
-  if (r.ok) patchWorkItemTitle(itemId, r.value.title);
+  if (r.ok) {
+    patchWorkItemTitle(itemId, r.value.title);
+    bumpWorkChanged();
+  }
   return r;
 }
 
@@ -525,7 +561,10 @@ export async function resumeWork(a: ResumeWorkArgs): Promise<Result<SessionRow>>
       brief: a.brief ?? null,
     },
   });
-  if (r.ok) acceptCommandRow(r.value);
+  if (r.ok) {
+    acceptCommandRow(r.value);
+    bumpWorkChanged();
+  }
   return r;
 }
 

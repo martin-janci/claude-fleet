@@ -1,0 +1,949 @@
+//! The decision record and the decision model's credential (Jev evaluation,
+//! decisions D35 / D37; migration 069). The envelope that writes these rows
+//! is `service::decide`; the guide is `docs/decisions.md`.
+//!
+//! The rules that matter here:
+//!
+//! * **Never raw text in `decision_runs`.** Every text column is an id or a
+//!   vocabulary word ([`is_decision_word`]), a number, or JSON of those; the
+//!   input is kept only as an HMAC fingerprint keyed by a local secret.
+//!   [`Store::insert_decision_run`] refuses anything else, so an adapter
+//!   cannot slip a prompt or a ticket title in by mistake.
+//! * **The API key has one reader.** [`Store::resolve_decision_credential`]
+//!   is the one function that selects `decision_secrets`' key row, and it
+//!   hands back a [`Secret`], which neither serialises nor prints. A key
+//!   may be a reference (`env:NAME` / `file:/path`) the process reads at
+//!   use, like a tracker credential.
+
+use super::trackers::read_credential_ref;
+use super::{now_unix, Secret, Store};
+use crate::ipc_error::{codes, IpcError};
+use rusqlite::OptionalExtension;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// `decision_runs.fallback`: why a decision was not (or not only) the
+/// model's. Closed; the migration's CHECK holds the same list.
+pub const DECISION_FALLBACKS: &[&str] = &[
+    "not_owner",
+    "flag_off",
+    "org_off",
+    "mode_off",
+    "no_key",
+    "breaker_open",
+    "budget",
+    "timeout",
+    "http_error",
+    "rate_limited",
+    "invalid_answer",
+    "low_confidence",
+];
+
+/// The fallbacks that are a failed CALL: the circuit breaker counts these
+/// (and only among rows that sent a request).
+pub const DECISION_CALL_FAILURES: &[&str] = &["timeout", "http_error", "rate_limited"];
+
+/// `decision_runs.followup`: what became of a decision, filled in later by
+/// its adapter.
+pub const DECISION_FOLLOWUPS: &[&str] = &["confirmed", "rejected", "corrected", "ignored"];
+
+/// `decision_runs.mode`.
+pub const DECISION_MODES: &[&str] = &["off", "shadow", "assist"];
+
+/// Most candidates one run records (Jev's own limit on choice options).
+pub const DECISION_MAX_CANDIDATES: usize = 255;
+
+/// Most runs [`Store::decision_runs_for_subjects`] returns.
+pub const DECISION_SUBJECT_RUNS_MAX: usize = 5_000;
+
+/// Longest id or vocabulary word a run records.
+pub const DECISION_WORD_MAX_CHARS: usize = 80;
+
+/// `decision_secrets.name` of the API key.
+const API_KEY_NAME: &str = "jev_api_key";
+
+/// PURE: an id or a vocabulary word — the only text `decision_runs` holds:
+/// 1..=80 of `A-Z a-z 0-9 _ - . : / #`. No space, so no sentence fits.
+pub fn is_decision_word(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().count() <= DECISION_WORD_MAX_CHARS
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '/' | '#'))
+}
+
+/// One run to record. Every text field must pass [`is_decision_word`]
+/// (`input_fp`: 64 lower-case hex digits).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct NewDecisionRun {
+    pub at: i64,
+    pub feature: String,
+    pub org_id: Option<i64>,
+    pub subject_kind: String,
+    pub subject_id: String,
+    /// `off` | `shadow` | `assist`: the feature's configured mode.
+    pub mode: String,
+    /// `jev`, `rules`, …
+    pub provider: String,
+    /// The provider's `model` answer (e.g. `jev-1.13.0`).
+    pub model_version: Option<String>,
+    /// The adapter's question version (a constant per adapter).
+    pub question_version: String,
+    pub input_fp: Option<String>,
+    /// The ids / vocabulary words offered.
+    pub candidates: Vec<String>,
+    /// A choice's option, or a noul / score value written as a number.
+    pub answer: Option<String>,
+    pub probabilities: Option<BTreeMap<String, f64>>,
+    pub confidence: Option<f64>,
+    pub fallback: Option<String>,
+    /// What the current rule decided, for the shadow comparison.
+    pub baseline_answer: Option<String>,
+    /// A request was sent to the provider.
+    pub called: bool,
+    pub latency_ms: Option<i64>,
+    pub input_tokens: i64,
+    pub cost_microusd: i64,
+}
+
+/// One recorded run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecisionRunRow {
+    pub id: i64,
+    pub at: i64,
+    pub feature: String,
+    pub org_id: Option<i64>,
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub mode: String,
+    pub provider: String,
+    pub model_version: Option<String>,
+    pub question_version: String,
+    pub input_fp: Option<String>,
+    pub candidates: Vec<String>,
+    pub answer: Option<String>,
+    pub probabilities: Option<BTreeMap<String, f64>>,
+    pub confidence: Option<f64>,
+    pub fallback: Option<String>,
+    pub baseline_answer: Option<String>,
+    pub called: bool,
+    pub latency_ms: Option<i64>,
+    pub input_tokens: i64,
+    pub cost_microusd: i64,
+    pub followup: Option<String>,
+    pub followup_at: Option<i64>,
+    pub corrected_to: Option<String>,
+}
+
+/// Which runs [`Store::list_decision_runs`] returns, newest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DecisionRunFilter {
+    pub feature: Option<String>,
+    pub provider: Option<String>,
+    pub org_id: Option<i64>,
+    /// Only runs at or after this unix time.
+    pub since: Option<i64>,
+    /// At most this many (clamped to 1..=1000; `0` = 100).
+    pub limit: u32,
+}
+
+/// One group of [`Store::decision_stats`]: runs per feature, provider,
+/// fallback and org.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionStatRow {
+    pub feature: String,
+    pub provider: String,
+    pub fallback: Option<String>,
+    pub org_id: Option<i64>,
+    pub runs: i64,
+    /// Runs that sent a request.
+    pub called: i64,
+    pub input_tokens: i64,
+    pub cost_microusd: i64,
+    pub confirmed: i64,
+    pub rejected: i64,
+    pub corrected: i64,
+    pub ignored: i64,
+    /// Runs with both an answer and a baseline, and of those, the ones where
+    /// they agree (the shadow comparison).
+    pub compared: i64,
+    pub agreed: i64,
+}
+
+/// Whether an API key is configured — never the key.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionKeyStatus {
+    pub configured: bool,
+    /// Stored as an `env:` / `file:` reference.
+    pub by_reference: bool,
+    /// When it was set (or last replaced).
+    pub set_at: Option<i64>,
+}
+
+fn invalid(msg: impl Into<String>) -> IpcError {
+    IpcError::new(codes::E_INVALID, msg)
+}
+
+fn check_word(field: &str, v: &str) -> Result<(), IpcError> {
+    if is_decision_word(v) {
+        Ok(())
+    } else {
+        Err(invalid(format!(
+            "decision_runs.{field} holds only an id or a vocabulary word \
+             (1-{DECISION_WORD_MAX_CHARS} of A-Za-z0-9_-.:/#), never text"
+        )))
+    }
+}
+
+fn check_opt_word(field: &str, v: Option<&str>) -> Result<(), IpcError> {
+    v.map_or(Ok(()), |v| check_word(field, v))
+}
+
+fn check_unit(field: &str, v: Option<f64>) -> Result<(), IpcError> {
+    match v {
+        Some(x) if !x.is_finite() => Err(invalid(format!("decision_runs.{field} is not finite"))),
+        _ => Ok(()),
+    }
+}
+
+impl NewDecisionRun {
+    /// Refuse anything but ids, vocabulary words and numbers.
+    pub fn validate(&self) -> Result<(), IpcError> {
+        check_word("feature", &self.feature)?;
+        check_word("subject_kind", &self.subject_kind)?;
+        check_word("subject_id", &self.subject_id)?;
+        check_word("provider", &self.provider)?;
+        check_word("question_version", &self.question_version)?;
+        check_opt_word("model_version", self.model_version.as_deref())?;
+        check_opt_word("answer", self.answer.as_deref())?;
+        check_opt_word("baseline_answer", self.baseline_answer.as_deref())?;
+        if !DECISION_MODES.contains(&self.mode.as_str()) {
+            return Err(invalid(format!("unknown decision mode {:?}", self.mode)));
+        }
+        if let Some(f) = &self.fallback {
+            if !DECISION_FALLBACKS.contains(&f.as_str()) {
+                return Err(invalid(format!("unknown decision fallback {f:?}")));
+            }
+        }
+        if let Some(fp) = &self.input_fp {
+            if fp.len() != 64 || !fp.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+                return Err(invalid(
+                    "decision_runs.input_fp is 64 lower-case hex digits",
+                ));
+            }
+        }
+        if self.candidates.len() > DECISION_MAX_CANDIDATES {
+            return Err(invalid(format!(
+                "a decision records at most {DECISION_MAX_CANDIDATES} candidates"
+            )));
+        }
+        for c in &self.candidates {
+            check_word("candidates", c)?;
+        }
+        if let Some(p) = &self.probabilities {
+            if p.len() > DECISION_MAX_CANDIDATES {
+                return Err(invalid("too many probabilities"));
+            }
+            for (k, v) in p {
+                check_word("probabilities", k)?;
+                check_unit("probabilities", Some(*v))?;
+            }
+        }
+        check_unit("confidence", self.confidence)?;
+        if self.input_tokens < 0 || self.cost_microusd < 0 {
+            return Err(invalid("decision tokens and cost are never negative"));
+        }
+        Ok(())
+    }
+}
+
+const RUN_COLUMNS: &str = "id, at, feature, org_id, subject_kind, subject_id, mode, provider, \
+     model_version, question_version, input_fp, candidates, answer, probabilities, confidence, \
+     fallback, baseline_answer, called, latency_ms, input_tokens, cost_microusd, followup, \
+     followup_at, corrected_to";
+
+fn map_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<DecisionRunRow> {
+    let candidates: String = r.get(11)?;
+    let probabilities: Option<String> = r.get(13)?;
+    Ok(DecisionRunRow {
+        id: r.get(0)?,
+        at: r.get(1)?,
+        feature: r.get(2)?,
+        org_id: r.get(3)?,
+        subject_kind: r.get(4)?,
+        subject_id: r.get(5)?,
+        mode: r.get(6)?,
+        provider: r.get(7)?,
+        model_version: r.get(8)?,
+        question_version: r.get(9)?,
+        input_fp: r.get(10)?,
+        candidates: serde_json::from_str(&candidates).unwrap_or_default(),
+        answer: r.get(12)?,
+        probabilities: probabilities.and_then(|p| serde_json::from_str(&p).ok()),
+        confidence: r.get(14)?,
+        fallback: r.get(15)?,
+        baseline_answer: r.get(16)?,
+        called: r.get::<_, i64>(17)? != 0,
+        latency_ms: r.get(18)?,
+        input_tokens: r.get(19)?,
+        cost_microusd: r.get(20)?,
+        followup: r.get(21)?,
+        followup_at: r.get(22)?,
+        corrected_to: r.get(23)?,
+    })
+}
+
+impl Store {
+    // --- decision_runs --------------------------------------------------------
+
+    /// Record one run (validated: ids, words and numbers only). Returns its id.
+    pub fn insert_decision_run(&self, run: &NewDecisionRun) -> Result<i64, IpcError> {
+        run.validate()?;
+        let candidates = serde_json::to_string(&run.candidates)
+            .map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))?;
+        let probabilities = run
+            .probabilities
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))?;
+        self.conn.execute(
+            "INSERT INTO decision_runs (at, feature, org_id, subject_kind, subject_id, mode, \
+             provider, model_version, question_version, input_fp, candidates, answer, \
+             probabilities, confidence, fallback, baseline_answer, called, latency_ms, \
+             input_tokens, cost_microusd) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
+             ?17, ?18, ?19, ?20)",
+            rusqlite::params![
+                run.at,
+                run.feature,
+                run.org_id,
+                run.subject_kind,
+                run.subject_id,
+                run.mode,
+                run.provider,
+                run.model_version,
+                run.question_version,
+                run.input_fp,
+                candidates,
+                run.answer,
+                probabilities,
+                run.confidence,
+                run.fallback,
+                run.baseline_answer,
+                run.called as i64,
+                run.latency_ms,
+                run.input_tokens,
+                run.cost_microusd,
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn get_decision_run(&self, id: i64) -> Result<Option<DecisionRunRow>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {RUN_COLUMNS} FROM decision_runs WHERE id = ?1"),
+                [id],
+                map_run,
+            )
+            .optional()?)
+    }
+
+    /// What became of run `id` (filled in by its adapter): `followup` is one
+    /// of [`DECISION_FOLLOWUPS`]; `corrected_to` (an id or word) only with
+    /// `corrected`. `false` when there is no such run (swept, say).
+    pub fn set_decision_followup(
+        &self,
+        id: i64,
+        followup: &str,
+        corrected_to: Option<&str>,
+        at: i64,
+    ) -> Result<bool, IpcError> {
+        if !DECISION_FOLLOWUPS.contains(&followup) {
+            return Err(invalid(format!(
+                "followup is one of {}, not {followup:?}",
+                DECISION_FOLLOWUPS.join(", ")
+            )));
+        }
+        if corrected_to.is_some() && followup != "corrected" {
+            return Err(invalid("corrected_to goes only with followup corrected"));
+        }
+        check_opt_word("corrected_to", corrected_to)?;
+        Ok(self.conn.execute(
+            "UPDATE decision_runs SET followup = ?2, followup_at = ?3, corrected_to = ?4 \
+             WHERE id = ?1",
+            rusqlite::params![id, followup, at, corrected_to],
+        )? > 0)
+    }
+
+    /// Recent runs, newest first.
+    pub fn list_decision_runs(
+        &self,
+        f: &DecisionRunFilter,
+    ) -> Result<Vec<DecisionRunRow>, IpcError> {
+        let limit = match f.limit {
+            0 => 100,
+            n => n.min(1000),
+        };
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {RUN_COLUMNS} FROM decision_runs \
+             WHERE (?1 IS NULL OR feature = ?1) AND (?2 IS NULL OR provider = ?2) \
+               AND (?3 IS NULL OR org_id = ?3) AND (?4 IS NULL OR at >= ?4) \
+             ORDER BY id DESC LIMIT ?5"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![f.feature, f.provider, f.org_id, f.since, limit],
+            map_run,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// A feature's runs about subjects of `subject_kind` whose id starts with
+    /// `subject_prefix` (an adapter's own namespace, e.g. `3:` for tracker
+    /// 3's sections), at or after `since` when given, newest first, at most
+    /// [`DECISION_SUBJECT_RUNS_MAX`]. What an adapter reads to skip a
+    /// question it asked recently, and to list its proposals.
+    pub fn decision_runs_for_subjects(
+        &self,
+        feature: &str,
+        subject_kind: &str,
+        subject_prefix: &str,
+        since: Option<i64>,
+    ) -> Result<Vec<DecisionRunRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {RUN_COLUMNS} FROM decision_runs \
+             WHERE feature = ?1 AND subject_kind = ?2 \
+               AND substr(subject_id, 1, length(?3)) = ?3 \
+               AND (?4 IS NULL OR at >= ?4) \
+             ORDER BY id DESC LIMIT ?5"
+        ))?;
+        let rows = stmt.query_map(
+            rusqlite::params![
+                feature,
+                subject_kind,
+                subject_prefix,
+                since,
+                DECISION_SUBJECT_RUNS_MAX as i64
+            ],
+            map_run,
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Runs since `since`, grouped per feature, provider, fallback and org.
+    pub fn decision_stats(&self, since: i64) -> Result<Vec<DecisionStatRow>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT feature, provider, fallback, org_id, COUNT(*), \
+               COALESCE(SUM(called), 0), COALESCE(SUM(input_tokens), 0), \
+               COALESCE(SUM(cost_microusd), 0), \
+               COALESCE(SUM(followup = 'confirmed'), 0), COALESCE(SUM(followup = 'rejected'), 0), \
+               COALESCE(SUM(followup = 'corrected'), 0), COALESCE(SUM(followup = 'ignored'), 0), \
+               COALESCE(SUM(answer IS NOT NULL AND baseline_answer IS NOT NULL), 0), \
+               COALESCE(SUM(answer IS NOT NULL AND answer = baseline_answer), 0) \
+             FROM decision_runs WHERE at >= ?1 \
+             GROUP BY feature, provider, fallback, org_id \
+             ORDER BY feature, provider, fallback IS NOT NULL, fallback, org_id",
+        )?;
+        let rows = stmt.query_map([since], |r| {
+            Ok(DecisionStatRow {
+                feature: r.get(0)?,
+                provider: r.get(1)?,
+                fallback: r.get(2)?,
+                org_id: r.get(3)?,
+                runs: r.get(4)?,
+                called: r.get(5)?,
+                input_tokens: r.get(6)?,
+                cost_microusd: r.get(7)?,
+                confirmed: r.get(8)?,
+                rejected: r.get(9)?,
+                corrected: r.get(10)?,
+                ignored: r.get(11)?,
+                compared: r.get(12)?,
+                agreed: r.get(13)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// `(input tokens, cost in micro-USD)` of `provider`'s runs since `since`
+    /// (the daily budget's count).
+    pub fn decision_usage_since(&self, provider: &str, since: i64) -> Result<(i64, i64), IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cost_microusd), 0) \
+             FROM decision_runs WHERE provider = ?1 AND at >= ?2",
+            rusqlite::params![provider, since],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
+
+    /// The circuit breaker's evidence: how many of `provider`'s latest calls
+    /// (rows that sent a request, at most `max`) failed in a row, and when
+    /// the newest of those failures was. `(0, None)` when the latest call
+    /// succeeded or there was none.
+    pub fn decision_failure_streak(
+        &self,
+        provider: &str,
+        max: u32,
+    ) -> Result<(u32, Option<i64>), IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT fallback, at FROM decision_runs WHERE provider = ?1 AND called = 1 \
+             ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![provider, max], |r| {
+            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        let mut streak = 0;
+        let mut newest = None;
+        for row in rows {
+            let (fallback, at) = row?;
+            let failed = fallback
+                .as_deref()
+                .is_some_and(|f| DECISION_CALL_FAILURES.contains(&f));
+            if !failed {
+                break;
+            }
+            newest.get_or_insert(at);
+            streak += 1;
+        }
+        Ok((streak, newest))
+    }
+
+    /// Delete at most `limit` runs older than `cutoff`; the number deleted.
+    pub fn sweep_decision_runs(&self, cutoff: i64, limit: usize) -> Result<usize, IpcError> {
+        Ok(self.conn.execute(
+            "DELETE FROM decision_runs WHERE id IN \
+             (SELECT id FROM decision_runs WHERE at < ?1 ORDER BY id LIMIT ?2)",
+            rusqlite::params![cutoff, limit as i64],
+        )?)
+    }
+
+    /// Rows in `decision_runs`.
+    pub fn decision_run_count(&self) -> Result<i64, IpcError> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM decision_runs", [], |r| r.get(0))?)
+    }
+
+    // --- decision_secrets -----------------------------------------------------
+
+    /// Set (or replace) the decision model's API key: exactly one of a
+    /// `value` or a `credential_ref` (`env:NAME` / `file:/path`).
+    pub fn set_decision_credential(
+        &self,
+        value: Option<&Secret>,
+        credential_ref: Option<&str>,
+    ) -> Result<(), IpcError> {
+        let value = value.map(|v| v.expose().trim()).filter(|v| !v.is_empty());
+        let credential_ref = credential_ref.map(str::trim).filter(|v| !v.is_empty());
+        match (value, credential_ref) {
+            (Some(_), None) | (None, Some(_)) => {}
+            _ => return Err(invalid("pass exactly one of a key or a credential_ref")),
+        }
+        if let Some(r) = credential_ref {
+            super::validate_credential_ref(r)?;
+        }
+        if let Some(v) = value {
+            if v.chars().any(char::is_control) || v.chars().any(char::is_whitespace) {
+                return Err(invalid("an API key is one word with no spaces"));
+            }
+        }
+        let now = now_unix();
+        self.conn.execute(
+            "INSERT INTO decision_secrets (name, value, credential_ref, created_at) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(name) DO UPDATE SET value = excluded.value, \
+               credential_ref = excluded.credential_ref, updated_at = ?4",
+            rusqlite::params![API_KEY_NAME, value, credential_ref, now],
+        )?;
+        Ok(())
+    }
+
+    /// Forget the API key (the fingerprint key stays). `true` when one was set.
+    pub fn clear_decision_credential(&self) -> Result<bool, IpcError> {
+        Ok(self.conn.execute(
+            "DELETE FROM decision_secrets WHERE name = ?1",
+            [API_KEY_NAME],
+        )? > 0)
+    }
+
+    /// THE one place the decision model's API key is read. For the envelope's
+    /// transport only; a [`Secret`] neither serialises nor prints. The
+    /// reference wins over a stored value. `Ok(None)` when none is set or
+    /// none can be read.
+    pub fn resolve_decision_credential(&self) -> Result<Option<Secret>, IpcError> {
+        let row: Option<(Option<String>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT value, credential_ref FROM decision_secrets WHERE name = ?1",
+                [API_KEY_NAME],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((value, credential_ref)) = row else {
+            return Ok(None);
+        };
+        Ok(credential_ref
+            .as_deref()
+            .and_then(read_credential_ref)
+            .or(value)
+            .map(Secret::new))
+    }
+
+    /// Whether a key is configured, and how — never the key.
+    pub fn decision_credential_status(&self) -> Result<DecisionKeyStatus, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT credential_ref IS NOT NULL, COALESCE(updated_at, created_at) \
+                 FROM decision_secrets WHERE name = ?1",
+                [API_KEY_NAME],
+                |r| {
+                    Ok(DecisionKeyStatus {
+                        configured: true,
+                        by_reference: r.get::<_, i64>(0)? != 0,
+                        set_at: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    /// The local HMAC key of `decision_runs.input_fp`: generated (32 random
+    /// bytes, hex) on first use and kept; never sent anywhere.
+    pub fn decision_fp_key(&self) -> Result<Secret, IpcError> {
+        if let Some(k) = self.stored_fp_key()? {
+            return Ok(Secret::new(k));
+        }
+        let mut bytes = [0u8; 32];
+        {
+            use rand::Rng;
+            rand::rng().fill_bytes(&mut bytes);
+        }
+        self.conn.execute(
+            "INSERT OR IGNORE INTO decision_secrets (name, value, created_at) \
+             VALUES ('fp_key', ?1, ?2)",
+            rusqlite::params![hex::encode(bytes), now_unix()],
+        )?;
+        // Another writer may have won the insert: read what is stored.
+        self.stored_fp_key()?
+            .map(Secret::new)
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "fingerprint key vanished"))
+    }
+
+    /// The API key's literal form (and the fingerprint key's), for the
+    /// diagnostics bundle's masking list.
+    pub fn decision_secret_literals(&self) -> Result<Vec<String>, IpcError> {
+        let mut out = Vec::new();
+        if let Some(k) = self.resolve_decision_credential()? {
+            out.push(k.expose().to_string());
+        }
+        out.extend(self.stored_fp_key()?);
+        Ok(out)
+    }
+
+    /// The fingerprint key as stored, if one was generated: the one read of
+    /// it ([`Self::decision_fp_key`] generates, this never does).
+    fn stored_fp_key(&self) -> Result<Option<String>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM decision_secrets WHERE name = 'fp_key'",
+                [],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(feature: &str) -> NewDecisionRun {
+        NewDecisionRun {
+            at: 1_000,
+            feature: feature.into(),
+            org_id: Some(1),
+            subject_kind: "session".into(),
+            subject_id: "42".into(),
+            mode: "shadow".into(),
+            provider: "jev".into(),
+            model_version: Some("jev-1.13.0".into()),
+            question_version: "wl.1".into(),
+            input_fp: Some("ab".repeat(32)),
+            candidates: vec!["ACME-1".into(), "ACME-2".into()],
+            answer: Some("ACME-1".into()),
+            probabilities: Some(BTreeMap::from([
+                ("ACME-1".into(), 0.9),
+                ("ACME-2".into(), 0.1),
+            ])),
+            confidence: Some(0.8),
+            fallback: None,
+            baseline_answer: Some("ACME-1".into()),
+            called: true,
+            latency_ms: Some(120),
+            input_tokens: 500,
+            cost_microusd: 21,
+        }
+    }
+
+    #[test]
+    fn runs_for_subjects_match_the_kind_and_the_prefix_exactly() {
+        let s = Store::open_in_memory().unwrap();
+        let at = |subject: &str, kind: &str, at: i64| NewDecisionRun {
+            subject_kind: kind.into(),
+            subject_id: subject.into(),
+            at,
+            ..run("status_map")
+        };
+        let a = s
+            .insert_decision_run(&at("3:aa", "tracker_section", 100))
+            .unwrap();
+        let b = s
+            .insert_decision_run(&at("3:bb", "tracker_section", 200))
+            .unwrap();
+        s.insert_decision_run(&at("31:aa", "tracker_section", 200))
+            .unwrap();
+        s.insert_decision_run(&at("3:aa", "session", 200)).unwrap();
+        s.insert_decision_run(&NewDecisionRun {
+            subject_kind: "tracker_section".into(),
+            subject_id: "3:cc".into(),
+            ..run("work_link")
+        })
+        .unwrap();
+        let ids = |since| {
+            s.decision_runs_for_subjects("status_map", "tracker_section", "3:", since)
+                .unwrap()
+                .into_iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(None),
+            vec![b, a],
+            "newest first; not 31:, not another kind or feature"
+        );
+        assert_eq!(ids(Some(150)), vec![b]);
+    }
+
+    #[test]
+    fn a_run_round_trips_and_takes_a_followup() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.insert_decision_run(&run("work_link")).unwrap();
+        let r = s.get_decision_run(id).unwrap().unwrap();
+        assert_eq!(r.candidates, vec!["ACME-1", "ACME-2"]);
+        assert_eq!(r.probabilities.as_ref().unwrap()["ACME-1"], 0.9);
+        assert!(r.called);
+        assert!(r.followup.is_none());
+        assert!(s
+            .set_decision_followup(id, "corrected", Some("ACME-2"), 2_000)
+            .unwrap());
+        let r = s.get_decision_run(id).unwrap().unwrap();
+        assert_eq!(r.followup.as_deref(), Some("corrected"));
+        assert_eq!(r.corrected_to.as_deref(), Some("ACME-2"));
+        assert_eq!(r.followup_at, Some(2_000));
+        assert!(s.set_decision_followup(id, "maybe", None, 1).is_err());
+        assert!(s
+            .set_decision_followup(id, "confirmed", Some("ACME-2"), 1)
+            .is_err());
+        assert!(!s.set_decision_followup(9_999, "ignored", None, 1).unwrap());
+    }
+
+    #[test]
+    fn text_never_gets_into_a_run() {
+        let s = Store::open_in_memory().unwrap();
+        let prose = "fix the login bug for bob@example.com";
+        for bad in [
+            NewDecisionRun {
+                answer: Some(prose.into()),
+                ..run("work_link")
+            },
+            NewDecisionRun {
+                candidates: vec![prose.into()],
+                ..run("work_link")
+            },
+            NewDecisionRun {
+                baseline_answer: Some(prose.into()),
+                ..run("work_link")
+            },
+            NewDecisionRun {
+                subject_id: prose.into(),
+                ..run("work_link")
+            },
+            NewDecisionRun {
+                input_fp: Some("not a fingerprint".into()),
+                ..run("work_link")
+            },
+            NewDecisionRun {
+                fallback: Some("because".into()),
+                ..run("work_link")
+            },
+            NewDecisionRun {
+                mode: "auto".into(),
+                ..run("work_link")
+            },
+            NewDecisionRun {
+                confidence: Some(f64::NAN),
+                ..run("work_link")
+            },
+        ] {
+            assert_eq!(
+                s.insert_decision_run(&bad).unwrap_err().code,
+                codes::E_INVALID,
+                "{bad:?}"
+            );
+        }
+        assert_eq!(s.decision_run_count().unwrap(), 0);
+        assert!(s
+            .set_decision_followup(1, "corrected", Some(prose), 1)
+            .is_err());
+    }
+
+    #[test]
+    fn the_breaker_streak_counts_failed_calls_in_a_row() {
+        let s = Store::open_in_memory().unwrap();
+        let fail = |at: i64, f: &str| NewDecisionRun {
+            at,
+            fallback: Some(f.into()),
+            answer: None,
+            ..run("work_link")
+        };
+        assert_eq!(s.decision_failure_streak("jev", 5).unwrap(), (0, None));
+        s.insert_decision_run(&fail(10, "timeout")).unwrap();
+        s.insert_decision_run(&run("work_link")).unwrap();
+        s.insert_decision_run(&fail(20, "http_error")).unwrap();
+        s.insert_decision_run(&fail(30, "rate_limited")).unwrap();
+        // A refusal that sent nothing is not a call: it neither counts nor
+        // breaks the streak.
+        s.insert_decision_run(&NewDecisionRun {
+            called: false,
+            ..fail(40, "breaker_open")
+        })
+        .unwrap();
+        assert_eq!(s.decision_failure_streak("jev", 5).unwrap(), (2, Some(30)));
+        assert_eq!(s.decision_failure_streak("jev", 1).unwrap(), (1, Some(30)));
+        // An invalid answer is a call that came back: it ends a streak.
+        s.insert_decision_run(&fail(50, "invalid_answer")).unwrap();
+        assert_eq!(s.decision_failure_streak("jev", 5).unwrap(), (0, None));
+        assert_eq!(s.decision_failure_streak("rules", 5).unwrap(), (0, None));
+    }
+
+    #[test]
+    fn usage_stats_listing_and_sweep() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_decision_run(&NewDecisionRun {
+            at: 100,
+            ..run("work_link")
+        })
+        .unwrap();
+        s.insert_decision_run(&NewDecisionRun {
+            at: 200,
+            answer: Some("ACME-2".into()),
+            ..run("work_link")
+        })
+        .unwrap();
+        s.insert_decision_run(&NewDecisionRun {
+            at: 300,
+            feature: "status_map".into(),
+            fallback: Some("flag_off".into()),
+            called: false,
+            answer: None,
+            input_tokens: 0,
+            cost_microusd: 0,
+            ..run("status_map")
+        })
+        .unwrap();
+        assert_eq!(s.decision_usage_since("jev", 150).unwrap(), (500, 21));
+        assert_eq!(s.decision_usage_since("jev", 0).unwrap(), (1000, 42));
+        let stats = s.decision_stats(0).unwrap();
+        let wl = stats.iter().find(|r| r.feature == "work_link").unwrap();
+        assert_eq!((wl.runs, wl.called, wl.compared, wl.agreed), (2, 2, 2, 1));
+        let sm = stats.iter().find(|r| r.feature == "status_map").unwrap();
+        assert_eq!(sm.fallback.as_deref(), Some("flag_off"));
+        assert_eq!((sm.runs, sm.called), (1, 0));
+        let listed = s
+            .list_decision_runs(&DecisionRunFilter {
+                feature: Some("work_link".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed[0].id > listed[1].id, "newest first");
+        assert_eq!(s.sweep_decision_runs(250, 1).unwrap(), 1);
+        assert_eq!(s.sweep_decision_runs(250, 10).unwrap(), 1);
+        assert_eq!(s.decision_run_count().unwrap(), 1);
+    }
+
+    const KEY: &str = "tsk_live_0123456789abcdefghijklmnop";
+
+    #[test]
+    fn the_key_is_stored_resolved_and_cleared_but_never_listed() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.resolve_decision_credential().unwrap().is_none());
+        assert!(!s.decision_credential_status().unwrap().configured);
+        assert!(s.set_decision_credential(None, None).is_err());
+        assert!(s
+            .set_decision_credential(Some(&Secret::new(KEY)), Some("env:X"))
+            .is_err());
+        assert!(s
+            .set_decision_credential(Some(&Secret::new("two words")), None)
+            .is_err());
+        assert!(s.set_decision_credential(None, Some("http://x")).is_err());
+        s.set_decision_credential(Some(&Secret::new(KEY)), None)
+            .unwrap();
+        let k = s.resolve_decision_credential().unwrap().unwrap();
+        assert_eq!(k.expose(), KEY);
+        assert!(!format!("{k:?} {k}").contains(KEY));
+        let st = s.decision_credential_status().unwrap();
+        assert!(st.configured && !st.by_reference && st.set_at.is_some());
+        assert!(!serde_json::to_string(&st).unwrap().contains(KEY));
+        assert!(s
+            .decision_secret_literals()
+            .unwrap()
+            .contains(&KEY.to_string()));
+        // The fingerprint key survives clearing the API key.
+        let fp = s.decision_fp_key().unwrap();
+        assert_eq!(fp.expose().len(), 64);
+        assert!(s.clear_decision_credential().unwrap());
+        assert!(!s.clear_decision_credential().unwrap());
+        assert!(s.resolve_decision_credential().unwrap().is_none());
+        assert_eq!(s.decision_fp_key().unwrap().expose(), fp.expose());
+    }
+
+    #[test]
+    fn a_reference_is_read_at_use_and_wins() {
+        let s = Store::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jev");
+        std::fs::write(&path, format!("{KEY}\n")).unwrap();
+        s.set_decision_credential(None, Some(&format!("file:{}", path.display())))
+            .unwrap();
+        assert_eq!(
+            s.resolve_decision_credential().unwrap().unwrap().expose(),
+            KEY
+        );
+        assert!(s.decision_credential_status().unwrap().by_reference);
+        std::fs::remove_file(&path).unwrap();
+        assert!(s.resolve_decision_credential().unwrap().is_none());
+    }
+
+    /// Source guard: the key row has one reader, and the secret type never
+    /// grows a `Serialize` derive (it lives in `trackers.rs`, guarded there).
+    #[test]
+    fn the_api_key_has_one_reader() {
+        let src = include_str!("decisions.rs");
+        let src = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert_eq!(
+            src.matches("SELECT value, credential_ref FROM decision_secrets")
+                .count(),
+            1,
+            "the API key is read by resolve_decision_credential only"
+        );
+        // The API key's reader, its writers' delete / lookup, and the
+        // fingerprint key's one reader (`stored_fp_key`).
+        assert_eq!(src.matches("FROM decision_secrets").count(), 4);
+    }
+}

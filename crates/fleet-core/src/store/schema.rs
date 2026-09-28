@@ -43,6 +43,19 @@ fn worktrees_has_host_alias(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 071: `usage_daily` already has its
+/// `backfill` column. 071 rebuilds the table, and running it again would
+/// collapse backfill rows into live ones, so on such a table a re-run only
+/// records the version. See [`Migration`].
+fn usage_daily_has_backfill(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('usage_daily') WHERE name = 'backfill'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 025 (session usage): it adds its
 /// columns in one transaction, so its last column present means the whole
 /// migration is, and a re-run (`ALTER TABLE ... ADD COLUMN` again) would
@@ -227,6 +240,17 @@ fn work_links_has_archived_at(conn: &Connection) -> rusqlite::Result<bool> {
 fn orgs_has_auto_tidy(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'auto_tidy'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 068: `orgs` already has its
+/// `jev_allowed` column.
+fn orgs_has_jev_allowed(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'jev_allowed'",
         [],
         |r| r.get(0),
     )?;
@@ -665,11 +689,32 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/067_org_bound_sees_unassigned.sql"),
         already_applied: Some(orgs_has_bound_sees_unassigned),
     },
+    // Jev evaluation (D31 / D36): `orgs.jev_allowed`, an org's consent to
+    // decision-model calls. One ADD COLUMN, its own guard.
+    Migration {
+        version: 68,
+        sql: include_str!("../../migrations/068_org_jev_allowed.sql"),
+        already_applied: Some(orgs_has_jev_allowed),
+    },
+    // Jev evaluation (D35 / D37): `decision_runs` and `decision_secrets`.
+    // New tables and indexes, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(69, include_str!("../../migrations/069_decision_runs.sql")),
+    // D34 label hygiene: `work_unlinks`, a person's "Clear work" held
+    // against the unchanged state signal (R9u). A new table, index and
+    // trigger, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(70, include_str!("../../migrations/070_work_unlinks.sql")),
+    // usage_daily keyed by (day, host_alias, backfill): a table rebuild, so
+    // guarded — re-running the INSERT…SELECT would collapse backfill rows.
+    Migration {
+        version: 71,
+        sql: include_str!("../../migrations/071_usage_daily_backfill.sql"),
+        already_applied: Some(usage_daily_has_backfill),
+    },
     // Task 5: the describe cache (`work_item_descriptions`) — one item's
     // whole description, held for `work.describe_cache_secs`. `CREATE TABLE
     // IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` are idempotent on their
     // own, so this needs no `already_applied` guard.
-    Migration::plain(68, include_str!("../../migrations/068_describe_cache.sql")),
+    Migration::plain(72, include_str!("../../migrations/072_describe_cache.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -1566,6 +1611,7 @@ mod tests {
                 last_msg_id: None,
                 last_msg_usage: None,
                 now: 86_400,
+                by_day: Vec::new(),
             },
         )
         .unwrap();
@@ -3281,6 +3327,47 @@ mod tests {
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_071_rekeys_usage_daily_by_backfill_and_keeps_the_rows() {
+        const SEED_AT: i64 = 70;
+        let s = store_at_version(SEED_AT);
+        s.conn
+            .execute_batch(
+                "INSERT INTO usage_daily (day, host_alias, input_tokens, output_tokens, \
+                 cache_write_tokens, cache_read_tokens, cost_micros) VALUES (20714, 'trn', 1, 2, 3, 4, 5);",
+            )
+            .unwrap();
+        assert!(!usage_daily_has_backfill(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(usage_daily_has_backfill(&s.conn).unwrap());
+        let (backfill, cost): (i64, i64) = s
+            .conn
+            .query_row(
+                "SELECT backfill, cost_micros FROM usage_daily WHERE day = 20714 AND host_alias = 'trn'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((backfill, cost), (0, 5), "existing rows are live rows");
+        // The new key admits a backfill row beside the live one for the same day.
+        s.conn
+            .execute(
+                "INSERT INTO usage_daily (day, host_alias, backfill, cost_micros) VALUES (20714, 'trn', 1, 7)",
+                [],
+            )
+            .unwrap();
+        let n: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_daily WHERE day = 20714",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2);
     }
 }
 

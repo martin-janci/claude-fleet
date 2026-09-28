@@ -976,6 +976,13 @@ fn write_reachable_host(
         // A newly-set (or changed) stuck_kind is the alert-worthy
         // event; clearing it back to None is not recorded.
         if row.stuck_kind.is_some() && row.stuck_kind != prior.stuck_kind {
+            tracing::info!(
+                host = %host.alias,
+                session = %tmux_name,
+                kind = row.stuck_kind.as_deref().unwrap_or("?"),
+                was = prior.stuck_kind.as_deref().unwrap_or("none"),
+                "[reconcile] stuck"
+            );
             events.push(("stuck", row.stuck_kind.as_deref()));
         }
         for (kind, detail) in events {
@@ -1538,8 +1545,9 @@ pub(super) async fn probe_with_timeout(
     probe
 }
 
-/// Full fleet pass: probe every non-hidden host in parallel, then apply each
-/// host's result under its own short store-lock window. Callers are expected
+/// Full fleet pass: probe every non-hidden host in parallel and apply each
+/// host's result as its probe completes, under its own short store-lock
+/// window — a slow host delays only its own rows. Callers are expected
 /// to hold a `ReconcilePass` from the shared gate (see `run_full_reconcile`);
 /// this function does not take the gate itself so tests can drive it directly.
 pub(crate) async fn reconcile_sessions_with(
@@ -1602,40 +1610,37 @@ pub(crate) async fn reconcile_sessions_with(
     //    `JoinSet::drop` aborts the futures but does NOT kill spawned ssh
     //    children by itself; the ssh layer's own wall clock
     //    (`SshClient::run_child`) kills and reaps them and resets the master.
-    let mut set = tokio::task::JoinSet::new();
-    for (host, paths) in hosts.into_iter().filter(|(h, _)| !h.hidden) {
-        let deps = Arc::clone(deps);
-        set.spawn(async move { probe_one_host(host, paths, &deps).await });
-    }
-
-    // Collect per-host probe results. Join errors (task panics) are logged
-    // and skipped — they don't abort the rest of reconcile.
-    let mut probed: Vec<HostProbe> = Vec::new();
-    while let Some(join) = set.join_next().await {
-        match join {
-            Ok(probe) => probed.push(probe),
-            Err(e) => tracing::error!(error = %e, "[reconcile] probe task panicked"),
-        }
-    }
-
-    // 3. Apply writes, taking the store lock ONCE PER HOST rather than once
-    //    for the whole loop (BE-12): a command or the PTY poller waiting on
-    //    the store only ever queues behind one host's transaction. Each
-    //    host's whole write — account link, mass-loss marks, boot identity,
-    //    the `apply_host_reconcile_in_tx` burst (host probe, upserts, touches,
-    //    ghosting), PR signals, timeline events, conversation rebinds and bg
-    //    rows — runs in `reconcile_write_one_host` under ONE
-    //    `Store::atomically` transaction (one commit), whose events are held
-    //    until it commits — so a mid-write error rolls the host back as a
-    //    whole and emits nothing for it.
-    //
     //    The project list is identical for every host — fetch it once here
     //    rather than re-querying inside `find_project_id_for_path` per session.
     let projects = {
         let s = lock(store)?;
         s.list_projects()?
     };
-    for probe in &probed {
+    let mut set = tokio::task::JoinSet::new();
+    for (host, paths) in hosts.into_iter().filter(|(h, _)| !h.hidden) {
+        let deps = Arc::clone(deps);
+        set.spawn(async move { probe_one_host(host, paths, &deps).await });
+    }
+
+    // 3. Apply each host's result AS ITS PROBE COMPLETES, taking the store
+    //    lock once per host (BE-12), rather than after every host has
+    //    joined: `HOST_PROBE_TIMEOUT` (65 s) is far past the 20 s tick, and
+    //    one wedged host used to hold every other host's rows back for that
+    //    long (perf-logs §3). The write is unchanged — each host's whole
+    //    write (account link, mass-loss marks, boot identity, the
+    //    `apply_host_reconcile_in_tx` burst, PR signals, timeline events,
+    //    conversation rebinds and bg rows) runs in `reconcile_write_one_host`
+    //    under ONE `Store::atomically` transaction, events held until it
+    //    commits, a failed host rolled back alone. Join errors (task panics)
+    //    are logged and skipped — they don't abort the rest of reconcile.
+    while let Some(join) = set.join_next().await {
+        let probe = match join {
+            Ok(probe) => probe,
+            Err(e) => {
+                tracing::error!(error = %e, "[reconcile] probe task panicked");
+                continue;
+            }
+        };
         {
             let mut s = lock(store)?;
             // Per-host isolation: one host's DB write failure (e.g. an FK
@@ -1643,7 +1648,7 @@ pub(crate) async fn reconcile_sessions_with(
             // for every other host. The host's whole write is one
             // transaction, so a failed host rolls back cleanly; we log it
             // and carry on.
-            if let Err(e) = reconcile_write_one_host(&mut s, probe, &projects) {
+            if let Err(e) = reconcile_write_one_host(&mut s, &probe, &projects) {
                 tracing::error!(
                     host = %probe.host.alias,
                     error = %e,
@@ -1897,12 +1902,18 @@ pub async fn reconcile_now(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
 }
 
 /// `hub.local_host` for this pass; a poisoned lock counts as "true" (the
-/// desktop default) so reconcile keeps its old behaviour on error.
+/// desktop default) so reconcile keeps its old behaviour on error. Off, too,
+/// whenever the process has no local host at all
+/// ([`crate::service::hub::local_host_enabled`]): a Windows desktop never
+/// writes the setting, and reading only the setting re-marked its hidden
+/// `local` row reachable and linked the Windows Claude account to it every
+/// pass.
 pub(super) fn local_host(store: &Mutex<Store>) -> bool {
-    store
-        .lock()
-        .map(|s| crate::service::hub::read_local_host(&s))
-        .unwrap_or(true)
+    crate::service::hub::local_host_enabled()
+        && store
+            .lock()
+            .map(|s| crate::service::hub::read_local_host(&s))
+            .unwrap_or(true)
 }
 
 /// Pure interval-guard decision for the background reconcile tick.
