@@ -118,7 +118,9 @@ pub fn current_log_file(dir: &Path) -> Option<PathBuf> {
 /// bundle.
 const TAIL_READ_BYTES: u64 = 256 * 1024;
 
-fn read_tail(path: &Path) -> std::io::Result<String> {
+/// The last `TAIL_READ_BYTES` of `path`, and whether that cut anything off
+/// the front.
+fn read_tail(path: &Path) -> std::io::Result<(String, bool)> {
     let mut f = std::fs::File::open(path)?;
     let len = f.metadata()?.len();
     let start = len.saturating_sub(TAIL_READ_BYTES);
@@ -132,20 +134,26 @@ fn read_tail(path: &Path) -> std::io::Result<String> {
             text.drain(..=nl);
         }
     }
-    Ok(text)
+    Ok((text, start > 0))
 }
 
 /// The last `n` lines across the log files in `dir`, oldest first. Walks
 /// back into earlier files when the current one is short. Unreadable files
 /// are skipped. Lines are returned as written (already redacted by the
 /// writer); callers that expose them should still run [`redact`].
+///
+/// The result is contiguous: a file too big to read whole (over
+/// `TAIL_READ_BYTES`) ends the walk, since prepending an older file to it
+/// would hide the lines between them. `n` can therefore come back short.
 pub fn tail_lines(dir: &Path, n: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for path in log_files(dir).iter().rev() {
         if out.len() >= n {
             break;
         }
-        let Ok(text) = read_tail(path) else { continue };
+        let Ok((text, truncated)) = read_tail(path) else {
+            continue;
+        };
         let lines: Vec<&str> = text.lines().collect();
         let need = n - out.len();
         let take_from = lines.len().saturating_sub(need);
@@ -153,6 +161,9 @@ pub fn tail_lines(dir: &Path, n: usize) -> Vec<String> {
         let mut chunk: Vec<String> = lines[take_from..].iter().map(|l| l.to_string()).collect();
         chunk.append(&mut out);
         out = chunk;
+        if truncated {
+            break;
+        }
     }
     out
 }
@@ -1056,5 +1067,23 @@ mod tests {
         assert_eq!(tail_lines(d, 1), ["b2"]);
         assert_eq!(tail_lines(d, 50), ["a1", "a2", "a3", "b1", "b2"]);
         assert!(tail_lines(&d.join("missing"), 5).is_empty());
+    }
+
+    #[test]
+    fn tail_lines_does_not_splice_an_older_file_onto_a_cut_one() {
+        // The current file is bigger than one tail read, so its first lines
+        // are not read; prepending the older file would put "a1" right
+        // before a line hours later, with the gap invisible.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        std::fs::write(d.join("claude-fleet.2026-09-10.log"), "a1\n").unwrap();
+        let line = "x".repeat(99) + "\n";
+        let big = line.repeat(TAIL_READ_BYTES as usize / line.len() + 10);
+        std::fs::write(d.join("claude-fleet.2026-09-11.log"), big).unwrap();
+        let got = tail_lines(d, 1_000_000);
+        assert!(!got.is_empty());
+        assert!(got.len() < TAIL_READ_BYTES as usize / line.len() + 10);
+        assert!(!got.iter().any(|l| l == "a1"), "spliced across a gap");
+        assert!(got.iter().all(|l| l.len() == 99), "a partial first line");
     }
 }
