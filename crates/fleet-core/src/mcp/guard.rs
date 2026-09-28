@@ -873,8 +873,11 @@ pub fn needs_confirmation(name: &str) -> bool {
 /// (work graph M9.7, decision D12). For anyone else they are ungated.
 /// Some are gated only for the actions that create a session, at the call
 /// site: `work_link` for `start` / `resume`, `dispatch_task` for
-/// `new_worker`, `restore_host_sessions` unless `dry_run`.
+/// `new_worker`, `restore_host_sessions` unless `dry_run`, `add_project`
+/// for `new` with `create_remote` (publishing a GitHub repository) once the
+/// service's own confirm token is presented.
 pub const OPERATOR_CONFIRMS: &[&str] = &[
+    "add_project",
     "new_session",
     "new_shell_session",
     "new_bg_session",

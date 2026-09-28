@@ -279,6 +279,30 @@ pub(super) fn require_bound_client_may_create(
     Ok(())
 }
 
+/// A paired client bound to an org (work graph M14) acts on a host with no
+/// session in play (`add_project`, `list_github_repos`) only when it may see
+/// that host's org: its own, or none while its org's `bound_sees_unassigned`
+/// is on (D31). Everyone else passes; a per-host token's own rule is
+/// [`require_host`].
+pub(super) fn require_bound_client_sees_host(
+    s: &Store,
+    caller: &Caller,
+    host: &str,
+) -> Result<(), McpError> {
+    if caller.client.as_ref().is_none_or(|c| c.org_id.is_none()) {
+        return Ok(());
+    }
+    let scope = caller.org_scope(s).map_err(to_mcp_err)?;
+    if !scope.sees_org(s.host_org(host).map_err(to_mcp_err)?) {
+        return Err(mcp_err(
+            codes::E_FORBIDDEN,
+            format!("host {host} is outside this client's org"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 /// A paired client bound to an org (work graph M14) reaches only its org's
 /// and unassigned sessions — to read, prompt, kill or link them. Another
 /// org's session answers exactly as one that does not exist. A per-host

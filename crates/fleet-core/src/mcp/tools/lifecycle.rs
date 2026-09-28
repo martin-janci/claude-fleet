@@ -238,16 +238,21 @@ impl FleetTools {
             None,
             "the session to rewind",
         )?;
-        // Rewind rebuilds a live pane, so it needs a person (D12), the same
-        // rule restart_session follows. Fork starts something new and does not.
-        if mode == rewind::RewindMode::Rewind {
-            self.confirm_gate(
-                "rewind_conversation",
-                p.confirm_nonce.as_deref(),
-                &format!("session_id={} anchor={:?}", p.session_id, p.anchor_uuid),
-                &caller,
-            )?;
-        }
+        // Both modes need a person when the operator asks (D12): rewind
+        // rebuilds a live pane, the same rule restart_session follows, and
+        // fork starts a new session — an operator's start is always
+        // confirmed (M9.7). The mode is bound into the summary, so an
+        // approved fork cannot be replayed as a rewind. For anyone else the
+        // gate is a no-op (`rewind_conversation` is not `confirm: true`).
+        self.confirm_gate(
+            "rewind_conversation",
+            p.confirm_nonce.as_deref(),
+            &format!(
+                "session_id={} mode={} anchor={:?} new_worktree={:?}",
+                p.session_id, p.mode, p.anchor_uuid, p.new_worktree
+            ),
+            &caller,
+        )?;
         let row = rewind::rewind_conversation(
             rewind::RewindArgs {
                 session_id: row.id,

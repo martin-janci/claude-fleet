@@ -507,6 +507,17 @@ pub struct ListHostWorktreesParams {
     pub project_id: i64,
 }
 
+// `add_project`'s arguments plus the operator's confirmation (M9.7; only a
+// `create_remote` carrying the service's token ever needs one).
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AddProjectParams {
+    #[serde(flatten)]
+    pub args: crate::service::add_project::AddProjectArgs,
+    /// Approved confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
+}
+
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ListGithubReposParams {
     /// Host whose `gh` login lists the repositories.
