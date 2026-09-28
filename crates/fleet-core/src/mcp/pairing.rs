@@ -100,9 +100,28 @@ pub(crate) fn limiter_key(
         return UNKNOWN_PEER.to_string();
     };
     if !is_trusted_front_end(peer) {
-        return peer.to_string();
+        return bucket_of(peer);
     }
-    forwarded_last_hop(headers).unwrap_or_else(|| peer.to_string())
+    forwarded_last_hop(headers).map_or_else(|| bucket_of(peer), bucket_of)
+}
+
+/// The budget an address draws on: itself, or for a routable IPv6 address
+/// its /64 — one host is routinely handed a whole /64, so per-address
+/// buckets would let it mint a fresh one per request. An IPv4-mapped IPv6
+/// address is its IPv4 address; loopback stays itself.
+fn bucket_of(ip: std::net::IpAddr) -> String {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None if v6.is_loopback() => v6.to_string(),
+            None => {
+                let s = v6.segments();
+                format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+            }
+        },
+        v4 => v4.to_string(),
+    }
 }
 
 /// The last `X-Forwarded-For` hop that parses as an IP address. Several
@@ -118,7 +137,7 @@ pub(crate) fn limiter_key(
 /// shared bucket this function exists to avoid. So it keeps walking left
 /// until something parses; only a chain with no parseable hop at all falls
 /// back to the peer.
-fn forwarded_last_hop(headers: &axum::http::HeaderMap) -> Option<String> {
+fn forwarded_last_hop(headers: &axum::http::HeaderMap) -> Option<std::net::IpAddr> {
     let chain: Vec<&str> = headers
         .get_all("x-forwarded-for")
         .iter()
@@ -131,7 +150,6 @@ fn forwarded_last_hop(headers: &axum::http::HeaderMap) -> Option<String> {
         .iter()
         .rev()
         .find_map(|h| h.parse::<std::net::IpAddr>().ok())
-        .map(|ip| ip.to_string())
 }
 
 /// Whether `ip` may be believed when it forwards an address: loopback, or a
@@ -642,6 +660,21 @@ mod tests {
             "127.0.0.1"
         );
         assert_eq!(limiter_key(None, &hdrs("203.0.113.7")), UNKNOWN_PEER);
+        // A routable IPv6 address is budgeted by its /64, forwarded or not:
+        // one host holds the whole prefix. Mapped IPv4 is its IPv4 address.
+        assert_eq!(
+            limiter_key(ip("2001:db8:1:2:aaaa::1"), &hdrs("")),
+            "2001:db8:1:2::/64"
+        );
+        assert_eq!(
+            limiter_key(ip("127.0.0.1"), &hdrs("2001:db8:1:2:bbbb::9")),
+            "2001:db8:1:2::/64"
+        );
+        assert_eq!(
+            limiter_key(ip("::ffff:198.51.100.4"), &hdrs("")),
+            "198.51.100.4"
+        );
+        assert_eq!(limiter_key(ip("::1"), &hdrs("")), "::1");
     }
 
     /// Some proxies append a token that is not an address — `unknown` is the
