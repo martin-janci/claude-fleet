@@ -1073,6 +1073,12 @@ pub struct ReconcileSession<'a> {
     /// `None` CLEARS a stale dialog) when the pane was captured this pass,
     /// preserved when it was not.
     pub pending_input: Option<PendingInput>,
+    /// The pane captured this pass shows a live turn (`derived_status ==
+    /// Working`, the spinner's "esc to interrupt"). Stamps
+    /// `sessions.pane_working_at` (migration 074), which the stale-working
+    /// sweep respects: a row whose pane is visibly working is never demoted,
+    /// whatever the agents cadence let the status say this pass.
+    pub pane_working: bool,
 }
 
 /// All inputs for applying one host's probe result atomically. Consumed by

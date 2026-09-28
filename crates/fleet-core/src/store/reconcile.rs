@@ -263,6 +263,7 @@ impl Store {
         pending_input: Option<&str>,
         killed_at: Option<i64>,
         reconciled_at: Option<i64>,
+        pane_working: bool,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // Read the prior row (not just its id) before the write: it tells us
@@ -403,7 +404,7 @@ impl Store {
                                    claude_session_id, claude_status, effort_level, pr_url, current_activity,
                                    context_pct, stuck_kind, ci_status, idle_since, stuck_since,
                                    tmux_pane_id, context_source, context_at, pending_input,
-                                   last_reconciled_at)
+                                   last_reconciled_at, pane_working_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, NULL, {guarded_id}, ?10, ?11, ?12, ?13,
                      ?14, ?15, ?17,
                      CASE WHEN ?10 IN ('idle','completed','stopped') THEN ?19 ELSE NULL END,
@@ -412,7 +413,8 @@ impl Store {
                      CASE WHEN ?14 IS NULL THEN NULL ELSE 'pane' END,
                      CASE WHEN ?14 IS NULL THEN NULL ELSE ?19 END,
                      ?22,
-                     ?23)
+                     ?23,
+                     CASE WHEN ?25 THEN ?19 ELSE NULL END)
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
                project_id=excluded.project_id,
                last_activity_at=excluded.last_activity_at,
@@ -482,7 +484,12 @@ impl Store {
                -- `last_reconciled_at` is not a `SessionRow` field, so it
                -- never makes a no-op pass emit, and migration 063's trigger
                -- does not watch it, so it never bumps `row_version` either.
-               last_reconciled_at=COALESCE(?23, last_reconciled_at)
+               last_reconciled_at=COALESCE(?23, last_reconciled_at),
+               -- The pane showed a live turn this pass (?25): the stale-working
+               -- sweep's evidence of life (migration 074). Bookkeeping like
+               -- `last_reconciled_at`: not a `SessionRow` field, not watched
+               -- by the row_version trigger, so stamping it never emits.
+               pane_working_at=CASE WHEN ?25 THEN ?19 ELSE pane_working_at END
              WHERE {not_stale}",
             new_stuck = NEW_STUCK,
             new_pending = NEW_PENDING,
@@ -520,7 +527,8 @@ impl Store {
                 tmux_pane_id,
                 pending_input,
                 reconciled_at,
-                crate::service::playbooks::OOM_RECREATE_MIN_SPACING_SECS
+                crate::service::playbooks::OOM_RECREATE_MIN_SPACING_SECS,
+                pane_working
             ],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
@@ -801,6 +809,7 @@ impl Store {
                         pending_input_json.as_deref(),
                         kills.get(sess.tmux_name).copied(),
                         spec.reconciled_at,
+                        sess.pane_working,
                         &mut out,
                     )?;
                     if let Some(pid) = sess.project_id {
@@ -1176,6 +1185,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        false,
                         &mut out,
                     )?;
                     Ok(out)
@@ -2730,6 +2740,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    false,
                     &mut out,
                 )?;
                 Ok(out)

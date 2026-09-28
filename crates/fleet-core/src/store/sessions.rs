@@ -1366,9 +1366,16 @@ impl Store {
 
     /// The tick's stale-`working` rule (lifecycle F2): a live tmux row that
     /// says `working` but has had no hook, no turn, no transcript growth
-    /// (`context_at`, `usage_updated_at`) and no pane output
+    /// (`context_at`, `usage_updated_at`), no spinner on its pane
+    /// (`pane_working_at`, stamped by every reconcile pass that captured the
+    /// pane showing a live turn) and no tmux session activity
     /// (`last_activity_at`) for `stale_secs` is demoted to `idle` and stamped
     /// `stale_working_at = now`, which is what the attention model reads.
+    /// `last_activity_at` is tmux's `#{session_activity}`, which moves on a
+    /// client's input and an attach, NOT on pane output (a detached pane can
+    /// print for hours without moving it) — the spinner stamp is the pane
+    /// evidence. A demoted row's `idle` is a guess: `store::trusted_status`
+    /// makes turn-over checks ask the pane before believing it.
     /// Pane-less and `shell` rows are never judged (no hooks or turns to
     /// miss); a stamped row is not judged twice; `stale_secs <= 0` is off.
     /// Returns the demoted rows; each gets `session_updated`, a
@@ -1390,13 +1397,16 @@ impl Store {
                    AND kind NOT IN ('bg','external','shell') AND stale_working_at IS NULL \
                    AND COALESCE(last_hook_at, 0) < ?2 AND COALESCE(last_turn_at, 0) < ?2 \
                    AND COALESCE(context_at, 0) < ?2 AND COALESCE(usage_updated_at, 0) < ?2 \
+                   AND COALESCE(pane_working_at, 0) < ?2 \
                    AND last_activity_at < ?2 AND created_at < ?2 \
                  RETURNING id",
             )?
             .query_map(rusqlite::params![now, cutoff], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut out = Vec::with_capacity(ids.len());
-        let detail = format!("no hook, turn, transcript growth or pane output for {stale_secs}s");
+        let detail = format!(
+            "no hook, turn, transcript growth, pane spinner or tmux session activity for {stale_secs}s"
+        );
         for id in ids {
             for (kind, d) in [
                 ("status_change", "idle"),
@@ -3540,7 +3550,7 @@ mod tests {
                 .claude_status
                 .as_deref(),
             Some("working"),
-            "pane output 500 s ago is not stale"
+            "tmux session activity 500 s ago is not stale"
         );
         assert_eq!(
             s.get_session_by_id(sh).unwrap().unwrap().stale_working_at,

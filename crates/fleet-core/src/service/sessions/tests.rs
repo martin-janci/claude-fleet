@@ -98,6 +98,95 @@ fn a_stale_working_demotion_is_not_undone_by_the_cached_agents_status() {
     );
 }
 
+/// F2's flap: one tool call running longer than
+/// `reconcile.stale_working_secs` fires no hook, grows no transcript and
+/// moves no tmux `session_activity`. The tick ran reconcile then the
+/// stale sweep; every pass that asked `claude agents` saw the pane's
+/// spinner, lifted the demotion, and the sweep right after demoted the row
+/// again — a `status_change` pair per tick, until the 500-entry timeline
+/// cap evicted history (the OOM attempt count among it). A pane that shows
+/// a live turn now stamps `pane_working_at`, which the sweep respects.
+#[test]
+fn a_long_tool_call_is_not_demoted_and_lifted_again_every_tick() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let projects = s.list_projects().unwrap();
+    let agent = crate::claude_agents::ClaudeAgentRow {
+        status: Some("working".into()),
+        ..agent_for_session("dev-a", "cid-a")
+    };
+    let spinner = crate::service::pane_intel::analyze(
+        "⏺ Bash(sleep 3600)\n  ⎿ Running…\n✶ Cooking… (2400s · esc to interrupt)\n",
+    );
+    assert_eq!(
+        spinner.derived_status,
+        Some(crate::service::pane_intel::ClaudeStatus::Working)
+    );
+    // One tick: a reconcile pass (the pane captured or not, `claude
+    // agents` asked or cadence-skipped), then the sweep. Returns how many
+    // rows the sweep demoted.
+    let tick = |s: &mut Store, pane: bool, agents: bool| -> usize {
+        let mut probe = vps_probe(
+            s,
+            vec![tmux_session("dev-a")],
+            None,
+            vec![agent.clone()],
+            PrInfoMap::new(),
+        );
+        if !agents {
+            probe.agent_rows = None;
+        }
+        if pane {
+            probe.intel.insert("dev-a".into(), spinner.clone());
+        }
+        reconcile_write_one_host(s, &probe, &projects).unwrap();
+        s.age_out_stale_working(now_unix(), 1_800).unwrap().len()
+    };
+    let status = |s: &Store| s.get_session("dev-a", "vps").unwrap().unwrap();
+    let status_changes = |s: &Store| {
+        let id = status(s).id;
+        s.list_session_events(id, 500)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "status_change")
+            .count()
+    };
+
+    // The pane shows the spinner from the first pass: never demoted.
+    assert_eq!(
+        tick(&mut s, true, true),
+        0,
+        "a visibly working pane is not stale"
+    );
+    assert_eq!(status(&s).claude_status.as_deref(), Some("working"));
+
+    // A spell of failed captures lets the sweep demote it once...
+    s.conn_for_test()
+        .execute("UPDATE sessions SET pane_working_at = 1", [])
+        .unwrap();
+    assert_eq!(tick(&mut s, false, true), 1);
+    assert_eq!(status(&s).claude_status.as_deref(), Some("idle"));
+    let after_demotion = status_changes(&s);
+
+    // ...then the spinner is back. Ticks alternate agents-asked and
+    // cadence-skipped passes, as production does: the first asked pass
+    // lifts the demotion, and nothing demotes it again.
+    for (n, agents) in [false, true, false, true, true, false, true]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(tick(&mut s, true, agents), 0, "tick {n}: no re-demotion");
+    }
+    let row = status(&s);
+    assert_eq!(row.claude_status.as_deref(), Some("working"));
+    assert_eq!(row.stale_working_at, None);
+    assert_eq!(
+        status_changes(&s) - after_demotion,
+        1,
+        "one transition back to working, no flap"
+    );
+}
+
 fn job_agent(session_id: &str, job_id: Option<&str>) -> crate::claude_agents::ClaudeAgentRow {
     crate::claude_agents::ClaudeAgentRow {
         session_id: Some(session_id.into()),
