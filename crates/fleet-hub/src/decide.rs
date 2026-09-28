@@ -18,11 +18,16 @@
 //!   map over the running hub's `work_admin update`, like `fleet-hub tracker
 //!   section-map`; `proposals reject <run>` writes only the run's follow-up,
 //!   directly, like `set-key`.
+//! * `enable` / `disable`, `mode`, `unassigned` and `set` change the
+//!   `decide.*` settings over the running hub's `set_setting` (master token,
+//!   loopback), like `fleet-hub org set` does for orgs: the hub validates
+//!   the value and audits the change, and there is no other way to reach
+//!   them on a hub (a paired desktop shows them read-only).
 
 use crate::config::{self, HubOptions};
 use crate::out;
 use crate::serve;
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 use fleet_core::service::decide;
 use fleet_core::service::decide::status_map::{self, ProposalAction, ProposalOutcome};
 use fleet_core::store::{DecisionRunFilter, DecisionRunRow, Secret, Store};
@@ -32,6 +37,37 @@ use std::process::ExitCode;
 
 #[derive(Subcommand, Debug)]
 pub enum DecideCmd {
+    /// Turn the kill switch on (`decide.jev.enabled`). Nothing is sent
+    /// until a feature's mode (`fleet-hub decide mode`), an org's consent
+    /// (`fleet-hub org set <id> --jev on`) and a key allow it too. Needs a
+    /// running hub.
+    Enable,
+    /// Turn the kill switch off: every call stops at once, nothing in
+    /// flight is retried. Needs a running hub.
+    Disable,
+    /// Set a feature's mode (`decide.jev.<feature>`): off, shadow (ask and
+    /// record next to the rule, act on the rule) or assist (also propose
+    /// the answer for a person to confirm). Needs a running hub.
+    Mode {
+        /// status_map or work_link.
+        feature: String,
+        /// off, shadow or assist.
+        mode: String,
+    },
+    /// Whether sessions and items that belong to no org may be sent
+    /// (`decide.jev.unassigned`, off by default). Needs a running hub.
+    Unassigned {
+        #[arg(value_enum)]
+        value: Switch,
+    },
+    /// Set any other `decide.*` setting, e.g. `decide.jev.timeout_ms 2000`
+    /// or `decide.jev.daily_token_budget 500000`; the hub checks the value.
+    /// The table is in docs/decisions.md → Settings. Needs a running hub.
+    Set {
+        /// A key starting with `decide.`.
+        key: String,
+        value: String,
+    },
     /// Store the TypeSafe (Jev) API key. Read from stdin (one line) unless
     /// --from-env or --ref says otherwise; never an argument. Nothing is
     /// sent until `decide.jev.enabled`, a feature's mode and an org's
@@ -104,6 +140,77 @@ pub enum DecideCmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// `on` / `off` for a boolean `decide.*` setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Switch {
+    On,
+    Off,
+}
+
+/// The `decide.*` setting a settings subcommand writes, checked before the
+/// hub is called: `None` for every other subcommand.
+fn setting_for(cmd: &DecideCmd) -> Result<Option<(String, String)>, String> {
+    use fleet_core::service::settings as st;
+    let pair = |k: &str, v: &str| Ok(Some((k.to_string(), v.to_string())));
+    match cmd {
+        DecideCmd::Enable => pair(st::DECIDE_JEV_ENABLED, "true"),
+        DecideCmd::Disable => pair(st::DECIDE_JEV_ENABLED, "false"),
+        DecideCmd::Mode { feature, mode } => {
+            let f = decide::Feature::parse(feature).ok_or_else(|| {
+                format!(
+                    "the feature is one of {}, not {feature:?}",
+                    decide::Feature::ALL
+                        .iter()
+                        .map(|f| f.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+            if !st::DECIDE_MODES.contains(&mode.as_str()) {
+                return Err(format!(
+                    "the mode is one of {}, not {mode:?} (auto is not offered: no feature has passed acceptance)",
+                    st::DECIDE_MODES.join(", ")
+                ));
+            }
+            pair(f.setting_key(), mode)
+        }
+        DecideCmd::Unassigned { value } => pair(
+            st::DECIDE_JEV_UNASSIGNED,
+            if *value == Switch::On {
+                "true"
+            } else {
+                "false"
+            },
+        ),
+        DecideCmd::Set { key, value } => {
+            if !key.starts_with("decide.") {
+                return Err(format!(
+                    "`fleet-hub decide set` changes decide.* settings only, not {key:?}"
+                ));
+            }
+            pair(key, value)
+        }
+        _ => Ok(None),
+    }
+}
+
+/// What still stops a call after a settings change, in one line.
+fn after_setting(key: &str, value: &str) -> String {
+    use fleet_core::service::settings as st;
+    match (key, value) {
+        (k, "false") if k == st::DECIDE_JEV_ENABLED => {
+            "every call is stopped; the record and the key stay".to_string()
+        }
+        (k, "true") if k == st::DECIDE_JEV_ENABLED => "a call also needs an org's consent \
+             (fleet-hub org set <id> --jev on) and a key (fleet-hub decide set-key); a live \
+             feature also its mode (fleet-hub decide mode status_map shadow), which a benchmark \
+             does not need; fleet-hub decide status shows what is missing"
+            .to_string(),
+        _ => "fleet-hub decide status shows the flag, the modes, the consents and the key"
+            .to_string(),
+    }
 }
 
 /// `fleet-hub decide proposals apply|reject <run>`: a person decides one
@@ -320,7 +427,24 @@ pub async fn run(
     opts: &HubOptions,
     env: &HashMap<String, String>,
 ) -> Result<ExitCode, String> {
+    if let Some((key, value)) = setting_for(&cmd)? {
+        let conn = crate::pair::hub_conn(opts, env)?;
+        crate::pair::call_tool(
+            &conn,
+            "set_setting",
+            serde_json::json!({ "key": key, "value": value }),
+        )
+        .await?;
+        out::line(&format!("{key} = {value}"));
+        out::line(&after_setting(&key, &value));
+        return Ok(ExitCode::SUCCESS);
+    }
     match cmd {
+        DecideCmd::Enable
+        | DecideCmd::Disable
+        | DecideCmd::Mode { .. }
+        | DecideCmd::Unassigned { .. }
+        | DecideCmd::Set { .. } => unreachable!("settings subcommands return above"),
         DecideCmd::Bench { cmd } => return crate::bench::run(*cmd, opts, env).await,
         DecideCmd::SetKey {
             from_env,
@@ -459,6 +583,78 @@ mod tests {
         let mut all = vec!["t"];
         all.extend_from_slice(args);
         T::try_parse_from(all).map(|t| t.cmd)
+    }
+
+    fn setting(args: &[&str]) -> Result<Option<(String, String)>, String> {
+        setting_for(&parse(args).map_err(|e| e.to_string())?)
+    }
+
+    fn kv(k: &str, v: &str) -> Option<(String, String)> {
+        Some((k.to_string(), v.to_string()))
+    }
+
+    #[test]
+    fn the_settings_subcommands_name_their_decide_key() {
+        assert_eq!(
+            setting(&["enable"]).unwrap(),
+            kv("decide.jev.enabled", "true")
+        );
+        assert_eq!(
+            setting(&["disable"]).unwrap(),
+            kv("decide.jev.enabled", "false")
+        );
+        assert_eq!(
+            setting(&["mode", "status_map", "shadow"]).unwrap(),
+            kv("decide.jev.status_map", "shadow")
+        );
+        assert_eq!(
+            setting(&["mode", "work_link", "off"]).unwrap(),
+            kv("decide.jev.work_link", "off")
+        );
+        assert_eq!(
+            setting(&["unassigned", "on"]).unwrap(),
+            kv("decide.jev.unassigned", "true")
+        );
+        assert_eq!(
+            setting(&["unassigned", "off"]).unwrap(),
+            kv("decide.jev.unassigned", "false")
+        );
+        assert_eq!(
+            setting(&["set", "decide.jev.timeout_ms", "2000"]).unwrap(),
+            kv("decide.jev.timeout_ms", "2000")
+        );
+        // Every other subcommand writes no setting.
+        assert_eq!(setting(&["status"]).unwrap(), None);
+        assert_eq!(setting(&["clear-key"]).unwrap(), None);
+    }
+
+    #[test]
+    fn a_bad_feature_mode_or_key_is_refused_before_the_hub_is_called() {
+        let e = setting(&["mode", "tidy", "shadow"]).unwrap_err();
+        assert!(e.contains("status_map, work_link"), "{e}");
+        let e = setting(&["mode", "status_map", "auto"]).unwrap_err();
+        assert!(
+            e.contains("off, shadow, assist") && e.contains("auto is not offered"),
+            "{e}"
+        );
+        let e = setting(&["set", "work.auto_tidy", "true"]).unwrap_err();
+        assert!(e.contains("decide.* settings only"), "{e}");
+        assert!(parse(&["unassigned", "maybe"]).is_err());
+        assert!(parse(&["mode", "status_map"]).is_err());
+    }
+
+    #[test]
+    fn after_a_change_the_cli_says_what_else_a_call_needs() {
+        let on = after_setting("decide.jev.enabled", "true");
+        assert!(on.contains("fleet-hub decide mode"), "{on}");
+        assert!(
+            !on.contains("  "),
+            "no runs of spaces from a wrapped literal: {on}"
+        );
+        assert!(after_setting("decide.jev.enabled", "false").contains("every call is stopped"));
+        assert!(
+            after_setting("decide.jev.status_map", "shadow").contains("fleet-hub decide status")
+        );
     }
 
     const KEY: &str = "tsk_live_0123456789abcdefghijklmnop";

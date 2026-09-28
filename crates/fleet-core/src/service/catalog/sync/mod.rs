@@ -41,7 +41,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Which hosts / assets a plan covers. All three narrow; `None` everywhere
 /// means the whole fleet and the whole catalog.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlanArgs {
     pub host_alias: Option<String>,
     pub kind: Option<super::model::Kind>,
@@ -49,7 +49,7 @@ pub struct PlanArgs {
 }
 
 /// Apply a plan `plan_sync` computed and parked in the registry.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplyArgs {
     pub plan_id: String,
     /// Apply everything that is not blocked on a missing `${NAME}` secret

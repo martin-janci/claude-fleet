@@ -2032,7 +2032,8 @@ fn capture_default_cap_matches_docs() {
 /// the merged count is 81, 83 with the work graph's `work` / `work_link`,
 /// 84 with `work_admin`; hub federation adds `peer_exchange` and
 /// `list_peer_links`: 86; `get_settings` / `set_setting`: 88; `quick_replies`:
-/// 89; `rewind_conversation`: 90; `add_project` / `list_github_repos`: 92.)
+/// 89; `rewind_conversation`: 90; `add_project` / `list_github_repos`: 92;
+/// `catalog_admin`: 93.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -2053,7 +2054,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 92);
+    assert_eq!(served, 93);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3258,10 +3259,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// measured apart never cover the merged surface, so a merge that trips
     /// this re-measures. The why of each raise belongs in its commit
     /// message (`git log -L` on this constant), not here: a log in this
-    /// comment conflicted on every merge. Measured at 62,676 on 2026-09-28
-    /// (`new_session`'s `model` / `effort` over #359's `confirm_nonce` /
-    /// `new_worktree`).
-    const BUDGET_BYTES: usize = 62_776;
+    /// comment conflicted on every merge. Measured at 63,473 on 2026-09-28
+    /// (`catalog_admin` over `new_session`'s `model` / `effort`).
+    const BUDGET_BYTES: usize = 63_573;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

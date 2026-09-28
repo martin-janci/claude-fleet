@@ -97,7 +97,10 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 - **Client access** (`mcp/pairing.rs`, `mcp/events_route.rs`,
   `store/clients.rs`): a phone or browser pairs through a single-use code
   (`pair_client` → `POST /pair`) for a named, revocable client token
-  (`full`/`readonly`) that is never the master and never reaches fleet admin,
+  (`full`/`readonly`) that is never the master and never reaches fleet admin
+  — except the asset catalog, when the operator grants it per client
+  (`fleet-hub client grant <name> assets`, migration 074; the hub's
+  `catalog_admin` tool, `service/catalog/admin.rs`, reads the grant live) —
   and follows `GET /events` instead of polling. Hub-only; `fleet-hub
   pair|client` is the operator's side. See `docs/hub.md` → *Pair a phone*.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +

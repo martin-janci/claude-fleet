@@ -16,7 +16,7 @@ use crate::store::{
     AccountRow, AssetInventoryRow, HostRow, ProjectRow, SessionEvent, SessionRow, TaskRow,
     WorktreeRow,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -134,7 +134,7 @@ pub struct AssetInventoryClearedPayload {
     pub harness: String,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct CatalogSummary {
     pub head: String,
     pub loaded_at: i64,
