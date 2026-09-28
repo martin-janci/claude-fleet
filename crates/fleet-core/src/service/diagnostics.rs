@@ -20,6 +20,12 @@ use std::sync::Mutex;
 
 /// How many trailing log lines the bundle carries.
 pub const LOG_TAIL_LINES: usize = 200;
+/// How far back the bundle looks for warnings and errors. The tail above is
+/// often all INFO by the time someone copies the bundle, and the ERROR that
+/// started the trouble has scrolled out of it; this window brings it back.
+pub const LOG_SCAN_LINES: usize = 5_000;
+/// Most distinct warning/error lines listed from before the tail.
+pub const LOG_PROBLEM_LINES: usize = 40;
 
 /// Runtime state the store does not hold, gathered by the caller (the Tauri
 /// command) from managed state.
@@ -53,11 +59,116 @@ fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// `2026-09-28T10:00:00Z` — the same clock the log lines are stamped with,
+/// so a host's last ping can be lined up against the log by eye.
+fn utc(t: i64) -> String {
+    crate::service::trackers::format_timestamp(t)
+}
+
 fn age(at: Option<i64>, now: i64) -> String {
     match at {
-        Some(t) => format!("{t} ({}s ago)", (now - t).max(0)),
+        Some(t) => format!("{} ({}s ago)", utc(t), (now - t).max(0)),
         None => "never".into(),
     }
+}
+
+/// The level of a log line as the file layer writes it
+/// (`<timestamp> <LEVEL> <target>: <message>`), when it is a warning or an
+/// error. Anything else — a continuation line, a panic backtrace, INFO — is
+/// `None`.
+fn problem_level(line: &str) -> Option<&'static str> {
+    let mut words = line.split_whitespace();
+    let _timestamp = words.next()?;
+    match words.next()? {
+        "ERROR" => Some("ERROR"),
+        "WARN" => Some("WARN"),
+        _ => None,
+    }
+}
+
+/// A line without its leading timestamp: two occurrences of the same warning
+/// share it.
+fn without_timestamp(line: &str) -> &str {
+    let line = line.trim_start();
+    match line.find(char::is_whitespace) {
+        Some(i) => line[i..].trim_start(),
+        None => line,
+    }
+}
+
+/// The `== Earlier warnings and errors ==` section: every WARN / ERROR line
+/// in `earlier` (the scanned log before the tail), repeats folded into one
+/// line with a count, most recent last, capped at `LOG_PROBLEM_LINES`.
+/// `None` when there are none, so a quiet log adds nothing.
+///
+/// A flapping tunnel writes the same warning thousands of times; folding it
+/// is what lets the one ERROR that preceded it still fit.
+fn earlier_problems(earlier: &[String], tail: &[String]) -> Option<String> {
+    struct Seen<'a> {
+        first: &'a str,
+        last: &'a str,
+        count: usize,
+        order: usize,
+    }
+    let count = |lines: &[String], level: &str| {
+        lines
+            .iter()
+            .filter(|l| problem_level(l) == Some(level))
+            .count()
+    };
+    let mut seen: HashMap<&str, Seen<'_>> = HashMap::new();
+    for (order, line) in earlier.iter().enumerate() {
+        if problem_level(line).is_none() {
+            continue;
+        }
+        let e = seen.entry(without_timestamp(line)).or_insert(Seen {
+            first: line,
+            last: line,
+            count: 0,
+            order,
+        });
+        e.last = line;
+        e.count += 1;
+        e.order = order;
+    }
+    if seen.is_empty() {
+        return None;
+    }
+    let mut rows: Vec<Seen<'_>> = seen.into_values().collect();
+    rows.sort_by_key(|r| r.order);
+    let distinct = rows.len();
+    let shown = &rows[distinct.saturating_sub(LOG_PROBLEM_LINES)..];
+
+    let mut t = String::new();
+    let _ = writeln!(
+        t,
+        "== Earlier warnings and errors ({} before the tail; {} distinct, last {} shown) ==",
+        earlier.len(),
+        distinct,
+        shown.len()
+    );
+    let _ = writeln!(
+        t,
+        "before_tail: ERROR={} WARN={}",
+        count(earlier, "ERROR"),
+        count(earlier, "WARN")
+    );
+    let _ = writeln!(
+        t,
+        "in_tail: ERROR={} WARN={}",
+        count(tail, "ERROR"),
+        count(tail, "WARN")
+    );
+    for r in shown {
+        if r.count == 1 {
+            let _ = writeln!(t, "{}", r.last);
+        } else {
+            let since = r.first.split_whitespace().next().unwrap_or("?");
+            let _ = writeln!(t, "{} [x{} since {since}]", r.last, r.count);
+        }
+    }
+    let _ = writeln!(t);
+    Some(t)
 }
 
 fn tunnel_state(alias: &str, tunnels: &HashMap<String, TunnelHealth>) -> &'static str {
@@ -148,12 +259,14 @@ pub fn collect(
         .collect();
 
     let log_file = logging::current_log_file(inputs.log_dir);
-    let log_tail = logging::tail_lines(inputs.log_dir, LOG_TAIL_LINES);
+    // One read for both the tail and the wider scan for warnings.
+    let scanned = logging::tail_lines(inputs.log_dir, LOG_SCAN_LINES);
+    let (log_earlier, log_tail) = scanned.split_at(scanned.len().saturating_sub(LOG_TAIL_LINES));
 
     // ── 2. Render. `writeln!` into a String cannot fail. ──
     let mut t = String::new();
     let _ = writeln!(t, "claude-fleet diagnostics");
-    let _ = writeln!(t, "generated_at: {now} (unix seconds)");
+    let _ = writeln!(t, "generated_at: {} ({now} unix seconds)", utc(now));
     let _ = writeln!(t);
 
     let _ = writeln!(t, "== App ==");
@@ -268,8 +381,12 @@ pub fn collect(
     }
     let _ = writeln!(t);
 
+    if let Some(section) = earlier_problems(log_earlier, log_tail) {
+        t.push_str(&section);
+    }
+
     let _ = writeln!(t, "== Recent log (last {} lines) ==", log_tail.len());
-    for line in &log_tail {
+    for line in log_tail {
         let _ = writeln!(t, "{line}");
     }
 
@@ -472,5 +589,112 @@ mod tests {
             },
         )]);
         assert_eq!(tunnel_detail("ok", &h), None);
+    }
+
+    fn lines(v: &[&str]) -> Vec<String> {
+        v.iter().map(|l| l.to_string()).collect()
+    }
+
+    #[test]
+    fn problem_level_reads_the_file_layer_format() {
+        assert_eq!(
+            problem_level("2026-09-28T10:00:00.1Z ERROR fleet_core::ssh: boom"),
+            Some("ERROR")
+        );
+        assert_eq!(
+            problem_level("2026-09-28T10:00:00.1Z  WARN fleet_core::ssh: hm"),
+            Some("WARN")
+        );
+        assert_eq!(
+            problem_level("2026-09-28T10:00:00.1Z  INFO fleet_core: ERROR in text"),
+            None
+        );
+        assert_eq!(problem_level("    at src/main.rs:3"), None);
+        assert_eq!(problem_level(""), None);
+    }
+
+    #[test]
+    fn earlier_problems_folds_repeats_and_counts_the_tail() {
+        let earlier = lines(&[
+            "2026-09-28T10:00:00Z ERROR fleet_core::tunnel: bind failed",
+            "2026-09-28T10:00:01Z  WARN fleet_core::tunnel: retrying",
+            "2026-09-28T10:00:02Z  INFO fleet_core: fine",
+            "2026-09-28T10:00:03Z  WARN fleet_core::tunnel: retrying",
+            "2026-09-28T10:00:04Z  WARN fleet_core::tunnel: retrying",
+        ]);
+        let tail = lines(&["2026-09-28T10:05:00Z ERROR fleet_core::x: later"]);
+        let s = earlier_problems(&earlier, &tail).expect("has problems");
+        assert!(
+            s.contains("5 before the tail; 2 distinct, last 2 shown"),
+            "{s}"
+        );
+        assert!(s.contains("before_tail: ERROR=1 WARN=3"), "{s}");
+        assert!(s.contains("in_tail: ERROR=1 WARN=0"), "{s}");
+        assert!(
+            s.contains(
+                "2026-09-28T10:00:04Z  WARN fleet_core::tunnel: retrying \
+                 [x3 since 2026-09-28T10:00:01Z]"
+            ),
+            "{s}"
+        );
+        assert!(s.contains("ERROR fleet_core::tunnel: bind failed\n"), "{s}");
+        assert!(!s.contains("fine"), "{s}");
+        // Oldest first: the ERROR that started it precedes the retries.
+        assert!(s.find("bind failed") < s.find("retrying"), "{s}");
+    }
+
+    #[test]
+    fn earlier_problems_keeps_the_most_recent_when_capped() {
+        let earlier: Vec<String> = (0..LOG_PROBLEM_LINES + 5)
+            .map(|i| format!("2026-09-28T10:00:00Z  WARN t: distinct {i}"))
+            .collect();
+        let s = earlier_problems(&earlier, &[]).unwrap();
+        assert!(!s.contains("distinct 4\n"), "{s}");
+        assert!(s.contains("distinct 5\n"), "{s}");
+        assert!(s.contains(&format!("distinct {}\n", LOG_PROBLEM_LINES + 4)));
+    }
+
+    #[test]
+    fn a_quiet_log_adds_no_problems_section() {
+        let earlier = lines(&["2026-09-28T10:00:00Z  INFO t: ok"]);
+        assert_eq!(earlier_problems(&earlier, &[]), None);
+        assert_eq!(earlier_problems(&[], &[]), None);
+    }
+
+    #[test]
+    fn an_error_scrolled_out_of_the_tail_still_reaches_the_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let logs = logging::log_dir_in(tmp.path());
+        std::fs::create_dir_all(&logs).unwrap();
+        let mut text =
+            format!("2026-09-28T09:00:00Z ERROR fleet_core::ssh: master died, token {HOST_TOK}\n");
+        for i in 0..LOG_TAIL_LINES + 50 {
+            text.push_str(&format!(
+                "2026-09-28T09:10:00Z  INFO fleet_core: tick {i}\n"
+            ));
+        }
+        std::fs::write(logs.join("claude-fleet.2026-09-28-09.log"), text).unwrap();
+        let store = seeded_store();
+        let b = collect(&store, inputs(tmp.path(), &logs)).unwrap();
+        let problems = b
+            .text
+            .find("== Earlier warnings and errors")
+            .expect("section present");
+        let tail = b.text.find("== Recent log").unwrap();
+        assert!(problems < tail, "{}", b.text);
+        assert!(b.text.contains("master died"), "{}", b.text);
+        assert!(!b.text.contains(HOST_TOK), "the section is redacted too");
+        assert!(b
+            .text
+            .contains(&format!("== Recent log (last {LOG_TAIL_LINES} lines) ==")));
+    }
+
+    #[test]
+    fn timestamps_are_readable() {
+        assert_eq!(
+            age(Some(1_790_000_000), 1_790_000_060),
+            "2026-09-21T14:13:20Z (60s ago)"
+        );
+        assert_eq!(age(None, 0), "never");
     }
 }

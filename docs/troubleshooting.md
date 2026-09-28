@@ -355,10 +355,19 @@ plain text and contains:
 - every host: reachability, last probe time, tmux/claude versions,
   provisioned, tunnel state, token **mode**;
 - session counts by host and status;
+- the hub: standalone, hub client (hub URL, client name, whether the live
+  link is up and why not, the hub's wire-contract verdict) or a configured
+  hub this launch cannot use, with the reason;
+- SSH ControlMaster resets since launch, per host;
+- warnings and errors from the last 5,000 log lines that have scrolled out
+  of the tail, repeats folded into one line with a count;
 - the last 200 log lines.
 
-Tokens are never included. The master token and every per-host token are
-masked even when they show up in a log line or error message. Hostnames, SSH
+Times are UTC (`2026-09-28T10:00:00Z`), the clock the log lines use.
+
+Tokens are never included. The master token, every per-host token, tracker
+credentials and a hub client's own token are masked even when they show up
+in a log line or error message. Hostnames, SSH
 aliases and file paths **are** included, so read the bundle before you post
 it publicly.
 ### Repairing a session whose directory vanished
