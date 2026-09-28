@@ -1365,7 +1365,10 @@
         session is working on. Data is sent to TypeSafe only for organisations that opted in
         (Organisations), redacted, and never raw text is recorded. A model answer never grants a
         permission or runs a risky action: at most it pre-selects a suggestion you confirm.
-        The key is set on the machine with <code>fleet-hub decide set-key</code>.
+        The key is not set here: on this machine, with the app's data folder,
+        <code>fleet-hub decide set-key --data-dir DIR</code>, where DIR is
+        <code>~/Library/Application Support/sk.rlt.claude-fleet</code> on macOS and
+        <code>~/.local/share/claude-fleet</code> on Linux (see <code>docs/decisions.md</code>).
       </p>
       <label class="toggle">
         <input
@@ -1386,13 +1389,12 @@
           class="layout-select"
           id="decide-jev-work-link"
           value={$fleetSettings[SETTING_KEYS.decideJevWorkLink] ?? 'off'}
-          disabled={decideBusy}
+          disabled
           aria-describedby="decide-jev-work-link-desc"
-          data-testid="decide-jev-work-link"
-          onchange={(e) => void applyDecide(SETTING_KEYS.decideJevWorkLink, (e.currentTarget as HTMLSelectElement).value)}>
+          data-testid="decide-jev-work-link">
           {#each DECIDE_MODES as m (m)}<option value={m}>{m}</option>{/each}
         </select>
-        <span class="hook-desc" id="decide-jev-work-link-desc">choosing a ticket for a session no rule could link (shadow: record only; assist: suggest)</span>
+        <span class="hook-desc" id="decide-jev-work-link-desc" data-testid="decide-jev-work-link-desc">choosing a ticket for a session no rule could link — offline benchmark only until J1 passes its acceptance lines (<code>fleet-hub decide bench work-link</code>); no live path reads this yet</span>
       </div>
       <div class="mcp-field">
         <label class="lbl" for="decide-jev-status-map">status map</label>

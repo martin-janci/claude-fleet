@@ -31,7 +31,9 @@ and nothing is sent:
    (Settings → Organisations → *send to Jev*, or `fleet-hub org set <id>
    --jev on`); off by default. A session or item with no org follows
    `decide.jev.unassigned` (off by default).
-5. **A key is configured** (`no_key`): `fleet-hub decide set-key`.
+5. **A key is configured** (`no_key`): `fleet-hub decide set-key` (on a
+   standalone desktop, pointed at the app's data folder — see
+   [the key on a standalone desktop](#the-key-on-a-standalone-desktop)).
 6. **The circuit breaker is closed** (`breaker_open`): after
    `decide.jev.breaker_failures` failed calls in a row (timeouts, HTTP errors,
    rate limits) no call is made for `decide.jev.breaker_open_secs`; then one
@@ -277,6 +279,10 @@ On a standalone desktop they are in Settings → *Decisions (Jev)*. On a hub
 they are set over the API with `set_setting` (master token), like the
 `work.*` settings; a paired desktop shows them read-only there.
 
+`decide.jev.work_link` has no live path yet (decision D32: J1 is measured
+offline only, until it passes its acceptance lines), so Settings shows it
+read-only, with whatever value it holds; the benchmark does not need it.
+
 ## The command line (hub)
 
 ```bash
@@ -295,7 +301,8 @@ fleet-hub decide bench … --provider haiku --haiku-host ALIAS [--haiku-model ha
 ```
 
 The key is never an argument (shell history, `ps`). `set-key` and
-`clear-key` write the hub's database directly, like `fleet-hub tracker
+`clear-key` write the hub's database (`--data-dir`, else the hub's default)
+directly, like `fleet-hub tracker
 webhook`; the running hub reads the key at its next call. `status`,
 `runs` and `proposals` (the listing) open the database read-only (no running hub needed; `--db FILE`
 reads a desktop's `state.db`) and print ids, words and numbers only:
@@ -303,6 +310,31 @@ the flag, the modes, which orgs consented, whether a key is configured
 (never the key), the live breaker, today's tokens and cost (the live
 features', which the budget counts, and the benchmark's apart), and runs
 per feature, `live` or `bench`, provider, fallback and org.
+
+### The key on a standalone desktop
+
+A standalone desktop keeps its own `state.db`, and the app has no key field
+(the key is never typed into a window). Set it with the same `fleet-hub`
+binary, pointed at the **desktop's** data folder with `--data-dir` — the
+hub's default folder is a different one on purpose:
+
+| Platform | The desktop's data folder |
+|---|---|
+| macOS | `~/Library/Application Support/sk.rlt.claude-fleet` |
+| Linux | `~/.local/share/claude-fleet` |
+
+```bash
+fleet-hub decide set-key --data-dir ~/.local/share/claude-fleet         # the key on stdin
+fleet-hub decide set-key --data-dir ~/.local/share/claude-fleet --ref file:/path/to/jev-key
+fleet-hub decide status  --db ~/.local/share/claude-fleet/state.db     # read-only
+fleet-hub decide clear-key --data-dir ~/.local/share/claude-fleet
+```
+
+The desktop may keep running: the key is read at its next call. Prefer the
+key itself or a `file:` reference — an `env:NAME` reference is read by the
+desktop process, which (started from the Dock or a launcher) usually does
+not have your shell's variables. Everything else — the kill switch, modes,
+consent — is in Settings.
 
 ## Benchmarking work_link
 
