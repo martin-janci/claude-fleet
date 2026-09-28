@@ -500,6 +500,7 @@ fn routed_read_cases() -> Vec<Case> {
                     vec![fleet_core::service::quick_replies::QuickReply {
                         label: "Tests".into(),
                         text: "run the tests".into(),
+                        auto_send: None,
                     }],
                     s,
                 ))
@@ -2609,6 +2610,97 @@ fn an_unreachable_hub_makes_health_an_error_rather_than_a_zeroed_fleet() {
     assert!(!format!("{e:?}").contains("cl_s3cret-token"), "{e:?}");
 }
 
+/// A hub that never answers, and a flag for whether the call reached it.
+struct Hanging(std::sync::atomic::AtomicBool);
+
+#[async_trait::async_trait]
+impl remote::HubTransport for Hanging {
+    async fn post_json(
+        &self,
+        _url: &str,
+        _bearer: &str,
+        _body: String,
+    ) -> Result<remote::HubResponse, String> {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        std::future::pending().await
+    }
+}
+
+/// #352: Stop waiting on a hub client. The dialog cancels by `call_id`; the
+/// hub branch used to bind nothing under it, so the cancel was a no-op and
+/// the dialog stayed busy for the hub's whole deadline. Now the call comes
+/// back `E_CANCELLED`, says the hub may still finish (D3: no hub-side
+/// cancel), and carries the GitHub hedge for a `create_remote` run.
+#[test]
+fn stop_waiting_on_a_hub_client_abandons_add_project() {
+    use fleet_core::cancel::CancellationRegistry;
+    use fleet_core::service::add_project::{AddProjectArgs, AddProjectSource};
+    for (source, github) in [
+        (AddProjectSource::Clone { url: "o/r".into() }, false),
+        (
+            AddProjectSource::New {
+                owner: "o".into(),
+                repo: "r".into(),
+                create_remote: true,
+                confirm: Some("tok".into()),
+            },
+            true,
+        ),
+    ] {
+        let hub = Arc::new(Hanging(Default::default()));
+        let link = Arc::new(connection::HubConnectionStatus::remote(
+            Arc::new(Silent),
+            &cfg().token,
+        ));
+        link.report(connection::HubConnection::Connected);
+        let backend = FleetBackend::remote_over(cfg(), hub.clone())
+            .watching(link as Arc<dyn connection::ConnectionView>);
+        let (_dir, st) = store();
+        let reg = CancellationRegistry::new();
+        let ssh = ssh();
+        let e = block_on(async {
+            let call = commands::projects::routed::add_project(
+                &backend,
+                AddProjectArgs {
+                    host_alias: "trn".into(),
+                    source,
+                    call_id: Some(41),
+                },
+                &st,
+                &ssh,
+                &reg,
+            );
+            let stop = async {
+                while !hub.0.load(std::sync::atomic::Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+                reg.cancel(41);
+                std::future::pending::<()>().await
+            };
+            let r = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::select! {
+                    r = call => r,
+                    () = stop => unreachable!(),
+                }
+            })
+            .await
+            .expect("cancel_command(call_id) must end the wait for the hub");
+            match r {
+                Err(e) => e,
+                Ok(_) => panic!("a stopped wait must not look like a created project"),
+            }
+        });
+        assert_eq!(e.code, codes::E_CANCELLED, "{e:?}");
+        assert!(
+            e.message.contains("the hub may still finish"),
+            "{}",
+            e.message
+        );
+        assert!(e.message.contains("trn"), "{}", e.message);
+        assert_eq!(e.message.contains("GitHub"), github, "{}", e.message);
+    }
+}
+
 // ── 2. standalone mode still runs the local service call ────────────────────
 
 /// The store-backed reads answer from the store. This is the "standalone
@@ -2703,7 +2795,8 @@ fn standalone_work_links_are_decided_in_the_local_store() {
                 ..Default::default()
             },
             &st,
-        )),
+        ))
+        .map(|d| d.row),
         block_on(commands::work::routed::unlink_session_work(
             &local,
             commands::work::UnlinkSessionWorkArgs {

@@ -29,9 +29,11 @@
 //!   runs it at most once a day per tracker (sooner when its sections
 //!   change) and off the sync's path ([`StatusMapTrigger`]).
 //! * **Follow-up.** When a person's `settings.section_map` later holds a
-//!   section, its latest answered run is marked `confirmed` (same category)
-//!   or `corrected` (to theirs) — [`record_followups`], called where the
-//!   settings are updated.
+//!   section, its latest answered assist run — the one a person was shown —
+//!   is marked `confirmed` (same category) or `corrected` (to theirs) —
+//!   [`record_followups`], called where the settings are updated. A shadow
+//!   answer nobody saw is never marked. A proposal nobody decided before a newer one
+//!   for the same section arrived is marked `ignored`.
 //! * **Deciding one proposal** ([`decide_proposal`], by its run id):
 //!   *apply* (its category — `not_planned` applies as `done`), *apply as*
 //!   another category (a correction), both through `work_admin update`
@@ -377,12 +379,13 @@ pub async fn propose_for_tracker(ctx: &DecideCtx, tracker_id: i64) -> Result<Run
     report.mode = Some(mode);
     report.deferred = asks.len().saturating_sub(MAX_ASKS_PER_RUN);
     for ask in asks.into_iter().take(MAX_ASKS_PER_RUN) {
+        let subject = ask.subject;
         let out = decide(
             ctx,
             DecideRequest {
                 feature: Feature::StatusMap,
                 subject_kind: SUBJECT_KIND.into(),
-                subject_id: ask.subject,
+                subject_id: subject.clone(),
                 org_id: row.org_id,
                 request: ask.request,
                 baseline: Some(ask.baseline),
@@ -394,6 +397,26 @@ pub async fn propose_for_tracker(ctx: &DecideCtx, tracker_id: i64) -> Result<Run
         report.asked += 1;
         if out.usable().is_some() {
             report.usable += 1;
+        }
+        // A new proposal takes the place of an older one nobody decided:
+        // that one is `ignored` (the view only ever offers the latest).
+        if let (Some(_), Some(id)) = (out.proposal(), out.run_id) {
+            if let Ok(s) = lock(&ctx.store) {
+                if let Err(e) = s.supersede_decision_runs(
+                    Feature::StatusMap.as_str(),
+                    SUBJECT_KIND,
+                    &subject,
+                    Mode::Assist.as_str(),
+                    id,
+                    now,
+                ) {
+                    tracing::warn!(
+                        tracker_id,
+                        "[decide] ignored follow-up not recorded: {}",
+                        e.message
+                    );
+                }
+            }
         }
         if let Some(f) = out.fallback.filter(|f| stops_the_run(*f)) {
             report.stopped = Some(f);
@@ -422,9 +445,14 @@ fn answered(r: &DecisionRunRow) -> bool {
 }
 
 /// After a person's `settings.section_map` changed on `row`: mark the latest
-/// answered run of every section their map now holds `confirmed` (the
-/// answer applies as their category) or `corrected` (to theirs), once.
+/// answered ASSIST run of every section their map now holds `confirmed`
+/// (the answer applies as their category) or `corrected` (to theirs), once.
 /// Returns the runs marked. Never writes a tracker.
+///
+/// A shadow answer is never marked: nobody saw it, so a person's map
+/// neither confirmed nor corrected it, and a follow-up is a person's
+/// response to what they were shown (D34: person counts come from person
+/// decisions only; D37). The shadow comparison is the run's baseline.
 pub fn record_followups(s: &Store, row: &TrackerRow, now: i64) -> Result<usize, IpcError> {
     if row.provider != PROVIDER || row.settings.section_map.is_empty() {
         return Ok(0);
@@ -439,7 +467,9 @@ pub fn record_followups(s: &Store, row: &TrackerRow, now: i64) -> Result<usize, 
         return Ok(0);
     }
     let latest = latest_per_subject(&runs, |r| {
-        answered(r) && r.answer.as_deref().and_then(applied_category).is_some()
+        r.mode == Mode::Assist.as_str()
+            && answered(r)
+            && r.answer.as_deref().and_then(applied_category).is_some()
     });
     let fp_key = s.decision_fp_key()?;
     let mut marked = 0;
@@ -974,9 +1004,6 @@ pub fn pending_proposal(s: &Store, run_id: i64) -> Result<PendingProposal, IpcEr
             "{section:?} is already in your section map as {c}"
         )));
     }
-    if let Some(f) = &run.followup {
-        return Err(conflict(format!("run {run_id} is already {f}")));
-    }
     let runs = s.decision_runs_for_subjects(
         Feature::StatusMap.as_str(),
         SUBJECT_KIND,
@@ -993,6 +1020,11 @@ pub fn pending_proposal(s: &Store, run_id: i64) -> Result<PendingProposal, IpcEr
                 newer.id
             )));
         }
+    }
+    // After the latest-check: a proposal a newer one superseded (`ignored`)
+    // is refused as not the latest, which names the one to decide.
+    if let Some(f) = &run.followup {
+        return Err(conflict(format!("run {run_id} is already {f}")));
     }
     if was_rejected(&runs, &run) {
         return Err(conflict(format!(
@@ -1037,7 +1069,7 @@ pub struct ProposalOutcome {
 /// After an apply went through `work_admin update` (whose
 /// [`record_followups`] marks the latest answered run of the section):
 /// make sure run `p` carries its follow-up — `record_followups` leaves an
-/// `unsure` answer alone, and a newer shadow answer would take its mark.
+/// `unsure` answer alone.
 /// Returns the outcome as the record now reads.
 pub fn record_applied(
     s: &Store,
@@ -1092,22 +1124,23 @@ pub fn decide_proposal(
     action: &ProposalAction,
     now: i64,
 ) -> Result<ProposalOutcome, IpcError> {
+    let s = lock(store)?;
     if *action == ProposalAction::Reject {
-        return reject_proposal(&*lock(store)?, run_id, now);
+        return reject_proposal(&s, run_id, now);
     }
-    let (p, category) = {
-        let s = lock(store)?;
-        let p = pending_proposal(&s, run_id)?;
-        let category = p
-            .category(action)?
-            .ok_or_else(|| invalid("an apply needs a category"))?;
-        (p, category)
-    };
+    // One lock from the read to the write: the settings the apply merges
+    // into are the tracker's as it is now, so a settings change made
+    // meanwhile (another section, a sprint field) is never overwritten by
+    // a stale copy, and the proposal cannot be decided twice.
+    let p = pending_proposal(&s, run_id)?;
+    let category = p
+        .category(action)?
+        .ok_or_else(|| invalid("an apply needs a category"))?;
     let args: crate::service::trackers::admin::WorkAdminArgs =
         serde_json::from_value(apply_one_args(&p.tracker, &p.section, &category))
             .map_err(|e| IpcError::new(crate::ipc_error::codes::E_SERIALIZE, e.to_string()))?;
-    crate::service::trackers::admin::admin_sync(&args, store)?;
-    record_applied(&*lock(store)?, &p, action, &category, now)
+    crate::service::trackers::admin::update_locked(&args, &s)?;
+    record_applied(&s, &p, action, &category, now)
 }
 
 /// The sync tick's hook: after a pass, the Asana trackers that synced
@@ -1120,11 +1153,13 @@ pub struct StatusMapTrigger {
     running: Arc<AtomicBool>,
 }
 
-/// PURE: a digest of what a run reads from a tracker's row.
-fn sections_digest(row: &TrackerRow) -> u64 {
+/// PURE: a digest of what a run reads from a tracker's row, and its org's
+/// consent (D36): a run the gate refused is due again once the org says yes.
+fn sections_digest(row: &TrackerRow, org_consents: bool) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     row.org_id.hash(&mut h);
+    org_consents.hash(&mut h);
     row.config.unmapped_sections.hash(&mut h);
     row.config.project_sections.hash(&mut h);
     row.config.section_map.hash(&mut h);
@@ -1157,7 +1192,13 @@ impl StatusMapTrigger {
         passes: &[TrackerPass],
     ) -> Option<tokio::task::JoinHandle<()>> {
         let now = self.ctx.now();
-        let due_ids: Vec<i64> = {
+        // Single-flight FIRST: a pass that finds a run going marks nothing,
+        // so the trackers it found due are still due on the next pass
+        // instead of recorded as asked for a day.
+        if self.running.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        let due_ids: Vec<i64> = (|| {
             let s = lock(&self.ctx.store).ok()?;
             if !settings::get_bool(&s, settings::DECIDE_JEV_ENABLED)
                 || FeatureMode::of(&s, Feature::StatusMap) == FeatureMode::Off
@@ -1173,15 +1214,21 @@ impl StatusMapTrigger {
                 if row.provider != PROVIDER {
                     continue;
                 }
-                let digest = sections_digest(&row);
+                let consents = row
+                    .org_id
+                    .and_then(|o| s.get_org(o).ok().flatten())
+                    .is_some_and(|o| o.jev_allowed);
+                let digest = sections_digest(&row, consents);
                 if due(last.get(&row.id).copied(), now, digest) {
                     ids.push(row.id);
                     last.insert(row.id, (now, digest));
                 }
             }
-            ids
-        };
-        if due_ids.is_empty() || self.running.swap(true, Ordering::AcqRel) {
+            Some(ids)
+        })()
+        .unwrap_or_default();
+        if due_ids.is_empty() {
+            self.running.store(false, Ordering::Release);
             return None;
         }
         let ctx = self.ctx.clone();
@@ -1193,8 +1240,11 @@ impl StatusMapTrigger {
                 self.0.store(false, Ordering::Release);
             }
         }
+        // Built before the spawn: a task dropped before its first poll (a
+        // runtime shutting down) still releases the flag.
+        let reset = Reset(running);
         Some(crate::rt::spawn(async move {
-            let _reset = Reset(running);
+            let _reset = reset;
             for id in due_ids {
                 match propose_for_tracker(&ctx, id).await {
                     Ok(r) => tracing::debug!(

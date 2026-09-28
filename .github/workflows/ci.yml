@@ -129,7 +129,25 @@ jobs:
           node-version: '20'
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
-      - run: pnpm tauri build --debug --bundles nsis
+      # Microsoft's ConPTY beside the exe, as the release ships it
+      # (scripts/fetch-conpty.sh says why), and proof that it landed there.
+      - run: bash scripts/fetch-conpty.sh
+        shell: bash
+      - run: pnpm tauri build --debug --bundles nsis --config src-tauri/tauri.conpty.conf.json
+      - name: ConPTY sits next to the exe
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in claude-fleet.exe conpty.dll OpenConsole.exe licenses/ConPTY-LICENSE.txt; do
+            test -s "target/debug/$f" || { echo "::error::target/debug/$f missing"; exit 1; }
+          done
+          # ...and in the installer itself, which is what users get: files
+          # in target/ prove the copy, not the NSIS payload. 7-Zip reads NSIS.
+          setup=$(ls target/debug/bundle/nsis/*-setup.exe)
+          listing=$(7z l "$setup")
+          for f in conpty.dll OpenConsole.exe ConPTY-LICENSE.txt; do
+            grep -q "$f" <<<"$listing" || { echo "::error::$f missing from $setup"; exit 1; }
+          done
 
   # The regression guard for the crate split: fleet-hub must build on a box
   # with none of the Tauri system libraries. If this job fails with a

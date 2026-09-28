@@ -675,7 +675,7 @@ mod tests {
         assert!(s.list_client_tokens(true).unwrap()[0].trusted_at.is_some());
     }
 
-    /// The assets grant (migration 072): only a live, `full`, unbound client
+    /// The assets grant (migration 074): only a live, `full`, unbound client
     /// can hold it, `client_is_assets_admin` reads it live, and a revoke
     /// ends it whatever the column still says.
     #[test]

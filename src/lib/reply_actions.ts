@@ -1,4 +1,4 @@
-import { isQuietStatus, sessionActivity, type ActivityProbe, type ConvTurn } from './conversation';
+import { sessionActivity, type ActivityProbe, type ConvTurn } from './conversation';
 import type { Result } from './result';
 
 /** Which of the five reply actions this turn offers, and with what anchor. */
@@ -15,6 +15,12 @@ export interface ReplyActionsView {
    * user approved a re-send.
    */
   canRetry: boolean;
+  /**
+   * Why Retry is NOT offered on a turn that could otherwise be rewound, or
+   * `null`. The row shows Retry disabled with this as its tooltip rather than
+   * dropping it silently: the prompt on screen is not what would be re-sent.
+   */
+  retryUnavailable: string | null;
   /** Keep strictly before this; `null` keeps the whole transcript. */
   forkAnchor: string | null;
   rewindAnchor: string | null;
@@ -37,6 +43,7 @@ export function replyActionsFor(
     canFork: false,
     canRewind: false,
     canRetry: false,
+    retryUnavailable: null,
     forkAnchor: null,
     rewindAnchor: null,
   };
@@ -59,13 +66,34 @@ export function replyActionsFor(
   const isConversationStart = index === 0 && !truncated;
   const canRewind = own !== null && !isConversationStart;
 
+  const retryUnavailable = !canRewind ? null : retryBlockedReason(turns[index]);
+
   return {
     canFork: true,
     canRewind,
-    canRetry: canRewind && (turns[index]?.prompt ?? null) !== null,
+    canRetry: canRewind && retryUnavailable === null,
+    retryUnavailable,
     forkAnchor,
     rewindAnchor: canRewind ? own : null,
   };
+}
+
+/**
+ * Why this turn's prompt cannot be re-sent as "the same prompt", or `null`
+ * when it can. `prompt` is only the prompt's text: an image-only prompt has
+ * none, a prompt with an image lost the image, and a prompt too long for the
+ * read budget lost its tail (`prompt_partial`, set by `transcript.rs`).
+ * Sending any of those would send something other than what the user asked
+ * to retry.
+ */
+export function retryBlockedReason(turn: ConvTurn | undefined): string | null {
+  if (!turn || turn.prompt === null) {
+    return 'Retry is unavailable: this prompt had no text to send again (an image only). Rewind puts the conversation back; attach the image again yourself.';
+  }
+  if (turn.prompt_partial) {
+    return 'Retry is unavailable: the prompt shown is not the whole prompt (it was cut to fit, or held an image). Rewind here, then send it yourself.';
+  }
+  return null;
 }
 
 /**
@@ -81,13 +109,24 @@ export const RETRY_READY_TIMEOUT_MS = 30_000;
 export const RETRY_READY_POLL_MS = 750;
 
 /**
- * Poll a session until its REPL is quiet, BOUNDED. `true` means it answered
- * quiet within the bound; `false` means it did not, and the caller must NOT
- * send — the prompt goes back into the composer with an error instead, so it
- * is never silently lost.
+ * Poll a session until its REPL is back at its input prompt, BOUNDED. `true`
+ * means it answered ready within the bound; `false` means it did not, and the
+ * caller must NOT send — the prompt goes back into the composer with an
+ * error instead, so it is never silently lost.
+ *
+ * "Ready" is stricter than `isQuietStatus`, because the pane was respawned
+ * moments ago and the probe reads a capture that includes scrollback: a
+ * reading can still be the OLD REPL's footer, or a blank pane that node has
+ * not drawn into yet. So readiness is `idle` — the REPL's own input chrome,
+ * the one status `pane_intel` derives from the prompt being on screen; the
+ * other quiet values (`completed` / `stopped` / `failed`) mean Claude is not
+ * taking input at all — with no dialog and no spinner, on TWO consecutive
+ * probes. One stale frame cannot pass that; a REPL that really is up passes
+ * it one poll later.
  *
  * A probe that cannot answer (a refused read, a hub too old) is not evidence
- * of readiness, so it counts as "not yet" and the bound still applies.
+ * of readiness, so it counts as "not yet" and resets the streak; the bound
+ * still applies.
  *
  * The dependencies are injected so this is testable without timers.
  */
@@ -104,12 +143,23 @@ export async function waitForReplQuiet(
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const timeoutMs = deps.timeoutMs ?? RETRY_READY_TIMEOUT_MS;
   const pollMs = deps.pollMs ?? RETRY_READY_POLL_MS;
+  let streak = 0;
   for (let waited = 0; ; waited += pollMs) {
     await sleep(pollMs);
     const r = await probe(sessionId);
-    if (r.ok && isQuietStatus(r.value.claude_status)) return true;
+    streak = r.ok && isReplReady(r.value) ? streak + 1 : 0;
+    if (streak >= READY_STREAK) return true;
     if (waited + pollMs >= timeoutMs) return false;
   }
+}
+
+/** Consecutive ready probes `waitForReplQuiet` needs. */
+export const READY_STREAK = 2;
+
+/** One probe showing the REPL at its input prompt: `idle`, nothing on
+ *  screen asking a question, nothing generating. */
+export function isReplReady(p: ActivityProbe): boolean {
+  return p.claude_status === 'idle' && !p.pending_input && !p.spinner;
 }
 
 /** A reply as a Markdown block quote, ready to precede the user's own words. */

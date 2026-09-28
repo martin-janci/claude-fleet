@@ -695,6 +695,7 @@ mod tests {
             turn_seq: 0,
             last_stop_at: None,
             stale_working_at: None,
+            work_rev: 0,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
@@ -904,6 +905,9 @@ mod tests {
         let id = store
             .upsert_session("t", "alpha", None, None, 1, 1, "running", None)
             .unwrap();
+        // One clock read: a UTC midnight between seeding and asserting
+        // must not move the expected day.
+        let now = now_unix();
         store
             .apply_usage(
                 id,
@@ -920,8 +924,9 @@ mod tests {
                     source: "x.jsonl".into(),
                     last_msg_id: None,
                     last_msg_usage: None,
-                    now: now_unix(),
+                    now,
                     by_day: Vec::new(),
+                    backfill_until: None,
                 },
             )
             .unwrap();
@@ -931,7 +936,7 @@ mod tests {
         assert_eq!(h.usage_by_day[0].totals.input_tokens, 7);
         assert_eq!(
             h.usage_by_day[0].day,
-            usage::day_string(now_unix().div_euclid(86_400))
+            usage::day_string(now.div_euclid(86_400))
         );
         let v = serde_json::to_value(&h).unwrap();
         assert_eq!(v["usage_by_day"][0]["cost_micros"], 35);

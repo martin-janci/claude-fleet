@@ -846,6 +846,16 @@ fn apply_session_start_hook(
             }
             return Ok(());
         }
+        // A genuine start (a restart, a rewind, a recreate, `/clear`) ends
+        // whatever the last turn left: a StopFailure's `failed` and the
+        // tick's stale-working stamp would otherwise outlive the process
+        // that earned them, until someone prompts it. (A SessionStart that
+        // loses the race to its own first prompt finds `working` and a
+        // cleared stamp: nothing to undo.)
+        // A stale id is the row's own earlier conversation, not a new start.
+        if binding != Binding::Stale {
+            s.clear_ended_turn_state(row.id)?;
+        }
         if binding == Binding::Current {
             // A turn already began on this conversation (its
             // UserPromptSubmit won the race and rebound the row): turns and
@@ -1083,8 +1093,9 @@ fn apply_stop_hook(
 /// even begins. A new id rebinds the row first (this covers hosts where the
 /// SessionStart hook is missing, and a SessionStart still in flight): source
 /// `clear` / `resume` after the matching SessionEnd, else `unknown`. The
-/// prompt's first 200 chars become the conversation's `first_prompt` (never
-/// logged).
+/// first 200 chars of the first prompt a person typed become the
+/// conversation's `first_prompt` (never logged); what Claude Code submits
+/// itself is skipped (`prompt_origin`).
 fn apply_prompt_submit_hook(
     store: &Arc<Mutex<Store>>,
     payload: &HookPayload,
@@ -1107,14 +1118,23 @@ fn apply_prompt_submit_hook(
             Binding::Rebound => {}
         }
         // Fleet's own prompts (a peer's wake nudge, the safe-kill
-        // instructions, an inbox delivery, a typed start prompt) come back
-        // through this hook like a person's; the same guard detection uses
-        // tells them apart, so they never count as a touch (work graph M7).
+        // instructions, an inbox delivery, a typed start prompt) and Claude
+        // Code's (a task notification) come back through this hook like a
+        // person's; the same guard detection uses tells them apart, so they
+        // never count as a touch (work graph M7).
         let touch = payload.prompt.as_deref().is_none_or(|p| {
             crate::service::work::detect::loop_guard(p, row.last_prompt.as_deref(), &[]).is_none()
         });
         s.record_prompt_submit_hook_for_row_with(row.id, touch)?;
-        if let Some(p) = payload.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
+        // What Claude Code submits itself (a `<task-notification>`, a slash
+        // command's echo) is neither the first prompt nor evidence: the
+        // person's next prompt becomes the first. Harness blocks ahead of a
+        // person's text are taken off it.
+        if let Some(p) = payload
+            .prompt
+            .as_deref()
+            .and_then(crate::service::prompt_origin::human_part)
+        {
             let first = s
                 .get_conversation(row.id, session_id)?
                 .is_none_or(|c| c.first_prompt.is_none());
@@ -1850,6 +1870,62 @@ mod tests {
                 .any(|x| x.row.id == id && x.last_touch_at.is_some()),
             "a person's prompt touches"
         );
+    }
+
+    #[test]
+    fn a_prompt_claude_code_submits_itself_is_not_the_first_nor_a_touch() {
+        let store = make_store();
+        let id = {
+            let s = store.lock().unwrap();
+            s.upsert_host("hostb").unwrap();
+            let id = s
+                .upsert_session("sess", "hostb", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, "uuid-b").unwrap();
+            s.rebind_conversation(id, "uuid-b", StartSource::Startup, None, None)
+                .unwrap();
+            id
+        };
+        let first = |store: &Arc<Mutex<Store>>| {
+            let s = store.lock().unwrap();
+            s.get_conversation(id, "uuid-b")
+                .unwrap()
+                .unwrap()
+                .first_prompt
+        };
+        // A background agent finishing, before the person typed anything.
+        let mut notification = make_payload("UserPromptSubmit", "uuid-b");
+        notification.prompt = Some(
+            "<task-notification>\n<task-type>artifact-watch-lifecycle</task-type>\n\
+             <summary>Stopped watching Artifact \"Notes\"</summary>\n</task-notification>"
+                .into(),
+        );
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &notification,
+            &ctx(&Caller::master(), None),
+        )
+        .unwrap();
+        assert_eq!(first(&store), None);
+        {
+            let s = store.lock().unwrap();
+            let row = s.get_session_by_id(id).unwrap().unwrap();
+            assert_eq!(row.claude_status.as_deref(), Some("working"));
+            assert!(
+                s.tidy_sessions()
+                    .unwrap()
+                    .iter()
+                    .all(|x| x.row.id != id || x.last_touch_at.is_none()),
+                "Claude Code's own prompt is nobody's touch"
+            );
+        }
+        // The person's first prompt is the first; its harness head is off.
+        let mut person = make_payload("UserPromptSubmit", "uuid-b");
+        person.prompt =
+            Some("<system-reminder>Plan mode.</system-reminder>\n  fix the signup page".into());
+        apply_hook(&store, &make_ssh(), &person, &ctx(&Caller::master(), None)).unwrap();
+        assert_eq!(first(&store).as_deref(), Some("fix the signup page"));
     }
 
     #[test]
@@ -2700,6 +2776,35 @@ mod tests {
         );
         apply_hook(&store, &make_ssh(), &make_payload("Stop", "uuid-1"), &c).unwrap();
         assert_eq!(status_of(&store, id).claude_status.as_deref(), Some("idle"));
+    }
+
+    /// A restart, a rewind or a recreate starts a new Claude process: its
+    /// SessionStart ends the failed turn and the stale stamp the old process
+    /// left, instead of the row reading `stop_failed` until someone prompts.
+    #[test]
+    fn a_session_start_ends_the_last_processes_failed_turn() {
+        let store = make_store();
+        let id = hooked(&store);
+        let master = Caller::master();
+        let c = ctx(&master, None);
+        let mut p = make_payload("StopFailure", "uuid-1");
+        p.error = Some("rate_limit".into());
+        apply_hook(&store, &make_ssh(), &p, &c).unwrap();
+        store
+            .lock()
+            .unwrap()
+            .conn_for_test()
+            .execute(
+                "UPDATE sessions SET stale_working_at = 1 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        let mut start = make_payload("SessionStart", "uuid-1");
+        start.source = Some("resume".into());
+        apply_hook(&store, &make_ssh(), &start, &c).unwrap();
+        let row = status_of(&store, id);
+        assert_eq!(row.claude_status.as_deref(), Some("idle"));
+        assert_eq!(row.stale_working_at, None);
     }
 
     /// F10 (the two-writer gap): the hooks set status without recording

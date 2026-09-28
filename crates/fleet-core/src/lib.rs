@@ -23,6 +23,7 @@ pub mod mcp;
 pub mod net;
 #[cfg(test)]
 mod no_eprintln_tests;
+pub mod proc;
 pub mod projects;
 pub mod repo_url;
 pub mod rt;
@@ -37,3 +38,4 @@ pub mod store;
 pub mod tmux;
 pub mod validate;
 pub mod wire_contract;
+pub mod wsl;

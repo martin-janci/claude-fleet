@@ -164,12 +164,15 @@ impl OrgScope {
     /// of it for a session outside the scope's orgs, else a link (primary or
     /// suggestion) whose own org is outside. `work_rejected` — bare keys
     /// with no org of their own, which only the sidebar's fallback
-    /// recognition reads — never reaches a per-host token.
+    /// recognition reads — and `work_rev` (a digest over every link) never
+    /// reach a scoped caller.
     pub fn redact_row(&self, row: &mut SessionRow) {
         if self.is_all() {
             return;
         }
         row.work_rejected.clear();
+        // Another org's hidden link would move it (M14).
+        row.work_rev = 0;
         if !self.sees_org(row.org_id) {
             row.work = None;
             row.work_suggested = None;
@@ -212,6 +215,7 @@ impl OrgScope {
                     && WORK_FIELDS.iter().any(|k| map.contains_key(*k));
                 if is_row {
                     map.remove("work_rejected");
+                    map.remove("work_rev");
                     let org = session_org(map);
                     if !self.sees_org(org) {
                         for k in WORK_FIELDS {
@@ -242,7 +246,7 @@ impl OrgScope {
 }
 
 /// The `SessionRow` fields that are work data.
-pub const WORK_FIELDS: &[&str] = &["work", "work_suggested", "work_rejected"];
+pub const WORK_FIELDS: &[&str] = &["work", "work_suggested", "work_rejected", "work_rev"];
 
 /// What an id outside the scope answers: the words an unknown id gets.
 pub fn not_found(what: &str, id: i64) -> IpcError {
@@ -470,7 +474,8 @@ pub fn scopes(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<ScopeEntry>,
         .into_iter()
         .filter(|r| r.status != "ghost" && scope.sees_row(r) && scope.sees_org(r.org_id))
         .collect();
-    let needs = |r: &SessionRow| crate::service::attention::needs_attention(r).is_some();
+    let red = crate::service::health::context_red_pct(&s);
+    let needs = |r: &SessionRow| crate::service::attention::needs_attention_with(r, red).is_some();
     let mut out = Vec::new();
     for o in orgs.iter().filter(|o| scope.sees_org(Some(o.id))) {
         let mine: Vec<&SessionRow> = rows.iter().filter(|r| r.org_id == Some(o.id)).collect();

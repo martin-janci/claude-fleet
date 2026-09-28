@@ -93,6 +93,16 @@
 //!   neither: the sidebar's "Add project" would be enabled and every attempt
 //!   would fail with an unknown-tool error. `GithubRepo` also joins the
 //!   report types the desktop deserialises.
+//!
+//!   `rewind_conversation` (reply actions: Rewind here, Fork here, Retry)
+//!   belongs here too. v0.3.3 shipped it as a routed hub tool while still
+//!   on revision 4, so a revision-4 hub may or may not serve it — the same
+//!   skew revision 5 exists to refuse; from 5 on every hub serves it.
+//!
+//!   Its `new_worktree` parameter later became functional (a fork into a
+//!   new worktree) with no bump: a hub before that refuses it with
+//!   `E_UNSUPPORTED` — a clear refusal, never a silent different action —
+//!   and the Fork sheet reads that code as "update the hub".
 //! - **6** — *a brand-new tool the desktop routes to.* `catalog_admin`: the
 //!   desktop's asset-catalog commands (config, authoring, commit / push,
 //!   lint, Sync, secrets, layers) route to it instead of refusing as

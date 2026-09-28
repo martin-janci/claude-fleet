@@ -843,21 +843,6 @@ mod tests {
         std::fs::metadata(p).unwrap().permissions().mode() & 0o777
     }
 
-    /// `true` when this test process is root — permission-denial tests are
-    /// meaningless there (uid 0 reads/writes anything regardless of mode
-    /// bits), so those assertions are skipped, loudly, rather than silently
-    /// passing for the wrong reason.
-    #[cfg(unix)]
-    fn is_root() -> bool {
-        std::process::Command::new("id")
-            .arg("-u")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim() == "0")
-            .unwrap_or(false)
-    }
-
     #[cfg(unix)]
     #[test]
     fn session_state_is_listed_packed_staged_and_merged() {
@@ -1052,8 +1037,9 @@ mod tests {
         if !require(&["bash", "tar"]) {
             return;
         }
-        if is_root() {
-            eprintln!("skipping: uid 0 can read anything regardless of mode 000");
+        if crate::service::move_session::carry::tests::skip_as_root(
+            "uid 0 can read anything regardless of mode 000",
+        ) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -1371,8 +1357,9 @@ with tarfile.open(out, "w:gz") as tar:
         if !require(&["bash", "tar", "python3"]) {
             return;
         }
-        if is_root() {
-            eprintln!("skipping: uid 0 can traverse a mode-000 directory anyway");
+        if crate::service::move_session::carry::tests::skip_as_root(
+            "uid 0 can traverse a mode-000 directory anyway",
+        ) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();
@@ -1792,8 +1779,9 @@ with tarfile.open(out, "w:gz") as tar:
         if !require(&["bash"]) {
             return;
         }
-        if is_root() {
-            eprintln!("skipping: chmod 000 has no effect on root");
+        if crate::service::move_session::carry::tests::skip_as_root(
+            "chmod 000 has no effect on root",
+        ) {
             return;
         }
         let tmp = tempfile::tempdir().unwrap();

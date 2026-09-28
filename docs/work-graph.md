@@ -55,16 +55,21 @@ what its conversations did: the first prompt, the last turns, Claude
 Code's own compaction summary and the outcome (branch, head, PR, diff
 stat). That is what makes old work resumable weeks later.
 
-In the sidebar, **View ▾ → Work** (⧉ by work) groups sessions by their
+In the sidebar, **⋯ → Group by → Work** groups sessions by their
 primary work. Work groups come first; sessions with no work stay under
 their project. Each group's header rolls up the PR / CI state of its
 sessions, and ended sessions show in a collapsed **Done · n** section of
-the group. The **⚑ work** pill in the triage row opens filter chips:
-tracker (with two or more trackers), status, *mine*, *hide archived*, and
-in work mode *any / with session / past only*.
+the group. The **Filters** panel has a *Work* group: tracker (with two
+or more trackers), status, the tracker's own column names, *Assigned to
+me*, and in work mode *Session: Any / Active session / Past only*;
+*Include → Archived work* shows or hides archived sessions and past
+work. Archived work is hidden by default: the end of the list says *N
+archived hidden* with *Show archived*, and *Session: Past only* shows it
+regardless. Each filter that is on shows as a chip under the search, with a ×
+and *Clear all*; an empty list names the filters that hide it.
 
 > **[Screenshot placeholder]** The sidebar grouped by work, with a Done
-> section open and the ⚑ work filter chips showing.
+> section open and the Filters panel's Work group showing.
 
 ## The Work view
 
@@ -96,12 +101,19 @@ Sections load page by page (*Load more*), so a fleet with thousands of
 tickets stays quick; expanded sections and the last selection are kept per
 view.
 
-**Filters and saved views.** Organisation, tracker (or *local* / *bare
-keys*), status (open, to do, in progress, done), *mine*, *with an active
-session*, *only past sessions*, *no session*, *suggested*, *to review*, and
-a search. **Views ▾** saves the current filters under a name (Save as…,
-Update, Delete); saved views live on the hub, so the phone has the same
-ones.
+**Filters and saved views.** A search, the *Assigned to me* and *To
+review* toggles, and a **Filters** panel laid out like the Sessions
+list's: Organisation, Tracker (or *Local work* / *Bare keys*), Status
+(Open, To do, In progress, Done) and Sessions (Active session, Past only,
+No session, Suggested). Each filter that is on shows as a chip with a ×
+and *Clear all*, and "No tasks match" names them. The view select saves
+the current filters under a name (Save as…, Update, Delete); saved views
+live on the hub, so the phone has the same ones. The Sessions list's own
+filters (hosts, recency, org scope) do not apply here and step aside.
+Archived tasks (done, or every session archived, with nothing running)
+are hidden by default; the end of the tree says how many, with *Show
+archived*, and the panel has an *Archived tasks* switch. *Status: Done*
+shows done tasks regardless. ⌘⇧O cycles the Work view's organisation.
 
 **A task's detail** (select it) shows the tracker's data, where its org and
 its group come from, the repositories it ran in, every session with its
@@ -176,7 +188,14 @@ including tasks with no session at all — as reads of the `work` tool
   count under the filters), and the orgs and trackers the caller sees.
   Filters: `org` (an id or `"none"`), `tracker` (an id, `"local"` or
   `"ref"`), `status`, `mine`, `has` (`active` / `past_only` / `none` /
-  `suggested`), `review`, `query`, `group`. Pages are a keyset: pass
+  `suggested`), `review`, `query`, `group`, `archived`. A task is
+  *archived* when it has no active session and is done, or every one of
+  its links (at least one of them past) is archived; the tree hides
+  archived tasks unless `archived: true` (or `status: "done"`) asks for
+  them, and `archived_hidden` says how many passed every other filter but
+  were hidden that way (over the whole result, not the page). Each task
+  carries `archived`; `task` / `session_tasks` / `review` answer archived
+  tasks as any other. Pages are a keyset: pass
   `next_cursor` back with the same filters (other filters refuse it). No
   task is repeated across pages while the fleet changes; a task that moved
   meanwhile may be skipped until the next full read.
@@ -507,6 +526,35 @@ once in a browser), `rate_limited` and `unreachable` (both retry on their
 own). See [troubleshooting.md](troubleshooting.md#work-and-trackers) when a
 sync fails.
 
+### Reading a ticket's description
+
+Fleet caches the first 2,000 characters of a ticket's description, and shows
+less than that in places with less room (a card, a start brief). When a
+description is longer than what a place can show, what Claude is handed ends
+with one line naming the cut, for example:
+
+```
+[shown 2000 of 6812 chars of the description — work { action: describe, key: "ABC-1" } for the rest]
+```
+
+You do not have to do anything about it. The line is there so Claude knows it
+is holding part of a requirement rather than all of it, and can ask fleet for
+the rest itself — which it does with `work { action: describe }`, one extra
+read of that one ticket. Without the line, an agent would work from a third of
+a ticket believing it had the whole thing, which is the mistake this exists to
+prevent. A description that fits carries no line at all, so a line means
+there really is more.
+
+Only Jira (Cloud and Data Center) and GitHub serve a full description on
+demand; for Asana and Linear the line says *open the ticket* instead, and the
+ticket's URL is in every answer that carries its description. Nothing is
+written to the tracker either way — this is a read.
+
+What Claude fetches is held briefly (`work.describe_cache_secs`, 300 s by
+default) so a second question about the same ticket costs no second request,
+and it is never mixed into the ticket's cached excerpt, sent to a phone, or
+put in a session's event history. Disconnecting a tracker deletes it.
+
 ## Starting work
 
 - **From ⌘K:** type a key or paste a ticket URL, or pick a ticket from
@@ -696,6 +744,18 @@ it. `0` keeps a table forever.
 - `work.retention.tracker_items_days` (180): cached tickets in done. Kept
   while any link, live or ended, names one, and while it is the parent of a
   kept ticket.
+- The describe cache (`work.describe_cache_secs`'s table, one item's whole
+  description) is swept with the tracker items, by the same window — except
+  its `0` is never "forever": with `work.retention.tracker_items_days` at
+  `0`, the describe cache is still swept at a fixed 30-day floor, so a
+  full-text cache never becomes an unbounded copy of every description
+  fleet ever fetched. It is the one swept table with no liveness rule — a
+  cached description goes on age alone, even for a ticket a live session is
+  working on, because the next `describe` simply fetches it again. That
+  window is also the ceiling on how long an entry is *served*: a longer
+  `work.describe_cache_secs` is clamped to it. Disconnecting a tracker
+  deletes its items' cached descriptions at once, and so does a sync that
+  changes a description.
 - `work.retention.timeline_work_events_days` (180): handover, nudge, tidy and withdrawn-suggestion
   timeline events. The newest of each kind per session stays.
 - The write-back outbox (see *Write-back*) follows the journal's window:
@@ -913,6 +973,7 @@ table.
 |---|---|---|---|
 | `work.recent_days` | `14` | 1–365 days | how long ended work with no live session keeps a sidebar group |
 | `work.sync_interval_secs` | `300` | seconds, `0` = off | seconds between tracker sync passes; read at start; under a minute is raised to one |
+| `work.describe_cache_secs` | `300` | seconds, `0` = off | how long a full ticket description fetched by `work { action: describe }` is reused before fleet asks the tracker again. Never longer than the window that cache is swept at: the value is clamped to `work.retention.tracker_items_days` (or the fixed 30-day floor when that is `0`), so fleet never serves a description the sweep would already have deleted |
 | `work.trusted_branch_projects` | `[]` | project ids | projects where a sole branch key links automatically; set from the popover, cleared with **Trust none** |
 | `work.evidence_snippets` | `true` | on / off | keep a redacted ±40-character prompt snippet around a detected key as evidence |
 | `work.session_start_context` | `false` | on / off | SessionStart hands Claude the linked ticket's context (synchronous hook; takes effect on re-provision) |

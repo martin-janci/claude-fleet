@@ -109,7 +109,9 @@ impl Store {
     /// One transaction; emits `work:item` and the session's row.
     ///
     /// `E_EXISTS` when a local item already carries `key` (the unique
-    /// index); `E_NOTFOUND` for a session row that does not exist.
+    /// index); `E_NOTFOUND` for a session row that does not exist. Test
+    /// shorthand for a person's: production names its decider.
+    #[cfg(test)]
     pub fn name_session_work(
         &self,
         session_id: i64,

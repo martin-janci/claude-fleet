@@ -1039,19 +1039,26 @@ impl Store {
     /// rejected link that detection had proposed goes back to a suggestion,
     /// keeping its evidence. A link made by hand, with nothing that proposed
     /// it, is refused — remove it instead (`unlink`). A suggestion is left
-    /// as it is (idempotent).
-    pub fn reconsider_work_link(&self, session_id: i64, link_id: i64) -> Result<(), IpcError> {
+    /// as it is (idempotent). An agent never undoes a person's decision
+    /// (D34): undo, then confirm, would overturn a person's rejection in two
+    /// steps.
+    pub fn reconsider_work_link(
+        &self,
+        session_id: i64,
+        link_id: i64,
+        decider: Decider,
+    ) -> Result<(), IpcError> {
         let participant = self.work_participant(session_id)?;
-        let row: Option<(String, Option<String>, Option<String>)> = self
+        let row: Option<(String, String, Option<String>, Option<String>)> = self
             .conn
             .query_row(
-                "SELECT state, rule, evidence FROM work_links \
+                "SELECT state, source, rule, evidence FROM work_links \
                  WHERE id = ?1 AND participant_id = ?2 AND ended_at IS NULL",
                 rusqlite::params![link_id, participant],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        let Some((state, rule, evidence)) = row else {
+        let Some((state, source, rule, evidence)) = row else {
             return Err(IpcError::new(
                 codes::E_NOTFOUND,
                 format!("session {session_id} has no live work link {link_id}"),
@@ -1068,6 +1075,18 @@ impl Store {
                     "work link {link_id} was made by hand, not proposed: remove it (unlink) \
                      instead of undoing it"
                 ),
+            ));
+        }
+        if decider == Decider::Agent && PERSON_SOURCES.contains(&source.as_str()) {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                format!(
+                    "a person decided work link {link_id} for session {session_id}; an agent \
+                     cannot undo a person's decision — ask the person"
+                ),
+            )
+            .with_details(
+                serde_json::json!({ "link_id": link_id, "reason": "decided_by_person" }),
             ));
         }
         let tx = self.conn.unchecked_transaction()?;
@@ -1109,7 +1128,10 @@ impl Store {
 
     /// Say that `session_id` does NOT work on `target` (a person's "Not
     /// this"). Sticky: detection must never re-propose it; only a later
-    /// explicit link by a person overrides it.
+    /// explicit link by a person overrides it. Test shorthand for a
+    /// person's reject: every production path names its decider
+    /// ([`Self::reject_session_work_as`]).
+    #[cfg(test)]
     pub fn reject_session_work(
         &self,
         session_id: i64,
@@ -1736,6 +1758,64 @@ mod tests {
         assert_eq!(s.session_work_links(sid).unwrap().len(), 2);
         let summary = s.primary_work_by_session().unwrap();
         assert_eq!(summary[&sid].key.as_deref(), Some("ABC-1"));
+    }
+
+    #[test]
+    fn work_rev_moves_on_a_secondary_link_change_that_work_does_not_show() {
+        let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+        let dyn_bus: std::sync::Arc<dyn crate::events::EventBus> = bus.clone();
+        let s = Store::open_with_bus_in_memory(dyn_bus).unwrap();
+        let sid = seed(&s, "dev");
+        let row = || s.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(row().work_rev, 0, "no live link: omitted");
+        s.link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+            .unwrap();
+        let primary = row().work;
+        let first = row().work_rev;
+        assert_ne!(first, 0, "a live link");
+        let mut seen = vec![first];
+        let mut step = |what: &str, r: crate::store::SessionRow| {
+            assert_eq!(r.work, primary, "{what}: the primary did not move");
+            // Only a change from the value before matters to a client (the
+            // same set of links reads the same again: removing what was
+            // added gives back the first value).
+            let rev = r.work_rev;
+            assert_ne!(Some(&rev), seen.last(), "{what}: work_rev did not move");
+            seen.push(rev);
+        };
+        // Added as a secondary; the row goes out (`emit_session` re-reads
+        // it, so the event carries the new digest).
+        bus.take();
+        let b = s
+            .link_session_work_as(sid, WorkTarget::Key("DEF-2"), "manual", false, None)
+            .unwrap();
+        assert_eq!(bus.names(), vec!["session:updated"]);
+        step("add", row());
+        // A secondary rejected (a new rejected link), then confirmed.
+        let c = s
+            .reject_session_work(sid, WorkTarget::Key("GHI-3"))
+            .unwrap();
+        step("reject", row());
+        s.link_session_work_as(sid, WorkTarget::Key("GHI-3"), "manual", false, None)
+            .unwrap();
+        step("confirm", row());
+        // Archived, then ended by the R7 path's column.
+        s.conn
+            .execute(
+                "UPDATE work_links SET archived_at = 5 WHERE id = ?1",
+                [b.id],
+            )
+            .unwrap();
+        step("archive", row());
+        s.conn
+            .execute("UPDATE work_links SET ended_at = 9 WHERE id = ?1", [c.id])
+            .unwrap();
+        step("end", row());
+        // Removed.
+        bus.take();
+        assert!(s.unlink_session_work(sid, b.id).unwrap());
+        assert_eq!(bus.names(), vec!["session:updated"]);
+        step("unlink", row());
     }
 
     #[test]

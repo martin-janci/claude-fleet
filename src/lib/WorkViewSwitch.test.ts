@@ -13,6 +13,7 @@ import { session } from './hosts_fixture';
 import { todayOpen } from './today';
 import { openTask, selectedTaskId, sidebarView, taskDetailOpen } from './work_view';
 import { onboardingDismissed } from './onboarding';
+import { clearSessionFocus, focusSession } from './session_focus';
 
 async function flush() {
   for (let i = 0; i < 8; i++) await tick();
@@ -37,10 +38,17 @@ describe('Sessions | Work switch', () => {
     expect(screen.queryByTestId('sidebar-search')).toBeNull();
     // The footer (New session) stays in both.
     expect(screen.getByTestId('new-session-footer')).toBeTruthy();
-    // So does the shared chrome: Refresh, Needs you, select, Tasks, Settings.
-    for (const id of ['sidebar-refresh', 'needs-you-filter', 'select-mode', 'tasks-open', 'settings-open', 'sidebar-collapse']) {
+    // So does the global chrome: Refresh, Tasks, Settings, collapse.
+    for (const id of ['sidebar-refresh', 'tasks-open', 'settings-open', 'sidebar-collapse']) {
       expect(screen.getByTestId(id)).toBeTruthy();
     }
+    // The Sessions list's own filters step aside: none of them narrows the
+    // Work tree, which has its own.
+    for (const id of ['needs-you-filter', 'select-mode', 'filters-open', 'scope-select']) {
+      expect(screen.queryByTestId(id)).toBeNull();
+    }
+    // One refresh, not two.
+    expect(screen.queryByTestId('work-refresh')).toBeNull();
     // One collapse control, not two.
     expect(screen.queryByTestId('work-collapse')).toBeNull();
     await fireEvent.click(screen.getByTestId('sidebar-view-sessions'));
@@ -49,17 +57,28 @@ describe('Sessions | Work switch', () => {
     expect(screen.queryByTestId('work-tree')).toBeNull();
   });
 
-  it('Needs you in the Work view goes to the Sessions list with the filter on', async () => {
+  it('the Sessions tab carries the Needs you count while the Work view is up', async () => {
+    sessions.set([session('mefistos', 'api', { id: 7, stuck_kind: 'oom' })]);
     sidebarView.set('work');
     render(Sidebar, { onCollapse: () => {} });
     await flush();
-    const pill = screen.getByTestId('needs-you-filter');
-    expect(pill.getAttribute('aria-pressed')).toBe('false');
-    await fireEvent.click(pill);
+    expect(screen.getByTestId('sessions-tab-needs-you').textContent).toBe('1');
+    await fireEvent.click(screen.getByTestId('sidebar-view-sessions'));
+    await flush();
+    expect(screen.queryByTestId('sessions-tab-needs-you')).toBeNull();
+    expect(screen.getByTestId('needs-you-filter').textContent).toContain('Needs you 1');
+  });
+
+  it('a focused session brings the Sessions list back', async () => {
+    sessions.set([session('mefistos', 'api', { id: 7 })]);
+    sidebarView.set('work');
+    render(Sidebar, { onCollapse: () => {} });
+    await flush();
+    focusSession(7, 'api');
     await flush();
     expect(get(sidebarView)).toBe('sessions');
-    expect(screen.getByTestId('needs-you-filter').getAttribute('aria-pressed')).toBe('true');
-    expect(screen.queryByTestId('work-tree')).toBeNull();
+    expect(screen.getByTestId('session-focus-bar')).toBeTruthy();
+    clearSessionFocus();
   });
 });
 

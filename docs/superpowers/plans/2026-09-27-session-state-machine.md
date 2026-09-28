@@ -1,5 +1,7 @@
 # Session State Machine Hardening Implementation Plan
 
+**Status:** landed (#343). Its migration shipped as **065**, not the 061 below.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (or superpowers:executing-plans) to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `claude_status` / `stuck_kind` trustworthy on the live fleet: the `oom` playbook can no longer kill a working session, the `oom` detector needs a dead process, ghosts and shells stop carrying pane-derived state, a `StopFailure` reads as `failed`, a `working` row ages out, the attention model names the five things a person can act on, and the timeline records one event per transition.

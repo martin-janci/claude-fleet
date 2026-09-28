@@ -187,6 +187,40 @@ pub fn run() {
             // refused with E_NOTFOUND, and the seeded row is hidden.
             #[cfg(windows)]
             {
+                // WSL distributions become hosts (`fleet_core::wsl`), found on
+                // a thread of their own: the first wsl.exe after a boot starts
+                // the WSL service and can take seconds, which must not hold up
+                // the window. Commands for `wsl-` aliases wait for it.
+                fleet_core::wsl::refresh_in_background(
+                    || {
+                        fleet_core::ssh_config::load_user_config()
+                            .into_iter()
+                            .map(|h| h.alias)
+                            .collect()
+                    },
+                    std::time::Duration::from_secs(15),
+                );
+                let ssh_bin = fleet_core::ssh::default_ssh_binary();
+                if ssh_bin.is_absolute() && !ssh_bin.is_file() {
+                    tracing::warn!(
+                        ssh = %ssh_bin.display(),
+                        "[startup] the ssh program (CLAUDE_FLEET_SSH) does not exist; every host will fail"
+                    );
+                }
+                // portable-pty prefers a conpty.dll beside the exe (the one the
+                // installer ships) to the built-in ConPTY. This says whether the
+                // file is there; the first terminal logs which one actually
+                // loaded (`pty::log_conpty_once`) — a DLL for another CPU is
+                // there and still falls back.
+                let bundled_conpty = std::env::current_exe()
+                    .ok()
+                    .and_then(|exe| exe.parent().map(|d| d.join("conpty.dll").is_file()))
+                    .unwrap_or(false);
+                tracing::info!(
+                    ssh = %ssh_bin.display(),
+                    conpty_file = if bundled_conpty { "present" } else { "absent" },
+                    "[startup] Windows host sources"
+                );
                 fleet_core::service::hub::disable_local_host();
                 if let Ok(s) = store.lock() {
                     let now = std::time::SystemTime::now()

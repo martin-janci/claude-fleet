@@ -1,5 +1,7 @@
 # Hub Ops & Accounting Implementation Plan
 
+**Status:** landed (#344). Its migration shipped as **071**, not the 062 below; `upgrade.sh` no longer takes `FLEET_HUB_IMAGE` (the image is the compose file's).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: use superpowers:subagent-driven-development (or superpowers:executing-plans) to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give the live hub (`fleet.rlt.sk` 0.3.1 on the NAS) a real backup/upgrade path, a safer ingress, tick-level observability, an event stream that resumes instead of re-listing, a bounded startup, usage-by-day figures that mean what they say, and a reconcile pass that no longer waits for its slowest host.
@@ -2627,3 +2629,4 @@ git commit -m "perf(reconcile): write each host's rows as its probe completes in
 - *Cloudflare rate rule, Uptime Kuma monitors, the NAS cleanup itself, `chmod` of `settings.json.bak`*: operations on the NAS/Mac, documented, never run by the repo.
 - *perf-logs §2 residual (status_change dedupe, hook-recorded transitions, trim to GC)* and the rest of row 25: lifecycle F9/F10, the lifecycle slice's plan.
 - *A size cap beside `MAX_LOG_FILES`* (perf §5 P3) and *the idle peer supervisor's slower rescan* (F8 optional): hygiene below the P2 line.
+- *Stamping the price table with a date and echoing the rate used per model in the report* (perf-logs §6d): the table's "as of 2026-09" lives in `BUILTIN_PRICES`' doc comment and every surface already says "Estimated … Not a bill" (`ESTIMATE_NOTE`); echoing rates adds a field to `usage_report` / `fleet_health` (and so the generated reference and the phone's parser) for a presentation gain, while §6a's wrong-day spikes were the defect. Task 6 fixes attribution only.

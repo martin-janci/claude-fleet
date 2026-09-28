@@ -261,7 +261,10 @@ Index by area (names only; see the reference for details):
   connected; see *`/agent`* above).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
   `add_project` (clone, adopt or create a repository on a host — `git` and
-  `gh` run there), `list_github_repos` (what `gh` on a host can see),
+  `gh` run there; a per-host token acts on its own host only, and
+  `create_remote` — publishing on GitHub — needs a person's approval from
+  any caller but a paired client, refused outright on a hub with no
+  approver), `list_github_repos` (what `gh` on a host can see),
   `list_worktrees`, `list_host_worktrees` (one host scanned over SSH, for the
   worktrees fleet's own rows do not cover), `delete_worktree`.
 - **Sessions** — `list_sessions`, `related_sessions`, `new_session`,
@@ -270,8 +273,10 @@ Index by area (names only; see the reference for details):
   agent's own session, idempotent), `operator_status` (why it cannot work,
   if it cannot).
 - **Composer** — `quick_replies` (the fleet's shared chip row: the prompt
-  presets the desktop and the phone both draw above their text box — call it
-  with no arguments to read, with `set` to replace the list).
+  presets the desktop and the phone both draw above their text box, in list
+  order, each with `auto_send`: a tap sends at once rather than filling the
+  box — call it with no arguments to read, with `set` to replace the list; a
+  `set` entry without `auto_send` keeps the stored chip's flag).
 - **Steering & observing** — `send_prompt`, `broadcast_prompt`,
   `capture_session`, `session_transcript` (the conversation of any session,
   including pane-less `bg:<uuid>` rows — track background runs with it),
@@ -283,8 +288,11 @@ Index by area (names only; see the reference for details):
   fleet can read them (`session_transcript`) but not control them.
 - **Lifecycle & recovery** — `restart_session`, `rewind_conversation`
   (truncate a session's Claude transcript into a new conversation: mode
-  `fork` starts a new session from that point, mode `rewind` restarts this
-  one there; the original transcript is never changed), `recreate_session`,
+  `fork` starts a new session from that point — in this worktree, or with
+  `new_worktree: "<name>"` in a new worktree and branch cut from the
+  session's HEAD (uncommitted changes stay behind; an existing name is
+  `E_CONFLICT`) — mode `rewind` restarts this one there; the original
+  transcript is never changed), `recreate_session`,
   `repair_session` (explicit repair, same as the Repair workspace button:
   may unregister this worktree's stale entry, adopt a moved checkout,
   recreate the branch and respawn the pane; behind the desktop confirmation

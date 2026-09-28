@@ -180,11 +180,19 @@ pub fn read_local_host(s: &Store) -> bool {
 /// Set once `hub.local_host` is off: every explicit `local` target is refused.
 static LOCAL_HOST_DISABLED: AtomicBool = AtomicBool::new(false);
 
-/// The refusal for a `local` target on a hub without a local host.
-const LOCAL_DISABLED_MESSAGE: &str = "host local is disabled on this hub (hub.local_host=false)";
+/// The refusal for a `local` target where there is no local host: a hub
+/// started with `hub.local_host=false`, or a Windows desktop, which is a
+/// client only (docs/windows.md) and says so rather than naming a hub.
+pub const LOCAL_DISABLED_MESSAGE: &str = if cfg!(windows) {
+    "host local does not exist on Windows: this desktop is a client for your \
+     Linux and macOS hosts (see docs/windows.md)"
+} else {
+    "host local is disabled on this hub (hub.local_host=false)"
+};
 
 /// Turn the `local` host off for this process. Called once by `fleet-hub
-/// serve` when `hub.local_host` is false; the desktop never calls it.
+/// serve` when `hub.local_host` is false, and by the Windows desktop at
+/// startup.
 /// Idempotent, and there is no way back: a process that disabled `local`
 /// never runs anything on its own machine as a fleet host.
 pub fn disable_local_host() {
@@ -387,6 +395,8 @@ mod tests {
     fn check_local_allowed_refuses_only_local_when_disabled() {
         let e = check_local_allowed("local", false).unwrap_err();
         assert_eq!(e.code, crate::ipc_error::codes::E_NOTFOUND);
+        assert_eq!(e.message, LOCAL_DISABLED_MESSAGE);
+        #[cfg(unix)]
         assert_eq!(
             e.message,
             "host local is disabled on this hub (hub.local_host=false)"

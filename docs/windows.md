@@ -1,8 +1,9 @@
 # claude-fleet on Windows
 
 On Windows, claude-fleet is a **desktop client** for a fleet of Linux and macOS
-hosts. It is not a fleet host itself: Claude Code sessions live in tmux on the
-hosts, and Windows has no tmux.
+hosts. Windows itself is not a fleet host, because it has no tmux. A WSL
+distribution on the same machine can be one, though (see
+[WSL distributions as hosts](#wsl-distributions-as-hosts)).
 
 | On Windows | |
 |---|---|
@@ -11,6 +12,7 @@ hosts, and Windows has no tmux.
 | SSH to Linux / macOS hosts, sessions in their tmux | yes |
 | The terminal (ConPTY running `ssh.exe -tt … tmux attach`) | yes |
 | Hub-client mode (a window onto a `fleet-hub`) | yes, and the recommended setup |
+| WSL distributions on this machine as hosts (`wsl-<name>`) | yes, no sshd needed |
 | The `local` host | no: switched off, as on a hub with `hub.local_host=false` |
 | `fleet-agent`, `fleet-hub` | no: both run on Linux (see [hub.md](hub.md)) |
 
@@ -57,6 +59,62 @@ Windows 10. The installer downloads it if it is missing.
 On each host, `claude` and `tmux` are needed as on any other platform (see
 [getting-started.md](getting-started.md)).
 
+## WSL distributions as hosts
+
+If WSL is installed, each of its distributions shows up in **Add a host** as
+`wsl-<name>`, for example `wsl-ubuntu-22.04`. Once the distribution has
+`tmux` and Claude Code installed, it works like any other host: sessions,
+the terminal, move and transfer. There are two differences:
+
+- **No SSH.** fleet reaches the distribution through
+  `wsl.exe --distribution <name>`, so there is nothing to set up: no sshd,
+  no keys, no `~/.ssh/config` entry.
+- **Hooks depend on WSL networking.** Claude Code's hooks inside the
+  distribution report back to fleet on `127.0.0.1`. That address is this
+  Windows machine only under WSL1, or under WSL2 with mirrored networking
+  (`networkingMode=mirrored` in `%USERPROFILE%\.wslconfig`, Windows 11 22H2
+  or later). Under WSL2's default NAT networking, sessions still run, but
+  turn events and the Control API's per-host features do not arrive.
+
+The distributions are detected when the app starts, in the background: the
+first `wsl.exe` after a reboot starts the WSL service, which can take several
+seconds, and the window does not wait for it. A command for a `wsl-` host
+that comes in before detection has finished waits for it, up to 20 seconds.
+Restart the app after installing a new distribution.
+
+Each distribution needs `bash`, `tmux` and Claude Code. Alpine's default
+image has no `bash`: `apk add bash tmux` first.
+
+An alias you already defined in `~/.ssh/config` (for example a `wsl-ubuntu`
+that reaches an sshd inside WSL) stays an SSH host; fleet does not shadow it.
+Docker Desktop's internal distributions are never offered.
+
+## Git Bash, MSYS2 and Cygwin
+
+A machine with Git for Windows, MSYS2 or Cygwin usually has more than one
+`ssh.exe`. Each reads a different home directory and talks to a different
+ssh-agent, so the first `ssh` on `PATH` is not a safe choice.
+
+- **The default is the Windows OpenSSH,**
+  `%SystemRoot%\System32\OpenSSH\ssh.exe`, whenever it is installed. It
+  reads `%USERPROFILE%\.ssh` and uses the Windows `ssh-agent` service. The
+  terminal, every probe and the tunnels all use this same program.
+- **To use another build,** set `CLAUDE_FLEET_SSH` to its full path, for
+  example `C:\cygwin64\bin\ssh.exe` or `C:\Program
+  Files\Git\usr\bin\ssh.exe`, and restart the app. Quotes around the
+  value, as Explorer's *Copy as path* adds them, are fine. If the path does
+  not exist, the app logs a warning at startup. fleet then also reads
+  the `~/.ssh/config` under that environment's `HOME` (Cygwin's
+  `C:\cygwin64\home\<you>`), besides the one in your Windows profile.
+
+Host discovery reads your ssh config the way `ssh` does. Every alias on a
+`Host a b` line is offered. `Include` files are followed, relative to
+`.ssh`, with `*` globs. For a host defined more than once, the first value
+wins. `Match` blocks give their values to no host.
+
+Whichever `ssh` you use must be able to log in without a prompt
+(`BatchMode=yes`), with its own agent or with an unencrypted key.
+
 ## SSH without multiplexing
 
 On macOS and Linux, the app keeps one SSH connection per host open
@@ -70,6 +128,21 @@ The fix is **hub-client mode**. Run `fleet-hub` on a Linux machine (see
 [hub.md](hub.md)) and pair the desktop with it in **Settings → Hub**. The
 hub does all the SSH work from Linux, with multiplexing. The Windows app
 then opens SSH only for the terminal you are looking at.
+
+## The terminal
+
+The terminal pane runs `ssh.exe` (or `wsl.exe`) in a Windows pseudo console
+(ConPTY). The installer ships Microsoft's current ConPTY, `conpty.dll` and
+`OpenConsole.exe` from the Windows Terminal project (MIT), next to
+`claude-fleet.exe`. The app uses that copy instead of the one built into
+Windows. The built-in one, on Windows 10 especially, redraws the screen
+itself and drops tmux's bracketed-paste and mouse modes. Without those, a
+multi-line paste into Claude submits at its first line and the mouse wheel
+does nothing in the pane.
+
+When you build from source, `pnpm tauri dev` uses the built-in ConPTY. For
+the shipped behaviour, run `bash scripts/fetch-conpty.sh` once, then
+`pnpm tauri dev --config src-tauri/tauri.conpty.conf.json`.
 
 ## Where things are kept
 

@@ -674,9 +674,7 @@ impl Store {
                 ""
             };
             let sql = format!(
-                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='missing',
-                     claude_status=NULL, stuck_kind=NULL, stuck_since=NULL,
-                     current_activity=NULL, pending_input=NULL
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='missing', {LOSS_CLEARS}
                  WHERE host_alias=?2 AND status!='ghost' AND {kind_filter}{guard}{not_in}
                  RETURNING id"
             );
@@ -949,6 +947,7 @@ mod tests {
             turn_seq: 0,
             last_stop_at: None,
             stale_working_at: None,
+            work_rev: 0,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),

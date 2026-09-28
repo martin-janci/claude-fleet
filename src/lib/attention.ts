@@ -83,10 +83,6 @@ export function setContextRedPct(pct: number | undefined): void {
   if (typeof pct === 'number' && Number.isFinite(pct) && pct > 0 && pct <= 100) contextRedPct = pct;
 }
 
-export function contextRedThreshold(): number {
-  return contextRedPct;
-}
-
 export function contextLevel(pct: number | null): ContextLevel | null {
   if (pct === null || !Number.isFinite(pct)) return null;
   if (pct >= contextRedPct) return 'crit';
@@ -118,8 +114,6 @@ export interface AttentionOptions {
   /** Unix seconds "now" (injected so tests are deterministic). */
   now: number;
 }
-
-export const DEFAULT_ATTENTION_IDLE_MINUTES = 30;
 
 /** Triage buckets, most urgent first. `classify()` puts a row in exactly one,
  *  and everything that orders sessions reads this one list — the sidebar's
@@ -214,8 +208,10 @@ export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
   if (isWaiting(s)) return 'waiting';
   if (s.stuck_kind) return 'stuck';
   if (s.claude_status === 'failed') return s.kind === 'bg' ? 'failed' : 'stop_failed';
-  if (contextLevel(s.context_pct) === 'crit') return 'context_full';
-  if ((s.stale_working_at ?? null) !== null) return 'stale_working';
+  // A dead row keeps its last context reading; a lost one reads `lifecycle`.
+  const live = s.status !== 'ghost' && s.lost_at === null;
+  if (live && contextLevel(s.context_pct) === 'crit') return 'context_full';
+  if (live && (s.stale_working_at ?? null) !== null) return 'stale_working';
   if (s.ci_status === 'failing' && isIdleStatus(s.claude_status)) return 'ci_failing';
   if (isDoneUnread(s)) return 'done_unread';
   if (isLifecycleBroken(s)) return 'lifecycle';
@@ -228,13 +224,18 @@ function isIdleStatus(status: ClaudeStatus | null): boolean {
   return status === 'idle' || status === 'completed' || status === 'stopped';
 }
 
-/** When the row entered the state its bucket describes, best effort. */
+/** When the row entered `bucket`, best effort — the same field per reason as the hub's
+ *  `attention::since_for`. */
 function bucketSince(s: SessionRow, bucket: TriageBucket): number {
   switch (bucket) {
     case 'stuck':
       return s.stuck_since ?? s.last_activity_at;
     case 'stop_failed':
       return s.last_stop_at ?? s.last_activity_at;
+    case 'failed':
+      return s.last_activity_at;
+    case 'context_full':
+      return s.context_at ?? s.last_activity_at;
     case 'stale_working':
       return s.stale_working_at ?? s.last_activity_at;
     case 'ci_failing':
