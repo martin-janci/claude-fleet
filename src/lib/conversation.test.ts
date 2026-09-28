@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import quietStatuses from '../../crates/fleet-core/src/service/testdata/quiet_statuses.json';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
@@ -450,6 +451,17 @@ describe('isQuietStatus / shouldFetchTranscript', () => {
     expect(isQuietStatus('working')).toBe(false);
     expect(isQuietStatus('blocked')).toBe(false);
     expect(isQuietStatus(null)).toBe(false);
+  });
+
+  // The shared fixture the backend's `ClaudeStatus::is_quiet` /
+  // `store::turn_over` test reads too (`pane_intel.rs`): one answer to
+  // "is this turn over?" on both sides, an unknown value included.
+  it('agrees with the backend on every status (shared fixture)', () => {
+    const cases = quietStatuses as { status: string | null; quiet: boolean }[];
+    expect(cases.length).toBeGreaterThanOrEqual(7);
+    for (const c of cases) {
+      expect(isQuietStatus(c.status as Parameters<typeof isQuietStatus>[0]), String(c.status)).toBe(c.quiet);
+    }
   });
 
   it('a quiet session is re-read only on a turn change or after the quiet cadence', () => {

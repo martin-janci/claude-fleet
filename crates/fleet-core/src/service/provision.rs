@@ -436,9 +436,70 @@ fn routes_to_agent(store: &Mutex<Store>, host: &str) -> Result<bool, IpcError> {
     Ok(s.agent_host_alias(host)?.as_deref() == Some(host))
 }
 
+/// What [`provision_host_with_token`] reports for a WSL distribution whose
+/// hooks cannot reach this desktop's `127.0.0.1` (WSL2's default NAT
+/// networking): the sessions run, but no hook event ever arrives.
+pub const WSL_HOOKS_UNREACHABLE: &str = "provisioned, but hooks can't reach the desktop from this \
+     WSL distribution (WSL2 NAT networking): enable WSL mirrored networking \
+     (networkingMode=mirrored in %USERPROFILE%\\.wslconfig), run `wsl --shutdown`, then \
+     provision again";
+
+/// Printed by [`hook_reach_script`] when the distribution has neither `curl`
+/// nor `wget` to ask with: the check cannot tell, so it says nothing.
+const HOOK_REACH_NO_CLIENT: &str = "FLEET-HOOKREACH-NOCLIENT";
+
+/// The script, run inside a WSL distribution, that asks this desktop's
+/// `/healthz` on `127.0.0.1:<port>` — the address its hooks post to. It
+/// prints the answer (the listener's own body) or nothing.
+pub fn hook_reach_script(port: u16) -> String {
+    let url = quote(&format!("http://127.0.0.1:{port}/healthz"));
+    format!(
+        "if command -v curl >/dev/null 2>&1; then curl -s -m 5 {url}; \
+         elif command -v wget >/dev/null 2>&1; then wget -q -T 5 -O - {url}; \
+         else echo {HOOK_REACH_NO_CLIENT}; fi"
+    )
+}
+
+/// Read [`hook_reach_script`]'s output: `Some(true)` when this desktop's
+/// listener answered, `Some(false)` when nothing did (or something else did),
+/// `None` when the distribution had no client to ask with.
+pub fn hook_reach_verdict(stdout: &str) -> Option<bool> {
+    if stdout.contains(HOOK_REACH_NO_CLIENT) {
+        return None;
+    }
+    Some(stdout.contains(crate::mcp::HEALTHZ_BODY.trim_end()))
+}
+
+/// For a WSL host of a loopback desktop: can the distribution's hooks reach
+/// `127.0.0.1:<port>`? `Some(`[`WSL_HOOKS_UNREACHABLE`]`)` when they cannot;
+/// `None` when they can, or when the check itself could not run (a failed
+/// `wsl.exe` is the provisioning's error to report, not this one's).
+pub async fn wsl_hooks_warning(ssh: &dyn SshExec, host: &str, port: u16) -> Option<String> {
+    let script = quote(&hook_reach_script(port));
+    let out = ssh
+        .run(host, &["sh", "-c", &script], PROVISION_TIMEOUT)
+        .await
+        .ok()?;
+    match hook_reach_verdict(&String::from_utf8_lossy(&out.stdout)) {
+        Some(false) => {
+            tracing::warn!(
+                host = %host,
+                port,
+                "[provision] hooks cannot reach 127.0.0.1 from this WSL distribution; \
+                 WSL mirrored networking is needed"
+            );
+            Some(WSL_HOOKS_UNREACHABLE.to_string())
+        }
+        _ => None,
+    }
+}
+
 /// Provision ONE host end to end with its own token: resolve/mint → write
 /// files → persist the token → ensure the tunnel (remote host, loopback hub) → mark
 /// provisioned. Shared by [`provision_hosts`] and the per-host Rotate action.
+///
+/// `Ok(Some(warning))` is provisioned but degraded: a WSL distribution whose
+/// hooks cannot reach this desktop ([`wsl_hooks_warning`]).
 pub async fn provision_host_with_token(
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
@@ -446,7 +507,7 @@ pub async fn provision_host_with_token(
     host: &str,
     base: &HubBase,
     rotate: bool,
-) -> Result<(), IpcError> {
+) -> Result<Option<String>, IpcError> {
     let (token, minted) = resolve_host_token(store, host, rotate)?;
     if minted && routes_to_agent(store, host)? {
         // An agent host's new token cannot go the usual way. The usual way
@@ -484,17 +545,24 @@ pub async fn provision_host_with_token(
     // A WSL distribution is not dialed over SSH either: `ssh -R` cannot
     // reach it, and where its hooks can reach this machine at all (WSL1,
     // WSL2 mirrored networking) they do so on 127.0.0.1 directly.
-    if host != "local"
-        && !base.public
-        && !routes_to_agent(store, host)?
-        && !crate::wsl::is_wsl_host(host)
-    {
+    //
+    // No tunnel also means nothing fleet can repair: whether the hooks get
+    // here is WSL's networking mode. So it is checked, from inside the
+    // distribution, and said at once rather than found out from a Stop
+    // that never arrives.
+    let wsl = crate::wsl::is_wsl_host(host);
+    if host != "local" && !base.public && !routes_to_agent(store, host)? && !wsl {
         tunnels.ensure(host, base.port, base.port);
     }
+    let warning = if wsl && !base.public {
+        wsl_hooks_warning(ssh, host, base.port).await
+    } else {
+        None
+    };
     if let Ok(s) = store.lock() {
         let _ = s.set_host_provisioned(host, true);
     }
-    Ok(())
+    Ok(warning)
 }
 
 /// Ensure `~/.tmux.conf` has `set -g set-clipboard on` for OSC 52 passthrough.
@@ -623,20 +691,24 @@ pub async fn provision_hosts(
             continue;
         }
         let outcome = if scope.content_only {
-            provision_content_only(store, ssh, &h.alias, base).await
+            provision_content_only(store, ssh, &h.alias, base)
+                .await
+                .map(|()| None)
         } else {
             provision_host_with_token(store, ssh, tunnels, &h.alias, base, scope.rotate).await
         };
         match outcome {
-            Ok(()) => {
+            Ok(warning) => {
                 results.push(HostProvisionResult {
                     host: h.alias,
                     status: "provisioned".into(),
-                    detail: Some(if scope.content_only {
-                        "skills, CLAUDE.md block and hooks refreshed (no restart needed)".into()
-                    } else {
-                        "restart Claude on this host to load the MCP server".into()
-                    }),
+                    detail: Some(warning.unwrap_or_else(|| {
+                        if scope.content_only {
+                            "skills, CLAUDE.md block and hooks refreshed (no restart needed)".into()
+                        } else {
+                            "restart Claude on this host to load the MCP server".into()
+                        }
+                    })),
                 });
             }
             Err(e) => results.push(HostProvisionResult {
@@ -1066,6 +1138,52 @@ pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A WSL2 distribution under NAT networking reaches nothing on
+    /// `127.0.0.1:<port>`: the check says so; the listener's own answer, or
+    /// a distribution with no client to ask with, says nothing.
+    #[tokio::test]
+    async fn wsl_hooks_warning_reads_the_healthz_answer_from_inside_the_distribution() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let script = hook_reach_script(4180);
+        assert!(
+            script.contains("'http://127.0.0.1:4180/healthz'"),
+            "{script}"
+        );
+        assert!(script.contains("curl -s -m 5"), "{script}");
+        assert!(script.contains("wget -q -T 5 -O -"), "{script}");
+
+        let ssh = FakeSsh::new();
+        ssh.on_host("wsl-nat", Match::contains("healthz"), Reply::fail(7, ""));
+        ssh.on_host(
+            "wsl-mirrored",
+            Match::contains("healthz"),
+            Reply::ok(crate::mcp::HEALTHZ_BODY),
+        );
+        ssh.on_host(
+            "wsl-bare",
+            Match::contains("healthz"),
+            Reply::ok(&format!("{HOOK_REACH_NO_CLIENT}\n")),
+        );
+        ssh.on_host(
+            "wsl-other",
+            Match::contains("healthz"),
+            Reply::ok("<html>not fleet</html>"),
+        );
+        assert_eq!(
+            wsl_hooks_warning(&ssh, "wsl-nat", 4180).await.as_deref(),
+            Some(WSL_HOOKS_UNREACHABLE)
+        );
+        assert_eq!(
+            wsl_hooks_warning(&ssh, "wsl-other", 4180).await.as_deref(),
+            Some(WSL_HOOKS_UNREACHABLE)
+        );
+        assert_eq!(wsl_hooks_warning(&ssh, "wsl-mirrored", 4180).await, None);
+        assert_eq!(wsl_hooks_warning(&ssh, "wsl-bare", 4180).await, None);
+        let call = &ssh.calls_for("wsl-nat")[0];
+        assert_eq!(call.args[..2], ["sh", "-c"]);
+        assert!(WSL_HOOKS_UNREACHABLE.contains("mirrored networking"));
+    }
 
     #[test]
     fn merge_adds_entry_to_empty() {

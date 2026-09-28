@@ -757,6 +757,7 @@ mod tests {
                 pr_observed: false,
                 tmux_pane_id: None,
                 pending_input: None,
+                pane_working: false,
             }],
             keep: &[name.to_string()],
             lost_ttl_cutoff: None,

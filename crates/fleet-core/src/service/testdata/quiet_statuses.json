@@ -1,0 +1,10 @@
+[
+ { "status": "working", "quiet": false },
+ { "status": "blocked", "quiet": false },
+ { "status": "completed", "quiet": true },
+ { "status": "failed", "quiet": true },
+ { "status": "stopped", "quiet": true },
+ { "status": "idle", "quiet": true },
+ { "status": null, "quiet": false },
+ { "status": "awaiting_input", "quiet": false }
+]

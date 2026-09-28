@@ -104,6 +104,7 @@
   const stripFacets = $derived(facets.filter((x) => x.id !== 'query' && x.id !== 'mine' && x.id !== 'review'));
   const panelCount = $derived(stripFacets.length);
   let panelOpen = $state(false);
+  let filtersBtn: HTMLButtonElement | undefined = $state();
   function clearFacet(id: string) {
     if (id === 'query') cancelSearch();
     const { group: _g, ...next } = withoutWorkFacet(get(workViewFilters), id as WorkFacetId);
@@ -306,6 +307,7 @@
       class:has-active={panelCount > 0}
       type="button"
       data-testid="work-filters-open"
+      bind:this={filtersBtn}
       aria-expanded={panelOpen}
       aria-controls="work-filter-panel"
       aria-label={panelCount > 0 ? `Filters, ${panelCount} active` : 'Filters'}
@@ -334,7 +336,14 @@
     >
   </div>
 
-  <ActiveFilters facets={stripFacets} onclear={clearFacet} onclearall={clearAll} testid="work-active-filters" clearAllTestid="work-filter-clear" />
+  <ActiveFilters
+    facets={stripFacets}
+    onclear={clearFacet}
+    onclearall={clearAll}
+    testid="work-active-filters"
+    clearAllTestid="work-filter-clear"
+    emptyFocus={() => filtersBtn}
+  />
 
   {#if panelOpen}
     <div class="panel" id="work-filter-panel" role="group" aria-label="Work filters" data-testid="work-filter-panel">

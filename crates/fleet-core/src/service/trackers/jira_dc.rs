@@ -24,8 +24,8 @@ use super::jira_common::{
     map_status_category, normalize_resolution, EPIC_LINK_SCHEMA, SPRINT_FIELD_SCHEMA,
 };
 use super::{
-    map_transport, CallKind, Caps, Fetched, Incremental, ItemRef, Page, RefCtx, StatusSnapshot,
-    TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot, WriteOp,
+    map_transport, CallKind, Caps, Fetched, FullDescription, Incremental, ItemRef, Page, RefCtx,
+    StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot, WriteOp,
     NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
@@ -656,7 +656,7 @@ impl TrackerProvider for JiraDc {
         out
     }
 
-    async fn describe(&self, r: &ItemRef) -> Result<Option<String>, TrackerError> {
+    async fn describe(&self, r: &ItemRef) -> Result<Option<FullDescription>, TrackerError> {
         let Some(key) = self.describe_key(r) else {
             return Ok(None);
         };

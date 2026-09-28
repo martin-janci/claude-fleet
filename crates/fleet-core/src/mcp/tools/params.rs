@@ -568,6 +568,9 @@ pub struct QuickRepliesParams {
     /// built-in defaults). Omit to read the current list instead.
     #[serde(default)]
     pub set: Option<Vec<crate::service::quick_replies::QuickReply>>,
+    /// With `set`: the list last read; E_CONFLICT if it changed since.
+    #[serde(default)]
+    pub expected: Option<Vec<crate::service::quick_replies::QuickReply>>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

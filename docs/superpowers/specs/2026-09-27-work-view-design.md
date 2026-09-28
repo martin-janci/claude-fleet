@@ -207,7 +207,7 @@ changes shape. `CONTRACT_REVISION` stays 4.
   "review": true,      // only tasks with something to review
   "query": "login",    // case-insensitive substring of key or title
   "group": "tracker:1:ABC",  // one group only (a section being expanded)
-  "archived": true     // include archived tasks (absent/false hides them; `status: done` shows done ones)
+  "archived": false    // false hides archived tasks into `archived_hidden`; absent or true shows them (a client from before the archive never sends it); `status: done` and `has: past_only` show them anyway
 }
 
 // GroupRef

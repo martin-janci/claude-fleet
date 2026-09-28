@@ -75,7 +75,18 @@ struct SshClientInner {
     /// Off, every call is its own connection and nothing below touches a
     /// control socket (no `-O check`, no `-O exit`, no mux retry).
     mux: bool,
+    /// Per-host cap on concurrent children when `mux` is off (see
+    /// [`MAX_CONNECTIONS_PER_HOST_NO_MUX`]). Unused with a master.
+    conn_limits: DashMap<String, Arc<tokio::sync::Semaphore>>,
 }
+
+/// Without multiplexing every command is a whole SSH connection (Windows).
+/// The reconcile, usage and repair ticks each fan out over hosts and
+/// sessions, so without a cap one tick could start dozens of `ssh.exe` to the
+/// same host at once, each a full handshake, and trip the server's
+/// `MaxStartups`. At most this many run per host; the rest queue. The
+/// attached terminal and the tunnels are separate processes and never wait.
+pub const MAX_CONNECTIONS_PER_HOST_NO_MUX: usize = 4;
 
 /// Environment variable naming the `ssh` program to run, overriding the
 /// default below: a Cygwin or MSYS2 `ssh.exe`, or any other build.
@@ -222,6 +233,7 @@ impl SshClient {
                 ssh_bin,
                 toolchains: DashMap::new(),
                 mux,
+                conn_limits: DashMap::new(),
             }),
         }
     }
@@ -724,6 +736,18 @@ impl SshClient {
         max_output: Option<usize>,
         stdin: Option<Vec<u8>>,
     ) -> Result<Output, IpcError> {
+        // Queued behind the host's other connections (no mux only). The wait
+        // is bounded by the same wall clock, and a cancel ends it.
+        let _slot = match &token {
+            Some(t) => tokio::select! {
+                biased;
+                _ = t.cancelled() => {
+                    return Err(IpcError::new(codes::E_CANCELLED, format!("ssh {host} cancelled")));
+                }
+                slot = self.connection_slot(host, wall_clock) => slot?,
+            },
+            None => self.connection_slot(host, wall_clock).await?,
+        };
         let in_flight = InFlight::enter(&self.inner, host);
         if stdin.is_some() {
             cmd.stdin(std::process::Stdio::piped());
@@ -795,6 +819,41 @@ impl SshClient {
                 let stderr = stderr_task.await.unwrap_or_default();
                 Ok(Output { status, stdout, stderr })
             }
+        }
+    }
+
+    /// A slot for one more connection to `host` when this client does not
+    /// multiplex: `None` (no limit) with a master, else a permit of the
+    /// host's semaphore, waited for at most `wait`. A wait that runs out is
+    /// `E_SSH_TIMEOUT`, as the command itself would have been.
+    async fn connection_slot(
+        &self,
+        host: &str,
+        wait: Duration,
+    ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, IpcError> {
+        if self.inner.mux {
+            return Ok(None);
+        }
+        let sem = self
+            .inner
+            .conn_limits
+            .entry(host.to_string())
+            .or_insert_with(|| {
+                Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS_PER_HOST_NO_MUX))
+            })
+            .clone();
+        match tokio::time::timeout(wait, sem.acquire_owned()).await {
+            Ok(Ok(permit)) => Ok(Some(permit)),
+            // The semaphore is never closed.
+            Ok(Err(_)) => Ok(None),
+            Err(_) => Err(IpcError::new(
+                codes::E_SSH_TIMEOUT,
+                format!(
+                    "ssh {host}: no free connection within {}s ({MAX_CONNECTIONS_PER_HOST_NO_MUX} \
+                     already open to this host)",
+                    wait.as_secs()
+                ),
+            )),
         }
     }
 
@@ -1085,6 +1144,11 @@ pub const TOOLCHAIN_RETRY_AFTER: Duration = Duration::from_secs(300);
 /// is where Homebrew and `cl` usually live on a Mac; the login variant
 /// (`-lc`) is the fallback when an rc file misbehaves without a tty. Noise
 /// from rc files is harmless: only marked lines are read.
+///
+/// The shell is `$SHELL`, else the account's login shell from the passwd
+/// database, else `/bin/sh`. `ssh` always sets `$SHELL`; `wsl.exe --exec`
+/// does not, and a `/bin/sh -lc` there never reads the `.bashrc` / `.zshrc`
+/// that puts `~/.local/bin` (where Claude Code installs) on PATH.
 pub fn toolchain_script(interactive: bool) -> String {
     let flags = if interactive { "-ilc" } else { "-lc" };
     let inner = format!(
@@ -1092,7 +1156,8 @@ pub fn toolchain_script(interactive: bool) -> String {
         m = TOOLCHAIN_MARKER
     );
     format!(
-        "\"${{SHELL:-/bin/sh}}\" {flags} {} </dev/null 2>/dev/null",
+        "s=\"${{SHELL:-$(getent passwd \"$(id -un)\" 2>/dev/null | cut -d: -f7)}}\"; \
+         \"${{s:-/bin/sh}}\" {flags} {} </dev/null 2>/dev/null",
         crate::shell::quote(&inner)
     )
 }
@@ -1954,6 +2019,8 @@ mod tests {
             [
                 "--distribution",
                 "Ubuntu",
+                "--cd",
+                "~",
                 "--exec",
                 "sh",
                 "-c",
@@ -2568,15 +2635,97 @@ mod tests {
         c.shutdown_all(); // a no-op without mux
     }
 
+    /// Without a master, at most [`MAX_CONNECTIONS_PER_HOST_NO_MUX`]
+    /// connections run per host; the next waits (bounded), another host is
+    /// not held up, and a released slot is reused. With a master there is no
+    /// limit at all.
+    #[tokio::test]
+    async fn without_mux_connections_per_host_are_capped() {
+        let c = SshClient::new_with_mux(false);
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONNECTIONS_PER_HOST_NO_MUX {
+            held.push(
+                c.connection_slot("h", Duration::from_millis(50))
+                    .await
+                    .unwrap()
+                    .expect("a slot"),
+            );
+        }
+        let err = c
+            .connection_slot("h", Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_SSH_TIMEOUT, "{err:?}");
+        assert!(c
+            .connection_slot("other", Duration::from_millis(50))
+            .await
+            .unwrap()
+            .is_some());
+        held.pop();
+        assert!(c
+            .connection_slot("h", Duration::from_millis(50))
+            .await
+            .unwrap()
+            .is_some());
+
+        let m = SshClient::new_with_mux(true);
+        for _ in 0..(MAX_CONNECTIONS_PER_HOST_NO_MUX * 3) {
+            assert!(m
+                .connection_slot("h", Duration::from_millis(50))
+                .await
+                .unwrap()
+                .is_none());
+        }
+    }
+
     #[test]
     fn toolchain_script_asks_the_users_shell_and_marks_every_line() {
         let s = toolchain_script(true);
-        assert!(s.starts_with("\"${SHELL:-/bin/sh}\" -ilc "), "{s}");
+        const PICK: &str =
+            "s=\"${SHELL:-$(getent passwd \"$(id -un)\" 2>/dev/null | cut -d: -f7)}\"; ";
+        assert!(s.starts_with(PICK), "{s}");
+        assert!(s.contains("\"${s:-/bin/sh}\" -ilc "), "{s}");
         assert!(s.contains("FLEET-TC home=%s"), "{s}");
         assert!(s.contains("command -v tmux 2>/dev/null || true"), "{s}");
         assert!(s.contains("command -v claude 2>/dev/null || true"), "{s}");
         assert!(s.ends_with("</dev/null 2>/dev/null"), "{s}");
-        assert!(toolchain_script(false).starts_with("\"${SHELL:-/bin/sh}\" -lc "));
+        let login = toolchain_script(false);
+        assert!(login.starts_with(PICK), "{login}");
+        assert!(login.contains("\"${s:-/bin/sh}\" -lc "), "{login}");
+    }
+
+    /// `wsl.exe --exec` leaves `$SHELL` unset: the script then asks the
+    /// passwd database for the login shell instead of dropping to `/bin/sh`.
+    #[cfg(unix)]
+    #[test]
+    fn toolchain_script_without_shell_uses_the_passwd_login_shell() {
+        let has_getent = std::process::Command::new("sh")
+            .args(["-c", "command -v getent"])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !has_getent {
+            return; // macOS: no getent; the /bin/sh fallback is the old behaviour
+        }
+        let pick = toolchain_script(false)
+            .split_once("; ")
+            .map(|(p, _)| p.to_string())
+            .unwrap();
+        let run = |shell: Option<&str>| {
+            let mut cmd = std::process::Command::new("sh");
+            cmd.args(["-c", &format!("{pick}; printf %s \"$s\"")]);
+            cmd.env_remove("SHELL");
+            if let Some(v) = shell {
+                cmd.env("SHELL", v);
+            }
+            String::from_utf8(cmd.output().unwrap().stdout).unwrap()
+        };
+        assert_eq!(run(Some("/bin/zsh")), "/bin/zsh");
+        let want = std::process::Command::new("sh")
+            .args(["-c", "getent passwd \"$(id -un)\" | cut -d: -f7"])
+            .output()
+            .unwrap();
+        let want = String::from_utf8(want.stdout).unwrap();
+        assert_eq!(run(None), want.trim(), "the passwd login shell");
     }
 
     #[test]

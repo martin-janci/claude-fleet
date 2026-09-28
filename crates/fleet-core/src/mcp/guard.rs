@@ -1491,7 +1491,13 @@ pub fn fence_ticket(
         return format!("[{}]", ask("the description did not fit"));
     }
     let fenced = fence_untrusted(text, from, max);
-    let shown = defuse(text).chars().take(max).count() as i64;
+    // Both sides of the comparison on the tracker's own text: `full_chars`
+    // counts the RAW description, so `shown` does too — counted on the
+    // defused copy, a `defuse` that ever changed a length would make the
+    // notice claim (or hide) a cut the cap did not make. It keeps lengths
+    // today (`defuse_keeps_every_length` pins that), so this is also exactly
+    // how much of the fenced copy is shown.
+    let shown = text.chars().take(max).count() as i64;
     let full = full_chars.unwrap_or_else(|| text.chars().count() as i64);
     if full <= shown {
         return fenced;
@@ -2159,6 +2165,52 @@ mod tests {
         assert_eq!(
             out.lines().last().unwrap(),
             "[shown 10 of 99 chars of the description — open the ticket for the rest]"
+        );
+    }
+
+    /// `fence_ticket` counts what it shows on the raw text and the fenced
+    /// copy is the defused one: the two agree only while `defuse` keeps
+    /// every length.
+    #[test]
+    fn defuse_keeps_every_length() {
+        for s in [
+            "[claude-fleet",
+            "a[claude-fleet:b]c",
+            "x",
+            "",
+            "[claude-fleet[claude-fleet",
+        ] {
+            assert_eq!(defuse(s).chars().count(), s.chars().count(), "{s:?}");
+        }
+    }
+
+    /// A body full of marker openers that fits its budget exactly, with the
+    /// tracker's raw length as `full_chars`: nothing was cut, so no notice.
+    #[test]
+    fn a_whole_description_full_of_markers_gets_no_notice() {
+        let body = "[claude-fleet".repeat(10);
+        let n = body.chars().count();
+        let out = fence_ticket(
+            &body,
+            "a tracker ticket",
+            n,
+            Some(n as i64),
+            DescribeOffer::Key("ABC-1"),
+        );
+        assert!(!out.contains("shown"), "{out}");
+        let out = fence_ticket(
+            &body,
+            "a tracker ticket",
+            n - 1,
+            Some(n as i64),
+            DescribeOffer::Key("ABC-1"),
+        );
+        assert!(
+            out.lines()
+                .last()
+                .unwrap()
+                .starts_with(&format!("[shown {} of {n} chars", n - 1)),
+            "{out}"
         );
     }
 

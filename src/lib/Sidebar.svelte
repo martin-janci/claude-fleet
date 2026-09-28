@@ -284,32 +284,72 @@
   // Archived live sessions and past work stay out of the list until asked
   // for; the list says how many it holds back under the other filters, and
   // brings them all back in one click.
+  // Counted the way the list matches a search: a work group by its key, a
+  // project by owner / repo, a past-only group by its key or a link's name
+  // (any of which then shows every row in it), else the session itself.
+  // Matching each archived row on its own used to disagree with the list.
   const archivedHidden = $derived.by((): number => {
     if (focus || workFilterView.archived) return 0;
     const shown: WorkFilters = { ...workFilterView, archived: true };
-    const pred = workFilterPredicate(shown, workFilterCtx);
     const opts = attentionOpts;
+    const r = recency;
+    const shownPred = bothPredicates(
+      bothPredicates(
+        needsYouOnly ? (s) => needsYou(s, opts) : null,
+        r === 'all' ? null : (s) => withinRecency(s.last_activity_at, r, opts.now),
+      ),
+      workFilterPredicate(shown, workFilterCtx),
+    );
     const q = searchQuery.toLowerCase();
+    const isArchived = (s: SessionRow) => s.work?.archived_at != null;
+    const byWork =
+      $sidebarGroupBy === 'work'
+        ? buildSessionsByWork($sessions, viewHost, viewBg, shownPred, (s) => workKeyFor(s, branchById), viewScope)
+        : null;
     let n = 0;
-    for (const s of $sessions) {
-      if (s.work?.archived_at == null || s.kind === 'external') continue;
-      if (!sessionVisible(s, viewHost, viewBg, null, viewScope)) continue;
-      if (needsYouOnly && !needsYou(s, opts)) continue;
-      if (!withinRecency(s.last_activity_at, recency, opts.now)) continue;
-      if (pred && !pred(s)) continue;
-      if (q && !sessionMatchesSearch(s, q)) continue;
-      n++;
+    const liveKeys = new Set<string>();
+    const matchedKeys = new Set<string>();
+    for (const g of byWork?.groups ?? []) {
+      liveKeys.add(g.key);
+      if (!workGroupMatchesSearch(g, q)) continue;
+      matchedKeys.add(g.key);
+      n += g.sessions.filter(isArchived).length;
     }
-    if ($sidebarGroupBy === 'work' && !needsYouOnly) {
+    const keyed = byWork?.keyed;
+    const rest: SessionPredicate = (s) => !keyed?.has(s.id) && (!shownPred || shownPred(s));
+    const byProject = buildSessionsByProject($sessions, viewHost, viewBg, rest, viewScope);
+    for (const p of $projects) {
+      const rows = byProject.get(p.project.id) ?? [];
+      const archived = rows.filter(isArchived).length;
+      if (archived === 0) continue;
+      const hit =
+        !q ||
+        p.project.owner.toLowerCase().includes(q) ||
+        p.project.repo.toLowerCase().includes(q) ||
+        rows.some((s) => sessionMatchesSearch(s, q));
+      if (hit) n += archived;
+    }
+    for (const s of $sessions) {
+      if (s.project_id !== null || s.kind === 'external' || !isArchived(s)) continue;
+      if (!sessionVisible(s, viewHost, viewBg, rest, viewScope)) continue;
+      if (sessionMatchesSearch(s, q)) n++;
+    }
+    if (byWork && !needsYouOnly) {
       const rf = toRowFilters(shown);
       for (const [key, links] of $pastWork) {
-        for (const l of links) {
-          if (!withinRecency(l.ended_at, recency, nowSec)) continue;
-          if (!rowMatches(pastFilterRow(l), { host: $effectiveHostFilter, scope: $effectiveScope })) continue;
-          if (!rowMatches({ ...pastFilterRow(l), ...pastWorkFields(key, l.item_id, workFilterCtx) }, rf)) continue;
-          if (q && !key.toLowerCase().includes(q) && !(l.snap_name ?? '').toLowerCase().includes(q)) continue;
-          n++;
-        }
+        const past = links.filter(
+          (l) =>
+            withinRecency(l.ended_at, r, nowSec) &&
+            rowMatches(pastFilterRow(l), { host: $effectiveHostFilter, scope: $effectiveScope }) &&
+            rowMatches({ ...pastFilterRow(l), ...pastWorkFields(key, l.item_id, workFilterCtx) }, rf),
+        );
+        if (past.length === 0) continue;
+        // A live group's past work sits in its Done row; a past-only group
+        // matches by its key or a link's name.
+        const hit = liveKeys.has(key)
+          ? matchedKeys.has(key)
+          : !q || key.toLowerCase().includes(q) || past.some((l) => (l.snap_name ?? '').toLowerCase().includes(q));
+        if (hit) n += past.length;
       }
     }
     return n;

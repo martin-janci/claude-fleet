@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# release-update-scripts-test.sh — the update-publishing scripts end to end
+# (slice S2), with a throwaway key, a fake `gh` and a local bare remote:
+# release-manifest.sh → update-channels.sh add / edit / resign, every
+# document checked by the fleet's own verifier (`fleet-release verify`).
+#
+#   FLEET_RELEASE=target/debug/fleet-release FLEET_HUB=target/debug/fleet-hub \
+#     scripts/release-update-scripts-test.sh
+#
+# Needs minisign, git, tar. Run by ci.yml's hub-headless job.
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+root="$(cd "$here/.." && pwd)"
+FLEET_RELEASE="$(cd "$(dirname "${FLEET_RELEASE:?}")" && pwd)/$(basename "$FLEET_RELEASE")"
+FLEET_HUB="$(cd "$(dirname "${FLEET_HUB:?}")" && pwd)/$(basename "$FLEET_HUB")"
+export FLEET_RELEASE
+command -v minisign >/dev/null || { echo "release-update-scripts-test: minisign not found" >&2; exit 1; }
+
+t="$(mktemp -d)"
+trap 'rm -rf "$t"' EXIT
+fails=0
+check() {
+  local what="$1"
+  shift
+  if "$@"; then echo "  ok    $what"; else echo "  FAIL  $what"; fails=$((fails + 1)); fi
+}
+json() { # json <file> <python expression over d>
+  python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print($2)" "$1"
+}
+
+# A throwaway key the scripts trust through a copy of keys.rs.
+minisign -G -W -f -p "$t/test.pub" -s "$t/test.key" >/dev/null
+pub="$(sed -n 2p "$t/test.pub")"
+printf 'pub const RELEASE_KEYS: &[&str] = &[\n    "%s",\n];\n' "$pub" >"$t/keys.rs"
+export FLEET_RELEASE_KEYS_RS="$t/keys.rs"
+export RELEASE_SIGNING_KEY
+RELEASE_SIGNING_KEY="$(cat "$t/test.key")"
+printf '%s\n' "$pub" >"$t/pubkeys"
+
+# The release's assets, with the real fleet-hub inside its tarball.
+v=0.4.1
+assets="$t/assets"
+mkdir -p "$assets" "$t/pack"
+for n in "claude-fleet_${v}_aarch64.dmg" "claude-fleet_${v}_x64.dmg" "claude-fleet_${v}_amd64.deb" \
+  "claude-fleet_${v}_amd64.AppImage" "claude-fleet_${v}_x64-setup.exe" "claude-fleet_${v}_aarch64.app.tar.gz" \
+  "fleet-agent-${v}-x86_64-unknown-linux-gnu.tar.gz"; do
+  head -c 64 /dev/urandom >"$assets/$n"
+done
+mkdir -p "$t/pack/fleet-hub-$v"
+cp "$FLEET_HUB" "$t/pack/fleet-hub-$v/fleet-hub"
+tar -czf "$assets/fleet-hub-${v}-x86_64-unknown-linux-gnu.tar.gz" -C "$t/pack" "fleet-hub-$v"
+
+# A fake gh: the release body carries the hub image block; `release download`
+# serves what "the release" holds ($t/published/<tag>).
+digest="sha256:$(printf 'hub' | sha256sum | cut -d' ' -f1)"
+mkdir -p "$t/bin" "$t/published"
+cat >"$t/bin/gh" <<EOF
+#!/usr/bin/env bash
+case "\$1 \$2" in
+  "api repos/"*)
+    printf '%s\n' 'notes' '<!-- fleet-hub-image -->' '### Hub image' '' '\`ghcr.io/o/fleet-hub:$v\` — digest \`$digest\`' '<!-- /fleet-hub-image -->' ;;
+  "release download")
+    tag="\$3"; shift 3; dir=.
+    while [ \$# -gt 0 ]; do case "\$1" in -D) dir="\$2"; shift 2;; *) shift;; esac; done
+    cp "$t/published/\$tag/"* "\$dir/" ;;
+  "secret set") cat >"$t/secret-\$3" ;;
+  *) echo "fake gh: \$*" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$t/bin/gh"
+export PATH="$t/bin:$PATH"
+
+echo "release-manifest.sh"
+(cd "$t" && TAG="v0.4.0" ASSETS_DIR="$assets" "$here/release-manifest.sh" 2>/dev/null)
+check "an older version needs no manifest" test ! -e "$t/release-manifest.json"
+check "no key fails the release" bash -c "cd '$t' && ! RELEASE_SIGNING_KEY= TAG=v$v ASSETS_DIR='$assets' '$here/release-manifest.sh' >/dev/null 2>&1"
+(cd "$t" && DRY_RUN=1 TAG="v$v" RELEASE_ID=1 REPO=o/r GIT_SHA=abc BUILD_ID=gh-run-1-1 \
+  HUB_IMAGE_WAIT_SECS=0 ASSETS_DIR="$assets" "$here/release-manifest.sh" 2>/dev/null)
+m="$t/release-manifest.json"
+check "the manifest verifies with the fleet's verifier" \
+  "$FLEET_RELEASE" verify --keys-file "$t/pubkeys" --kind manifest --file "$m" --sig "$m.minisig"
+contract="$("$FLEET_HUB" compat | python3 -c 'import json,sys; print(json.load(sys.stdin)["contract"]["hub_serves"])')"
+check "it states the shipped hub's contract" test "$(json "$m" 'd["compatibility"]["contract"]["hub_serves"]')" = "$contract"
+dmin="$(sed -n 's/^pub const MIN_HUB_CONTRACT: u32 = \([0-9]*\);.*/\1/p' "$root/src-tauri/src/backend/contract.rs")"
+check "and the desktop's window from contract.rs" test "$(json "$m" 'd["compatibility"]["contract"]["desktop_accepts"][0]')" = "$dmin"
+check "it carries the hub image by digest" test "$(json "$m" '[a["digest"] for a in d["components"]["hub"]["artifacts"] if a["kind"]=="oci"][0]')" = "$digest"
+check "desktop downloads, not the unsigned updater bundle" test "$(json "$m" 'len(d["components"]["desktop"]["artifacts"])')" = 5
+
+# Publish it, then run update-channels.sh against a local bare remote.
+mkdir -p "$t/published/v$v"
+cp "$m" "$m.minisig" "$t/published/v$v/"
+git init -q --bare "$t/remote.git"
+git init -q "$t/repo"
+git -C "$t/repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
+git -C "$t/repo" remote add origin "$t/remote.git"
+chan() { # chan <track> — the pushed document, verified
+  git -C "$t/remote.git" show "update-channels:$1.json" >"$t/$1.json"
+  git -C "$t/remote.git" show "update-channels:$1.json.minisig" >"$t/$1.json.minisig"
+  "$FLEET_RELEASE" verify --keys-file "$t/pubkeys" --kind channel --track "$1" --file "$t/$1.json" --sig "$t/$1.json.minisig" >/dev/null 2>&1
+}
+uc() { (cd "$t/repo" && REPO=o/r "$here/update-channels.sh" "$@" 2>/dev/null); }
+
+echo "update-channels.sh"
+uc add "v$v"
+check "a stable release lands on stable" chan stable
+check "and on beta" chan beta
+check "stable recommends it" test "$(json "$t/stable.json" 'd["recommended"]')" = "$v"
+
+rc="0.4.2-rc.1"
+rcassets="$t/assets-rc"
+mkdir -p "$rcassets" "$t/published/v$rc" "$t/pack/fleet-hub-$rc"
+cp "$FLEET_HUB" "$t/pack/fleet-hub-$rc/fleet-hub"
+tar -czf "$rcassets/fleet-hub-${rc}-x86_64-unknown-linux-gnu.tar.gz" -C "$t/pack" "fleet-hub-$rc"
+(cd "$t" && DRY_RUN=1 TAG="v$rc" HUB_IMAGE_WAIT_SECS=0 ASSETS_DIR="$rcassets" "$here/release-manifest.sh" 2>/dev/null)
+check "an rc's manifest is on the beta track" test "$(json "$t/release-manifest.json" 'd["release"]["track"]')" = beta
+cp "$t/release-manifest.json" "$t/release-manifest.json.minisig" "$t/published/v$rc/"
+uc add "v$rc"
+chan beta
+check "an rc lands on beta" test "$(json "$t/beta.json" 'd["current"]')" = "$rc"
+chan stable
+check "and not on stable" test "$(json "$t/stable.json" 'd["current"]')" = "$v"
+
+seq="$(json "$t/stable.json" 'd["sequence"]')"
+uc edit stable minimum "$v" hub
+chan stable
+check "an edit re-signs with a higher sequence" test "$(json "$t/stable.json" 'd["sequence"]')" -gt "$seq"
+check "and sets the signed floor" test "$(json "$t/stable.json" 'd["minimum_supported"]["hub"]')" = "$v"
+check "withdrawing the recommended release is refused" bash -c "! (cd '$t/repo' && '$here/update-channels.sh' edit stable withdraw '$v' '' bad >/dev/null 2>&1)"
+seq="$(json "$t/stable.json" 'd["sequence"]')"
+uc resign
+chan stable
+check "resign bumps every track" test "$(json "$t/stable.json" 'd["sequence"]')" -gt "$seq"
+
+# A secret that does not match keys.rs pushes nothing.
+minisign -G -W -f -p "$t/other.pub" -s "$t/other.key" >/dev/null
+before="$(git -C "$t/remote.git" rev-parse update-channels)"
+check "a key the fleet does not trust is refused" bash -c "! (cd '$t/repo' && RELEASE_SIGNING_KEY=\"\$(cat '$t/other.key')\" '$here/update-channels.sh' resign >/dev/null 2>&1)"
+check "and nothing was pushed" test "$(git -C "$t/remote.git" rev-parse update-channels)" = "$before"
+
+echo "release-key.sh"
+cp "$root/crates/fleet-update/src/keys.rs" "$t/keys-empty.rs"
+if grep -q '^pub const RELEASE_KEYS: &\[&str\] = &\[\];$' "$t/keys-empty.rs"; then
+  mkdir -p "$t/home"
+  FLEET_RELEASE_KEYS_RS="$t/keys-empty.rs" HOME="$t/home" USER=t "$here/release-key.sh" --no-keychain --repo o/r >"$t/key.out" 2>&1 || true
+  newpub="$(FLEET_RELEASE_KEYS_RS="$t/keys-empty.rs" "$here/release-pubkeys.sh")"
+  check "it writes one public key into keys.rs" test "$(printf '%s\n' "$newpub" | grep -c '^RW')" = 1
+  check "the secret went to gh on stdin" grep -q 'secret key' "$t/secret-RELEASE_SIGNING_KEY"
+  check "keys.rs still compiles as the same constant" grep -q '^pub const RELEASE_KEYS: &\[&str\] = &\[$' "$t/keys-empty.rs"
+  check "a second run is refused (that is a rotation)" bash -c "! FLEET_RELEASE_KEYS_RS='$t/keys-empty.rs' HOME='$t/home' '$here/release-key.sh' --no-keychain >/dev/null 2>&1"
+else
+  echo "  skip  keys.rs already names a key"
+fi
+
+if [ "$fails" -ne 0 ]; then
+  echo "release-update-scripts-test: $fails check(s) failed" >&2
+  exit 1
+fi
+echo "release-update-scripts-test: all checks passed"

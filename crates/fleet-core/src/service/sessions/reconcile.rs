@@ -821,6 +821,11 @@ fn write_reachable_host(
             pr_observed: pr.is_some(),
             tmux_pane_id: sess.pane_id.clone(),
             pending_input: pane.and_then(|p| p.pending_input.clone()),
+            // The spinner on screen is life, whether or not this pass asked
+            // `claude agents`: the stale-working sweep that runs right after
+            // this pass must not demote a row its pane shows working (F2's
+            // demote-lift-demote flap during one long tool call).
+            pane_working: pane_status == Some(crate::service::pane_intel::ClaudeStatus::Working),
         });
     }
     let now = now_unix();

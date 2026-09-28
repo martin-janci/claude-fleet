@@ -502,6 +502,7 @@ fn routed_read_cases() -> Vec<Case> {
                         text: "run the tests".into(),
                         auto_send: None,
                     }],
+                    None,
                     s,
                 ))
                 .map(|_| ())

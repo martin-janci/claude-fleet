@@ -24,14 +24,16 @@ pub async fn quick_replies(
 }
 
 /// Replace the whole list (`[]` restores the defaults). Returns the list as
-/// stored, which is what every client will read next.
+/// stored, which is what every client will read next. `expected` is the list
+/// the editor last read: `E_CONFLICT` when another device saved since.
 #[tauri::command]
 pub async fn set_quick_replies(
     entries: Vec<QuickReply>,
+    expected: Option<Vec<QuickReply>>,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<QuickReply>, IpcError> {
-    routed::set_quick_replies(&backend, entries, &store).await
+    routed::set_quick_replies(&backend, entries, expected, &store).await
 }
 
 pub(crate) mod routed {
@@ -50,11 +52,12 @@ pub(crate) mod routed {
     pub async fn set_quick_replies(
         backend: &FleetBackend,
         entries: Vec<QuickReply>,
+        expected: Option<Vec<QuickReply>>,
         store: &Mutex<Store>,
     ) -> Result<Vec<QuickReply>, IpcError> {
         match backend.hub() {
-            Some(hub) => hub.set_quick_replies(entries).await,
-            None => quick_replies::replace(store, entries),
+            Some(hub) => hub.set_quick_replies(entries, expected).await,
+            None => quick_replies::replace(store, entries, expected),
         }
     }
 }

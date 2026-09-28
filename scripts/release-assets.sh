@@ -40,7 +40,9 @@ self="$(basename "$0")"
 #
 # `kind` groups legs into the workflow matrices: `desktop` is tauri-action,
 # `bins` is the fleet-agent/fleet-hub tarball packaging, `checksums` is the
-# single aggregate job that has no matrix but does produce an asset.
+# single aggregate job that has no matrix but does produce an asset, and
+# `manifest` is the signed update manifest (scripts/release-manifest.sh,
+# update-channel design §4), required from 0.4.1.
 #
 # Runner choices are explained in release.yml (22.04 for the bins legs so the
 # binaries only need glibc 2.35+). The macOS `.app.tar.gz` names here are the
@@ -66,6 +68,7 @@ desktop-x86_64-windows|desktop|windows-latest||--bundles nsis --config src-tauri
 bins-x86_64-unknown-linux-gnu|bins|ubuntu-22.04|x86_64-unknown-linux-gnu||fleet-agent-{v}-x86_64-unknown-linux-gnu.tar.gz fleet-hub-{v}-x86_64-unknown-linux-gnu.tar.gz
 bins-aarch64-unknown-linux-gnu|bins|ubuntu-22.04-arm|aarch64-unknown-linux-gnu||fleet-agent-{v}-aarch64-unknown-linux-gnu.tar.gz fleet-hub-{v}-aarch64-unknown-linux-gnu.tar.gz
 checksums|checksums|ubuntu-24.04|||SHA256SUMS
+manifest|manifest|ubuntu-24.04|||release-manifest.json release-manifest.json.minisig|0.4.1
 LEGS
 }
 

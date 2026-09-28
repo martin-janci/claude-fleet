@@ -81,12 +81,18 @@ beforeEach(() => {
 describe('commands: every one takes { args: { … } } with the action’s fields', () => {
   it('reads', async () => {
     await workTree({ filters: { status: 'open', query: ' login ', has: 'any' }, limit: 50 });
-    expect(lastCall()).toEqual(['work_tree', { args: { filters: { status: 'open', query: 'login' }, limit: 50 } }]);
+    expect(lastCall()).toEqual(['work_tree', { args: { filters: { status: 'open', query: 'login', archived: false }, limit: 50 } }]);
     await workTree({ filters: { org: 3, group: 'tracker:1:ABC' }, cursor: 'c1', limit: 20, per_task: 4 });
     expect(lastCall()).toEqual([
       'work_tree',
-      { args: { filters: { org: 3, group: 'tracker:1:ABC' }, cursor: 'c1', limit: 20, per_task: 4 } },
+      { args: { filters: { org: 3, group: 'tracker:1:ABC', archived: false }, cursor: 'c1', limit: 20, per_task: 4 } },
     ]);
+    // The hub hides archived tasks only when asked: `archived` always goes
+    // on the wire, `false` without a filter and `true` when showing them.
+    await workTree();
+    expect(lastCall()).toEqual(['work_tree', { args: { filters: { archived: false } } }]);
+    await workTree({ filters: { archived: true } });
+    expect(lastCall()).toEqual(['work_tree', { args: { filters: { archived: true } } }]);
     await workTask('ref:ABC-1');
     expect(lastCall()).toEqual(['work_task', { args: { task_id: 'ref:ABC-1' } }]);
     await workSessionTasks(7);

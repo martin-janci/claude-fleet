@@ -26,6 +26,7 @@ pub mod keys;
 pub mod manifest;
 pub mod model;
 pub mod phase;
+pub mod publish;
 pub mod time;
 pub mod verify;
 pub mod wire;
