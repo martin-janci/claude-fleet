@@ -8,7 +8,8 @@
         "stat",
         "record",
         "notice",
-        "link"
+        "link",
+        "custom"
       ],
       "supported": true
     },
@@ -847,6 +848,139 @@
         "number",
         "readonly"
       ]
+    },
+    {
+      "default_widget": "text",
+      "key": "hub.bind",
+      "kind": {
+        "max": 255,
+        "type": "text"
+      },
+      "label": "Hub bind address",
+      "widgets": [
+        "text",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "text",
+      "key": "hub.public_url",
+      "kind": {
+        "max": 2048,
+        "type": "text"
+      },
+      "label": "Hub public URL",
+      "widgets": [
+        "text",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "text",
+      "key": "hub.allowed_hosts",
+      "kind": {
+        "max": 4096,
+        "type": "text"
+      },
+      "label": "Hub allowed hosts",
+      "widgets": [
+        "text",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "hub.local_host",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Hub runs local sessions",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "hub.allow_plaintext",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Hub serves plaintext",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "hub.tls",
+      "kind": {
+        "options": [
+          "off",
+          "cert"
+        ],
+        "type": "choice"
+      },
+      "label": "Hub TLS",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "mcp.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Control API",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "mcp.port",
+      "kind": {
+        "max": 65535,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Control API port",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "mcp.confirm_destructive",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Confirm destructive calls",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "mcp.broadcast_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Broadcast interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
     }
   ],
   "sources": [
@@ -1054,6 +1188,12 @@
       ]
     },
     {
+      "id": "text",
+      "kinds": [
+        "text"
+      ]
+    },
+    {
       "id": "textarea",
       "kinds": [
         "id_set",
@@ -1083,7 +1223,8 @@
         "int",
         "path_map",
         "price_map",
-        "secs"
+        "secs",
+        "text"
       ]
     }
   ]

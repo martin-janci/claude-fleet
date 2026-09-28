@@ -157,11 +157,13 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   // Gated by SettingsDialog.svelte's own `get_fleet_settings` gate: `{#if
   // !ownsFleet}` swaps the whole Projects section for the remote note, and
   // the Limits section (with WorkRetention.svelte, work graph M12.3) too.
-  // `describe_fleet_settings` (declarative pages P1) feeds the generated
-  // settings pages, which sit behind that same gate.
+  // `describe_fleet_settings` (declarative pages P1) and
+  // `fetch_page_source` (P3) feed the generated pages, which show the same
+  // hub reason instead (`pages-remote`) when the app does not own the fleet.
   gatedBySettingsDialog: [
     'set_fleet_setting',
     'describe_fleet_settings',
+    'fetch_page_source',
     'work_retention_status',
     'work_retention_sweep',
   ],

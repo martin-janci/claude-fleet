@@ -529,6 +529,14 @@ impl Store {
         Ok(())
     }
 
+    /// Emit `settings:changed` for `key` (declarative pages P3). Called by
+    /// `service::settings::set` after a validated write, not by
+    /// [`Self::set_setting`]: most rows in this table are internal state
+    /// nobody renders.
+    pub fn emit_settings_changed(&self, key: &str) {
+        self.bus.emit(&RowChange::SettingsChanged(key.to_string()));
+    }
+
     /// Forget a key, so the next `get_setting` answers `None` and its reader
     /// falls back to its own default. Absent and "stored as the default" are
     /// not the same thing: the second pins today's default forever (see

@@ -17,6 +17,7 @@ pub fn default_widget(kind: Kind) -> Widget {
         Kind::PathMap => Widget::KeyValueTable,
         Kind::IdSet => Widget::IdList,
         Kind::PriceMap => Widget::Textarea,
+        Kind::Text { .. } => Widget::Text,
     }
 }
 
@@ -32,6 +33,7 @@ pub fn accepts(widget: Widget, kind: Kind) -> bool {
         Widget::KeyValueTable => matches!(kind, Kind::PathMap),
         Widget::IdList => matches!(kind, Kind::IdSet),
         Widget::Textarea => matches!(kind, Kind::PathMap | Kind::PriceMap | Kind::IdSet),
+        Widget::Text => matches!(kind, Kind::Text { .. }),
     }
 }
 
@@ -45,8 +47,13 @@ pub fn item_type(item: &Item) -> &'static str {
         Item::Chart { .. } => "chart",
         Item::Notice { .. } => "notice",
         Item::Link { .. } => "link",
+        Item::Custom { .. } => "custom",
     }
 }
+
+/// Most `custom` items all pages together may hold: the escape hatch stays
+/// small (design §8).
+pub const MAX_CUSTOM: usize = 3;
 
 /// Whether this build can render `layout` at all. The resource layouts wait
 /// on the resource and action registries (design P4).
@@ -59,7 +66,7 @@ pub fn layout_supported(layout: Layout) -> bool {
 /// cannot render yet.
 pub fn layout_item_types(layout: Layout) -> &'static [&'static str] {
     match layout {
-        Layout::Category => &["field", "stat", "record", "notice", "link"],
+        Layout::Category => &["field", "stat", "record", "notice", "link", "custom"],
         Layout::Cards => &["stat", "record", "notice", "link"],
         Layout::DataPage => &["stat", "record", "table", "chart", "notice", "link"],
         Layout::MasterDetail | Layout::Flow | Layout::ObjectEditor | Layout::ReviewApply => &[],
@@ -90,6 +97,7 @@ pub const WIDGETS: &[Widget] = &[
     Widget::Select,
     Widget::Radio,
     Widget::Multiselect,
+    Widget::Text,
     Widget::Textarea,
     Widget::KeyValueTable,
     Widget::IdList,

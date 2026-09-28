@@ -94,6 +94,10 @@
               "type": "notice",
               "tone": "warn",
               "text": "On, the sweep safe-kills finished sessions without asking. A session that is working, waiting on you, linked to in-progress work or used in the last hour is never touched."
+            },
+            {
+              "type": "custom",
+              "component": "auto_tidy_preview"
             }
           ]
         }
@@ -116,6 +120,10 @@
             {
               "type": "field",
               "key": "work.retention.timeline_work_events_days"
+            },
+            {
+              "type": "custom",
+              "component": "work_retention"
             }
           ]
         }

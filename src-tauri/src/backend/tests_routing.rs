@@ -4003,6 +4003,7 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/move_session.rs"),
     ),
     ("commands/mutate.rs", include_str!("../commands/mutate.rs")),
+    ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (
         "commands/onboarding.rs",
         include_str!("../commands/onboarding.rs"),

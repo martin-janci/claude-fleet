@@ -9,6 +9,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SettingsDialog from './SettingsDialog.svelte';
 import { hosts } from './hosts';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { bundle } from './pages/testing';
 
 const mcpStatusObj = {
   enabled: false,
@@ -53,6 +54,8 @@ function route(overrides: Record<string, unknown> = {}) {
         return [];
       case 'get_fleet_settings':
         return {};
+      case 'list_pages':
+        return bundle;
       default:
         return null;
     }
@@ -259,7 +262,7 @@ describe('the panels that do not apply to a hub client', () => {
     await screen.findByTestId('hub-section');
     await tick();
     await tick();
-    for (const cmd of ['mcp_status', 'get_fleet_settings']) {
+    for (const cmd of ['mcp_status', 'get_fleet_settings', 'describe_fleet_settings']) {
       expect(inv.mock.calls.some((c) => c[0] === cmd), cmd).toBe(false);
     }
   });
@@ -267,14 +270,18 @@ describe('the panels that do not apply to a hub client', () => {
   it('replaces each of them with the reason instead of an error', async () => {
     route();
     render(SettingsDialog, { props: { onClose: () => {} } });
-    for (const testid of ['projects-remote', 'automation-remote', 'limits-remote', 'mcp-remote']) {
+    for (const testid of ['projects-remote', 'mcp-remote']) {
       const note = await screen.findByTestId(testid);
       expect(note.textContent, testid).toContain('fleet.example.com');
     }
     // …and the controls are gone rather than present-but-broken.
     expect(screen.queryByTestId('projects-save')).toBeNull();
-    expect(screen.queryByTestId('gc-enabled')).toBeNull();
     expect(screen.queryByTestId('mcp-enable')).toBeNull();
+    // A generated page says the same instead of rendering fields it cannot
+    // read (describe_fleet_settings is local-only too).
+    await fireEvent.click(await screen.findByTestId('settings-nav-settings.automation'));
+    expect((await screen.findByTestId('pages-remote')).textContent).toContain('fleet.example.com');
+    expect(screen.queryByTestId('setting-gc-enabled')).toBeNull();
   });
 
   it('still renders Diagnostics, which is about THIS process either way', async () => {
@@ -290,7 +297,7 @@ describe('the panels that do not apply to a hub client', () => {
     await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'mcp_status')).toBe(true));
     expect(inv.mock.calls.some((c) => c[0] === 'get_fleet_settings')).toBe(true);
     expect(screen.getByTestId('projects-section')).toBeInTheDocument();
-    expect(screen.getByTestId('automation-section')).toBeInTheDocument();
+    expect(inv.mock.calls.some((c) => c[0] === 'describe_fleet_settings')).toBe(true);
     expect(screen.queryByTestId('projects-remote')).toBeNull();
   });
 });

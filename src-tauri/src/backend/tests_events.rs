@@ -508,7 +508,9 @@ async fn every_event_name_the_frontend_listens_for_crosses_the_bridge() {
         // `move:progress` is read field by field rather than merged on a key.
         "to_host": "trn", "step": "git", "state": "done", "index": 4,
         // `work:changed` (work graph M14) says what changed.
-        "what": "rule"
+        "what": "rule",
+        // `settings:changed` (declarative pages P3) names the key.
+        "key": "gc.enabled"
     });
     let body: Vec<String> = fleet_core::events::EVENT_NAMES
         .iter()

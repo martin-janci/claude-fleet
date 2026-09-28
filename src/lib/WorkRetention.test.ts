@@ -1,12 +1,10 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import WorkRetention from './WorkRetention.svelte';
-import SettingsDialog from './SettingsDialog.svelte';
-import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import { lastSweepLine, retentionLine, type RetentionStatus } from './work_retention';
 
 const NOW = 1_800_000_000;
@@ -85,40 +83,5 @@ describe('WorkRetention', () => {
     expect((await screen.findByTestId('work-retention-backlog')).textContent).toContain('at most 2000');
     await fireEvent.click(screen.getByTestId('work-retention-sweep'));
     expect((await screen.findByTestId('work-retention-error')).textContent).toContain('on the hub');
-  });
-});
-
-describe('SettingsDialog — work retention (M12.3)', () => {
-  afterEach(() => fleetSettings.set({ ...SETTING_DEFAULTS }));
-
-  it('shows the stored windows and writes a new one', async () => {
-    inv.mockImplementation(async (cmd: string) => {
-      if (cmd === 'get_fleet_settings')
-        return {
-          'work.retention.journal_days': '30',
-          'work.retention.tracker_items_days': '0',
-          'work.retention.timeline_work_events_days': '90',
-        };
-      if (cmd === 'work_retention_status') return status();
-      if (cmd === 'mcp_status') return { enabled: false, running: false, port: 4180, token: 't', url: '', bind_error: null, confirm_destructive: false };
-      if (cmd === 'list_hosts' || cmd === 'list_host_tokens' || cmd === 'discover_hosts') return [];
-      return null;
-    });
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    const input = (id: string) => screen.getByTestId(id) as HTMLInputElement;
-    await waitFor(() => expect(input('work-retention-journal-days').value).toBe('30'));
-    expect(input('work-retention-tracker-items-days').value).toBe('0');
-    expect(input('work-retention-timeline-days').value).toBe('90');
-    expect(await screen.findByTestId('work-retention-work_journal')).toBeTruthy();
-    expect(screen.queryByTestId('work-journal-days')).toBeNull();
-
-    input('work-retention-tracker-items-days').value = '120';
-    await fireEvent.change(input('work-retention-tracker-items-days'));
-    await waitFor(() =>
-      expect(inv).toHaveBeenCalledWith('set_fleet_setting', {
-        key: 'work.retention.tracker_items_days',
-        value: '120',
-      }),
-    );
   });
 });

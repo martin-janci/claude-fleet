@@ -62,6 +62,7 @@ pub(crate) fn range_text(spec: &Spec) -> String {
         Kind::PathMap => "JSON map: host alias → path".to_string(),
         Kind::IdSet => "JSON array of ids".to_string(),
         Kind::PriceMap => "JSON map: model → USD per million tokens".to_string(),
+        Kind::Text { max } => format!("text, up to {max} characters"),
     };
     match spec.zero {
         Some(zero) => format!("{base}, `0` = {zero}"),
@@ -82,6 +83,9 @@ fn what_it_does(spec: &Spec) -> String {
     }
     if let Danger::Confirm(_) = spec.danger {
         out.push_str(" Asks to confirm.");
+    }
+    if let Some(how) = spec.owned_by {
+        out.push_str(&format!(" Read-only here: change it with {how}."));
     }
     out.replace('|', "\\|")
 }
@@ -127,6 +131,8 @@ fn group_title(prefix: &str) -> &str {
         "health" => "Health",
         "work" => "Work graph",
         "decide" => "Decisions (Jev)",
+        "hub" => "Hub daemon (read-only)",
+        "mcp" => "Control API (read-only)",
         other => other,
     }
 }

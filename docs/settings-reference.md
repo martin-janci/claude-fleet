@@ -130,3 +130,23 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | `decide.jev.daily_token_budget` | `2000000` | 0–1000000000 tokens, `0` = none | Input tokens the decision model may be sent per UTC day. At $0.042 per million, the default is under $0.09 a day. |
 | `decide.jev.model` | `jev-1.13.0` | `jev-1.13.0` / `jev-latest` | The model version a request names. jev-1.13.0 is pinned; jev-latest follows TypeSafe. |
 | `decide.retention_days` | `90` | 0–3650 days, `0` = forever | Days a decision record (ids and numbers, never text) is kept. |
+
+## Hub daemon (read-only)
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `hub.bind` | `127.0.0.1` | text, up to 255 characters | The address the hub daemon listens on. Loopback unless the daemon was started with a routable bind. Read-only here: change it with fleet-hub serve --bind. |
+| `hub.public_url` | `` | text, up to 2048 characters | The URL hosts and paired clients reach the hub at. Empty means loopback with a reverse tunnel per host. Read-only here: change it with fleet-hub serve --public-url. |
+| `hub.allowed_hosts` | `` | text, up to 4096 characters | Extra Host header values the hub accepts, comma-separated, besides the ones its bind and public URL imply. Read-only here: change it with fleet-hub serve --allowed-host. |
+| `hub.local_host` | `true` | on / off | Whether the hub's own machine is a fleet host. On for the desktop; the daemon turns it off by default. Read-only here: change it with fleet-hub serve --local-host. |
+| `hub.allow_plaintext` | `false` | on / off | Whether the hub daemon may serve a routable bind without TLS. Read-only here: change it with fleet-hub serve --allow-plaintext. |
+| `hub.tls` | `off` | `off` / `cert` | How the hub daemon terminates TLS: off, behind a proxy, or cert, with its own certificate. Read-only here: change it with fleet-hub serve --tls. |
+
+## Control API (read-only)
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `mcp.enabled` | `false` | on / off | Whether the embedded control API (MCP) runs, so an AI assistant can drive the fleet. Read-only here: change it with Settings → Control API. |
+| `mcp.port` | `4180` | 1–65535 | The localhost port the control API listens on. Read-only here: change it with Settings → Control API. |
+| `mcp.confirm_destructive` | `false` | on / off | Every destructive control API call waits for a confirmation on the desktop. Read-only here: change it with Settings → Control API. |
+| `mcp.broadcast_interval_secs` | `30` | seconds | Shortest time between two broadcast prompts from the same caller. Read-only here: change it with the settings table only. |

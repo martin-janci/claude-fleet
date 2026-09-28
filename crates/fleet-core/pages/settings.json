@@ -19,6 +19,14 @@
         {
           "type": "link",
           "page": "settings.projects"
+        },
+        {
+          "type": "link",
+          "page": "settings.hub"
+        },
+        {
+          "type": "link",
+          "page": "settings.control_api"
         }
       ]
     },

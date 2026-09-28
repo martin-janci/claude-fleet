@@ -49,6 +49,14 @@ pub const PAGE_FILES: &[(&str, &str)] = &[
         "settings.decisions.json",
         include_str!("../../pages/settings.decisions.json"),
     ),
+    (
+        "settings.hub.json",
+        include_str!("../../pages/settings.hub.json"),
+    ),
+    (
+        "settings.control_api.json",
+        include_str!("../../pages/settings.control_api.json"),
+    ),
     ("usage.json", include_str!("../../pages/usage.json")),
 ];
 

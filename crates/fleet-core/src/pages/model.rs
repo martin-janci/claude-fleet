@@ -134,6 +134,11 @@ pub enum Item {
     },
     /// A static callout.
     Notice { tone: Tone, text: String },
+    /// A hand-written component registered in code: the one escape hatch
+    /// (design §8), for what the catalog cannot express yet. Closed set,
+    /// capped at [`crate::pages::catalog::MAX_CUSTOM`] uses across all
+    /// pages.
+    Custom { component: CustomComponent },
     /// A link to another page.
     Link {
         page: String,
@@ -164,10 +169,27 @@ pub enum Widget {
     Select,
     Radio,
     Multiselect,
+    Text,
     Textarea,
     KeyValueTable,
     IdList,
     Readonly,
+}
+
+/// The registered hand-written components. Each one is a debt: when the
+/// catalog can express it (a data source plus an action), it is replaced
+/// and removed from this list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "snake_case")]
+pub enum CustomComponent {
+    /// Work retention's dry-run preview and "Sweep now" (work graph M12.3;
+    /// `WorkRetention.svelte`). Waits on actions (P4).
+    WorkRetention,
+    /// "Show what auto-tidy would do": the tidy candidates the ticked
+    /// reasons would act on (work graph M7.3; `AutoTidyPreview.svelte`).
+    /// Waits on a `work.tidy` data source with a param from the page.
+    AutoTidyPreview,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

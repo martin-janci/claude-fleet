@@ -104,8 +104,13 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   catalog widgets and layouts; `pages::validate` refuses anything else, and
   every setting has exactly one home (`every_setting_has_one_home`: a new
   `SPECS` row needs a `field` on a page). Authoring guide `docs/pages.md`;
-  regenerate `docs/page-spec.schema.json` / `docs/page-catalog.json` with
+  regenerate `docs/page-spec.schema.json` / `docs/page-catalog.json` and
+  the frontend fixture `src/lib/pages/registry.generated.json` with
   `REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current`.
+  P3's renderer (`src/lib/pages/`) shows them in Settings beside
+  "General" (`list_pages`, `fetch_page_source`); `hub.*` / `mcp.*` are
+  read-only specs (`owned_by`, D-P7), and `settings::set` emits
+  `settings:changed` (kind `settings`, never on host/org-bound streams).
 - **Status vocabulary** (`claude_status`, `stuck_kind`) lives in the enums in
   `service/pane_intel.rs`; the MCP tool descriptions and the generated
   reference derive from them, so add values there, not in prose.
@@ -127,7 +132,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 205
+  verdict is written down once, in `backend/verdicts.rs`, for all 207
   commands; `backend/tests_routing.rs` holds the handler list, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table

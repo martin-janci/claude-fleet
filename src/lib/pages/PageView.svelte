@@ -1,0 +1,210 @@
+<script lang="ts">
+  // Renders one page spec (`crates/fleet-core/pages/<id>.json`) with the
+  // closed catalog: layout → sections (or tabs of sections) → items. The
+  // spec only says what goes where; a field's label, help, bounds and danger
+  // come from the registry's descriptor, a data item's formatting from its
+  // source's declared shape.
+  import { tick } from 'svelte';
+  import FieldRow from './FieldRow.svelte';
+  import DataItem from './DataItem.svelte';
+  import Disclosure from './Disclosure.svelte';
+  import Tabs from './Tabs.svelte';
+  import WorkRetention from '../WorkRetention.svelte';
+  import AutoTidyPreview from '../AutoTidyPreview.svelte';
+  import { evalCondition, sectionsOf, type Descriptor, type Page, type Section, type SourceSpec } from './pages';
+
+  let {
+    page,
+    pages,
+    descs,
+    values,
+    sources,
+    focusKey = null,
+    readonly = false,
+    onnavigate,
+  }: {
+    page: Page;
+    pages: Page[];
+    descs: Map<string, Descriptor>;
+    values: Record<string, string>;
+    sources: SourceSpec[];
+    /** A setting to bring into view and highlight (a search hit). */
+    focusKey?: string | null;
+    /** Show every field without editing (a hub client). */
+    readonly?: boolean;
+    onnavigate: (pageId: string) => void;
+  } = $props();
+
+  const tabs = $derived((page.tabs ?? []).filter((t) => evalCondition(t.when, values)));
+  let tab = $state(0);
+
+  const visibleSections = $derived<Section[]>(
+    (tabs.length ? (tabs[Math.min(tab, tabs.length - 1)]?.sections ?? []) : (page.sections ?? [])).filter(
+      (s) => evalCondition(s.when, values),
+    ),
+  );
+
+  const modifiedCount = $derived(
+    sectionsOf(page)
+      .flatMap(({ section }) => section.items)
+      .filter((i) => i.type === 'field')
+      .filter((i) => {
+        const d = descs.get(i.key);
+        return d !== undefined && d.owned_by === undefined && (values[i.key] ?? d.value) !== d.default;
+      }).length,
+  );
+
+  const titleOf = (id: string) => pages.find((p) => p.id === id)?.title ?? id;
+  const sourceOf = (id: string) => sources.find((s) => s.id === id);
+
+  let root = $state<HTMLElement>();
+
+  // A search hit: open the tab the setting is on, then scroll to it.
+  $effect(() => {
+    const key = focusKey;
+    if (!key) return;
+    const at = (page.tabs ?? []).findIndex((t) =>
+      t.sections.some((s) => s.items.some((i) => i.type === 'field' && i.key === key)),
+    );
+    if (at >= 0) tab = at;
+    void tick().then(() => {
+      const el = root?.querySelector<HTMLElement>(`[data-setting-key="${CSS.escape(key)}"]`);
+      el?.scrollIntoView?.({ block: 'center' });
+      el?.closest('details')?.setAttribute('open', '');
+    });
+  });
+</script>
+
+<div class="page" class:cards={page.layout === 'cards'} class:data={page.layout === 'data_page'} bind:this={root} data-testid={`page-${page.id}`}>
+  <header>
+    <h4>{page.title}</h4>
+    {#if modifiedCount > 0}<span class="tag" data-testid="page-modified-count">{modifiedCount} changed</span>{/if}
+  </header>
+  {#if page.intro}<p class="intro">{page.intro}</p>{/if}
+
+  {#if tabs.length > 0}
+    <Tabs tabs={tabs.map((t) => t.title)} bind:selected={tab} label={page.title} testidPrefix={`page-${page.id}-tab`} />
+  {/if}
+
+  {#each visibleSections as section (section.title)}
+    {#if section.collapsible || section.advanced}
+      <Disclosure title={section.title} open={!section.advanced} badge={section.advanced ? 'Advanced' : undefined} testid={`section-${section.title}`}>
+        {@render sectionBody(section)}
+      </Disclosure>
+    {:else}
+      <section class="section" data-testid={`section-${section.title}`}>
+        <h5>{section.title}</h5>
+        {@render sectionBody(section)}
+      </section>
+    {/if}
+  {/each}
+</div>
+
+{#snippet sectionBody(section: Section)}
+  {#if section.intro}<p class="intro">{section.intro}</p>{/if}
+  <div class="items">
+    {#each section.items as item, i (i)}
+      {#if item.type === 'field'}
+        {@const d = descs.get(item.key)}
+        {#if d && evalCondition(item.when, values)}
+          <FieldRow
+            {d}
+            value={values[item.key] ?? d.value}
+            widget={item.widget}
+            hint={item.hint}
+            highlighted={focusKey === item.key}
+            {readonly} />
+        {/if}
+      {:else if item.type === 'notice'}
+        <p class={`notice ${item.tone}`} role={item.tone === 'info' ? undefined : 'note'}>{item.text}</p>
+      {:else if item.type === 'link'}
+        <button type="button" class="link" data-testid={`page-link-${item.page}`} onclick={() => onnavigate(item.page)}
+          >{item.label ?? titleOf(item.page)} →</button
+        >
+      {:else if item.type === 'custom'}
+        {#if readonly}
+          <!-- Custom components call local-only commands; nothing to show. -->
+        {:else if item.component === 'work_retention'}
+          <WorkRetention />
+        {:else if item.component === 'auto_tidy_preview'}
+          <AutoTidyPreview />
+        {/if}
+      {:else if !readonly}
+        <DataItem {item} spec={sourceOf(item.source.id)} />
+      {/if}
+    {/each}
+  </div>
+{/snippet}
+
+<style>
+  .page header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  h4 {
+    margin: 0;
+    font-size: 1rem;
+  }
+  h5 {
+    margin: 0 0 0.35rem;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--fg-muted);
+  }
+  .intro {
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+    margin: 0.25rem 0 0.75rem;
+    line-height: 1.4;
+  }
+  .section {
+    border-top: 1px solid var(--border);
+    padding: 0.6rem 0 0.4rem;
+  }
+  .items {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+  .cards .items,
+  .data .items {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: flex-start;
+  }
+  .data .items > :global(figure),
+  .data .items > :global(.table-wrap) {
+    flex: 1 1 100%;
+  }
+  .notice {
+    font-size: 0.78rem;
+    margin: 0.2rem 0;
+    padding: 0.4rem 0.6rem;
+    border-radius: var(--radius-sm);
+    background: var(--bg-pane);
+    border-left: 3px solid var(--border);
+    line-height: 1.4;
+  }
+  .notice.warn {
+    border-left-color: var(--usage-warn);
+  }
+  .notice.danger {
+    border-left-color: var(--usage-crit);
+  }
+  .link {
+    background: none;
+    border: none;
+    padding: 0.2rem 0;
+    color: var(--accent);
+    font: inherit;
+    font-size: 0.85rem;
+    cursor: pointer;
+    text-align: left;
+  }
+  .link:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+  }
+</style>

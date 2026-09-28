@@ -613,6 +613,21 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "list_pages",
+        Verdict::SameInBoth {
+            why: "the page specs are compiled into this binary: the same pages whichever \
+                  process owns the fleet. What a page shows comes through its own commands, \
+                  each with its own verdict",
+        },
+    ),
+    (
+        "fetch_page_source",
+        Verdict::LocalOnly {
+            instead: "a page's data sources read this fleet's store, which the hub owns; \
+                      read the same numbers on the hub with usage_report",
+        },
+    ),
+    (
         "set_fleet_setting",
         Verdict::LocalOnly {
             instead: "these settings drive the reconcile tick, the GC sweeper and the \

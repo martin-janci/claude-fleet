@@ -5,8 +5,18 @@
 //! reader (reconcile tick, playbooks, GC, project discovery) resolves the
 //! same default.
 //!
-//! Keys that other subsystems own (MCP `mcp.*`, `controller.*`) are NOT
-//! listed and cannot be written through this path.
+//! Keys that other subsystems own and write themselves — the hub daemon's
+//! `hub.*` and the control API's `mcp.*` — are registered READ-ONLY
+//! (decision D-P7): they carry metadata and a place on a page, `describe`
+//! shows their stored value, and [`set`] refuses them, naming where they are
+//! changed ([`Spec::owned_by`]). Their owners keep reading them their own
+//! way; nothing here changes what a value means to them.
+//!
+//! Never registered, so never described or shown: secrets and key material
+//! (`mcp.token`, `hub.tls_key`, `hub.tls_cert`, `operator.token_sha`,
+//! `hub.client_plaintext_token`), internal state that is not a setting
+//! (`operator.session`, `operator.host`, `fleet.id`), and `ui.quick_replies`,
+//! a list with its own tool (`never_registered_keys_stay_out`).
 
 use crate::ipc_error::{codes, IpcError};
 use crate::store::Store;
@@ -41,6 +51,8 @@ pub enum Kind {
     /// cache_read} }` in USD per million tokens (`service::usage`). `{}`
     /// means "built-in prices only".
     PriceMap,
+    /// One line of text, at most `max` bytes, no control characters.
+    Text { max: usize },
 }
 
 /// Upper bound for `Kind::Secs` (ten years): keeps every `secs as i64`
@@ -77,6 +89,12 @@ pub struct Spec {
     pub danger: Danger,
     pub restart: Restart,
     pub ai: AiPolicy,
+    /// `Some(how)`: another subsystem owns and writes this key, and `how`
+    /// says where a person changes it. [`set`] refuses it.
+    pub owned_by: Option<&'static str>,
+    /// Display labels for a `Choice` / `ChoiceSet`'s options, `(value,
+    /// label)`, covering every option when set; empty shows the raw values.
+    pub option_labels: &'static [(&'static str, &'static str)],
 }
 
 /// The unit a setting's value is shown in (see [`Spec::unit`]).
@@ -181,6 +199,8 @@ impl Spec {
             danger: Danger::None,
             restart: Restart::None,
             ai: AiPolicy::Suggest,
+            owned_by: None,
+            option_labels: &[],
         }
     }
     pub const fn unit(self, unit: Unit) -> Self {
@@ -208,6 +228,21 @@ impl Spec {
     }
     pub const fn ai(self, ai: AiPolicy) -> Self {
         Spec { ai, ..self }
+    }
+    pub const fn labels(self, option_labels: &'static [(&'static str, &'static str)]) -> Self {
+        Spec {
+            option_labels,
+            ..self
+        }
+    }
+    /// Read-only here: `how` names where the key is changed. An agent never
+    /// writes it either.
+    pub const fn owned_by(self, how: &'static str) -> Self {
+        Spec {
+            owned_by: Some(how),
+            ai: AiPolicy::Never,
+            ..self
+        }
     }
 }
 
@@ -430,6 +465,9 @@ pub const DECIDE_JEV_MODELS: &[&str] = &["jev-1.13.0", "jev-latest"];
 /// Days a `decision_runs` row is kept (`0` = forever).
 pub const DECIDE_RETENTION_DAYS: &str = "decide.retention_days";
 
+/// What `hub.tls` holds (`fleet-hub`'s `TlsMode`).
+pub const HUB_TLS_MODES: &[&str] = &["off", "cert"];
+
 /// Every editable setting. Order is the display order.
 pub const SPECS: &[Spec] = &[
     Spec::new(
@@ -570,7 +608,8 @@ pub const SPECS: &[Spec] = &[
         Kind::Choice(LAYOUTS),
         "Projects layout",
         "Where a repository sits under the projects root: github puts it at root/owner/repo, flat at root/repo.",
-    ),
+    )
+    .labels(&[("github", "github: root/owner/repo"), ("flat", "flat: root/repo")]),
     Spec::new(
         TASKS_MAX_AGE_SECS,
         "86400",
@@ -844,7 +883,8 @@ pub const SPECS: &[Spec] = &[
         Kind::ChoiceSet(AUTO_TIDY_REASONS),
         "Auto-tidy reasons",
         "The tidy reasons auto-tidy may act on.",
-    ),
+    )
+    .labels(&[("done_idle", "Done and idle"), ("pr_merged_idle", "PR merged, idle"), ("not_planned", "Won't do / duplicate")]),
     Spec::new(
         DECIDE_JEV_ENABLED,
         "false",
@@ -861,7 +901,8 @@ pub const SPECS: &[Spec] = &[
         "Jev: status map",
         "Proposing a status category for an Asana section. Shadow only records; assist suggests.",
     )
-    .tags(&[Tag::Experimental, Tag::Ai]),
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
     Spec::new(
         DECIDE_JEV_WORK_LINK,
         "off",
@@ -869,7 +910,8 @@ pub const SPECS: &[Spec] = &[
         "Jev: work link",
         "Choosing a ticket for a session no rule could link. Shadow only records; assist suggests.",
     )
-    .tags(&[Tag::Experimental, Tag::Ai]),
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
     Spec::new(
         DECIDE_JEV_UNASSIGNED,
         "false",
@@ -941,6 +983,100 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Days)
     .zero("forever"),
+    // ── read-only: owned and written elsewhere (D-P7) ──
+    Spec::new(
+        crate::service::hub::SETTING_BIND,
+        "127.0.0.1",
+        Kind::Text { max: 255 },
+        "Hub bind address",
+        "The address the hub daemon listens on. Loopback unless the daemon was started with a routable bind.",
+    )
+    .owned_by("fleet-hub serve --bind")
+    .tags(&[Tag::Network]),
+    Spec::new(
+        crate::service::hub::SETTING_PUBLIC_URL,
+        "",
+        Kind::Text { max: 2048 },
+        "Hub public URL",
+        "The URL hosts and paired clients reach the hub at. Empty means loopback with a reverse tunnel per host.",
+    )
+    .owned_by("fleet-hub serve --public-url")
+    .tags(&[Tag::Network]),
+    Spec::new(
+        crate::service::hub::SETTING_ALLOWED_HOSTS,
+        "",
+        Kind::Text { max: 4096 },
+        "Hub allowed hosts",
+        "Extra Host header values the hub accepts, comma-separated, besides the ones its bind and public URL imply.",
+    )
+    .owned_by("fleet-hub serve --allowed-host")
+    .tags(&[Tag::Network, Tag::Advanced]),
+    Spec::new(
+        crate::service::hub::SETTING_LOCAL_HOST,
+        "true",
+        Kind::Bool,
+        "Hub runs local sessions",
+        "Whether the hub's own machine is a fleet host. On for the desktop; the daemon turns it off by default.",
+    )
+    .owned_by("fleet-hub serve --local-host"),
+    Spec::new(
+        crate::service::hub::SETTING_ALLOW_PLAINTEXT,
+        "false",
+        Kind::Bool,
+        "Hub serves plaintext",
+        "Whether the hub daemon may serve a routable bind without TLS.",
+    )
+    .owned_by("fleet-hub serve --allow-plaintext")
+    .tags(&[Tag::Network]),
+    Spec::new(
+        crate::service::hub::SETTING_TLS,
+        "off",
+        Kind::Choice(HUB_TLS_MODES),
+        "Hub TLS",
+        "How the hub daemon terminates TLS: off, behind a proxy, or cert, with its own certificate.",
+    )
+    .owned_by("fleet-hub serve --tls")
+    .tags(&[Tag::Network])
+    .labels(&[("off", "Off (a proxy in front)"), ("cert", "Own certificate")]),
+    Spec::new(
+        crate::mcp::SETTING_ENABLED,
+        "false",
+        Kind::Bool,
+        "Control API",
+        "Whether the embedded control API (MCP) runs, so an AI assistant can drive the fleet.",
+    )
+    .owned_by("Settings → Control API")
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        crate::mcp::SETTING_PORT,
+        "4180",
+        Kind::Int {
+            min: 1,
+            max: 65_535,
+        },
+        "Control API port",
+        "The localhost port the control API listens on.",
+    )
+    .unit(Unit::Count)
+    .owned_by("Settings → Control API"),
+    Spec::new(
+        crate::mcp::guard::SETTING_CONFIRM_DESTRUCTIVE,
+        "false",
+        Kind::Bool,
+        "Confirm destructive calls",
+        "Every destructive control API call waits for a confirmation on the desktop.",
+    )
+    .owned_by("Settings → Control API"),
+    Spec::new(
+        crate::mcp::guard::SETTING_BROADCAST_INTERVAL,
+        "30",
+        Kind::Secs,
+        "Broadcast interval",
+        "Shortest time between two broadcast prompts from the same caller.",
+    )
+    .unit(Unit::Seconds)
+    .owned_by("the settings table only")
+    .tags(&[Tag::Advanced]),
 ];
 
 /// Parse + validate a `Kind::ChoiceSet` value into the chosen options, in
@@ -1083,6 +1219,11 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
             .map(|_| ())
             .map_err(|e| IpcError::new(codes::E_INVALID, format!("{key} {}", e.message))),
         Kind::PriceMap => crate::service::usage::parse_price_overrides(v).map(|_| ()),
+        Kind::Text { max } if v.len() <= max && !v.chars().any(char::is_control) => Ok(()),
+        Kind::Text { max } => Err(IpcError::new(
+            codes::E_INVALID,
+            format!("{key} must be one line of at most {max} characters"),
+        )),
     }
 }
 
@@ -1112,6 +1253,21 @@ pub fn get_string(s: &Store, key: &str) -> String {
     resolve(key, raw.as_deref())
 }
 
+/// What a page shows for `spec`: the resolved value of an editable setting,
+/// or, for a key another subsystem owns, its stored text as that owner wrote
+/// it (else the default) — the owner may read spellings `resolve` would not.
+fn effective(s: &Store, spec: &Spec) -> String {
+    if spec.owned_by.is_some() {
+        return s
+            .get_setting(spec.key)
+            .ok()
+            .flatten()
+            .map(|v| v.trim().to_string())
+            .unwrap_or_else(|| spec.default.to_string());
+    }
+    get_string(s, spec.key)
+}
+
 /// The `projects.base_path` map (empty when unset or malformed).
 pub fn base_path_map(s: &Store) -> BTreeMap<String, String> {
     parse_path_map(PROJECTS_BASE_PATH, &get_string(s, PROJECTS_BASE_PATH)).unwrap_or_default()
@@ -1122,7 +1278,7 @@ pub fn base_path_map(s: &Store) -> BTreeMap<String, String> {
 pub fn read_all(s: &Store) -> BTreeMap<String, String> {
     let mut all: BTreeMap<String, String> = SPECS
         .iter()
-        .map(|spec| (spec.key.to_string(), get_string(s, spec.key)))
+        .map(|spec| (spec.key.to_string(), effective(s, spec)))
         .collect();
     all.insert(
         PROJECTS_LOCAL_ENV_BASE.to_string(),
@@ -1149,6 +1305,7 @@ pub enum KindDesc {
     PathMap,
     IdSet,
     PriceMap,
+    Text { max: usize },
 }
 
 impl From<Kind> for KindDesc {
@@ -1166,6 +1323,7 @@ impl From<Kind> for KindDesc {
             Kind::PathMap => KindDesc::PathMap,
             Kind::IdSet => KindDesc::IdSet,
             Kind::PriceMap => KindDesc::PriceMap,
+            Kind::Text { max } => KindDesc::Text { max },
         }
     }
 }
@@ -1191,6 +1349,12 @@ pub struct Descriptor {
     pub danger: Danger,
     pub restart: Restart,
     pub ai: AiPolicy,
+    /// Set for a key another subsystem owns: where it is changed. A page
+    /// shows it read-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owned_by: Option<&'static str>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub option_labels: &'static [(&'static str, &'static str)],
 }
 
 impl Spec {
@@ -1210,6 +1374,8 @@ impl Spec {
             danger: self.danger,
             restart: self.restart,
             ai: self.ai,
+            owned_by: self.owned_by,
+            option_labels: self.option_labels,
         }
     }
 }
@@ -1220,13 +1386,19 @@ impl Spec {
 pub fn describe(s: &Store) -> Vec<Descriptor> {
     SPECS
         .iter()
-        .map(|spec| spec.describe(get_string(s, spec.key)))
+        .map(|spec| spec.describe(effective(s, spec)))
         .collect()
 }
 
 /// Validate then persist one setting. A `PathMap` is stored normalised
 /// (trimmed paths, sorted keys).
 pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
+    if let Some(how) = spec(key).and_then(|sp| sp.owned_by) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("{key} is read-only here: change it with {how}"),
+        ));
+    }
     validate(key, value)?;
     let v = value.trim();
     let stored = match spec(key).map(|sp| sp.kind) {
@@ -1242,6 +1414,7 @@ pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
         _ => v.to_string(),
     };
     s.set_setting(key, &stored)?;
+    s.emit_settings_changed(key);
     Ok(())
 }
 
@@ -1310,41 +1483,30 @@ mod tests {
         }
     }
 
-    /// Every registered setting has a Settings dialog row: a `SETTING_KEYS`
-    /// entry and a matching `SETTING_DEFAULTS` value in `fleet_settings.ts`,
-    /// and a control in `SettingsDialog.svelte` addressing that key. Fails when
-    /// a new `SPECS` entry ships without its row.
+    /// Every editable setting has a `SETTING_KEYS` entry and a matching
+    /// `SETTING_DEFAULTS` value in `fleet_settings.ts`.
     #[test]
-    fn every_spec_has_a_settings_dialog_row() {
+    fn every_spec_is_mirrored_in_fleet_settings_ts() {
+        // Where a setting is SHOWN is the page specs' business
+        // (`pages::tests::every_setting_has_one_home`); the frontend still
+        // keeps a typed key and a default for every editable setting, for the
+        // components that read one before `get_fleet_settings` answers.
         const TS: &str = include_str!("../../../../src/lib/fleet_settings.ts");
-        const DIALOG: &str = include_str!("../../../../src/lib/SettingsDialog.svelte");
-        // Comments cannot satisfy the check: a key only mentioned in a
-        // `// …`, `/* … */` or `<!-- … -->` does not count as a row.
         let ts = code_only(TS);
-        let dialog = code_only(DIALOG);
-        for spec in SPECS {
+        for spec in SPECS.iter().filter(|s| s.owned_by.is_none()) {
             // `  camelName: 'the.key',` (SETTING_DEFAULTS lines start with a quote).
             let entry = format!(": '{}',", spec.key);
-            let line = ts
-                .lines()
-                .find(|l| l.trim_end().ends_with(&entry) && !l.trim_start().starts_with('\''))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{} has no SETTING_KEYS entry in src/lib/fleet_settings.ts",
-                        spec.key
-                    )
-                });
-            let name = line.trim().split(':').next().unwrap_or_default().trim();
+            assert!(
+                ts.lines()
+                    .any(|l| l.trim_end().ends_with(&entry) && !l.trim_start().starts_with('\'')),
+                "{} has no SETTING_KEYS entry in src/lib/fleet_settings.ts",
+                spec.key
+            );
             assert!(
                 ts.contains(&format!("'{}': '{}',", spec.key, spec.default)),
                 "{}: SETTING_DEFAULTS must mirror the backend default {:?}",
                 spec.key,
                 spec.default
-            );
-            assert!(
-                dialog.contains(&format!("SETTING_KEYS.{name}")),
-                "{} (SETTING_KEYS.{name}) has no row in src/lib/SettingsDialog.svelte",
-                spec.key
             );
         }
     }
@@ -1746,6 +1908,26 @@ mod tests {
                 spec.zero.is_none() || zero_allowed,
                 "{k}: `zero` names what 0 means, but 0 is not allowed"
             );
+            if !spec.option_labels.is_empty() {
+                let options: Vec<&str> = match spec.kind {
+                    Kind::Choice(o) | Kind::ChoiceSet(o) => o.to_vec(),
+                    _ => panic!("{k}: option labels on a kind with no options"),
+                };
+                let labelled: Vec<&str> = spec.option_labels.iter().map(|(v, _)| *v).collect();
+                assert_eq!(labelled, options, "{k}: label every option, in order");
+            }
+            if spec.owned_by.is_some() {
+                assert_eq!(
+                    spec.ai,
+                    AiPolicy::Never,
+                    "{k}: an agent never writes a key it does not own"
+                );
+                assert_eq!(
+                    spec.danger,
+                    Danger::None,
+                    "{k}: nothing to confirm on a read-only key"
+                );
+            }
             if let Danger::Confirm(message) = spec.danger {
                 assert!(
                     message.ends_with('.'),
@@ -1758,6 +1940,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A validated write emits `settings:changed` with the key; a refused
+    /// one emits nothing.
+    #[test]
+    fn a_write_emits_settings_changed() {
+        let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        bus.take();
+        set(&s, WORK_RECENT_DAYS, "30").unwrap();
+        assert!(set(&s, WORK_RECENT_DAYS, "soon").is_err());
+        assert!(set(&s, crate::mcp::SETTING_ENABLED, "true").is_err());
+        assert_eq!(
+            bus.take(),
+            vec![format!("settings:changed:{WORK_RECENT_DAYS}")]
+        );
+    }
+
+    /// Secrets, key material and internal state never enter the registry,
+    /// so `describe`, the docs and every page stay blind to them.
+    #[test]
+    fn never_registered_keys_stay_out() {
+        for key in [
+            crate::mcp::SETTING_TOKEN,
+            crate::service::hub::SETTING_TLS_KEY,
+            crate::service::hub::SETTING_TLS_CERT,
+            crate::service::operator::SETTING_OPERATOR_TOKEN_SHA,
+            crate::service::operator::SETTING_OPERATOR_SESSION,
+            crate::service::operator::SETTING_OPERATOR_HOST,
+            crate::service::address::FLEET_ID_KEY,
+            crate::service::quick_replies::SETTING_KEY,
+            "hub.client_plaintext_token",
+        ] {
+            assert!(spec(key).is_none(), "{key} must never be registered");
+        }
+    }
+
+    /// D-P7: a key another subsystem owns is described as it is stored and
+    /// refused on write, with where it is changed.
+    #[test]
+    fn owned_keys_are_shown_as_stored_and_refused_on_write() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, " no ")
+            .unwrap();
+        let d = describe(&s)
+            .into_iter()
+            .find(|d| d.key == crate::service::hub::SETTING_LOCAL_HOST)
+            .unwrap();
+        assert_eq!(d.value, "no", "the owner's spelling, not the default");
+        assert!(d.owned_by.is_some());
+        let err = set(&s, crate::mcp::guard::SETTING_CONFIRM_DESTRUCTIVE, "true").unwrap_err();
+        assert!(err.message.contains("read-only here"), "{}", err.message);
+        assert_eq!(
+            s.get_setting(crate::mcp::guard::SETTING_CONFIRM_DESTRUCTIVE)
+                .unwrap(),
+            None,
+            "nothing written"
+        );
     }
 
     #[test]

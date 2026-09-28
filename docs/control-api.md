@@ -622,10 +622,20 @@ Index by area (names only; see the reference for details):
   projects roots) and `set_setting` (change one: validated against the
   key's shape, `E_INVALID` for an unknown or derived key or a bad value;
   returns the whole object). They reach the same keys as the desktop's
-  Settings dialog and no others: `mcp.*`, `hub.*` and `controller.*` are
-  set by their own flags and commands. The ticks and sweeps read their
-  settings every pass, so a change takes effect on the next one. On a hub
-  this is how `reports.*` and `work.*`, which have no flag, are set.
+  Settings dialog and no others. `hub.*` and `mcp.*` are registered
+  read-only: `get_settings` shows them, and `set_setting` refuses them,
+  naming the flag or command that changes each one. `controller.*` and the
+  tokens are not registered at all. `get_settings { describe: true }`
+  returns every key's metadata instead of a plain map, in display order:
+  label, help, kind with bounds and options, unit, what `0` means, default,
+  value, `modified`, tags, danger, restart, AI policy, `owned_by` and option
+  labels. This is the list `docs/settings-reference.md` is generated from.
+  A write emits `settings:changed { key }`. Like `work:*`, it never reaches
+  a per-host token or an org-bound client.
+
+  The ticks and sweeps read their settings every pass, so a change takes
+  effect on the next one. On a hub, this is how `reports.*` and `work.*`,
+  which have no flag, are set.
 
 A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 `run_prompt` to steer it and get the reply back (or `send_prompt` →

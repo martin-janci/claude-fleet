@@ -61,8 +61,7 @@ fn every_page_file_is_compiled_in() {
 }
 
 /// Coverage: a new setting cannot ship without a place in the UI (the
-/// generated pages replace `every_spec_has_a_settings_dialog_row` once the
-/// renderer lands).
+/// generated pages replaced `every_spec_has_a_settings_dialog_row` in P3).
 #[test]
 fn every_setting_has_one_home() {
     let unplaced = unplaced_keys(&compiled_pages(), UNLISTED);
@@ -167,6 +166,13 @@ fn unknown_keys_sources_and_widgets_are_refused() {
             "{items}\n  wanted: {want}\n  got: {got}"
         );
     }
+}
+
+#[test]
+fn custom_items_are_capped() {
+    let item = json!({ "type": "custom", "component": "work_retention" });
+    let p = category(json!([item, item, item, item]));
+    assert!(messages(&[p]).contains("over the cap of 3"));
 }
 
 #[test]
@@ -296,6 +302,20 @@ fn render_schema() -> String {
     serde_json::to_string_pretty(&schema).unwrap() + "\n"
 }
 
+/// The frontend tests' fixture: exactly what `list_pages` and
+/// `describe_fleet_settings` answer on a fresh store, so the renderer is
+/// tested against the real pages and the real registry, never a hand copy.
+fn render_frontend_fixture() -> String {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let v = json!({
+        "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
+        "pages": super::all(),
+        "sources": SOURCES,
+        "descriptors": crate::service::settings::describe(&s),
+    });
+    serde_json::to_string_pretty(&v).unwrap() + "\n"
+}
+
 #[test]
 fn page_docs_are_current() {
     let regen = std::env::var("REGEN_PAGE_DOCS").is_ok();
@@ -303,6 +323,10 @@ fn page_docs_are_current() {
     for (rel, text) in [
         ("docs/page-spec.schema.json", render_schema()),
         ("docs/page-catalog.json", render_catalog()),
+        (
+            "src/lib/pages/registry.generated.json",
+            render_frontend_fixture(),
+        ),
     ] {
         let path = repo_path(rel);
         if regen {

@@ -254,6 +254,7 @@ fn check_item(
             }
         }
         Item::Notice { text, .. } => cx.text(at, "text", text, MAX_TEXT),
+        Item::Custom { .. } => {}
         Item::Link { label, .. } => {
             if let Some(l) = label {
                 cx.text(at, "label", l, MAX_TITLE);
@@ -388,6 +389,24 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
                 break;
             }
         }
+    }
+    let mut customs = 0;
+    for page in pages {
+        for_each_item(page, |_, item| {
+            if matches!(item, Item::Custom { .. }) {
+                customs += 1;
+            }
+        });
+    }
+    if customs > catalog::MAX_CUSTOM {
+        problems.push(Problem {
+            page: "(all pages)".into(),
+            at: String::new(),
+            message: format!(
+                "{customs} custom items, over the cap of {}: express one with the catalog instead",
+                catalog::MAX_CUSTOM
+            ),
+        });
     }
     problems
 }

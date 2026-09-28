@@ -126,6 +126,21 @@
       },
       "additionalProperties": false
     },
+    "CustomComponent": {
+      "description": "The registered hand-written components. Each one is a debt: when the\ncatalog can express it (a data source plus an action), it is replaced\nand removed from this list.",
+      "oneOf": [
+        {
+          "description": "Work retention's dry-run preview and \"Sweep now\" (work graph M12.3;\n`WorkRetention.svelte`). Waits on actions (P4).",
+          "type": "string",
+          "const": "work_retention"
+        },
+        {
+          "description": "\"Show what auto-tidy would do\": the tidy candidates the ticked\nreasons would act on (work graph M7.3; `AutoTidyPreview.svelte`).\nWaits on a `work.tidy` data source with a param from the page.",
+          "type": "string",
+          "const": "auto_tidy_preview"
+        }
+      ]
+    },
     "Item": {
       "description": "One thing on a page. Tagged by `type`, one shape per purpose.",
       "oneOf": [
@@ -293,6 +308,24 @@
             "type",
             "tone",
             "text"
+          ]
+        },
+        {
+          "description": "A hand-written component registered in code: the one escape hatch\n(design §8), for what the catalog cannot express yet. Closed set,\ncapped at [`crate::pages::catalog::MAX_CUSTOM`] uses across all\npages.",
+          "type": "object",
+          "properties": {
+            "component": {
+              "$ref": "#/$defs/CustomComponent"
+            },
+            "type": {
+              "type": "string",
+              "const": "custom"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "component"
           ]
         },
         {
@@ -467,6 +500,7 @@
         "select",
         "radio",
         "multiselect",
+        "text",
         "textarea",
         "key_value_table",
         "id_list",
