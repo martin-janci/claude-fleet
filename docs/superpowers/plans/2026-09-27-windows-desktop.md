@@ -22,6 +22,15 @@
 | 6 package | done — no updater exists on any platform, so the `latest.json` item is void; `release-assets.sh` gained a `since` column so the new leg does not fail every earlier release in `verify-release` and the drift check |
 | 7 later | not started |
 
+Hardening after the merge (2026-09-28): no console window for any child
+(`fleet_core::proc`, guarded by `production_code_spawns_through_proc`);
+orphaned `ssh -R` tunnels reaped on Windows (sysinfo, `ssh.exe`); a BOM'd
+ssh config; reconcile, the hook auto-install and onboarding now honour the
+missing local host; `ssh` gets a null stdin; the terminal reports a gone
+`ssh.exe` itself, since the ConPTY pipe outlives it; CRLF pastes; UNC
+credential paths refused. Still open from that review: shipping
+`conpty.dll`/`OpenConsole.exe` (bracketed paste and mouse on Windows 10).
+
 Owner decision still open: Authenticode signing (the first Windows release ships unsigned; `docs/windows.md` says so).
 
 ## 0. Evidence: what actually fails today

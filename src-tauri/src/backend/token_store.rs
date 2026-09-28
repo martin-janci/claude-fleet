@@ -206,7 +206,11 @@ impl TokenStore for OsTokenStore {
         let Some(token) = self.file_get()? else {
             return Ok(None);
         };
-        self.set(&token)?;
+        // The file holds a good token: a failed move is logged and retried at
+        // the next read, never allowed to make the pairing look broken.
+        if let Err(e) = self.set(&token) {
+            tracing::warn!("hub token not moved to Credential Manager yet: {e}");
+        }
         Ok(Some(token))
     }
 

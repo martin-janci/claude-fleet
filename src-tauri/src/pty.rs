@@ -65,7 +65,17 @@ pub struct PtyState {
     input_tx: Option<SyncSender<Vec<u8>>>,
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     shared: Arc<PtyShared>,
+    /// When [`PtyState::poll_child_exit`] first saw the child gone. Only the
+    /// Windows drain path sets it; see there.
+    child_gone_at: Option<Instant>,
 }
+
+/// How long a child that has exited gets for its last output to be read
+/// before the drain reports EOF on its behalf (Windows, see
+/// [`PtyState::poll_child_exit`]). The bytes are already in the pipe when the
+/// process ends; the reader thread only has to pick them up.
+#[cfg_attr(not(windows), allow(dead_code))]
+const CHILD_EXIT_GRACE: Duration = Duration::from_millis(300);
 
 /// Everything one open shares with its reader thread. A FRESH one per open:
 /// a reader that is still winding down owns the previous `Arc` and can
@@ -120,6 +130,7 @@ impl PtyState {
             input_tx: None,
             child: None,
             shared: Arc::new(PtyShared::new()),
+            child_gone_at: None,
         }
     }
 
@@ -142,6 +153,7 @@ impl PtyState {
         shared: Arc<PtyShared>,
     ) -> PtyParts {
         let previous = self.take_parts();
+        self.child_gone_at = None;
         self.master = Some(master);
         self.input_tx = Some(input_tx);
         self.child = Some(child);
@@ -153,6 +165,7 @@ impl PtyState {
     /// non-blocking: the returned parts do the blocking work.
     #[must_use = "the attachment must be torn down off-lock"]
     fn take_parts(&mut self) -> PtyParts {
+        self.child_gone_at = None;
         PtyParts {
             master: self.master.take(),
             input_tx: self.input_tx.take(),
@@ -160,6 +173,39 @@ impl PtyState {
             // Leave the state genuinely closed: after a detach, a drain must
             // not see the dead attachment's buffer or its `exited` flag.
             shared: std::mem::replace(&mut self.shared, Arc::new(PtyShared::new())),
+        }
+    }
+}
+
+impl PtyState {
+    /// Report the attachment over once its child has been gone for `grace`,
+    /// even though the reader has not seen EOF.
+    ///
+    /// Under ConPTY the output pipe belongs to the pseudo console, not to
+    /// `ssh.exe`, so it stays open after ssh exits (network drop, remote
+    /// detach, the tmux session killed) until the master is dropped — which
+    /// only teardown does. The reader then never reads 0 bytes, `exited` is
+    /// never set, and the pane would freeze instead of re-attaching. On Unix
+    /// the slave closes with the child and the reader's EOF is the signal.
+    ///
+    /// `try_wait` does not block (a zero-timeout wait), so it may run under
+    /// the state lock.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn poll_child_exit(&mut self, grace: Duration) {
+        if self.shared.exited.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        if !matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        let gone_at = *self.child_gone_at.get_or_insert_with(Instant::now);
+        if gone_at.elapsed() >= grace {
+            self.shared
+                .note("\r\n\x1b[33m[cf] ssh exited (the pseudo console stays open)\x1b[0m\r\n");
+            self.shared.exited.store(true, Ordering::Release);
         }
     }
 }
@@ -648,9 +694,12 @@ pub fn pty_drain(state: State<'_, Mutex<PtyState>>) -> Result<PtyDrainResult, Ip
 /// session's bytes land in front of the new session's first output".
 fn drain_from(state: &Mutex<PtyState>) -> Result<PtyDrainResult, IpcError> {
     let (raw, overflowed, eof) = {
-        let s = state
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut s = state
             .lock()
             .map_err(|_| IpcError::new(codes::E_LOCK, "pty mutex poisoned"))?;
+        #[cfg(windows)]
+        s.poll_child_exit(CHILD_EXIT_GRACE);
         let exited = s.shared.exited.load(Ordering::Acquire);
         let mut buf = s
             .shared
@@ -1392,6 +1441,72 @@ mod tests {
         assert!(died(pid2));
         assert!(!state.lock().unwrap().is_open());
         assert_eq!(write_to(&state, "x").unwrap_err().code, "E_PTY_CLOSED");
+    }
+
+    /// The Windows EOF path, driven directly: a child that has exited is
+    /// reported only after the grace, once, with the reader never involved.
+    #[test]
+    fn a_child_gone_past_the_grace_is_reported_as_exited() {
+        let pair = match native_pty_system().openpty(clamp_size(80, 24)) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("SKIP: openpty unavailable here: {e}");
+                return;
+            }
+        };
+        let program = if cfg!(windows) { "cmd" } else { "sh" };
+        let mut cmd = CommandBuilder::new(program);
+        cmd.args(if cfg!(windows) {
+            ["/C", "exit 0"]
+        } else {
+            ["-c", "exit 0"]
+        });
+        let child = pair.slave.spawn_command(cmd).expect("spawn");
+        let writer = pair.master.take_writer().expect("writer");
+        let shared = Arc::new(PtyShared::new());
+        let input_tx = spawn_writer(writer, Arc::clone(&shared));
+        let state = Mutex::new(PtyState::new());
+        let previous =
+            state
+                .lock()
+                .unwrap()
+                .install(pair.master, input_tx, child, Arc::clone(&shared));
+        previous.teardown();
+
+        // Not yet: a long grace keeps it open however soon the child ends.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            state
+                .lock()
+                .unwrap()
+                .poll_child_exit(Duration::from_secs(3600));
+            if state.lock().unwrap().child_gone_at.is_some() || Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            state.lock().unwrap().child_gone_at.is_some(),
+            "the child ended"
+        );
+        assert!(
+            !shared.exited.load(Ordering::Acquire),
+            "still inside the grace"
+        );
+
+        state.lock().unwrap().poll_child_exit(Duration::ZERO);
+        assert!(shared.exited.load(Ordering::Acquire));
+        let text = String::from_utf8_lossy(&shared.buffer.lock().unwrap().bytes).into_owned();
+        assert_eq!(text.matches("[cf] ssh exited").count(), 1, "{text}");
+        state.lock().unwrap().poll_child_exit(Duration::ZERO);
+        let text = String::from_utf8_lossy(&shared.buffer.lock().unwrap().bytes).into_owned();
+        assert_eq!(
+            text.matches("[cf] ssh exited").count(),
+            1,
+            "noted once: {text}"
+        );
+
+        close_pty(&state);
     }
 
     #[test]

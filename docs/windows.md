@@ -89,5 +89,10 @@ Manager → Windows Credentials**.
 - The terminal on ConPTY has had no long manual test yet: resizing, pasting
   large blocks and fast session switching are the places to watch. Please
   report what you see.
+- The app uses the ConPTY built into Windows. On Windows 10 in particular it
+  may not pass tmux's bracketed-paste and mouse modes through, so a
+  multi-line paste can submit at its first line and mouse scrolling in the
+  pane may not work. Shipping Microsoft's own `conpty.dll` /
+  `OpenConsole.exe` beside the app would fix it; that is not done yet.
 - There is no auto-update on any platform yet; install a new release over
   the old one.

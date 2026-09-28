@@ -1902,12 +1902,18 @@ pub async fn reconcile_now(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
 }
 
 /// `hub.local_host` for this pass; a poisoned lock counts as "true" (the
-/// desktop default) so reconcile keeps its old behaviour on error.
+/// desktop default) so reconcile keeps its old behaviour on error. Off, too,
+/// whenever the process has no local host at all
+/// ([`crate::service::hub::local_host_enabled`]): a Windows desktop never
+/// writes the setting, and reading only the setting re-marked its hidden
+/// `local` row reachable and linked the Windows Claude account to it every
+/// pass.
 pub(super) fn local_host(store: &Mutex<Store>) -> bool {
-    store
-        .lock()
-        .map(|s| crate::service::hub::read_local_host(&s))
-        .unwrap_or(true)
+    crate::service::hub::local_host_enabled()
+        && store
+            .lock()
+            .map(|s| crate::service::hub::read_local_host(&s))
+            .unwrap_or(true)
 }
 
 /// Pure interval-guard decision for the background reconcile tick.

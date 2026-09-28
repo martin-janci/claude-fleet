@@ -12,6 +12,9 @@ export interface LocalPrereqs {
   tmux_version: string | null;
   projects_path: string;
   projects_readable: boolean;
+  /** `false` when this machine is not a fleet host (a Windows desktop): the
+   *  step does not apply. Absent from an older backend, which means `true`. */
+  local_host?: boolean;
   projects_count: number;
 }
 
@@ -88,11 +91,14 @@ export interface DeriveInputs {
 }
 
 export function deriveSteps(i: DeriveInputs): OnboardingStep[] {
+  const noLocalHost = i.prereqs?.local_host === false;
   const prereqsDone =
-    !!i.prereqs && i.prereqs.claude_ok && i.prereqs.tmux_ok && i.prereqs.projects_readable;
+    noLocalHost ||
+    (!!i.prereqs && i.prereqs.claude_ok && i.prereqs.tmux_ok && i.prereqs.projects_readable);
 
   const prereqSub = (() => {
     if (!i.prereqs) return undefined;
+    if (noLocalHost) return 'Not needed: this machine is a client, your hosts run the sessions';
     const missing: string[] = [];
     if (!i.prereqs.claude_ok) missing.push('claude');
     if (!i.prereqs.tmux_ok) missing.push('tmux');

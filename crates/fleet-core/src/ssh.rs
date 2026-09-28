@@ -190,8 +190,15 @@ impl SshClient {
     /// A fresh `Command` for the configured ssh binary (`"ssh"` in
     /// production, a fake script under test — see
     /// [`SshClient::with_ssh_binary`]).
+    ///
+    /// stdin is null unless a caller pipes it (`run_child_io` does, for an
+    /// upload): what `ssh -n` would do. The Windows release app has no stdin
+    /// to inherit, and Win32-OpenSSH duplicates its stdin handle when the
+    /// session opens.
     fn ssh_command(&self) -> tokio::process::Command {
-        crate::proc::command(&self.inner.ssh_bin)
+        let mut cmd = crate::proc::command(&self.inner.ssh_bin);
+        cmd.stdin(std::process::Stdio::null());
+        cmd
     }
 
     /// The registry this client routes agent hosts through, if it has one.
