@@ -118,10 +118,10 @@ pub fn needs_attention_with(row: &SessionRow, context_red_pct: f64) -> Option<At
     // A dead row keeps its last context reading; only a live one can act on
     // it (or on a stale stamp) — a lost one reads `Lifecycle`.
     let live = row.status != "ghost" && row.lost_at.is_none();
-    let idle = matches!(
-        row.claude_status.as_deref(),
-        Some("idle") | Some("completed") | Some("stopped")
-    );
+    let idle = row
+        .claude_status
+        .as_deref()
+        .is_some_and(|s| crate::store::IDLE_STATUSES.contains(&s));
     let reason = if row.claude_status.as_deref() == Some("blocked") {
         Reason::Waiting
     } else if row.stuck_kind.is_some() {

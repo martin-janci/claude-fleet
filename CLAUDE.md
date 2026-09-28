@@ -272,7 +272,7 @@ downgrade guard (`store::testgen`), the scale fixture and budget tests
 (`service/work/scale_tests.rs`, migration 058), the `work.retention.*`
 windows (`store/work_retention.rs`), trackers in `fleet_health` with a
 Reconnect Attention item, and the review of the decided-against list
-(`reviews/2026-09-26-work-graph-decisions-revisited.md`).
+(`docs/superpowers/reviews/2026-09-26-work-graph-decisions-revisited.md`).
 M13 (live use, `docs/superpowers/plans/2026-09-26-work-graph-m13-live-use.md`)
 is closed (M13.5, #337): M13.1 (partial sync failures, #320), M13.2
 (`work_admin { usage }`, #323 / #324), M13.4c and M13.4e above are on

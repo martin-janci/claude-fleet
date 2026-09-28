@@ -683,6 +683,14 @@ pub struct UsageDelta {
 /// `idle_since` is stamped on (see migration 019).
 pub const IDLE_STATUSES: [&str; 3] = ["idle", "completed", "stopped"];
 
+/// A `claude_status` whose turn is over: an idle status, or `failed` (a turn
+/// that ended in an error). What `wait_for_session { until: idle }`,
+/// `run_prompt` and a move's source check all wait for — one set, so a new
+/// terminal status cannot reach one and not the others.
+pub fn turn_over(status: Option<&str>) -> bool {
+    status.is_some_and(|s| IDLE_STATUSES.contains(&s) || s == "failed")
+}
+
 /// SQL fragment: the new `idle_since` given the OLD row's `idle_since` and the
 /// status expression `{st}` (which must resolve to the post-write status).
 /// Entering an idle status stamps `now` once; staying idle keeps the stamp;

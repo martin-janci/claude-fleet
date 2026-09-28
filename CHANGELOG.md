@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [Unreleased]
+
+The Work view (M14), reply actions, session state hardening and hub ops.
+Migrations 065–071 run on first start — 071 rebuilds `usage_daily` with a
+`backfill` key; back up `state.db` first (see
+[docs/RELEASING.md](docs/RELEASING.md#upgrading-into-the-work-graph)), since
+an older build refuses a database a newer one has migrated. A client bound
+to an organisation sees unassigned work by default (roadmap D31; per org,
+`fleet-hub org set --bound-sees-unassigned`).
+
 ## [0.3.2] - 2026-09-27
 
 The work graph's M13 (live use): what real use showed, and the decided-against

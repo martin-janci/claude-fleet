@@ -2161,7 +2161,7 @@ standalone exactly as before.
   with backoff, re-lists sessions, hosts, tasks and accounts once, and shows a
   banner — "what you see may be out of date", the attempt number and the
   reason — until it is back. After a dropped stream the app resumes from the
-  last event it applied when the hub still has it (15 minutes / 512 events);
+  last event it applied when the hub still has it (the last 512 events, roughly thirteen minutes of a busy fleet);
   otherwise it re-lists. A stream that goes silent (not even the hub's
   15-second keep-alive) for about 40 seconds is treated as dead, which is what
   a laptop that slept and woke on another network looks like.

@@ -456,7 +456,7 @@ pub(super) fn broadcast_summary(
 /// "idle" }` accepts, so following this error's advice cannot loop.
 pub(super) fn run_prompt_ready(row: &crate::store::SessionRow) -> Result<(), McpError> {
     match row.claude_status.as_deref() {
-        Some("idle") | Some("completed") | Some("stopped") | Some("failed") => Ok(()),
+        s if crate::store::turn_over(s) => Ok(()),
         other => Err(mcp_err(
             "E_INVALID_STATE",
             format!(
