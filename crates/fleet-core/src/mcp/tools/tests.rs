@@ -3587,7 +3587,13 @@ fn the_served_definition_budget_stays_bounded() {
     // on 2026-09-27, 919 bytes over main's 58,977 baseline — exactly
     // `rewind_conversation`'s stable cost. Raised to that measurement plus
     // 100.
-    const BUDGET_BYTES: usize = 59_996;
+    // Hub ops & accounting (plan D): `fleet_health` names `hub`,
+    // `tunnels_mode` and `peer_links_total`; `usage_report` names
+    // `by_day.backfill_cost_micros` — one slim clause each, the prose in
+    // docs/hub.md: +162 on its own branch (57,112 over 56,950). Merged over
+    // M14.1b/c and reply actions: measured at 60,058 on 2026-09-28 (59,896
+    // + 162); plus 100.
+    const BUDGET_BYTES: usize = 60_158;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

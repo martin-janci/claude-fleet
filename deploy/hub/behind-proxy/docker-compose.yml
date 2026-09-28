@@ -1,0 +1,47 @@
+# fleet-hub behind a reverse proxy you already run (a NAS with its own
+# Caddy, say) — the shape docs/hub.md "Behind an existing reverse proxy"
+# describes. Differences from ../docker-compose.yml, all deliberate:
+#   * no bundled caddy: yours terminates TLS and forwards to this container;
+#   * the image tag comes from .env (FLEET_HUB_TAG), so deploy/hub/upgrade.sh
+#     can move it, and `docker compose config` refuses to start without one —
+#     this file is never a version carrier the way the shipped compose is;
+#   * state.db lives in a bind mount (./data) the host's sqlite3 can reach,
+#     which is what deploy/hub/backup.sh needs.
+# The https:// public URL in fleet-hub.env is what permits the 0.0.0.0 bind
+# without --allow-plaintext; the hub still logs a warning at startup that
+# plaintext 4180 is reachable by anything that can route to the container.
+services:
+  fleet-hub:
+    image: ghcr.io/martin-janci/fleet-hub:${FLEET_HUB_TAG:?set FLEET_HUB_TAG in .env (deploy/hub/upgrade.sh <version> writes it)}
+    restart: unless-stopped
+    # DRAIN_TIMEOUT (10s) + TICK_SHUTDOWN_TIMEOUT (10s) < this grace.
+    stop_grace_period: 30s
+    env_file: fleet-hub.env
+    environment:
+      FLEET_HUB_BIND: 0.0.0.0
+      # Hourly files the operator can read without sudo:
+      # install -d -o 1000 -g users -m 2750 logs (setgid, so new files
+      # inherit the group).
+      FLEET_HUB_LOG_DIR: /var/lib/fleet-hub/logs
+    # Reachable only from your proxy's container network: nothing is published
+    # on the host, so LAN and VPN peers cannot reach the plaintext port. The
+    # image's HEALTHCHECK probes 127.0.0.1:4180 inside the container and is
+    # unaffected. FLEET_HUB_PROXY_NETWORK (in .env) names the network your
+    # proxy is on — `docker network ls` shows it (caddy_default for a compose
+    # project named caddy).
+    networks: [proxy]
+    # Docker's stdout capture of the same lines the hub already rotates in
+    # its own log file; uncapped it is the file that fills the disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    volumes:
+      - ./data:/var/lib/fleet-hub
+      - ./ssh:/home/fleet/.ssh
+      - ./logs:/var/lib/fleet-hub/logs
+networks:
+  proxy:
+    external: true
+    name: ${FLEET_HUB_PROXY_NETWORK:-caddy_default}

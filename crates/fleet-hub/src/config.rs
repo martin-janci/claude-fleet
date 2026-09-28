@@ -435,6 +435,33 @@ pub fn resolve(
     })
 }
 
+/// The one thing `resolve` cannot turn into a refusal: a routable bind that
+/// serves plaintext because an https:// public URL says a proxy terminates
+/// TLS *somewhere* in front, or because `--allow-plaintext` waived the
+/// check. Nothing proves that proxy is the only path to the port — on a NAS
+/// that publishes `4180:4180` so a separate Caddy container can reach it,
+/// every LAN and VPN peer can too (hub-ops F3). `None` on a loopback bind
+/// or when the hub terminates TLS itself.
+pub fn plaintext_exposure_warning(r: &Resolved) -> Option<String> {
+    if fleet_proto::net::is_loopback_ip(&r.bind) || r.tls.terminates_tls() {
+        return None;
+    }
+    let why = if r.allow_plaintext {
+        "--allow-plaintext waived the refusal".to_string()
+    } else {
+        format!(
+            "the https:// public URL {} only proves a proxy terminates TLS somewhere in front",
+            r.public_url.as_deref().unwrap_or("(none)")
+        )
+    };
+    Some(format!(
+        "plaintext http on {}:{} is reachable by anything that can route to this address \
+         ({why}); front it with the proxy's own container network \
+         (deploy/hub/behind-proxy: networks, no ports) or bind to 127.0.0.1",
+        r.bind, r.port
+    ))
+}
+
 /// Drop repeats, keeping the first occurrence's position.
 fn dedup(list: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
@@ -1014,5 +1041,42 @@ mod tests {
         assert!(resolve(&opts(), &e, &|_| None)
             .unwrap_err()
             .contains("local_host"));
+    }
+
+    /// hub-ops F3: an https:// public URL waives the plaintext refusal
+    /// because a proxy terminates TLS *somewhere* in front — it does not
+    /// prove that proxy is the only route to the port. Say so at startup.
+    #[test]
+    fn a_routable_plaintext_bind_behind_an_https_proxy_warns() {
+        let mut o = routable();
+        o.public_url = Some("https://fleet.example.com".into());
+        let r = resolve(&o, &env(&[]), &|_| None).unwrap();
+        let w = plaintext_exposure_warning(&r).expect("a warning");
+        assert!(w.contains("0.0.0.0:4180"), "{w}");
+        assert!(w.contains("https://fleet.example.com"), "{w}");
+        assert!(w.contains("behind-proxy"), "names the fix: {w}");
+    }
+
+    #[test]
+    fn a_waived_routable_bind_warns_naming_the_flag() {
+        let mut o = routable();
+        o.allow_plaintext = true;
+        let r = resolve(&o, &env(&[]), &|_| None).unwrap();
+        let w = plaintext_exposure_warning(&r).expect("a warning");
+        assert!(w.contains("--allow-plaintext"), "{w}");
+    }
+
+    #[test]
+    fn loopback_and_hub_terminated_tls_do_not_warn() {
+        let r = resolve(&opts(), &env(&[]), &|_| None).unwrap();
+        assert_eq!(plaintext_exposure_warning(&r), None, "loopback");
+        let mut o = cert_opts();
+        o.bind = Some("0.0.0.0".into());
+        let r = resolve(&o, &env(&[]), &|_| None).unwrap();
+        assert_eq!(
+            plaintext_exposure_warning(&r),
+            None,
+            "the hub terminates TLS itself"
+        );
     }
 }

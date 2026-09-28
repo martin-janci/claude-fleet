@@ -142,6 +142,23 @@ curl -s https://fleet.example.com/mcp \
 
 A healthy hub answers with `db_ready: true` and the running version.
 
+`hub` is this process: `started_at`, `uptime_secs` and `reconcile`
+(`last_started_at`, `last_finished_at`, `last_duration_ms`,
+`consecutive_failures`, `failures_total`, `last_error`) — alert on
+`consecutive_failures >= 3`. `tunnels_mode` is `none` on a public hub (hooks
+post directly; the `tunnels` map is empty because nothing applies) and
+`reverse` otherwise. `peer_links_total` tells `peer_links_down: 0` from "no
+peers configured".
+
+`usage_by_day` books each token to the UTC day of the transcript line that
+produced it. The first time a transcript is read (a new host, a hub takeover)
+its history before that day lands in `backfill_cost_micros`, apart from the
+day's live `cost_micros`, so a takeover never reads as an $850 day.
+`usage_report` says what each figure counts: `by_host_population: live_rows`
+(session rows that still exist, over their lifetime — ghosts included) and
+`by_day_population: durable` (the daily roll-up, killed sessions included);
+the two need not agree.
+
 The image carries a Docker `HEALTHCHECK` that runs `fleet-hub healthcheck`
 every 30 s, so `docker compose ps` shows the hub as `healthy` (or
 `unhealthy`) in its STATUS column. The check sends one `GET /healthz` to
@@ -273,6 +290,110 @@ the spelling and, above all, that you did not write the `v`: the image tag for
 `v0.3.0` is `0.3.0`. `no matching manifest for linux/arm64` means that
 version's arm64 leg failed and the tag carries an amd64-only manifest (see
 *Platforms* above); pin the previous version, or a later one, instead.
+
+### Upgrade with the script
+
+`deploy/hub/upgrade.sh <version>` does the sequence above for a deployment
+whose tag lives in `.env` (the `deploy/hub/behind-proxy` compose): it pulls
+first (a tag ghcr does not have stops it with the hub untouched), takes a
+consistent online backup (`backup.sh`, kept as `backups/pre-<version>-*.db`,
+newest three), `docker compose stop`s the hub so the 30 s grace applies,
+moves `FLEET_HUB_TAG`, starts it, waits for the image's own healthcheck,
+and checks `fleet-hub --version`. With a readonly client token in
+`readonly.token` beside the compose file (`fleet-hub pair --mode readonly
+upgrade-check`) it also asks `fleet_health` over the public URL — never the
+master token. On any failure after the stop it prints the rollback.
+
+**Order across the three binaries.** Today (contract 4 on both sides,
+proto 1 on both sides) the order is a habit: hub, then desktop, then the
+agents. When a release bumps `CONTRACT_REVISION`, upgrade the **hub first,
+then the desktop in the same window** — there is no mixed window, the desktop
+refuses with `E_HUB_CONTRACT` until it is updated, hooks and the phone keep
+working meanwhile. When a release bumps `PROTO_VERSION`, upgrade the **hub
+first**; the release holds `MIN_SUPPORTED_PROTO` at the previous value so an
+older `fleet-agent` keeps connecting until it is reinstalled. A hub upgrade
+never needs the agents restarted.
+
+## Backups
+
+`state.db` carries the master token, every host, every session and the
+usage roll-ups. The hub keeps it in WAL mode, so a `cp` of the file from a
+running hub is a stale database (pages still in `state.db-wal` are missing)
+and a `cp` of the `state.db*` triple can be torn. Use SQLite's online backup
+API instead — one self-contained file, no stop:
+
+```bash
+sudo deploy/hub/backup.sh          # FLEET_HUB_DATA=./data, keeps 14 dailies in ./backups
+```
+
+It runs `.backup`, then `PRAGMA integrity_check` on the copy (a failed check
+removes it and exits 1), then prunes to `KEEP` files per `PREFIX`. On a
+Synology: Control Panel → Task Scheduler → user `root`, daily 03:30,
+`bash /volume1/docker/fleet-hub/backup.sh`; add `backups/` to Hyper Backup
+or any off-box target. `upgrade.sh` calls the same script with
+`PREFIX=pre-<version> KEEP=3` before it stops the hub.
+
+**Restore drill** (rehearse it once; a backup nobody restored is a hope):
+
+```bash
+docker compose stop fleet-hub
+mkdir -p data.aside && mv data/state.db data/state.db-wal data/state.db-shm data.aside/ 2>/dev/null
+cp backups/state-<stamp>.db data/state.db && chown 1000 data/state.db
+docker compose up -d fleet-hub
+curl -s https://fleet.example.com/mcp/json -H "Authorization: Bearer <readonly token>" ... # fleet_health.schema_version
+```
+
+Restoring a copy taken before a migration onto a newer image re-runs the
+migrations (fine). Never restore a *newer* copy onto an *older* image: the
+hub refuses a database a newer build has migrated (see *Roll back* above).
+Sessions that ran between the copy and the restore are not in it.
+
+## Behind an existing reverse proxy
+
+`deploy/hub/behind-proxy/docker-compose.yml` is the shape for a box that
+already runs a reverse proxy (a NAS with its own Caddy): no bundled caddy, the
+image tag in `.env` (`FLEET_HUB_TAG=…`, moved by `upgrade.sh`), and
+`state.db` in a bind mount `./data` the host's `sqlite3` can back up. Set
+`FLEET_HUB_PUBLIC_URL=https://…` in `fleet-hub.env` as usual: it is what
+permits the `0.0.0.0` bind without `--allow-plaintext`. Files: `.env`,
+`fleet-hub.env`, `docker-compose.yml`, `backup.sh`, `upgrade.sh`, `data/`,
+`ssh/`, `backups/`.
+
+The variant publishes **no** port: the hub joins your proxy's docker network
+(`FLEET_HUB_PROXY_NETWORK` in `.env`, `caddy_default` for a compose project
+named `caddy`) and the proxy forwards by service name:
+
+```
+http://fleet.example.com {
+    reverse_proxy fleet-hub:4180 {
+        flush_interval -1
+    }
+}
+```
+
+The https:// public URL permits the `0.0.0.0` bind, and the hub logs at
+startup that plaintext 4180 is reachable by anything that can route to it —
+on the proxy network, that is the proxy. Publishing `4180:4180` on the host
+instead makes it the whole LAN and every VPN peer; the warning says so.
+
+**Logs without sudo.** The variant mounts `./logs` as the hub's log directory
+(`FLEET_HUB_LOG_DIR`); create it as `install -d -o 1000 -g users -m 2750 logs`
+so hourly files stay group-readable. Docker's own capture of the same lines
+is capped at 3 × 10 MB. **Watching it.** Uptime Kuma: an HTTP keyword monitor
+on `/healthz` (`fleet-hub ok`) and a JSON-query monitor posting `tools/call
+fleet_health` to `/mcp/json` with a readonly client token (`fleet-hub pair
+--mode readonly kuma`) — never the master — on `db_ready`, `hosts_reachable`,
+`tunnels_flapping` and `hub.reconcile.consecutive_failures`.
+
+**Tidying a hand-upgraded deployment.** A directory upgraded by hand tends to
+collect `docker-compose.yml.<version>` copies (the `image:` line was the only
+difference), `data.pre-<version>` directory copies and `backup-<version>-<ts>`
+`cp` triples. With the script in place: keep the live compose and `.env`;
+verify each old copy once (`sqlite3 <copy>/state.db 'PRAGMA integrity_check'`
+as root — the triples are only valid as the triple), move the ones that pass
+into `backups/legacy/`, delete the rest and the `._docker-compose.yml`
+AppleDouble sidecar a Mac copy leaves; `chmod 0640 fleet-hub.env`. Nothing in
+the repository does this for you — it is the operator's directory.
 
 ## Add and provision hosts
 
@@ -1459,7 +1580,17 @@ curl -s https://fleet.example.com/metrics -H "Authorization: Bearer <master toke
 fleet_tool_calls_total{caller="client:phone"} 412
 fleet_tool_errors_total{caller="client:phone"} 3
 fleet_event_streams_open{caller="client:phone"} 1
+fleet_reconcile_duration_ms 812
+fleet_reconcile_failures_total 0
+fleet_sessions{status="working"} 12
+fleet_hosts_reachable 5
 ```
+
+Besides the per-caller counters the exposition carries four process gauges:
+`fleet_reconcile_duration_ms` (the last pass's wall time),
+`fleet_reconcile_failures_total`, `fleet_sessions{status="…"}` (by
+`claude_status`, external rows excluded, the same roll-up
+`fleet_health.by_status` uses) and `fleet_hosts_reachable`.
 
 Prometheus text format, **master token only** — a per-host token and a paired
 phone are both callers this reports on, and letting one read the others'
@@ -1524,6 +1655,10 @@ because the gap was longer than the history kept (512 events, roughly thirteen
 minutes of a busy fleet's churn) or because the hub has restarted since the id
 was minted, which the `generation` half is there to catch. `false` means
 re-list; it is never a reason to assume continuity.
+
+The desktop does this: it sends the last row frame id it applied, re-lists
+only when `ready` says `resumed: false`, and then also re-fetches projects,
+worktrees and work in the window.
 
 `?fields=id,claude_status,…` keeps only those keys in each frame's payload.
 There is no fixed vocabulary — a field is whatever the row type serialises,
@@ -1970,6 +2105,10 @@ causes are:
 - no client token is stored;
 - the token cannot be read, for example because the macOS keychain was locked
   at launch or its prompt was denied;
+- the client token could not be read in time — the keychain was locked and
+  its prompt did not answer within 10 s. The app logs `startup: resolving
+  backend` … `startup: backend resolved elapsed_ms=…` around this step;
+  unlock the keychain and relaunch;
 - the URL is plain `http://` to a host that is not loopback, and
   `hub.client_plaintext_token` is not set;
 - `hub.remote_url` does not parse;
@@ -1996,7 +2135,9 @@ standalone exactly as before.
   produced, so the window updates itself. When that stream drops it reconnects
   with backoff, re-lists sessions, hosts, tasks and accounts once, and shows a
   banner — "what you see may be out of date", the attempt number and the
-  reason — until it is back. A stream that goes silent (not even the hub's
+  reason — until it is back. After a dropped stream the app resumes from the
+  last event it applied when the hub still has it (15 minutes / 512 events);
+  otherwise it re-lists. A stream that goes silent (not even the hub's
   15-second keep-alive) for about 40 seconds is treated as dead, which is what
   a laptop that slept and woke on another network looks like.
 - **The fleet is the hub's.** No reconcile tick, no account-usage poll and no
@@ -2302,6 +2443,12 @@ deliberately.
   and `POST /pair`, the one unauthenticated route besides `/healthz`, is
   rate-limited to one attempt per address every six seconds. See *Pair a
   phone* and *Clients* above.
+- **Failed bearers are throttled per address.** A bad or missing token on any
+  authenticated route is answered `401` once per second per source address
+  (the peer, or the last `X-Forwarded-For` hop when the peer is a private or
+  loopback proxy — the same rule `/pair` uses); a repeat inside that second is
+  `429`. The `[mcp] rejected request` log line names the address. A valid
+  token is never throttled: successes do not touch the bucket.
 - **Peer tokens.** A linked hub holds a fourth kind of token, mode `peer`: it
   reaches the `peer_exchange` tool only — every other tool answers
   `E_FORBIDDEN` and `/events` answers `403` — and it is never trusted; there
@@ -2448,3 +2595,26 @@ deliberately.
   logs `no /report route` once), the desktop was started with
   `CLAUDE_FLEET_HUB_REPORTS=0`, the agent's config has
   `report_errors: false`, or the sender's `RUST_LOG` silences `error`.
+
+**One host is slow; everything looks stale.** A reconcile pass probes every
+host in parallel and writes each host's rows the moment its probe answers, so
+a host that takes the full 65 s probe budget delays only its own freshness;
+`fleet_health.hub.reconcile.last_duration_ms` still shows the pass as slow,
+and the host's `[reconcile] host probe exceeded its wall clock` line names it.
+
+### When a host's SSH key changes
+
+A reinstalled host, or a rotated host key, shows up as `Host key verification
+failed` → `reachable: false` → one `E_SSH` row in `GET /reports`. The hub's
+`known_hosts` is the bind-mounted `./ssh/known_hosts` (uid 1000, so `sudo` on
+a NAS): `ssh-keyscan <host> | sudo tee -a ssh/known_hosts`, remove the stale
+line for that host, then `probe_host` with the master token. No restart.
+
+### Rotate the hub's SSH key
+
+`fleet-hub ssh-key` never overwrites an existing pair, so rotation is manual:
+`ssh-keygen -t ed25519 -f ssh/id_ed25519.new -N ''`; append
+`ssh/id_ed25519.new.pub` to `~/.ssh/authorized_keys` on every host; stop the
+hub; `mv` the new pair over `ssh/id_ed25519{,.pub}`; start the hub;
+`probe_host` every host; then remove the old public key from each host's
+`authorized_keys`. Everything under `./ssh` is uid 1000: `sudo` throughout.
