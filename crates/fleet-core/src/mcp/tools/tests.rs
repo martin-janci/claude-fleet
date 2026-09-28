@@ -7830,12 +7830,14 @@ fn add_params(host: &str, source: AddProjectSource) -> AddProjectParams {
     }
 }
 
+#[cfg(unix)]
 fn clone_src() -> AddProjectSource {
     AddProjectSource::Clone {
         url: "https://github.com/acme/widget".into(),
     }
 }
 
+#[cfg(unix)]
 fn create_remote_src(confirm: Option<&str>) -> AddProjectSource {
     AddProjectSource::New {
         owner: "acme".into(),
@@ -7845,6 +7847,7 @@ fn create_remote_src(confirm: Option<&str>) -> AddProjectSource {
     }
 }
 
+#[cfg(unix)]
 /// `FleetTools` over a fake `ssh` binary: `printenv HOME` answers `/home/u`,
 /// `gh repo list` answers one repository, a clone succeeds, and every call
 /// is appended to `calls.log` so a test can prove nothing ran.
@@ -7875,10 +7878,12 @@ fn tools_over_fake_ssh(s: Store, dir: &std::path::Path) -> FleetTools {
     )
 }
 
+#[cfg(unix)]
 fn ssh_calls(dir: &std::path::Path) -> String {
     std::fs::read_to_string(dir.join("calls.log")).unwrap_or_default()
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn add_project_clones_on_a_registered_host_and_returns_the_row() {
     let dir = tempfile::tempdir().unwrap();
@@ -7902,6 +7907,7 @@ async fn add_project_clones_on_a_registered_host_and_returns_the_row() {
         .any(|p| p.owner == "acme" && p.repo == "widget"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn list_github_repos_returns_what_gh_lists_on_the_host() {
     let dir = tempfile::tempdir().unwrap();
@@ -7921,6 +7927,7 @@ async fn list_github_repos_returns_what_gh_lists_on_the_host() {
     assert_eq!(v[0]["is_private"], false, "{v}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn create_remote_without_the_token_answers_one_in_the_structured_error() {
     let dir = tempfile::tempdir().unwrap();
@@ -7945,6 +7952,7 @@ async fn create_remote_without_the_token_answers_one_in_the_structured_error() {
     assert!(ssh_calls(dir.path()).is_empty(), "nothing ran on the host");
 }
 
+#[cfg(unix)]
 /// A per-host token for host A reached host B's `gh` login and could clone
 /// or create repositories there; an org-bound phone reached another org's
 /// hosts. Both tools now fence like `new_session`, before any ssh.
@@ -8011,6 +8019,7 @@ async fn add_project_and_list_github_repos_are_fenced_to_the_callers_host_and_or
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn add_project_and_list_github_repos_refuse_an_unregistered_host() {
     let dir = tempfile::tempdir().unwrap();
@@ -8041,6 +8050,7 @@ async fn add_project_and_list_github_repos_refuse_an_unregistered_host() {
     );
 }
 
+#[cfg(unix)]
 /// Publishing a GitHub repository is one of the operator's starts (D12):
 /// the call that carries the service's token waits for a person, and the
 /// approval is bound to the host and repository.
@@ -8088,6 +8098,7 @@ async fn the_operators_create_remote_waits_for_a_person() {
         .expect("a clone is not confirm-gated");
 }
 
+#[cfg(unix)]
 /// A per-host token or the master token could send the service's
 /// create_remote token straight back and publish a GitHub repository with
 /// no person involved. Like the operator, they now wait for an approval;
@@ -8128,6 +8139,7 @@ async fn create_remote_from_a_token_that_is_not_a_person_waits_for_one() {
     assert!(ssh_calls(dir.path()).is_empty(), "nothing ran on the host");
 }
 
+#[cfg(unix)]
 /// Where there is no approver (a hub), a token that is not a person cannot
 /// publish a repository at all; a paired phone still can, with the token.
 #[tokio::test]

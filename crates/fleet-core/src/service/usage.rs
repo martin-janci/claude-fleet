@@ -2539,6 +2539,7 @@ mod tests {
     /// passes; only the first is a `new` read. The size that read saw is
     /// kept as the cursor's backfill mark, so every later chunk below it is
     /// history too, and only bytes written after it are live.
+    #[cfg(unix)]
     #[test]
     fn a_multi_chunk_first_read_books_every_chunk_as_backfill() {
         let fx = fixture();
@@ -2668,6 +2669,7 @@ mod tests {
     /// perf-logs §6a: the day is the entry's own `timestamp`, which Claude
     /// Code writes after `message`; a `tool_use` input inside `message` can
     /// carry a `timestamp` key of its own and must not win.
+    #[cfg(unix)]
     #[test]
     fn awk_takes_the_entrys_own_timestamp_not_a_nested_one() {
         let fx = fixture();
