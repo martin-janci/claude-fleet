@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::ipc_error::lock;
+use crate::service::tasks::PaneProbe as _;
 
 #[tool_router(router = orchestration_router, vis = "pub(super)")]
 impl FleetTools {
@@ -29,10 +30,21 @@ impl FleetTools {
             self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
         let _permit = self.long_poll_permit(&caller, "wait_for_session")?;
         let cond = tasks::WaitCond::parse(&p.until, p.turn).map_err(to_mcp_err)?;
-        let out =
-            tasks::wait_for_session(&self.store, row.id, cond, tasks::wait_timeout(p.timeout_s))
-                .await
-                .map_err(to_mcp_err)?;
+        // A stale-demoted row's `idle` is a guess: the wait asks its pane.
+        let out = tasks::wait_for_session_probed(
+            &self.store,
+            row.id,
+            cond,
+            tasks::wait_timeout(p.timeout_s),
+            tasks::POLL_INTERVAL,
+            &tasks::LivePaneProbe {
+                store: &self.store,
+                ssh: &self.ssh,
+            },
+            tasks::STALE_PANE_PROBE_EVERY,
+        )
+        .await
+        .map_err(to_mcp_err)?;
         ok_json(&serde_json::json!({
             "status": if out.satisfied { "satisfied" } else { "timeout" },
             "claude_status": out.row.claude_status,
@@ -272,7 +284,19 @@ impl FleetTools {
             None,
             "the session to prompt",
         )?;
-        run_prompt_ready(&row)?;
+        // A stale-demoted row reads `idle` only because nothing moved; a
+        // long tool call looks exactly like that. Ask the pane (S5 + F2).
+        let live = if crate::store::needs_pane_confirmation(&row) {
+            tasks::LivePaneProbe {
+                store: &self.store,
+                ssh: &self.ssh,
+            }
+            .pane_status(row.id)
+            .await
+        } else {
+            None
+        };
+        run_prompt_ready(&row, live.as_deref())?;
         let _permit = self.long_poll_permit(&caller, "run_prompt")?;
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
         let before = row.turn_seq;
