@@ -12,18 +12,7 @@ pub struct RelatedSessionsArgs {
     pub session_id: i64,
 }
 
-pub fn related_sessions(
-    args: RelatedSessionsArgs,
-    store: &Mutex<Store>,
-) -> Result<Vec<SessionRow>, IpcError> {
-    related_sessions_scoped(
-        args,
-        store,
-        &crate::service::view_scope::ViewScope::internal(),
-    )
-}
-
-/// [`related_sessions`] under the caller's scope (work graph M5, D7 +
+/// The sessions sharing one's project and worktree, under the caller's scope (work graph M5, D7 +
 /// multi-user M1, T7): sessions of an org isolated from the caller's host, and
 /// sessions belonging to another person, are left out — and an anchor that is
 /// one of them reads as missing.

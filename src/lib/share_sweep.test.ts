@@ -725,6 +725,12 @@ const NO_FRONTEND_WRITER: Partial<Record<SessionAction, string>> = {
   set_session_tags:
     'No desktop command exists yet: tags arrive on the row and are shown, and `set_session_tags` ' +
     'is reachable only through the control API.',
+  delete_worktree:
+    'The `delete_worktree` tool is fleet-mobile’s and the control API’s: the desktop had a command ' +
+    'and a wrapper no component imported, removed as dead code.',
+  archive_session_work:
+    'A `work_link { archive }` for the phone and the control API: the desktop archives through ' +
+    'Tidy-up’s `tidy_apply`, and its standalone wrapper had no caller, so it was removed.',
 };
 
 /** Every writer this sweep follows: the derived ones plus the verified relays. */
