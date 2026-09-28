@@ -768,6 +768,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/075_session_launch_model.sql"),
         already_applied: Some(sessions_has_launch_model),
     },
+    // Application updates (S4): desired / observed / events / the signed
+    // document cache. `CREATE TABLE IF NOT EXISTS` only.
+    Migration::plain(76, include_str!("../../migrations/076_update_state.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

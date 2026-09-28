@@ -2033,7 +2033,7 @@ fn capture_default_cap_matches_docs() {
 /// 84 with `work_admin`; hub federation adds `peer_exchange` and
 /// `list_peer_links`: 86; `get_settings` / `set_setting`: 88; `quick_replies`:
 /// 89; `rewind_conversation`: 90; `add_project` / `list_github_repos`: 92;
-/// `catalog_admin`: 93.)
+/// `catalog_admin`: 93; `update_status` / `update_admin`: 95.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -2045,6 +2045,7 @@ fn router_sum_serves_every_tool() {
         include_str!("repo.rs"),
         include_str!("assets.rs"),
         include_str!("peer.rs"),
+        include_str!("updates.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -2054,7 +2055,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 93);
+    assert_eq!(served, 95);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -2903,6 +2904,25 @@ fn a_peer_token_reaches_only_peer_exchange_and_nothing_else_reaches_it() {
     }
 }
 
+/// `fleet-updater`'s token reaches `/update/*` only (update-channel design
+/// §6.1): no tool is served to it and every tool refuses it, `peer_exchange`
+/// included.
+#[test]
+fn an_updater_token_reaches_no_tool() {
+    let upd = client_caller("updater", TokenMode::Updater);
+    for t in FleetTools::tool_router_for_doc().list_all() {
+        let name = t.name.to_string();
+        assert!(
+            enforce_mode(&upd, &name).is_err(),
+            "an updater token must be refused {name}"
+        );
+        assert!(
+            !present::visible_to(&upd, &name),
+            "{name} served to an updater token"
+        );
+    }
+}
+
 #[test]
 fn a_readonly_token_is_served_no_mutating_tools_and_a_client_no_admin_tools() {
     let all = FleetTools::tool_router_for_doc().list_all();
@@ -3259,9 +3279,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// measured apart never cover the merged surface, so a merge that trips
     /// this re-measures. The why of each raise belongs in its commit
     /// message (`git log -L` on this constant), not here: a log in this
-    /// comment conflicted on every merge. Measured at 63,473 on 2026-09-28
-    /// (`catalog_admin` over `new_session`'s `model` / `effort`).
-    const BUDGET_BYTES: usize = 63_573;
+    /// comment conflicted on every merge. Measured at 64,528 on 2026-09-28
+    /// (`update_status` / `update_admin`, `pair_client`'s `updater` mode).
+    const BUDGET_BYTES: usize = 64_628;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

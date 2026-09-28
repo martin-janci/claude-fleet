@@ -33,6 +33,10 @@ pub enum TokenMode {
     /// Another fleet's hub (federation): `peer_exchange` and nothing else.
     /// Only a paired client row can hold it (see `parse_client`).
     Peer,
+    /// `fleet-updater` acting for this hub (update-channel design §6.1):
+    /// `/update/check` and `/update/report` and nothing else — no tool, no
+    /// `/events`, no `/report`. Only a paired client row can hold it.
+    Updater,
 }
 
 /// The one tool a `Peer` token may call, and that only a `Peer` token may
@@ -49,12 +53,20 @@ impl TokenMode {
         }
     }
 
-    /// A paired client row's mode: `full`, `peer`, else `readonly`.
+    /// A paired client row's mode: `full`, `peer`, `updater`, else
+    /// `readonly`.
     fn parse_client(s: &str) -> TokenMode {
         match s {
             "peer" => TokenMode::Peer,
+            "updater" => TokenMode::Updater,
             other => TokenMode::parse(other),
         }
+    }
+
+    /// A token with one door only (`peer` → `peer_exchange`, `updater` →
+    /// `/update/*`): refused by every tool and route but its own.
+    pub fn is_single_purpose(self) -> bool {
+        matches!(self, TokenMode::Peer | TokenMode::Updater)
     }
 }
 
@@ -400,16 +412,13 @@ pub fn check_request(
 /// it may proceed.
 pub(crate) fn refuses_peer(caller: &Caller) -> Option<axum::response::Response> {
     use axum::response::IntoResponse;
-    if caller.mode != TokenMode::Peer {
-        return None;
-    }
-    Some(
-        (
-            StatusCode::FORBIDDEN,
-            "a hub link may call peer_exchange only\n",
-        )
-            .into_response(),
-    )
+    let body = match caller.mode {
+        TokenMode::Peer => "a hub link may call peer_exchange only\n",
+        // Same rule for the updater's token: its only door is `/update/*`.
+        TokenMode::Updater => "an updater token may call /update only\n",
+        TokenMode::Full | TokenMode::Readonly => return None,
+    };
+    Some((StatusCode::FORBIDDEN, body).into_response())
 }
 
 #[cfg(test)]

@@ -24,6 +24,7 @@ mod tests_auth_limit;
 mod tests_token_cache;
 mod token_cache;
 mod tools;
+pub mod update_route;
 pub mod wire;
 
 use crate::cancel::CancellationRegistry;
@@ -439,6 +440,22 @@ fn build_app(
                 .layer(axum::extract::DefaultBodyLimit::max(
                     fleet_proto::report::BODY_MAX,
                 ))
+                .with_state(report_state.clone()),
+        )
+        // `/update/check` and `/update/report`: the frozen update wire
+        // (update-channel design §6). Behind `authorize` like `/report`, and
+        // the one door an `updater` token has.
+        .merge(
+            axum::Router::new()
+                .route(
+                    "/update/check",
+                    axum::routing::post(update_route::handle_check),
+                )
+                .route(
+                    "/update/report",
+                    axum::routing::post(update_route::handle_report),
+                )
+                .layer(axum::extract::DefaultBodyLimit::max(update_route::BODY_MAX))
                 .with_state(report_state),
         )
         .layer(axum::middleware::from_fn_with_state(auth_state, authorize));

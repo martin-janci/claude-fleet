@@ -264,7 +264,8 @@ impl FleetTools {
         sees it; the device posts it to /pair once for a token of its own. \
         name: 1-64 chars, no control characters, not a live client's. mode \
         full drives sessions fleet-wide, readonly observes, peer is another \
-        hub's link (see peer_exchange); fleet-admin tools stay out of a \
+        hub's link (see peer_exchange), updater is fleet-updater's (/update \
+        only); fleet-admin tools stay out of a \
         client's reach. Codes are in memory only: a hub restart voids them. \
         org_id binds it to one org (its work and sessions only). Master token \
         only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.")]
@@ -292,6 +293,14 @@ impl FleetTools {
             return Err(mcp_err(
                 codes::E_VALIDATE,
                 "a peer hub link is never bound to an org; drop org_id",
+                None,
+            ));
+        }
+        // `fleet-updater` sends no prompts and belongs to no org.
+        if mode == "updater" && (p.trusted || p.org_id.is_some()) {
+            return Err(mcp_err(
+                codes::E_VALIDATE,
+                "an updater token is never trusted or bound to an org; drop trusted / org_id",
                 None,
             ));
         }

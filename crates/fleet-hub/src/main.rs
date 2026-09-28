@@ -84,7 +84,7 @@ enum Cmd {
         /// Name for the client, as it will appear in `client list` (1-64 characters).
         #[arg(long)]
         name: String,
-        /// What the client may do: full (drive sessions), readonly (observe), or peer (another hub; see fleet-hub peer add). [default: full]
+        /// What the client may do: full (drive sessions), readonly (observe), peer (another hub; see fleet-hub peer add), or updater (fleet-updater; /update only). [default: full]
         #[arg(long)]
         mode: Option<String>,
         /// Seconds the pairing code stays valid (30-3600). [default: 600]

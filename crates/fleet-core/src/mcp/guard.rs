@@ -152,6 +152,21 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Quick,
     },
     ToolPolicy {
+        name: "update_status",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "update_admin",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        // `refresh` fetches the channel and its manifests.
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
         name: "add_host",
         access: Access::Master,
         readonly: false,
