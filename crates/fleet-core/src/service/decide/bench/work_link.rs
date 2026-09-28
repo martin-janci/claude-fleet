@@ -561,6 +561,9 @@ pub struct Sizes {
     /// Labels naming an item that is not among the row's candidates: the
     /// candidate set missed the truth (a recall miss, not scored).
     pub h_label_outside: Shown,
+    /// Rows whose session is no longer in the database: their org cannot
+    /// be read from it, so they are left out ([`resolve_label_orgs`]).
+    pub h_session_gone: Shown,
 }
 
 /// Where the truth was, before any model is asked.
@@ -900,7 +903,9 @@ pub fn load(
     let mut cases = truths;
     cases.extend(nones);
     if let Some(rows) = labels {
-        cases.extend(h_cases(rows, ranker, opts, &mut sizes));
+        let rows = resolve_label_orgs(store, rows, &mut sizes)
+            .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
+        cases.extend(h_cases(&rows, ranker, opts, &mut sizes));
     }
     let org_names = store
         .list_orgs()?
@@ -989,6 +994,47 @@ pub fn export_unlinked(
             label: None,
         });
         at += step;
+    }
+    Ok(out)
+}
+
+/// Every hand-label row's org, from the DATABASE, before any case is built
+/// (Jev's consent gate, the haiku org fence and `--org` all trust it), as
+/// `status_map::resolve_label_orgs` does for sections: the row's session's
+/// org as the database computes it now. A row naming another org than
+/// that is refused (the file was edited, or the session's org moved since
+/// the export and its candidates are another org's: export again); a row
+/// whose session is gone is left out and counted (`h_session_gone`),
+/// since nothing can vouch for its org. An error names the row.
+pub fn resolve_label_orgs(
+    store: &Store,
+    rows: &[UnlinkedCase],
+    sizes: &mut Sizes,
+) -> Result<Vec<UnlinkedCase>, String> {
+    let org_name = |o: Option<i64>| o.map_or_else(|| "none".to_string(), |o| o.to_string());
+    let mut out = Vec::with_capacity(rows.len());
+    for (i, r) in rows.iter().enumerate() {
+        let row = i + 1;
+        let Some(session) = store
+            .get_session_by_id(r.session_id)
+            .map_err(|e| format!("row {row}: {e}"))?
+        else {
+            sizes.h_records.0 += 1;
+            sizes.h_session_gone.0 += 1;
+            continue;
+        };
+        if r.org_id != session.org_id {
+            return Err(format!(
+                "row {row}: org_id {} but session {} is in org {}; export the labels again",
+                org_name(r.org_id),
+                r.session_id,
+                org_name(session.org_id)
+            ));
+        }
+        out.push(UnlinkedCase {
+            org_id: session.org_id,
+            ..r.clone()
+        });
     }
     Ok(out)
 }
@@ -2581,8 +2627,13 @@ impl BenchReport {
         ];
         if s.h_records.0 > 0 {
             v.push(format!(
-                "H: {} rows, {} labeled: {} cases + {} none-cases; {} labels outside their candidates (recall misses, not scored)",
-                s.h_records, s.h_labeled, s.h_cases, s.h_none_cases, s.h_label_outside
+                "H: {} rows, {} labeled: {} cases + {} none-cases; {} labels outside their candidates (recall misses, not scored){}",
+                s.h_records, s.h_labeled, s.h_cases, s.h_none_cases, s.h_label_outside,
+                if s.h_session_gone.0 > 0 {
+                    format!("; {} rows whose session is gone left out", s.h_session_gone)
+                } else {
+                    String::new()
+                }
             ));
         }
         let th = &self.thresholds;

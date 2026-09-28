@@ -468,7 +468,11 @@ the window, one JSON line each: the redacted prompt, the candidates (ids and
 titles) and `"label": null`. A person sets `label` to a candidate's id or to
 `"none"`; `--labels FILE` adds the labeled rows as dataset H, reported on
 its own (a label naming an item outside the row's candidates is counted as a
-recall miss). **The file holds prompt and title text**: it is created
+recall miss). A row's org is read from the database — its session's org
+now — never from the file: a row whose `org_id` differs is refused (export
+again), and a row whose session is gone is left out and counted, since
+nothing can vouch for its org (Jev's consent gate and the haiku org fence
+rest on it). **The file holds prompt and title text**: it is created
 `0600`, never over an existing file, and stays on the machine. The report
 itself never holds a prompt or a title.
 

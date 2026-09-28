@@ -940,6 +940,54 @@ async fn export_then_labels_round_trip_into_dataset_h() {
     assert_eq!(h.scope, "all labeled");
 }
 
+/// A hand-label row's org is its session's, read from the database: an
+/// org the file names differently is refused, a session that is gone is
+/// left out, and neither is ever trusted from the file.
+#[tokio::test]
+async fn a_labels_org_comes_from_the_database_not_the_file() {
+    let mut w = seeded();
+    for i in 0..3 {
+        w.unlinked(
+            &format!("something unlinked number {i} for PAY-3"),
+            *NOW - (20 - i) * DAY,
+        );
+    }
+    let o = opts(Split::All, vec![Provider::None, Provider::Bm25]);
+    let mut rows = export_unlinked(&w.s, &o, 3).unwrap();
+    assert_eq!(rows.len(), 3);
+    for r in &mut rows {
+        r.label = Some("none".into());
+    }
+    let org =
+        w.s.get_session_by_id(rows[0].session_id)
+            .unwrap()
+            .unwrap()
+            .org_id;
+
+    // A file that claims another org for a row is refused, naming it.
+    let mut claimed = rows.clone();
+    claimed[1].org_id = Some(org.map_or(4242, |o| o + 4242));
+    let e = load(&w.s, &Words, &o, Some(&claimed)).unwrap_err();
+    assert_eq!(e.code, crate::ipc_error::codes::E_INVALID);
+    assert!(e.message.starts_with("row 2: org_id"), "{}", e.message);
+
+    // A row whose session is gone cannot be vouched for: left out.
+    w.s.conn_for_test()
+        .execute("DELETE FROM sessions WHERE id = ?1", [rows[2].session_id])
+        .unwrap();
+    let loaded = load(&w.s, &Words, &o, Some(&rows)).unwrap();
+    let s = &loaded.sizes;
+    assert_eq!(
+        (s.h_records.0, s.h_session_gone.0, s.h_none_cases.0),
+        (3, 1, 2)
+    );
+    assert!(loaded
+        .cases
+        .iter()
+        .filter(|c| c.dataset == Dataset::H)
+        .all(|c| c.org_id == org));
+}
+
 #[test]
 fn options_are_bounded() {
     assert!(BenchOptions::new(Some(0), None, None, Split::All, vec![], None, *NOW).is_err());
