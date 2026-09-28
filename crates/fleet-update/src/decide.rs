@@ -481,9 +481,10 @@ fn installed_fit(c: Component, speaks: &Speaks, hub: &HubSpeaks) -> Option<Fit> 
 fn release_fits(c: &Compatibility, component: Component, hub: &HubSpeaks) -> bool {
     match component {
         Component::Desktop => c.contract.desktop_accepts.contains(hub.contract_serves),
-        Component::Android | Component::Ios => {
-            c.contract.mobile_accepts.contains(hub.contract_serves)
-        }
+        Component::Android | Component::Ios => c
+            .contract
+            .mobile_accepts
+            .is_some_and(|w| w.contains(hub.contract_serves)),
         Component::Agent => hub.agent_proto_accepts.contains(c.agent_proto.agent_speaks),
         Component::Hub => true,
     }

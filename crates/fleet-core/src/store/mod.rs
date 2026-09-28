@@ -83,6 +83,7 @@ pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};
 pub use rows::*;
+pub use schema::known_schema_version;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;

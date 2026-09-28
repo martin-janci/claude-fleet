@@ -1,0 +1,96 @@
+# The publisher's side of the update channels (update-channel design §5,
+# slice S2): the signed `<track>.json` documents on the orphan branch
+# `update-channels`, written only by scripts/update-channels.sh.
+#
+# - weekly: re-sign every track with a fresh sequence and expiry, so a
+#   quiet channel never reaches its 14-day `expires_at` (a client treats an
+#   expired channel as frozen, never as "no update");
+# - by hand (Actions → update-channels → Run workflow): one edit — withdraw
+#   a release, recommend one, set or clear the rollback target or a
+#   component's minimum, mark a release mandatory, or re-sign now.
+#
+# release.yml's `channel` job lists each published release; it shares the
+# concurrency group below, so two writers never race for the branch.
+name: update-channels
+
+on:
+  schedule:
+    # Mondays 06:17 UTC: well inside the 14-day expiry, off the hour.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      track:
+        description: Track to edit
+        type: choice
+        options: [stable, beta, nightly]
+        default: stable
+      op:
+        description: What to change
+        type: choice
+        options: [resign, withdraw, recommend, rollback, clear-rollback, minimum, clear-minimum, mandatory]
+        default: resign
+      version:
+        description: Release version (withdraw, recommend, rollback, minimum, mandatory)
+        required: false
+        default: ''
+      component:
+        description: Component (minimum, clear-minimum, mandatory) — hub, agent, desktop, mobile
+        required: false
+        default: ''
+      reason:
+        description: Reason shown to operators (withdraw, mandatory)
+        required: false
+        default: ''
+      deadline:
+        description: RFC 3339 deadline (mandatory)
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-channels
+  cancel-in-progress: false
+
+jobs:
+  channels:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: release-manifest
+      - run: sudo apt-get update && sudo apt-get install -y minisign
+      - run: cargo build -p fleet-update --bin fleet-release --release --locked
+      # Every input arrives through env:, never interpolated into the run:
+      # body, so a reason or version string can never be read as shell.
+      - name: Write the channel documents
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          FLEET_RELEASE: target/release/fleet-release
+          EVENT: ${{ github.event_name }}
+          TRACK: ${{ inputs.track }}
+          OP: ${{ inputs.op }}
+          VERSION: ${{ inputs.version }}
+          COMPONENT: ${{ inputs.component }}
+          REASON: ${{ inputs.reason }}
+          DEADLINE: ${{ inputs.deadline }}
+        run: |
+          set -euo pipefail
+          # Until scripts/release-key.sh has run there is nothing to re-sign:
+          # the weekly run says so instead of failing every Monday.
+          if [ "$EVENT" = schedule ] && [ -z "$(scripts/release-pubkeys.sh)" ]; then
+            echo "::notice::crates/fleet-update/src/keys.rs names no release key yet; nothing to re-sign."
+            exit 0
+          fi
+          if [ "$EVENT" = schedule ] || [ "${OP:-resign}" = resign ]; then
+            scripts/update-channels.sh resign
+          else
+            scripts/update-channels.sh edit "$TRACK" "$OP" "$VERSION" "$COMPONENT" "$REASON" "$DEADLINE"
+          fi

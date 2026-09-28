@@ -236,6 +236,10 @@ enum Cmd {
     },
     /// Print this hub's SSH public key (generated on first use; derived when only the private key exists).
     SshKey,
+    /// Print this build's protocol windows and store schema as JSON — the
+    /// release manifest's `compatibility` (update design U3). For CI.
+    #[command(hide = true)]
+    Compat,
     /// Exit 0 when a hub answers HTTP on 127.0.0.1 (for Docker HEALTHCHECK). Does not open the database.
     Healthcheck {
         /// Port to probe [env: FLEET_HUB_PORT] [default: 4180]
@@ -330,6 +334,24 @@ enum PeerCmd {
     Remove { target: String },
 }
 
+/// The build's windows, in the shape `fleet_update::publish::HubCompat`
+/// reads. A test holds it to the constants.
+fn compat_json() -> serde_json::Value {
+    let peer = fleet_core::service::peer::wire::PROTO;
+    serde_json::json!({
+        "contract": { "hub_serves": fleet_core::wire_contract::CONTRACT_REVISION },
+        "agent_proto": {
+            "hub_accepts": [fleet_proto::MIN_SUPPORTED_PROTO, fleet_proto::PROTO_VERSION],
+            "agent_speaks": fleet_proto::PROTO_VERSION
+        },
+        // The listener refuses any other revision (`peer/listen.rs`).
+        "peer_proto": { "speaks": peer, "accepts": [peer, peer] },
+        // Any older database is migrated forward; a newer one is refused.
+        "store": { "schema_to": fleet_core::store::known_schema_version(), "opens_down_to": 1 },
+        "update_proto": fleet_update::wire::UPDATE_PROTO
+    })
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     // Mandatory and first: fleet-core keeps no default app version, so
@@ -414,6 +436,10 @@ async fn main() -> ExitCode {
             opts,
         } => demo_seed(&opts, &env, hosts, clear, force),
         Cmd::SshKey => serve::ssh_key(),
+        Cmd::Compat => {
+            out::line(&compat_json().to_string());
+            Ok(ExitCode::SUCCESS)
+        }
         Cmd::Healthcheck {
             port,
             tls,
@@ -496,6 +522,22 @@ fn demo_seed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compat_is_what_the_release_manifest_reads() {
+        let c: fleet_update::publish::HubCompat = serde_json::from_value(compat_json()).unwrap();
+        assert_eq!(
+            c.contract.hub_serves,
+            fleet_core::wire_contract::CONTRACT_REVISION
+        );
+        assert_eq!(c.agent_proto.agent_speaks, fleet_proto::PROTO_VERSION);
+        assert_eq!(
+            c.agent_proto.hub_accepts.min,
+            fleet_proto::MIN_SUPPORTED_PROTO
+        );
+        assert_eq!(c.store.schema_to, fleet_core::store::known_schema_version());
+        assert_eq!(c.update_proto, fleet_update::wire::UPDATE_PROTO);
+    }
 
     #[test]
     fn cli_parses_every_subcommand() {
@@ -863,5 +905,6 @@ mod tests {
         };
         assert_eq!((to, prefix.as_str(), json), (None, "pre-0.3.4", true));
         assert!(Cli::try_parse_from(["fleet-hub", "bogus"]).is_err());
+        Cli::try_parse_from(["fleet-hub", "compat"]).unwrap();
     }
 }
