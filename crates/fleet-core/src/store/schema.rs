@@ -58,6 +58,15 @@ fn usage_daily_has_backfill(conn: &Connection) -> rusqlite::Result<bool> {
 
 /// `already_applied` guard of migration 072: `sessions` already has its
 /// `usage_backfill_until` column.
+fn sessions_has_launch_model(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'launch_model'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn sessions_has_usage_backfill_until(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'usage_backfill_until'",
@@ -788,26 +797,33 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/074_client_assets_admin.sql"),
         already_applied: Some(client_tokens_has_assets_admin),
     },
+    // `sessions.launch_model`: the `claude --model` recreate / restart pass
+    // again. One ADD COLUMN, its own guard.
+    Migration {
+        version: 75,
+        sql: include_str!("../../migrations/075_session_launch_model.sql"),
+        already_applied: Some(sessions_has_launch_model),
+    },
     // Host identity & health, task 1: `hosts.claude_version_at`. Guarded:
     // ADD COLUMN. (Numbered at merge time — `migrations_are_contiguous_from_one`
     // allows no gap — so a sibling plan merged first shifts these.)
     Migration {
-        version: 75,
-        sql: include_str!("../../migrations/075_host_claude_version_at.sql"),
+        version: 76,
+        sql: include_str!("../../migrations/076_host_claude_version_at.sql"),
         already_applied: Some(hosts_has_claude_version_at),
     },
     // Host identity & health, task 2: the per-pass health sample, the last
     // accepted hook and the agent version on `hosts`. Guarded: ADD COLUMN.
     Migration {
-        version: 76,
-        sql: include_str!("../../migrations/076_host_health.sql"),
+        version: 77,
+        sql: include_str!("../../migrations/077_host_health.sql"),
         already_applied: Some(hosts_has_health_at),
     },
     // Host identity & health, task 6: the provisioning content fingerprint
     // and its stamp on `hosts`. Guarded: ADD COLUMN.
     Migration {
-        version: 77,
-        sql: include_str!("../../migrations/077_host_provision_fingerprint.sql"),
+        version: 78,
+        sql: include_str!("../../migrations/078_host_provision_fingerprint.sql"),
         already_applied: Some(hosts_has_provision_fingerprint),
     },
 ];
@@ -3273,8 +3289,12 @@ mod tests {
     /// is not a `SessionRow` field (the reconcile's stamp, 072's usage
     /// backfill mark). Every other column is
     /// watched, so a write that changes it bumps the counter.
-    const ROW_VERSION_UNWATCHED: [&str; 3] =
-        ["row_version", "last_reconciled_at", "usage_backfill_until"];
+    const ROW_VERSION_UNWATCHED: [&str; 4] = [
+        "row_version",
+        "last_reconciled_at",
+        "usage_backfill_until",
+        "launch_model",
+    ];
 
     /// The SQL of `sessions_row_version_bump`, as the database holds it.
     fn row_version_trigger_sql(s: &Store) -> String {

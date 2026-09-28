@@ -12,6 +12,7 @@ mod out;
 mod pair;
 mod peer;
 mod provision;
+mod ready;
 mod reports;
 mod serve;
 mod tls;
@@ -243,6 +244,30 @@ enum Cmd {
         /// Whether the hub terminates TLS, so the probe speaks it too: off or cert [env: FLEET_HUB_TLS] [default: off]
         #[arg(long)]
         tls: Option<String>,
+        /// Also require readiness (store migrated, listener bound, first reconcile done) from the
+        /// running serve's readiness file, and check its build identity. For fleet-updater.
+        #[arg(long)]
+        ready: bool,
+        /// With --ready: print the verdict and the build identity as JSON (always, even when not ready).
+        #[arg(long, requires = "ready")]
+        json: bool,
+        /// Where serve keeps its readiness file [env: FLEET_HUB_DATA_DIR]
+        #[arg(long)]
+        data_dir: Option<std::path::PathBuf>,
+    },
+    /// Take a consistent online copy of state.db (read-only; never migrates). Safe while the hub serves.
+    Backup {
+        /// Write the copy here (refuses to overwrite) [default: <data dir>/backups/<prefix>-<UTC stamp>.db]
+        #[arg(long)]
+        to: Option<std::path::PathBuf>,
+        /// File name prefix for the default path, [A-Za-z0-9._-]+ (fleet-updater uses pre-<version>).
+        #[arg(long, default_value = "manual")]
+        prefix: String,
+        /// Print {path, schema, bytes} as JSON.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        opts: HubOptions,
     },
 }
 
@@ -389,7 +414,25 @@ async fn main() -> ExitCode {
             opts,
         } => demo_seed(&opts, &env, hosts, clear, force),
         Cmd::SshKey => serve::ssh_key(),
-        Cmd::Healthcheck { port, tls } => serve::healthcheck(port, tls, &env).await,
+        Cmd::Healthcheck {
+            port,
+            tls,
+            ready,
+            json,
+            data_dir,
+        } => {
+            if ready {
+                serve::healthcheck_ready(port, tls, data_dir, json, &env).await
+            } else {
+                serve::healthcheck(port, tls, &env).await
+            }
+        }
+        Cmd::Backup {
+            to,
+            prefix,
+            json,
+            opts,
+        } => serve::backup(&opts, &env, to, &prefix, json),
     };
     match result {
         Ok(code) => code,
@@ -771,7 +814,7 @@ mod tests {
         Cli::try_parse_from(["fleet-hub", "reports"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "ssh-key"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "healthcheck"]).unwrap();
-        let Cmd::Healthcheck { port, tls } = Cli::try_parse_from([
+        let Cmd::Healthcheck { port, tls, .. } = Cli::try_parse_from([
             "fleet-hub",
             "healthcheck",
             "--port",
@@ -786,6 +829,39 @@ mod tests {
         };
         assert_eq!(port, Some(4190));
         assert_eq!(tls.as_deref(), Some("cert"));
+        let Cmd::Healthcheck {
+            ready,
+            json,
+            data_dir,
+            ..
+        } = Cli::try_parse_from([
+            "fleet-hub",
+            "healthcheck",
+            "--ready",
+            "--json",
+            "--data-dir",
+            "/var/lib/fleet-hub",
+        ])
+        .unwrap()
+        .cmd
+        else {
+            panic!("healthcheck --ready did not parse");
+        };
+        assert!(ready && json);
+        assert_eq!(data_dir, Some("/var/lib/fleet-hub".into()));
+        assert!(
+            Cli::try_parse_from(["fleet-hub", "healthcheck", "--json"]).is_err(),
+            "--json needs --ready"
+        );
+        let Cmd::Backup {
+            to, prefix, json, ..
+        } = Cli::try_parse_from(["fleet-hub", "backup", "--prefix", "pre-0.3.4", "--json"])
+            .unwrap()
+            .cmd
+        else {
+            panic!("backup did not parse");
+        };
+        assert_eq!((to, prefix.as_str(), json), (None, "pre-0.3.4", true));
         assert!(Cli::try_parse_from(["fleet-hub", "bogus"]).is_err());
     }
 }

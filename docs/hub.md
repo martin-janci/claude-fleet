@@ -361,6 +361,40 @@ or any off-box target. `upgrade.sh` calls the same script with
 keeps its own three and older versions' `pre-*` files stay until you delete
 them.
 
+**From the binary, with no `sqlite3` on the host.** `fleet-hub backup` takes
+the same kind of copy from inside the container. It opens `state.db`
+read-only and never migrates it, copies it with `VACUUM INTO` while the hub
+keeps serving, and checks the copy with `PRAGMA integrity_check` before
+renaming it out of `.part`. It never overwrites an existing file. It does
+not prune: retention stays with `backup.sh`.
+
+```bash
+docker compose exec fleet-hub fleet-hub backup --prefix pre-0.3.4 --json
+# {"path":"/var/lib/fleet-hub/backups/pre-0.3.4-20260930-101200.db","schema":73,"bytes":524288}
+```
+
+The default path is `<data dir>/backups/<prefix>-<UTC stamp>.db`, the same
+name `backup.sh` uses. `--to <path>` names the file instead. This is the
+backup `fleet-updater` takes before it replaces the hub (update design
+`docs/superpowers/specs/2026-09-28-update-channel-design.md` §8).
+
+**Readiness, beside liveness.** The image's `HEALTHCHECK` (`fleet-hub
+healthcheck`) says only that `/healthz` answers, and `/healthz` names no
+version. `fleet-hub healthcheck --ready --json` also reads the readiness
+file that `serve` rewrites every 5 s at `<data dir>/run/ready.json`. It exits
+0 only when all three hold:
+
+- the hub is **live**;
+- the file is **fresh**, meaning its heartbeat is at most 20 s old and its
+  pid is running;
+- the hub is **ready**, meaning the store is migrated, the listener is bound
+  and the first reconcile pass has finished.
+
+It prints the build the process runs (`version`, `commit`, `build_id`,
+`contract`, `agent_proto`, `peer_proto`, `schema`). None of it goes on the
+network: run it with `docker compose exec`. A hub that stops removes the
+file, and one that was killed leaves a stale file, which reads as not ready.
+
 **Restore drill** (rehearse it once; a backup nobody restored is a hope):
 
 ```bash

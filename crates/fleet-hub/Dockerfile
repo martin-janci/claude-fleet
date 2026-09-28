@@ -9,6 +9,11 @@ COPY src-tauri/Cargo.toml ./src-tauri/Cargo.toml
 RUN mkdir -p src-tauri/src && echo '' > src-tauri/src/lib.rs
 COPY skills ./skills
 COPY src/lib/names.json ./src/lib/names.json
+# The context has no .git, so build.rs takes the build identity from these
+# (hub-image.yml passes them; a local `docker build` gets unknown / local).
+ARG FLEET_GIT_SHA=
+ARG FLEET_BUILD_ID=
+ENV FLEET_GIT_SHA=${FLEET_GIT_SHA} FLEET_BUILD_ID=${FLEET_BUILD_ID}
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build -p fleet-hub --release --locked \
