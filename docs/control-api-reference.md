@@ -667,8 +667,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::purge_project`
 - `commands::quick_replies::quick_replies`
 - `commands::quick_replies::set_quick_replies`
-- `commands::sessions::get_fleet_settings`
-- `commands::sessions::describe_fleet_settings`
+- `commands::pages::get_fleet_settings`
+- `commands::pages::describe_fleet_settings`
 - `commands::pages::list_pages`
 - `commands::pages::fetch_page_source`
 - `commands::pages::flow_start`
@@ -678,7 +678,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::pages::setting_proposals`
 - `commands::pages::decide_setting_proposals`
 - `commands::pages::setting_history`
-- `commands::sessions::set_fleet_setting`
+- `commands::pages::set_fleet_setting`
 - `commands::tasks::list_tasks`
 - `commands::tasks::cancel_task`
 - `commands::files::repo_changes`
