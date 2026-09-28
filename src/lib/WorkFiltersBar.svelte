@@ -379,6 +379,19 @@
           onchange={(id) => set({ has: id })}
         />
       </section>
+      <section>
+        <button
+          type="button"
+          class="switch-row"
+          role="switch"
+          aria-checked={!!f.archived}
+          data-testid="work-filter-archived"
+          title="Done tasks, and tasks whose sessions are all archived, with nothing running"
+          onclick={() => set({ archived: !f.archived })}
+        >
+          <span>Archived tasks</span><span class="switch" aria-hidden="true"></span>
+        </button>
+      </section>
       <div class="panel-foot">
         {#if panelCount > 0}
           <button type="button" class="btn btn--quiet" data-testid="work-filter-panel-clear" onclick={clearAll}>Clear all</button>

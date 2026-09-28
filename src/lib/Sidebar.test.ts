@@ -1930,6 +1930,9 @@ describe('Sidebar — group by work (roadmap M1)', () => {
 
   beforeEach(() => {
     sidebarGroupBy.set('project');
+    // These cases are about past and archived work: show it (it is hidden
+    // by default — see "archived is hidden by default" below).
+    workFilters.set({ ...DEFAULT_WORK_FILTERS, archived: true });
   });
 
   it('project mode keeps the tree, and shows the work key as a chip on the row', async () => {
@@ -2330,7 +2333,7 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     expect(screen.getByTestId('filters-open')).toHaveAttribute('aria-label', 'Filters, 1 active');
     expect(screen.getByTestId('facet-wf-status')).toHaveTextContent('Status: To do');
     const isAny = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
-    expect(readPref('sidebar.work-filters', {}, isAny)).toMatchObject({ status: 'todo' });
+    expect(readPref('sidebar.work-filters.v2', {}, isAny)).toMatchObject({ status: 'todo' });
     await fireEvent.click(screen.getByTestId('wf-clear'));
     await tick();
     expect(names()).toHaveLength(2);
@@ -2405,7 +2408,7 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     expect(names()[0]).toContain('dev-b');
   });
 
-  it('work mode: past only and hide archived act on past work', async () => {
+  it('work mode: archived past work is hidden by default, counted, and one click away', async () => {
     const nowSec = Math.floor(Date.now() / 1000);
     const a = { ...sessionFor(1, 'dev-a'), tags: ['PAY-7'] };
     mockBackend(fakeProjects, [a]);
@@ -2420,9 +2423,16 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     });
     sidebarGroupBy.set('work');
     render(Sidebar);
+    // Hidden, but the list says so and brings it back.
+    const row = await screen.findByTestId('archived-row');
+    expect(row).toHaveTextContent('1 archived hidden');
+    expect(screen.queryByTestId('past-work-group')).toBeNull();
+    await fireEvent.click(screen.getByTestId('archived-toggle'));
     await screen.findByTestId('past-work-group');
+    expect(screen.getByTestId('archived-row')).toHaveTextContent('Showing archived work');
     expect(names()).toHaveLength(1);
     await openFilters();
+    expect(screen.getByTestId('wf-hide-archived')).toHaveAttribute('aria-checked', 'true');
     await fireEvent.click(screen.getByTestId('wf-session-no'));
     await tick();
     expect(names()).toHaveLength(0);
@@ -2455,7 +2465,7 @@ describe('Sidebar filters: one set of rules for every section', () => {
   beforeEach(() => {
     sidebarGroupBy.set('project');
     hostFilter.set('all');
-    workFilters.set({ ...DEFAULT_WORK_FILTERS });
+    workFilters.set({ ...DEFAULT_WORK_FILTERS, archived: true });
   });
 
   it('an empty list names the filters that hide it and clears them', async () => {
@@ -2503,6 +2513,36 @@ describe('Sidebar filters: one set of rules for every section', () => {
     await tick(); await tick();
     expect(screen.queryByTestId('work-done')).toBeNull();
     expect(names()).toHaveLength(1);
+  });
+
+  it('the selection drops a row a filter hides: bulk actions reach only what you see', async () => {
+    const a = sessionFor(1, 'dev-a');
+    const b = { ...sessionFor(1, 'dev-b'), host_alias: 'mefistos' };
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('select-mode'));
+    await tick();
+    for (const box of screen.getAllByTestId('select-box')) await fireEvent.click(box);
+    await tick();
+    expect(screen.getByTestId('bulk-bar')).toHaveTextContent('2 selected');
+    hostFilter.set('local');
+    await tick(); await tick();
+    expect(screen.getByTestId('bulk-bar')).toHaveTextContent('1 selected');
+  });
+
+  it('Last active narrows Other sessions too, by each session’s own activity', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    mockBackend(fakeProjects, [
+      { ...sessionFor(null, 'loose-fresh'), last_activity_at: now - 60 },
+      { ...sessionFor(null, 'loose-stale'), last_activity_at: now - 40 * 86400 },
+    ]);
+    localStorage.setItem('cf:pref:recency', '"1d"');
+    render(Sidebar);
+    await tick(); await tick();
+    expect(names()).toHaveLength(1);
+    expect(names()[0]).toContain('loose-fresh');
+    localStorage.removeItem('cf:pref:recency');
   });
 
   it('Needs you hides past work: an ended session never waits on you', async () => {

@@ -35,7 +35,9 @@ export interface WorkFilters {
   status: StatusFilter;
   assignee: 'all' | 'mine';
   hasSession: HasSessionFilter;
-  /** Show archived rows (archived live sessions and past work). */
+  /** Show archived rows (archived live sessions and past work). Off by
+   *  default: the list stays about what is running; the sidebar says how
+   *  many are hidden and shows them all in one click. */
   archived: boolean;
 }
 
@@ -44,7 +46,7 @@ export const DEFAULT_WORK_FILTERS: WorkFilters = {
   status: 'all',
   assignee: 'all',
   hasSession: 'any',
-  archived: true,
+  archived: false,
 };
 
 export const STATUS_FILTERS: readonly StatusCategoryFilter[] = ['all', 'todo', 'in_progress', 'done'];
@@ -104,10 +106,22 @@ export function isWorkFilters(v: unknown): v is WorkFilters {
   );
 }
 
-const PREF_KEY = 'sidebar.work-filters';
+const PREF_KEY = 'sidebar.work-filters.v2';
+/** Before archived rows were hidden by default. Every install wrote
+ *  `archived: true` there (the old default), so it says nothing about a
+ *  choice: carry the rest over and start hidden. */
+const PREF_KEY_V1 = 'sidebar.work-filters';
+
+/** The stored filters: v2, else v1's with the new archived default. */
+export function readWorkFilters(): WorkFilters {
+  const v2 = readPref<WorkFilters | null>(PREF_KEY, null, (v): v is WorkFilters | null => v === null || isWorkFilters(v));
+  if (v2) return v2;
+  const v1 = readPref(PREF_KEY_V1, DEFAULT_WORK_FILTERS, isWorkFilters);
+  return { ...v1, archived: false };
+}
 
 /** Persisted across restarts, like `hostFilter` and `scopeFilter`. */
-export const workFilters = writable<WorkFilters>(readPref(PREF_KEY, DEFAULT_WORK_FILTERS, isWorkFilters));
+export const workFilters = writable<WorkFilters>(readWorkFilters());
 workFilters.subscribe((v) => writePref(PREF_KEY, v));
 
 /** The filters as they apply: a tracker that no longer exists is "all"
@@ -124,22 +138,25 @@ export function effectiveWorkFilters(
     statusNames !== undefined &&
     isStatusNameFilter(f.status) &&
     !statusNames.some((n) => statusNameFilter(n).toLowerCase() === f.status.toLowerCase());
+  const hasSession = workMode ? f.hasSession : 'any';
   return {
     ...f,
     tracker: f.tracker !== 'all' && !trackers.some((t) => t.id === f.tracker) ? 'all' : f.tracker,
     status: goneName ? 'all' : f.status,
-    hasSession: workMode ? f.hasSession : 'any',
+    hasSession,
+    // "Past only" asks for past work, which is archived: show it.
+    archived: f.archived || hasSession === 'no',
   };
 }
 
-/** How many filters narrow the view (the chrome's count). */
+/** How many filters narrow the view (the chrome's count). Archived rows
+ *  are hidden by default, so hiding them is not a filter the user set. */
 export function activeWorkFilterCount(f: WorkFilters): number {
   return (
     (f.tracker !== 'all' ? 1 : 0) +
     (f.status !== 'all' ? 1 : 0) +
     (f.assignee !== 'all' ? 1 : 0) +
-    (f.hasSession !== 'any' ? 1 : 0) +
-    (f.archived ? 0 : 1)
+    (f.hasSession !== 'any' ? 1 : 0)
   );
 }
 
@@ -196,7 +213,7 @@ export function pastWorkFields(
 
 /** The session predicate of the work filters, `null` when none narrows. */
 export function workFilterPredicate(f: WorkFilters, ctx: WorkFilterContext): SessionPredicate {
-  if (activeWorkFilterCount(f) === 0) return null;
+  if (activeWorkFilterCount(f) === 0 && f.archived) return null;
   const rf = toRowFilters(f);
   return (s) => rowMatches(sessionWorkRow(s, ctx), rf);
 }

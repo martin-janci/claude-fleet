@@ -42,8 +42,7 @@ export type SessionFacetId =
   | 'wf-tracker'
   | 'wf-status'
   | 'wf-mine'
-  | 'wf-session'
-  | 'wf-archived';
+  | 'wf-session';
 
 export interface SessionFacetInput {
   /** The effective scope id (`all` = none). */
@@ -80,7 +79,6 @@ export function sessionFacets(i: SessionFacetInput): (Facet & { id: SessionFacet
   }
   if (w.assignee === 'mine') out.push({ id: 'wf-mine', label: 'Assigned to me' });
   if (w.hasSession !== 'any') out.push({ id: 'wf-session', label: `Session: ${HAS_SESSION_LABELS[w.hasSession]}` });
-  if (!w.archived) out.push({ id: 'wf-archived', label: 'Archived hidden' });
   if (!i.showBgAgents) out.push({ id: 'bg', label: 'Background agents hidden' });
   return out;
 }
@@ -97,8 +95,6 @@ export function clearWorkFilterPatch(id: SessionFacetId): Partial<WorkFilters> |
       return { assignee: DEFAULT_WORK_FILTERS.assignee };
     case 'wf-session':
       return { hasSession: DEFAULT_WORK_FILTERS.hasSession };
-    case 'wf-archived':
-      return { archived: DEFAULT_WORK_FILTERS.archived };
     default:
       return null;
   }

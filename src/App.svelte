@@ -11,7 +11,15 @@
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import { todayOpen } from './lib/today';
-  import { bumpWorkChanged, noteWorkChanged, noteWorkEvents, sessionEventsTouchWork, sidebarView, toggleSidebarView } from './lib/work_view';
+  import {
+    bumpWorkChanged,
+    cycleWorkOrg,
+    noteWorkChanged,
+    noteWorkEvents,
+    sessionEventsTouchWork,
+    sidebarView,
+    toggleSidebarView,
+  } from './lib/work_view';
   import type { SessionEvent } from './lib/sessions';
   import { composerInsert } from './lib/conversation';
   import { tidyRequest } from './lib/tidy';
@@ -643,7 +651,8 @@
     else if (chord === 'session-view') flipSessionView();
     else if (chord === 'settings') settingsOpen.set(true);
     else if (chord === 'agent') void toggleAgent();
-    else if (chord === 'scope') cycleScope();
+    // The Work view has its own org filter: the chord cycles that one there.
+    else if (chord === 'scope') (get(sidebarView) === 'work' ? cycleWorkOrg : cycleScope)();
     else if (chord === 'today') todayOpen.update((v) => !v);
     else if (chord === 'work-view') {
       sidebarCollapsed = false;

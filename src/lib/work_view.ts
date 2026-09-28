@@ -45,6 +45,10 @@ export interface WorkTreeFilters {
   query?: string;
   /** One group only (a section being expanded). */
   group?: string;
+  /** Include archived tasks (done, or every session link archived, with no
+   *  active session). Absent: they are hidden, and the page says how many
+   *  (`archived_hidden`). An older hub ignores it and shows them all. */
+  archived?: boolean;
 }
 
 export const STATUS_FILTERS = ['any', 'open', 'todo', 'in_progress', 'done'] as const;
@@ -189,6 +193,9 @@ export interface WorkTreePage {
   orgs: WorkTreeOrg[];
   trackers: WorkTreeTracker[];
   total: number;
+  /** Tasks that passed every other filter but were hidden as archived
+   *  (absent from an older hub, which hides none). */
+  archived_hidden?: number;
   next_cursor?: string | null;
   generated_at?: number;
 }
@@ -619,10 +626,11 @@ export function normalizeFilters(v: unknown): WorkTreeFilters {
   if (v.review === true) out.review = true;
   if (typeof v.query === 'string' && v.query.trim() !== '') out.query = v.query.trim();
   if (typeof v.group === 'string' && v.group !== '') out.group = v.group;
+  if (v.archived === true) out.archived = true;
   return out;
 }
 
-const FILTER_ORDER: (keyof WorkTreeFilters)[] = ['org', 'tracker', 'status', 'mine', 'has', 'review', 'query', 'group'];
+const FILTER_ORDER: (keyof WorkTreeFilters)[] = ['org', 'tracker', 'status', 'mine', 'has', 'review', 'query', 'group', 'archived'];
 
 /** A stable string for a filters object (equal filters, equal keys). */
 export function filtersKey(f: WorkTreeFilters): string {
@@ -659,13 +667,15 @@ export function filtersFromQuery(s: string): WorkTreeFilters {
     review: p.get('review') === '1',
     query: p.get('q') ?? undefined,
     group: p.get('group') ?? undefined,
+    archived: p.get('archived') === '1',
   });
 }
 
-/** How many filters are on (the chip's count); `group` is navigation. */
+/** How many filters are on (the chip's count); `group` is navigation, and
+ *  showing archived tasks widens the view rather than narrowing it. */
 export function activeFilterCount(f: WorkTreeFilters): number {
   const n = normalizeFilters(f);
-  return FILTER_ORDER.filter((k) => k !== 'group' && n[k] !== undefined).length;
+  return FILTER_ORDER.filter((k) => k !== 'group' && k !== 'archived' && n[k] !== undefined).length;
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,6 +1073,21 @@ export const workTreeMeta = writable<{ orgs: WorkTreeOrg[]; trackers: WorkTreeTr
   trackers: [],
   groups: [],
 });
+
+/** ⌘⇧O in the Work view: the next organisation in the Work view's own org
+ *  filter (any → each org → unassigned → any), as the chord cycles the
+ *  Sessions list's scope there. */
+export function cycleWorkOrg(): void {
+  const orgs = get(workTreeMeta).orgs;
+  const ids: (number | 'none' | undefined)[] = [undefined, ...orgs.map((o) => o.id), 'none'];
+  const cur = normalizeFilters(get(workViewFilters)).org;
+  const i = ids.indexOf(cur);
+  const next = ids[(i + 1) % ids.length];
+  workViewFilters.update((f) => {
+    const { group: _g, org: _o, ...rest } = normalizeFilters(f);
+    return next === undefined ? rest : { ...rest, org: next };
+  });
+}
 
 /** Bumped by every work write (`work.ts`), by `work:changed` and by session
  *  events that touch work; the Work view re-reads what it shows (debounced)

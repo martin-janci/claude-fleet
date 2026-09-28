@@ -43,9 +43,12 @@ describe('sessionFacets', () => {
       'Status: In progress',
       'Assigned to me',
       'Session: Past only',
-      'Archived hidden',
       'Background agents hidden',
     ]);
+  });
+
+  it('archived rows hidden by default is not a filter the user set', () => {
+    expect(sessionFacets({ ...none, work: { ...DEFAULT_WORK_FILTERS, archived: false } })).toEqual([]);
   });
 
   it('a tracker column reads as a column, not a status', () => {
@@ -54,7 +57,7 @@ describe('sessionFacets', () => {
   });
 
   it('clearing a work facet resets that one field to its default', () => {
-    expect(clearWorkFilterPatch('wf-archived')).toEqual({ archived: true });
+    expect(clearWorkFilterPatch('wf-session')).toEqual({ hasSession: 'any' });
     expect(clearWorkFilterPatch('wf-mine')).toEqual({ assignee: 'all' });
     expect(clearWorkFilterPatch('host')).toBeNull();
   });
@@ -111,5 +114,32 @@ describe('the guards that keep a stale filter from emptying the list', () => {
     const f = { ...DEFAULT_WORK_FILTERS, assignee: 'mine' as const };
     expect(withMineReady(f, false).assignee).toBe('all');
     expect(withMineReady(f, true).assignee).toBe('mine');
+  });
+});
+
+describe('archived by default', () => {
+  it('a v1 pref (which always stored archived: true) starts hidden; v2 is kept as is', async () => {
+    const { readWorkFilters } = await import('./work_filters');
+    localStorage.setItem('cf:pref:sidebar.work-filters', JSON.stringify({ ...DEFAULT_WORK_FILTERS, status: 'todo', archived: true }));
+    localStorage.removeItem('cf:pref:sidebar.work-filters.v2');
+    expect(readWorkFilters()).toMatchObject({ status: 'todo', archived: false });
+    localStorage.setItem('cf:pref:sidebar.work-filters.v2', JSON.stringify({ ...DEFAULT_WORK_FILTERS, archived: true }));
+    expect(readWorkFilters().archived).toBe(true);
+    localStorage.removeItem('cf:pref:sidebar.work-filters');
+    localStorage.removeItem('cf:pref:sidebar.work-filters.v2');
+  });
+
+  it('"Past only" shows past work, which is archived', async () => {
+    const { effectiveWorkFilters } = await import('./work_filters');
+    expect(effectiveWorkFilters({ ...DEFAULT_WORK_FILTERS, hasSession: 'no' }, [], true).archived).toBe(true);
+    expect(effectiveWorkFilters({ ...DEFAULT_WORK_FILTERS, hasSession: 'no' }, [], false).archived).toBe(false);
+  });
+
+  it('recency is one rule for every row', async () => {
+    const { withinRecency } = await import('./session_status');
+    expect(withinRecency(1000, 'all', 5000)).toBe(true);
+    expect(withinRecency(null, '1d', 5000)).toBe(false);
+    expect(withinRecency(5000 - 3600, '8h', 5000)).toBe(true);
+    expect(withinRecency(5000 - 9 * 3600, '8h', 5000)).toBe(false);
   });
 });

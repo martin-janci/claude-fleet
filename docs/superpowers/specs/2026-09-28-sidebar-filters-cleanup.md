@@ -29,6 +29,26 @@ nobody could see:
 | 12 | "Mine" persisted on emptied the list until the hub's `mine` view loaded | `withMineReady` applies it once it has loaded |
 | – | Two refresh buttons in the Work view | The sidebar's ↻ now re-reads the Work tree too |
 
+## Follow-ups (same PR)
+
+- **Archived is hidden by default, never lost.** Archived live sessions and
+  past work (Sessions list) and archived tasks (Work view: done, or every
+  session link archived, with nothing running) stay out of the list. The end
+  of each list says *N archived hidden · Show archived*, and the filter
+  panel has an *Archived* switch. An explicit *Status: Done* (Work) or
+  *Session: Past only* (Sessions) shows them regardless. The Work tree gets
+  `filters.archived` and `archived_hidden` on the page; both are additive,
+  and an older hub ignores the filter and shows everything. The Sessions
+  pref moved to `sidebar.work-filters.v2`: every install had stored the old
+  default `archived: true`, so the rest of the filters carry over and the
+  new default applies.
+- **Last active is one rule.** Every row is judged by its own time: a
+  session by its last activity, a past link by when it ended. It used to
+  weigh only a project's newest session, and only in the project tree.
+- **Selection follows the filters.** A row that a filter hides leaves the
+  selection, so bulk Kill and Send reach only what you can see.
+- **⌘⇧O in the Work view** cycles the Work view's own organisation filter.
+
 ## Layout
 
 ```

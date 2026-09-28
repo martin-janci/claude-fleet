@@ -506,3 +506,28 @@ describe('stores', () => {
     expect(sessionEventsTouchWork([{ type: 'killed', id: 1 }], cur, new Set())).toBe(false);
   });
 });
+
+describe('the Work view org chord and archived tasks', () => {
+  it('⌘⇧O cycles the Work view org: any → each org → unassigned → any', async () => {
+    const { cycleWorkOrg, workTreeMeta, workViewFilters } = await import('./work_view');
+    const { get } = await import('svelte/store');
+    workTreeMeta.set({ orgs: [{ id: 1, name: 'Acme' }, { id: 2, name: 'Beta' }], trackers: [], groups: [] });
+    workViewFilters.set({ status: 'open' });
+    const seen = [];
+    for (let i = 0; i < 4; i++) {
+      cycleWorkOrg();
+      seen.push(get(workViewFilters).org);
+    }
+    expect(seen).toEqual([1, 2, 'none', undefined]);
+    expect(get(workViewFilters).status).toBe('open');
+    workViewFilters.set({});
+  });
+
+  it('archived is kept, round-trips, and is not counted as narrowing', async () => {
+    const { activeFilterCount, filtersFromQuery, filtersToQuery, normalizeFilters } = await import('./work_view');
+    expect(normalizeFilters({ archived: true })).toEqual({ archived: true });
+    expect(normalizeFilters({ archived: false })).toEqual({});
+    expect(filtersFromQuery(filtersToQuery({ archived: true, org: 3 }))).toEqual({ org: 3, archived: true });
+    expect(activeFilterCount({ archived: true })).toBe(0);
+  });
+});

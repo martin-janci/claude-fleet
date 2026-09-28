@@ -54,6 +54,7 @@
     workViewFilters,
     workViewKey,
     activeWorkViewId,
+    normalizeFilters,
     type GroupSection,
     type OrgSection,
     type SectionState,
@@ -75,6 +76,13 @@
 
   let tab = $state<'tasks' | 'review'>('tasks');
   let page = $state.raw<WorkTreePage | null>(null);
+  const archivedHidden = $derived(page?.archived_hidden ?? 0);
+  function setArchived(on: boolean) {
+    workViewFilters.update((f) => {
+      const { group: _g, archived: _a, ...rest } = normalizeFilters(f);
+      return on ? { ...rest, archived: true } : rest;
+    });
+  }
   let states = $state.raw<Map<string, SectionState>>(new Map());
   let loading = $state(false);
   let error = $state<IpcError | null>(null);
@@ -105,6 +113,7 @@
       orgs: Array.isArray(v?.orgs) ? v.orgs : [],
       trackers: Array.isArray(v?.trackers) ? v.trackers : [],
       total: typeof v?.total === 'number' ? v.total : 0,
+      archived_hidden: typeof v?.archived_hidden === 'number' ? v.archived_hidden : 0,
       next_cursor: v?.next_cursor ?? null,
       generated_at: v?.generated_at,
     };
@@ -410,8 +419,11 @@
               workViewFilters.set({});
             }}>Clear filters</button
           >
-        {:else}
+        {:else if archivedHidden === 0}
           <p>No work yet. Tasks appear here once a session is linked to a ticket, or you name its work. Back to Sessions: {chord}.</p>
+        {/if}
+        {#if archivedHidden > 0}
+          {@render archivedRow()}
         {/if}
       </div>
     {:else}
@@ -530,9 +542,30 @@
           </li>
         {/each}
       </ul>
+      {#if archivedHidden > 0 || $workViewFilters.archived}
+        {@render archivedRow()}
+      {/if}
     {/if}
   </div>
 </div>
+
+{#snippet archivedRow()}
+  <!-- Archived tasks (done, or every session archived, and nothing
+       running) stay out of the way; one click brings them all back. -->
+  <div class="archived-row" data-testid="work-archived-row">
+    {#if $workViewFilters.archived}
+      <span>Showing archived tasks</span>
+      <button class="btn btn--quiet" type="button" data-testid="work-archived-toggle" onclick={() => setArchived(false)}
+        >Hide archived</button
+      >
+    {:else}
+      <span>{archivedHidden} archived task{archivedHidden === 1 ? '' : 's'} hidden</span>
+      <button class="btn btn--quiet" type="button" data-testid="work-archived-toggle" onclick={() => setArchived(true)}
+        >Show archived</button
+      >
+    {/if}
+  </div>
+{/snippet}
 
 {#if rulesOpen}
   <WorkRules onclose={() => (rulesOpen = false)} />
@@ -753,6 +786,19 @@
   }
   .state {
     padding: 0.4rem 0.2rem;
+  }
+  .archived-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 6px 0 4px;
+    padding: 4px 6px;
+    border-top: 1px dashed var(--border);
+    color: var(--fg-muted);
+    font-size: var(--control-font);
+  }
+  .archived-row span {
+    flex: 1;
   }
   .empty {
     display: flex;
