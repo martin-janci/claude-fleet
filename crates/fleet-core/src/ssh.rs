@@ -1085,6 +1085,11 @@ pub const TOOLCHAIN_RETRY_AFTER: Duration = Duration::from_secs(300);
 /// is where Homebrew and `cl` usually live on a Mac; the login variant
 /// (`-lc`) is the fallback when an rc file misbehaves without a tty. Noise
 /// from rc files is harmless: only marked lines are read.
+///
+/// The shell is `$SHELL`, else the account's login shell from the passwd
+/// database, else `/bin/sh`. `ssh` always sets `$SHELL`; `wsl.exe --exec`
+/// does not, and a `/bin/sh -lc` there never reads the `.bashrc` / `.zshrc`
+/// that puts `~/.local/bin` (where Claude Code installs) on PATH.
 pub fn toolchain_script(interactive: bool) -> String {
     let flags = if interactive { "-ilc" } else { "-lc" };
     let inner = format!(
@@ -1092,7 +1097,8 @@ pub fn toolchain_script(interactive: bool) -> String {
         m = TOOLCHAIN_MARKER
     );
     format!(
-        "\"${{SHELL:-/bin/sh}}\" {flags} {} </dev/null 2>/dev/null",
+        "s=\"${{SHELL:-$(getent passwd \"$(id -un)\" 2>/dev/null | cut -d: -f7)}}\"; \
+         \"${{s:-/bin/sh}}\" {flags} {} </dev/null 2>/dev/null",
         crate::shell::quote(&inner)
     )
 }
@@ -2573,12 +2579,51 @@ mod tests {
     #[test]
     fn toolchain_script_asks_the_users_shell_and_marks_every_line() {
         let s = toolchain_script(true);
-        assert!(s.starts_with("\"${SHELL:-/bin/sh}\" -ilc "), "{s}");
+        const PICK: &str =
+            "s=\"${SHELL:-$(getent passwd \"$(id -un)\" 2>/dev/null | cut -d: -f7)}\"; ";
+        assert!(s.starts_with(PICK), "{s}");
+        assert!(s.contains("\"${s:-/bin/sh}\" -ilc "), "{s}");
         assert!(s.contains("FLEET-TC home=%s"), "{s}");
         assert!(s.contains("command -v tmux 2>/dev/null || true"), "{s}");
         assert!(s.contains("command -v claude 2>/dev/null || true"), "{s}");
         assert!(s.ends_with("</dev/null 2>/dev/null"), "{s}");
-        assert!(toolchain_script(false).starts_with("\"${SHELL:-/bin/sh}\" -lc "));
+        let login = toolchain_script(false);
+        assert!(login.starts_with(PICK), "{login}");
+        assert!(login.contains("\"${s:-/bin/sh}\" -lc "), "{login}");
+    }
+
+    /// `wsl.exe --exec` leaves `$SHELL` unset: the script then asks the
+    /// passwd database for the login shell instead of dropping to `/bin/sh`.
+    #[cfg(unix)]
+    #[test]
+    fn toolchain_script_without_shell_uses_the_passwd_login_shell() {
+        let has_getent = std::process::Command::new("sh")
+            .args(["-c", "command -v getent"])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !has_getent {
+            return; // macOS: no getent; the /bin/sh fallback is the old behaviour
+        }
+        let pick = toolchain_script(false)
+            .split_once("; ")
+            .map(|(p, _)| p.to_string())
+            .unwrap();
+        let run = |shell: Option<&str>| {
+            let mut cmd = std::process::Command::new("sh");
+            cmd.args(["-c", &format!("{pick}; printf %s \"$s\"")]);
+            cmd.env_remove("SHELL");
+            if let Some(v) = shell {
+                cmd.env("SHELL", v);
+            }
+            String::from_utf8(cmd.output().unwrap().stdout).unwrap()
+        };
+        assert_eq!(run(Some("/bin/zsh")), "/bin/zsh");
+        let want = std::process::Command::new("sh")
+            .args(["-c", "getent passwd \"$(id -un)\" | cut -d: -f7"])
+            .output()
+            .unwrap();
+        let want = String::from_utf8(want.stdout).unwrap();
+        assert_eq!(run(None), want.trim(), "the passwd login shell");
     }
 
     #[test]
