@@ -174,6 +174,17 @@ pub(super) fn enforce_mode(caller: &Caller, tool: &str) -> Result<(), McpError> 
             None,
         ));
     }
+    if caller.is_org_bound() && guard::ORG_BOUND_REFUSED.contains(&tool) {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            format!(
+                "{tool} reads the fleet's own machines and config, which belong to no \
+                 org; a client bound to an org does not ({} refused)",
+                caller.label()
+            ),
+            None,
+        ));
+    }
     if caller.mode == TokenMode::Readonly && !guard::is_readonly_tool(tool) {
         return Err(mcp_err(
             "E_FORBIDDEN",
@@ -1222,6 +1233,73 @@ pub(super) fn usage_scope(
 }
 
 impl FleetTools {
+    /// What a client bound to an org sees of hosts and accounts
+    /// ([`BoundInfra`](crate::service::orgs::BoundInfra)); `None` for every
+    /// other caller, who reads every host and account.
+    pub(super) fn bound_infra(
+        &self,
+        caller: &Caller,
+    ) -> Result<Option<crate::service::orgs::BoundInfra>, McpError> {
+        if !caller.is_org_bound() {
+            return Ok(None);
+        }
+        let s = lock(self.reader()).map_err(to_mcp_err)?;
+        let scope = caller.org_scope(&s).map_err(to_mcp_err)?;
+        crate::service::orgs::BoundInfra::of(&s, &scope).map_err(to_mcp_err)
+    }
+
+    /// A host a bound client may not see answers as one that does not exist.
+    pub(super) fn require_bound_host(&self, caller: &Caller, alias: &str) -> Result<(), McpError> {
+        match self.bound_infra(caller)? {
+            Some(i) if !i.sees_host(alias) => Err(mcp_err(
+                "E_NOTFOUND",
+                format!("host {alias:?} not found"),
+                None,
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// [`Self::require_bound_host`] for the host a worktree is on; an id
+    /// that does not exist is left to the tool's own "not found".
+    pub(super) fn require_bound_worktree(
+        &self,
+        caller: &Caller,
+        worktree_id: i64,
+    ) -> Result<(), McpError> {
+        let Some(infra) = self.bound_infra(caller)? else {
+            return Ok(());
+        };
+        let host = lock(self.reader())
+            .map_err(to_mcp_err)?
+            .get_worktree_row(worktree_id)
+            .map_err(|e| to_mcp_err(IpcError::from(e)))?
+            .map(|w| w.host_alias);
+        match host {
+            Some(h) if !infra.sees_host(&h) => Err(mcp_err(
+                "E_NOTFOUND",
+                format!("worktree {worktree_id} not found"),
+                None,
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    /// A project is navigation, never a boundary, so every caller lists them
+    /// all; a bound client's list carries only the worktrees on its hosts.
+    pub(super) fn fence_project_worktrees(
+        &self,
+        caller: &Caller,
+        trees: &mut [crate::service::projects::ProjectTreeRow],
+    ) -> Result<(), McpError> {
+        if let Some(infra) = self.bound_infra(caller)? {
+            for t in trees {
+                t.worktrees.retain(|w| infra.sees_host(&w.host_alias));
+            }
+        }
+        Ok(())
+    }
+
     /// True when the operator turned on desktop confirmation for
     /// destructive calls (`mcp.confirm_destructive`).
     pub(super) fn confirm_enabled(&self) -> Result<bool, McpError> {
@@ -1571,6 +1649,16 @@ impl FleetTools {
                 ),
                 None,
             ));
+        }
+        if caller.is_org_bound() {
+            let scope = caller.org_scope(&s).map_err(to_mcp_err)?;
+            if !tasks::task_in_scope(&s, &task, &scope).map_err(to_mcp_err)? {
+                return Err(mcp_err(
+                    "E_NOTFOUND",
+                    format!("task {task_id} not found"),
+                    None,
+                ));
+            }
         }
         Ok(task)
     }

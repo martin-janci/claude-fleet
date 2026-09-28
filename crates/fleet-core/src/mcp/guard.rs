@@ -900,6 +900,21 @@ pub fn is_admin_tool(name: &str) -> bool {
     policy(name).is_some_and(|p| matches!(p.access, Access::Master))
 }
 
+/// Client tools a client bound to an org may not call (work graph M14):
+/// they read the fleet's own machines and config as a whole — the hub's SSH
+/// config, the asset catalog and every host's installed assets — which
+/// belong to no org. Hidden from such a client's tool list too.
+pub const ORG_BOUND_REFUSED: &[&str] = &[
+    "discover_hosts",
+    "list_assets",
+    "scan_assets",
+    "import_assets",
+    "plan_sync",
+    "list_layers",
+    "propose_layers",
+    "resolve_preview",
+];
+
 /// Every other router tool: reachable by a paired `full` client — see
 /// [`Access::Client`].
 ///

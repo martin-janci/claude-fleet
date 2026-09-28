@@ -540,6 +540,7 @@ impl FleetTools {
             &format!("host={} dry_run={}", args.host_alias, args.dry_run),
         );
         require_host(&caller, &args.host_alias, "the lost sessions")?;
+        self.require_bound_host(&caller, &args.host_alias)?;
         // A real restore starts sessions: the operator's needs a person
         // (D12). A dry run only reads the plan.
         if !args.dry_run {
@@ -580,6 +581,7 @@ impl FleetTools {
             &format!("host={} limit={:?}", args.host_alias, args.limit),
         );
         require_host(&caller, &args.host_alias, "the lost sessions")?;
+        self.require_bound_host(&caller, &args.host_alias)?;
         let candidates = sessions::discover_lost_sessions(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -624,6 +626,7 @@ impl FleetTools {
             &format!("host={} name={}", args.host_alias, args.name),
         );
         require_host(&caller, &args.host_alias, "the new background session")?;
+        self.require_bound_host(&caller, &args.host_alias)?;
         self.confirm_gate(
             "new_bg_session",
             confirm_nonce.as_deref(),
@@ -645,8 +648,15 @@ impl FleetTools {
     }
 
     #[tool(description = "Ensure the UX agent's operator session exists; returns its row.")]
-    pub(super) async fn ensure_operator(&self) -> Result<CallToolResult, McpError> {
+    pub(super) async fn ensure_operator(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
         audit("ensure_operator", "");
+        let host = crate::service::operator::read_operator_host(
+            &*lock(self.reader()).map_err(to_mcp_err)?,
+        );
+        self.require_bound_host(&caller, &host)?;
         let row = crate::service::operator::ensure_operator(&self.store, &self.ssh, &self.reg)
             .await
             .map_err(to_mcp_err)?;
@@ -656,9 +666,23 @@ impl FleetTools {
     #[tool(
         description = "Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host."
     )]
-    pub(super) async fn operator_status(&self) -> Result<CallToolResult, McpError> {
+    pub(super) async fn operator_status(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
         audit("operator_status", "");
-        let status = crate::service::operator::operator_status(&self.store).map_err(to_mcp_err)?;
+        let mut status =
+            crate::service::operator::operator_status(&self.store).map_err(to_mcp_err)?;
+        // A bound client that does not see the operator's host reads what a
+        // fleet without that host answers.
+        if self
+            .bound_infra(&caller)?
+            .is_some_and(|i| !i.sees_host(&status.host))
+        {
+            status.ready = false;
+            status.session = None;
+            status.blocked = Some("no_host".into());
+        }
         ok_json(&status)
     }
 

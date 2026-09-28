@@ -353,6 +353,15 @@ impl FleetTools {
                 // (it could otherwise read another host's output back via
                 // wait_for_task / list_tasks / its inbox).
                 require_host(&caller, &spec.host_alias, "the new worker")?;
+                {
+                    let s = lock(&self.store).map_err(to_mcp_err)?;
+                    require_bound_client_may_create(
+                        &s,
+                        &caller,
+                        &spec.host_alias,
+                        spec.project_id,
+                    )?;
+                }
                 // A new worker is a start: the operator's needs a person (D12).
                 self.confirm_gate(
                     "dispatch_task",
@@ -476,9 +485,17 @@ impl FleetTools {
         .map_err(to_mcp_err)?;
         let rows: Vec<crate::store::TaskRow> = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            rows.into_iter()
-                .map(|t| tasks::mark_task_result(&s, t))
-                .collect()
+            let scope = caller.org_scope(&s).map_err(to_mcp_err)?;
+            let mut out = Vec::with_capacity(rows.len());
+            for t in rows {
+                if caller.is_org_bound()
+                    && !tasks::task_in_scope(&s, &t, &scope).map_err(to_mcp_err)?
+                {
+                    continue;
+                }
+                out.push(tasks::mark_task_result(&s, t));
+            }
+            out
         };
         ok_json_compact(&rows)
     }

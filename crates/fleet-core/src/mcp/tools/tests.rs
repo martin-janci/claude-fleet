@@ -3101,7 +3101,10 @@ async fn list_worktrees_defaults_to_slim_capped_rows_with_a_total() {
     let call = |p: ListWorktreesParams| {
         let t = t.clone();
         async move {
-            let r = t.list_worktrees(Parameters(p)).await.unwrap();
+            let r = t
+                .list_worktrees(Extension(Caller::master()), Parameters(p))
+                .await
+                .unwrap();
             serde_json::from_str::<serde_json::Value>(text_of(&r.content[0])).unwrap()
         }
     };
@@ -3163,10 +3166,13 @@ async fn list_host_worktrees_answers_the_hosts_rows() {
         .unwrap();
     let t = test_tools(s);
     let r = t
-        .list_host_worktrees(Parameters(ListHostWorktreesParams {
-            host_alias: "local".into(),
-            project_id: pid,
-        }))
+        .list_host_worktrees(
+            Extension(Caller::master()),
+            Parameters(ListHostWorktreesParams {
+                host_alias: "local".into(),
+                project_id: pid,
+            }),
+        )
         .await
         .unwrap();
     let v: serde_json::Value = serde_json::from_str(text_of(&r.content[0])).unwrap();
@@ -3199,10 +3205,13 @@ async fn list_host_worktrees_answers_the_hosts_rows() {
 async fn list_host_worktrees_rejects_an_unknown_project_before_it_reaches_a_host() {
     let t = test_tools(Store::open_in_memory().unwrap());
     let e = t
-        .list_host_worktrees(Parameters(ListHostWorktreesParams {
-            host_alias: "vps".into(),
-            project_id: 4242,
-        }))
+        .list_host_worktrees(
+            Extension(Caller::master()),
+            Parameters(ListHostWorktreesParams {
+                host_alias: "vps".into(),
+                project_id: 4242,
+            }),
+        )
         .await
         .unwrap_err();
     assert!(e.message.starts_with("E_NOTFOUND"), "{}", e.message);
@@ -3214,10 +3223,13 @@ async fn list_host_worktrees_rejects_an_unknown_project_before_it_reaches_a_host
 async fn list_host_worktrees_rejects_a_crafted_host_alias() {
     let t = test_tools(Store::open_in_memory().unwrap());
     let e = t
-        .list_host_worktrees(Parameters(ListHostWorktreesParams {
-            host_alias: "-oProxyCommand=touch /tmp/pwned".into(),
-            project_id: 1,
-        }))
+        .list_host_worktrees(
+            Extension(Caller::master()),
+            Parameters(ListHostWorktreesParams {
+                host_alias: "-oProxyCommand=touch /tmp/pwned".into(),
+                project_id: 1,
+            }),
+        )
         .await
         .unwrap_err();
     assert!(e.message.starts_with("E_INVALID"), "{}", e.message);
@@ -3360,12 +3372,15 @@ async fn list_worktrees_limit_zero_returns_every_row() {
     }
     let t = test_tools(s);
     let r = t
-        .list_worktrees(Parameters(ListWorktreesParams {
-            project_id: None,
-            host_alias: None,
-            summary: false,
-            limit: Some(0),
-        }))
+        .list_worktrees(
+            Extension(Caller::master()),
+            Parameters(ListWorktreesParams {
+                project_id: None,
+                host_alias: None,
+                summary: false,
+                limit: Some(0),
+            }),
+        )
         .await
         .unwrap();
     let v: serde_json::Value = serde_json::from_str(text_of(&r.content[0])).unwrap();
@@ -6235,14 +6250,22 @@ async fn list_projects_has_sessions_keeps_only_projects_a_live_session_names() {
             .collect()
     };
 
-    let all = repos(t.list_projects(Parameters(params(false))).await.unwrap());
+    let all = repos(
+        t.list_projects(Extension(Caller::master()), Parameters(params(false)))
+            .await
+            .unwrap(),
+    );
     assert_eq!(
         all.len(),
         3,
         "the default still lists every project: {all:?}"
     );
 
-    let live = repos(t.list_projects(Parameters(params(true))).await.unwrap());
+    let live = repos(
+        t.list_projects(Extension(Caller::master()), Parameters(params(true)))
+            .await
+            .unwrap(),
+    );
     assert_eq!(live, vec!["used".to_string()], "got {live:?}");
 }
 
@@ -7771,20 +7794,26 @@ fn a_readonly_client_may_browse_repos_but_not_add_a_project() {
 async fn add_project_refuses_a_hostile_alias_before_any_ssh() {
     let t = test_tools(Store::open_in_memory().unwrap());
     let err = t
-        .add_project(Parameters(AddProjectArgs {
-            host_alias: "-oProxyCommand=x".into(),
-            source: AddProjectSource::Clone {
-                url: "https://github.com/o/r".into(),
-            },
-            call_id: None,
-        }))
+        .add_project(
+            Extension(Caller::master()),
+            Parameters(AddProjectArgs {
+                host_alias: "-oProxyCommand=x".into(),
+                source: AddProjectSource::Clone {
+                    url: "https://github.com/o/r".into(),
+                },
+                call_id: None,
+            }),
+        )
         .await
         .unwrap_err();
     assert!(err.message.starts_with("E_"), "{}", err.message);
     let err = t
-        .list_github_repos(Parameters(ListGithubReposParams {
-            host_alias: "-oProxyCommand=x".into(),
-        }))
+        .list_github_repos(
+            Extension(Caller::master()),
+            Parameters(ListGithubReposParams {
+                host_alias: "-oProxyCommand=x".into(),
+            }),
+        )
         .await
         .unwrap_err();
     assert!(err.message.starts_with("E_"), "{}", err.message);

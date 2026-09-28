@@ -17,6 +17,7 @@ impl FleetTools {
         sessions in).")]
     pub(super) async fn list_projects(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<ListProjectsParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
@@ -32,6 +33,7 @@ impl FleetTools {
             projects::list_projects(self.reader())
         }
         .map_err(to_mcp_err)?;
+        self.fence_project_worktrees(&caller, &mut trees)?;
         // After the filter, so a capped page is a page of matches — the same
         // order `list_sessions` applies its own `limit` in.
         if let Some(n) = p.limit {
@@ -49,13 +51,16 @@ impl FleetTools {
         removed repositories and worktrees; returns the project list. \
         On a hub with hub.local_host off there is no local projects \
         directory: nothing is scanned and the stored list is returned.")]
-    pub(super) async fn refresh_projects(&self) -> Result<CallToolResult, McpError> {
+    pub(super) async fn refresh_projects(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
         audit("refresh_projects", "");
-        ok_json_compact(
-            &projects::refresh_projects(&self.store)
-                .await
-                .map_err(to_mcp_err)?,
-        )
+        let mut trees = projects::refresh_projects(&self.store)
+            .await
+            .map_err(to_mcp_err)?;
+        self.fence_project_worktrees(&caller, &mut trees)?;
+        ok_json_compact(&trees)
     }
 
     #[tool(description = "Add a project on a host: clone a GitHub URL, adopt a \
@@ -65,6 +70,7 @@ impl FleetTools {
         project row.")]
     pub(super) async fn add_project(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<add_project::AddProjectArgs>,
     ) -> Result<CallToolResult, McpError> {
         let target = match &args.source {
@@ -78,6 +84,7 @@ impl FleetTools {
             } => format!("kind=new repo={owner}/{repo} create_remote={create_remote}"),
         };
         audit("add_project", &format!("host={} {target}", args.host_alias));
+        self.require_bound_host(&caller, &args.host_alias)?;
         // `call_id` is never set here (it is `#[schemars(skip)]`): the
         // registry mints an anonymous token and `CancelGuard` releases it.
         let row = add_project::add_project(args, &self.store, &*self.ssh, &self.reg)
@@ -90,9 +97,11 @@ impl FleetTools {
         what to clone with add_project.")]
     pub(super) async fn list_github_repos(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<ListGithubReposParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("list_github_repos", &format!("host={}", p.host_alias));
+        self.require_bound_host(&caller, &p.host_alias)?;
         let repos = add_project::list_github_repos_with(&p.host_alias, &self.store, &*self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -107,6 +116,7 @@ impl FleetTools {
         project_id / host_alias: a fleet-wide call answers hundreds of rows.")]
     pub(super) async fn list_worktrees(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<ListWorktreesParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
@@ -122,6 +132,9 @@ impl FleetTools {
         let mut out = worktrees::list_worktrees(args, self.reader()).map_err(to_mcp_err)?;
         if let Some(host) = p.host_alias.as_deref() {
             out.retain(|w| w.worktree.host_alias == host);
+        }
+        if let Some(i) = self.bound_infra(&caller)? {
+            out.retain(|w| i.sees_host(&w.worktree.host_alias));
         }
         // `total` before the cap: a caller that gets 100 of 249 rows must be
         // able to see that it is holding a slice, or it will reason about the
@@ -155,12 +168,14 @@ impl FleetTools {
         E_NOTFOUND, E_GIT_SETUP, E_SSH.")]
     pub(super) async fn list_host_worktrees(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<ListHostWorktreesParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "list_host_worktrees",
             &format!("host={} project_id={}", p.host_alias, p.project_id),
         );
+        self.require_bound_host(&caller, &p.host_alias)?;
         let args = worktrees::ListHostWorktreesArgs {
             host_alias: p.host_alias,
             project_id: p.project_id,
@@ -184,6 +199,7 @@ impl FleetTools {
             "delete_worktree",
             &format!("worktree_id={} force={}", p.worktree_id, p.force),
         );
+        self.require_bound_worktree(&caller, p.worktree_id)?;
         self.confirm_gate(
             "delete_worktree",
             p.confirm_nonce.as_deref(),

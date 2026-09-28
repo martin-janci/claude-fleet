@@ -247,6 +247,42 @@ impl OrgScope {
 /// The `SessionRow` fields that are work data.
 pub const WORK_FIELDS: &[&str] = &["work", "work_suggested", "work_rejected"];
 
+/// What a client bound to an org may see of the fleet's machines (work graph
+/// M14): the hosts in its scope — its org's and, under D31, unassigned ones,
+/// the set `fleet_health` counts — and the accounts those hosts use. Every
+/// other caller reads every host and account, so [`Self::of`] answers `None`
+/// for them: a per-host token's host view is fleet-wide by design.
+#[derive(Debug, Clone, Default)]
+pub struct BoundInfra {
+    hosts: BTreeSet<String>,
+    accounts: BTreeSet<String>,
+}
+
+impl BoundInfra {
+    /// `Some` for [`OrgScope::Org`] only.
+    pub fn of(s: &Store, scope: &OrgScope) -> Result<Option<BoundInfra>, IpcError> {
+        if !matches!(scope, OrgScope::Org { .. }) {
+            return Ok(None);
+        }
+        let mut out = BoundInfra::default();
+        for h in s.list_hosts()? {
+            if scope.sees_org(h.org_id) {
+                out.accounts.extend(h.account_uuid.clone());
+                out.hosts.insert(h.alias);
+            }
+        }
+        Ok(Some(out))
+    }
+
+    pub fn sees_host(&self, alias: &str) -> bool {
+        self.hosts.contains(alias)
+    }
+
+    pub fn sees_account(&self, uuid: &str) -> bool {
+        self.accounts.contains(uuid)
+    }
+}
+
 /// What an id outside the scope answers: the words an unknown id gets.
 pub fn not_found(what: &str, id: i64) -> IpcError {
     IpcError::new(codes::E_NOTFOUND, format!("{what} {id} not found"))

@@ -929,7 +929,23 @@ What a client may do:
   what moving a task between orgs would change (`org_impact`) or move one
   (`assign_org`), write placement rules (`rule_save` / `rule_delete`), or
   change trust or reopened work; it may decide links and place tasks it
-  sees, and keep its own org's saved views (M14.1c). The binding and the switch take effect from its
+  sees, and keep its own org's saved views (M14.1c). Of the fleet's
+  machines it sees the hosts in scope (the org's, and unassigned ones under
+  D31) and only those: `list_hosts`, `agent_status`, `list_accounts` (the
+  accounts on those hosts), `list_worktrees` and the worktrees under
+  `list_projects`, tasks through their sessions, and the `host`, `account`,
+  `worktree`, `task` and `move` frames. Every tool that names another org's
+  host or worktree — `probe_host`, the clipboard, `list_github_repos`,
+  `add_project`, `new_bg_session`, `discover_lost_sessions`,
+  `restore_host_sessions`, `delete_worktree`, a move's target — answers as
+  for one that does not exist. Projects list in full (a project is
+  navigation, never a boundary). What belongs to no org is refused to it:
+  the hub's SSH config (`discover_hosts`), the asset catalog and every
+  host's installed assets (`list_assets`, `scan_assets`, `import_assets`,
+  `plan_sync`, `list_layers`, `propose_layers`, `resolve_preview`, and
+  their frames). The fleet's UX agent is its host's: where the client
+  does not see that host, `operator_status` answers `no_host` and
+  `ensure_operator` refuses. The binding and the switch take effect from its
   next request (re-binding invalidates the token cache; an open event
   stream re-reads its scope and ends at its next beat when re-bound).
   Deleting the org leaves the client bound to an org that no longer

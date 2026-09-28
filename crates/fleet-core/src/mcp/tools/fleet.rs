@@ -110,7 +110,7 @@ impl FleetTools {
                     .iter()
                     .any(|x| x.alias == h)
                 {
-                    return Err(mcp_err("E_NOTFOUND", format!("no host {h:?}"), None));
+                    return Err(mcp_err("E_NOTFOUND", format!("host {h:?} not found"), None));
                 }
             }
             usage::report_on(&s, host.as_deref(), p.since_secs, now, &scope).map_err(to_mcp_err)?
@@ -122,9 +122,16 @@ impl FleetTools {
 
     #[tool(description = "Registered hosts: reachability, claude/tmux \
         versions, linked account.")]
-    pub(super) async fn list_hosts(&self) -> Result<CallToolResult, McpError> {
+    pub(super) async fn list_hosts(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
         audit("list_hosts", "");
-        ok_json_compact(&hosts::list_hosts(self.reader()).map_err(to_mcp_err)?)
+        let mut rows = hosts::list_hosts(self.reader()).map_err(to_mcp_err)?;
+        if let Some(i) = self.bound_infra(&caller)? {
+            rows.retain(|h| i.sees_host(&h.alias));
+        }
+        ok_json_compact(&rows)
     }
 
     #[tool(description = "Which agent hosts (transport \"agent\") have a \
@@ -132,10 +139,17 @@ impl FleetTools {
         Offline ones show connected=false; a call for one fails fast with \
         E_AGENT_OFFLINE. enabled=false where no agents are accepted (the \
         desktop).")]
-    pub(super) async fn agent_status(&self) -> Result<CallToolResult, McpError> {
+    pub(super) async fn agent_status(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
         audit("agent_status", "");
         let registry = self.ssh.agent_registry().map(|r| r.as_ref());
-        ok_json_compact(&hosts::agent_status(&self.store, registry).map_err(to_mcp_err)?)
+        let mut report = hosts::agent_status(&self.store, registry).map_err(to_mcp_err)?;
+        if let Some(i) = self.bound_infra(&caller)? {
+            report.hosts.retain(|h| i.sees_host(&h.alias));
+        }
+        ok_json_compact(&report)
     }
 
     #[tool(description = "SSH hosts in the user's ~/.ssh/config: candidates \
@@ -146,9 +160,16 @@ impl FleetTools {
     }
 
     #[tool(description = "The cached Claude accounts seen across hosts.")]
-    pub(super) async fn list_accounts(&self) -> Result<CallToolResult, McpError> {
+    pub(super) async fn list_accounts(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
         audit("list_accounts", "");
-        ok_json_compact(&hosts::list_accounts(&self.store).map_err(to_mcp_err)?)
+        let mut rows = hosts::list_accounts(&self.store).map_err(to_mcp_err)?;
+        if let Some(i) = self.bound_infra(&caller)? {
+            rows.retain(|a| i.sees_account(&a.uuid));
+        }
+        ok_json_compact(&rows)
     }
 
     #[tool(description = "Read or replace the fleet's quick replies: the \
@@ -195,9 +216,11 @@ impl FleetTools {
         Returns the host row.")]
     pub(super) async fn probe_host(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<hosts::HostAliasArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("probe_host", &format!("alias={}", args.alias));
+        self.require_bound_host(&caller, &args.alias)?;
         let row = hosts::probe_host(args, &self.store, &self.ssh, &self.reg)
             .await
             .map_err(to_mcp_err)?;

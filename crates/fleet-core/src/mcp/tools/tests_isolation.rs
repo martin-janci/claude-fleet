@@ -3,7 +3,7 @@
 //!
 //! Every `work` / `work_link` / `work_admin` action — enumerated from
 //! `WORK_ACTIONS`, `WORK_LINK_ACTIONS` and `AdminAction::NAMES`, so a new
-//! action without a row here fails `every_action_has_a_matrix_row` — runs
+//! action without a row here fails `the_isolation_matrix_holds_*` — runs
 //! against eight callers (master, client full, client readonly, a host in
 //! org A, a host in org B, a host in no org, and — work graph M14.1b — a
 //! full client bound to org A and one bound to org B), with
@@ -18,6 +18,11 @@
 //!   journal and description text). A host in no org sees neither org's.
 //! * **The row's own expectation**: who gets what, which error, and that an
 //!   id of another org answers exactly as an id that does not exist.
+//!
+//! Every other client tool has a harness arm in [`call`] and a test here, is
+//! refused to a bound client (`guard::ORG_BOUND_REFUSED`), or has a
+//! [`FENCED_BY`] row naming the gate its body calls;
+//! `every_client_tool_is_fenced_or_in_the_matrix` fails otherwise.
 
 use super::*;
 use crate::service::orgs::OrgScope;
@@ -356,6 +361,72 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
             fx.t.usage_report(ext, Parameters(serde_json::from_value(args).unwrap()))
                 .await
         }
+        "list_hosts" => fx.t.list_hosts(ext).await,
+        "agent_status" => fx.t.agent_status(ext).await,
+        "list_accounts" => fx.t.list_accounts(ext).await,
+        "probe_host" => {
+            fx.t.probe_host(ext, Parameters(serde_json::from_value(args).unwrap()))
+                .await
+        }
+        "list_worktrees" => {
+            fx.t.list_worktrees(ext, Parameters(serde_json::from_value(args).unwrap()))
+                .await
+        }
+        "list_host_worktrees" => {
+            fx.t.list_host_worktrees(ext, Parameters(serde_json::from_value(args).unwrap()))
+                .await
+        }
+        "get_clipboard" => {
+            fx.t.get_clipboard(ext, Parameters(serde_json::from_value(args).unwrap()))
+                .await
+        }
+        "set_clipboard" => {
+            fx.t.set_clipboard(ext, Parameters(serde_json::from_value(args).unwrap()))
+                .await
+        }
+        "discover_lost_sessions" => {
+            fx.t.discover_lost_sessions(ext, Parameters(serde_json::from_value(args).unwrap()))
+                .await
+        }
+        "restore_host_sessions" => {
+            fx.t.restore_host_sessions(ext, Parameters(serde_json::from_value(args).unwrap()))
+                .await
+        }
+        "list_github_repos" => {
+            fx.t.list_github_repos(ext, Parameters(serde_json::from_value(args).unwrap()))
+                .await
+        }
+        "add_project" => {
+            fx.t.add_project(ext, Parameters(serde_json::from_value(args).unwrap()))
+                .await
+        }
+        "delete_worktree" => {
+            fx.t.delete_worktree(ext, Parameters(serde_json::from_value(args).unwrap()))
+                .await
+        }
+        "move_session" => {
+            fx.t.move_session(ext, Parameters(serde_json::from_value(args).unwrap()))
+                .await
+        }
+        "new_bg_session" => {
+            fx.t.new_bg_session(ext, Parameters(serde_json::from_value(args).unwrap()))
+                .await
+        }
+        "list_tasks" => {
+            fx.t.list_tasks(ext, Parameters(serde_json::from_value(args).unwrap()))
+                .await
+        }
+        "cancel_task" => {
+            fx.t.cancel_task(ext, Parameters(serde_json::from_value(args).unwrap()))
+                .await
+        }
+        "list_projects" => {
+            fx.t.list_projects(ext, Parameters(serde_json::from_value(args).unwrap()))
+                .await
+        }
+        "refresh_projects" => fx.t.refresh_projects(ext).await,
+        "ensure_operator" => fx.t.ensure_operator(ext).await,
+        "operator_status" => fx.t.operator_status(ext).await,
         other => panic!("no harness arm for {other}"),
     };
     match r {
@@ -1874,8 +1945,8 @@ async fn run_matrix(isolate: bool) {
                 payload: json!({ "id": 1, "session_id": row.id, "kind": "prompt_sent" }),
                 seq: 100 + i as u64,
             };
-            let ev_out = crate::mcp::events_route::fence_frame(&scope, &ev, &lookup);
-            let out = crate::mcp::events_route::fence_frame(&scope, &msg, &lookup);
+            let ev_out = crate::mcp::events_route::fence_frame(&scope, &ev, &lookup, &|| None);
+            let out = crate::mcp::events_route::fence_frame(&scope, &msg, &lookup, &|| None);
             assert_eq!(
                 ev_out.is_none(),
                 out.is_none(),
@@ -3794,6 +3865,340 @@ async fn fleet_healths_totals_are_fenced_for_an_org_bound_client() {
     }
 }
 
+/// A client bound to an org sees the fleet's machines of its scope only
+/// (work graph M14): the hosts `fleet_health` counts for it — its org's and,
+/// D31 on, the unassigned one — the accounts those hosts use and the
+/// worktrees on them; another host answers as one that does not exist, and
+/// the tools that read the fleet's own machines and config as a whole are
+/// refused. Every other caller reads every machine, as before.
+#[tokio::test]
+async fn bound_clients_see_their_orgs_machines_only() {
+    let fx = fixture(false);
+    {
+        let s = fx.t.store.lock().unwrap();
+        for (host, acct) in [("h-a", "acct-a"), ("h-b", "acct-b"), ("h-n", "acct-n")] {
+            s.upsert_account(&crate::store::AccountRow {
+                uuid: acct.into(),
+                email: Some(format!("{acct}@example.com")),
+                ..Default::default()
+            })
+            .unwrap();
+            s.set_host_account(host, Some(acct)).unwrap();
+        }
+        // `list_worktrees` reads the local checkout's rows: a `local` host
+        // placed in org B.
+        s.upsert_host("local").unwrap();
+        s.set_host_org("local", Some(fx.org_b)).unwrap();
+        s.upsert_worktree(fx.pid_beta, "wt-l", "/src/beta/wt-l", None)
+            .unwrap();
+    }
+    let names = |a: &Answer, list: &str, key: &str| -> BTreeSet<String> {
+        let v: Value = serde_json::from_str(text(a)).unwrap();
+        let rows = if list.is_empty() { &v } else { &v[list] };
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                let r = if key == "host_alias" && r.get("worktree").is_some() {
+                    &r["worktree"]
+                } else {
+                    r
+                };
+                r[key].as_str().unwrap().to_string()
+            })
+            .collect()
+    };
+    let set = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<BTreeSet<_>>();
+    for &who in EVERYONE {
+        let (hosts, accts, wts) = match who {
+            Who::BoundA => (set(&["h-a", "h-n"]), set(&["acct-a", "acct-n"]), set(&[])),
+            Who::BoundB => (
+                set(&["h-b", "h-n", "local"]),
+                set(&["acct-b", "acct-n"]),
+                set(&["local"]),
+            ),
+            _ => (
+                set(&["h-a", "h-b", "h-n", "local"]),
+                set(&["acct-a", "acct-b", "acct-n"]),
+                set(&["local"]),
+            ),
+        };
+        let a = call(&fx, who, "list_hosts", json!({})).await;
+        assert_eq!(names(&a, "", "alias"), hosts, "{who:?} list_hosts");
+        let a = call(&fx, who, "agent_status", json!({})).await;
+        let v: Value = serde_json::from_str(text(&a)).unwrap();
+        for h in v["hosts"].as_array().unwrap() {
+            assert!(
+                hosts.contains(h["alias"].as_str().unwrap()),
+                "{who:?} agent_status"
+            );
+        }
+        let a = call(&fx, who, "list_accounts", json!({})).await;
+        assert_eq!(names(&a, "", "uuid"), accts, "{who:?} list_accounts");
+        let a = call(
+            &fx,
+            who,
+            "list_worktrees",
+            json!({ "summary": false, "limit": 0 }),
+        )
+        .await;
+        assert_eq!(
+            names(&a, "worktrees", "host_alias"),
+            wts,
+            "{who:?} list_worktrees"
+        );
+    }
+    // Another org's host answers as an unknown one, before any SSH.
+    for (who, other) in [(Who::BoundA, "h-b"), (Who::BoundB, "h-a")] {
+        let a = call(&fx, who, "probe_host", json!({ "alias": other })).await;
+        assert_eq!(code(&a), "E_NOTFOUND", "{who:?}: {a:?}");
+        let a = call(
+            &fx,
+            who,
+            "list_host_worktrees",
+            json!({ "host_alias": other, "project_id": fx.pid_acme }),
+        )
+        .await;
+        assert_eq!(code(&a), "E_NOTFOUND", "{who:?}: {a:?}");
+    }
+    // The fleet's own machines and config as a whole: refused, and not
+    // listed for them at all.
+    for &tool in guard::ORG_BOUND_REFUSED {
+        for who in [Who::BoundA, Who::BoundB] {
+            let a = call(&fx, who, tool, json!({})).await;
+            assert_eq!(code(&a), "E_FORBIDDEN", "{who:?} {tool}: {a:?}");
+            assert!(!super::present::visible_to(&who.caller(), tool), "{tool}");
+        }
+        assert!(
+            super::present::visible_to(&Who::ClientFull.caller(), tool),
+            "{tool}"
+        );
+    }
+}
+
+/// The frames that are not a session's, on a bound client's stream: a
+/// host, worktree or account frame by its host, a task or move frame by
+/// its session; the asset catalog's kinds are not sent at all. Every other
+/// caller gets them all, as before.
+#[tokio::test]
+async fn bound_clients_reach_only_their_orgs_hosts_worktrees_and_tasks() {
+    let fx = fixture(false);
+    let (wt_b, task_a, task_b) = {
+        let s = fx.t.store.lock().unwrap();
+        let wt_b = s
+            .upsert_worktree_on("h-b", fx.pid_beta, "wt-b", "/src/beta/wt-b", None)
+            .unwrap();
+        // Projects list the local checkouts: a `local` host in org B.
+        s.upsert_host("local").unwrap();
+        s.set_host_org("local", Some(fx.org_b)).unwrap();
+        s.upsert_worktree(fx.pid_beta, "wt-l", "/src/beta/wt-l", None)
+            .unwrap();
+        let task_a = crate::service::tasks::create_task(&s, None, Some(fx.s_a), "x")
+            .unwrap()
+            .id;
+        let task_b = crate::service::tasks::create_task(&s, Some(fx.s_b), None, "y")
+            .unwrap()
+            .id;
+        (wt_b, task_a, task_b)
+    };
+    // Every tool that names a host answers for org B's host as for a host
+    // that does not exist — before it reaches SSH or asks for a confirm.
+    let host_b = [
+        ("get_clipboard", json!({ "host_alias": "h-b" })),
+        (
+            "set_clipboard",
+            json!({ "host_alias": "h-b", "content": "x" }),
+        ),
+        ("discover_lost_sessions", json!({ "host_alias": "h-b" })),
+        (
+            "restore_host_sessions",
+            json!({ "host_alias": "h-b", "dry_run": true }),
+        ),
+        ("list_github_repos", json!({ "host_alias": "h-b" })),
+        (
+            "add_project",
+            json!({ "host_alias": "h-b", "source": { "kind": "clone", "url": "https://github.com/beta/web" } }),
+        ),
+        (
+            "new_bg_session",
+            json!({ "host_alias": "h-b", "name": "bg", "prompt": "p" }),
+        ),
+        (
+            "move_session",
+            json!({ "session_id": fx.s_a, "target_host_alias": "h-b", "dry_run": true }),
+        ),
+    ];
+    for (tool, args) in host_b {
+        let a = call(&fx, Who::BoundA, tool, args).await;
+        assert_eq!(
+            a,
+            Err("E_NOTFOUND: host \"h-b\" not found".into()),
+            "{tool}"
+        );
+    }
+
+    let unknown = call(
+        &fx,
+        Who::BoundA,
+        "delete_worktree",
+        json!({ "worktree_id": 999_999 }),
+    )
+    .await;
+    let other = call(
+        &fx,
+        Who::BoundA,
+        "delete_worktree",
+        json!({ "worktree_id": wt_b }),
+    )
+    .await;
+    same_as_unknown(&other, &unknown, &wt_b.to_string(), "999999");
+    // Org B's own client passes the fence and meets the tool's own rule.
+    let own = call(
+        &fx,
+        Who::BoundB,
+        "delete_worktree",
+        json!({ "worktree_id": wt_b }),
+    )
+    .await;
+    assert!(text(&own).contains("is a checkout on host h-b"), "{own:?}");
+
+    let unknown = call(
+        &fx,
+        Who::BoundA,
+        "cancel_task",
+        json!({ "task_id": 999_999 }),
+    )
+    .await;
+    let other = call(
+        &fx,
+        Who::BoundA,
+        "cancel_task",
+        json!({ "task_id": task_b }),
+    )
+    .await;
+    same_as_unknown(&other, &unknown, &task_b.to_string(), "999999");
+
+    let task_ids = |a: &Answer| -> BTreeSet<i64> {
+        let v: Value = serde_json::from_str(text(a)).unwrap();
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["id"].as_i64().unwrap())
+            .collect()
+    };
+    let wt_hosts = |a: &Answer| -> BTreeSet<String> {
+        let v: Value = serde_json::from_str(text(a)).unwrap();
+        v.as_array()
+            .unwrap()
+            .iter()
+            // The compact form drops an empty `worktrees`.
+            .filter_map(|p| p.get("worktrees").and_then(Value::as_array))
+            .flatten()
+            .map(|w| w["host_alias"].as_str().unwrap().to_string())
+            .collect()
+    };
+    for (who, tasks, hosts) in [
+        (Who::BoundA, vec![task_a], vec![]),
+        (Who::BoundB, vec![task_b], vec!["local"]),
+        (Who::ClientFull, vec![task_a, task_b], vec!["local"]),
+    ] {
+        let a = call(&fx, who, "list_tasks", json!({})).await;
+        assert_eq!(
+            task_ids(&a),
+            tasks.into_iter().collect(),
+            "{who:?} list_tasks"
+        );
+        let a = call(&fx, who, "list_projects", json!({ "summary": false })).await;
+        assert_eq!(
+            wt_hosts(&a),
+            hosts.into_iter().map(String::from).collect(),
+            "{who:?} list_projects"
+        );
+    }
+
+    // The operator lives on `local`, in org B here.
+    let a = call(&fx, Who::BoundA, "ensure_operator", json!({})).await;
+    assert_eq!(a, Err("E_NOTFOUND: host \"local\" not found".into()));
+    for (who, blocked) in [(Who::BoundA, "no_host"), (Who::BoundB, "no_mcp")] {
+        let a = call(&fx, who, "operator_status", json!({})).await;
+        let v: Value = serde_json::from_str(text(&a)).unwrap();
+        assert_eq!(v["blocked"], blocked, "{who:?}: {a:?}");
+    }
+}
+
+#[tokio::test]
+async fn bound_streams_fence_every_frame_by_what_it_names() {
+    use crate::events::EventMessage;
+    use crate::mcp::events_route::{fence_frame, fence_host_bound};
+    let fx = fixture(false);
+    {
+        let s = fx.t.store.lock().unwrap();
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "acct-b".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        s.set_host_account("h-b", Some("acct-b")).unwrap();
+    }
+    let frame = |name: &'static str, payload: Value| EventMessage {
+        name,
+        payload,
+        seq: 1,
+    };
+    // (frame, is it B's) — each names only org B's machine or session.
+    let b_frames = [
+        frame("host:probed", json!({ "alias": "h-b" })),
+        frame(
+            "host:pinged",
+            json!({ "alias": "h-b", "last_pinged_at": 1, "reachable": true }),
+        ),
+        frame("worktree:updated", json!({ "id": 9, "host_alias": "h-b" })),
+        frame("account:upserted", json!({ "uuid": "acct-b" })),
+        frame("account_usage:updated", json!({ "account_uuid": "acct-b" })),
+        frame(
+            "task:updated",
+            json!({ "id": 3, "requester_session_id": fx.s_b }),
+        ),
+        frame(
+            "move:progress",
+            json!({ "session_id": fx.s_b, "to_host": "h-n" }),
+        ),
+    ];
+    let a_frame = frame(
+        "move:progress",
+        json!({ "session_id": fx.s_a, "to_host": "h-n" }),
+    );
+    for &who in EVERYONE {
+        let c = who.caller();
+        let store = &fx.t.store;
+        let scope = c.org_scope(&store.lock().unwrap()).unwrap();
+        let lookup = |sid: i64| {
+            let s = store.lock().unwrap();
+            s.get_session_by_id(sid)
+                .unwrap()
+                .map(|r| (r.host_alias, r.org_id))
+        };
+        let infra = || {
+            let s = store.lock().unwrap();
+            crate::service::orgs::BoundInfra::of(&s, &scope).unwrap()
+        };
+        for f in &b_frames {
+            let got = fence_frame(&scope, f, &lookup, &infra).is_some();
+            assert_eq!(got, who != Who::BoundA, "{who:?} {} {}", f.name, f.payload);
+        }
+        assert_eq!(
+            fence_frame(&scope, &a_frame, &lookup, &infra).is_some(),
+            who != Who::BoundB,
+            "{who:?} move of A's session"
+        );
+        let kinds = fence_host_bound(&c, None);
+        for k in ["catalog", "sync", "asset_inventory"] {
+            let sent = kinds.as_ref().is_none_or(|ks| ks.iter().any(|x| x == k));
+            assert_eq!(sent, !who.is_bound(), "{who:?} {k}");
+        }
+    }
+}
+
 /// `usage_report` is fenced like `fleet_health`: a client bound to an org
 /// sees its org's sessions and hosts (and, D31 on, the unassigned host's),
 /// never another org's spend; a host outside that answers as unknown.
@@ -4158,7 +4563,7 @@ fn work_changed_carries_ids_only_and_reaches_only_unbound_callers() {
         for f in &frames {
             for k in [&kinds, &asked] {
                 let delivered =
-                    matches(k.as_ref(), f) && fence_frame(&scope, f, &|_| None).is_some();
+                    matches(k.as_ref(), f) && fence_frame(&scope, f, &|_| None, &|| None).is_some();
                 assert_eq!(
                     delivered,
                     who.is_unbound(),
@@ -4166,6 +4571,166 @@ fn work_changed_carries_ids_only_and_reaches_only_unbound_callers() {
                     f.payload
                 );
             }
+        }
+    }
+}
+
+/// How a client tool the harness does not call keeps a per-host token and a
+/// client bound to an org inside their scope.
+enum Fence {
+    /// Its body calls this gate on everything it addresses:
+    /// `resolve_target` / `resolve_target_row` (`require_host` and
+    /// `require_bound_client_sees` on the resolved session),
+    /// `require_visible_session` (D7 and the bound client's org),
+    /// `require_bound_client_may_create` (where a new session would
+    /// belong), `visible_task`, or `org_scope` read by the tool itself.
+    Gate(&'static str),
+    /// It reads or writes nothing of any org, host or session; why.
+    NoOrgData(&'static str),
+}
+
+/// Every client tool is in the matrix's harness ([`call`]), refused to a
+/// bound client ([`guard::ORG_BOUND_REFUSED`]), or here. A new client tool
+/// fails `every_client_tool_is_fenced_or_in_the_matrix` until it is one of
+/// the three.
+const FENCED_BY: &[(&str, Fence)] = &[
+    ("register_self", Fence::Gate("resolve_target")),
+    ("capture_session", Fence::Gate("resolve_target")),
+    ("session_activity", Fence::Gate("resolve_target")),
+    ("recreate_session", Fence::Gate("resolve_target")),
+    ("dismiss_ghost_session", Fence::Gate("resolve_target")),
+    ("kill_session", Fence::Gate("resolve_target")),
+    ("safe_kill_session", Fence::Gate("resolve_target")),
+    ("rename_session", Fence::Gate("resolve_target")),
+    ("set_friendly_name", Fence::Gate("resolve_target")),
+    ("restart_session", Fence::Gate("resolve_target")),
+    ("repair_session", Fence::Gate("resolve_target")),
+    ("resolve_move", Fence::Gate("resolve_target")),
+    ("spawn_review", Fence::Gate("resolve_target_row")),
+    ("send_prompt", Fence::Gate("resolve_target_row")),
+    ("session_conversations", Fence::Gate("resolve_target_row")),
+    ("inbox", Fence::Gate("resolve_target_row")),
+    ("wait_for_session", Fence::Gate("resolve_target_row")),
+    ("wait_for_reply", Fence::Gate("resolve_target_row")),
+    ("session_transcript", Fence::Gate("resolve_target_row")),
+    ("session_conversation", Fence::Gate("resolve_target_row")),
+    ("run_prompt", Fence::Gate("resolve_target_row")),
+    ("set_session_tags", Fence::Gate("resolve_target_row")),
+    (
+        "new_session",
+        Fence::Gate("require_bound_client_may_create"),
+    ),
+    (
+        "new_shell_session",
+        Fence::Gate("require_bound_client_may_create"),
+    ),
+    (
+        "dispatch_task",
+        Fence::Gate("require_bound_client_may_create"),
+    ),
+    (
+        "rewind_conversation",
+        Fence::Gate("require_visible_session"),
+    ),
+    ("repo_tree", Fence::Gate("require_visible_session")),
+    ("repo_file", Fence::Gate("require_visible_session")),
+    ("repo_diff", Fence::Gate("require_visible_session")),
+    ("repo_log", Fence::Gate("require_visible_session")),
+    ("repo_branches", Fence::Gate("require_visible_session")),
+    ("repo_commit", Fence::Gate("require_visible_session")),
+    ("repo_commit_diff", Fence::Gate("require_visible_session")),
+    ("wait_for_task", Fence::Gate("visible_task")),
+    ("broadcast_prompt", Fence::Gate("org_scope")),
+    (
+        "quick_replies",
+        Fence::NoOrgData("the fleet's canned reply texts, naming no session, host or org"),
+    ),
+    (
+        "peer_exchange",
+        Fence::NoOrgData("a peer hub's link only; a peer token is never bound to an org"),
+    ),
+];
+
+/// The tools [`call`] has an arm for, read from its own source.
+fn harness_tools() -> BTreeSet<&'static str> {
+    let src = include_str!("tests_isolation.rs");
+    let start = src.find("async fn call(").unwrap();
+    let end = start + src[start..].find("other => panic!").unwrap();
+    src[start..end]
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix('"')?.split_once("\" =>"))
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The body of the router tool `name`: from its `async fn` to the next
+/// `#[tool(` (or the end of its file).
+fn tool_body(name: &str) -> &'static str {
+    const SOURCES: &[&str] = &[
+        include_str!("fleet.rs"),
+        include_str!("session_ops.rs"),
+        include_str!("lifecycle.rs"),
+        include_str!("messaging.rs"),
+        include_str!("orchestration.rs"),
+        include_str!("repo.rs"),
+        include_str!("assets.rs"),
+        include_str!("peer.rs"),
+        include_str!("views.rs"),
+    ];
+    let head = format!("async fn {name}(");
+    let hits: Vec<&str> = SOURCES
+        .iter()
+        .filter_map(|src| {
+            let at = src.find(&head)?;
+            let rest = &src[at..];
+            Some(&rest[..rest.find("#[tool(").unwrap_or(rest.len())])
+        })
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "{name}: expected one `{head}` in the tool files"
+    );
+    hits[0]
+}
+
+#[test]
+fn every_client_tool_is_fenced_or_in_the_matrix() {
+    let harness = harness_tools();
+    let refused: BTreeSet<&str> = guard::ORG_BOUND_REFUSED.iter().copied().collect();
+    let listed: BTreeSet<&str> = FENCED_BY.iter().map(|(n, _)| *n).collect();
+    assert_eq!(
+        listed.len(),
+        FENCED_BY.len(),
+        "a tool listed twice in FENCED_BY"
+    );
+    for name in guard::CLIENT_TOOLS {
+        let (tested, refused, listed) = (
+            harness.contains(name),
+            refused.contains(name),
+            listed.contains(name),
+        );
+        assert!(
+            tested || refused || listed,
+            "client tool {name} is not in the isolation matrix: give it a harness arm in \
+             `call` and a test, an ORG_BOUND_REFUSED entry, or a FENCED_BY row naming its gate"
+        );
+        assert!(
+            !(listed && (tested || refused)),
+            "{name} has a FENCED_BY row it does not need: drop the row"
+        );
+    }
+    for name in harness.iter().chain(&refused).chain(&listed) {
+        assert!(guard::policy(name).is_some(), "{name} is not a router tool");
+    }
+    for (name, fence) in FENCED_BY {
+        assert!(guard::is_client_tool(name), "{name} is not a client tool");
+        match fence {
+            Fence::Gate(gate) => assert!(
+                tool_body(name).contains(&format!("{gate}(")),
+                "{name} no longer calls {gate}: fence it again or move its FENCED_BY row"
+            ),
+            Fence::NoOrgData(why) => assert!(!why.trim().is_empty(), "{name}: say why"),
         }
     }
 }

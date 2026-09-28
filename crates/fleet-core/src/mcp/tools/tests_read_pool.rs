@@ -52,7 +52,7 @@ fn host_caller() -> Caller {
 async fn call(t: &FleetTools, tool: &str) -> Result<CallToolResult, McpError> {
     let empty = || serde_json::json!({});
     match tool {
-        "list_hosts" => t.list_hosts().await,
+        "list_hosts" => t.list_hosts(Extension(Caller::master())).await,
         "whoami" => {
             t.whoami(
                 Extension(host_caller()),
@@ -63,12 +63,18 @@ async fn call(t: &FleetTools, tool: &str) -> Result<CallToolResult, McpError> {
             .await
         }
         "list_worktrees" => {
-            t.list_worktrees(Parameters(serde_json::from_value(empty()).unwrap()))
-                .await
+            t.list_worktrees(
+                Extension(Caller::master()),
+                Parameters(serde_json::from_value(empty()).unwrap()),
+            )
+            .await
         }
         "list_projects" => {
-            t.list_projects(Parameters(serde_json::from_value(empty()).unwrap()))
-                .await
+            t.list_projects(
+                Extension(Caller::master()),
+                Parameters(serde_json::from_value(empty()).unwrap()),
+            )
+            .await
         }
         "fleet_health" => t.fleet_health(Extension(host_caller())).await,
         "list_sessions" => {

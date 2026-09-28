@@ -337,6 +337,11 @@ fn accepted_list(kinds: Option<&Vec<String>>) -> Vec<String> {
 /// `session` frames are fenced per frame instead ([`fence_frame`]).
 pub const HOST_BOUND_HIDDEN_KINDS: &[&str] = &["work"];
 
+/// Hidden from a client bound to an org besides [`HOST_BOUND_HIDDEN_KINDS`]:
+/// the asset catalog and its sync and inventory, which belong to no org and
+/// whose tools it may not call (`guard::ORG_BOUND_REFUSED`).
+pub const ORG_BOUND_HIDDEN_KINDS: &[&str] = &["catalog", "sync", "asset_inventory"];
+
 /// Narrow the requested kinds for a host-bound caller; everyone else keeps
 /// what they asked for.
 pub(crate) fn fence_host_bound(caller: &Caller, kinds: Option<Vec<String>>) -> Option<Vec<String>> {
@@ -355,6 +360,7 @@ pub(crate) fn fence_host_bound(caller: &Caller, kinds: Option<Vec<String>>) -> O
     Some(
         all.into_iter()
             .filter(|k| !HOST_BOUND_HIDDEN_KINDS.contains(&k.as_str()))
+            .filter(|k| !(caller.is_org_bound() && ORG_BOUND_HIDDEN_KINDS.contains(&k.as_str())))
             .collect(),
     )
 }
@@ -370,13 +376,23 @@ pub(crate) fn fence_host_bound(caller: &Caller, kinds: Option<Vec<String>>) -> O
 /// `session:conversations` — names its session by `session_id`; `lookup`
 /// answers that session's `(host, org)` from the store, and is only asked
 /// when some org isolates its sessions (otherwise sessions are not fenced).
+///
+/// For a client bound to an org (work graph M14) every other frame is fenced
+/// too ([`fence_infra_frame`]): a host, worktree or asset frame by its host,
+/// an account frame by the hosts that use it, a task or move frame by its
+/// session. `infra` answers what the client sees of hosts and accounts; it
+/// is only asked for such a frame.
 pub(crate) fn fence_frame(
     scope: &crate::service::orgs::OrgScope,
     msg: &EventMessage,
     lookup: &dyn Fn(i64) -> Option<(String, Option<i64>)>,
+    infra: &dyn Fn() -> Option<crate::service::orgs::BoundInfra>,
 ) -> Option<serde_json::Value> {
-    if scope.is_all() || msg.kind() != "session" || !msg.payload.is_object() {
+    if scope.is_all() || !msg.payload.is_object() {
         return Some(msg.payload.clone());
+    }
+    if msg.kind() != "session" {
+        return fence_infra_frame(scope, msg, lookup, infra);
     }
     let p = &msg.payload;
     let host = p.get("host_alias").and_then(serde_json::Value::as_str);
@@ -408,6 +424,47 @@ pub(crate) fn fence_frame(
         m.get("org_id").and_then(serde_json::Value::as_i64)
     });
     Some(v)
+}
+
+/// [`fence_frame`] for the frames that are not a session's, on a stream of
+/// a client bound to an org; every other scope passes them unchanged. A
+/// frame whose host, account or session cannot be found is dropped (a
+/// removed host's `host:removed` among them): what a bound client cannot
+/// place, it does not see. Projects, the asset catalog and its sync carry
+/// no org and pass.
+fn fence_infra_frame(
+    scope: &crate::service::orgs::OrgScope,
+    msg: &EventMessage,
+    lookup: &dyn Fn(i64) -> Option<(String, Option<i64>)>,
+    infra: &dyn Fn() -> Option<crate::service::orgs::BoundInfra>,
+) -> Option<serde_json::Value> {
+    if !matches!(scope, crate::service::orgs::OrgScope::Org { .. }) {
+        return Some(msg.payload.clone());
+    }
+    let p = &msg.payload;
+    let text = |k: &str| p.get(k).and_then(serde_json::Value::as_str);
+    let session_seen = |k: &str| {
+        p.get(k)
+            .and_then(serde_json::Value::as_i64)
+            .and_then(lookup)
+            .is_some_and(|(h, o)| scope.sees_session(&h, o))
+    };
+    let visible = match msg.kind() {
+        "host" => text("alias").is_some_and(|a| infra().is_some_and(|i| i.sees_host(a))),
+        // `worktree:removed` names an id only.
+        "worktree" | "asset_inventory" => match text("host_alias") {
+            Some(h) => infra().is_some_and(|i| i.sees_host(h)),
+            None => msg.kind() == "worktree",
+        },
+        "account" => text("uuid").is_some_and(|u| infra().is_some_and(|i| i.sees_account(u))),
+        "account_usage" => {
+            text("account_uuid").is_some_and(|u| infra().is_some_and(|i| i.sees_account(u)))
+        }
+        "task" => session_seen("requester_session_id") || session_seen("worker_session_id"),
+        "move" => session_seen("session_id"),
+        _ => true,
+    };
+    visible.then(|| p.clone())
 }
 
 pub(crate) fn matches(kinds: Option<&Vec<String>>, msg: &EventMessage) -> bool {
@@ -523,7 +580,11 @@ fn row_event(
         let row = s.get_session_by_id(sid).ok()??;
         Some((row.host_alias, row.org_id))
     };
-    let fenced = fence_frame(scope, msg, &lookup)?;
+    let infra = || {
+        let s = store?.lock().ok()?;
+        crate::service::orgs::BoundInfra::of(&s, scope).ok()?
+    };
+    let fenced = fence_frame(scope, msg, &lookup, &infra)?;
     let payload = match fields {
         Some(f) => project(&fenced, f),
         None => fenced,

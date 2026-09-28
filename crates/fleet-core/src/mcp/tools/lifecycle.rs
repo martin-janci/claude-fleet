@@ -310,9 +310,11 @@ impl FleetTools {
         E_CLIPBOARD_UNAVAILABLE if none is installed.")]
     pub(super) async fn get_clipboard(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<crate::service::clipboard::GetClipboardArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("get_clipboard", &format!("host={}", args.host_alias));
+        self.require_bound_host(&caller, &args.host_alias)?;
         let text = crate::service::clipboard::get_clipboard(args, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -340,6 +342,7 @@ impl FleetTools {
             "set_clipboard",
             &format!("host={} bytes={}", p.host_alias, p.content.len()),
         );
+        self.require_bound_host(&caller, &p.host_alias)?;
         self.confirm_gate(
             "set_clipboard",
             p.confirm_nonce.as_deref(),
@@ -466,6 +469,7 @@ impl FleetTools {
             "the session to move",
         )?;
         require_move_hosts(&caller, &row.host_alias, &p.target_host_alias)?;
+        self.require_bound_host(&caller, &p.target_host_alias)?;
         // `dry_run` changes nothing, and a `when` of `cancel` PREVENTS a
         // move — for both, asking the user to confirm would put a dialog
         // between them and the safe action. A `when` of `idle` is a

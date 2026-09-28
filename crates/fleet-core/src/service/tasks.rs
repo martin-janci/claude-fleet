@@ -392,6 +392,28 @@ pub fn task_visible_to(s: &Store, task: &TaskRow, host: Option<&str>) -> Result<
     ))
 }
 
+/// Whether a caller under `scope` sees a task: through its requester or its
+/// worker session, as it sees those. A task whose sessions are both gone
+/// is seen only by an unscoped caller.
+pub fn task_in_scope(
+    s: &Store,
+    task: &TaskRow,
+    scope: &crate::service::orgs::OrgScope,
+) -> Result<bool, IpcError> {
+    if matches!(scope, crate::service::orgs::OrgScope::All) {
+        return Ok(true);
+    }
+    for id in [task.requester_session_id, task.worker_session_id]
+        .into_iter()
+        .flatten()
+    {
+        if s.get_session_by_id(id)?.is_some_and(|r| scope.sees_row(&r)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Tasks visible to a caller: all of them for the master token, host-scoped
 /// for a per-host token.
 pub fn list_tasks_for(
