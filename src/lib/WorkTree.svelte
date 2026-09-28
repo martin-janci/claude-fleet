@@ -23,6 +23,7 @@
   import { workViewChordLabel } from './app_views';
   import { detectMac } from './terminal_keys';
   import WorkFiltersBar from './WorkFiltersBar.svelte';
+  import { facetSentence, workFacets } from './filter_facets';
   import WorkReview from './WorkReview.svelte';
   import WorkRules from './WorkRules.svelte';
   import {
@@ -52,6 +53,7 @@
     workTreeSessionIds,
     workViewFilters,
     workViewKey,
+    activeWorkViewId,
     type GroupSection,
     type OrgSection,
     type SectionState,
@@ -63,12 +65,11 @@
   import type { IpcError } from './result';
 
   let {
-    onCollapse,
     /** Tasks per page; injectable for tests. */
     pageSize = 50,
     /** The refetch debounce, ms; injectable for tests. */
     debounceMs = 500,
-  }: { onCollapse?: () => void; pageSize?: number; debounceMs?: number } = $props();
+  }: { pageSize?: number; debounceMs?: number } = $props();
 
   const chord = workViewChordLabel(detectMac(typeof navigator === 'undefined' ? undefined : navigator));
 
@@ -345,7 +346,7 @@
   }
 </script>
 
-<div class="work-tree" data-testid="work-tree" bind:this={root}>
+<div class="work-tree" data-testid="work-tree" aria-busy={loading} bind:this={root}>
   <header class="work-header">
     <div class="row">
       <div class="tabs" role="tablist" aria-label="Work view">
@@ -374,28 +375,8 @@
         data-testid="work-rules-open"
         onclick={() => (rulesOpen = true)}>⚙</button
       >
-      <button
-        class="btn btn--quiet btn--icon"
-        type="button"
-        title="Refresh"
-        aria-label="Refresh the Work view"
-        data-testid="work-refresh"
-        disabled={loading}
-        onclick={() => {
-          void load();
-          void loadReviewCount();
-        }}>{loading ? '…' : '↻'}</button
-      >
-      {#if onCollapse}
-        <button
-          class="btn btn--quiet btn--icon"
-          type="button"
-          title="Hide sidebar (more room for terminal)"
-          aria-label="Hide sidebar"
-          data-testid="work-collapse"
-          onclick={onCollapse}>‹</button
-        >
-      {/if}
+      <!-- Refresh is the sidebar's ↻ (it re-reads this view too), and
+           collapse is the sidebar's ‹: one of each. -->
     </div>
     {#if tab === 'tasks'}
       <WorkFiltersBar orgs={page?.orgs ?? []} trackers={page?.trackers ?? []} />
@@ -413,9 +394,26 @@
     {:else if !page}
       <p class="state muted" data-testid="work-tree-loading">Loading work…</p>
     {:else if sections.length === 0}
-      <p class="state muted" data-testid="work-tree-empty">
-        No tasks match. Clear a filter, or switch back to Sessions ({chord}).
-      </p>
+      {@const facets = workFacets($workViewFilters, {
+        orgName: (id) => page?.orgs.find((o) => o.id === id)?.name,
+        trackerName: (id) => page?.trackers.find((t) => t.id === id)?.name,
+      })}
+      <div class="state muted empty" data-testid="work-tree-empty">
+        {#if facets.length > 0}
+          <p>No tasks match <strong>{facetSentence(facets)}</strong>.</p>
+          <button
+            class="btn btn--quiet is-bounded"
+            type="button"
+            data-testid="work-tree-empty-clear"
+            onclick={() => {
+              activeWorkViewId.set(null);
+              workViewFilters.set({});
+            }}>Clear filters</button
+          >
+        {:else}
+          <p>No work yet. Tasks appear here once a session is linked to a ticket, or you name its work. Back to Sessions: {chord}.</p>
+        {/if}
+      </div>
     {:else}
       <ul class="orgs" aria-label="Work">
         {#each sections as o (o.key)}
@@ -755,6 +753,19 @@
   }
   .state {
     padding: 0.4rem 0.2rem;
+  }
+  .empty {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .empty p {
+    margin: 0;
+  }
+  .empty strong {
+    color: var(--fg);
+    font-weight: 500;
   }
   .muted {
     color: var(--fg-muted);

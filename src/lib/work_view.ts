@@ -50,21 +50,21 @@ export interface WorkTreeFilters {
 export const STATUS_FILTERS = ['any', 'open', 'todo', 'in_progress', 'done'] as const;
 export type WorkStatusFilter = (typeof STATUS_FILTERS)[number];
 export const STATUS_FILTER_LABELS: Record<WorkStatusFilter, string> = {
-  any: 'any status',
-  open: 'open',
-  todo: 'to do',
-  in_progress: 'in progress',
-  done: 'done',
+  any: 'Any',
+  open: 'Open',
+  todo: 'To do',
+  in_progress: 'In progress',
+  done: 'Done',
 };
 
 export const HAS_FILTERS = ['any', 'active', 'past_only', 'none', 'suggested'] as const;
 export type WorkHasFilter = (typeof HAS_FILTERS)[number];
 export const HAS_FILTER_LABELS: Record<WorkHasFilter, string> = {
-  any: 'any sessions',
-  active: 'active session',
-  past_only: 'past sessions only',
-  none: 'no session',
-  suggested: 'suggested',
+  any: 'Any',
+  active: 'Active session',
+  past_only: 'Past only',
+  none: 'No session',
+  suggested: 'Suggested',
 };
 
 /** `manual` | `rule` | `tracker` | `repo` | `key` | `none`. */

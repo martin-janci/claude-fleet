@@ -49,10 +49,10 @@ export const DEFAULT_WORK_FILTERS: WorkFilters = {
 
 export const STATUS_FILTERS: readonly StatusCategoryFilter[] = ['all', 'todo', 'in_progress', 'done'];
 export const STATUS_FILTER_LABELS: Record<StatusCategoryFilter, string> = {
-  all: 'any status',
-  todo: 'to do',
-  in_progress: 'in progress',
-  done: 'done',
+  all: 'Any',
+  todo: 'To do',
+  in_progress: 'In progress',
+  done: 'Done',
 };
 export function statusNameFilter(name: string): StatusNameFilter {
   return `${STATUS_NAME_PREFIX}${name.trim()}` as StatusNameFilter;
@@ -82,9 +82,9 @@ export function statusNamesOf(sessions: readonly Pick<SessionRow, 'work'>[]): st
 
 export const HAS_SESSION_FILTERS: readonly HasSessionFilter[] = ['any', 'yes', 'no'];
 export const HAS_SESSION_LABELS: Record<HasSessionFilter, string> = {
-  any: 'any',
-  yes: 'with session',
-  no: 'past only',
+  any: 'Any',
+  yes: 'Active session',
+  no: 'Past only',
 };
 
 /** The assignee `rowMatches` reads for "mine". Not a name a tracker can
@@ -210,10 +210,22 @@ export function bothPredicates(a: SessionPredicate, b: SessionPredicate): Sessio
 
 /** The item ids of the hub's `mine` view. */
 export const mineItemIds = writable<ReadonlySet<number>>(new Set());
+/** Whether `mineItemIds` has been read at least once. Until it has, "mine"
+ *  is not applied: an empty set would hide every row behind a filter that
+ *  simply has not loaded yet (or whose read failed). */
+export const mineLoaded = writable(false);
 
 /** Read the `mine` view (a read of the hub's cache; routed on a paired
  *  desktop). A failure keeps the last set. */
 export async function loadMine(): Promise<void> {
   const r = await workTickets({ view: 'mine', limit: 200 });
-  if (r.ok && Array.isArray(r.value)) mineItemIds.set(new Set(r.value.map((t) => t.id)));
+  if (r.ok && Array.isArray(r.value)) {
+    mineItemIds.set(new Set(r.value.map((t) => t.id)));
+    mineLoaded.set(true);
+  }
+}
+
+/** The filters with "mine" set aside until the `mine` view has loaded. */
+export function withMineReady(f: WorkFilters, loaded: boolean): WorkFilters {
+  return f.assignee === 'mine' && !loaded ? { ...f, assignee: 'all' } : f;
 }

@@ -55,16 +55,19 @@ what its conversations did: the first prompt, the last turns, Claude
 Code's own compaction summary and the outcome (branch, head, PR, diff
 stat). That is what makes old work resumable weeks later.
 
-In the sidebar, **View ▾ → Work** (⧉ by work) groups sessions by their
+In the sidebar, **⋯ → Group by → Work** groups sessions by their
 primary work. Work groups come first; sessions with no work stay under
 their project. Each group's header rolls up the PR / CI state of its
 sessions, and ended sessions show in a collapsed **Done · n** section of
-the group. The **⚑ work** pill in the triage row opens filter chips:
-tracker (with two or more trackers), status, *mine*, *hide archived*, and
-in work mode *any / with session / past only*.
+the group. The **Filters** panel has a *Work* group: tracker (with two
+or more trackers), status, the tracker's own column names, *Assigned to
+me*, and in work mode *Session: Any / Active session / Past only*;
+*Include → Archived work* shows or hides archived sessions and past
+work. Each filter that is on shows as a chip under the search, with a ×
+and *Clear all*; an empty list names the filters that hide it.
 
 > **[Screenshot placeholder]** The sidebar grouped by work, with a Done
-> section open and the ⚑ work filter chips showing.
+> section open and the Filters panel's Work group showing.
 
 ## The Work view
 
@@ -96,12 +99,15 @@ Sections load page by page (*Load more*), so a fleet with thousands of
 tickets stays quick; expanded sections and the last selection are kept per
 view.
 
-**Filters and saved views.** Organisation, tracker (or *local* / *bare
-keys*), status (open, to do, in progress, done), *mine*, *with an active
-session*, *only past sessions*, *no session*, *suggested*, *to review*, and
-a search. **Views ▾** saves the current filters under a name (Save as…,
-Update, Delete); saved views live on the hub, so the phone has the same
-ones.
+**Filters and saved views.** A search, the *Assigned to me* and *To
+review* toggles, and a **Filters** panel laid out like the Sessions
+list's: Organisation, Tracker (or *Local work* / *Bare keys*), Status
+(Open, To do, In progress, Done) and Sessions (Active session, Past only,
+No session, Suggested). Each filter that is on shows as a chip with a ×
+and *Clear all*, and "No tasks match" names them. The view select saves
+the current filters under a name (Save as…, Update, Delete); saved views
+live on the hub, so the phone has the same ones. The Sessions list's own
+filters (hosts, recency, org scope) do not apply here and step aside.
 
 **A task's detail** (select it) shows the tracker's data, where its org and
 its group come from, the repositories it ran in, every session with its

@@ -6,10 +6,17 @@
   // views live on the hub (`work_views`), so the phone and every desktop
   // share them; a write that lost a race answers `E_CONFLICT`, which reloads
   // the list and says so.
+  //
+  // Laid out like the Sessions list's chrome (SidebarFilters): search and a
+  // Filters button, the two quick toggles, the strip of active filters with
+  // Clear all, and one panel of labelled chip groups.
   import { onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import ActiveFilters from './ActiveFilters.svelte';
+  import FilterChipGroup from './FilterChipGroup.svelte';
+  import { withoutWorkFacet, workFacets, type WorkFacetId } from './filter_facets';
   import {
     activeFilterCount,
     activeWorkViewId,
@@ -82,6 +89,30 @@
   }
   function onTracker(v: string) {
     set({ tracker: v === '' ? undefined : v === 'local' || v === 'ref' ? v : Number(v) });
+  }
+
+  // ── the strip and the panel ──
+  const facets = $derived(
+    workFacets(f, {
+      orgName: (id) => orgs.find((o) => o.id === id)?.name,
+      trackerName: (id) => trackers.find((t) => t.id === id)?.name,
+    }),
+  );
+  // The strip and the badge carry what the panel holds; search and the two
+  // toggles show their state on screen already.
+  const stripFacets = $derived(facets.filter((x) => x.id !== 'query' && x.id !== 'mine' && x.id !== 'review'));
+  const panelCount = $derived(stripFacets.length);
+  let panelOpen = $state(false);
+  function clearFacet(id: string) {
+    if (id === 'query') cancelSearch();
+    const { group: _g, ...next } = withoutWorkFacet(get(workViewFilters), id as WorkFacetId);
+    workViewFilters.set(next);
+    if (id === 'query') search = '';
+  }
+  function clearAll() {
+    cancelSearch();
+    workViewFilters.set({});
+    search = '';
   }
 
   // ── saved views ──
@@ -193,7 +224,7 @@
 </script>
 
 <div class="work-filters" data-testid="work-filters">
-  <div class="views">
+  <div class="row views">
     <select
       class="view-select"
       aria-label="Saved view"
@@ -201,22 +232,11 @@
       value={$activeWorkViewId == null ? '' : String($activeWorkViewId)}
       onchange={(e) => apply((e.currentTarget as HTMLSelectElement).value)}
     >
-      <option value="">{count > 0 ? `Custom (${count} filter${count === 1 ? '' : 's'})` : 'All work'}</option>
+      <option value="">{count > 0 ? `Custom view (${count} filter${count === 1 ? '' : 's'})` : 'All work'}</option>
       {#each views as v (v.id)}
-        <option value={String(v.id)}>{v.name}{v.id === $activeWorkViewId && modified ? ' *' : ''}</option>
+        <option value={String(v.id)}>{v.name}{v.id === $activeWorkViewId && modified ? ' (edited)' : ''}</option>
       {/each}
     </select>
-    <button
-      class="btn btn--quiet"
-      type="button"
-      data-testid="work-view-save-as"
-      disabled={saveBlocked !== null}
-      title={saveBlocked ?? 'Save these filters as a view (shared with your phone and other desktops)'}
-      onclick={() => {
-        naming = !naming;
-        notice = null;
-      }}>Save as…</button
-    >
     {#if active}
       <button
         class="btn btn--quiet"
@@ -235,9 +255,20 @@
         onclick={() => void deleteCurrent()}>Delete</button
       >
     {/if}
+    <button
+      class="btn btn--quiet"
+      type="button"
+      data-testid="work-view-save-as"
+      disabled={saveBlocked !== null}
+      title={saveBlocked ?? 'Save these filters as a view (shared with your phone and other desktops)'}
+      onclick={() => {
+        naming = !naming;
+        notice = null;
+      }}>Save as…</button
+    >
   </div>
   {#if naming}
-    <form class="name-row" onsubmit={saveAs}>
+    <form class="row name-row" onsubmit={saveAs}>
       <input
         type="text"
         placeholder="View name"
@@ -256,65 +287,38 @@
     <p class="notice muted" data-testid="work-views-error">Saved views: {viewsError}</p>
   {/if}
 
-  <input
-    class="search"
-    type="search"
-    placeholder="Search key or title…"
-    aria-label="Search tasks"
-    data-testid="work-search"
-    value={search}
-    oninput={(e) => onSearch((e.currentTarget as HTMLInputElement).value)}
-  />
-  <div class="selects">
-    <select aria-label="Organisation" data-testid="work-filter-org" value={orgValue(f.org)} onchange={(e) => onOrg((e.currentTarget as HTMLSelectElement).value)}>
-      <option value="">all orgs</option>
-      {#each orgs as o (o.id)}
-        <option value={String(o.id)}>{o.name}</option>
-      {/each}
-      <option value="none">unassigned</option>
-    </select>
-    <select
-      aria-label="Tracker"
-      data-testid="work-filter-tracker"
-      value={f.tracker === undefined ? '' : String(f.tracker)}
-      onchange={(e) => onTracker((e.currentTarget as HTMLSelectElement).value)}
+  <div class="row">
+    <input
+      class="search"
+      type="search"
+      placeholder="Search key or title…"
+      aria-label="Search tasks"
+      data-testid="work-search"
+      value={search}
+      oninput={(e) => onSearch((e.currentTarget as HTMLInputElement).value)}
+    />
+    <button
+      class="btn btn--quiet is-bounded filters-btn"
+      class:has-active={panelCount > 0}
+      type="button"
+      data-testid="work-filters-open"
+      aria-expanded={panelOpen}
+      aria-controls="work-filter-panel"
+      aria-label={panelCount > 0 ? `Filters, ${panelCount} active` : 'Filters'}
+      title="Filter by organisation, tracker, status and sessions"
+      onclick={() => (panelOpen = !panelOpen)}
     >
-      <option value="">all trackers</option>
-      {#each trackers as t (t.id)}
-        <option value={String(t.id)}>{t.name}</option>
-      {/each}
-      <option value="local">local work</option>
-      <option value="ref">bare keys</option>
-    </select>
-    <select
-      aria-label="Status"
-      data-testid="work-filter-status"
-      value={f.status ?? 'any'}
-      onchange={(e) => set({ status: (e.currentTarget as HTMLSelectElement).value as WorkTreeFilters['status'] })}
-    >
-      {#each STATUS_FILTERS as s (s)}
-        <option value={s}>{STATUS_FILTER_LABELS[s]}</option>
-      {/each}
-    </select>
-    <select
-      aria-label="Sessions"
-      data-testid="work-filter-has"
-      value={f.has ?? 'any'}
-      onchange={(e) => set({ has: (e.currentTarget as HTMLSelectElement).value as WorkTreeFilters['has'] })}
-    >
-      {#each HAS_FILTERS as h (h)}
-        <option value={h}>{HAS_FILTER_LABELS[h]}</option>
-      {/each}
-    </select>
+      <span aria-hidden="true">⏷</span> Filters{#if panelCount > 0}<span class="badge">{panelCount}</span>{/if}
+    </button>
   </div>
-  <div class="toggles">
+  <div class="row toggles">
     <button
       class="btn btn--chip btn--toggle"
       type="button"
       aria-pressed={!!f.mine}
       data-testid="work-filter-mine"
       title="Assigned to me in its tracker"
-      onclick={() => set({ mine: !f.mine })}>mine</button
+      onclick={() => set({ mine: !f.mine })}>Assigned to me</button
     >
     <button
       class="btn btn--chip btn--toggle"
@@ -322,63 +326,157 @@
       aria-pressed={!!f.review}
       data-testid="work-filter-review"
       title="Only tasks with something to review"
-      onclick={() => set({ review: !f.review })}>to review</button
+      onclick={() => set({ review: !f.review })}>To review</button
     >
-    {#if count > 0}
-      <button
-        class="btn btn--quiet"
-        type="button"
-        data-testid="work-filter-clear"
-        onclick={() => {
-          cancelSearch();
-          workViewFilters.set({});
-          search = '';
-        }}>clear</button
-      >
-    {/if}
   </div>
+
+  <ActiveFilters facets={stripFacets} onclear={clearFacet} onclearall={clearAll} testid="work-active-filters" clearAllTestid="work-filter-clear" />
+
+  {#if panelOpen}
+    <div class="panel" id="work-filter-panel" role="group" aria-label="Work filters" data-testid="work-filter-panel">
+      <section data-testid="work-filter-org">
+        <FilterChipGroup
+          label="Organisation"
+          value={orgValue(f.org)}
+          options={[
+            { id: '', label: 'Any' },
+            ...orgs.map((o) => ({ id: String(o.id), label: o.name })),
+            { id: 'none', label: 'Unassigned' },
+          ]}
+          testidFor={(id) => `work-filter-org-${id === '' ? 'any' : id}`}
+          onchange={onOrg}
+        />
+      </section>
+      <section data-testid="work-filter-tracker">
+        <FilterChipGroup
+          label="Tracker"
+          value={f.tracker === undefined ? '' : String(f.tracker)}
+          options={[
+            { id: '', label: 'Any' },
+            ...trackers.map((t) => ({ id: String(t.id), label: t.name })),
+            { id: 'local', label: 'Local work', title: 'Work named in fleet, with no tracker' },
+            { id: 'ref', label: 'Bare keys', title: 'A key (ABC-123) no tracker claims' },
+          ]}
+          testidFor={(id) => `work-filter-tracker-${id === '' ? 'any' : id}`}
+          onchange={onTracker}
+        />
+      </section>
+      <section data-testid="work-filter-status">
+        <FilterChipGroup
+          label="Status"
+          value={f.status ?? 'any'}
+          options={STATUS_FILTERS.map((s) => ({ id: s, label: STATUS_FILTER_LABELS[s] }))}
+          testidFor={(id) => `work-filter-status-${id}`}
+          onchange={(id) => set({ status: id })}
+        />
+      </section>
+      <section data-testid="work-filter-has">
+        <FilterChipGroup
+          label="Sessions"
+          value={f.has ?? 'any'}
+          options={HAS_FILTERS.map((h) => ({ id: h, label: HAS_FILTER_LABELS[h] }))}
+          testidFor={(id) => `work-filter-has-${id}`}
+          onchange={(id) => set({ has: id })}
+        />
+      </section>
+      <div class="panel-foot">
+        {#if panelCount > 0}
+          <button type="button" class="btn btn--quiet" data-testid="work-filter-panel-clear" onclick={clearAll}>Clear all</button>
+        {/if}
+        <span class="spacer"></span>
+        <button type="button" class="btn btn--quiet is-bounded" data-testid="work-filters-done" onclick={() => (panelOpen = false)}
+          >Done</button
+        >
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
   .work-filters {
     display: flex;
     flex-direction: column;
-    gap: 0.3rem;
-    font-size: 0.8rem;
+    gap: 6px;
+    font-size: var(--control-font);
   }
-  .views,
-  .name-row,
-  .toggles,
-  .selects {
+  .row {
     display: flex;
-    gap: 0.25rem;
+    gap: 4px;
     align-items: center;
+    min-width: 0;
+  }
+  .toggles {
     flex-wrap: wrap;
+  }
+  .spacer {
+    flex: 1;
   }
   .view-select {
     flex: 1 1 8rem;
     min-width: 0;
   }
-  .selects select {
-    flex: 1 1 6.5rem;
-    min-width: 0;
-  }
   select,
   input {
     font: inherit;
-    padding: 0.15rem 0.3rem;
+    height: var(--control-h-lg);
+    padding: 0 6px;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg);
     color: var(--fg);
   }
+  .search,
   .name-row input {
     flex: 1 1 auto;
     min-width: 0;
   }
+  .search::placeholder {
+    color: var(--fg-muted);
+  }
+  .filters-btn {
+    height: var(--control-h-lg);
+    gap: 4px;
+  }
+  .filters-btn.has-active {
+    border-color: var(--accent);
+    color: var(--control-fg);
+  }
+  .badge {
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: var(--radius-pill);
+    background: var(--accent);
+    color: var(--accent-fg);
+    font-size: var(--control-font-sm);
+    line-height: 16px;
+    font-weight: 600;
+  }
+  .panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 50vh;
+    overflow-y: auto;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg);
+  }
+  .panel section + section {
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+  }
+  .panel-foot {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    border-top: 1px solid var(--border);
+    padding-top: 6px;
+  }
   .notice {
     margin: 0;
-    font-size: 0.75rem;
+    font-size: var(--control-font-sm);
   }
   .muted {
     color: var(--fg-muted);
