@@ -148,10 +148,23 @@ pub struct KillSessionParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ForgetProjectParams {
+    /// The project's id.
+    pub project_id: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ProvisionHostsParams {
     /// Mint fresh per-host tokens (invalidates each host's current one).
     #[serde(default)]
     pub rotate: bool,
+    /// One host alias; every active host when omitted.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Skills, CLAUDE.md block and hooks only: no token, no ~/.claude.json
+    /// rewrite, no tunnel.
+    #[serde(default)]
+    pub content_only: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

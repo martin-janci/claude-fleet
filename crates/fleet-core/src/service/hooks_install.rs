@@ -126,6 +126,23 @@ pub const FLEET_HOOK_EVENTS: &[(&str, &str, HookKind)] = &[
     ("PostCompact", "", HookKind::Http),
 ];
 
+/// A token- and URL-free rendering of what `provision_hook` installs:
+/// every event with its matcher and kind, then the SessionStart command
+/// template. Part of `provision::fingerprint()`, so a changed hook set
+/// marks every host `provision_stale`.
+pub fn hook_shape() -> String {
+    let mut s = String::new();
+    for (event, matcher, kind) in FLEET_HOOK_EVENTS {
+        let k = match kind {
+            HookKind::Http => "http",
+            HookKind::Command => "command",
+        };
+        s.push_str(&format!("{event}|{matcher}|{k};"));
+    }
+    s.push_str(&session_start_command("<hook_url>"));
+    s
+}
+
 /// Name of the file (in `~/.claude`, mode 0600) holding the bearer header the
 /// SessionStart command hook sends with `curl -H @file`. Keeps the token out
 /// of argv (SEC-3) and out of the command string in settings.json.

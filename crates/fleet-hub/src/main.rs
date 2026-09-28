@@ -7,6 +7,7 @@ mod org;
 mod out;
 mod pair;
 mod peer;
+mod provision;
 mod reports;
 mod serve;
 mod tls;
@@ -167,6 +168,18 @@ enum Cmd {
         #[command(flatten)]
         opts: HubOptions,
     },
+    /// Provision every active host (or one) from this hub: skills, the
+    /// managed CLAUDE.md block, hooks and the MCP entry. Needs a running hub.
+    Provision {
+        /// One host; every active host when omitted.
+        #[arg(long)]
+        host: Option<String>,
+        /// Skills, CLAUDE.md block and hooks only (no token, no ~/.claude.json).
+        #[arg(long)]
+        content_only: bool,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
     /// Show the error reports the hub has collected from its participants, newest first. Needs a running hub.
     Reports {
         /// Rows to show (1-1000). [default: 100]
@@ -292,6 +305,11 @@ async fn main() -> ExitCode {
         Cmd::Tracker { cmd, opts } => tracker::run(cmd, &opts, &env).await,
         Cmd::Org { cmd, opts } => org::run(cmd, &opts, &env).await,
         Cmd::Host { cmd, opts } => host::run(cmd, &opts, &env).await,
+        Cmd::Provision {
+            host,
+            content_only,
+            opts,
+        } => provision::run(host, content_only, &opts, &env).await,
         Cmd::Work { cmd, opts } => work::run(cmd, &opts, &env).await,
         Cmd::Reports {
             limit,
@@ -419,6 +437,22 @@ mod tests {
         assert!(
             matches!(cmd, host::HostCmd::Merge { ref from, ref into } if from == "local" && into == "mac")
         );
+        // Task 6: the content-only re-provision of one host.
+        let Cmd::Provision {
+            host, content_only, ..
+        } = Cli::try_parse_from([
+            "fleet-hub",
+            "provision",
+            "--host",
+            "mefistos",
+            "--content-only",
+        ])
+        .unwrap()
+        .cmd
+        else {
+            panic!("provision parses")
+        };
+        assert_eq!((host.as_deref(), content_only), (Some("mefistos"), true));
         Cli::try_parse_from([
             "fleet-hub",
             "agent-token",

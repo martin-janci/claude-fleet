@@ -217,6 +217,24 @@ describe('host health helpers', () => {
     expect(hostAttention({ ...base, host: agent })?.kind).toBe('agent_old');
     expect(hostAttention({ ...base, host: host('ok', { transport: 'agent', agent_version: '0.3.1' }) })).toBeNull();
   });
+
+  it('provision_stale outranks disk_low and names the content-only refresh', () => {
+    const base = {
+      hasToken: true,
+      tokensLoaded: true,
+      hook: { state: 'seen' as const, lastAt: NOW },
+      sessionCount: 1,
+      newestClaude: null,
+      now: NOW,
+      versionMaxAgeSecs: 86400,
+      diskLowPct: 90,
+      hubVersion: '0.3.1',
+    };
+    const stale = host('x', { provision_stale: true, disk_home_free_kb: 3_600_000, disk_home_total_kb: 150_000_000 });
+    const mark = hostAttention({ ...base, host: stale });
+    expect(mark?.kind).toBe('provision_stale');
+    expect(mark?.title).toContain('fleet-hub provision --host x --content-only');
+  });
 });
 
 describe('compact usage', () => {

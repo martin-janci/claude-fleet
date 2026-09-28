@@ -31,6 +31,10 @@ export interface HostRow {
   last_hook_at?: number | null;
   /** The fleet-agent version its last hello reported (agent hosts). */
   agent_version?: string | null;
+  /** When provision_hosts last completed on this host; absent from an older hub. */
+  provisioned_at?: number | null;
+  /** Provisioned, but with content older than this build ships (or unknown). */
+  provision_stale?: boolean;
 }
 
 /** The volatile half of a host row, as `host:pinged` carries it. */

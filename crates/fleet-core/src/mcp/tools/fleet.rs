@@ -225,12 +225,19 @@ impl FleetTools {
         / EnterWorktree http hooks and this fleet's MCP server entry \
         (per-host bearer token) into every reachable host's ~/.claude.json \
         (a reverse SSH tunnel when the hub is loopback-only). Returns \
-        per-host status; each host must restart Claude to load it.")]
+        per-host status; each host must restart Claude to load it. host: \
+        one alias; content_only: skills, CLAUDE.md and hooks only, no token.")]
     pub(super) async fn provision_hosts(
         &self,
         Parameters(p): Parameters<ProvisionHostsParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit("provision_hosts", &format!("rotate={}", p.rotate));
+        audit(
+            "provision_hosts",
+            &format!(
+                "rotate={} host={:?} content_only={}",
+                p.rotate, p.host, p.content_only
+            ),
+        );
         let base = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?
@@ -240,7 +247,11 @@ impl FleetTools {
             &self.ssh,
             &self.tunnels,
             &base,
-            p.rotate,
+            crate::service::provision::ProvisionScope {
+                rotate: p.rotate,
+                only_host: p.host,
+                content_only: p.content_only,
+            },
         )
         .await
         .map_err(to_mcp_err)?;

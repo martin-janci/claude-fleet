@@ -798,6 +798,8 @@ mod tests {
             health_at: None,
             last_hook_at: None,
             agent_version: None,
+            provisioned_at: None,
+            provision_stale: false,
         }
     }
 

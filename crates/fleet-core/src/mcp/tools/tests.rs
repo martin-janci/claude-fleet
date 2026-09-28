@@ -327,6 +327,7 @@ fn fleet_admin_tools_are_master_only() {
         "add_host",
         "remove_host",
         "merge_host",
+        "forget_project",
         "hide_host",
         "apply_sync",
         "set_secret",
@@ -445,6 +446,35 @@ fn keys_test_tools() -> (FleetTools, Arc<Mutex<Store>>, i64) {
 /// Validation happens before any tmux/ssh delivery is attempted, so this
 /// needs no real backend: an unknown key name, and text alongside `keys`,
 /// are both refused up front.
+/// Host identity & health, task 7: `forget_project` over the tool surface.
+#[tokio::test]
+async fn forget_project_refuses_a_live_project_then_drops_it() {
+    let (t, store, _sid) = keys_test_tools();
+    let (pid, sid) = {
+        let s = store.lock().unwrap();
+        let pid = s.upsert_project("o", "gone", "/p/o/gone").unwrap();
+        let sid = s
+            .upsert_session("dev-gone", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        (pid, sid)
+    };
+    let err = t
+        .forget_project(Parameters(ForgetProjectParams { project_id: pid }))
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("E_INVALID_STATE"), "{}", err.message);
+    store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute("UPDATE sessions SET status='ghost' WHERE id=?1", [sid])
+        .unwrap();
+    t.forget_project(Parameters(ForgetProjectParams { project_id: pid }))
+        .await
+        .unwrap();
+    assert!(store.lock().unwrap().get_project(pid).unwrap().is_none());
+}
+
 /// Host identity & health, task 5: the master folds a renamed alias in one
 /// call and the old row is gone.
 #[tokio::test]
@@ -1941,7 +1971,7 @@ fn capture_default_cap_matches_docs() {
 /// the merged count is 81, 83 with the work graph's `work` / `work_link`,
 /// 84 with `work_admin`; hub federation adds `peer_exchange` and
 /// `list_peer_links`: 86; `get_settings` / `set_setting`: 88; host identity &
-/// health's `merge_host`: 90.)
+/// health's `merge_host` and `forget_project`: 91.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -1962,7 +1992,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 90);
+    assert_eq!(served, 91);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3486,10 +3516,11 @@ fn the_served_definition_budget_stays_bounded() {
     // (+144); plus 100.
     // Merged with M13.4c (`work_link` `summarize`): measured at 56,950 on
     // 2026-09-27; plus 100.
-    // Host identity & health (`fleet_health` `hosts[]` clause, `merge_host`,
-    // `provision_hosts` `host` / `content_only`): measured at 57,689 on
-    // 2026-09-27; plus 100.
-    const BUDGET_BYTES: usize = 57_789;
+    // Host identity & health (`fleet_health` `hosts[]` clause, `merge_host`):
+    // measured at 57,689 on 2026-09-27; plus 100.
+    // Host identity & health (`provision_hosts` `host` / `content_only`,
+    // `forget_project`): measured at 58,284 on 2026-09-28; plus 100.
+    const BUDGET_BYTES: usize = 58_384;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

@@ -86,6 +86,10 @@ pub const HEALTH_CLAUDE_MAX_BEHIND: &str = "health.claude_max_behind";
 /// Seconds without an accepted hook from a reachable host that has a live
 /// session before it reads as `hooks_silent` (hosts F9). Default 1 h.
 pub const HEALTH_HOOKS_SILENT_SECS: &str = "health.hooks_silent_secs";
+/// Write fleet's two skill dirs even when `~/.claude/skills` is inside a
+/// git work tree (a dotfiles checkout, hosts F2). Off: provisioning
+/// refuses such a host with `E_INVALID` (decision B-2).
+pub const PROVISION_FORCE_GIT_TREE: &str = "provision.force_git_tree";
 /// How many resumable lost sessions a batch restore resumes in parallel.
 /// Read by Task 3's restore path via `get_setting` + `settings::resolve`.
 pub const RESTORE_BATCH_SIZE: &str = "restore.batch_size";
@@ -459,6 +463,11 @@ pub const SPECS: &[Spec] = &[
         key: HEALTH_HOOKS_SILENT_SECS,
         default: "3600",
         kind: Kind::Secs,
+    },
+    Spec {
+        key: PROVISION_FORCE_GIT_TREE,
+        default: "false",
+        kind: Kind::Bool,
     },
     Spec {
         key: WORK_RETENTION_JOURNAL_DAYS,

@@ -787,7 +787,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "provision_hosts",
         Verdict::LocalOnly {
             instead: "it rewrites every host's hook block to report to this app; provision \
-                      from the hub with `fleet-hub`",
+                      from the hub with `fleet-hub provision [--host <alias>] [--content-only]`",
         },
     ),
     (

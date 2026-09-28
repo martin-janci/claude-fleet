@@ -208,7 +208,10 @@ pub async fn provision_hosts(
         &*ssh,
         &tunnels,
         &base,
-        rotate.unwrap_or(false),
+        fleet_core::service::provision::ProvisionScope {
+            rotate: rotate.unwrap_or(false),
+            ..Default::default()
+        },
     )
     .await
 }

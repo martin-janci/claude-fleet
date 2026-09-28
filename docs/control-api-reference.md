@@ -77,6 +77,12 @@ Ensure the UX agent's operator session exists; returns its row.
 
 Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers. hosts[]: per host disk_home_pct/disk_low, claude_behind, agent_behind, hooks_silent.
 
+### `forget_project`
+
+Drop a project row and its worktrees (ghost sessions go with it); E_INVALID_STATE while a live session references it. Master only.
+
+Parameters: `project_id`
+
 ### `get_clipboard`
 
 Read a host's system clipboard (what Ctrl+V gives there), via wl-paste, xclip, xsel or pbpaste. E_CLIPBOARD_UNAVAILABLE if none is installed.
@@ -237,9 +243,9 @@ Propose a layer split from the last scan, grouping assets by the exact set of ho
 
 ### `provision_hosts`
 
-Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it.
+Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it. host: one alias; content_only: skills, CLAUDE.md and hooks only, no token.
 
-Parameters: `rotate`
+Parameters: `content_only`, `host`, `rotate`
 
 ### `quick_replies`
 

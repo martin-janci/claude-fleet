@@ -607,6 +607,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Lifecycle,
     },
+    // Host identity & health, task 7: drops a project row nothing can
+    // rescan away — fleet admin.
+    ToolPolicy {
+        name: "forget_project",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "list_worktrees",
         access: Access::Client,

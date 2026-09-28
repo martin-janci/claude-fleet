@@ -64,7 +64,7 @@ the host's detail in the **Hosts** view (⌘I):
   `E_FORBIDDEN`.
 
 The fleet-admin tools — `provision_hosts`, `add_host`, `remove_host`,
-`merge_host`, `hide_host` — are **master-token only** in either mode: a token lifted from
+`merge_host`, `hide_host`, `forget_project` — are **master-token only** in either mode: a token lifted from
 one host must not be able to rotate, re-provision or remove the others.
 
 **Rotate** next to a host mints a fresh token and re-provisions that host with
@@ -261,6 +261,7 @@ Index by area (names only; see the reference for details):
   `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
   connected; see *`/agent`* above).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
+  `forget_project` (drop a row a local-less hub cannot rescan away),
   `list_worktrees`, `list_host_worktrees` (one host scanned over SSH, for the
   worktrees fleet's own rows do not cover), `delete_worktree`.
 - **Sessions** — `list_sessions`, `related_sessions`, `new_session`,
@@ -1008,6 +1009,8 @@ timeline instead of a reply. See `docs/hub.md` → *Link two hubs*.
 6. **Reverse SSH tunnel** (remote hosts only, loopback hubs only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel. A `fleet-hub` daemon configured with a public URL skips this step entirely — every host already reaches the hub's public address directly.
 
 **After provisioning, each host must restart Claude** to load the MCP server (skill files and CLAUDE.md are picked up live, but the MCP server entry requires a restart).
+
+`provision_hosts` takes `host` (one alias; every active host when omitted) and `content_only` (steps 1, 2 and 5 only — skills, the CLAUDE.md block and hooks, with the host's existing token; no token minted, no `~/.claude.json` rewrite, no tunnel, no restart needed; a host without a token answers `E_NO_TOKEN`). Each provisioning records a fingerprint of the content it shipped, and `list_hosts` reports `provisioned_at` and `provision_stale` (provisioned with content other than this build's). Each managed skill dir carries a `.fleet-managed` marker; a skills dir inside a git work tree is refused (`E_INVALID`) unless `provision.force_git_tree` is on.
 
 **After upgrading claude-fleet to a build with per-host tokens, re-provision every host** (Settings → Control API → **Provision hosts**; no rotate needed). Until a host is re-provisioned it keeps authenticating with the master token and its old command hook keeps posting `?token=` — the master token is still accepted in that query form on `/hook` (only there, and only the master token) for the transition — but it has no host identity, cannot be set `readonly`, and its hook still carries the token in argv. **The `?token=` form is removed in 0.4.**
 

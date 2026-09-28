@@ -868,6 +868,15 @@
       </div>
       <p class="hook-desc">Auth menus, trust prompts and reconnects are always notify-only.</p>
 
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={settingBool($fleetSettings, SETTING_KEYS.provisionForceGitTree)}
+          disabled={automationBusy}
+          data-testid="provision-force-git-tree"
+          onchange={() => toggleSetting(SETTING_KEYS.provisionForceGitTree)} />
+        Write fleet's two skill dirs even when ~/.claude/skills is a git checkout
+      </label>
       <label class="toggle gc-toggle">
         <input
           type="checkbox"

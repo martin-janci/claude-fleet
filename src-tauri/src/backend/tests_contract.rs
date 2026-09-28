@@ -150,6 +150,8 @@ pub(crate) fn sample_host() -> HostRow {
         health_at: Some(1_725_000_000),
         last_hook_at: Some(1_725_000_000),
         agent_version: Some("0.3.1".into()),
+        provisioned_at: Some(1_725_000_000),
+        provision_stale: true,
     }
 }
 

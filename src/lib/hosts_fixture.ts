@@ -61,6 +61,8 @@ export function host(alias: string, over: Partial<HostRow> = {}): HostRow {
     health_at: NOW - 2 * MIN,
     last_hook_at: NOW - 5 * MIN,
     agent_version: null,
+    provisioned_at: NOW - 86400,
+    provision_stale: false,
     ...over,
   };
 }

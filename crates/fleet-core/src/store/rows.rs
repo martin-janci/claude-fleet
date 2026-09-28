@@ -713,6 +713,13 @@ pub struct HostRow {
     /// The fleet-agent version its last hello reported (agent hosts).
     #[serde(default)]
     pub agent_version: Option<String>,
+    /// When `provision_hosts` last completed on this host (migration 068).
+    #[serde(default)]
+    pub provisioned_at: Option<i64>,
+    /// `provisioned` but with content older than this build ships (or
+    /// unknown). Computed from the stored fingerprint, never stored.
+    #[serde(default)]
+    pub provision_stale: bool,
 }
 
 /// The volatile half of a host row, as `host:pinged` carries it (host
@@ -766,10 +773,14 @@ pub(super) const HOST_COLUMNS: &str =
     "alias, ssh_alias, reachable, claude_version, tmux_version, hidden, \
      last_pinged_at, account_uuid, provisioned, transport, org_id, claude_version_at, \
      disk_home_free_kb, disk_home_total_kb, disk_tmp_free_kb, load_1m, mem_avail_kb, \
-     uptime_secs, health_at, last_hook_at, agent_version";
+     uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
+    let provisioned = row.get::<_, i64>(8)? != 0;
+    // Task 6: a provisioned host whose stored content fingerprint is not
+    // this build's (or unknown, an older provisioning) reads as stale.
+    let fingerprint: Option<String> = row.get(22)?;
     Ok(HostRow {
         alias: row.get(0)?,
         ssh_alias: row.get(1)?,
@@ -779,7 +790,7 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         hidden: row.get::<_, i64>(5)? != 0,
         last_pinged_at: row.get(6)?,
         account_uuid: row.get(7)?,
-        provisioned: row.get::<_, i64>(8)? != 0,
+        provisioned,
         transport: row.get(9)?,
         org_id: row.get(10)?,
         claude_version_at: row.get(11)?,
@@ -792,6 +803,9 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         health_at: row.get(18)?,
         last_hook_at: row.get(19)?,
         agent_version: row.get(20)?,
+        provisioned_at: row.get(21)?,
+        provision_stale: provisioned
+            && fingerprint.as_deref() != Some(crate::service::provision::fingerprint()),
     })
 }
 

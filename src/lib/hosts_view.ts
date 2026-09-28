@@ -167,6 +167,7 @@ export type AttentionKind =
   | 'token_missing'
   | 'hooks_missing'
   | 'hooks_stale'
+  | 'provision_stale'
   | 'disk_low'
   | 'agent_old'
   | 'claude_old';
@@ -222,6 +223,14 @@ export function hostAttention(args: {
       kind: 'hooks_stale',
       glyph: '⚠',
       title: `Fleet hooks are installed on ${host.alias}, but none of its sessions has reported a finished turn. The hooks may be stale — re-provision the host.`,
+    };
+  }
+  // hosts F1: every host ran skills from 15 hub upgrades ago and nothing said so.
+  if (host.provision_stale) {
+    return {
+      kind: 'provision_stale',
+      glyph: '↻',
+      title: `${host.alias} was provisioned with an older fleet (content differs from this build): re-provision it — fleet-hub provision --host ${host.alias} --content-only.`,
     };
   }
   // hosts F4 / ux F-14: two hosts sat at 98 % disk with no signal anywhere.

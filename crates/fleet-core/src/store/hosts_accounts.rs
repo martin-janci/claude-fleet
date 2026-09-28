@@ -449,15 +449,28 @@ impl Store {
         Ok(())
     }
 
+    /// Mark a host provisioned (or not). With `true` the content fingerprint
+    /// this build ships and the time are recorded too (migration 068), so
+    /// `HostRow::provision_stale` can compare on every later read; with
+    /// `false` both are cleared.
     pub fn set_host_provisioned(
         &self,
         alias: &str,
         provisioned: bool,
     ) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "UPDATE hosts SET provisioned=?1 WHERE alias=?2",
-            rusqlite::params![if provisioned { 1 } else { 0 }, alias],
-        )?;
+        if provisioned {
+            self.conn.execute(
+                "UPDATE hosts SET provisioned=1, provision_fingerprint=?1, provisioned_at=?2 \
+                 WHERE alias=?3",
+                rusqlite::params![crate::service::provision::fingerprint(), now_unix(), alias],
+            )?;
+        } else {
+            self.conn.execute(
+                "UPDATE hosts SET provisioned=0, provision_fingerprint=NULL, provisioned_at=NULL \
+                 WHERE alias=?1",
+                rusqlite::params![alias],
+            )?;
+        }
         Ok(())
     }
 
@@ -881,6 +894,42 @@ mod tests {
         let row = s.get_host_row("h").unwrap().unwrap();
         assert_eq!(row.last_hook_at, Some(1_700_000_100));
         assert_eq!(row.agent_version.as_deref(), Some("0.2.26"));
+    }
+
+    /// hosts F1: `provisioned` was a boolean set once; now it carries which
+    /// content and when, so an older provisioning reads as stale.
+    #[test]
+    fn set_host_provisioned_records_the_fingerprint_and_a_changed_one_reads_stale() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        let fresh = s.get_host_row("h").unwrap().unwrap();
+        assert!(
+            !fresh.provisioned && !fresh.provision_stale,
+            "unprovisioned is not stale"
+        );
+        s.set_host_provisioned("h", true).unwrap();
+        let row = s.get_host_row("h").unwrap().unwrap();
+        assert!(row.provisioned);
+        assert!(row.provisioned_at.is_some());
+        assert!(!row.provision_stale);
+        s.conn_for_test()
+            .execute(
+                "UPDATE hosts SET provision_fingerprint='old' WHERE alias='h'",
+                [],
+            )
+            .unwrap();
+        assert!(s.get_host_row("h").unwrap().unwrap().provision_stale);
+        // A provisioning from before the fingerprint existed is stale too.
+        s.conn_for_test()
+            .execute(
+                "UPDATE hosts SET provision_fingerprint=NULL WHERE alias='h'",
+                [],
+            )
+            .unwrap();
+        assert!(s.get_host_row("h").unwrap().unwrap().provision_stale);
+        s.set_host_provisioned("h", false).unwrap();
+        let row = s.get_host_row("h").unwrap().unwrap();
+        assert!(!row.provisioned && !row.provision_stale && row.provisioned_at.is_none());
     }
 
     /// data-sync F2/F5: the `local` → `mac` rename left 249 worktree rows

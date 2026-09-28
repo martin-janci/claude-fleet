@@ -834,6 +834,16 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     if let Err(e) = fleet_core::service::provision::reestablish_tunnels(&store, &tunnels, &base) {
         tracing::warn!(error = %e.message, "re-establishing host tunnels failed");
     }
+    // hosts F1: every host ran skills from 15 hub upgrades ago. A minute
+    // after start (the first reconcile pass has refreshed `reachable`),
+    // refresh the content of every host whose fingerprint is not this
+    // build's — no token, no `~/.claude.json`, nothing a person must watch.
+    let reprovision = fleet_core::service::provision::spawn_reprovision_stale(
+        Arc::clone(&store),
+        Arc::clone(&ssh),
+        base.clone(),
+        std::time::Duration::from_secs(60),
+    );
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         public = ?r.public_url,
@@ -934,6 +944,9 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         tick_handles.push(h);
     }
     await_ticks(tick_handles, TICK_SHUTDOWN_TIMEOUT).await;
+    // A stale-content refresh still sleeping (or mid-host) must not outlive
+    // the SSH masters it would use.
+    reprovision.abort();
     tunnels.stop_all();
     ssh.shutdown_all();
     Ok(ExitCode::SUCCESS)

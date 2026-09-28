@@ -141,6 +141,18 @@ fn hosts_has_health_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 068: `hosts` already has its
+/// `provision_fingerprint` column (and `provisioned_at` beside it), and
+/// `ALTER TABLE ... ADD COLUMN` would fail again. See [`Migration`].
+fn hosts_has_provision_fingerprint(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'provision_fingerprint'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 043: `session_messages` already has
 /// its `to_participant_id` column, and `ALTER TABLE ... ADD COLUMN` would
 /// fail again. See [`Migration`].
@@ -666,6 +678,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 67,
         sql: include_str!("../../migrations/067_host_health.sql"),
         already_applied: Some(hosts_has_health_at),
+    },
+    // Host identity & health, task 6: the provisioning content fingerprint
+    // and its stamp on `hosts`. Guarded: ADD COLUMN.
+    Migration {
+        version: 68,
+        sql: include_str!("../../migrations/068_host_provision_fingerprint.sql"),
+        already_applied: Some(hosts_has_provision_fingerprint),
     },
 ];
 
