@@ -36,6 +36,14 @@
     ],
     "macOS": {
       "hardenedRuntime": false
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
     }
   }
 }

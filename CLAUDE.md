@@ -340,6 +340,16 @@ Conversation event tracking is landed end to end (migration 037
 `session_conversations` API; the Conversations UI panel), per
 `docs/superpowers/specs/2026-09-18-conversation-events-design.md`.
 
+The desktop builds for Windows as a **client** (plan
+`docs/superpowers/plans/2026-09-27-windows-desktop.md`, user guide
+`docs/windows.md`): no `local` host (`retire_local_host`, as on a hub with
+`hub.local_host=false`), no ssh multiplexing (`ssh::mux_supported`, off
+there), the home/cache dirs through `fleet_core::home` only, and the hub
+token in Credential Manager. Unix-only code and tests stay `#[cfg(unix)]`
+(for a test module: a `#[cfg(unix)]` line above a bare `#[cfg(test)]`, the
+form `no_eprintln_tests` recognises); `rust-windows` in CI keeps clippy and
+the tests green there. `fleet-agent` and `fleet-hub` stay Unix-only.
+
 Hub↔hub federation (cycle 3) is landed: two `fleet-hub` daemons link with
 `fleet-hub pair --mode peer` / `peer add|list|remove`, a dialer supervisor
 and a `peer_exchange` listener carry messages both ways by fleet address,

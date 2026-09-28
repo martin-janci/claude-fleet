@@ -771,7 +771,9 @@ pub fn is_allowed_tracker_host(host: &str) -> bool {
 }
 
 /// Validate a credential reference: `env:NAME` (`[A-Za-z_][A-Za-z0-9_]*`) or
-/// `file:/absolute/path` (no `..`, no control characters).
+/// `file:/absolute/path` (no `..`, no control characters). Absolute by this
+/// machine's rules: the file is read here, so on a Windows desktop that is
+/// `file:C:\\…`.
 pub fn validate_credential_ref(r: &str) -> Result<(), IpcError> {
     let bad = |why: &str| {
         IpcError::new(
@@ -790,8 +792,9 @@ pub fn validate_credential_ref(r: &str) -> Result<(), IpcError> {
         return Ok(());
     }
     if let Some(path) = r.strip_prefix("file:") {
-        if !path.starts_with('/')
-            || path.split('/').any(|c| c == "..")
+        let p = std::path::Path::new(path);
+        if !p.is_absolute()
+            || p.components().any(|c| c == std::path::Component::ParentDir)
             || path.chars().any(char::is_control)
         {
             return Err(bad("must name an absolute path without .."));

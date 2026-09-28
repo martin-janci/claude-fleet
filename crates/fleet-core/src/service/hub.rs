@@ -212,6 +212,39 @@ pub fn ensure_local_allowed(alias: &str) -> Result<(), IpcError> {
     check_local_allowed(alias, local_host_enabled())
 }
 
+/// Put the `local` row of a process without a local host (a hub with
+/// `hub.local_host=false`, a Windows desktop) out of sight, and ghost its
+/// sessions. Returns how many sessions were retired. Idempotent.
+///
+/// The row is there because every `state.db` is seeded with one (and a hub's
+/// may be a desktop's copy). Hidden, nothing lists it; marked unreachable,
+/// nothing counts or polls it either (fleet_health, the account-usage tick);
+/// reconcile skips it regardless. `update_host_probe` is the only
+/// reachability setter, so the row's versions and last ping are written back
+/// unchanged. Its sessions would stay live forever, since nothing probes
+/// `local` here, and every click on one would hit the refusal: they are
+/// ghosted instead (dismissable, reaped by the routine prune).
+pub fn retire_local_host(s: &Store, now: i64) -> Result<usize, String> {
+    let local_host = crate::service::projects::LOCAL_HOST;
+    let hosts = s.list_hosts().map_err(|e| format!("list hosts: {e}"))?;
+    if let Some(local) = hosts.iter().find(|h| h.alias == local_host) {
+        s.set_host_hidden(local_host, true)
+            .map_err(|e| format!("hide the local host: {e}"))?;
+        if local.reachable {
+            s.update_host_probe(
+                local_host,
+                false,
+                local.claude_version.as_deref(),
+                local.tmux_version.as_deref(),
+                local.last_pinged_at.unwrap_or(0),
+            )
+            .map_err(|e| format!("mark the local host unreachable: {e}"))?;
+        }
+    }
+    retire_local_sessions(s, now)
+        .map_err(|e| format!("retire the local host's sessions: {}", e.message))
+}
+
 /// The `lost_reason` of a session a hub without a local host retired.
 pub const LOST_LOCAL_DISABLED: &str = "local_disabled";
 

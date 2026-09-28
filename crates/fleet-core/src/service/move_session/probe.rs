@@ -153,9 +153,12 @@ pub fn parse_commits_ahead(stdout: &str) -> Result<Option<u32>, IpcError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use crate::service::move_session::carry::tests::{bash, git, require};
 
+    #[cfg(unix)]
     #[test]
     fn a_missing_path_is_absent() {
         if !require(&["bash"]) {
@@ -177,6 +180,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_clean_worktree_reports_its_head_and_no_entries() {
         if !require(&["git", "bash"]) {
@@ -200,6 +204,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_dirty_worktree_lists_what_git_status_lists() {
         if !require(&["git", "bash"]) {
@@ -232,6 +237,7 @@ mod tests {
     /// ANOTHER repository: git walks up and answers for the enclosing repo.
     /// Its HEAD and its dirty files are not the target's, and must never be
     /// reported as if they were.
+    #[cfg(unix)]
     #[test]
     fn a_path_inside_another_repo_is_not_reported_as_that_repos_worktree() {
         if !require(&["git", "bash"]) {
@@ -264,6 +270,7 @@ mod tests {
 
     /// A path in no repository at all is unknown, with a reason — never a
     /// worktree.
+    #[cfg(unix)]
     #[test]
     fn a_path_in_no_repo_is_an_error_not_a_worktree() {
         if !require(&["git", "bash"]) {
@@ -284,6 +291,7 @@ mod tests {
         assert!(String::from_utf8_lossy(&out.stderr).contains("not-a-worktree"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_probe_writes_nothing() {
         if !require(&["git", "bash"]) {
@@ -333,6 +341,7 @@ mod tests {
         assert!(!ghost.exists(), "the probe created the path it looked at");
     }
 
+    #[cfg(unix)]
     #[test]
     fn commits_ahead_counts_what_the_tip_lacks_and_refuses_to_guess() {
         if !require(&["git", "bash"]) {
@@ -369,6 +378,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn target_tip_is_none_without_a_clone_or_a_branch() {
         if !require(&["git", "bash"]) {

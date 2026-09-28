@@ -866,6 +866,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_host_script_local_executes_bash() {
         let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
@@ -878,6 +879,7 @@ mod tests {
     /// Regression test: a scan script that exits non-zero must surface as an
     /// error, never as an empty-but-successful snapshot (which previously
     /// made every catalog asset read back as `missing`).
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_host_script_local_fails_on_nonzero_exit() {
         let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
@@ -891,6 +893,7 @@ mod tests {
 
     /// A cancelled token stops a host script instead of waiting it out, and
     /// an over-budget script fails on the wall clock rather than hanging.
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_host_script_with_honours_cancellation_and_the_wall_clock() {
         let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
@@ -929,6 +932,7 @@ mod tests {
     // `CATALOG_TEST_LOCK` only serialises tests against the process-global
     // `CATALOG`; it guards no resource the async runtime itself needs, so
     // holding it across `scan_hosts`'s awaits is safe despite the lint.
+    #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn scan_hosts_scans_local_and_persists_rows() {

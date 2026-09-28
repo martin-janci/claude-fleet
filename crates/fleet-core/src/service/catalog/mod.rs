@@ -56,8 +56,8 @@ pub struct ConfigureArgs {
 }
 
 fn expand_home(p: &str) -> String {
-    match (p.strip_prefix("~/"), std::env::var("HOME")) {
-        (Some(rest), Ok(home)) => format!("{home}/{rest}"),
+    match (p.strip_prefix("~/"), crate::home::home_dir()) {
+        (Some(rest), Some(home)) => format!("{}/{rest}", home.display()),
         _ => p.to_string(),
     }
 }

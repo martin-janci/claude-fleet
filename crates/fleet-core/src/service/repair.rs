@@ -5316,8 +5316,10 @@ mod tests {
 
     /// Runs scripts with the real local `bash`; tmux must never be touched
     /// (callers use `AUTO`).
+    #[cfg(unix)]
     struct LocalExec;
 
+    #[cfg(unix)]
     #[async_trait]
     impl RepairExec for LocalExec {
         async fn run_script(&self, script: &str) -> Result<ScriptOutput, IpcError> {
@@ -5343,6 +5345,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn git_in(dir: &std::path::Path, args: &[&str]) {
         let st = std::process::Command::new("git")
             .arg("-C")
@@ -5354,6 +5357,7 @@ mod tests {
     }
 
     /// `git init` + one commit on `main` at `root`.
+    #[cfg(unix)]
     fn init_repo(root: &std::path::Path) {
         std::fs::create_dir_all(root).unwrap();
         let st = std::process::Command::new("git")
@@ -5369,6 +5373,7 @@ mod tests {
         git_in(root, &["commit", "-q", "-m", "init"]);
     }
 
+    #[cfg(unix)]
     fn local_spec(root: &std::path::Path, wt: &std::path::Path, tag: &str) -> WorkspaceSpec {
         let mut s = spec(true);
         s.project_root = root.to_str().unwrap().to_string();
@@ -5499,6 +5504,7 @@ mod tests {
     /// `.worktrees` layout against real git: a key-only session whose path is
     /// only guessed (`.claude/worktrees/<name>`) resolves to the real
     /// `.worktrees/<name>` checkout — a no-op, never the missing guess.
+    #[cfg(unix)]
     #[tokio::test]
     async fn real_git_guessed_path_resolves_the_dot_worktrees_layout() {
         let base = tempfile::TempDir::new().unwrap();
@@ -5530,6 +5536,7 @@ mod tests {
     /// Branch gone everywhere with an unreachable origin: automatic runs only
     /// report it, and the explicit repair aborts instead of silently forking
     /// a new branch from base.
+    #[cfg(unix)]
     #[tokio::test]
     async fn real_git_unreachable_origin_aborts_branch_recreation() {
         let base = tempfile::TempDir::new().unwrap();
@@ -5567,6 +5574,7 @@ mod tests {
 
     /// Branch gone everywhere and no origin at all: the explicit repair
     /// recreates it from the base branch and records that.
+    #[cfg(unix)]
     #[tokio::test]
     async fn real_git_no_origin_recreates_branch_from_base_explicitly() {
         let base = tempfile::TempDir::new().unwrap();
@@ -5584,6 +5592,7 @@ mod tests {
 
     /// Prune scope against real git: two worktrees are deleted; repairing
     /// ours must leave the other's stale registration for its owner.
+    #[cfg(unix)]
     #[tokio::test]
     async fn real_git_repair_leaves_other_stale_registrations_alone() {
         let base = tempfile::TempDir::new().unwrap();
@@ -5643,6 +5652,7 @@ mod tests {
 
     /// Real `git` + a real `bash`, no tmux (policy Leave): delete a
     /// worktree directory and watch the repair bring it back on its branch.
+    #[cfg(unix)]
     #[tokio::test]
     async fn real_git_repairs_a_deleted_worktree_directory() {
         use std::process::Command;
@@ -6148,6 +6158,7 @@ mod tests {
     /// The owner's case against real git: `rm -rf` of a registered worktree
     /// directory. The automatic policy removes that one entry and re-adds it
     /// on the same branch; the second run is a no-op.
+    #[cfg(unix)]
     #[tokio::test]
     async fn real_git_automatic_repair_recreates_a_vanished_registered_worktree() {
         use std::process::Command;
@@ -6212,6 +6223,7 @@ mod tests {
 
     /// The unmounted-volume guard against real git: the whole worktrees dir
     /// is gone, so the parent is missing and nothing is removed.
+    #[cfg(unix)]
     #[tokio::test]
     async fn real_git_missing_parent_blocks_the_automatic_removal() {
         let base = tempfile::TempDir::new().unwrap();
@@ -6342,10 +6354,12 @@ mod tests {
 
     /// Real probe, then the directory reappears (with untracked work) right
     /// before the apply — an autofs / NFS path mounting late.
+    #[cfg(unix)]
     struct ReappearExec {
         dir: std::path::PathBuf,
     }
 
+    #[cfg(unix)]
     #[async_trait]
     impl RepairExec for ReappearExec {
         async fn run_script(&self, script: &str) -> Result<ScriptOutput, IpcError> {
@@ -6364,6 +6378,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn real_git_directory_reappearing_before_the_apply_is_never_removed() {
         let base = tempfile::TempDir::new().unwrap();
@@ -6679,6 +6694,7 @@ mod tests {
 
     /// Against real git: the parent directory is replaced (a new inode, as a
     /// remount gives). Automatic repair refuses; the registration stays.
+    #[cfg(unix)]
     #[tokio::test]
     async fn real_git_replaced_parent_directory_stays_explicit() {
         let base = tempfile::TempDir::new().unwrap();
@@ -6728,6 +6744,7 @@ mod tests {
     /// Against real git: two worktrees under one parent are deleted, but the
     /// parent is the same directory (its fingerprint matches), so the other
     /// is a stale registration: ours is re-added, the sibling only warned.
+    #[cfg(unix)]
     #[tokio::test]
     async fn real_git_stale_sibling_is_only_a_warning_when_the_fingerprint_matches() {
         let base = tempfile::TempDir::new().unwrap();
@@ -6777,6 +6794,7 @@ mod tests {
         assert!(!other.exists(), "the sibling is only reported");
     }
 
+    #[cfg(unix)]
     fn worktree_list(root: &std::path::Path) -> String {
         let out = std::process::Command::new("git")
             .arg("-C")

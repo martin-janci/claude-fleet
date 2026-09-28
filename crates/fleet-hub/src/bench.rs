@@ -579,7 +579,6 @@ mod tests {
             _: std::time::Duration,
             _: usize,
         ) -> Result<std::process::Output, fleet_core::ipc_error::IpcError> {
-            use std::os::unix::process::ExitStatusExt;
             self.hosts.lock().unwrap().push(host.to_string());
             self.commands.lock().unwrap().push(args.join(" "));
             self.stdins
@@ -587,7 +586,7 @@ mod tests {
                 .unwrap()
                 .push(String::from_utf8(stdin).unwrap());
             Ok(std::process::Output {
-                status: std::process::ExitStatus::from_raw(0),
+                status: fleet_core::agent::transport::exit_status(0),
                 stdout: self.stdout.clone().into_bytes(),
                 stderr: Vec::new(),
             })

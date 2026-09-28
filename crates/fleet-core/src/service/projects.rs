@@ -494,6 +494,7 @@ mod tests {
         assert_eq!(strip_root("/c/x", "/b/x"), None);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn refresh_projects_drops_stale_rows_outside_the_new_root() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -533,6 +534,7 @@ mod tests {
     /// scan can never rediscover it, so the refresh sweep must treat "under the
     /// root and missing on disk" as normal, not stale. If this fails, remotely
     /// added projects vanish from the sidebar on the next refresh.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_remotely_added_project_survives_refresh_though_absent_locally() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -563,6 +565,7 @@ mod tests {
     /// that must never be read as staleness. A plain (non-adopted) row in the
     /// same shape is still dropped, so the fix does not weaken the existing
     /// sweep.
+    #[cfg(unix)]
     #[tokio::test]
     async fn refresh_projects_keeps_an_adopted_row_outside_the_root_but_drops_a_plain_one() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -593,6 +596,7 @@ mod tests {
     /// The operator's project lives outside the projects root and no scan will
     /// ever rediscover it, which is exactly the shape the sweep deletes. It must
     /// survive, or the agent loses its home on the next Settings save.
+    #[cfg(unix)]
     #[tokio::test]
     async fn refresh_projects_keeps_a_system_row_outside_the_root() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -612,6 +616,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn refresh_projects_scans_the_flat_setting_root() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -764,6 +769,7 @@ mod tests {
     /// `main`. A session still pointing at the old row must not abort the
     /// refresh on the foreign key (which then failed every later refresh
     /// too); it moves to the `main` row of the same checkout.
+    #[cfg(unix)]
     #[tokio::test]
     async fn refresh_projects_repoints_sessions_from_a_renamed_main_row() {
         use crate::projects::test_git::init_repo;
@@ -811,6 +817,7 @@ mod tests {
     /// Remote hosts' worktree rows (stored by their EnterWorktree hooks) are
     /// not the local scan's to prune: a local refresh keeps them, even one
     /// named like a local row, and the local project tree never lists them.
+    #[cfg(unix)]
     #[tokio::test]
     async fn refresh_projects_never_deletes_remote_worktree_rows() {
         use crate::projects::test_git::init_repo;

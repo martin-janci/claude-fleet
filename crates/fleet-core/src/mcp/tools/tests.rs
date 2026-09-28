@@ -1,7 +1,9 @@
 use super::*;
 use crate::ipc_error::codes;
 use crate::service::add_project::{AddProjectArgs, AddProjectSource};
-use crate::store::{CursorRow, StartSource};
+use crate::store::CursorRow;
+#[cfg(unix)]
+use crate::store::StartSource;
 use std::time::Duration;
 
 fn text_of(c: &Content) -> &str {
@@ -5051,6 +5053,7 @@ async fn an_unknown_fresh_for_still_attempts_the_read_but_writes_no_cursor() {
 /// host `local` runs bash locally (`ssh::run_shell_bounded`, enabled by
 /// default), so `fresh_for`'s anchor positioning is exercised through an
 /// actual read, not asserted only at the decision level.
+#[cfg(unix)]
 fn transcript_fixture(path: &std::path::Path, jsonl: &str) -> (Store, i64, i64) {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
@@ -5074,6 +5077,7 @@ fn transcript_fixture(path: &std::path::Path, jsonl: &str) -> (Store, i64, i64) 
 
 /// One JSONL turn: a `user` prompt followed by its `assistant` reply, with
 /// distinct `timestamp`s so `ConvTurn::at`/`ended_at` are both real values.
+#[cfg(unix)]
 fn jsonl_turn(prompt: &str, reply: &str, at: &str, ended_at: &str) -> String {
     format!(
         "{}\n{}\n",
@@ -5082,6 +5086,7 @@ fn jsonl_turn(prompt: &str, reply: &str, at: &str, ended_at: &str) -> String {
     )
 }
 
+#[cfg(unix)]
 async fn read_transcript(
     t: &FleetTools,
     target: i64,
@@ -5111,6 +5116,7 @@ async fn read_transcript(
 /// "last (turn_seq − watermark) turns" arithmetic takes the last ONE
 /// file-turn — turn C, still in progress — and turn B, the actual new
 /// completed turn, is never served.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_in_progress_turn_does_not_hide_the_completed_turn_before_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -5158,6 +5164,7 @@ async fn an_in_progress_turn_does_not_hide_the_completed_turn_before_it() {
 
 /// A turn re-read through the SAME anchor `at` (its fingerprint differs
 /// from what was stored) is re-served whole — never left half-delivered.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_grown_in_progress_turn_is_re_served_not_skipped() {
     let dir = tempfile::tempdir().unwrap();
@@ -5203,6 +5210,7 @@ async fn a_grown_in_progress_turn_is_re_served_not_skipped() {
 /// Oldest-first paging: a small `max_chars` forces one turn per page, and
 /// every new turn must still be seen exactly once, in order, with `more`
 /// on every page but the last.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_transcript_delta_pages_oldest_first_with_more_and_skips_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -5263,6 +5271,7 @@ async fn a_transcript_delta_pages_oldest_first_with_more_and_skips_nothing() {
 
 /// A turn whose opening prompt carries no `timestamp` — `ConvTurn::at` is
 /// `None`, so it cannot be an anchor.
+#[cfg(unix)]
 fn jsonl_turn_without_at(prompt: &str, reply: &str, ended_at: &str) -> String {
     format!(
         "{}\n{}\n",
@@ -5274,6 +5283,7 @@ fn jsonl_turn_without_at(prompt: &str, reply: &str, ended_at: &str) -> String {
 /// Seed-read a transcript, append `turns` (each already one-or-more JSONL
 /// lines), record `stops` Stop hooks, then page with `max_chars` until
 /// `unchanged` (at most 8 calls). Returns every page's text.
+#[cfg(unix)]
 async fn page_transcript_until_unchanged(
     appended: &[String],
     stops: usize,
@@ -5323,6 +5333,7 @@ async fn page_transcript_until_unchanged(
 /// last anchorable turn, and the cut turn opens the next page. Here the
 /// budget fits B + C (C has no `at`) but not D, so page 1 is B alone, page
 /// 2 is C + D, and every turn is served exactly once — no reset needed.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_transcript_page_ending_on_an_unanchorable_turn_is_cut_back_not_looped() {
     let long_e = format!("{}EEEE_4", "x".repeat(40));
@@ -5370,6 +5381,7 @@ async fn a_transcript_page_ending_on_an_unanchorable_turn_is_cut_back_not_looped
 /// not fit with the next one cannot advance by cutting back. It is
 /// answered as a visible `too_far_behind` reset (the default window,
 /// `more: false`) — it terminates, and says so, never a silent loop.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_transcript_page_with_no_anchorable_turn_resets_visibly_and_terminates() {
     let long_d = format!("{}DDDD_3", "y".repeat(40));
@@ -5405,6 +5417,7 @@ async fn a_transcript_page_with_no_anchorable_turn_resets_visibly_and_terminates
 /// An anchor the read cannot locate (the file was replaced out from under
 /// it — log rotation, or simply too far behind the tail window) resets
 /// full with `too_far_behind`, never a guess at what to serve.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_transcript_anchor_the_read_cannot_locate_resets_too_far_behind() {
     let dir = tempfile::tempdir().unwrap();
@@ -5459,6 +5472,7 @@ async fn a_transcript_anchor_the_read_cannot_locate_resets_too_far_behind() {
 
 /// A conversation boundary (e.g. `/clear`) resets full with
 /// `conversation_changed`, even though the watermark alone looked current.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_transcript_conversation_change_resets_full_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
@@ -5506,6 +5520,7 @@ async fn a_transcript_conversation_change_resets_full_end_to_end() {
 /// skip-the-cursor-write guard would go unnoticed. This one uses a REAL,
 /// readable transcript: the read succeeds, and only the guard stops a
 /// cursor row from being written for a reader that does not exist.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_unknown_fresh_for_with_a_readable_transcript_answers_full_and_writes_no_cursor() {
     let dir = tempfile::tempdir().unwrap();
@@ -5552,6 +5567,7 @@ async fn an_unknown_fresh_for_with_a_readable_transcript_answers_full_and_writes
 /// FIRST instead, misreads it as "grown", and re-serves `[A, B]` on every
 /// call — a page that never reaches the real new content and never
 /// advances, because `more` stays true and the watermark stays held.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_duplicate_at_between_two_turns_does_not_loop_forever() {
     let dir = tempfile::tempdir().unwrap();
@@ -5624,6 +5640,7 @@ async fn a_duplicate_at_between_two_turns_does_not_loop_forever() {
 /// landed, with no reply yet, must not be mistaken for "the last turn" —
 /// that would both hide the real last reply behind it and anchor on
 /// content that never renders to anything.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_just_landed_empty_prompt_does_not_hide_the_reply_before_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -5671,6 +5688,7 @@ async fn a_just_landed_empty_prompt_does_not_hide_the_reply_before_it() {
 /// merged notification) adds rendered text to an anchored turn without
 /// touching it, so growth detection must key on the turn's rendered
 /// CONTENT, not `ended_at`.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_anchored_turn_that_gains_an_interrupt_with_no_new_assistant_entry_is_re_served() {
     let dir = tempfile::tempdir().unwrap();
@@ -5717,6 +5735,7 @@ async fn an_anchored_turn_that_gains_an_interrupt_with_no_new_assistant_entry_is
 
 // ---- Fix round 3 -------------------------------------------------------------
 
+#[cfg(unix)]
 fn notification_jsonl(at: &str, summary: &str) -> String {
     format!(
         "{}\n",
@@ -5730,6 +5749,7 @@ fn notification_jsonl(at: &str, summary: &str) -> String {
     )
 }
 
+#[cfg(unix)]
 fn bash_input_jsonl(at: &str, command: &str) -> String {
     format!(
         "{}\n",
@@ -5747,6 +5767,7 @@ fn bash_input_jsonl(at: &str, command: &str) -> String {
 /// `ended_at` change — and a turn C opens next, stamped the SAME `at` as A.
 /// A latest-match grown tier jumps straight to C and never serves A's
 /// growth.
+#[cfg(unix)]
 #[tokio::test]
 async fn the_grown_tier_finds_the_earliest_same_at_turn_not_the_latest() {
     let dir = tempfile::tempdir().unwrap();
@@ -5787,6 +5808,7 @@ async fn the_grown_tier_finds_the_earliest_same_at_turn_not_the_latest() {
 /// so it must still anchor on that turn (the last PARSED one) rather than
 /// store no anchor at all — otherwise the next `After` read has nothing to
 /// position from and answers a needless `too_far_behind` reset.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_first_read_of_only_an_empty_prompt_does_not_spuriously_reset_the_next_read() {
     let dir = tempfile::tempdir().unwrap();

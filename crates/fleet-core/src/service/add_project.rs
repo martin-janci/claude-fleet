@@ -1976,6 +1976,7 @@ mod tests {
     /// `body` (a bash script fragment — no shebang/chmod needed from the
     /// caller). Never anything that could pass for the real CLI: the point
     /// is that no test here ever spawns the actual `gh`.
+    #[cfg(unix)]
     fn write_stub_gh(dir: &Path, body: &str) {
         use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
         write_exec(dir, "gh", &format!("#!/bin/bash\n{PROBE_GUARD}{body}"));
@@ -2151,6 +2152,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_clone_guards_exit_3_survives_a_failing_bash_logout() {
         // The live bug: these scripts run under `bash -lc`, a LOGIN shell,
@@ -2333,6 +2335,7 @@ mod tests {
         assert!(store.lock().unwrap().list_projects().unwrap().is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn local_clone_runs_git_and_a_second_attempt_reports_e_exists() {
         // `clone_url_for` always targets github.com, so exercising the
@@ -2423,7 +2426,7 @@ mod tests {
         // must still surface as E_GIT_SETUP, which is exactly the case the
         // marker hardening exists to cover.
         let out = std::process::Output {
-            status: std::os::unix::process::ExitStatusExt::from_raw(3 << 8),
+            status: crate::agent::transport::exit_status(3),
             stdout: Vec::new(),
             stderr: b"some other failure".to_vec(),
         };
@@ -2444,7 +2447,7 @@ mod tests {
         // that throws away real diagnostic text — and the marker itself must
         // never reach the user-facing message.
         let out = std::process::Output {
-            status: std::os::unix::process::ExitStatusExt::from_raw(1 << 8),
+            status: crate::agent::transport::exit_status(1),
             stdout: b"real diagnostic from stdout".to_vec(),
             stderr: ALREADY_CLONED_MARKER.as_bytes().to_vec(),
         };
@@ -2485,6 +2488,7 @@ mod tests {
         assert!(fake.calls().is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_adopts_a_real_checkout_and_reads_its_origin() {
         let dir = tempfile::tempdir().unwrap();
@@ -2534,6 +2538,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_without_an_origin_falls_back_to_the_directory_name() {
         let dir = tempfile::tempdir().unwrap();
@@ -2566,6 +2571,7 @@ mod tests {
         assert_eq!(row.project.owner, "local");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_that_is_not_a_checkout_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -2589,6 +2595,7 @@ mod tests {
         assert!(err.message.contains("git"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_that_already_exists_as_a_project_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -2625,6 +2632,7 @@ mod tests {
         assert_eq!(err.code, codes::E_EXISTS);
     }
 
+    #[cfg(unix)]
     fn git_ok(dir: &std::path::Path, args: &[&str]) -> bool {
         std::process::Command::new("git")
             .args(args)
@@ -2635,6 +2643,7 @@ mod tests {
             .success()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_adopting_a_linked_worktree_registers_the_main_checkout() {
         use crate::projects::test_git::{init_repo, run};
@@ -2688,6 +2697,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_adopting_a_bare_repos_worktree_registers_the_worktree_not_the_bare_dir() {
         // A bare repo's worktrees also fail the git-dir/git-common-dir
@@ -2757,6 +2767,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_from_a_subdirectory_registers_the_top_level() {
         let dir = tempfile::tempdir().unwrap();
@@ -2790,6 +2801,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_with_a_non_github_origin_falls_back_to_the_directory_name() {
         let dir = tempfile::tempdir().unwrap();
@@ -2820,6 +2832,7 @@ mod tests {
         assert_eq!(row.project.repo, "gl-repo");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_sanitizes_a_basename_with_spaces_instead_of_storing_it_raw() {
         // `parse_repo_url`'s invariant is that a parsed pair is always safe
@@ -2901,6 +2914,7 @@ mod tests {
         assert_eq!(err.code, codes::E_INVALID);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_refuses_a_path_already_registered_by_another_project() {
         // Today two rows could share one path: adopt with no origin (falls
@@ -2953,6 +2967,7 @@ mod tests {
         assert_eq!(err.code, codes::E_EXISTS);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn folder_adoption_writes_nothing_to_the_checkout() {
         fn snapshot(
@@ -3303,6 +3318,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn new_on_local_runs_a_real_git_init_and_commit() {
         // Exercise the LOCAL branch (no FakeSsh involved) against a real
@@ -3342,6 +3358,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn new_refuses_when_the_destination_exists_and_is_not_a_git_repository() {
         let projects_root = tempfile::tempdir().unwrap();
@@ -3470,6 +3487,7 @@ mod tests {
     /// `/usr/bin` and `/bin` are enough to find `git`/`bash` on both macOS
     /// (Apple Git) and standard Linux. Keep it this way — widening `PATH`
     /// back out reopens the exact hole this guard exists to close.
+    #[cfg(unix)]
     async fn run_hermetic(
         script: &str,
         extra_path: &Path,
@@ -3503,6 +3521,7 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_hermetic_blocks_a_real_gh_invocation_when_no_stub_is_supplied() {
         // The regression test for the whole class of bug this hardening
@@ -3527,6 +3546,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn author_of(dest: &Path) -> String {
         let head = std::process::Command::new("git")
             .args([
@@ -3541,6 +3561,7 @@ mod tests {
         String::from_utf8_lossy(&head.stdout).trim().to_string()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn new_project_commits_with_the_hosts_own_identity_when_one_is_configured() {
         // Runs the REAL script (no FakeSsh) with a git identity configured
@@ -3574,6 +3595,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn new_project_falls_back_to_a_placeholder_identity_when_none_is_configured() {
         // Same real-execution proof as above, for the opposite branch: NO
@@ -3594,6 +3616,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn new_project_partial_identity_only_substitutes_the_missing_field() {
         // Only `user.email` configured: the REAL email must be kept, and
@@ -3621,6 +3644,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn new_with_create_remote_refuses_a_missing_identity_instead_of_the_placeholder() {
         // With `create_remote` on, a placeholder author must NEVER reach a
@@ -3655,7 +3679,7 @@ mod tests {
 
     fn output_with(code: i32, stderr: &str) -> std::process::Output {
         std::process::Output {
-            status: std::os::unix::process::ExitStatusExt::from_raw(code << 8),
+            status: crate::agent::transport::exit_status(code),
             stdout: Vec::new(),
             stderr: stderr.as_bytes().to_vec(),
         }
@@ -3892,6 +3916,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn new_project_script_resumes_after_a_failed_gh_stage() {
         // Prove `new_project_script` is safe to re-run after `gh` fails: it
@@ -4003,6 +4028,7 @@ mod tests {
 
     /// Run git with the TEST process's environment, for setting up and
     /// inspecting fixtures only — never for the code under test.
+    #[cfg(unix)]
     fn git_at(dir: &Path, args: &[&str]) -> std::process::Output {
         std::process::Command::new("git")
             .arg("-C")
@@ -4012,6 +4038,7 @@ mod tests {
             .unwrap()
     }
 
+    #[cfg(unix)]
     fn commit_count(dir: &Path) -> usize {
         let out = git_at(dir, &["log", "--oneline"]);
         if !out.status.success() {
@@ -4020,6 +4047,7 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).lines().count()
     }
 
+    #[cfg(unix)]
     fn bare_repo() -> tempfile::TempDir {
         let bare = tempfile::tempdir().unwrap();
         assert!(git_at(bare.path(), &["init", "-q", "--bare"])
@@ -4031,6 +4059,7 @@ mod tests {
     /// A `gh` stub that records it was called (by touching `called`) and
     /// wires `bare` up as `origin`, exactly like `gh repo create --remote
     /// origin` would with a real GitHub repository.
+    #[cfg(unix)]
     fn write_working_gh(dir: &Path, called: &Path, bare: &Path) {
         write_stub_gh(
             dir,
@@ -4042,6 +4071,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn identity_gitconfig(home: &Path) -> std::path::PathBuf {
         let path = home.join("global.gitconfig");
         std::fs::write(&path, "[user]\n\tname = T\n\temail = t@t\n").unwrap();
@@ -4050,6 +4080,7 @@ mod tests {
 
     /// Tag `dest` exactly as `new_project_script` tags a repository it
     /// creates.
+    #[cfg(unix)]
     fn tag_repo(dest: &Path, slug: &str) {
         assert!(
             git_at(dest, &["config", "--local", NEW_PROJECT_TAG_KEY, slug])
@@ -4058,6 +4089,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn tag_of(dest: &Path) -> Option<String> {
         let out = git_at(dest, &["config", "--local", "--get", NEW_PROJECT_TAG_KEY]);
         out.status
@@ -4067,6 +4099,7 @@ mod tests {
 
     /// A repository at `dest` with one commit, made outside `new` (so
     /// untagged unless the caller tags it).
+    #[cfg(unix)]
     fn repo_with_a_commit(dest: &Path) {
         std::fs::create_dir_all(dest).unwrap();
         assert!(git_at(dest, &["init", "-q"]).status.success());
@@ -4091,6 +4124,7 @@ mod tests {
         .success());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_untagged_existing_repo_is_refused_and_gh_never_runs() {
         // A local-only repository with history that `new` did not create —
@@ -4147,6 +4181,7 @@ mod tests {
         assert_eq!(git_at(bare.path(), &["for-each-ref"]).stdout, b"");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_repo_tagged_for_a_different_project_is_refused_without_gh_or_a_push() {
         let home = tempfile::tempdir().unwrap();
@@ -4190,6 +4225,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_fresh_branch_tags_only_a_create_remote_repository() {
         let home = tempfile::tempdir().unwrap();
@@ -4224,6 +4260,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_host_without_git_is_left_untouched_with_a_clear_message() {
         // `/bin/bash` by absolute path under a PATH holding nothing at all:
@@ -4272,6 +4309,7 @@ mod tests {
         assert!(remote.message.contains("on vps"), "{}", remote.message);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_missing_identity_leaves_nothing_behind_and_the_retry_commits_and_pushes() {
         let home = tempfile::tempdir().unwrap();
@@ -4313,6 +4351,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&pushed.stdout).lines().count(), 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn resuming_a_repo_whose_commit_failed_commits_before_the_gh_stage() {
         // `git init` succeeded but the commit did not (e.g. `commit.gpgsign`
@@ -4363,6 +4402,7 @@ mod tests {
         assert_eq!(commit_count(&dest2), 1);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_repo_with_origin_and_a_commit_reports_its_push_url_and_pushes_nothing() {
         let home = tempfile::tempdir().unwrap();
@@ -4420,6 +4460,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn push_only_script_pushes_to_the_verified_origin_and_refuses_a_changed_one() {
         let home = tempfile::tempdir().unwrap();
@@ -4885,6 +4926,7 @@ mod tests {
         assert_no_push(&fake);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn remote_branch_check_script_exits_2_only_when_main_is_absent() {
         // Real git against a local bare repo standing in for GitHub; never a
@@ -5148,11 +5190,13 @@ mod tests {
 
     /// Whether ANY process with this pid (`pid > 0`) or in this process group
     /// (`pid < 0`) still exists, zombies included.
+    #[cfg(unix)]
     fn exists(pid: libc::pid_t) -> bool {
         // SAFETY: signal 0 only checks for existence; no pointers involved.
         unsafe { libc::kill(pid, 0) == 0 }
     }
 
+    #[cfg(unix)]
     fn read_pid(path: &Path) -> libc::pid_t {
         std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
@@ -5162,6 +5206,7 @@ mod tests {
     }
 
     /// Wait for `path` to exist (the script got far enough), up to 5 s.
+    #[cfg(unix)]
     async fn wait_for_file(path: &Path) {
         for _ in 0..250 {
             if path.exists() {
@@ -5175,6 +5220,7 @@ mod tests {
     /// Poll until neither the group nor `extra` exists, up to 3 s. A killed
     /// grandchild is reparented to init/launchd and reaped there, which takes
     /// a moment.
+    #[cfg(unix)]
     async fn gone(pgid: libc::pid_t, extra: libc::pid_t) -> bool {
         for _ in 0..150 {
             if !exists(-pgid) && !exists(extra) {
@@ -5185,6 +5231,7 @@ mod tests {
         false
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_local_script_cancel_kills_a_forked_grandchild_and_the_whole_group() {
         // A real local process (never the network, never `gh`). The marker is
@@ -5233,6 +5280,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_local_script_cancel_sends_sigterm_first_so_processes_can_clean_up() {
         // `git clone` removes its half-written destination on SIGTERM but not
@@ -5260,6 +5308,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_local_script_timeout_escalates_to_sigkill_for_a_group_member_ignoring_sigterm() {
         let dir = tempfile::tempdir().unwrap();
@@ -5300,6 +5349,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_local_script_does_not_hang_on_a_grandchild_holding_the_pipes_after_exit() {
         // bash exits at once, but the backgrounded `sleep` inherited stdout
@@ -5329,6 +5379,7 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&out.stderr), "oops\n");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn run_local_script_gives_the_script_a_null_stdin() {
         // `.spawn()` would otherwise inherit the app's stdin, and under

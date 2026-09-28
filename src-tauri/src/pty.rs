@@ -177,37 +177,10 @@ impl PtyParts {
     /// Kill the child, reap it, then drop the fds. Blocking by nature — it
     /// must never run under `Mutex<PtyState>` or on the main thread.
     fn teardown(self) {
-        // Terminate the child with SIGKILL BEFORE tearing down the pty fds.
-        //
-        // The child is the local `tmux attach`, or — for a remote host — the
-        // `ssh -tt … tmux attach` that runs it. portable-pty's Child::kill()
-        // sends SIGHUP, not SIGKILL. At this point our reader thread still holds
-        // a cloned master fd, so the pty is still LIVE when that SIGHUP lands —
-        // which lets `ssh -tt` do a *graceful* shutdown and relay a trailing
-        // newline down its pty to the remote tmux pane. That stray `\n` is
-        // delivered into the attached app's (claude's) input on every detach /
-        // session-switch / deselect — the long-standing "new line on switch"
-        // bug. SIGKILL gives the child no chance to relay anything; the ssh
-        // channel and remote tty then tear down on their own and tmux detaches
-        // our client cleanly.
+        // Terminate the child hard BEFORE tearing down the pty fds — see
+        // [`kill_hard`] for why a polite signal is not enough.
         if let Some(mut child) = self.child {
-            match child.process_id() {
-                // Signal directly: spawning `/bin/kill` is a fork+exec+wait
-                // we would otherwise do on the caller's thread.
-                //
-                // SAFETY: `kill` takes no pointers and cannot trap. The pid is
-                // our own child, not yet reaped, so the OS cannot have recycled
-                // it. `pid > 1` keeps a bogus 0 (our whole process group) or 1
-                // (init) out of the call, as `add_project.rs` does.
-                Some(pid) if pid > 1 => unsafe {
-                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
-                },
-                // No pid (already exited / unsupported), or an implausible one:
-                // fall back to SIGHUP.
-                _ => {
-                    let _ = child.kill();
-                }
-            }
+            kill_hard(&mut *child);
             reap(child);
         }
         // Now the child is gone, drop our fds and let the reader thread observe
@@ -221,6 +194,48 @@ impl PtyParts {
             *b = PtyBuffer::default();
         }
     }
+}
+
+/// Kill the child with SIGKILL, never portable-pty's SIGHUP.
+///
+/// The child is the local `tmux attach`, or — for a remote host — the
+/// `ssh -tt … tmux attach` that runs it. portable-pty's Child::kill()
+/// sends SIGHUP, not SIGKILL. At this point our reader thread still holds
+/// a cloned master fd, so the pty is still LIVE when that SIGHUP lands —
+/// which lets `ssh -tt` do a *graceful* shutdown and relay a trailing
+/// newline down its pty to the remote tmux pane. That stray `\n` is
+/// delivered into the attached app's (claude's) input on every detach /
+/// session-switch / deselect — the long-standing "new line on switch"
+/// bug. SIGKILL gives the child no chance to relay anything; the ssh
+/// channel and remote tty then tear down on their own and tmux detaches
+/// our client cleanly.
+#[cfg(unix)]
+fn kill_hard(child: &mut dyn portable_pty::Child) {
+    match child.process_id() {
+        // Signal directly: spawning `/bin/kill` is a fork+exec+wait
+        // we would otherwise do on the caller's thread.
+        //
+        // SAFETY: `kill` takes no pointers and cannot trap. The pid is
+        // our own child, not yet reaped, so the OS cannot have recycled
+        // it. `pid > 1` keeps a bogus 0 (our whole process group) or 1
+        // (init) out of the call, as `add_project.rs` does.
+        Some(pid) if pid > 1 => unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        },
+        // No pid (already exited / unsupported), or an implausible one:
+        // fall back to SIGHUP.
+        _ => {
+            let _ = child.kill();
+        }
+    }
+}
+
+/// On Windows portable-pty's `Child::kill()` is `TerminateProcess`: already a
+/// hard kill that gives `ssh.exe` no chance to relay anything down the pty,
+/// which is exactly what the Unix branch buys with SIGKILL.
+#[cfg(windows)]
+fn kill_hard(child: &mut dyn portable_pty::Child) {
+    let _ = child.kill();
 }
 
 /// Reap a killed child. Teardown runs from Tauri's async runtime, so the
@@ -384,7 +399,9 @@ pub(crate) fn attach_argv(
 /// otherwise [`SshClient::mux_opts_for_pty`] — the terminal's own
 /// ControlPath and a gentler keepalive, so a probe's master reset (a
 /// DIFFERENT ssh call, on the DIFFERENT `cm-<host>.sock`) never takes the
-/// user's attached terminal down with it.
+/// user's attached terminal down with it. Where ssh cannot multiplex
+/// (Windows) there is no ControlPath at all: the attach is its own
+/// connection.
 pub(crate) fn attach_mux_opts(ssh: &SshClient, host: &str) -> Vec<String> {
     if host == "local" {
         Vec::new()
@@ -905,12 +922,22 @@ mod tests {
 
     #[test]
     fn attach_mux_opts_gives_local_nothing_and_remote_the_pty_socket() {
-        assert!(attach_mux_opts(&SshClient::new(), "local").is_empty());
-        let opts = attach_mux_opts(&SshClient::new(), "h").join(" ");
+        let ssh = SshClient::new_with_mux(true);
+        assert!(attach_mux_opts(&ssh, "local").is_empty());
+        let opts = attach_mux_opts(&ssh, "h").join(" ");
         assert!(
             opts.contains("cm-h-tty.sock"),
             "attach must use its own ControlPath, not the probe's: {opts}"
         );
+    }
+
+    /// Windows: `ssh.exe` has no ControlMaster, so the attach is its own
+    /// connection with no control socket, and keeps the gentler keepalive.
+    #[test]
+    fn attach_without_mux_has_no_control_socket() {
+        let opts = attach_mux_opts(&SshClient::new_with_mux(false), "h").join(" ");
+        assert!(!opts.contains("Control"), "{opts}");
+        assert!(opts.contains("ServerAliveInterval=15"), "{opts}");
     }
 
     // ---- environment ----
@@ -1293,15 +1320,29 @@ mod tests {
 
     impl Drop for KillOnDrop {
         fn drop(&mut self) {
-            let _ = std::process::Command::new("kill")
-                .args(["-KILL", &self.0.to_string()])
-                .status();
+            if let Some(p) = process(self.0).process(sysinfo::Pid::from_u32(self.0)) {
+                p.kill();
+            }
         }
+    }
+
+    /// A process table refreshed for `pid` alone. Through sysinfo rather than
+    /// `kill -0` so the same check holds on Windows, where a pid is not a
+    /// POSIX pid and Git's `kill` cannot see it.
+    fn process(pid: u32) -> sysinfo::System {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[Pid::from_u32(pid)]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        sys
     }
 
     /// `alive` with a deadline. Teardown signals the child while the caller
     /// waits, but reaping finishes on a detached thread once the inline budget
-    /// is spent (`PTY_REAP_INLINE`), and `kill -0` still succeeds for a zombie.
+    /// is spent (`PTY_REAP_INLINE`), and a zombie is still in the table.
     /// "Gone" is therefore eventually-true; how fast depends on the machine,
     /// which is what made this flaky on the macOS runner.
     fn died(pid: u32) -> bool {
@@ -1315,12 +1356,10 @@ mod tests {
         false
     }
 
+    /// Whether `pid` is still in the process table, a zombie included: only
+    /// a reaped child counts as gone, as with `kill -0`.
     fn alive(pid: u32) -> bool {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        process(pid).process(sysinfo::Pid::from_u32(pid)).is_some()
     }
 
     #[test]
