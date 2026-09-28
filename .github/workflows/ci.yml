@@ -96,6 +96,39 @@ jobs:
       - run: cargo deny check
         if: runner.os == 'Linux'
 
+  # Windows is a desktop CLIENT for a Linux/macOS fleet (docs/windows.md):
+  # the desktop crates must build, lint and test there. fleet-agent is
+  # Unix-only by design (a systemd service on a fleet host), so it is left
+  # out; fmt and cargo-deny read nothing platform-specific and stay on the
+  # Linux leg of `rust` above.
+  rust-windows:
+    runs-on: windows-latest
+    steps:
+      # Before checkout: .gitattributes already pins LF, this keeps a runner
+      # default from ever turning a generated file or a fixture into CRLF.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: windows
+      - run: cargo clippy --workspace --exclude fleet-agent --all-targets -- -D warnings
+      - run: cargo test --workspace --exclude fleet-agent
+      # The app itself, not only its crates: the frontend bundle, tauri-build's
+      # Windows resources (icon.ico, the manifest), the WebView2 link and the
+      # NSIS installer the release ships come together only here, so a break
+      # in any of them shows on the PR instead of at release time.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm tauri build --debug --bundles nsis
+
   # The regression guard for the crate split: fleet-hub must build on a box
   # with none of the Tauri system libraries. If this job fails with a
   # gtk/webkit/pkg-config error, a Tauri dependency leaked into fleet-core.
@@ -180,9 +213,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-24.04]
+        os: [macos-latest, ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
       # pnpm version comes from "packageManager" in package.json.
       - uses: pnpm/action-setup@v4
