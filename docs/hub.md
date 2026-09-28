@@ -297,12 +297,22 @@ version's arm64 leg failed and the tag carries an amd64-only manifest (see
 whose tag lives in `.env` (the `deploy/hub/behind-proxy` compose): it pulls
 first (a tag ghcr does not have stops it with the hub untouched), takes a
 consistent online backup (`backup.sh`, kept as `backups/pre-<version>-*.db`,
-newest three), `docker compose stop`s the hub so the 30 s grace applies,
-moves `FLEET_HUB_TAG`, starts it, waits for the image's own healthcheck,
-and checks `fleet-hub --version`. With a readonly client token in
-`readonly.token` beside the compose file (`fleet-hub pair --mode readonly
-upgrade-check`) it also asks `fleet_health` over the public URL — never the
-master token. On any failure after the stop it prints the rollback.
+the newest three *of that version*), `docker compose stop`s the hub so the
+30 s grace applies, moves `FLEET_HUB_TAG`, starts it, waits for the image's
+own healthcheck, and checks `fleet-hub --version`. With a readonly client
+token in `readonly.token` beside the compose file (`fleet-hub pair --mode
+readonly upgrade-check`) it also asks `fleet_health` over the public URL —
+never the master token, and passed to `curl` on stdin, not its command line.
+On any failure after the stop it prints the rollback.
+
+The image pulled is the compose file's own `image:` line at the new tag, and
+every `docker compose` call reads `FLEET_HUB_ENV_FILE` (default `.env`
+beside the compose file) through `--env-file`. The tag must match
+`[0-9A-Za-z._-]+`. On a fresh copy of `.env.example` (`FLEET_HUB_TAG=`
+empty) there is nothing to stop, and before the first start there is no
+`state.db` to back up: the script says so and skips those steps, so the
+same command is also the first install. An upgrade never prunes an older
+version's `pre-<version>-*.db` (see *Backups*).
 
 **Order across the three binaries.** Today (contract 4 on both sides,
 proto 1 on both sides) the order is a habit: hub, then desktop, then the
@@ -323,15 +333,23 @@ and a `cp` of the `state.db*` triple can be torn. Use SQLite's online backup
 API instead — one self-contained file, no stop:
 
 ```bash
-sudo deploy/hub/backup.sh          # FLEET_HUB_DATA=./data, keeps 14 dailies in ./backups
+sudo FLEET_HUB_DATA=/volume1/docker/fleet-hub/data deploy/hub/backup.sh
+# keeps 14 dailies in <FLEET_HUB_DATA>/../backups (FLEET_HUB_BACKUPS overrides)
 ```
 
+`FLEET_HUB_DATA` defaults to `/volume1/docker/fleet-hub/data` (the Synology
+layout below); point it at the compose directory's `data/` anywhere else.
+
 It runs `.backup`, then `PRAGMA integrity_check` on the copy (a failed check
-removes it and exits 1), then prunes to `KEEP` files per `PREFIX`. On a
+removes it and exits 1; a run killed mid-copy removes its `.part`), then
+prunes to the newest `KEEP` files of its own `PREFIX` — other prefixes are
+never touched. On a
 Synology: Control Panel → Task Scheduler → user `root`, daily 03:30,
 `bash /volume1/docker/fleet-hub/backup.sh`; add `backups/` to Hyper Backup
 or any off-box target. `upgrade.sh` calls the same script with
-`PREFIX=pre-<version> KEEP=3` before it stops the hub.
+`PREFIX=pre-<version> KEEP=3` before it stops the hub, so each version
+keeps its own three and older versions' `pre-*` files stay until you delete
+them.
 
 **Restore drill** (rehearse it once; a backup nobody restored is a hope):
 
@@ -364,15 +382,18 @@ The variant publishes **no** port: the hub joins your proxy's docker network
 named `caddy`) and the proxy forwards by service name:
 
 ```
-http://fleet.example.com {
+fleet.example.com {
     reverse_proxy fleet-hub:4180 {
         flush_interval -1
     }
 }
 ```
 
-The https:// public URL permits the `0.0.0.0` bind, and the hub logs at
-startup that plaintext 4180 is reachable by anything that can route to it —
+The bare site address lets your Caddy obtain the certificate and terminate
+TLS for the `https://` public URL; an `http://` prefix would switch that off
+and serve the hub in plaintext. The https:// public URL permits the
+`0.0.0.0` bind, and the hub logs at startup that plaintext 4180 is reachable
+by anything that can route to it —
 on the proxy network, that is the proxy. Publishing `4180:4180` on the host
 instead makes it the whole LAN and every VPN peer; the warning says so.
 

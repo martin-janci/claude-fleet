@@ -5,38 +5,76 @@
 #   pull → backup.sh (online, consistent) → compose stop → FLEET_HUB_TAG=<v>
 #   → up -d → the image's own healthcheck → `fleet-hub --version`
 #   → fleet_health.version over the public URL, only with a READONLY client
-#     token kept beside the compose file → keep 3 pre-upgrade backups.
+#     token kept beside the compose file → keep 3 backups per version.
 #
 # FLEET_HUB_DIR is where docker-compose.yml, .env, fleet-hub.env, ./data and
 # backup.sh live. Runs as root (the docker socket). The rollback is printed
 # on every failure after the stop. The tag has NO v: `v0.3.1` is `0.3.1`.
+# The image is the compose file's own `image:` line; every compose call reads
+# FLEET_HUB_ENV_FILE (default .env) through --env-file.
 set -euo pipefail
 
 NEW="${1:?usage: upgrade.sh <version>   (the image tag, e.g. 0.3.1 — no v)}"
 DIR="${FLEET_HUB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 ENV_FILE="${FLEET_HUB_ENV_FILE:-$DIR/.env}"
-IMAGE="${FLEET_HUB_IMAGE:-ghcr.io/martin-janci/fleet-hub}"
+case "$ENV_FILE" in /*) ;; *) ENV_FILE="$PWD/$ENV_FILE" ;; esac
 KEEP="${KEEP:-3}"
 TOKEN_FILE="${FLEET_HUB_READONLY_TOKEN_FILE:-$DIR/readonly.token}"
 HEALTH_TRIES="${HEALTH_TRIES:-60}"
+DATA="${FLEET_HUB_DATA:-$DIR/data}"
 
 case "$NEW" in v*) echo "upgrade: the image tag has no v prefix (got $NEW; the tag for v0.3.1 is 0.3.1)" >&2; exit 2;; esac
+# The tag goes into a sed replacement and .env: nothing but a docker tag's characters.
+case "$NEW" in *[!0-9A-Za-z._-]*) echo "upgrade: the tag must be [0-9A-Za-z._-]+, got '$NEW'" >&2; exit 2;; esac
 cd "$DIR"
 [ -f "$ENV_FILE" ] || { echo "upgrade: no $ENV_FILE — FLEET_HUB_TAG lives there (copy .env.example)" >&2; exit 2; }
 [ -f "$DIR/backup.sh" ] || { echo "upgrade: no $DIR/backup.sh beside this script" >&2; exit 2; }
 OLD="$(sed -n 's/^FLEET_HUB_TAG=//p' "$ENV_FILE" | head -n1)"
+dc() { docker compose --env-file "$ENV_FILE" "$@"; }
+STOPPED=0
+BACKED_UP=0
 rollback() {
-  echo "upgrade: ROLLBACK: set FLEET_HUB_TAG=${OLD:-<previous>} in $ENV_FILE, then: docker compose up -d fleet-hub" >&2
-  echo "upgrade: if $NEW migrated the database, first restore the newest backups/pre-$NEW-*.db (docs/hub.md → Backups → Restore drill)" >&2
+  if [ -z "$OLD" ]; then
+    echo "upgrade: no previous FLEET_HUB_TAG to roll back to; see docker compose logs fleet-hub and rerun upgrade.sh" >&2
+    return
+  fi
+  echo "upgrade: ROLLBACK: set FLEET_HUB_TAG=$OLD in $ENV_FILE, then: docker compose --env-file $ENV_FILE up -d fleet-hub" >&2
+  if [ "$BACKED_UP" = 1 ]; then
+    echo "upgrade: if $NEW migrated the database, first restore the newest backups/pre-$NEW-*.db (docs/hub.md → Backups → Restore drill)" >&2
+  fi
 }
+# Every exit after the stop that is not success — an explicit `exit 1` below
+# or any `set -e` failure — prints the rollback exactly once.
+on_exit() {
+  local rc=$?
+  if [ "$rc" -ne 0 ] && [ "$STOPPED" = 1 ]; then rollback; fi
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 echo "upgrade: ${OLD:-<unset>} -> $NEW in $DIR"
 
 # 1. Pull first: a tag ghcr does not have stops here, with the hub untouched.
-docker pull "$IMAGE:$NEW"
-# 2. A consistent copy of the database while the hub is still serving.
-PREFIX="pre-$NEW" KEEP="$KEEP" FLEET_HUB_DATA="${FLEET_HUB_DATA:-$DIR/data}" FLEET_HUB_BACKUPS="$DIR/backups" bash "$DIR/backup.sh"
+#    The shell's FLEET_HUB_TAG outranks the env file, so this pulls exactly
+#    what `up` will run.
+FLEET_HUB_TAG="$NEW" dc pull fleet-hub
+# 2. A consistent copy of the database while the hub is still serving — when
+#    there is one: a first run has no state.db yet.
+if [ -f "$DATA/state.db" ]; then
+  PREFIX="pre-$NEW" KEEP="$KEEP" FLEET_HUB_DATA="$DATA" FLEET_HUB_BACKUPS="$DIR/backups" bash "$DIR/backup.sh"
+  BACKED_UP=1
+else
+  echo "upgrade: no $DATA/state.db yet — skipping the pre-upgrade backup"
+fi
 # 3. SIGTERM under the compose stop_grace_period (drain + tick shutdown); `stop`, not `down`.
-docker compose stop fleet-hub
+#    An empty FLEET_HUB_TAG (a fresh .env.example) means nothing of this
+#    compose is running, and compose would refuse to interpolate the image.
+if [ -n "$OLD" ]; then
+  dc stop fleet-hub
+else
+  echo "upgrade: FLEET_HUB_TAG is empty in $ENV_FILE — first install, nothing to stop"
+fi
+STOPPED=1
 # 4. Move the pin. `-i.bak` is the spelling GNU and BSD sed both accept.
 if grep -q '^FLEET_HUB_TAG=' "$ENV_FILE"; then
   sed -i.bak "s|^FLEET_HUB_TAG=.*|FLEET_HUB_TAG=$NEW|" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
@@ -44,31 +82,33 @@ else
   printf 'FLEET_HUB_TAG=%s\n' "$NEW" >>"$ENV_FILE"
 fi
 # 5. Start on the new tag and wait for the image's own healthcheck.
-docker compose up -d fleet-hub || { rollback; exit 1; }
+dc up -d fleet-hub
 i=0
-until docker compose exec -T fleet-hub fleet-hub healthcheck >/dev/null 2>&1; do
+until dc exec -T fleet-hub fleet-hub healthcheck >/dev/null 2>&1; do
   i=$((i + 1))
   if [ "$i" -ge "$HEALTH_TRIES" ]; then
     echo "upgrade: the hub did not pass its healthcheck within $HEALTH_TRIES s (docker compose logs fleet-hub)" >&2
-    rollback; exit 1
+    exit 1
   fi
   sleep 1
 done
 # 6. The binary names its version without a credential.
-GOT="$(docker compose exec -T fleet-hub fleet-hub --version | tr -d '\r')"
+GOT="$(dc exec -T fleet-hub fleet-hub --version | tr -d '\r')"
 case "$GOT" in
   *" $NEW") echo "upgrade: running $GOT" ;;
-  *) echo "upgrade: running '$GOT', expected 'fleet-hub $NEW' (the pin did not take?)" >&2; rollback; exit 1 ;;
+  *) echo "upgrade: running '$GOT', expected 'fleet-hub $NEW' (the pin did not take?)" >&2; exit 1 ;;
 esac
 # 7. Over the network, with a READONLY client token when one is kept beside
 #    the compose file (`fleet-hub pair --mode readonly upgrade-check`) —
-#    never the master token. Absent file: skipped, not failed.
+#    never the master token. Absent file: skipped, not failed. The header
+#    reaches curl on stdin (`-H @-`, curl >= 7.55), never on its command
+#    line where `ps` would show the token; printf is a builtin.
 if [ -f "$TOKEN_FILE" ]; then
   URL="$(sed -n 's/^FLEET_HUB_PUBLIC_URL=//p' "$DIR/fleet-hub.env" 2>/dev/null | head -n1)"
   if [ -n "$URL" ]; then
     BODY='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"fleet_health","arguments":{}}}'
-    ANSWER="$(curl -sS --max-time 15 -X POST "$URL/mcp/json" \
-      -H "Authorization: Bearer $(cat "$TOKEN_FILE")" \
+    ANSWER="$(printf 'Authorization: Bearer %s\n' "$(tr -d '\r\n' <"$TOKEN_FILE")" \
+      | curl -sS --max-time 15 -X POST "$URL/mcp/json" -H @- \
       -H 'Content-Type: application/json' -H 'Accept: application/json' \
       --data "$BODY" || true)"
     case "$ANSWER" in
