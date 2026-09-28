@@ -453,7 +453,9 @@ pub fn provider_for(
 /// provider, and a credential to answer most of its other calls — a
 /// capability question must never depend on either, so this never goes
 /// through it. `tests::provider_caps_pins_to_each_adapters_own_caps` keeps
-/// the two literals from drifting apart.
+/// the two literals from drifting apart, over every provider in
+/// [`crate::store::TRACKER_PROVIDERS`] — so a new provider with no arm here
+/// (which would silently degrade to `Caps::default()`) fails that test.
 pub fn provider_caps(row: &TrackerRow) -> Caps {
     match row.provider.as_str() {
         "jira" => Caps {
@@ -1018,10 +1020,18 @@ mod tests {
     /// [`provider_caps`] must answer exactly what each adapter's own
     /// `caps()` answers, without a credential — or a transport at all — ever
     /// being built. If the two literals ever drift apart, this catches it.
+    ///
+    /// Driven by [`crate::store::TRACKER_PROVIDERS`], the one list of
+    /// providers this build accepts, and each provider's own caps are read
+    /// through `provider_for` rather than restated here: a sixth provider
+    /// added to that list and forgotten in `provider_caps` would fall through
+    /// to `Caps::default()` — `describe: false`, `write: false` — which is the
+    /// quietest possible failure (honest degradation, no error), so it must
+    /// fail here or it ships.
     #[test]
     fn provider_caps_pins_to_each_adapters_own_caps() {
         use crate::net::https::{FakeTransport, HttpTransport};
-        use crate::store::TrackerSettings;
+        use crate::store::{TrackerSettings, TRACKER_PROVIDERS};
 
         let fake: Arc<dyn HttpTransport> = Arc::new(FakeTransport::new());
         let row = |provider: &str| TrackerRow {
@@ -1043,61 +1053,20 @@ mod tests {
             org_id: None,
             settings: TrackerSettings::default(),
         };
-        let cases: [(&str, Caps); 5] = [
-            (
-                "jira",
-                jira::JiraCloud::new(
-                    "https://acme.atlassian.net",
-                    TrackerConfig::default(),
-                    None,
-                    Arc::clone(&fake),
-                )
-                .caps(),
-            ),
-            (
-                "jira_dc",
-                jira_dc::JiraDc::new(
-                    "https://jira.corp.example",
-                    TrackerConfig::default(),
-                    None,
-                    Arc::clone(&fake),
-                )
-                .caps(),
-            ),
-            (
-                "asana",
-                asana::Asana::new(
-                    "https://app.asana.com",
-                    TrackerConfig::default(),
-                    TrackerSettings::default(),
-                    None,
-                    Arc::clone(&fake),
-                )
-                .caps(),
-            ),
-            (
-                "linear",
-                linear::Linear::new(
-                    "https://linear.app/acme",
-                    TrackerConfig::default(),
-                    None,
-                    Arc::clone(&fake),
-                )
-                .caps(),
-            ),
-            (
-                "github",
-                github::GitHub::new(
-                    "https://github.com/acme",
-                    TrackerConfig::default(),
-                    TrackerSettings::default(),
-                    Arc::clone(&fake),
-                )
-                .caps(),
-            ),
-        ];
-        for (provider, want) in cases {
-            assert_eq!(provider_caps(&row(provider)), want, "{provider}");
+        let net = TrackerNet::fake(Arc::clone(&fake));
+        assert!(!TRACKER_PROVIDERS.is_empty());
+        for provider in TRACKER_PROVIDERS {
+            let r = row(provider);
+            // The adapter itself, over a fake transport: its `caps()` is the
+            // authority, and no arm of this test restates it.
+            let want = provider_for(&r, None, &net)
+                .unwrap_or_else(|e| panic!("{provider}: {e:?}"))
+                .caps();
+            assert_eq!(
+                provider_caps(&r),
+                want,
+                "{provider}: provider_caps has no arm for it, or its literal drifted"
+            );
         }
         // A row whose provider this build has none for: no capability is
         // claimed on a guess.

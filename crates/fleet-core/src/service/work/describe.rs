@@ -77,9 +77,10 @@ pub struct Described {
     /// For a person (master, a phone, bound or not) this is the plain body,
     /// exactly as `lookup` leaves its excerpt.
     pub body: String,
-    /// `body`'s length. Equal to the tracker's true length on a fresh fetch
-    /// (before fleet's own cap); on a cache hit, the length of what was
-    /// stored (already capped when it was fetched).
+    /// The DESCRIPTION's own length — `body` without the marker lines a
+    /// per-host token's copy is wrapped in. Equal to the tracker's true
+    /// length on a fresh fetch (before fleet's own cap); on a cache hit, the
+    /// length of what was stored (already capped when it was fetched).
     pub chars: i64,
     /// Served from the cache rather than asking the tracker.
     #[serde(default)]

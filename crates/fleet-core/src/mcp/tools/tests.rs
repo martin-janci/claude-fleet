@@ -4642,6 +4642,15 @@ fn no_projection_carries_a_full_description() {
             include_str!("../../store/rows.rs"),
         ),
         ("event frames (events.rs)", include_str!("../../events.rs")),
+        // The one file here that ALREADY projects a description (the Work
+        // view's task detail, `TaskDetail.description`), and therefore the
+        // likeliest place a future join into the cache would land — the leg
+        // with teeth, next to two that are positive statements about files
+        // holding no SQL at all.
+        (
+            "the Work view's task projection (service/work/view.rs)",
+            include_str!("../../service/work/view.rs"),
+        ),
     ] {
         assert!(
             !src.contains(TABLE),

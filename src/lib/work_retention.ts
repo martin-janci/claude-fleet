@@ -24,6 +24,8 @@ export interface RetentionSweep {
   timeline_work_events: number;
   /** Settled write-back outbox rows (M13.4e); absent from an older hub. */
   tracker_writes?: number;
+  /** Cached full ticket descriptions; absent from an older hub. */
+  describe_cache?: number;
 }
 
 export interface RetentionStatus {
@@ -56,6 +58,10 @@ export function retentionTableLabel(table: string): string {
 export function retentionLine(t: RetentionTableStatus): string {
   const label = retentionTableLabel(t.table);
   if (t.days === 0) return `${label}: ${t.rows} rows, kept forever`;
+  // The describe cache is the one table with no liveness rule: it sweeps on
+  // age alone, and the cache of a live-linked ticket goes with the rest.
+  if (t.table === 'work_item_descriptions')
+    return `${label}: ${t.rows} rows, ${t.would_delete} older than ${t.days} d`;
   return `${label}: ${t.rows} rows, ${t.would_delete} older than ${t.days} d with nothing live on them`;
 }
 
@@ -65,5 +71,6 @@ export function lastSweepLine(s: RetentionSweep | null | undefined, now: number)
   const mins = Math.max(0, Math.round((now - s.at) / 60));
   const ago = mins < 60 ? `${mins} min ago` : mins < 2880 ? `${Math.round(mins / 60)} h ago` : `${Math.round(mins / 1440)} d ago`;
   const outbox = s.tracker_writes ? `, ${s.tracker_writes} PR links` : '';
-  return `last sweep ${ago}: ${s.journal} journal, ${s.tracker_items} tickets, ${s.timeline_work_events} events${outbox} deleted`;
+  const described = s.describe_cache ? `, ${s.describe_cache} full descriptions` : '';
+  return `last sweep ${ago}: ${s.journal} journal, ${s.tracker_items} tickets, ${s.timeline_work_events} events${outbox}${described} deleted`;
 }

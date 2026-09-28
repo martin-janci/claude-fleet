@@ -377,6 +377,35 @@ once in a browser), `rate_limited` and `unreachable` (both retry on their
 own). See [troubleshooting.md](troubleshooting.md#work-and-trackers) when a
 sync fails.
 
+### Reading a ticket's description
+
+Fleet caches the first 2,000 characters of a ticket's description, and shows
+less than that in places with less room (a card, a start brief). When a
+description is longer than what a place can show, what Claude is handed ends
+with one line naming the cut, for example:
+
+```
+[shown 2000 of 6812 chars of the description — work { action: describe, key: "ABC-1" } for the rest]
+```
+
+You do not have to do anything about it. The line is there so Claude knows it
+is holding part of a requirement rather than all of it, and can ask fleet for
+the rest itself — which it does with `work { action: describe }`, one extra
+read of that one ticket. Without the line, an agent would work from a third of
+a ticket believing it had the whole thing, which is the mistake this exists to
+prevent. A description that fits carries no line at all, so a line means
+there really is more.
+
+Only Jira (Cloud and Data Center) and GitHub serve a full description on
+demand; for Asana and Linear the line says *open the ticket* instead, and the
+ticket's URL is in every answer that carries its description. Nothing is
+written to the tracker either way — this is a read.
+
+What Claude fetches is held briefly (`work.describe_cache_secs`, 300 s by
+default) so a second question about the same ticket costs no second request,
+and it is never mixed into the ticket's cached excerpt, sent to a phone, or
+put in a session's event history. Disconnecting a tracker deletes it.
+
 ## Starting work
 
 - **From ⌘K:** type a key or paste a ticket URL, or pick a ticket from
@@ -569,7 +598,13 @@ it. `0` keeps a table forever.
   its `0` is never "forever": with `work.retention.tracker_items_days` at
   `0`, the describe cache is still swept at a fixed 30-day floor, so a
   full-text cache never becomes an unbounded copy of every description
-  fleet ever fetched.
+  fleet ever fetched. It is the one swept table with no liveness rule — a
+  cached description goes on age alone, even for a ticket a live session is
+  working on, because the next `describe` simply fetches it again. That
+  window is also the ceiling on how long an entry is *served*: a longer
+  `work.describe_cache_secs` is clamped to it. Disconnecting a tracker
+  deletes its items' cached descriptions at once, and so does a sync that
+  changes a description.
 - `work.retention.timeline_work_events_days` (180): handover, nudge and tidy
   timeline events. The newest of each kind per session stays.
 - The write-back outbox (see *Write-back*) follows the journal's window:
@@ -780,7 +815,7 @@ table.
 |---|---|---|---|
 | `work.recent_days` | `14` | 1–365 days | how long ended work with no live session keeps a sidebar group |
 | `work.sync_interval_secs` | `300` | seconds, `0` = off | seconds between tracker sync passes; read at start; under a minute is raised to one |
-| `work.describe_cache_secs` | `300` | seconds, `0` = off | how long a full ticket description fetched by *Read the full description* (`work { action: describe }`) is reused before fleet asks the tracker again; the cache is swept with the tracker items, at a floor of 30 days when that retention window is `0` |
+| `work.describe_cache_secs` | `300` | seconds, `0` = off | how long a full ticket description fetched by `work { action: describe }` is reused before fleet asks the tracker again. Never longer than the window that cache is swept at: the value is clamped to `work.retention.tracker_items_days` (or the fixed 30-day floor when that is `0`), so fleet never serves a description the sweep would already have deleted |
 | `work.trusted_branch_projects` | `[]` | project ids | projects where a sole branch key links automatically; set from the popover, cleared with **Trust none** |
 | `work.evidence_snippets` | `true` | on / off | keep a redacted ±40-character prompt snippet around a detected key as evidence |
 | `work.session_start_context` | `false` | on / off | SessionStart hands Claude the linked ticket's context (synchronous hook; takes effect on re-provision) |
