@@ -513,7 +513,7 @@ Parameters: `action`, `cursor`, `filters`, `host_alias`, `host_aliases`, `key`, 
 
 Trackers, orgs, retention and usage counts; see action. Never returns a secret.
 
-Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `color`, `confirm_nonce`, `credential_ref`, `days`, `host_alias`, `isolate_sessions`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `site_url`, `tracker_id`, `transport`, `username`
+Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `color`, `confirm_nonce`, `credential_ref`, `days`, `host_alias`, `isolate_sessions`, `jev`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `site_url`, `tracker_id`, `transport`, `username`
 
 ### `work_link`
 
@@ -593,6 +593,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::trackers::test_tracker`
 - `commands::trackers::remove_tracker`
 - `commands::trackers::tracker_sync_metrics`
+- `commands::trackers::status_map_proposals`
+- `commands::trackers::decide_status_map_proposal`
 - `commands::trackers::work_retention_status`
 - `commands::trackers::work_retention_sweep`
 - `commands::trackers::work_usage`
