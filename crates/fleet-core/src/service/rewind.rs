@@ -250,12 +250,19 @@ git worktree add "$wt" -b "$name" "$head" 1>&2
 /// Undo [`fork_worktree_script`] after a later step failed: `git worktree
 /// remove` WITHOUT `--force` (a tree with changes in it stays), and only
 /// then the branch. Never touches the source: both values are the ones the
-/// creation just produced.
+/// creation just produced. A tree a live tmux pane is working in stays too
+/// (exit 3, `{TREE_IN_USE}`): `new_session` can fail after its pane started.
 pub fn remove_fork_worktree_script(path: &str, name: &str) -> String {
     format!(
         r#"set -e
 wt={path_q}
 name={name_q}
+phys=$(cd -- "$wt" 2>/dev/null && pwd -P || printf '%s' "$wt")
+if tmux list-panes -a -F '#{{pane_current_path}}' 2>/dev/null \
+  | awk -v a="$wt" -v b="$phys" '$0==a || $0==b || index($0, a "/")==1 || index($0, b "/")==1 {{ f=1 }} END {{ exit !f }}'; then
+  printf '{TREE_IN_USE} %s\n' "$wt" >&2
+  exit 3
+fi
 root=$(git -C "$wt" worktree list --porcelain | sed -n '1s/^worktree //p')
 cd -- "$root"
 git worktree remove "$wt"
@@ -263,8 +270,13 @@ git update-ref -d "refs/heads/$name"
 "#,
         path_q = quote(path),
         name_q = quote(name),
+        TREE_IN_USE = TREE_IN_USE,
     )
 }
+
+/// Sentinel [`remove_fork_worktree_script`] prints when a live pane is in
+/// the tree it was asked to remove.
+pub const TREE_IN_USE: &str = "FLEET_FORK_TREE_IN_USE";
 
 /// What happens after the truncated transcript exists.
 ///
@@ -788,9 +800,13 @@ async fn rewind_conversation_with(
             let row = match spawned {
                 Ok(row) => row,
                 Err(e) => {
+                    // The tree goes first: a start can fail after its pane
+                    // came up, and a pane still working in the tree keeps
+                    // the tree AND the copy it resumed.
                     if let Some(wt) = &new_wt {
-                        remove_copy(ssh, &sess.host_alias, &new_path, &new_id, sess.id).await;
-                        undo_new_worktree(ops, store, &sess.host_alias, wt, worktree_id).await;
+                        if undo_new_worktree(ops, store, &sess.host_alias, wt, worktree_id).await {
+                            remove_copy(ssh, &sess.host_alias, &new_path, &new_id, sess.id).await;
+                        }
                     }
                     return Err(e);
                 }
@@ -924,21 +940,21 @@ async fn remove_copy(
 /// branch (safe removal only, [`remove_fork_worktree_script`]), then its row
 /// when one was recorded and no session row points at it. The row goes only
 /// once the tree has; a tree that refused to go keeps the row that names it.
-/// Best-effort, like [`remove_copy`].
+/// Best-effort, like [`remove_copy`]; true when the tree went.
 async fn undo_new_worktree(
     ops: &dyn ReplyOps,
     store: &Mutex<Store>,
     host_alias: &str,
     wt: &NewWorktree,
     worktree_id: Option<i64>,
-) {
+) -> bool {
     if let Err(e) = ops.remove_worktree(host_alias, &wt.path, &wt.name).await {
         tracing::warn!(
             path = %wt.path,
             error = %e.message,
             "[rewind] removing the fork's new worktree failed"
         );
-        return;
+        return false;
     }
     if let Some(id) = worktree_id {
         if let Err(e) =
@@ -951,6 +967,7 @@ async fn undo_new_worktree(
             );
         }
     }
+    true
 }
 
 #[cfg(test)]
@@ -1794,6 +1811,9 @@ mod tests {
         root: Option<std::path::PathBuf>,
         add_err: Option<IpcError>,
         spawn_err: Option<IpcError>,
+        /// `remove_worktree` refuses (as the script does for a tree a live
+        /// pane is in) and leaves the tree.
+        remove_err: Option<IpcError>,
         /// Every worktree step and spawn, in order: `add:<name>`,
         /// `spawn:<worktree_id>`, `remove:<path>`.
         log: std::sync::Mutex<Vec<String>>,
@@ -1809,6 +1829,7 @@ mod tests {
                 spawns: Default::default(),
                 root: None,
                 add_err: None,
+                remove_err: None,
                 spawn_err: None,
                 log: Default::default(),
             }
@@ -1901,6 +1922,9 @@ mod tests {
             _name: &str,
         ) -> Result<(), IpcError> {
             self.log.lock().unwrap().push(format!("remove:{path}"));
+            if let Some(e) = &self.remove_err {
+                return Err(IpcError::new(&e.code, e.message.clone()));
+            }
             std::fs::remove_dir_all(path).ok();
             Ok(())
         }
@@ -2296,6 +2320,33 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    /// The start fails AFTER its pane came up: the removal refuses a tree
+    /// a live pane is in, and the copy that pane resumed stays with it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_start_whose_pane_is_live_keeps_the_tree_and_the_copy() {
+        let (d, _src, s, id) = local_session("idle");
+        let store = std::sync::Mutex::new(s);
+        let mut ops = FakeOps::new(&store, Some("idle"));
+        ops.root = Some(d.clone());
+        ops.spawn_err = Some(IpcError::new(codes::E_INTERNAL, "reconcile failed"));
+        ops.remove_err = Some(IpcError::new(codes::E_GIT_SETUP, TREE_IN_USE));
+        let ssh = std::sync::Arc::new(SshClient::new());
+        let err = rewind_conversation_with(fork_new(id, Some(A2), "fork-x"), &store, &ssh, &ops)
+            .await
+            .expect_err("the start failed");
+        assert_eq!(err.code, codes::E_INTERNAL, "the start's own error");
+        assert!(d.join("wt/fork-x").exists(), "the tree stays");
+        let wt_path = d.canonicalize().unwrap().join("wt/fork-x");
+        let enc = crate::service::transcript::encode_project_dir(wt_path.to_str().unwrap());
+        assert_eq!(
+            jsonl_files(&d.join("projects").join(enc)).len(),
+            1,
+            "the copy the pane resumed stays"
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
     /// Creating the tree fails (a name already taken): nothing else runs.
     #[cfg(unix)]
     #[tokio::test]
@@ -2481,6 +2532,77 @@ mod tests {
         assert!(git(&repo, &["branch", "--list", "fork-x"]).is_empty());
         assert!(src.exists(), "the source is untouched");
         assert_eq!(git(&src, &["rev-parse", "HEAD"]), head);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// The removal script refuses a tree a live tmux pane is working in
+    /// (below its root too) and leaves tree and branch; with no pane there
+    /// it removes both. Skipped where tmux is not installed.
+    #[cfg(unix)]
+    #[test]
+    fn the_removal_script_leaves_a_tree_a_live_pane_is_in() {
+        if std::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let d = tmp();
+        let sock = d.join("tmux");
+        std::fs::create_dir_all(&sock).unwrap();
+        let repo = d.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let sh = |script: &str| {
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .env("TMUX_TMPDIR", &sock)
+                .env_remove("TMUX")
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "commit.gpgsign")
+                .env("GIT_CONFIG_VALUE_0", "false")
+                .output()
+                .unwrap()
+        };
+        let r = quote(repo.to_str().unwrap());
+        let wt = repo.join("wt-live");
+        let w = quote(wt.to_str().unwrap());
+        let setup = sh(&format!(
+            "set -e; cd {r}; git init -q; git -c user.email=a@b -c user.name=a \
+             commit -q --allow-empty -m init; git worktree add -q {w} -b fork-live; \
+             mkdir -p {w}/sub; tmux new-session -d -s live -c {w}/sub 'sleep 60'"
+        ));
+        assert!(
+            setup.status.success(),
+            "{}",
+            String::from_utf8_lossy(&setup.stderr)
+        );
+
+        let rm = sh(&remove_fork_worktree_script(
+            wt.to_str().unwrap(),
+            "fork-live",
+        ));
+        assert_eq!(
+            rm.status.code(),
+            Some(3),
+            "{}",
+            String::from_utf8_lossy(&rm.stderr)
+        );
+        assert!(String::from_utf8_lossy(&rm.stderr).contains(TREE_IN_USE));
+        assert!(wt.exists(), "the tree stays");
+
+        sh("tmux kill-server");
+        let rm = sh(&remove_fork_worktree_script(
+            wt.to_str().unwrap(),
+            "fork-live",
+        ));
+        assert!(
+            rm.status.success(),
+            "{}",
+            String::from_utf8_lossy(&rm.stderr)
+        );
+        assert!(!wt.exists(), "no pane: the tree goes");
         std::fs::remove_dir_all(&d).ok();
     }
 }
