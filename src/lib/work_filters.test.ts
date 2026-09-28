@@ -16,6 +16,8 @@ import {
   bothPredicates,
   effectiveWorkFilters,
   isWorkFilters,
+  migrateWorkFilters,
+  readWorkFilters,
   loadMine,
   mineItemIds,
   pastWorkFields,
@@ -180,6 +182,34 @@ describe('work filter state', () => {
     vi.resetModules();
     const fresh = await import('./work_filters');
     expect(get(fresh.workFilters)).toEqual(DEFAULT_WORK_FILTERS);
+  });
+
+  it('a v1 pref missing a newer field keeps its other choices (field by field)', async () => {
+    // Saved before `archived` (and has-session) existed: every other
+    // choice carries over, the missing fields take their defaults.
+    localStorage.setItem('cf:pref:sidebar.work-filters', JSON.stringify({ tracker: 4, status: 'name:QA Review', assignee: 'mine' }));
+    vi.resetModules();
+    const fresh = await import('./work_filters');
+    expect(get(fresh.workFilters)).toEqual({
+      tracker: 4,
+      status: 'name:QA Review',
+      assignee: 'mine',
+      hasSession: 'any',
+      archived: false,
+    });
+  });
+
+  it('v1\'s archived: true (the old default) does not carry over; a bad field alone is reset', () => {
+    expect(migrateWorkFilters({ ...DEFAULT_WORK_FILTERS, status: 'todo', archived: true })).toMatchObject({ status: 'todo', archived: true });
+    localStorage.setItem('cf:pref:sidebar.work-filters', JSON.stringify({ ...DEFAULT_WORK_FILTERS, status: 'todo', archived: true }));
+    expect(readWorkFilters()).toEqual({ ...DEFAULT_WORK_FILTERS, status: 'todo', archived: false });
+    expect(migrateWorkFilters({ tracker: '3', status: 'done', hasSession: 'no' })).toEqual({
+      ...DEFAULT_WORK_FILTERS,
+      status: 'done',
+      hasSession: 'no',
+    });
+    expect(migrateWorkFilters(null)).toBeNull();
+    expect(migrateWorkFilters([1])).toBeNull();
   });
 
   it('"mine" is the hub\'s mine view', async () => {
