@@ -101,14 +101,15 @@ R3  Host: gpu-box ×  Last 1d ×  Clear all            only while something narr
 
 ## fleet-mobile
 
-*My work* filters the same `WorkTreeFilters`. To match the desktop:
+*My work* and the Sessions filters follow the same model. The work is on
+fleet-mobile's `claude/serene-faraday-7loasz` branch:
 
-- Use `workFacets` for its chip row. Port the function: it is pure. The labels
-  are the ones in `work_view.ts` (`STATUS_FILTER_LABELS`, `HAS_FILTER_LABELS`,
-  now in sentence case).
-- Put the filters in one bottom sheet with the same four groups, and keep
-  *Assigned to me* and *To review* as toggles on screen.
-- Its empty state should name the filters and offer **Clear filters**.
-
-The mobile repo was not reachable from this change, so its side is still to
-do.
+- `model/FilterFacets.kt` is a port of `filter_facets.ts` and carries the
+  same labels.
+- `ui/FilterControls.kt` holds the pieces both screens share: the
+  *Filters (n)* chip, the strip of removable chips with *Clear all*, and
+  the *N archived hidden · Show archived* row.
+- Archived items are hidden by default. The filter prefs move to
+  `sessions.filters.v2`, migrated the same way as on the desktop.
+- The Work tree reads the new `archived` filter and `archived_hidden`
+  count.
