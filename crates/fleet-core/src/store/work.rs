@@ -138,6 +138,12 @@ pub struct WorkItemRow {
     /// `todo` until someone says otherwise).
     #[serde(default)]
     pub status_category: String,
+    /// Who decided `status_category`: `None` (the sync's, or the default),
+    /// `"person"` (explicit, final) or `"derived"` (stamped from a merged PR).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_set_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_set_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
     // --- tracker attributes (migration 048, work graph M3); all default, so
@@ -491,7 +497,7 @@ pub(super) const ITEM_COLUMNS: &str =
     "id, source, key, title, url, status_category, created_at, updated_at, \
      tracker_id, external_id, aliases, kind, hierarchy_level, status_name, resolution, parent_id, \
      assignees, iteration, updated_ext, status_changed_at, fetched_at, unavailable_at, \
-     unavailable_reason";
+     unavailable_reason, status_set_by, status_set_at";
 
 /// A JSON array column as a list; anything unreadable is empty.
 fn json_list(raw: Option<String>) -> Vec<String> {
@@ -524,6 +530,8 @@ pub(super) fn map_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemRow> {
         fetched_at: r.get(20)?,
         unavailable_at: r.get(21)?,
         unavailable_reason: r.get(22)?,
+        status_set_by: r.get(23)?,
+        status_set_at: r.get(24)?,
     })
 }
 
@@ -2327,5 +2335,30 @@ mod tests {
             Some("ABC-1"),
             "the survivor's primary"
         );
+    }
+
+    #[test]
+    fn an_items_status_provenance_round_trips_and_defaults_to_none() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.create_local_work_item(None, "auth refactor").unwrap().id;
+        let row = s.get_work_item(id).unwrap().unwrap();
+        assert_eq!(row.status_category, "todo");
+        assert_eq!(
+            row.status_set_by, None,
+            "a fresh item has no decision on it"
+        );
+        assert_eq!(row.status_set_at, None);
+
+        s.conn
+            .execute(
+                "UPDATE work_items SET status_category = 'done', status_set_by = 'person', \
+                 status_set_at = 1700 WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        let row = s.get_work_item(id).unwrap().unwrap();
+        assert_eq!(row.status_category, "done");
+        assert_eq!(row.status_set_by.as_deref(), Some("person"));
+        assert_eq!(row.status_set_at, Some(1700));
     }
 }

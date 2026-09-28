@@ -987,7 +987,7 @@ impl Store {
              ORDER BY COALESCE(updated_ext, 0) DESC, id DESC"
         ))?;
         let rows = stmt.query_map(rusqlite::params![tracker_id], |r| {
-            let meta: Option<String> = r.get(23)?;
+            let meta: Option<String> = r.get(25)?;
             Ok((map_item(r)?, ItemMeta::parse(meta.as_deref())))
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

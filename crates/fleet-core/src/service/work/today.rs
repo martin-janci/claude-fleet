@@ -504,6 +504,8 @@ mod tests {
                 title: format!("{key} title"),
                 url: Some(format!("https://x.atlassian.net/browse/{key}")),
                 status_category: cat.into(),
+                status_set_by: None,
+                status_set_at: None,
                 created_at: 1,
                 updated_at: 1,
                 tracker_id: Some(1),

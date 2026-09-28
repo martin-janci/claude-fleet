@@ -183,12 +183,12 @@ impl Store {
                 OR EXISTS (SELECT 1 FROM work_links l WHERE l.item_id = w.id)"
         ))?;
         let rows = stmt.query_map([], |r| {
-            let meta: Option<String> = r.get(23)?;
+            let meta: Option<String> = r.get(25)?;
             Ok(ViewItem {
                 item: map_item(r)?,
                 meta: ItemMeta::parse(meta.as_deref()),
-                containers: json_list(r.get(24)?),
-                own_org: r.get(25)?,
+                containers: json_list(r.get(26)?),
+                own_org: r.get(27)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
