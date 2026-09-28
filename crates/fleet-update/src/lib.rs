@@ -22,6 +22,7 @@
 pub mod channel;
 pub mod channel_doc;
 pub mod decide;
+pub mod keys;
 pub mod manifest;
 pub mod model;
 pub mod phase;
@@ -29,11 +30,12 @@ pub mod time;
 pub mod verify;
 pub mod wire;
 
-#[cfg(test)]
-pub(crate) mod testkit;
+#[cfg(any(test, feature = "testkit"))]
+pub mod testkit;
 
 pub use channel::{
-    CheckOutcome, Fetch, GitUpdateChannel, HubTransport, HubUpdateChannel, MemorySequenceStore,
+    fetch_channel, fetch_manifests, verify_listed_manifest, wanted_versions, CheckOutcome, Fetch,
+    GitUpdateChannel, HubTransport, HubUpdateChannel, Manifests, MemorySequenceStore, RawDoc,
     SequenceStore, UpdateChannel, UpdateError,
 };
 pub use channel_doc::ChannelDoc;

@@ -282,6 +282,23 @@ pub const DECIDE_JEV_WORK_LINK: &str = "decide.jev.work_link";
 /// What a feature's mode may be. `auto` is not offered: no feature has
 /// passed acceptance (D36).
 pub const DECIDE_MODES: &[&str] = &["off", "shadow", "assist"];
+
+// ── update.* (application updates, update-channel design §7.3) ──
+/// The release track the hub follows for its fleet.
+pub const UPDATE_TRACK: &str = "update.track";
+pub const UPDATE_TRACKS: &[&str] = &["stable", "beta", "nightly"];
+/// Per component: `manual` (only pins), `notify` (offer), `automatic`
+/// (install at the next quiet point).
+pub const UPDATE_HUB_MODE: &str = "update.hub.mode";
+pub const UPDATE_AGENT_MODE: &str = "update.agent.mode";
+pub const UPDATE_DESKTOP_MODE: &str = "update.desktop.mode";
+/// A phone never installs silently, so it has no `automatic`.
+pub const UPDATE_MOBILE_MODE: &str = "update.mobile.mode";
+pub const UPDATE_MODES: &[&str] = &["manual", "notify", "automatic"];
+pub const UPDATE_MOBILE_MODES: &[&str] = &["manual", "notify"];
+/// How often the hub re-reads the channel, and clients re-check.
+pub const UPDATE_CHECK_INTERVAL_SECS: &str = "update.check_interval_secs";
+pub const UPDATE_CHECK_INTERVAL_MIN_SECS: u64 = 900;
 /// Sessions and items with no org may be sent too (D31). Off by default.
 pub const DECIDE_JEV_UNASSIGNED: &str = "decide.jev.unassigned";
 /// One call's whole budget, in milliseconds.
@@ -582,6 +599,36 @@ pub const SPECS: &[Spec] = &[
         key: WORK_AUTO_TIDY_REASONS,
         default: "done_idle,pr_merged_idle",
         kind: Kind::ChoiceSet(AUTO_TIDY_REASONS),
+    },
+    Spec {
+        key: UPDATE_TRACK,
+        default: "stable",
+        kind: Kind::Choice(UPDATE_TRACKS),
+    },
+    Spec {
+        key: UPDATE_HUB_MODE,
+        default: "notify",
+        kind: Kind::Choice(UPDATE_MODES),
+    },
+    Spec {
+        key: UPDATE_AGENT_MODE,
+        default: "notify",
+        kind: Kind::Choice(UPDATE_MODES),
+    },
+    Spec {
+        key: UPDATE_DESKTOP_MODE,
+        default: "notify",
+        kind: Kind::Choice(UPDATE_MODES),
+    },
+    Spec {
+        key: UPDATE_MOBILE_MODE,
+        default: "notify",
+        kind: Kind::Choice(UPDATE_MOBILE_MODES),
+    },
+    Spec {
+        key: UPDATE_CHECK_INTERVAL_SECS,
+        default: "21600",
+        kind: Kind::SecsMin(UPDATE_CHECK_INTERVAL_MIN_SECS),
     },
     Spec {
         key: DECIDE_JEV_ENABLED,
@@ -1356,6 +1403,46 @@ mod tests {
             assert!(
                 specs.iter().any(|s| s.key == *key),
                 "docs/decisions.md lists `{key}`, which is not a registered setting"
+            );
+        }
+    }
+
+    #[test]
+    fn update_settings_are_in_the_user_guide() {
+        const GUIDE: &str = include_str!("../../../../docs/updates.md");
+        let rows: BTreeMap<&str, &str> = GUIDE
+            .lines()
+            .filter_map(|l| {
+                let rest = l.strip_prefix("| `update.")?;
+                let key_len = rest.find('`')?;
+                Some((&l[3..3 + "update.".len() + key_len], l))
+            })
+            .collect();
+        let specs: Vec<&Spec> = SPECS
+            .iter()
+            .filter(|s| s.key.starts_with("update."))
+            .collect();
+        assert!(!specs.is_empty(), "no update.* settings registered");
+        for spec in &specs {
+            let row = rows.get(spec.key).unwrap_or_else(|| {
+                panic!(
+                    "docs/updates.md → Settings has no row for `{}` (default `{}`); add one",
+                    spec.key, spec.default
+                )
+            });
+            let cells: Vec<&str> = row.split('|').map(str::trim).collect();
+            assert_eq!(
+                cells.get(2).copied(),
+                Some(format!("`{}`", spec.default).as_str()),
+                "docs/updates.md: the default of `{}` is `{}` in code",
+                spec.key,
+                spec.default
+            );
+        }
+        for key in rows.keys() {
+            assert!(
+                specs.iter().any(|s| s.key == *key),
+                "docs/updates.md lists `{key}`, which is not a registered setting"
             );
         }
     }

@@ -826,6 +826,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/078_host_provision_fingerprint.sql"),
         already_applied: Some(hosts_has_provision_fingerprint),
     },
+    // Application updates (S4): desired / observed / events / the signed
+    // document cache. `CREATE TABLE IF NOT EXISTS` only.
+    Migration::plain(79, include_str!("../../migrations/079_update_state.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

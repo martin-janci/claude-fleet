@@ -39,6 +39,7 @@ mod timeline;
 mod tracker_items;
 mod tracker_writes;
 mod trackers;
+mod update;
 mod usage;
 mod work;
 mod work_describe;
@@ -96,6 +97,9 @@ pub use trackers::{
     validate_tracker_settings, validate_tracker_transport, Secret, TrackerConfig,
     TrackerCredential, TrackerRow, TrackerSettings, TrackerViewRow, WriteBack, TRACKER_AUTH_KINDS,
     TRACKER_PROVIDERS, TRACKER_STATES,
+};
+pub use update::{
+    UpdateDesiredRow, UpdateDocRow, UpdateEventRow, UpdateObservedRow, UPDATE_EVENT_RETENTION_SECS,
 };
 pub use work::{
     canonical_key, github_ref, normalize_work_ref, primary_conflict, split_github_repo, Decider,

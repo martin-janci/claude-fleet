@@ -61,6 +61,9 @@
     toggleAutoTidyReason,
     DECIDE_MODES,
     DECIDE_JEV_MODELS,
+    UPDATE_TRACKS,
+    UPDATE_MODES,
+    UPDATE_MOBILE_MODES,
     type SettingKey,
     type ProjectsLayout,
   } from './fleet_settings';
@@ -370,6 +373,30 @@
   // --- Decisions (Jev): experimental, off (docs/decisions.md) ---
   let decideError: string | null = $state(null);
   let decideBusy = $state(false);
+  // --- Updates (update.*): the hub's policy for the fleet's own software ---
+  let updateError: string | null = $state(null);
+  let updateBusy = $state(false);
+  async function applyUpdate(key: SettingKey, value: string) {
+    updateBusy = true;
+    updateError = null;
+    const r = await setFleetSetting(key, value);
+    updateBusy = false;
+    if (!r.ok) updateError = r.error.message;
+  }
+  function onUpdateIntervalChange(e: Event) {
+    const r = parseIntInput((e.currentTarget as HTMLInputElement).value);
+    if ('error' in r) {
+      updateError = `Check every: ${r.error}`;
+      return;
+    }
+    void applyUpdate(SETTING_KEYS.updateCheckIntervalSecs, r.value);
+  }
+  const UPDATE_MODE_ROWS = [
+    { key: SETTING_KEYS.updateHubMode, label: 'hub', id: 'update-hub-mode', modes: UPDATE_MODES },
+    { key: SETTING_KEYS.updateAgentMode, label: 'agents', id: 'update-agent-mode', modes: UPDATE_MODES },
+    { key: SETTING_KEYS.updateDesktopMode, label: 'desktops', id: 'update-desktop-mode', modes: UPDATE_MODES },
+    { key: SETTING_KEYS.updateMobileMode, label: 'phones', id: 'update-mobile-mode', modes: UPDATE_MOBILE_MODES },
+  ] as const;
   async function applyDecide(key: SettingKey, value: string) {
     decideBusy = true;
     decideError = null;
@@ -1566,6 +1593,54 @@
         <span class="hook-desc" id="decide-retention-days-desc">days a decision record (ids and numbers, never text) is kept (0 = forever)</span>
       </div>
       {#if decideError}<p class="err" role="alert" data-testid="decide-error">{decideError}</p>{/if}
+    </section>
+
+    <section class="block" data-testid="update-section">
+      <div class="section-header">
+        <h4>Updates</h4>
+      </div>
+      <p class="hook-desc" data-testid="update-explainer">
+        What the hub offers the fleet's own software: its track, and per component whether a newer
+        release is only pinned by hand (manual), offered (notify) or installed at the next quiet point
+        (automatic). Every release is signed; nothing unsigned is ever offered (see <code>docs/updates.md</code>).
+      </p>
+      <div class="mcp-field">
+        <label class="lbl" for="update-track">track</label>
+        <select
+          class="layout-select"
+          id="update-track"
+          value={$fleetSettings[SETTING_KEYS.updateTrack] ?? 'stable'}
+          disabled={updateBusy}
+          data-testid="update-track"
+          onchange={(e) => void applyUpdate(SETTING_KEYS.updateTrack, (e.currentTarget as HTMLSelectElement).value)}>
+          {#each UPDATE_TRACKS as t (t)}<option value={t}>{t}</option>{/each}
+        </select>
+      </div>
+      {#each UPDATE_MODE_ROWS as row (row.key)}
+        <div class="mcp-field">
+          <label class="lbl" for={row.id}>{row.label}</label>
+          <select
+            class="layout-select"
+            id={row.id}
+            value={$fleetSettings[row.key] ?? 'notify'}
+            disabled={updateBusy}
+            data-testid={row.id}
+            onchange={(e) => void applyUpdate(row.key, (e.currentTarget as HTMLSelectElement).value)}>
+            {#each row.modes as m (m)}<option value={m}>{m}</option>{/each}
+          </select>
+        </div>
+      {/each}
+      <div class="mcp-field">
+        <label class="lbl" for="update-check-interval">check every</label>
+        <input class="port" id="update-check-interval" type="number" min="900" max="604800" step="900"
+          value={settingInt($fleetSettings, SETTING_KEYS.updateCheckIntervalSecs)}
+          disabled={updateBusy}
+          aria-describedby="update-check-interval-desc"
+          data-testid="update-check-interval"
+          onchange={onUpdateIntervalChange} />
+        <span class="hook-desc" id="update-check-interval-desc">seconds between reading the release channel (at least 900)</span>
+      </div>
+      {#if updateError}<p class="err" role="alert" data-testid="update-error">{updateError}</p>{/if}
     </section>
 
     <!-- Provisioning mints host tokens: refresh the shared token cache the

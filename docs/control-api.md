@@ -634,6 +634,15 @@ Index by area (names only; see the reference for details):
   token; a read, but master token only, since it names other fleets — the
   `fleet-hub peer add|list|remove` commands drive the same links straight on
   `state.db`).
+- **Updates** — `update_status` (the fleet's application updates: the
+  verified release channel, each target's reported version and phase with
+  what the hub would tell it now, per-component counts and the operator's
+  pins; a read any client may make, but a per-host or org-bound token sees
+  its own row only) and `update_admin` (master token only: `pin` a version
+  for a component or one target, where a pin below installed is a rollback;
+  `unpin`; `refresh` to re-read the signed channel now). The update wire
+  itself, `POST /update/check` and `/update/report`, is not a tool: see
+  `docs/updates.md`.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
   read, but master token only, since the values name hosts and their

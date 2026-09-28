@@ -24,6 +24,16 @@ sha2 = "0.10"
 async-trait = "0.1"
 # Zero-dependency minisign verifier; the same crate tauri-plugin-updater uses.
 minisign-verify = "0.3"
+# The test signer (`testkit`), for other crates' tests only.
+ring = { version = "0.17", optional = true }
+blake2 = { version = "0.10", optional = true }
+base64 = { version = "0.22", optional = true }
+
+[features]
+# A minisign-format test signer and a manifest builder, for tests in crates
+# that depend on this one (fleet-core's `service::update`). Never in a
+# production build: only ever enabled from a `[dev-dependencies]` entry.
+testkit = ["dep:ring", "dep:blake2", "dep:base64"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
