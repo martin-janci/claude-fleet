@@ -932,3 +932,28 @@ async fn the_sync_hook_runs_a_clean_asana_pass_once_a_day() {
     trigger.after_pass(&[pass(None)]).unwrap().await.unwrap();
     assert_eq!(fake.calls(), 3, "due again, but nothing new to ask");
 }
+
+#[tokio::test]
+async fn a_tracker_due_while_a_run_is_going_stays_due() {
+    let w = world();
+    w.on("assist");
+    let fake = Fake::answering(vec![says("todo", 0.9); 3]);
+    let trigger = StatusMapTrigger::new(w.ctx(fake.clone()));
+    let pass = TrackerPass {
+        tracker_id: w.tracker,
+        ..Default::default()
+    };
+    // Another run holds the single flight: nothing starts, and nothing is
+    // marked as run.
+    trigger.running.store(true, Ordering::SeqCst);
+    assert!(trigger.after_pass(std::slice::from_ref(&pass)).is_none());
+    assert!(trigger.last.lock().unwrap().is_empty());
+    // It ends: the next pass runs the tracker, not a day later.
+    trigger.running.store(false, Ordering::SeqCst);
+    trigger
+        .after_pass(std::slice::from_ref(&pass))
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(fake.calls(), 3);
+}

@@ -1157,14 +1157,14 @@ impl StatusMapTrigger {
         passes: &[TrackerPass],
     ) -> Option<tokio::task::JoinHandle<()>> {
         let now = self.ctx.now();
-        let due_ids: Vec<i64> = {
+        let due_now: Vec<(i64, u64)> = {
             let s = lock(&self.ctx.store).ok()?;
             if !settings::get_bool(&s, settings::DECIDE_JEV_ENABLED)
                 || FeatureMode::of(&s, Feature::StatusMap) == FeatureMode::Off
             {
                 return None;
             }
-            let mut last = self.last.lock().ok()?;
+            let last = self.last.lock().ok()?;
             let mut ids = Vec::new();
             for p in passes.iter().filter(|p| !p.skipped && p.error.is_none()) {
                 let Ok(Some(row)) = s.get_tracker(p.tracker_id) else {
@@ -1175,15 +1175,23 @@ impl StatusMapTrigger {
                 }
                 let digest = sections_digest(&row);
                 if due(last.get(&row.id).copied(), now, digest) {
-                    ids.push(row.id);
-                    last.insert(row.id, (now, digest));
+                    ids.push((row.id, digest));
                 }
             }
             ids
         };
-        if due_ids.is_empty() || self.running.swap(true, Ordering::AcqRel) {
+        if due_now.is_empty() || self.running.swap(true, Ordering::AcqRel) {
+            // A run is still going: the trackers due now stay due, and the
+            // next pass after it ends picks them up.
             return None;
         }
+        // Only now is a run theirs: record it.
+        if let Ok(mut last) = self.last.lock() {
+            for (id, digest) in &due_now {
+                last.insert(*id, (now, *digest));
+            }
+        }
+        let due_ids: Vec<i64> = due_now.into_iter().map(|(id, _)| id).collect();
         let ctx = self.ctx.clone();
         let running = Arc::clone(&self.running);
         /// Clears the single-flight flag however the task ends.
