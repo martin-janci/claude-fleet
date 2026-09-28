@@ -15,7 +15,8 @@
 # To upgrade: bump VERSION, run with SHA256_OVERRIDE=skip once to see the new
 # hash printed, put that hash here, and read the terminal release notes.
 #
-# Usage: scripts/fetch-conpty.sh [x64|arm64]   (default x64)
+# Usage: scripts/fetch-conpty.sh [x64|arm64]   (default: this machine's CPU;
+# a DLL for another CPU fails to load and portable-pty silently falls back)
 # Then build with `--config src-tauri/tauri.conpty.conf.json` (release.yml and
 # ci.yml's rust-windows job do). Idempotent; needs curl, sha256sum or shasum,
 # and unzip or Python.
@@ -23,7 +24,13 @@ set -euo pipefail
 
 VERSION="1.24.260710001"
 SHA256="175640566a3b59c4b132070ee96c2c77e5ab7edd2e92732a5eb3610bbf63d90e"
-ARCH="${1:-x64}"
+default_arch() {
+  case "${PROCESSOR_ARCHITEW6432:-${PROCESSOR_ARCHITECTURE:-$(uname -m 2>/dev/null)}}" in
+    ARM64 | arm64 | aarch64) echo arm64 ;;
+    *) echo x64 ;;
+  esac
+}
+ARCH="${1:-$(default_arch)}"
 case "$ARCH" in
   x64 | arm64) ;;
   *) echo "fetch-conpty.sh: unsupported arch '$ARCH' (x64, arm64)" >&2; exit 2 ;;

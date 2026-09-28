@@ -19,9 +19,16 @@ pub struct SshHost {
 
 /// Parse a slice of `~/.ssh/config` lines into a list of named hosts. We
 /// drop wildcards and a small denylist of well-known non-machine aliases.
+///
+/// As `ssh` reads it: every alias on a `Host` line (`Host a b`) is a host of
+/// its own sharing the block's values, a negated one (`!c`) none; the first
+/// value given for a host wins, across repeated blocks too; and a `Match`
+/// block's values belong to no host here. `Include` is resolved by
+/// [`load_user_config`] before this runs.
 pub fn parse(input: &str) -> Vec<SshHost> {
     let mut hosts: Vec<SshHost> = Vec::new();
-    let mut current: Option<SshHost> = None;
+    // Indices into `hosts` of the block being read.
+    let mut current: Vec<usize> = Vec::new();
     // A byte-order mark is not part of the first keyword: Windows editors
     // (older Notepad) save `.ssh\config` with one, and the first `Host` line
     // would otherwise be lost.
@@ -37,50 +44,163 @@ pub fn parse(input: &str) -> Vec<SshHost> {
         };
         let key_l = key.to_ascii_lowercase();
         if key_l == "host" {
-            // Close out previous block (if it was a real host).
-            if let Some(prev) = current.take() {
-                hosts.push(prev);
-            }
-            // A single `Host` line may declare multiple aliases (`Host a b c`).
-            // For our purposes we take the FIRST alias and ignore the rest —
-            // exotic shared blocks aren't common in user configs.
-            let first = value.split_ascii_whitespace().next().unwrap_or("");
-            if is_real_alias(first) {
-                current = Some(SshHost {
-                    alias: first.to_string(),
-                    hostname: None,
-                    user: None,
-                    port: None,
-                });
-            } else {
-                current = None;
+            current.clear();
+            for alias in value.split_ascii_whitespace() {
+                if !is_real_alias(alias) {
+                    continue;
+                }
+                let idx = match hosts.iter().position(|h| h.alias == alias) {
+                    Some(i) => i,
+                    None => {
+                        hosts.push(SshHost {
+                            alias: alias.to_string(),
+                            hostname: None,
+                            user: None,
+                            port: None,
+                        });
+                        hosts.len() - 1
+                    }
+                };
+                if !current.contains(&idx) {
+                    current.push(idx);
+                }
             }
             continue;
         }
-        let Some(host) = current.as_mut() else {
+        if key_l == "match" {
+            current.clear();
             continue;
-        };
-        match key_l.as_str() {
-            "hostname" => host.hostname = Some(value.trim().to_string()),
-            "user" => host.user = Some(value.trim().to_string()),
-            "port" => host.port = value.trim().parse::<u16>().ok(),
-            _ => {}
         }
-    }
-    if let Some(last) = current.take() {
-        hosts.push(last);
+        let value = value.trim();
+        for &i in &current {
+            let host = &mut hosts[i];
+            match key_l.as_str() {
+                "hostname" if host.hostname.is_none() => host.hostname = Some(value.to_string()),
+                "user" if host.user.is_none() => host.user = Some(value.to_string()),
+                "port" if host.port.is_none() => host.port = value.parse::<u16>().ok(),
+                _ => {}
+            }
+        }
     }
     hosts
+}
+
+/// How deep `Include` may nest, as in `ssh` (a loop stops here too).
+const MAX_INCLUDE_DEPTH: usize = 16;
+
+/// A config file's text with every `Include` replaced by the files it names,
+/// as `ssh_config(5)` reads them: a relative path is under `ssh_dir` (the
+/// user config's `~/.ssh`), `~/` is the home, and a `*` / `?` in the last
+/// component matches files there in lexical order. A file that is missing
+/// or unreadable adds nothing, like in `ssh`.
+fn inline_includes(
+    text: &str,
+    ssh_dir: &std::path::Path,
+    home: Option<&std::path::Path>,
+    depth: usize,
+) -> String {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut out = String::with_capacity(text.len());
+    for raw in text.lines() {
+        let line = strip_comment(raw).trim();
+        if let Some((key, value)) = split_kv(line) {
+            if key.eq_ignore_ascii_case("include") {
+                if depth < MAX_INCLUDE_DEPTH {
+                    for pattern in value.split_ascii_whitespace() {
+                        for file in include_files(pattern, ssh_dir, home) {
+                            if let Ok(t) = std::fs::read_to_string(&file) {
+                                out.push_str(&inline_includes(&t, ssh_dir, home, depth + 1));
+                                out.push('\n');
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+        out.push_str(raw);
+        out.push('\n');
+    }
+    out
+}
+
+/// The files one `Include` pattern names (see [`inline_includes`]).
+fn include_files(
+    pattern: &str,
+    ssh_dir: &std::path::Path,
+    home: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    let pattern = pattern.trim_matches('"');
+    let tilde = pattern
+        .strip_prefix("~/")
+        .or_else(|| pattern.strip_prefix("~\\").filter(|_| cfg!(windows)));
+    let path = match tilde {
+        Some(rest) => match home {
+            Some(h) => h.join(rest),
+            None => return Vec::new(),
+        },
+        None if std::path::Path::new(pattern).is_absolute() => std::path::PathBuf::from(pattern),
+        None => ssh_dir.join(pattern),
+    };
+    let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+        return Vec::new();
+    };
+    if !name.contains(['*', '?']) {
+        return vec![path];
+    }
+    let Some(dir) = path.parent() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter(|e| glob_match(&name, &e.file_name().to_string_lossy()))
+        .map(|e| e.path())
+        .collect();
+    files.sort();
+    files
+}
+
+/// `*` (any run) and `?` (any one character) against a whole file name.
+fn glob_match(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    let (mut pi, mut ni) = (0, 0);
+    let (mut star, mut mark) = (None, 0);
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ni;
+            pi += 1;
+        } else if let Some(s) = star {
+            pi = s + 1;
+            mark += 1;
+            ni = mark;
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&c| c == '*')
 }
 
 /// Convenience wrapper: load and parse the user's `~/.ssh/config` — every
 /// file [`config_paths`] names, the first one's hosts first. A file that does
 /// not exist or cannot be read contributes nothing.
 pub fn load_user_config() -> Vec<SshHost> {
+    let home = dirs_home();
     let parsed = config_paths()
         .into_iter()
-        .filter_map(|p| std::fs::read_to_string(p).ok())
-        .map(|c| parse(&c))
+        .filter_map(|p| {
+            let text = std::fs::read_to_string(&p).ok()?;
+            let ssh_dir = p.parent()?.to_path_buf();
+            Some(parse(&inline_includes(&text, &ssh_dir, home.as_deref(), 0)))
+        })
         .collect();
     merge_hosts(parsed)
 }
@@ -197,6 +317,71 @@ Host beta
 ";
 
     #[test]
+    fn every_alias_on_a_host_line_is_a_host_and_the_first_value_wins() {
+        let cfg = "Host a b !c *.lan\n  HostName shared\n  User one\n  User two\n\
+                   Host b\n  HostName later\n  Port 2200\n";
+        let hosts = parse(cfg);
+        let aliases: Vec<&str> = hosts.iter().map(|h| h.alias.as_str()).collect();
+        assert_eq!(aliases, ["a", "b"]);
+        assert_eq!(hosts[0].hostname.as_deref(), Some("shared"));
+        assert_eq!(hosts[0].user.as_deref(), Some("one"), "first value wins");
+        assert_eq!(
+            hosts[1].hostname.as_deref(),
+            Some("shared"),
+            "first block wins"
+        );
+        assert_eq!(
+            hosts[1].port,
+            Some(2200),
+            "a later block fills what was unset"
+        );
+    }
+
+    #[test]
+    fn a_match_block_gives_its_values_to_no_host() {
+        let cfg =
+            "Host a\n  HostName real\nMatch host a exec \"true\"\n  HostName other\n  Port 1\n";
+        let hosts = parse(cfg);
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].hostname.as_deref(), Some("real"));
+        assert_eq!(hosts[0].port, None);
+    }
+
+    #[test]
+    fn includes_are_inlined_relative_to_the_ssh_dir_with_globs_and_a_depth_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join(".ssh");
+        std::fs::create_dir_all(ssh.join("config.d")).unwrap();
+        std::fs::write(
+            ssh.join("config.d").join("20-b.conf"),
+            "Host b\n  HostName bee\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ssh.join("config.d").join("10-a.conf"),
+            "\u{feff}Host a\n  HostName ay\n",
+        )
+        .unwrap();
+        std::fs::write(ssh.join("config.d").join("skip.txt"), "Host nope\n").unwrap();
+        std::fs::write(ssh.join("extra"), "Host c\n").unwrap();
+        // A file that includes itself stops at the depth limit.
+        std::fs::write(ssh.join("loop"), "Host d\nInclude loop\n").unwrap();
+        let top = "Include config.d/*.conf ~/.ssh/extra missing\nInclude loop\nHost z\n";
+        let text = inline_includes(top, &ssh, Some(dir.path()), 0);
+        let aliases: Vec<String> = parse(&text).into_iter().map(|h| h.alias).collect();
+        assert_eq!(aliases, ["a", "b", "c", "d", "z"]);
+    }
+
+    #[test]
+    fn globs_match_whole_names() {
+        assert!(glob_match("*.conf", "a.conf"));
+        assert!(glob_match("a?c*", "abcdef"));
+        assert!(glob_match("*", ""));
+        assert!(!glob_match("*.conf", "a.conf.bak"));
+        assert!(!glob_match("a?", "a"));
+    }
+
+    #[test]
     fn a_second_config_adds_only_aliases_the_first_lacks() {
         let first = parse(SIMPLE);
         let second = parse("Host beta\n    Hostname elsewhere\nHost gamma\n    Hostname g\n");
@@ -307,15 +492,19 @@ Host eq
     }
 
     #[test]
-    fn handles_first_alias_in_multi_alias_line() {
-        // OpenSSH allows `Host a b c` to share a block. We just take `a`.
+    fn handles_every_alias_in_multi_alias_line() {
+        // OpenSSH allows `Host a b c` to share a block; each is a host the
+        // user can `ssh` to, so each is offered, with the block's values.
         let cfg = "
 Host primary backup tertiary
     Hostname pool.lan
 ";
         let hosts = parse(cfg);
-        assert_eq!(hosts.len(), 1);
-        assert_eq!(hosts[0].alias, "primary");
+        let aliases: Vec<&str> = hosts.iter().map(|h| h.alias.as_str()).collect();
+        assert_eq!(aliases, ["primary", "backup", "tertiary"]);
+        assert!(hosts
+            .iter()
+            .all(|h| h.hostname.as_deref() == Some("pool.lan")));
     }
 
     #[test]

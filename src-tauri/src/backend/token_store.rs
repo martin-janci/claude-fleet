@@ -196,25 +196,76 @@ impl TokenStore for OsTokenStore {
 /// machine, never roamed), and Windows encrypts it with the user's logon
 /// secret (DPAPI). The fallback file an older build wrote, owner-only on Unix
 /// but a plain file on Windows, is moved in on first read and deleted.
+/// Serialises every write to the credential (and the old file) in this
+/// process. `BoundedTokenStore` can leave a timed-out `get` running: without
+/// this, its first-read migration could land after a re-pair's `set` and put
+/// the old — possibly revoked — token back over the new one.
+#[cfg(windows)]
+static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(windows)]
 impl TokenStore for OsTokenStore {
     fn get(&self) -> Result<Option<String>, String> {
-        if let Some(bytes) = wincred::read(&self.target)? {
-            let token = String::from_utf8_lossy(&bytes).trim().to_string();
-            return Ok(if token.is_empty() { None } else { Some(token) });
-        }
-        let Some(token) = self.file_get()? else {
-            return Ok(None);
+        let read_err = match wincred::read(&self.target) {
+            Ok(Some(bytes)) => {
+                let token = String::from_utf8_lossy(&bytes).trim().to_string();
+                return Ok(if token.is_empty() { None } else { Some(token) });
+            }
+            Ok(None) => None,
+            // Credential Manager out of reach (a network logon, `runas
+            // /netonly`, a profile it is not loaded for): an older build's
+            // file still pairs, so it is tried before the error is.
+            Err(e) => Some(e),
         };
+        let Some(token) = self.file_get()? else {
+            return match read_err {
+                Some(e) => Err(e),
+                None => Ok(None),
+            };
+        };
+        if let Some(e) = read_err {
+            tracing::warn!("hub token read from the old file; {e}");
+            return Ok(Some(token));
+        }
         // The file holds a good token: a failed move is logged and retried at
         // the next read, never allowed to make the pairing look broken.
-        if let Err(e) = self.set(&token) {
+        if let Err(e) = self.migrate(&token) {
             tracing::warn!("hub token not moved to Credential Manager yet: {e}");
         }
         Ok(Some(token))
     }
 
     fn set(&self, token: &str) -> Result<(), String> {
+        let _guard = WRITE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.write_and_drop_file(token)
+    }
+
+    fn clear(&self) -> Result<(), String> {
+        let _guard = WRITE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        wincred::delete(&self.target)?;
+        self.file_clear()
+    }
+}
+
+#[cfg(windows)]
+impl OsTokenStore {
+    /// Move an older build's file token in, unless a credential appeared
+    /// since `get` looked: a `set` that got there first wins.
+    fn migrate(&self, token: &str) -> Result<(), String> {
+        let _guard = WRITE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if wincred::read(&self.target)?.is_some() {
+            return Ok(());
+        }
+        self.write_and_drop_file(token)
+    }
+
+    fn write_and_drop_file(&self, token: &str) -> Result<(), String> {
         wincred::write(&self.target, ACCOUNT, token.trim().as_bytes())?;
         // Only once the credential holds it: a failed write keeps the old
         // file as the one copy there is. A file that will not go (locked by
@@ -226,11 +277,6 @@ impl TokenStore for OsTokenStore {
         }
         Ok(())
     }
-
-    fn clear(&self) -> Result<(), String> {
-        wincred::delete(&self.target)?;
-        self.file_clear()
-    }
 }
 
 /// The three Credential Manager calls, with the `unsafe` kept in here. No
@@ -238,7 +284,24 @@ impl TokenStore for OsTokenStore {
 /// blob.
 #[cfg(windows)]
 mod wincred {
-    use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
+    use windows_sys::Win32::Foundation::{
+        GetLastError, ERROR_NOT_FOUND, ERROR_NO_SUCH_LOGON_SESSION,
+    };
+
+    /// A Credential Manager failure as a sentence. 1312 is what a logon
+    /// without a credential store gets (`runas /netonly`, a network or
+    /// service logon), and "error 1312" alone tells a user nothing.
+    fn failed(what: &str, err: u32) -> String {
+        if err == ERROR_NO_SUCH_LOGON_SESSION {
+            format!(
+                "Credential Manager {what} failed: this Windows logon has no credential store \
+                 (error {err}); run claude-fleet from a normal interactive sign-in, not \
+                 `runas /netonly` or a service account"
+            )
+        } else {
+            format!("Credential Manager {what} failed (error {err})")
+        }
+    }
     use windows_sys::Win32::Security::Credentials::{
         CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
         CRED_TYPE_GENERIC,
@@ -262,7 +325,7 @@ mod wincred {
             return if err == ERROR_NOT_FOUND {
                 Ok(None)
             } else {
-                Err(format!("Credential Manager read failed (error {err})"))
+                Err(failed("read", err))
             };
         }
         // SAFETY: on success `cred` points at one CREDENTIALW the system
@@ -303,7 +366,7 @@ mod wincred {
         if ok == 0 {
             // SAFETY: as in `read`.
             let err = unsafe { GetLastError() };
-            return Err(format!("Credential Manager write failed (error {err})"));
+            return Err(failed("write", err));
         }
         Ok(())
     }
@@ -318,7 +381,7 @@ mod wincred {
             // SAFETY: as in `read`.
             let err = unsafe { GetLastError() };
             if err != ERROR_NOT_FOUND {
-                return Err(format!("Credential Manager delete failed (error {err})"));
+                return Err(failed("delete", err));
             }
         }
         Ok(())
