@@ -206,15 +206,25 @@ impl TokenStore for OsTokenStore {
         let Some(token) = self.file_get()? else {
             return Ok(None);
         };
-        self.set(&token)?;
+        // The file holds a good token: a failed move is logged and retried at
+        // the next read, never allowed to make the pairing look broken.
+        if let Err(e) = self.set(&token) {
+            tracing::warn!("hub token not moved to Credential Manager yet: {e}");
+        }
         Ok(Some(token))
     }
 
     fn set(&self, token: &str) -> Result<(), String> {
         wincred::write(&self.target, ACCOUNT, token.trim().as_bytes())?;
         // Only once the credential holds it: a failed write keeps the old
-        // file as the one copy there is.
-        self.file_clear()
+        // file as the one copy there is. A file that will not go (locked by
+        // a backup or an indexer) is logged, not an error: the credential is
+        // what `get` reads first, and failing here would make a working
+        // pairing — or its migration on first read — look broken.
+        if let Err(e) = self.file_clear() {
+            tracing::warn!("hub token moved to Credential Manager; old file left: {e}");
+        }
+        Ok(())
     }
 
     fn clear(&self) -> Result<(), String> {

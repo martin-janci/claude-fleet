@@ -311,7 +311,7 @@ pub(super) async fn create_worktree_local(
 ) -> Result<String, IpcError> {
     crate::service::hub::ensure_local_allowed(crate::service::projects::LOCAL_HOST)?;
     let script = worktree_add_script(root, name, base);
-    let out = tokio::process::Command::new("bash")
+    let out = crate::proc::command("bash")
         .args(["-lc", &script])
         .output()
         .await

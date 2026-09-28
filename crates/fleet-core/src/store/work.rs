@@ -1039,19 +1039,26 @@ impl Store {
     /// rejected link that detection had proposed goes back to a suggestion,
     /// keeping its evidence. A link made by hand, with nothing that proposed
     /// it, is refused — remove it instead (`unlink`). A suggestion is left
-    /// as it is (idempotent).
-    pub fn reconsider_work_link(&self, session_id: i64, link_id: i64) -> Result<(), IpcError> {
+    /// as it is (idempotent). An agent never undoes a person's decision
+    /// (D34): undo, then confirm, would overturn a person's rejection in two
+    /// steps.
+    pub fn reconsider_work_link(
+        &self,
+        session_id: i64,
+        link_id: i64,
+        decider: Decider,
+    ) -> Result<(), IpcError> {
         let participant = self.work_participant(session_id)?;
-        let row: Option<(String, Option<String>, Option<String>)> = self
+        let row: Option<(String, String, Option<String>, Option<String>)> = self
             .conn
             .query_row(
-                "SELECT state, rule, evidence FROM work_links \
+                "SELECT state, source, rule, evidence FROM work_links \
                  WHERE id = ?1 AND participant_id = ?2 AND ended_at IS NULL",
                 rusqlite::params![link_id, participant],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        let Some((state, rule, evidence)) = row else {
+        let Some((state, source, rule, evidence)) = row else {
             return Err(IpcError::new(
                 codes::E_NOTFOUND,
                 format!("session {session_id} has no live work link {link_id}"),
@@ -1068,6 +1075,18 @@ impl Store {
                     "work link {link_id} was made by hand, not proposed: remove it (unlink) \
                      instead of undoing it"
                 ),
+            ));
+        }
+        if decider == Decider::Agent && PERSON_SOURCES.contains(&source.as_str()) {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                format!(
+                    "a person decided work link {link_id} for session {session_id}; an agent \
+                     cannot undo a person's decision — ask the person"
+                ),
+            )
+            .with_details(
+                serde_json::json!({ "link_id": link_id, "reason": "decided_by_person" }),
             ));
         }
         let tx = self.conn.unchecked_transaction()?;
@@ -1109,7 +1128,10 @@ impl Store {
 
     /// Say that `session_id` does NOT work on `target` (a person's "Not
     /// this"). Sticky: detection must never re-propose it; only a later
-    /// explicit link by a person overrides it.
+    /// explicit link by a person overrides it. Test shorthand for a
+    /// person's reject: every production path names its decider
+    /// ([`Self::reject_session_work_as`]).
+    #[cfg(test)]
     pub fn reject_session_work(
         &self,
         session_id: i64,

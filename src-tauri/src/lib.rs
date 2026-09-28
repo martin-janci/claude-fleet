@@ -187,6 +187,28 @@ pub fn run() {
             // refused with E_NOTFOUND, and the seeded row is hidden.
             #[cfg(windows)]
             {
+                // WSL distributions become hosts (`fleet_core::wsl`). Found
+                // before the ticks start, so the first reconcile pass already
+                // routes `wsl-<name>` through wsl.exe; bounded, because a WSL
+                // service that is still starting can take seconds.
+                let ssh_aliases: Vec<String> = fleet_core::ssh_config::load_user_config()
+                    .into_iter()
+                    .map(|h| h.alias)
+                    .collect();
+                fleet_core::wsl::refresh(&ssh_aliases, std::time::Duration::from_secs(3));
+                // portable-pty prefers a conpty.dll beside the exe (the one the
+                // installer ships) to the built-in ConPTY; say which this run
+                // got, since bracketed paste and the mouse depend on it.
+                let bundled_conpty = std::env::current_exe()
+                    .ok()
+                    .and_then(|exe| exe.parent().map(|d| d.join("conpty.dll").is_file()))
+                    .unwrap_or(false);
+                tracing::info!(
+                    wsl_hosts = ?fleet_core::wsl::hosts(),
+                    ssh = %fleet_core::ssh::default_ssh_binary().display(),
+                    conpty = if bundled_conpty { "bundled" } else { "system" },
+                    "[startup] Windows host sources"
+                );
                 fleet_core::service::hub::disable_local_host();
                 if let Ok(s) = store.lock() {
                     let now = std::time::SystemTime::now()

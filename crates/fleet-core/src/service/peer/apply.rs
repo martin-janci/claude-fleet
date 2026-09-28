@@ -166,8 +166,12 @@ pub async fn apply_inbound(
         let Some(to) = wake_target(store, recipient) else {
             continue;
         };
-        if wake_action(false, to.claude_status.as_deref(), to.stuck_kind.is_some())
-            != WakeAction::Paste
+        if wake_action(
+            false,
+            to.claude_status.as_deref(),
+            to.stuck_kind.is_some(),
+            !crate::store::has_no_pane(&to.kind),
+        ) != WakeAction::Paste
         {
             continue;
         }

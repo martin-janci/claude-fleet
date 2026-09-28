@@ -99,11 +99,20 @@ struct Scan {
     hits: Vec<usize>,
     /// Test-only module files it declares (`#[cfg(test)] mod name;`).
     test_mods: Vec<String>,
+    /// Test-only module files it declares with an explicit
+    /// `#[path = "file.rs"]`, relative to the declaring file's directory.
+    test_paths: Vec<String>,
     /// 1-based lines of inline test modules whose closing brace was not found.
     unterminated: Vec<usize>,
 }
 
 fn scan(text: &str) -> Scan {
+    scan_with(text, calls_print)
+}
+
+/// [`scan`] for any production-code predicate: `hit` sees each trimmed,
+/// non-comment line outside test-only modules.
+fn scan_with(text: &str, hit: fn(&str) -> bool) -> Scan {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = Scan::default();
     let mut i = 0;
@@ -125,6 +134,17 @@ fn scan(text: &str) -> Scan {
             let Some((item_idx, item)) = found else {
                 break;
             };
+            // `#[path = "x.rs"]` among the attributes between the two.
+            let path_attr = lines
+                .get(i + 1..item_idx)
+                .unwrap_or_default()
+                .iter()
+                .find_map(|l| {
+                    l.trim()
+                        .strip_prefix("#[path = \"")?
+                        .strip_suffix("\"]")
+                        .map(str::to_string)
+                });
             let decl = item
                 .strip_prefix("pub(crate) ")
                 .or_else(|| item.strip_prefix("pub "))
@@ -132,7 +152,10 @@ fn scan(text: &str) -> Scan {
             if let Some(rest) = decl.strip_prefix("mod ") {
                 let rest = rest.trim_end();
                 if let Some(name) = rest.strip_suffix(';') {
-                    out.test_mods.push(name.trim().to_string());
+                    match path_attr {
+                        Some(p) => out.test_paths.push(p),
+                        None => out.test_mods.push(name.trim().to_string()),
+                    }
                 } else if rest.ends_with('}') {
                     // A one-line `mod x { … }`: only that line is test code.
                     i = item_idx + 1;
@@ -155,7 +178,7 @@ fn scan(text: &str) -> Scan {
             i += 1;
             continue;
         }
-        if !t.starts_with("//") && calls_print(t) {
+        if !t.starts_with("//") && hit(t) {
             out.hits.push(i + 1);
         }
         i += 1;
@@ -167,28 +190,83 @@ fn scan(text: &str) -> Scan {
 fn production_code_does_not_use_eprintln() {
     // All three crates: the core, the desktop command layer and the hub
     // daemon. The hub's `out.rs` is its one sanctioned printer (CLI output).
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    // (repo-relative label for reports, directory)
-    let roots = [
-        ("crates/fleet-core/src", manifest.join("src")),
-        ("src-tauri/src", manifest.join("../../src-tauri/src")),
-        ("crates/fleet-hub/src", manifest.join("../fleet-hub/src")),
-    ];
     // The ONE allowlisted file, by exact path: `crates/fleet-hub/src/out.rs`.
     // Matching any `out.rs` at any depth would silently exempt a future
     // `serve/out.rs` or `commands/out.rs` from the guard.
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let hub_out = manifest.join("../fleet-hub/src").join("out.rs");
+    let (offenders, unterminated) = production_hits(calls_print, &hub_out, true);
+    assert_scanned(&unterminated);
     assert!(
-        hub_out.is_file(),
+        offenders.is_empty(),
+        "production print macro ({}) found; use tracing::{{error,warn,info,debug}}! so it \
+         reaches the redacting log layer:\n{}",
+        needles().join(", "),
+        offenders.join("\n")
+    );
+}
+
+/// True when `line` builds a child with `Command::new` itself.
+fn calls_command_new(line: &str) -> bool {
+    line.contains(concat!("Command::", "new("))
+}
+
+/// Every child the desktop can start goes through `crate::proc`, which on
+/// Windows keeps a console program (`ssh.exe`, `git.exe`) from flashing a
+/// console window for every spawn. The core and the desktop are scanned; the
+/// hub is a Linux daemon and keeps its own spawns.
+#[test]
+fn production_code_spawns_through_proc() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let proc_rs = manifest.join("src").join("proc.rs");
+    let (offenders, unterminated) = production_hits(calls_command_new, &proc_rs, false);
+    assert_scanned(&unterminated);
+    assert!(
+        offenders.is_empty(),
+        "production code builds a child with Command::new; use fleet_core::proc::command / \
+         std_command, which open no console window on Windows:\n{}",
+        offenders.join("\n")
+    );
+}
+
+fn assert_scanned(unterminated: &[String]) {
+    assert!(
+        unterminated.is_empty(),
+        "inline #[cfg(test)] module without its closing `}}` at the `mod` line's \
+         indentation (run cargo fmt); the rest of the file could not be checked:\n{}",
+        unterminated.join("\n")
+    );
+}
+
+/// Scan the production code of fleet-core and the desktop (and the hub when
+/// `with_hub`) for lines where `hit` is true, skipping the one `allowed`
+/// file and every test-only module. Returns the offenders and the files whose
+/// inline test module could not be delimited, both as `repo/path: lines [..]`.
+fn production_hits(
+    hit: fn(&str) -> bool,
+    allowed: &Path,
+    with_hub: bool,
+) -> (Vec<String>, Vec<String>) {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // (repo-relative label for reports, directory)
+    let mut roots = vec![
+        ("crates/fleet-core/src", manifest.join("src")),
+        ("src-tauri/src", manifest.join("../../src-tauri/src")),
+    ];
+    if with_hub {
+        roots.push(("crates/fleet-hub/src", manifest.join("../fleet-hub/src")));
+    }
+    assert!(
+        allowed.is_file(),
         "the allowlisted path moved; the skip below would match nothing: {}",
-        hub_out.display()
+        allowed.display()
     );
     let mut files = Vec::new();
     for (_, root) in &roots {
         let mut found = Vec::new();
         rs_files(root, &mut found);
         for path in found {
-            if path == hub_out {
+            if path == allowed {
                 continue;
             }
             files.push(path);
@@ -200,7 +278,7 @@ fn production_code_does_not_use_eprintln() {
     let mut scanned = Vec::new();
     for file in &files {
         let text = std::fs::read_to_string(file).expect("read source file");
-        let result = scan(&text);
+        let result = scan_with(&text, hit);
         // `mod name;` in lib.rs / main.rs / mod.rs resolves next to the file;
         // in `foo.rs` it resolves under `foo/`.
         let base = match file.file_name().and_then(|n| n.to_str()) {
@@ -210,6 +288,9 @@ fn production_code_does_not_use_eprintln() {
         for m in &result.test_mods {
             test_only.insert(base.join(format!("{m}.rs")));
             test_only.insert(base.join(m).join("mod.rs"));
+        }
+        for p in &result.test_paths {
+            test_only.insert(file.parent().expect("parent").join(p));
         }
         scanned.push((file.clone(), result));
     }
@@ -238,19 +319,20 @@ fn production_code_does_not_use_eprintln() {
             unterminated.push(format!("{rel}: lines {:?}", result.unterminated));
         }
     }
-    assert!(
-        unterminated.is_empty(),
-        "inline #[cfg(test)] module without its closing `}}` at the `mod` line's \
-         indentation (run cargo fmt); the rest of the file could not be checked:\n{}",
-        unterminated.join("\n")
-    );
-    assert!(
-        offenders.is_empty(),
-        "production print macro ({}) found; use tracing::{{error,warn,info,debug}}! so it \
-         reaches the redacting log layer:\n{}",
-        needles().join(", "),
-        offenders.join("\n")
-    );
+    (offenders, unterminated)
+}
+
+#[test]
+fn a_path_attribute_names_the_test_modules_file() {
+    let text = "#[cfg(test)]\n#[path = \"tests_x.rs\"]\nmod tests;\nfn a() {}\n";
+    let found = scan_with(text, |_| false);
+    assert_eq!(found.test_paths, vec!["tests_x.rs".to_string()]);
+    assert!(found.test_mods.is_empty(), "{found:?}");
+    assert!(calls_command_new(concat!(
+        "let c = std::process::Command::",
+        "new(\"x\");"
+    )));
+    assert!(!calls_command_new("let c = crate::proc::command(\"x\");"));
 }
 
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {

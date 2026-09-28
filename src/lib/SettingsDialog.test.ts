@@ -489,6 +489,19 @@ describe('SettingsDialog projects (W5 G3)', () => {
       entries: [{ label: 'Wipe', text: '/clear now' }, seeded[1]],
     });
 
+    // The Send box and the arrows save too; the arrows stop at either end.
+    await fireEvent.click(screen.getAllByTestId('preset-auto-send')[1]);
+    expect(get(composerPresets)[1].auto_send).toBe(true);
+    expect((screen.getAllByTestId('preset-up')[0] as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getAllByTestId('preset-down')[1] as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.click(screen.getAllByTestId('preset-down')[0]);
+    await flushComposerPresets();
+    expect(inv).toHaveBeenCalledWith('set_quick_replies', {
+      entries: [{ ...seeded[1], auto_send: true }, { label: 'Wipe', text: '/clear now' }],
+    });
+    await fireEvent.click(screen.getAllByTestId('preset-up')[1]);
+    expect(get(composerPresets)[0].label).toBe('Wipe');
+
     await fireEvent.click(screen.getByTestId('preset-add'));
     expect(get(composerPresets)).toHaveLength(seeded.length + 1);
     expect(screen.getAllByTestId('preset-label')).toHaveLength(seeded.length + 1);

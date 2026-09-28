@@ -1376,7 +1376,7 @@ impl<'a> HostExec<'a> {
     ) -> Result<ScriptOutput, IpcError> {
         let out = if self.host == "local" {
             crate::service::hub::ensure_local_allowed(&self.host)?;
-            let child = tokio::process::Command::new("bash")
+            let child = crate::proc::command("bash")
                 .args(["-lc", script])
                 .kill_on_drop(true)
                 .output();

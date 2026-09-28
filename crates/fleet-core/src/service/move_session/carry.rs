@@ -965,9 +965,14 @@ pub fn parse_pack(stdout: &str) -> Result<(u64, String), IpcError> {
 /// list before extracting, runs byte for byte the same extraction as
 /// [`extract_keep_existing_script`] does. Assumes `$a` is set and a `cd`
 /// into the destination has already happened.
+///
+/// GNU tar run as root keeps the archive's modes and owners, ignoring the
+/// caller's `umask 077`: carried memory files arrived 0644 and owned by the
+/// source's uid. `--no-same-permissions --no-same-owner` make root extract
+/// as any other user does (what GNU tar does by default for a non-root one).
 pub(super) fn keep_existing_extract() -> String {
     format!(
-        r#"if tar --version 2>/dev/null | grep -q 'GNU tar'; then k=--skip-old-files; else k=-k; fi
+        r#"if tar --version 2>/dev/null | grep -q 'GNU tar'; then k='--skip-old-files --no-same-permissions --no-same-owner'; else k=-k; fi
 tar -xzf "$a" $k >/dev/null 2>&1 || {{ printf '{FAILED} extract\n' >&2; exit 5; }}"#
     )
 }
@@ -1058,6 +1063,20 @@ pub(crate) mod tests {
             missing.join(", ")
         );
         eprintln!("skipping: {} is not available", missing.join(", "));
+        false
+    }
+
+    /// `true` (after saying so) when this process runs as root, for a test
+    /// whose proof is a permission denial: uid 0 reads and writes past any
+    /// mode, so there the test proves nothing. CI runs as a normal user;
+    /// containers and cloud sessions often do not.
+    #[cfg(unix)]
+    pub(crate) fn skip_as_root(why: &str) -> bool {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping as root: {why}");
+            return true;
+        }
         false
     }
 
@@ -2191,7 +2210,7 @@ pub(crate) mod tests {
         assert!(payload(&out.stdout).is_none(), "no payload on failure");
 
         #[cfg(unix)]
-        {
+        if !skip_as_root("mode 000 does not stop uid 0 reading the bundle") {
             use std::os::unix::fs::PermissionsExt;
             let unreadable = tmp.path().join("secret.bundle");
             std::fs::write(&unreadable, b"data").unwrap();

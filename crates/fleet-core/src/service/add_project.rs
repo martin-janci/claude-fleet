@@ -1508,7 +1508,7 @@ fn sanitize_basename(name: &str) -> String {
 /// killed on timeout (`kill_on_drop`) instead of leaking a thread forever.
 fn git_out(handle: &tokio::runtime::Handle, dir: &str, args: &[&str]) -> Result<String, String> {
     handle.block_on(async {
-        let run = tokio::process::Command::new("git")
+        let run = crate::proc::command("git")
             .arg("-C")
             .arg(dir)
             .args(args)
@@ -1669,7 +1669,7 @@ async fn run_local_script(
 ) -> Result<std::process::Output, IpcError> {
     // Every caller runs this for the `local` host.
     crate::service::hub::ensure_local_allowed(crate::service::projects::LOCAL_HOST)?;
-    let mut cmd = tokio::process::Command::new("bash");
+    let mut cmd = crate::proc::command("bash");
     cmd.arg("-lc")
         .arg(script)
         .stdin(std::process::Stdio::null())

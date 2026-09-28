@@ -294,7 +294,14 @@ pub async fn provision_host_with_token(
     // reverse tunnel so the host's 127.0.0.1:<port> lands on this machine.
     // An agent host is never dialed over SSH at all, so it has no use for
     // one either — it reaches the hub over its own outbound connection.
-    if host != "local" && !base.public && !routes_to_agent(store, host)? {
+    // A WSL distribution is not dialed over SSH either: `ssh -R` cannot
+    // reach it, and where its hooks can reach this machine at all (WSL1,
+    // WSL2 mirrored networking) they do so on 127.0.0.1 directly.
+    if host != "local"
+        && !base.public
+        && !routes_to_agent(store, host)?
+        && !crate::wsl::is_wsl_host(host)
+    {
         tunnels.ensure(host, base.port, base.port);
     }
     if let Ok(s) = store.lock() {
@@ -451,7 +458,12 @@ pub fn reestablish_tunnels(
     }
     let hosts = { lock(store)?.list_hosts()? };
     for h in hosts {
-        if h.provisioned && h.alias != "local" && !h.hidden && h.transport != "agent" {
+        if h.provisioned
+            && h.alias != "local"
+            && !h.hidden
+            && h.transport != "agent"
+            && !crate::wsl::is_wsl_host(&h.alias)
+        {
             tunnels.ensure(&h.alias, base.port, base.port);
         }
     }
@@ -1068,6 +1080,11 @@ mod tests {
     #[tokio::test]
     async fn write_host_file_secret_local_failure_leaves_the_original_untouched() {
         use std::os::unix::fs::PermissionsExt;
+        if crate::service::move_session::carry::tests::skip_as_root(
+            "mode 0500 does not stop uid 0 writing into the directory",
+        ) {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret.json");
         std::fs::write(&path, "original").unwrap();

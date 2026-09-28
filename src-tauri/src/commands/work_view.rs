@@ -14,7 +14,7 @@ use fleet_core::service::work::view::{
     self, ReviewPage, SessionTasks, TaskDetail, TreeArgs, TreePage, WorkTask, WorkTreeFilters,
 };
 use fleet_core::service::work::{self, WorkArgs, WorkLinkArgs};
-use fleet_core::store::{SessionRow, Store, WorkRule, WorkView};
+use fleet_core::store::{Decider, SessionRow, Store, WorkRule, WorkView};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -510,7 +510,13 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("decide_work_batch", &wire).await,
             // The desktop is the master: every session passes its gate.
-            None => structure::decide_batch(store, &OrgScope::All, &args.decisions, &|_| Ok(())),
+            None => structure::decide_batch(
+                store,
+                &OrgScope::All,
+                Decider::Person,
+                &args.decisions,
+                &|_| Ok(()),
+            ),
         }
     }
 

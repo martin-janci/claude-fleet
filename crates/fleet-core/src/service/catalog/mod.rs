@@ -56,7 +56,11 @@ pub struct ConfigureArgs {
 }
 
 fn expand_home(p: &str) -> String {
-    match (p.strip_prefix("~/"), crate::home::home_dir()) {
+    // `~\` too on Windows, where that is how a user types it.
+    let rest = p
+        .strip_prefix("~/")
+        .or_else(|| p.strip_prefix("~\\").filter(|_| cfg!(windows)));
+    match (rest, crate::home::home_dir()) {
         (Some(rest), Some(home)) => format!("{}/{rest}", home.display()),
         _ => p.to_string(),
     }

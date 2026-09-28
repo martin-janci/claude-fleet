@@ -16,7 +16,7 @@
   import { orgs as orgStore } from './orgs';
   import { openExternal } from './open_external';
   import { timeAgo } from './session_status';
-  import { describeEvidence, resumeWork } from './work';
+  import { describeEvidence, onWorkChangedDebounced, resumeWork } from './work';
   import { providerInfo, startWork, unavailableLabel } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -34,7 +34,6 @@
     taskStatus,
     trackerDown,
     trackerDownLabel,
-    workChanged,
     workRules,
     workTask,
     workTreeMeta,
@@ -124,23 +123,11 @@
   }
   void loadRules();
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let first = true;
-  const off = workChanged.subscribe(() => {
-    if (first) {
-      first = false;
-      return;
-    }
-    clearTimeout(timer);
-    timer = setTimeout(() => {
-      void load(taskId);
-      void loadRules();
-    }, debounceMs);
-  });
-  onDestroy(() => {
-    off();
-    clearTimeout(timer);
-  });
+  const off = onWorkChangedDebounced(() => {
+    void load(taskId);
+    void loadRules();
+  }, () => debounceMs);
+  onDestroy(off);
 
   const task: WorkTask | null = $derived(detail?.task ?? null);
   const grouped = $derived(groupSessionLinks(task?.sessions ?? []));

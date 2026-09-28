@@ -22,6 +22,23 @@
 | 6 package | done — no updater exists on any platform, so the `latest.json` item is void; `release-assets.sh` gained a `since` column so the new leg does not fail every earlier release in `verify-release` and the drift check |
 | 7 later | not started |
 
+Hardening after the merge (2026-09-28): no console window for any child
+(`fleet_core::proc`, guarded by `production_code_spawns_through_proc`);
+orphaned `ssh -R` tunnels reaped on Windows (sysinfo, `ssh.exe`); a BOM'd
+ssh config; reconcile, the hook auto-install and onboarding now honour the
+missing local host; `ssh` gets a null stdin; the terminal reports a gone
+`ssh.exe` itself, since the ConPTY pipe outlives it; CRLF pastes; UNC
+credential paths refused. Still open from that review: shipping
+`conpty.dll`/`OpenConsole.exe` (bracketed paste and mouse on Windows 10) — done
+since: `scripts/fetch-conpty.sh` + `src-tauri/tauri.conpty.conf.json`.
+
+Compatibility round (2026-09-28): WSL distributions are hosts
+(`fleet_core::wsl`, `wsl-<name>`, run through `wsl.exe` — this replaces the
+Phase 7 "WSL spike"); the `ssh` program is chosen once
+(`ssh::default_ssh_binary`: `CLAUDE_FLEET_SSH`, else the Windows OpenSSH,
+else PATH) and used by probes, the terminal and the tunnels alike; a
+non-system `ssh` also gets its own `$HOME/.ssh/config` read.
+
 Owner decision still open: Authenticode signing (the first Windows release ships unsigned; `docs/windows.md` says so).
 
 ## 0. Evidence: what actually fails today

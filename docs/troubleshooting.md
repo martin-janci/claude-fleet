@@ -255,6 +255,18 @@ If the sidebar looks stale, click Refresh first. If Refresh does not change
 anything, check the log for `reconcile failed` lines and probe the host from
 Settings.
 
+### Session state thresholds
+
+Four settings tune how the tick reads a session's state (Settings, or
+`set_setting` over MCP):
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `reconcile.stale_working_secs` | `1800` | A `working` row with no hook, turn, transcript growth or pane output for this long turns `idle` and is flagged `stale_working`. `0` turns the rule off. |
+| `health.context_red_pct` | `85` | The context-window percentage at or past which a session reads `context_full`, counts as `context_red` in `fleet_health` and draws red on the desktop (1–100). |
+| `playbooks.oom_max_attempts` | `2` | How many recreates the `oom` playbook may run on one session per 24 h (0–20). `0` refuses every recreate but keeps the refusals on the timeline. |
+| `gc.external_lost_ttl_secs` | `3600` | How long a lost `external` row (a Claude fleet only observes) is kept before the GC sweep deletes it. `0` reaps it on the next pass. |
+
 ### After laptop sleep / wake
 
 When the laptop sleeps, the SSH ControlMaster connections (one per host,

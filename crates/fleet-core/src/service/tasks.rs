@@ -17,7 +17,7 @@
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::ssh::SshClient;
-use crate::store::{SessionRow, Store, TaskRow, IDLE_STATUSES, TASK_TERMINAL_STATES};
+use crate::store::{SessionRow, Store, TaskRow, TASK_TERMINAL_STATES};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -148,10 +148,7 @@ impl WaitCond {
 /// PURE: does `row` satisfy `cond`?
 pub fn session_satisfies(row: &SessionRow, cond: WaitCond) -> bool {
     match cond {
-        WaitCond::Idle => row
-            .claude_status
-            .as_deref()
-            .is_some_and(|s| IDLE_STATUSES.contains(&s) || s == "failed"),
+        WaitCond::Idle => crate::store::turn_over(row.claude_status.as_deref()),
         WaitCond::TurnGt(t) => row.turn_seq > t,
     }
 }
