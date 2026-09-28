@@ -116,20 +116,34 @@ no view needs to know which it is looking at.
 Two new columns:
 
 ```sql
-ALTER TABLE work_items ADD COLUMN status_set_by   TEXT;    -- NULL | 'person'
-ALTER TABLE work_items ADD COLUMN status_set_at   INTEGER;
+ALTER TABLE work_items ADD COLUMN status_set_by TEXT;    -- NULL | 'person' | 'derived'
+ALTER TABLE work_items ADD COLUMN status_set_at INTEGER;
 ```
 
 Precedence, deliberately the same shape as resolver rule R1:
 
 1. `status_set_by = 'person'` → that status is final. Nothing derives over it.
-2. Otherwise derive, cheapest signal first: a live confirmed link whose session
-   is working → `in_progress`; the item's PR merged → `done`; else `todo`.
+2. `status_set_by = 'derived'` → a stamped `done` (below).
+3. Otherwise, live: a confirmed link whose session is working → `in_progress`.
+4. Else `todo`.
 
-Derivation reads signals the work graph **already** keeps (`work_links`,
-`sessions`, `pr_url`) and is computed in the read path, not stored — so no new
-sweep, no new event kind, and nothing to reconcile. A person's override is the
-only write.
+**Why `done` is stamped and `in_progress` is not.** The merged-PR signal lives
+on the **session** (`sessions.pr_signals`, `state: OPEN|CLOSED|MERGED`, read
+today by `PrSignals::is_merged`). When that session is retired and swept, the
+signal is gone — so a purely computed `done` would silently revert to `todo`
+once the work's session disappeared, which is the worst possible behaviour for
+the one status a release depends on. `done` is therefore **written once** by the
+tick that already computes `pr_merged_idle` for tidy-up, with
+`status_set_by = 'derived'`, and it survives the session.
+
+`in_progress` stays computed in the read path, because it is transient by
+nature: it means "a session is working on this right now", and there is nothing
+to preserve after that stops.
+
+A stamped `done` is not undone by new work: if a session starts on a done item,
+the row keeps saying `done` and a person may set it back. Flip-flopping on
+resumption would make the status untrustworthy for exactly the reader that
+matters — a release asking what shipped.
 
 **Who may be overridden.** The override applies to `source = 'local'` items
 only. For a tracker item the tracker owns `status_category` — `store::
@@ -311,9 +325,10 @@ shipped. Phase 4 is independent and may land at any point after 1.
   `Project · Work · Host · Flat` and the Work view by `group_label`. Three more
   axes is the real UX risk of this design, and the mitigation is that they all
   live behind one `Group by ▾` rather than becoming separate modes.
-- **Status derivation reading hot paths.** It runs in the read path of the Work
-  view and the board. The work view's scale test already guards p95; the
-  derivation must be one join, not a per-row query, and it must be measured
+- **The live half of status derivation is in a hot path.** `in_progress` is
+  computed on every Work view and board read (`done` is stamped, so it costs
+  nothing there). `scale_work_view` already guards p95 on `tree(..)`; the
+  derivation must be one join, never a per-row query, and it must be measured
   against that test before phase 1 merges.
 - **`ux_work_buckets_name` and orgs.** A uniqueness index on
   `(kind, org_id, name)` means two orgs may both have "Sprint 24". That is
