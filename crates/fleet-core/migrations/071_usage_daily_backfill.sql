@@ -3,7 +3,7 @@
 -- those rows are `backfill = 1` and reported apart (perf-logs §6a). Existing
 -- rows become live (backfill = 0) rows. Guarded by `usage_daily_has_backfill`
 -- in schema.rs, so a re-run cannot collapse backfill rows into live ones.
--- (The plan numbered this 062; 061-067 landed on main first. MIGRATIONS
+-- (The plan numbered this 062; 061-070 landed on main first. MIGRATIONS
 -- must stay contiguous, so this takes the next free number.)
 -- Rebuilt WITHOUT `ALTER TABLE … RENAME`: a rename re-parses every trigger in
 -- the schema, and on a database whose `main` 034-036 columns are still
