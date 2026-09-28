@@ -108,13 +108,17 @@ impl FleetTools {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             require_bound_client_sees_host(&s, &caller, &args.host_alias)?;
         }
-        // Publishing a repository on GitHub is a start the operator may not
-        // make alone (D12, see `guard::OPERATOR_CONFIRMS`). Only the call
-        // that can actually create — `create_remote` WITH the service's
-        // single-use token — is gated: the call without one is refused by
-        // the service before anything runs, and gating it too would spend
-        // the person's approval on a call that could never create. For
-        // everyone else this is a no-op and the token alone decides.
+        // Publishing a repository on GitHub needs a person. A paired
+        // client (a phone, a paired desktop) is a person at a UI, and the
+        // service's single-use token is their confirmation. Every other
+        // caller — the operator (D12, see `guard::OPERATOR_CONFIRMS`), a
+        // per-host token, the master token an agent may hold — could send
+        // that token straight back, so it waits for a person's approval
+        // (refused outright where there is no approver, a hub). Only the
+        // call that can actually create — `create_remote` WITH the token —
+        // is gated: the call without one is refused by the service before
+        // anything runs, and gating it too would spend the person's
+        // approval on a call that could never create.
         if let add_project::AddProjectSource::New {
             owner,
             repo,
@@ -122,7 +126,8 @@ impl FleetTools {
             confirm: Some(_),
         } = &args.source
         {
-            self.confirm_gate(
+            let person = !caller.is_client() || caller.is_operator();
+            self.confirm_gate_with(
                 "add_project",
                 confirm_nonce.as_deref(),
                 &format!(
@@ -132,6 +137,7 @@ impl FleetTools {
                     bound_text(Some(repo))
                 ),
                 &caller,
+                person,
             )?;
         }
         // `call_id` is never set here (it is `#[schemars(skip)]`): the

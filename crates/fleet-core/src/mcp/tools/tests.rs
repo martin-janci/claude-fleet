@@ -8411,6 +8411,107 @@ async fn the_operators_create_remote_waits_for_a_person() {
         .expect("a clone is not confirm-gated");
 }
 
+/// A per-host token or the master token could send the service's
+/// create_remote token straight back and publish a GitHub repository with
+/// no person involved. Like the operator, they now wait for an approval;
+/// a paired client (a person at a UI) is confirmed by the token alone.
+#[tokio::test]
+async fn create_remote_from_a_token_that_is_not_a_person_waits_for_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, _) = two_host_store();
+    let t = tools_over_fake_ssh(s, dir.path());
+    for who in [host_caller("hostb", TokenMode::Full), Caller::master()] {
+        let first = t
+            .add_project(
+                Extension(who.clone()),
+                Parameters(add_params("hostb", create_remote_src(None))),
+            )
+            .await
+            .unwrap_err();
+        let token = first.data.as_ref().unwrap()["details"]["confirm"]
+            .as_str()
+            .expect("the service's token")
+            .to_string();
+        let asked = t
+            .add_project(
+                Extension(who.clone()),
+                Parameters(add_params("hostb", create_remote_src(Some(&token)))),
+            )
+            .await
+            .unwrap_err();
+        confirm_nonce_of(&asked);
+        assert!(
+            asked
+                .message
+                .contains("a person approves this call whoever makes it"),
+            "{}",
+            asked.message
+        );
+    }
+    assert!(ssh_calls(dir.path()).is_empty(), "nothing ran on the host");
+}
+
+/// Where there is no approver (a hub), a token that is not a person cannot
+/// publish a repository at all; a paired phone still can, with the token.
+#[tokio::test]
+async fn without_an_approver_only_a_paired_client_creates_a_remote() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, _) = two_host_store();
+    let mut t = tools_over_fake_ssh(s, dir.path());
+    t.guards = t.guards.clone().without_approver();
+    let first = t
+        .add_project(
+            Extension(host_caller("hostb", TokenMode::Full)),
+            Parameters(add_params("hostb", create_remote_src(None))),
+        )
+        .await
+        .unwrap_err();
+    let token = first.data.as_ref().unwrap()["details"]["confirm"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let err = t
+        .add_project(
+            Extension(host_caller("hostb", TokenMode::Full)),
+            Parameters(add_params("hostb", create_remote_src(Some(&token)))),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.message.starts_with("E_FORBIDDEN") && err.message.contains("this caller"),
+        "{}",
+        err.message
+    );
+    assert!(ssh_calls(dir.path()).is_empty(), "nothing ran on the host");
+
+    let phone = client_caller("phone", TokenMode::Full);
+    let first = t
+        .add_project(
+            Extension(phone.clone()),
+            Parameters(add_params("hostb", create_remote_src(None))),
+        )
+        .await
+        .unwrap_err();
+    let token = first.data.as_ref().unwrap()["details"]["confirm"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = t
+        .add_project(
+            Extension(phone),
+            Parameters(add_params("hostb", create_remote_src(Some(&token)))),
+        )
+        .await;
+    assert!(
+        r.as_ref()
+            .err()
+            .is_none_or(|e| !e.message.starts_with("E_CONFIRM_REQUIRED")
+                && !e.message.starts_with("E_FORBIDDEN")),
+        "a paired phone is not gated: {:?}",
+        r.err().map(|e| e.message)
+    );
+}
+
 #[tokio::test]
 async fn an_operator_fork_needs_a_person_too() {
     let s = Store::open_in_memory().unwrap();

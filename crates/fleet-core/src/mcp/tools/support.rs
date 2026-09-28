@@ -1265,6 +1265,21 @@ impl FleetTools {
         summary: &str,
         caller: &Caller,
     ) -> Result<(), McpError> {
+        self.confirm_gate_with(tool, nonce, summary, caller, false)
+    }
+
+    /// [`Self::confirm_gate`], with `person` forcing a person's approval
+    /// for this call whoever the caller is — as the operator's starts and
+    /// kills always are — for a call site that decides that itself (see
+    /// `add_project`'s `create_remote`).
+    pub(super) fn confirm_gate_with(
+        &self,
+        tool: &str,
+        nonce: Option<&str>,
+        summary: &str,
+        caller: &Caller,
+        person: bool,
+    ) -> Result<(), McpError> {
         debug_assert!(
             guard::needs_confirmation(tool) || guard::OPERATOR_CONFIRMS.contains(&tool),
             "{tool} is not in guard::CONFIRM_TOOLS"
@@ -1272,7 +1287,7 @@ impl FleetTools {
         // The operator's starts and kills are always confirmed (D12); for
         // everyone else only the `confirm: true` tools, and only with the
         // toggle on.
-        let forced = guard::operator_must_confirm(caller.is_operator(), tool);
+        let forced = person || guard::operator_must_confirm(caller.is_operator(), tool);
         if !forced && (!guard::needs_confirmation(tool) || !self.confirm_enabled()?) {
             return Ok(());
         }
@@ -1280,8 +1295,13 @@ impl FleetTools {
             return Err(mcp_err(
                 "E_FORBIDDEN",
                 format!(
-                    "{tool} from the operator needs a person to approve it, and this hub has \
-                     no approver; ask the person to do it from the sidebar"
+                    "{tool} from {} needs a person to approve it, and this hub has \
+                     no approver; ask the person to do it from the sidebar",
+                    if caller.is_operator() {
+                        "the operator"
+                    } else {
+                        "this caller"
+                    }
                 ),
                 None,
             ));
@@ -1316,7 +1336,9 @@ impl FleetTools {
             format!(
                 "{tool} needs approval on the claude-fleet desktop ({}); \
                  ask the user to approve it there, then retry with confirm_nonce={}",
-                if forced {
+                if person && !caller.is_operator() {
+                    "a person approves this call whoever makes it"
+                } else if forced {
                     "the operator's starts and kills always do"
                 } else {
                     "mcp.confirm_destructive is on"
