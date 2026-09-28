@@ -246,8 +246,11 @@ impl TokenStore for OsTokenStore {
         let _guard = WRITE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        wincred::delete(&self.target)?;
-        self.file_clear()
+        // The legacy file goes whatever Credential Manager said: a Disconnect
+        // must never leave a token on disk because the other store failed.
+        let cred = wincred::delete(&self.target);
+        let file = self.file_clear();
+        cred.and(file)
     }
 }
 
