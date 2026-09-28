@@ -1116,22 +1116,23 @@ pub fn decide_proposal(
     action: &ProposalAction,
     now: i64,
 ) -> Result<ProposalOutcome, IpcError> {
+    let s = lock(store)?;
     if *action == ProposalAction::Reject {
-        return reject_proposal(&*lock(store)?, run_id, now);
+        return reject_proposal(&s, run_id, now);
     }
-    let (p, category) = {
-        let s = lock(store)?;
-        let p = pending_proposal(&s, run_id)?;
-        let category = p
-            .category(action)?
-            .ok_or_else(|| invalid("an apply needs a category"))?;
-        (p, category)
-    };
+    // One lock from the read to the write: the settings the apply merges
+    // into are the tracker's as it is now, so a settings change made
+    // meanwhile (another section, a sprint field) is never overwritten by
+    // a stale copy, and the proposal cannot be decided twice.
+    let p = pending_proposal(&s, run_id)?;
+    let category = p
+        .category(action)?
+        .ok_or_else(|| invalid("an apply needs a category"))?;
     let args: crate::service::trackers::admin::WorkAdminArgs =
         serde_json::from_value(apply_one_args(&p.tracker, &p.section, &category))
             .map_err(|e| IpcError::new(crate::ipc_error::codes::E_SERIALIZE, e.to_string()))?;
-    crate::service::trackers::admin::admin_sync(&args, store)?;
-    record_applied(&*lock(store)?, &p, action, &category, now)
+    crate::service::trackers::admin::update_locked(&args, &s)?;
+    record_applied(&s, &p, action, &category, now)
 }
 
 /// The sync tick's hook: after a pass, the Asana trackers that synced
