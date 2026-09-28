@@ -472,3 +472,106 @@ fn a_newer_update_proto_is_refused() {
         codes::E_UNSUPPORTED
     );
 }
+
+// ── Git mode (S3): a standalone hub reads the channel itself ──
+
+fn git(seen: u64) -> GitCheck {
+    GitCheck {
+        base_url: BASE.into(),
+        track: Track::Stable,
+        policy: Policy::default(),
+        seen,
+    }
+}
+
+#[tokio::test]
+async fn a_standalone_hub_finds_its_update_in_the_channel() {
+    let key = TestKey::new(9);
+    let fetch = MapFetch::default();
+    publish(&fetch, &key, 10);
+    let o = git_check(fetch.clone(), git(0), keys(&key), &hub_req("0.3.3"), NOW)
+        .await
+        .unwrap();
+    assert_eq!(o.decision.status, Status::UpdateAvailable);
+    assert_eq!(o.decision.source, Source::Git);
+    let t = o.decision.target.as_ref().unwrap();
+    assert_eq!(t.version, Version::new(0, 3, 4));
+    assert!(
+        t.evidence.is_some(),
+        "a Git decision carries its own evidence"
+    );
+    let v = o
+        .verified
+        .expect("the target is proven against the signed documents");
+    assert_eq!(v.version, Version::new(0, 3, 4));
+
+    let o = git_check(fetch, git(0), keys(&key), &hub_req("0.3.4"), NOW)
+        .await
+        .unwrap();
+    assert_eq!(o.decision.status, Status::UpToDate);
+    assert!(o.verified.is_none());
+}
+
+#[tokio::test]
+async fn a_standalone_check_trusts_only_the_release_key_and_newer_channels() {
+    let key = TestKey::new(9);
+    let fetch = MapFetch::default();
+    publish(&fetch, &key, 10);
+    let other = keys(&TestKey::new(3));
+    let e = git_check(fetch.clone(), git(0), other, &hub_req("0.3.3"), NOW)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_UPDATE_UNVERIFIED);
+    let e = git_check(fetch, git(11), keys(&key), &hub_req("0.3.3"), NOW)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        e.code,
+        codes::E_UPDATE_UNVERIFIED,
+        "an older channel is a replay"
+    );
+
+    let e = git_check(
+        MapFetch::default(),
+        git(0),
+        keys(&key),
+        &hub_req("0.3.3"),
+        NOW,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_HUB_UNAVAILABLE);
+    assert!(e.message.contains("no stable channel"), "{}", e.message);
+}
+
+#[tokio::test]
+async fn a_standalone_check_takes_the_hubs_own_settings_and_pin() {
+    let key = TestKey::new(9);
+    let (store, fetch) = published_store(&key).await;
+    pin(&store, "hub", "", "0.3.3", false, None, NOW).unwrap();
+    let setup = {
+        let s = lock(&store).unwrap();
+        GitCheck::from_store(Some(&s), Component::Hub, "hub:self", None).unwrap()
+    };
+    assert_eq!((setup.track, setup.seen), (Track::Stable, 10));
+    let mut setup_at_base = setup.clone();
+    setup_at_base.base_url = BASE.into();
+    let o = git_check(fetch, setup_at_base, keys(&key), &hub_req("0.3.4"), NOW)
+        .await
+        .unwrap();
+    assert_eq!(o.decision.status, Status::Rollback);
+
+    let bare = GitCheck::from_store(None, Component::Hub, "hub:self", Some(Track::Beta)).unwrap();
+    assert_eq!((bare.track, bare.seen), (Track::Beta, 0));
+    assert_eq!(bare.policy.mode, Mode::Notify);
+}
+
+#[test]
+fn the_hub_asks_for_itself() {
+    let r = hub_self_request(Installed::version(Version::new(0, 4, 1)));
+    assert_eq!(
+        (r.component, r.update_proto),
+        (Component::Hub, UPDATE_PROTO)
+    );
+    assert_eq!(r.platform.os, std::env::consts::OS);
+}

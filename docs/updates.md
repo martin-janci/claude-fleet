@@ -11,11 +11,12 @@ and the phones. Design and rationale:
 > CI publishes the signed documents (slice S2): each release from 0.4.1
 > carries a signed `release-manifest.json`, and the `stable` and `beta`
 > channels live on the `update-channels` branch (`docs/RELEASING.md` →
-> *Update manifest and channels*). Nothing is offered until the owner has
-> created the release key (`scripts/release-key.sh`) and a build that
-> trusts it is running: a hub that cannot verify a channel offers
-> nothing. `fleet-updater`, the desktop and the phone install nothing yet
-> (slices S6–S8), and there is no `nightly` channel yet (S2b).
+> *Update manifest and channels*). The release key exists and every build
+> from 0.4.1 trusts it; until 0.4.1 is released there is no channel to
+> read, so nothing is offered yet. `fleet-hub update check` asks the
+> channel directly (slice S3). `fleet-updater`, the desktop and the phone
+> install nothing yet (slices S6–S8), and there is no `nightly` channel
+> yet (S2b).
 
 ## Who decides what
 
@@ -83,6 +84,26 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   the last good copy, and `update_status.last_refresh` says why it failed.
   `FLEET_UPDATE_CHANNEL_URL` points the hub at a mirror. It changes only
   where the documents come from: what is trusted is still the signature.
+- **Ask the channel from the hub box.** `fleet-hub update check` reads the
+  published channel itself (Git mode), verifies it against the release key,
+  and says what this hub build should run under its own `update.*`
+  settings and pin. It needs no running hub, no token and no network but
+  GitHub, and installs nothing:
+
+  ```bash
+  docker compose exec fleet-hub fleet-hub update check
+  # fleet-hub 0.4.1 (linux-x86_64, oci) on stable: update_available
+  #   why    newer_recommended — 0.4.2 is available.
+  #   target 0.4.2
+  #   image  ghcr.io/martin-janci/fleet-hub@sha256:…
+  #   signed release manifest and channel #7 verified against the release key
+  #   mode   notify (update.hub.mode)
+  ```
+
+  `--track beta` reads another track; `--json` prints the whole decision,
+  including the signed documents it rests on. It exits 1 when there is no
+  answer: no channel published yet, a document no trusted key signed, or
+  GitHub unreachable.
 
 ## Settings
 
