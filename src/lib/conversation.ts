@@ -811,6 +811,55 @@ export function completeSlashCommand(c: SlashCommand): string {
   return c.args ? `/${c.name} ` : `/${c.name}`;
 }
 
+// ─── Model / effort pickers ──────────────────────────────────────────────────
+
+/** One entry of the composer's model or effort picker: `value` is the
+ *  argument the slash command is sent with. */
+export interface PickerOption {
+  value: string;
+  label: string;
+}
+
+/** Claude Code's `/model` aliases (a hint list, like {@link SLASH_COMMANDS}):
+ *  `/model <alias>` switches without opening the REPL's picker. */
+export const MODEL_OPTIONS: readonly PickerOption[] = [
+  { value: 'default', label: 'Default' },
+  { value: 'opus', label: 'Opus' },
+  { value: 'opus[1m]', label: 'Opus (1M context)' },
+  { value: 'sonnet', label: 'Sonnet' },
+  { value: 'sonnet[1m]', label: 'Sonnet (1M context)' },
+  { value: 'haiku', label: 'Haiku' },
+  { value: 'opusplan', label: 'Opus plan / Sonnet' },
+];
+
+/** `/effort <level>` levels, lowest first. */
+export const EFFORT_OPTIONS: readonly PickerOption[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra high' },
+  { value: 'max', label: 'Max' },
+];
+
+/** The line a picker sends: `/model opus`, `/effort high`. `null` for an
+ *  empty or multi-word value, which the REPL would not read as one argument. */
+export function pickerCommand(cmd: 'model' | 'effort', value: string): string | null {
+  const v = value.trim();
+  if (!v || /\s/.test(v)) return null;
+  return `/${cmd} ${v}`;
+}
+
+/** Short label for a transcript model id: `claude-opus-5-5` → `opus 5.5`,
+ *  `claude-sonnet-5[1m]` → `sonnet 5 [1m]`. Anything else is returned as-is. */
+export function modelShortLabel(model: string | null): string | null {
+  if (!model) return null;
+  const m = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(\[1m\])?$/i.exec(model.trim());
+  if (!m) return model;
+  const ver = m[3] ? `${m[2]}.${m[3]}` : m[2];
+  return `${m[1].toLowerCase()} ${ver}${m[4] ? ` ${m[4].toLowerCase()}` : ''}`;
+}
+
 // ─── Live indicator ──────────────────────────────────────────────────────────
 
 /** `session_activity`: what the pane shows right now, same vocabularies as

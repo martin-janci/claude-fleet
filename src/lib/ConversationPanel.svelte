@@ -75,6 +75,10 @@
     carriedCount,
     matchSlashCommands,
     completeSlashCommand,
+    MODEL_OPTIONS,
+    EFFORT_OPTIONS,
+    pickerCommand,
+    modelShortLabel,
     sessionActivity,
     indicatorFor,
     doingNow,
@@ -1094,6 +1098,22 @@
   const outboxBusy = $derived(outgoing.some((m) => m.state === 'waiting' || m.state === 'sending' || m.state === 'sent'));
   const busyBlocked = $derived(blockWhileBusy && (busyNote !== null || outboxBusy));
   const canSend = $derived(draft.trim().length > 0 && viewing === null && !busyBlocked);
+  // Model / effort pickers: each sends `/model <v>` or `/effort <v>` through
+  // the same outbox as a typed slash command. The model shows from the row
+  // (the transcript's); effort is in no transcript, so the picker remembers
+  // what it last sent to each session and otherwise shows the row's, if any.
+  let effortSent = $state<Record<number, string>>({});
+  const currentModel = $derived(modelShortLabel(session.model));
+  const currentEffort = $derived(effortSent[session.id] ?? session.effort_level ?? '');
+  const pickersDisabled = $derived(viewing !== null || busyBlocked);
+  function pickSetting(cmd: 'model' | 'effort', e: Event) {
+    const el = e.currentTarget as HTMLSelectElement;
+    const line = pickerCommand(cmd, el.value);
+    if (cmd === 'model') el.value = '';
+    if (!line) return;
+    if (cmd === 'effort') effortSent = { ...effortSent, [session.id]: el.value };
+    void sendText(line);
+  }
   const statusNote = $derived(
     viewing !== null ? 'Viewing an earlier conversation — go back to current to send.' : busyNote,
   );
@@ -2254,6 +2274,34 @@
             aria-label="Attach files"
             title="Attach files"
             onclick={pickFiles}>⌾</button>
+          <select
+            class="composer-pick"
+            data-testid="conv-model-pick"
+            aria-label="Model"
+            title={currentModel ? `Model: ${currentModel}. Pick one to send /model.` : 'Pick a model to send /model.'}
+            value=""
+            disabled={pickersDisabled}
+            onchange={(e) => pickSetting('model', e)}>
+            <option value="" disabled>{currentModel ?? 'Model'}</option>
+            {#each MODEL_OPTIONS as o (o.value)}
+              <option value={o.value}>{o.label}</option>
+            {/each}
+          </select>
+          <select
+            class="composer-pick"
+            data-testid="conv-effort-pick"
+            aria-label="Effort"
+            title={currentEffort ? `Effort: ${currentEffort}. Pick one to send /effort.` : 'Pick an effort level to send /effort.'}
+            value={currentEffort}
+            disabled={pickersDisabled}
+            onchange={(e) => pickSetting('effort', e)}>
+            {#if !EFFORT_OPTIONS.some((o) => o.value === currentEffort)}
+              <option value={currentEffort} disabled>{currentEffort || 'Effort'}</option>
+            {/if}
+            {#each EFFORT_OPTIONS as o (o.value)}
+              <option value={o.value}>{o.label}</option>
+            {/each}
+          </select>
           <span class="composer-hint" id={COMPOSER_HINT_ID}>↵ send · ⇧↵ newline · ↑ history</span>
           <button
             type="submit"
@@ -2512,6 +2560,21 @@
      sheet, a phone) Send slid left beside the attach button. */
   .composer-send {
     margin-left: auto;
+  }
+  .composer-pick {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 9rem;
+    height: var(--control-h);
+    padding: 0 0.3rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--control-fg-quiet);
+    font-size: var(--control-font-sm);
+  }
+  .composer-pick:disabled {
+    opacity: 0.5;
   }
   .composer-hint {
     flex: 1 1 auto;
