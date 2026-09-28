@@ -233,9 +233,13 @@ pub fn cost_micros(t: &UsageTotals, cache_write_5m_tokens: i64, p: Price) -> i64
 /// carries a subagent's own `usage` — verified on a live transcript) and
 /// `<synthetic>` entries; cut the LAST `"usage":{` object, read the 5-minute
 /// cache-write split from it, strip its nested objects, and read the four
-/// counters. The line's UTC day is the LAST `"timestamp":"YYYY-MM-DD`
-/// match: Claude Code writes the entry's own `timestamp` after `message`,
-/// whose `tool_use` input can carry a `timestamp` key of its own. A new
+/// counters. The line's UTC day is the entry's OWN `"timestamp":"YYYY-MM-DD`
+/// (`top_day`): a `tool_use` input inside `message`, or any other nested
+/// object, can carry a `timestamp` key of its own, before or after the
+/// entry's. One match is taken as is (the common case, no scan); with more,
+/// the one at brace depth 1 wins, found by a string- and escape-aware scan
+/// (the last match if none is — Claude Code writes the entry's own after
+/// `message`). A new
 /// message id adds its counters; a repeat of the last id
 /// (its next content block) adds only what grew. `last`/`lu` carry that id
 /// and its counted usage (`in,out,cw,cr,cw5m`) across passes. Escaped JSON
@@ -253,7 +257,31 @@ function num(u, k,   i, r) {
   return 0
 }
 function pos(x) { return x > 0 ? x : 0 }
-function take(line,   i, u, raw, id, m, g, vi, vo, vw, vr, v5, di, dq, dw, dr, d5, d, r, key) {
+function top_day(s,   r, d, cnt, n, i, c, depth, instr, esc, v) {
+  d = ""; cnt = 0; r = s
+  while (match(r, /"timestamp":"[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) { cnt++; d = substr(r, RSTART + 13, 10); r = substr(r, RSTART + RLENGTH) }
+  if (cnt < 2) return d
+  n = length(s); depth = 0; instr = 0; esc = 0
+  for (i = 1; i <= n; i++) {
+    c = substr(s, i, 1)
+    if (instr) {
+      if (esc) esc = 0
+      else if (c == "\\") esc = 1
+      else if (c == "\"") instr = 0
+      continue
+    }
+    if (c == "{" || c == "[") { depth++; continue }
+    if (c == "}" || c == "]") { depth--; continue }
+    if (c != "\"") continue
+    if (depth == 1 && substr(s, i, 13) == "\"timestamp\":\"") {
+      v = substr(s, i + 13, 10)
+      if (v ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) return v
+    }
+    instr = 1
+  }
+  return d
+}
+function take(line,   i, u, raw, id, m, g, vi, vo, vw, vr, v5, di, dq, dw, dr, d5, d, key) {
   if (index(line, "\"usage\":{") == 0) return
   id = ""
   if (match(line, /"id":"msg_[A-Za-z0-9_-]+"/)) id = substr(line, RSTART + 6, RLENGTH - 7)
@@ -295,9 +323,7 @@ function take(line,   i, u, raw, id, m, g, vi, vo, vw, vr, v5, di, dq, dw, dr, d
   tw[m] += dw
   tr[m] += dr
   t5[m] += d5
-  d = ""
-  r = line
-  while (match(r, /"timestamp":"[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/)) { d = substr(r, RSTART + 13, 10); r = substr(r, RSTART + RLENGTH) }
+  d = top_day(line)
   if (d == "") d = "?"
   key = m SUBSEP d
   if (!(key in dseen)) { dseen[key] = 1; dorder[++nd] = key; dm[key] = m; dd[key] = d }
@@ -2688,6 +2714,45 @@ mod tests {
             r#"{"type":"tool_use","id":"toolu_1","name":"Write","input":{"timestamp":"2020-01-01T00:00:00Z","n":1}}"#,
         );
         assert!(line.find("2020-01-01") < line.find("2026-09-19"));
+        append(&fx.file, &(line + "\n"));
+        let r = read(run(
+            &fx.home,
+            &cursor(Some(&fx.file), 0, None, None),
+            MAX_CHUNK_BYTES,
+        ));
+        assert_eq!(r.by_day.len(), 1);
+        assert_eq!(r.by_day[0].day.as_deref(), Some("2026-09-19"));
+        assert_eq!(r.by_day[0].totals.input_tokens, 10);
+    }
+
+    /// The entry's own `timestamp` wins over a nested one AFTER it too
+    /// (a later top-level object carrying its own key), and over one on
+    /// each side at once: the day is the depth-1 key, not the last match.
+    #[cfg(unix)]
+    #[test]
+    fn awk_takes_the_entrys_own_timestamp_before_a_nested_one() {
+        let fx = fixture();
+        let line = assistant_at(
+            "msg_1",
+            "claude-opus-5",
+            "2026-09-19T08:00:00.000Z",
+            10,
+            1,
+            0,
+            0,
+            "a",
+        )
+        .replace(
+            r#"{"type":"text","text":"a"}"#,
+            r#"{"type":"tool_use","id":"toolu_1","name":"Write","input":{"timestamp":"2020-01-01T00:00:00Z","s":"x\"}{\\"}}"#,
+        );
+        let line = format!(
+            r#"{},"toolUseResult":{{"timestamp":"2021-02-02T00:00:00Z"}}}}"#,
+            line.strip_suffix('}').unwrap()
+        );
+        assert!(line.find("2026-09-19") < line.find("2021-02-02"));
+        assert!(line.find("2020-01-01") < line.find("2026-09-19"));
+        serde_json::from_str::<serde_json::Value>(&line).expect("the fixture is JSON");
         append(&fx.file, &(line + "\n"));
         let r = read(run(
             &fx.home,
