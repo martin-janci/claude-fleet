@@ -45,6 +45,7 @@ export const RETENTION_TABLE_LABELS: Readonly<Record<string, string>> = {
   work_journal: 'journal',
   work_items: 'done tickets',
   session_events: 'work timeline',
+  work_item_descriptions: 'full descriptions',
 };
 
 export function retentionTableLabel(table: string): string {

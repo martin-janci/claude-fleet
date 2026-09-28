@@ -76,19 +76,31 @@ impl RetentionDays {
     }
 }
 
-/// The describe cache's own cutoff (Task 5): the tracker items' window when
-/// it keeps anything at all, else a fixed floor — `tracker_items_days`'s `0`
-/// ("keep forever") must not apply to a full-text cache, or
-/// `DESCRIPTION_MAX_CHARS` would be reopened by the back door. See
-/// `service::work::describe::DESCRIBE_CACHE_RETENTION_FLOOR_DAYS` and the
-/// matching row in `docs/work-graph.md`.
-fn describe_cutoff(tracker_items_days: i64, now: i64) -> i64 {
-    let days = if tracker_items_days > 0 {
+/// The describe cache's own EFFECTIVE window, in days (Task 5):
+/// `tracker_items_days` when it keeps anything at all, else the fixed floor
+/// — `tracker_items_days`'s `0` ("keep forever") must not apply to a
+/// full-text cache, or `DESCRIPTION_MAX_CHARS` would be reopened by the back
+/// door. See `service::work::describe::DESCRIBE_CACHE_RETENTION_FLOOR_DAYS`
+/// and the matching row in `docs/work-graph.md`.
+///
+/// This is what `status()` reports as the row's `days` — never the raw `0`
+/// — so every consumer (the desktop's retention line, `fleet-hub tracker
+/// status`) reads a number that is already true and needs no special case
+/// for this one table: a `days == 0` row really does mean "forever" for
+/// every table including this one, because this one is never given a raw
+/// `0` to report.
+fn describe_effective_days(tracker_items_days: i64) -> i64 {
+    if tracker_items_days > 0 {
         tracker_items_days
     } else {
         crate::service::work::describe::DESCRIBE_CACHE_RETENTION_FLOOR_DAYS
-    };
-    now - days * 86_400
+    }
+}
+
+/// The describe cache's own cutoff (Task 5): `now` minus
+/// [`describe_effective_days`]'s window.
+fn describe_cutoff(tracker_items_days: i64, now: i64) -> i64 {
+    now - describe_effective_days(tracker_items_days) * 86_400
 }
 
 fn setting_of(t: RetentionTable) -> &'static str {
@@ -174,13 +186,20 @@ pub fn status(store: &Mutex<Store>, now: i64) -> Result<RetentionStatus, IpcErro
     // both temporaries' drop is deferred to the statement's end, so the
     // second `lock` would block forever on the first, still-held guard —
     // this deadlocked the whole test binary before it was caught here.
+    let describe_days = describe_effective_days(days.tracker_items);
     let describe_cutoff = describe_cutoff(days.tracker_items, now);
     let describe_rows = lock(store)?.describe_cache_rows()?;
     let describe_would_delete = lock(store)?.describe_cache_eligible(describe_cutoff)?;
     tables.push(RetentionTableStatus {
         table: "work_item_descriptions".into(),
         setting: settings::WORK_RETENTION_TRACKER_ITEMS_DAYS.into(),
-        days: days.tracker_items,
+        // The EFFECTIVE window (30 when the setting is 0), not the raw
+        // setting: this row must never claim "kept forever" while
+        // `would_delete` says otherwise. Every display site (the desktop's
+        // retention line, `fleet-hub tracker status`) reads `days == 0` as
+        // "forever" with no table-specific exception, so the row itself
+        // must never hand it a `0` that isn't true.
+        days: describe_days,
         rows: describe_rows,
         would_delete: describe_would_delete,
     });
@@ -609,5 +628,63 @@ mod tests {
                 .as_deref(),
             Some("fresh text")
         );
+    }
+
+    /// The bug a re-review caught: with `work.retention.tracker_items_days`
+    /// at `0`, the describe cache's status row must report the EFFECTIVE
+    /// 30-day floor as `days`, not the raw `0` — a `0` there reads to every
+    /// consumer (the desktop's retention line, `fleet-hub tracker status`)
+    /// as "kept forever", which is false for this table and contradicted by
+    /// `would_delete` on the very same row.
+    #[test]
+    fn a_zero_tracker_items_window_reports_the_30_day_floor_in_status() {
+        let st = store();
+        settings::set(
+            &st.lock().unwrap(),
+            settings::WORK_RETENTION_TRACKER_ITEMS_DAYS,
+            "0",
+        )
+        .unwrap();
+        let old_id = {
+            let s = st.lock().unwrap();
+            let t = s
+                .add_tracker("jira", "J", "https://acme.atlassian.net")
+                .unwrap()
+                .id;
+            let old_id = s
+                .upsert_tracker_item(
+                    t,
+                    &crate::store::TrackerItemWrite {
+                        external_id: "1".into(),
+                        key: Some("ABC-1".into()),
+                        title: "Old".into(),
+                        status_name: "Done".into(),
+                        status_category: "done".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .id;
+            s.put_description(old_id, "old text", 8).unwrap();
+            old_id
+        };
+        let now = crate::service::catalog::now_secs();
+        st.lock()
+            .unwrap()
+            .conn_for_test()
+            .execute(
+                "UPDATE work_item_descriptions SET fetched_at = ?1 WHERE item_id = ?2",
+                rusqlite::params![now - 40 * 86_400, old_id],
+            )
+            .unwrap();
+        let s = status(&st, now).unwrap();
+        let row = s
+            .tables
+            .iter()
+            .find(|t| t.table == "work_item_descriptions")
+            .expect("a status row for the describe cache");
+        assert_eq!(row.days, 30, "the effective window, not the raw 0");
+        assert_eq!(row.would_delete, 1, "the 40-day-old row is past the floor");
+        assert_eq!(row.rows, 1);
     }
 }
