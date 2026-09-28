@@ -154,10 +154,6 @@ const REASONS = {
     'host discovery reads this machine’s SSH config, and a paired client does not administer the fleet anyway',
   provision_hosts:
     'provisioning rewrites every host’s hook block to report to whichever app ran it, and this desktop is a paired client',
-  apply_sync:
-    'asset sync writes to the hosts over SSH, which a paired client does not do',
-  set_secret:
-    'sync secrets belong to the machine that runs the sync, and this desktop is a paired client',
   install_fleet_hook:
     'the hook points at a control API this app is not running, because a paired client runs none',
   host_tokens:
@@ -213,8 +209,10 @@ const REASONS = {
     'the setup checklist is about running a fleet from this machine, which the hub is doing instead',
   tunnel_status: 'the tunnels belong to whichever process owns the fleet',
   mcp_status: 'this app runs no embedded control API while a hub owns the fleet',
-  catalog_config:
-    'the asset catalog is a git checkout on the machine that owns the fleet; the hub serves its asset list to any paired client (list_assets), but not the configuration and checkout this panel is built on',
+  catalog_import_host:
+    'an import reads host `local`’s Claude config, which on a hub is the hub’s own machine, not this one — call import_assets on the hub',
+  catalog_spawn_author_session:
+    'an author session is a Claude session in the catalog’s checkout on the hub’s machine, and the hub has no tool that starts one — edit the asset here instead',
   get_fleet_settings:
     'these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; the hub’s master token reads and changes them (get_settings, set_setting)',
   list_account_usage:

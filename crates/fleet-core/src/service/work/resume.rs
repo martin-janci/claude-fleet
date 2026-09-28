@@ -755,6 +755,8 @@ pub fn resume_session_args(
         } else {
             None
         },
+        model: None,
+        effort: None,
     })
 }
 

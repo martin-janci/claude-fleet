@@ -1,6 +1,7 @@
 //! `fleet-hub` — claude-fleet without the desktop app. See `docs/hub.md`.
 
 mod bench;
+mod catalog;
 mod census;
 mod config;
 mod decide;
@@ -9,6 +10,7 @@ mod org;
 mod out;
 mod pair;
 mod peer;
+mod ready;
 mod reports;
 mod serve;
 mod tls;
@@ -132,6 +134,15 @@ enum Cmd {
         #[command(flatten)]
         opts: HubOptions,
     },
+    /// Point the hub at its asset catalog (a git checkout on this machine),
+    /// show it, or reload it. No running hub needed; a running one picks the
+    /// change up at its next catalog call.
+    Catalog {
+        #[command(subcommand)]
+        cmd: catalog::CatalogCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
     /// Local measurements for the Jev evaluation: counts only, read straight
     /// from the database. No running hub needed; nothing is written or sent.
     Census {
@@ -212,6 +223,30 @@ enum Cmd {
         /// Whether the hub terminates TLS, so the probe speaks it too: off or cert [env: FLEET_HUB_TLS] [default: off]
         #[arg(long)]
         tls: Option<String>,
+        /// Also require readiness (store migrated, listener bound, first reconcile done) from the
+        /// running serve's readiness file, and check its build identity. For fleet-updater.
+        #[arg(long)]
+        ready: bool,
+        /// With --ready: print the verdict and the build identity as JSON (always, even when not ready).
+        #[arg(long, requires = "ready")]
+        json: bool,
+        /// Where serve keeps its readiness file [env: FLEET_HUB_DATA_DIR]
+        #[arg(long)]
+        data_dir: Option<std::path::PathBuf>,
+    },
+    /// Take a consistent online copy of state.db (read-only; never migrates). Safe while the hub serves.
+    Backup {
+        /// Write the copy here (refuses to overwrite) [default: <data dir>/backups/<prefix>-<UTC stamp>.db]
+        #[arg(long)]
+        to: Option<std::path::PathBuf>,
+        /// File name prefix for the default path, [A-Za-z0-9._-]+ (fleet-updater uses pre-<version>).
+        #[arg(long, default_value = "manual")]
+        prefix: String,
+        /// Print {path, schema, bytes} as JSON.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        opts: HubOptions,
     },
 }
 
@@ -219,6 +254,13 @@ enum Cmd {
 enum TokenCmd {
     Show,
     Regenerate,
+}
+
+/// What `fleet-hub client grant` can give a paired client.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum Grant {
+    /// The asset catalog: the hub's `catalog_admin` tool.
+    Assets,
 }
 
 #[derive(Subcommand)]
@@ -237,6 +279,13 @@ enum ClientCmd {
     Untrust { name: String },
     /// Bind a client to one org (its id): it reads only that org's work and sessions.
     Bind { name: String, org: i64 },
+    /// Let a paired client do what is otherwise the master's. `assets`: manage
+    /// the asset catalog (edit, commit, push, Sync, Secrets, layers) from its
+    /// Assets tab. Only a `full` client bound to no org. No running hub
+    /// needed.
+    Grant { name: String, grant: Grant },
+    /// Take a `grant` back.
+    Ungrant { name: String, grant: Grant },
     /// Lift a client's org binding: it reads every org again.
     Unbind { name: String },
 }
@@ -304,6 +353,10 @@ async fn main() -> ExitCode {
             ClientCmd::Untrust { name } => pair::client_trust(&opts, &env, &name, false).await,
             ClientCmd::Bind { name, org } => pair::client_bind(&opts, &env, &name, Some(org)).await,
             ClientCmd::Unbind { name } => pair::client_bind(&opts, &env, &name, None).await,
+            ClientCmd::Grant { name, grant } => pair::client_grant(&opts, &env, &name, grant, true),
+            ClientCmd::Ungrant { name, grant } => {
+                pair::client_grant(&opts, &env, &name, grant, false)
+            }
         },
         Cmd::Peer { cmd, opts } => match cmd {
             PeerCmd::Add {
@@ -317,6 +370,7 @@ async fn main() -> ExitCode {
         Cmd::Tracker { cmd, opts } => tracker::run(cmd, &opts, &env).await,
         Cmd::Org { cmd, opts } => org::run(cmd, &opts, &env).await,
         Cmd::Work { cmd, opts } => work::run(cmd, &opts, &env).await,
+        Cmd::Catalog { cmd, opts } => catalog::run(cmd, &opts, &env),
         Cmd::Census { cmd, opts } => census::run(cmd, &opts, &env),
         Cmd::Decide { cmd, opts } => decide::run(cmd, &opts, &env).await,
         Cmd::Reports {
@@ -333,7 +387,25 @@ async fn main() -> ExitCode {
             opts,
         } => demo_seed(&opts, &env, hosts, clear, force),
         Cmd::SshKey => serve::ssh_key(),
-        Cmd::Healthcheck { port, tls } => serve::healthcheck(port, tls, &env).await,
+        Cmd::Healthcheck {
+            port,
+            tls,
+            ready,
+            json,
+            data_dir,
+        } => {
+            if ready {
+                serve::healthcheck_ready(port, tls, data_dir, json, &env).await
+            } else {
+                serve::healthcheck(port, tls, &env).await
+            }
+        }
+        Cmd::Backup {
+            to,
+            prefix,
+            json,
+            opts,
+        } => serve::backup(&opts, &env, to, &prefix, json),
     };
     match result {
         Ok(code) => code,
@@ -688,7 +760,7 @@ mod tests {
         Cli::try_parse_from(["fleet-hub", "reports"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "ssh-key"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "healthcheck"]).unwrap();
-        let Cmd::Healthcheck { port, tls } = Cli::try_parse_from([
+        let Cmd::Healthcheck { port, tls, .. } = Cli::try_parse_from([
             "fleet-hub",
             "healthcheck",
             "--port",
@@ -703,6 +775,39 @@ mod tests {
         };
         assert_eq!(port, Some(4190));
         assert_eq!(tls.as_deref(), Some("cert"));
+        let Cmd::Healthcheck {
+            ready,
+            json,
+            data_dir,
+            ..
+        } = Cli::try_parse_from([
+            "fleet-hub",
+            "healthcheck",
+            "--ready",
+            "--json",
+            "--data-dir",
+            "/var/lib/fleet-hub",
+        ])
+        .unwrap()
+        .cmd
+        else {
+            panic!("healthcheck --ready did not parse");
+        };
+        assert!(ready && json);
+        assert_eq!(data_dir, Some("/var/lib/fleet-hub".into()));
+        assert!(
+            Cli::try_parse_from(["fleet-hub", "healthcheck", "--json"]).is_err(),
+            "--json needs --ready"
+        );
+        let Cmd::Backup {
+            to, prefix, json, ..
+        } = Cli::try_parse_from(["fleet-hub", "backup", "--prefix", "pre-0.3.4", "--json"])
+            .unwrap()
+            .cmd
+        else {
+            panic!("backup did not parse");
+        };
+        assert_eq!((to, prefix.as_str(), json), (None, "pre-0.3.4", true));
         assert!(Cli::try_parse_from(["fleet-hub", "bogus"]).is_err());
     }
 }

@@ -455,6 +455,7 @@ mod tests {
             revoked_at: None,
             trusted_at: None,
             org_id: None,
+            assets_admin_at: None,
         }
     }
 
@@ -621,6 +622,7 @@ mod tests {
                     revoked_at: None,
                     trusted_at: None,
                     org_id: None,
+                    assets_admin_at: None,
                 }]
             ),
             None

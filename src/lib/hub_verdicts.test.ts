@@ -67,16 +67,9 @@ describe('ROUTED_ACTIONS against the generated routed/routed_unless commands', (
 //                  RemoteToolbar, BranchList, CommitGraph)
 //   host_tokens -> list_host_tokens / set_host_token_mode / rotate_host_token
 //                  (HostDetail.svelte's per-host token controls)
-//   apply_sync  -> catalog_apply_sync — no component calls
-//                  hubBlock('apply_sync', …) today; AssetsPanel hides the
-//                  whole Sync section instead (transitively gated via
-//                  catalog_config, group B below)
-//   set_secret  -> catalog_set_secret — same as apply_sync
 const REASONS_KEYS_THAT_ARE_NOT_COMMANDS: ReadonlySet<string> = new Set([
   'repo_write',
   'host_tokens',
-  'apply_sync',
-  'set_secret',
 ]);
 
 describe('REASONS against the generated local_only commands', () => {
@@ -111,49 +104,10 @@ describe('REASONS against the generated local_only commands', () => {
 // each group below names the component whose own gate covers it, which is
 // how to re-verify a group.
 const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
-  // No frontend UI calls these at all — the Layers feature
-  // (list/resolve/propose/set-host-layers/template/write/delete) has no
-  // Svelte component yet.
-  noUiControl: [
-    'catalog_list_layers',
-    'catalog_resolve_preview',
-    'catalog_propose_layers',
-    'catalog_set_host_layers',
-    'catalog_layer_template',
-    'catalog_write_layer',
-    'catalog_delete_layer',
-  ],
-  // Gated by AssetsPanel.svelte's own `catalog_config` gate: `{#if
-  // catalogBlocked}` swaps the ENTIRE panel body (Sync, Secrets, asset
-  // detail, import, lint, layers-adjacent…) for the hub's read-only
-  // overview, which calls only the two routed commands (catalog_list_assets,
-  // assets_scan_hosts), so none of these ever fires — `catalog_config`
-  // already carries the REASONS entry that disables the panel.
-  gatedByAssetsPanel: [
-    'catalog_configure',
-    'catalog_load',
-    'catalog_get_asset',
-    'catalog_import_host',
-    'assets_inventory',
-    'catalog_plan_sync',
-    'catalog_apply_sync',
-    'catalog_last_sync',
-    'catalog_list_secrets',
-    'catalog_set_secret',
-    'catalog_delete_secret',
-    'catalog_create_asset',
-    'catalog_update_asset',
-    'catalog_delete_asset',
-    'catalog_add_resource',
-    'catalog_remove_resource',
-    'catalog_lint_asset',
-    'catalog_lint_all',
-    'catalog_commit_pending',
-    'catalog_push',
-    'catalog_repo_status',
-    'catalog_template',
-    'catalog_spawn_author_session',
-  ],
+  // (The asset catalog used to be most of this list, gated by AssetsPanel's
+  // `catalog_config` check. Its commands route to the hub's `catalog_admin`
+  // now; the two that still refuse — `catalog_import_host` and
+  // `catalog_spawn_author_session` — have REASONS entries of their own.)
   // Gated by SettingsDialog.svelte's own `get_fleet_settings` gate: `{#if
   // !ownsFleet}` swaps the whole Projects section for the remote note, and
   // the Limits section (with WorkRetention.svelte, work graph M12.3) too.

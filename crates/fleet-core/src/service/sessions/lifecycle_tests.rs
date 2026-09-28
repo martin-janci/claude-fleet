@@ -196,6 +196,8 @@ async fn an_unknown_project_id_is_not_found_not_a_raw_sqlite_error() {
         start_command: None,
         friendly_name: None,
         resume_claude_session_id: None,
+        model: None,
+        effort: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
@@ -221,6 +223,8 @@ async fn an_unknown_project_id_is_not_found_for_a_new_worktree_too() {
         start_command: None,
         friendly_name: None,
         resume_claude_session_id: None,
+        model: None,
+        effort: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
@@ -595,6 +599,8 @@ fn args_named(name: &str, resume: Option<&str>) -> NewSessionArgs {
         start_command: None,
         friendly_name: None,
         resume_claude_session_id: resume.map(str::to_string),
+        model: None,
+        effort: None,
     }
 }
 
@@ -787,7 +793,7 @@ fn a_resume_id_is_used_for_both_the_pane_command_and_the_stored_id() {
     );
     assert_eq!(
         pane,
-        recreate_pane_command("work", Some(RESUME_ID), "dev-z")
+        recreate_pane_command("work", Some(RESUME_ID), "dev-z", &Default::default())
     );
 }
 
@@ -798,6 +804,58 @@ fn without_a_resume_id_a_fresh_uuid_is_minted() {
     assert_ne!(cid, RESUME_ID);
     assert!(crate::validate::claude_session_id(&cid).is_ok());
     assert!(pane.contains(&format!("--resume '{cid}'")), "got: {pane}");
+}
+
+#[test]
+fn model_and_effort_ride_on_every_launch_in_the_chain() {
+    let mut args = args_named("dev-z", None);
+    args.model = Some(" opus[1m] ".into());
+    args.effort = Some("xhigh".into());
+    normalize_launch(&mut args).unwrap();
+    assert_eq!(args.model.as_deref(), Some("opus[1m]"));
+    let (_, pane) = claude_id_and_pane_cmd(&args);
+    assert_eq!(
+        pane.matches("--model 'opus[1m]' --effort 'xhigh'").count(),
+        3,
+        "got: {pane}"
+    );
+    // Without either, the command is the plain one a recreate would run.
+    let (cid, pane) = claude_id_and_pane_cmd(&args_named("dev-z", Some(RESUME_ID)));
+    assert_eq!(
+        pane,
+        recreate_pane_command("work", cid.as_deref(), "dev-z", &Default::default())
+    );
+}
+
+#[test]
+fn launch_options_are_validated_and_blank_means_default() {
+    let mut args = args_named("dev-z", None);
+    args.model = Some("  ".into());
+    args.effort = Some(String::new());
+    normalize_launch(&mut args).unwrap();
+    assert_eq!((args.model, args.effort), (None, None));
+    for (model, effort) in [
+        (Some("--dangerously"), None),
+        (Some("opus; rm -rf ~"), None),
+        (None, Some("huge")),
+    ] {
+        let mut args = args_named("dev-z", None);
+        args.model = model.map(str::to_string);
+        args.effort = effort.map(str::to_string);
+        let err = normalize_launch(&mut args).unwrap_err();
+        assert_eq!(
+            err.code,
+            crate::ipc_error::codes::E_INVALID,
+            "{model:?} {effort:?}"
+        );
+    }
+    let mut args = args_named("dev-z", None);
+    args.kind = Some("shell".into());
+    args.model = Some("opus".into());
+    assert_eq!(
+        normalize_launch(&mut args).unwrap_err().code,
+        crate::ipc_error::codes::E_INVALID
+    );
 }
 
 #[test]
@@ -904,6 +962,8 @@ fn a_new_session_is_linked_to_the_worktree_it_was_started_in() {
         start_command: None,
         friendly_name: None,
         resume_claude_session_id: None,
+        model: None,
+        effort: None,
     };
 
     // A new worktree on local: its row is created and linked.

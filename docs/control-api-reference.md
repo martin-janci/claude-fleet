@@ -47,6 +47,12 @@ Capture a session's terminal: the visible tmux pane, plus scrollback_lines of hi
 
 Parameters: `max_lines`, `scrollback_lines`, `session_id`
 
+### `catalog_admin`
+
+The Assets tab's catalog operations as one tool. Master or a client granted `assets`.
+
+Parameters: `action`, `args`, `confirm_nonce`
+
 ### `delete_worktree`
 
 Delete a git worktree on its host (no --force) and drop fleet's row. Refuses if an alive session points at it, unless force. Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, E_CONFIRM_REQUIRED (desktop confirmation on).
@@ -123,7 +129,7 @@ The cached Claude accounts seen across hosts.
 
 ### `list_assets`
 
-The asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each asset's per-host drift state from the last scan, plus unmanaged assets on hosts and catalog parse problems. Requires catalog_configure + catalog_load in the app.
+The asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each asset's per-host drift state from the last scan, plus unmanaged assets on hosts and catalog parse problems. E_CATALOG_NOT_CONFIGURED until a catalog is set (in the app, or `fleet-hub catalog set` on a hub).
 
 ### `list_clients`
 
@@ -195,7 +201,7 @@ Parameters: `confirm_nonce`, `host_alias`, `name`, `prompt`, `requester_session_
 
 Create a Claude Code tmux session on a host, in a project (and optional worktree, or a fresh one with new_worktree). Auto-clones the repo on remote hosts.
 
-Parameters: `base_branch`, `confirm_nonce`, `friendly_name`, `host_alias`, `kind`, `name`, `new_worktree`, `project_id`, `resume_claude_session_id`, `start_command`, `worktree_id`
+Parameters: `base_branch`, `confirm_nonce`, `effort`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `project_id`, `resume_claude_session_id`, `start_command`, `worktree_id`
 
 ### `new_shell_session`
 
@@ -457,7 +463,7 @@ Parameters: `friendly_name`, `host_alias`, `session_id`, `tmux_name`
 
 ### `set_host_layers`
 
-Replace a host's layer assignment: one optional role plus context layers. Edits fleet state only, never catalog files. Requires catalog_configure + catalog_load in the app. Master token only.
+Replace a host's layer assignment: one optional role plus context layers. Edits fleet state only, never catalog files. Requires a configured catalog (in the app, or `fleet-hub catalog set` on a hub). Master token only.
 
 Parameters: `contexts`, `host_alias`, `role`
 

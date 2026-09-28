@@ -790,6 +790,8 @@ async fn rewind_conversation_with(
                     start_command: None,
                     friendly_name: None,
                     resume_claude_session_id: Some(new_id.clone()),
+                    model: None,
+                    effort: None,
                 })
                 .await;
             // A failed start leaves nothing a new-worktree fork made: the

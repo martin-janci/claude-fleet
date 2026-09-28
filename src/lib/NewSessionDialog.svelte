@@ -8,6 +8,7 @@
   import { newSessionAbortable, sessions, type SessionRow } from './sessions';
   import { defaultHost, hosts, isPickableHost } from './hosts';
   import { readPref, writePref } from './prefs';
+  import { MODEL_OPTIONS, LAUNCH_EFFORT_OPTIONS } from './conversation';
   import { slugifyBranch, finalizeBranchSlug } from './branch-slug';
   import { generateName, nameWords, tmuxNameSuffix } from './names';
   import Modal from './Modal.svelte';
@@ -126,6 +127,17 @@
   let chosenKind = $state<'work' | 'shell'>(untrack(() => memory?.kind ?? 'work'));
   // Optional command run on start for a shell session (empty = bare shell).
   let startCommand = $state<string>('');
+  // `claude --model` / `--effort` for a Claude session; '' = the host's
+  // default. The last choice is remembered across projects.
+  const isLaunchModel = (v: unknown): v is string => typeof v === 'string' && (v === '' || MODEL_OPTIONS.some((o) => o.value === v));
+  const isLaunchEffort = (v: unknown): v is string =>
+    typeof v === 'string' && (v === '' || LAUNCH_EFFORT_OPTIONS.some((o) => o.value === v));
+  let chosenModel = $state<string>(readPref('newsession.model', '', isLaunchModel));
+  let chosenEffort = $state<string>(readPref('newsession.effort', '', isLaunchEffort));
+  $effect(() => {
+    writePref('newsession.model', chosenModel);
+    writePref('newsession.effort', chosenEffort);
+  });
 
   // Inverse of slugify-ish: take a worktree/branch name and produce a
   // sentence-cased label so the friendly-name field is pre-filled with
@@ -835,6 +847,8 @@
         start_command:
           chosenKind === 'shell' ? startCommand.trim() || null : null,
         friendly_name: friendlyName.trim() || null,
+        model: chosenKind === 'work' && chosenModel ? chosenModel : null,
+        effort: chosenKind === 'work' && chosenEffort ? chosenEffort : null,
       },
       createController.signal,
     );
@@ -1008,6 +1022,29 @@
       </button>
     </div>
 
+    {#if chosenKind === 'work' && !ticket}
+      <div class="launch-row">
+        <div class="launch-field">
+          <label for="launch-model">Model</label>
+          <select id="launch-model" data-testid="launch-model" bind:value={chosenModel}>
+            <option value="">Host default</option>
+            {#each MODEL_OPTIONS.filter((o) => o.value !== 'default') as o (o.value)}
+              <option value={o.value}>{o.label}</option>
+            {/each}
+          </select>
+        </div>
+        <div class="launch-field">
+          <label for="launch-effort">Effort</label>
+          <select id="launch-effort" data-testid="launch-effort" bind:value={chosenEffort}>
+            <option value="">Host default</option>
+            {#each LAUNCH_EFFORT_OPTIONS as o (o.value)}
+              <option value={o.value}>{o.label}</option>
+            {/each}
+          </select>
+        </div>
+      </div>
+    {/if}
+
     {#if chosenKind === 'shell'}
       <label for="start-command">start command (optional)</label>
       <input
@@ -1169,6 +1206,17 @@
   }
   .dice:hover { border-color: var(--accent); }
   .kind-row { display: flex; gap: 0.3rem; }
+  .launch-row { display: flex; gap: 0.6rem; }
+  .launch-field { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+  .launch-field select {
+    font: inherit;
+    padding: 0.3rem 0.4rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-pane);
+    color: var(--fg);
+    min-width: 0;
+  }
   .kind-pick {
     font-size: 0.75rem;
     padding: 0.2rem 0.7rem;

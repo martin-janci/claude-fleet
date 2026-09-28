@@ -8,6 +8,7 @@ use crate::events::{EventBus, RowChange};
 use rusqlite::{Connection, OptionalExtension, Result, TransactionBehavior};
 use std::sync::Arc;
 
+pub mod backup;
 mod bench_work_link;
 mod catalog;
 mod clients;

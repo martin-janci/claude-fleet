@@ -164,6 +164,8 @@ jobs:
   # fleet-agent rides along for the same reason, one step stricter: it installs
   # on an arbitrary host, so it must build with neither the Tauri libraries nor
   # fleet-core. If it starts pulling either, this is where you find out.
+  # fleet-update (the update engine) is held to the same rule: fleet-updater
+  # and, later, fleet-agent depend on it.
   hub-headless:
     runs-on: ubuntu-24.04
     steps:
@@ -176,7 +178,7 @@ jobs:
       - run: cargo build -p fleet-hub --locked
       - run: cargo test -p fleet-core -p fleet-hub --locked
       - run: cargo build -p fleet-agent --locked
-      - run: cargo test -p fleet-proto -p fleet-agent --locked
+      - run: cargo test -p fleet-proto -p fleet-agent -p fleet-update --locked
       # The work-graph leg (hub W, M10.2) needs a hub built with the test-only
       # `e2e` feature (the loopback fake-tracker override). Its own target dir,
       # so the plain target/debug/fleet-hub the rest of the script tests (and
