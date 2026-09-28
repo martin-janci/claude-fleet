@@ -75,7 +75,18 @@ struct SshClientInner {
     /// Off, every call is its own connection and nothing below touches a
     /// control socket (no `-O check`, no `-O exit`, no mux retry).
     mux: bool,
+    /// Per-host cap on concurrent children when `mux` is off (see
+    /// [`MAX_CONNECTIONS_PER_HOST_NO_MUX`]). Unused with a master.
+    conn_limits: DashMap<String, Arc<tokio::sync::Semaphore>>,
 }
+
+/// Without multiplexing every command is a whole SSH connection (Windows).
+/// The reconcile, usage and repair ticks each fan out over hosts and
+/// sessions, so without a cap one tick could start dozens of `ssh.exe` to the
+/// same host at once, each a full handshake, and trip the server's
+/// `MaxStartups`. At most this many run per host; the rest queue. The
+/// attached terminal and the tunnels are separate processes and never wait.
+pub const MAX_CONNECTIONS_PER_HOST_NO_MUX: usize = 4;
 
 /// Environment variable naming the `ssh` program to run, overriding the
 /// default below: a Cygwin or MSYS2 `ssh.exe`, or any other build.
@@ -222,6 +233,7 @@ impl SshClient {
                 ssh_bin,
                 toolchains: DashMap::new(),
                 mux,
+                conn_limits: DashMap::new(),
             }),
         }
     }
@@ -724,6 +736,18 @@ impl SshClient {
         max_output: Option<usize>,
         stdin: Option<Vec<u8>>,
     ) -> Result<Output, IpcError> {
+        // Queued behind the host's other connections (no mux only). The wait
+        // is bounded by the same wall clock, and a cancel ends it.
+        let _slot = match &token {
+            Some(t) => tokio::select! {
+                biased;
+                _ = t.cancelled() => {
+                    return Err(IpcError::new(codes::E_CANCELLED, format!("ssh {host} cancelled")));
+                }
+                slot = self.connection_slot(host, wall_clock) => slot?,
+            },
+            None => self.connection_slot(host, wall_clock).await?,
+        };
         let in_flight = InFlight::enter(&self.inner, host);
         if stdin.is_some() {
             cmd.stdin(std::process::Stdio::piped());
@@ -795,6 +819,41 @@ impl SshClient {
                 let stderr = stderr_task.await.unwrap_or_default();
                 Ok(Output { status, stdout, stderr })
             }
+        }
+    }
+
+    /// A slot for one more connection to `host` when this client does not
+    /// multiplex: `None` (no limit) with a master, else a permit of the
+    /// host's semaphore, waited for at most `wait`. A wait that runs out is
+    /// `E_SSH_TIMEOUT`, as the command itself would have been.
+    async fn connection_slot(
+        &self,
+        host: &str,
+        wait: Duration,
+    ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, IpcError> {
+        if self.inner.mux {
+            return Ok(None);
+        }
+        let sem = self
+            .inner
+            .conn_limits
+            .entry(host.to_string())
+            .or_insert_with(|| {
+                Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS_PER_HOST_NO_MUX))
+            })
+            .clone();
+        match tokio::time::timeout(wait, sem.acquire_owned()).await {
+            Ok(Ok(permit)) => Ok(Some(permit)),
+            // The semaphore is never closed.
+            Ok(Err(_)) => Ok(None),
+            Err(_) => Err(IpcError::new(
+                codes::E_SSH_TIMEOUT,
+                format!(
+                    "ssh {host}: no free connection within {}s ({MAX_CONNECTIONS_PER_HOST_NO_MUX} \
+                     already open to this host)",
+                    wait.as_secs()
+                ),
+            )),
         }
     }
 
@@ -2574,6 +2633,49 @@ mod tests {
         assert!(!calls.contains("Control"), "no Control option: {calls}");
         assert!(!c.master_reset_counts().contains_key("h-nomux"));
         c.shutdown_all(); // a no-op without mux
+    }
+
+    /// Without a master, at most [`MAX_CONNECTIONS_PER_HOST_NO_MUX`]
+    /// connections run per host; the next waits (bounded), another host is
+    /// not held up, and a released slot is reused. With a master there is no
+    /// limit at all.
+    #[tokio::test]
+    async fn without_mux_connections_per_host_are_capped() {
+        let c = SshClient::new_with_mux(false);
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONNECTIONS_PER_HOST_NO_MUX {
+            held.push(
+                c.connection_slot("h", Duration::from_millis(50))
+                    .await
+                    .unwrap()
+                    .expect("a slot"),
+            );
+        }
+        let err = c
+            .connection_slot("h", Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_SSH_TIMEOUT, "{err:?}");
+        assert!(c
+            .connection_slot("other", Duration::from_millis(50))
+            .await
+            .unwrap()
+            .is_some());
+        held.pop();
+        assert!(c
+            .connection_slot("h", Duration::from_millis(50))
+            .await
+            .unwrap()
+            .is_some());
+
+        let m = SshClient::new_with_mux(true);
+        for _ in 0..(MAX_CONNECTIONS_PER_HOST_NO_MUX * 3) {
+            assert!(m
+                .connection_slot("h", Duration::from_millis(50))
+                .await
+                .unwrap()
+                .is_none());
+        }
     }
 
     #[test]
