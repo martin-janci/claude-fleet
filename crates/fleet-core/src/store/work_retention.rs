@@ -35,6 +35,15 @@
 //!   (`newest_session_event_of`, a pending handover) and `MAX(id)` (the
 //!   M11.3 keep in `tidy_sessions`) — so a clock step cannot drop either.
 //!
+//! * **`work_item_descriptions`** (the `describe` cache, by `fetched_at`):
+//!   the one table here with NO liveness rule — a cached full description is
+//!   pure age, and the row of a live-linked ticket goes with the rest once it
+//!   is older than the window. Its window is `work.retention.tracker_items_days`
+//!   too, but never its `0`: `service::work::retention` hands this table a
+//!   floored window (`describe_effective_days`), because "keep forever" must
+//!   not apply to a full-text cache — that would reopen `DESCRIPTION_MAX_CHARS`
+//!   by the back door.
+//!
 //! There is no pinned-note concept in the schema; a note is kept by the
 //! journal rules above. `0` days keeps a table forever.
 
@@ -57,19 +66,28 @@ pub const WORK_EVENT_KINDS: &[&str] = &[
     "tidy_kept",
 ];
 
-/// One retention-swept table.
+/// One retention-swept table. THE list: [`RetentionTable::ALL`] is the only
+/// sequence of swept tables, so `status`'s rows, the sweep's loop and every
+/// test that pairs the two are driven by identity from here — a table added
+/// to this enum cannot be forgotten by a caller (a `match` stops compiling),
+/// and a caller cannot silently cover fewer tables than `status` reports
+/// (which is what a `zip` of two hand-written sequences did).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetentionTable {
     Journal,
     TrackerItems,
     WorkEvents,
+    /// The `describe` cache (`work_item_descriptions`): pure age, no
+    /// liveness, and never "forever" — see the module doc.
+    Descriptions,
 }
 
 impl RetentionTable {
-    pub const ALL: [RetentionTable; 3] = [
+    pub const ALL: [RetentionTable; 4] = [
         RetentionTable::Journal,
         RetentionTable::TrackerItems,
         RetentionTable::WorkEvents,
+        RetentionTable::Descriptions,
     ];
 
     /// The SQL table.
@@ -78,6 +96,7 @@ impl RetentionTable {
             RetentionTable::Journal => "work_journal",
             RetentionTable::TrackerItems => "work_items",
             RetentionTable::WorkEvents => "session_events",
+            RetentionTable::Descriptions => "work_item_descriptions",
         }
     }
 
@@ -87,6 +106,22 @@ impl RetentionTable {
             RetentionTable::Journal => JOURNAL_CTE.to_string(),
             RetentionTable::TrackerItems => ITEMS_CTE.to_string(),
             RetentionTable::WorkEvents => events_cte(),
+            // No liveness rule at all: a cached description is age only.
+            RetentionTable::Descriptions => "\
+                WITH eligible(id) AS ( \
+                  SELECT item_id FROM work_item_descriptions WHERE fetched_at < ?1)"
+                .to_string(),
+        }
+    }
+
+    /// The column [`Store::retention_delete_batch`] deletes by — the
+    /// table's own primary key, which is `item_id` for the describe cache.
+    fn key_col(self) -> &'static str {
+        match self {
+            RetentionTable::Journal | RetentionTable::TrackerItems | RetentionTable::WorkEvents => {
+                "id"
+            }
+            RetentionTable::Descriptions => "item_id",
         }
     }
 
@@ -101,6 +136,7 @@ impl RetentionTable {
                 "SELECT COUNT(*) FROM session_events WHERE kind IN ({})",
                 kinds_sql()
             ),
+            RetentionTable::Descriptions => "SELECT COUNT(*) FROM work_item_descriptions".into(),
         }
     }
 }
@@ -206,7 +242,8 @@ impl Store {
         )?)
     }
 
-    /// Delete at most `limit` eligible rows of `t`, oldest ids first. One
+    /// Delete at most `limit` eligible rows of `t`, oldest keys first (the
+    /// table's own primary key — `item_id` for the describe cache). One
     /// statement: the caller holds the lock for one batch only.
     pub fn retention_delete_batch(
         &self,
@@ -223,9 +260,11 @@ impl Store {
         }
         Ok(self.conn.execute(
             &format!(
-                "{} DELETE FROM {} WHERE id IN (SELECT id FROM eligible ORDER BY id LIMIT ?2)",
+                "{} DELETE FROM {} WHERE {} IN \
+                 (SELECT id FROM eligible ORDER BY id LIMIT ?2)",
                 t.cte(),
-                t.table()
+                t.table(),
+                t.key_col()
             ),
             rusqlite::params![cutoff, limit as i64],
         )?)

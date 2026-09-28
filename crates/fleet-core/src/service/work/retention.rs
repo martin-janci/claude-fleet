@@ -72,6 +72,10 @@ impl RetentionDays {
             RetentionTable::Journal => self.journal,
             RetentionTable::TrackerItems => self.tracker_items,
             RetentionTable::WorkEvents => self.timeline_work_events,
+            // The describe cache rides the tracker items' window but never
+            // its "forever": the floor is part of the window itself, so
+            // every caller (status, the sweep, a test) gets one number.
+            RetentionTable::Descriptions => describe_effective_days(self.tracker_items),
         }
     }
 }
@@ -89,7 +93,7 @@ impl RetentionDays {
 /// for this one table: a `days == 0` row really does mean "forever" for
 /// every table including this one, because this one is never given a raw
 /// `0` to report.
-fn describe_effective_days(tracker_items_days: i64) -> i64 {
+pub(crate) fn describe_effective_days(tracker_items_days: i64) -> i64 {
     if tracker_items_days > 0 {
         tracker_items_days
     } else {
@@ -97,16 +101,13 @@ fn describe_effective_days(tracker_items_days: i64) -> i64 {
     }
 }
 
-/// The describe cache's own cutoff (Task 5): `now` minus
-/// [`describe_effective_days`]'s window.
-fn describe_cutoff(tracker_items_days: i64, now: i64) -> i64 {
-    now - describe_effective_days(tracker_items_days) * 86_400
-}
-
 fn setting_of(t: RetentionTable) -> &'static str {
     match t {
         RetentionTable::Journal => settings::WORK_RETENTION_JOURNAL_DAYS,
-        RetentionTable::TrackerItems => settings::WORK_RETENTION_TRACKER_ITEMS_DAYS,
+        // The describe cache is swept by the tracker items' own setting.
+        RetentionTable::TrackerItems | RetentionTable::Descriptions => {
+            settings::WORK_RETENTION_TRACKER_ITEMS_DAYS
+        }
         RetentionTable::WorkEvents => settings::WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS,
     }
 }
@@ -126,7 +127,7 @@ pub struct RetentionSweep {
     #[serde(default)]
     pub tracker_writes: usize,
     /// The describe cache (Task 5): swept by `tracker_items`'s window, but
-    /// never kept forever — see [`describe_cutoff`].
+    /// never kept forever — see [`describe_effective_days`].
     #[serde(default)]
     pub describe_cache: usize,
 }
@@ -137,6 +138,7 @@ impl RetentionSweep {
             RetentionTable::Journal => self.journal += n,
             RetentionTable::TrackerItems => self.tracker_items += n,
             RetentionTable::WorkEvents => self.timeline_work_events += n,
+            RetentionTable::Descriptions => self.describe_cache += n,
         }
     }
 }
@@ -172,37 +174,16 @@ pub fn status(store: &Mutex<Store>, now: i64) -> Result<RetentionStatus, IpcErro
         tables.push(RetentionTableStatus {
             table: t.table().into(),
             setting: setting_of(t).into(),
+            // `days.of` already floors the describe cache's window, so that
+            // row never claims "kept forever" (a `0`) while `would_delete`
+            // says otherwise: every display site (the desktop's retention
+            // line, `fleet-hub tracker status`) reads `days == 0` as
+            // forever, with no table-specific exception.
             days: days.of(t),
             rows,
             would_delete,
         });
     }
-    // The describe cache (Task 5): not a `RetentionTable` (its own single-
-    // column rule needs no CTE), but it holds third-party full text like
-    // every table above, so it earns the same dry-run visibility.
-    //
-    // Two separate `let` statements, not two `lock(store)?` calls as sibling
-    // field initializers of one struct literal: within a single statement,
-    // both temporaries' drop is deferred to the statement's end, so the
-    // second `lock` would block forever on the first, still-held guard —
-    // this deadlocked the whole test binary before it was caught here.
-    let describe_days = describe_effective_days(days.tracker_items);
-    let describe_cutoff = describe_cutoff(days.tracker_items, now);
-    let describe_rows = lock(store)?.describe_cache_rows()?;
-    let describe_would_delete = lock(store)?.describe_cache_eligible(describe_cutoff)?;
-    tables.push(RetentionTableStatus {
-        table: "work_item_descriptions".into(),
-        setting: settings::WORK_RETENTION_TRACKER_ITEMS_DAYS.into(),
-        // The EFFECTIVE window (30 when the setting is 0), not the raw
-        // setting: this row must never claim "kept forever" while
-        // `would_delete` says otherwise. Every display site (the desktop's
-        // retention line, `fleet-hub tracker status`) reads `days == 0` as
-        // "forever" with no table-specific exception, so the row itself
-        // must never hand it a `0` that isn't true.
-        days: describe_days,
-        rows: describe_rows,
-        would_delete: describe_would_delete,
-    });
     let last_sweep = lock(store)?
         .get_setting(LAST_SWEEP_KEY)?
         .and_then(|v| serde_json::from_str(&v).ok());
@@ -275,32 +256,6 @@ pub fn sweep_capped(store: &Mutex<Store>, now: i64, batch: usize, cap: usize) ->
                     tracing::warn!(error = %e, "[gc] tracker write outbox sweep failed");
                     break;
                 }
-            }
-        }
-    }
-    // Task 5: the describe cache, by the tracker items' window (with the
-    // 30-day floor `describe_cutoff` applies when that window is "forever").
-    // Batched and capped exactly like every table above and the outbox
-    // below: it holds third-party full text, up to DESCRIBE_MAX_CHARS
-    // (32,000 chars) per row, so it gets no exemption from the per-lock /
-    // per-tick discipline just because it usually holds fewer rows.
-    let cutoff = describe_cutoff(days.tracker_items, now);
-    while out.describe_cache < cap {
-        let want = batch.min(cap - out.describe_cache);
-        let n = match store.lock() {
-            Ok(s) => s.sweep_descriptions(cutoff, want),
-            Err(_) => break,
-        };
-        match n {
-            Ok(n) => {
-                out.describe_cache += n;
-                if n < want {
-                    break;
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "[gc] describe cache sweep failed");
-                break;
             }
         }
     }

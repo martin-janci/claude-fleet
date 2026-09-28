@@ -59,8 +59,14 @@ fn deleting_an_item_takes_its_description() {
     assert_eq!(s.cached_description(id, 300, now_unix()).unwrap(), None);
 }
 
+/// The describe cache sweeps as `RetentionTable::Descriptions`, through the
+/// same `retention_rows` / `retention_eligible` / `retention_delete_batch`
+/// the other swept tables use (there is no second implementation to drift):
+/// only rows past the window go, and a live-linked ticket earns its cache no
+/// keep — this table has no liveness rule.
 #[test]
-fn sweep_descriptions_drops_only_what_is_older_than_the_cutoff() {
+fn the_cache_sweeps_only_what_is_older_than_its_window() {
+    use crate::store::RetentionTable::Descriptions;
     let s = store();
     let old_id = seed_item(&s);
     let t = s
@@ -84,15 +90,18 @@ fn sweep_descriptions_drops_only_what_is_older_than_the_cutoff() {
     s.put_description(old_id, "old", 3).unwrap();
     s.put_description(fresh_id, "fresh", 5).unwrap();
     let now = now_unix();
+    let days = 30;
     s.conn_for_test()
         .execute(
             "UPDATE work_item_descriptions SET fetched_at = ?1 WHERE item_id = ?2",
-            rusqlite::params![now - 1000, old_id],
+            rusqlite::params![now - (days + 1) * 86_400, old_id],
         )
         .unwrap();
-    assert_eq!(s.describe_cache_rows().unwrap(), 2);
-    assert_eq!(s.describe_cache_eligible(now - 500).unwrap(), 1);
-    let n = s.sweep_descriptions(now - 500, 200).unwrap();
+    assert_eq!(s.retention_rows(Descriptions).unwrap(), 2);
+    assert_eq!(s.retention_eligible(Descriptions, now, days).unwrap(), 1);
+    let n = s
+        .retention_delete_batch(Descriptions, now, days, 200)
+        .unwrap();
     assert_eq!(n, 1);
     assert_eq!(s.cached_description(old_id, 10_000, now).unwrap(), None);
     assert_eq!(
@@ -101,20 +110,24 @@ fn sweep_descriptions_drops_only_what_is_older_than_the_cutoff() {
             .as_deref(),
         Some("fresh")
     );
-    assert_eq!(s.describe_cache_rows().unwrap(), 1);
+    assert_eq!(s.retention_rows(Descriptions).unwrap(), 1);
 }
 
 /// The batch discipline `service::work::retention::sweep_capped` relies on:
-/// `limit` bounds one call, `0` deletes nothing, and repeated calls drain
-/// the backlog oldest-`item_id`-first.
+/// `limit` bounds one call, `0` deletes nothing, and repeated calls drain the
+/// backlog oldest-`item_id`-first (the describe cache's primary key, which is
+/// what `RetentionTable::key_col` names for it — a delete by `id` would not
+/// even parse against this table).
 #[test]
-fn sweep_descriptions_batches_oldest_item_id_first() {
+fn the_cache_sweeps_in_batches_oldest_item_id_first() {
+    use crate::store::RetentionTable::Descriptions;
     let s = store();
     let t = s
         .add_tracker("jira", "J", "https://acme.atlassian.net")
         .unwrap()
         .id;
     let now = now_unix();
+    let days = 30;
     let mut ids = Vec::new();
     for i in 0..5 {
         let id = s
@@ -137,24 +150,38 @@ fn sweep_descriptions_batches_oldest_item_id_first() {
     s.conn_for_test()
         .execute(
             "UPDATE work_item_descriptions SET fetched_at = ?1",
-            rusqlite::params![now - 1000],
+            rusqlite::params![now - (days + 1) * 86_400],
         )
         .unwrap();
     assert_eq!(
-        s.sweep_descriptions(now - 500, 0).unwrap(),
+        s.retention_delete_batch(Descriptions, now, days, 0)
+            .unwrap(),
         0,
         "0 deletes nothing"
     );
-    assert_eq!(s.describe_cache_eligible(now - 500).unwrap(), 5);
-    assert_eq!(s.sweep_descriptions(now - 500, 2).unwrap(), 2, "one batch");
-    assert_eq!(s.describe_cache_rows().unwrap(), 3);
-    // The two oldest ids (lowest item_id) went first.
+    assert_eq!(s.retention_eligible(Descriptions, now, days).unwrap(), 5);
+    assert_eq!(
+        s.retention_delete_batch(Descriptions, now, days, 2)
+            .unwrap(),
+        2,
+        "one batch"
+    );
+    assert_eq!(s.retention_rows(Descriptions).unwrap(), 3);
+    // The two oldest ids (lowest item_id) went first. A TTL wide enough to
+    // cover the backdated `fetched_at`: what is asserted here is which rows
+    // the sweep deleted, not the TTL.
+    let ttl = 100 * 86_400;
     for id in &ids[..2] {
-        assert_eq!(s.cached_description(*id, 10_000, now).unwrap(), None);
+        assert_eq!(s.cached_description(*id, ttl, now).unwrap(), None);
     }
     for id in &ids[2..] {
-        assert!(s.cached_description(*id, 10_000, now).unwrap().is_some());
+        assert!(s.cached_description(*id, ttl, now).unwrap().is_some());
     }
-    assert_eq!(s.sweep_descriptions(now - 500, 200).unwrap(), 3, "the rest");
-    assert_eq!(s.describe_cache_rows().unwrap(), 0);
+    assert_eq!(
+        s.retention_delete_batch(Descriptions, now, days, 200)
+            .unwrap(),
+        3,
+        "the rest"
+    );
+    assert_eq!(s.retention_rows(Descriptions).unwrap(), 0);
 }

@@ -2,11 +2,14 @@
 //! held for `work.describe_cache_secs`. The only reader is
 //! `service::work::describe`; nothing projects it onto the wire.
 //!
-//! Swept by the work retention pass alongside the tracker items it belongs
-//! to (`service::work::retention`), with a floor: when
-//! `work.retention.tracker_items_days` is `0` (this repo's usual "keep
-//! forever"), the describe cache is swept at a fixed 30-day floor instead —
-//! see `service::work::describe::DESCRIBE_CACHE_RETENTION_FLOOR_DAYS`. A
+//! Swept by the work retention pass as [`crate::store::RetentionTable`]'s
+//! `Descriptions` — the same batched, capped path as every other swept table,
+//! counted and deleted by the same two store functions, so the dry run and
+//! the sweep cannot disagree. Its window is the tracker items' with a floor:
+//! when `work.retention.tracker_items_days` is `0` (this repo's usual "keep
+//! forever"), the describe cache is still swept at a fixed 30-day floor —
+//! see `service::work::retention::describe_effective_days` and
+//! `service::work::describe::DESCRIBE_CACHE_RETENTION_FLOOR_DAYS`. A
 //! full-text cache with no floor at all would just be `DESCRIPTION_MAX_CHARS`'s
 //! cap reopened by the back door.
 
@@ -48,48 +51,6 @@ impl Store {
             rusqlite::params![item_id, body, chars, now_unix()],
         )?;
         Ok(())
-    }
-
-    /// Delete at most `limit` rows fetched before `older_than`, oldest
-    /// `item_id` first — one statement, so the caller holds the lock for one
-    /// batch only, exactly like `sweep_tracker_writes` (this cache is not a
-    /// [`crate::store::RetentionTable`]: its own single column,
-    /// `fetched_at`, needs no CTE). Called in a loop by
-    /// `service::work::retention::sweep_capped`, batched and capped the same
-    /// as every other table that pass sweeps.
-    pub fn sweep_descriptions(&self, older_than: i64, limit: usize) -> Result<usize, IpcError> {
-        if limit == 0 {
-            return Ok(0);
-        }
-        Ok(self.conn.execute(
-            "DELETE FROM work_item_descriptions WHERE item_id IN (\
-               SELECT item_id FROM work_item_descriptions \
-               WHERE fetched_at < ?1 ORDER BY item_id LIMIT ?2)",
-            rusqlite::params![older_than, limit as i64],
-        )?)
-    }
-
-    /// Rows currently in the describe cache — `work_admin { action: status }`'s
-    /// dry-run count for it (it holds third-party full text, so it earns a
-    /// row count like the other retention-swept tables, even though it is
-    /// not one of them).
-    pub fn describe_cache_rows(&self) -> Result<i64, IpcError> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM work_item_descriptions", [], |r| {
-                r.get(0)
-            })?)
-    }
-
-    /// How many describe-cache rows are older than `older_than` — the
-    /// dry-run count `sweep_descriptions(older_than, usize::MAX)` would
-    /// remove.
-    pub fn describe_cache_eligible(&self, older_than: i64) -> Result<i64, IpcError> {
-        Ok(self.conn.query_row(
-            "SELECT COUNT(*) FROM work_item_descriptions WHERE fetched_at < ?1",
-            rusqlite::params![older_than],
-            |r| r.get(0),
-        )?)
     }
 }
 
