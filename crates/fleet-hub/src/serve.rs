@@ -822,6 +822,18 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         base.clone(),
         std::time::Duration::from_secs(60),
     );
+    // The asset catalog lives only in memory once loaded, and nothing on a
+    // hub loads it but this and the catalog tools' own catch-up
+    // (`catalog::ensure_fresh`). Off the runtime (it runs git), never fatal:
+    // a missing checkout or a parse problem is the catalog's, not the hub's,
+    // and Assets on a paired client shows it at its next Refresh.
+    let catalog_store = Arc::clone(&store);
+    tokio::task::spawn_blocking(move || {
+        match fleet_core::service::catalog::ensure_fresh(&catalog_store) {
+            Ok(()) => {}
+            Err(e) => tracing::warn!(error = %e.message, "loading the asset catalog failed"),
+        }
+    });
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         public = ?r.public_url,

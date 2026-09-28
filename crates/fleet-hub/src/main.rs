@@ -1,6 +1,7 @@
 //! `fleet-hub` — claude-fleet without the desktop app. See `docs/hub.md`.
 
 mod bench;
+mod catalog;
 mod census;
 mod config;
 mod decide;
@@ -134,6 +135,15 @@ enum Cmd {
         #[command(flatten)]
         opts: HubOptions,
     },
+    /// Point the hub at its asset catalog (a git checkout on this machine),
+    /// show it, or reload it. No running hub needed; a running one picks the
+    /// change up at its next catalog call.
+    Catalog {
+        #[command(subcommand)]
+        cmd: catalog::CatalogCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
     /// Local measurements for the Jev evaluation: counts only, read straight
     /// from the database. No running hub needed; nothing is written or sent.
     Census {
@@ -242,6 +252,13 @@ enum TokenCmd {
     Regenerate,
 }
 
+/// What `fleet-hub client grant` can give a paired client.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum Grant {
+    /// The asset catalog: the hub's `catalog_admin` tool.
+    Assets,
+}
+
 #[derive(Subcommand)]
 enum ClientCmd {
     /// Print the paired clients, one per line.
@@ -258,6 +275,13 @@ enum ClientCmd {
     Untrust { name: String },
     /// Bind a client to one org (its id): it reads only that org's work and sessions.
     Bind { name: String, org: i64 },
+    /// Let a paired client do what is otherwise the master's. `assets`: manage
+    /// the asset catalog (edit, commit, push, Sync, Secrets, layers) from its
+    /// Assets tab. Only a `full` client bound to no org. No running hub
+    /// needed.
+    Grant { name: String, grant: Grant },
+    /// Take a `grant` back.
+    Ungrant { name: String, grant: Grant },
     /// Lift a client's org binding: it reads every org again.
     Unbind { name: String },
 }
@@ -325,6 +349,10 @@ async fn main() -> ExitCode {
             ClientCmd::Untrust { name } => pair::client_trust(&opts, &env, &name, false).await,
             ClientCmd::Bind { name, org } => pair::client_bind(&opts, &env, &name, Some(org)).await,
             ClientCmd::Unbind { name } => pair::client_bind(&opts, &env, &name, None).await,
+            ClientCmd::Grant { name, grant } => pair::client_grant(&opts, &env, &name, grant, true),
+            ClientCmd::Ungrant { name, grant } => {
+                pair::client_grant(&opts, &env, &name, grant, false)
+            }
         },
         Cmd::Peer { cmd, opts } => match cmd {
             PeerCmd::Add {
@@ -344,6 +372,7 @@ async fn main() -> ExitCode {
             opts,
         } => provision::run(host, content_only, &opts, &env).await,
         Cmd::Work { cmd, opts } => work::run(cmd, &opts, &env).await,
+        Cmd::Catalog { cmd, opts } => catalog::run(cmd, &opts, &env),
         Cmd::Census { cmd, opts } => census::run(cmd, &opts, &env),
         Cmd::Decide { cmd, opts } => decide::run(cmd, &opts, &env).await,
         Cmd::Reports {

@@ -21,7 +21,8 @@
 //! with a section the rule cannot classify: it counts as to do), `rule` (the
 //! keyword rule [`infer_section`], abstaining where it returns none) and
 //! `jev` (one Choice through [`crate::service::decide::decide`], question
-//! version [`QUESTION_VERSION`], subject `bench:<case>`, with the adapter's
+//! version [`QUESTION_VERSION`] — or `status_map.bench.q.<version>` under a
+//! question file, below — subject `bench:<case>`, with the adapter's
 //! confidence floor: `unsure` and an answer under the floor are
 //! abstentions). A case whose org the gate refuses is skipped with that
 //! fallback and nothing is sent for it; the built-in set has no org, so it
@@ -30,22 +31,47 @@
 //! operator names ([`crate::service::decide::haiku`]), at the same floor;
 //! an answer outside the options is an abstention counted as `invalid`.
 //!
-//! **No threshold is tuned on the set** — the rule is fixed and Jev runs at
-//! the adapter's floor — so there is no dev/test split.
+//! **A question file** (`--question FILE`, [`parse_question`]) rewords the
+//! question — the instructions and each option's criterion — for both `jev`
+//! and `haiku`; the options, their order, the floor and the state (section
+//! and board window, redacted as ever) stay the adapter's. Its Jev runs are
+//! recorded as `status_map.bench.q.<version>`, never mixed with the
+//! adapter's wording.
+//!
+//! **The dev/test split** ([`split_cases`], `--split`) exists for tuning a
+//! question's wording: iterate on `dev`, judge the result once on `test`.
+//! No threshold is tuned on the set (the rule is fixed and Jev runs at the
+//! adapter's floor). It is by board, never by case: a case's board key is
+//! its normalised board joined with `\n` ([`board_key`]), and a board is dev
+//! when the first 8 bytes of the SHA-256 of that key, read as a big-endian
+//! `u64`, are 0, 1 or 2 modulo 10 ([`is_dev_board`]) — about 30% of the
+//! boards, the same on every run, machine and Rust version. Dev is kept
+//! small so the test side keeps the 200 paired rule-abstained cases the
+//! haiku line needs.
 //!
 //! The report holds counts and rates only: no section name.
 
-use super::{bootstrap_acc_diff, f3, percentile, Calibration, Criterion, Paired, Verdict};
+use super::{bootstrap_acc_diff, f3, percentile, Calibration, Criterion, Paired, Split, Verdict};
 use crate::ipc_error::lock;
 use crate::service::decide::haiku::{reason::OTHER_ORG, Haiku};
 use crate::service::decide::status_map::{self as sm, MIN_CONFIDENCE, NO_RULE, UNSURE};
-use crate::service::decide::{decide, gate_bench_at, DecideCtx, DecideRequest, Fallback, Feature};
+use crate::service::decide::{
+    decide, gate_bench_at, DecideCtx, DecideRequest, Fallback, Feature, JevRequest, Question,
+};
 use crate::service::trackers::asana::{infer_section, section_key};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The question's version, recorded on every Jev run of the benchmark.
 pub const QUESTION_VERSION: &str = "status_map.bench.v1";
+/// The question version of a Jev run asked a question file's wording: this
+/// prefix and the file's `version`.
+pub const QUESTION_FILE_PREFIX: &str = "status_map.bench.q.";
+/// A question file's `version`: 1-40 of `a-z0-9._-`, starting with a letter
+/// or digit.
+pub const QUESTION_FILE_VERSION_MAX: usize = 40;
 /// `decision_runs.subject_kind` of a benchmark call: gated without the
 /// feature's mode, and kept out of the live breaker, budget and stats.
 pub const SUBJECT_KIND: &str = crate::store::DECISION_BENCH_SUBJECT;
@@ -304,6 +330,179 @@ pub fn cases(labels: &[SectionLabel]) -> (Vec<SectionCase>, usize) {
     (out, dropped)
 }
 
+// --- the dev/test split ------------------------------------------------------------
+
+/// PURE: a case's board key: its board's normalised, de-duplicated names
+/// ([`SectionCase::board`]) joined with `\n`. Every section of a board has
+/// the same key.
+pub fn board_key(c: &SectionCase) -> String {
+    c.board.join("\n")
+}
+
+/// PURE: whether the board with `key` is in the dev split: the first 8
+/// bytes of the SHA-256 of the key, read as a big-endian `u64`, are under
+/// [`DEV_BOARD_TENTHS`] modulo 10 (about 30% of the boards). A fixed hash (never `std`'s randomly seeded one), so a board's side is
+/// the same on every run, machine and Rust version.
+pub fn is_dev_board(key: &str) -> bool {
+    let d = Sha256::digest(key.as_bytes());
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&d[..8]);
+    u64::from_be_bytes(b) % 10 < DEV_BOARD_TENTHS
+}
+
+/// Tenths of the boards in the dev split (the rest are test): small, so the
+/// test side can judge the haiku line.
+pub const DEV_BOARD_TENTHS: u64 = 3;
+
+/// How the whole set divides into the dev and test boards.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct SplitSizes {
+    pub dev_boards: u64,
+    pub dev_cases: u64,
+    pub test_boards: u64,
+    pub test_cases: u64,
+}
+
+/// PURE: the sizes of both sides of `cases`.
+pub fn split_sizes(cases: &[SectionCase]) -> SplitSizes {
+    let (mut dev, mut test) = (BTreeSet::new(), BTreeSet::new());
+    let mut sizes = SplitSizes::default();
+    for c in cases {
+        let key = board_key(c);
+        if is_dev_board(&key) {
+            sizes.dev_cases += 1;
+            dev.insert(key);
+        } else {
+            sizes.test_cases += 1;
+            test.insert(key);
+        }
+    }
+    sizes.dev_boards = dev.len() as u64;
+    sizes.test_boards = test.len() as u64;
+    sizes
+}
+
+/// PURE: the cases `split` keeps, in their order (ids unchanged), and the
+/// sizes of both sides over all of `cases`.
+pub fn split_cases(cases: Vec<SectionCase>, split: Split) -> (Vec<SectionCase>, SplitSizes) {
+    let sizes = split_sizes(&cases);
+    let kept = cases
+        .into_iter()
+        .filter(|c| split.keeps(is_dev_board(&board_key(c))))
+        .collect();
+    (kept, sizes)
+}
+
+// --- a question file ---------------------------------------------------------------
+
+/// A reworded question (`--question FILE`): what `jev` and `haiku` are asked
+/// instead of the adapter's [`sm::INSTRUCTIONS`] and [`sm::OPTIONS`]
+/// criteria. The file is JSON:
+/// `{"version": "v2-draft1", "instructions": "…", "options": {"todo": "…",
+/// "in_progress": "…", "done": "…", "not_planned": "…", "unsure": "…"}}`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionOverride {
+    pub version: String,
+    pub instructions: String,
+    /// Each of the adapter's option ids, with its criterion.
+    pub options: BTreeMap<String, String>,
+}
+
+fn is_question_file_version(v: &str) -> bool {
+    let b = v.as_bytes();
+    !b.is_empty()
+        && b.len() <= QUESTION_FILE_VERSION_MAX
+        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+        && b.iter().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'.' | b'_' | b'-')
+        })
+}
+
+/// PURE: a question file, checked: exactly the adapter's five option ids,
+/// no text empty (after trimming), a `version` of 1-40 of `a-z0-9._-`
+/// starting with a letter or digit. An error says what is wrong.
+pub fn parse_question(json: &str) -> Result<QuestionOverride, String> {
+    let q: QuestionOverride =
+        serde_json::from_str(json).map_err(|e| format!("not a question file: {e}"))?;
+    if !is_question_file_version(&q.version) {
+        return Err(format!(
+            "version must be 1-{QUESTION_FILE_VERSION_MAX} of a-z 0-9 . _ - starting with a \
+             letter or digit (^[a-z0-9][a-z0-9._-]{{0,39}}$), not {:?}",
+            q.version
+        ));
+    }
+    if q.instructions.trim().is_empty() {
+        return Err("instructions is empty".into());
+    }
+    let ids: Vec<&str> = sm::OPTIONS.iter().map(|(id, _)| *id).collect();
+    let missing: Vec<&str> = ids
+        .iter()
+        .copied()
+        .filter(|id| !q.options.contains_key(*id))
+        .collect();
+    let unknown: Vec<&str> = q
+        .options
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !ids.contains(k))
+        .collect();
+    if !missing.is_empty() || !unknown.is_empty() {
+        let mut why = Vec::new();
+        if !missing.is_empty() {
+            why.push(format!("missing {}", missing.join(", ")));
+        }
+        if !unknown.is_empty() {
+            why.push(format!("unknown {}", unknown.join(", ")));
+        }
+        return Err(format!(
+            "options must be exactly {}: {}",
+            ids.join(", "),
+            why.join("; ")
+        ));
+    }
+    if let Some(id) = ids.iter().find(|id| q.options[**id].trim().is_empty()) {
+        return Err(format!("options.{id} is empty"));
+    }
+    Ok(q)
+}
+
+impl QuestionOverride {
+    /// What its Jev runs record as their question version.
+    pub fn recorded_version(&self) -> String {
+        format!("{QUESTION_FILE_PREFIX}{}", self.version)
+    }
+
+    /// PURE: the question: the adapter's options, in its order, each with
+    /// this file's criterion, under this file's instructions.
+    pub fn question(&self) -> Question {
+        Question::Choice {
+            instructions: Value::String(self.instructions.clone()),
+            criteria: sm::OPTIONS
+                .iter()
+                .map(|(id, _)| {
+                    (
+                        id.to_string(),
+                        Some(Value::String(self.options[*id].clone())),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+/// PURE: the request for a case: the adapter's own
+/// ([`sm::question_for`]: the section and its board window), with the
+/// question replaced by `question`'s when one is given. The state is the
+/// adapter's either way.
+pub fn request_for(c: &SectionCase, question: Option<&QuestionOverride>) -> JevRequest {
+    let mut r = sm::question_for(&c.key, &c.board);
+    if let Some(q) = question {
+        r.question = q.question();
+    }
+    r
+}
+
 // --- providers -------------------------------------------------------------------
 
 /// What one provider did with one case.
@@ -367,7 +566,16 @@ pub fn offline_outcome(p: Provider, c: &SectionCase) -> Outcome {
 /// recorded); every call made is recorded in `decision_runs` (feature
 /// `status_map`, subject `bench:<case>`, baseline the rule's category or
 /// `none`). At most `max_calls` calls; the rest are skipped as `max_calls`.
-pub async fn run_jev(ctx: &DecideCtx, cases: &[SectionCase], max_calls: usize) -> Vec<Outcome> {
+/// With `question`, its wording is asked ([`request_for`]) and recorded
+/// under its version ([`QuestionOverride::recorded_version`]).
+pub async fn run_jev(
+    ctx: &DecideCtx,
+    cases: &[SectionCase],
+    max_calls: usize,
+    question: Option<&QuestionOverride>,
+) -> Vec<Outcome> {
+    let question_version =
+        question.map_or_else(|| QUESTION_VERSION.to_string(), |q| q.recorded_version());
     let mut out = Vec::with_capacity(cases.len());
     let mut calls = 0usize;
     for c in cases {
@@ -391,9 +599,9 @@ pub async fn run_jev(ctx: &DecideCtx, cases: &[SectionCase], max_calls: usize) -
                 subject_kind: SUBJECT_KIND.into(),
                 subject_id: c.id.clone(),
                 org_id: c.org_id,
-                request: sm::question_for(&c.key, &c.board),
+                request: request_for(c, question),
                 baseline: Some(c.rule.unwrap_or(NO_RULE).to_string()),
-                question_version: QUESTION_VERSION.into(),
+                question_version: question_version.clone(),
                 min_confidence: Some(MIN_CONFIDENCE),
             },
         )
@@ -437,8 +645,14 @@ pub async fn run_jev(ctx: &DecideCtx, cases: &[SectionCase], max_calls: usize) -
 /// floor to apply) and is left out of calibration. A case whose org is not
 /// the host's is skipped as `other_org` and nothing is sent for it (the
 /// built-in set has no org: it needs a host with no org). At most
-/// `max_calls` calls; nothing is recorded in `decision_runs`.
-pub async fn run_haiku(h: &Haiku<'_>, cases: &[SectionCase], max_calls: usize) -> Vec<Outcome> {
+/// `max_calls` calls; nothing is recorded in `decision_runs`. With
+/// `question`, its wording is asked ([`request_for`]), as of Jev.
+pub async fn run_haiku(
+    h: &Haiku<'_>,
+    cases: &[SectionCase],
+    max_calls: usize,
+    question: Option<&QuestionOverride>,
+) -> Vec<Outcome> {
     let mut out = Vec::with_capacity(cases.len());
     let mut calls = 0usize;
     for c in cases {
@@ -452,7 +666,7 @@ pub async fn run_haiku(h: &Haiku<'_>, cases: &[SectionCase], max_calls: usize) -
             out.push(Outcome::skipped("max_calls"));
             continue;
         }
-        let r = h.ask(&sm::question_for(&c.key, &c.board)).await;
+        let r = h.ask(&request_for(c, question)).await;
         calls += usize::from(r.ran);
         let mut o = Outcome {
             ran: r.ran,
@@ -487,24 +701,26 @@ pub async fn run_providers(
     jev: Option<&DecideCtx>,
     max_calls: usize,
 ) -> Outcomes {
-    run_providers_with(cases, providers, jev, None, max_calls).await
+    run_providers_with(cases, providers, jev, None, max_calls, None).await
 }
 
 /// [`run_providers`], and the haiku baseline when asked for (with `haiku`
 /// given; without it every case is skipped as `no_backend`). `max_calls`
-/// bounds each network provider's calls.
+/// bounds each network provider's calls; `question` rewords what both
+/// models are asked (none: the adapter's question).
 pub async fn run_providers_with(
     cases: &[SectionCase],
     providers: &[Provider],
     jev: Option<&DecideCtx>,
     haiku: Option<&Haiku<'_>>,
     max_calls: usize,
+    question: Option<&QuestionOverride>,
 ) -> Outcomes {
     let mut all = Outcomes::new();
     for &p in providers {
         let v = match (p, jev, haiku) {
-            (Provider::Jev, Some(ctx), _) => run_jev(ctx, cases, max_calls).await,
-            (Provider::Haiku, _, Some(h)) => run_haiku(h, cases, max_calls).await,
+            (Provider::Jev, Some(ctx), _) => run_jev(ctx, cases, max_calls, question).await,
+            (Provider::Haiku, _, Some(h)) => run_haiku(h, cases, max_calls, question).await,
             _ => cases.iter().map(|c| offline_outcome(p, c)).collect(),
         };
         all.insert(p, v);
@@ -734,12 +950,22 @@ pub struct Sizes {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Report {
     pub benchmark: &'static str,
-    pub question_version: &'static str,
+    /// What Jev's runs are recorded under: [`QUESTION_VERSION`], or
+    /// `status_map.bench.q.<version>` with a question file.
+    pub question_version: String,
+    /// The question asked: `the adapter's status_map.v1`, or `file
+    /// <version>` (`--question`).
+    pub question: String,
     /// The adapter's question the requests are built from.
     pub adapter_question: &'static str,
     pub min_confidence: f64,
     /// `fixture` (synthetic, D43) or `labels`.
     pub source: &'static str,
+    /// The cases reported: `dev`, `test` or `all` (by board).
+    pub split: &'static str,
+    /// Both sides of the whole set, whichever is reported.
+    pub split_sizes: SplitSizes,
+    /// The reported cases.
     pub sizes: Sizes,
     pub providers: Vec<&'static str>,
     pub metrics: Vec<ProviderMetrics>,
@@ -1063,7 +1289,7 @@ pub fn report(
         .collect();
 
     let mut notes = vec![
-        "no threshold is tuned on this set (the rule is fixed; jev runs at the adapter's confidence floor), so there is no dev/test split".to_string(),
+        "no threshold is tuned on this set (the rule is fixed; jev runs at the adapter's confidence floor); the dev/test split is by board, for rewording a question (--question) on dev and judging it once on test".to_string(),
         "done precision counts answers that APPLY as done (done or not_planned: a section map stores not_planned as done) against labels that apply as done — a wrong one hides live work; the strict column counts `done` alone".to_string(),
     ];
     if synthetic {
@@ -1076,10 +1302,13 @@ pub fn report(
     }
     Report {
         benchmark: "status_map (J3, phase 0, offline)",
-        question_version: QUESTION_VERSION,
+        question_version: QUESTION_VERSION.to_string(),
+        question: format!("the adapter's {}", sm::QUESTION_VERSION),
         adapter_question: sm::QUESTION_VERSION,
         min_confidence: MIN_CONFIDENCE,
         source: if synthetic { "fixture" } else { "labels" },
+        split: Split::All.as_str(),
+        split_sizes: split_sizes(cases),
         sizes,
         providers: providers.iter().map(|p| p.as_str()).collect(),
         metrics,
@@ -1097,6 +1326,23 @@ fn f2(x: Option<f64>) -> String {
 }
 
 impl Report {
+    /// The report of the `split` side of a set whose sides are `sizes`
+    /// ([`split_cases`]).
+    pub fn with_split(mut self, split: Split, sizes: SplitSizes) -> Report {
+        self.split = split.as_str();
+        self.split_sizes = sizes;
+        self
+    }
+
+    /// The report of a run asked `question`'s wording (none: unchanged).
+    pub fn with_question(mut self, question: Option<&QuestionOverride>) -> Report {
+        if let Some(q) = question {
+            self.question_version = q.recorded_version();
+            self.question = format!("file {}", q.version);
+        }
+        self
+    }
+
     /// The report as lines for a terminal.
     pub fn lines(&self) -> Vec<String> {
         let s = &self.sizes;
@@ -1108,12 +1354,20 @@ impl Report {
         };
         let mut v = vec![
             format!(
-                "benchmark {} — question {} (the adapter's {}, floor {})",
-                self.benchmark, self.question_version, self.adapter_question, self.min_confidence
+                "benchmark {} — question {} ({}, floor {})",
+                self.benchmark, self.question_version, self.question, self.min_confidence
             ),
             format!(
                 "source: {}; {} rows, {} cases ({} dropped by the probe's name check); {} ambiguous; the rule abstains on {}",
                 self.source, s.rows, s.cases, s.dropped, s.ambiguous, s.rule_abstained
+            ),
+            format!(
+                "split: {} (by board: dev {} boards, {} cases; test {} boards, {} cases)",
+                self.split,
+                self.split_sizes.dev_boards,
+                self.split_sizes.dev_cases,
+                self.split_sizes.test_boards,
+                self.split_sizes.test_cases
             ),
             format!("by language: {}", join(&s.by_lang)),
             format!("by label: {}", join(&s.by_expect)),

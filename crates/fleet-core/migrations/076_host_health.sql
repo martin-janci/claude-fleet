@@ -13,4 +13,4 @@ ALTER TABLE hosts ADD COLUMN uptime_secs INTEGER;
 ALTER TABLE hosts ADD COLUMN health_at INTEGER;
 ALTER TABLE hosts ADD COLUMN last_hook_at INTEGER;
 ALTER TABLE hosts ADD COLUMN agent_version TEXT;
-INSERT OR IGNORE INTO schema_version (version) VALUES (75);
+INSERT OR IGNORE INTO schema_version (version) VALUES (76);
