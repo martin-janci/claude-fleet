@@ -1301,7 +1301,9 @@ mod tests {
     use super::*;
     use crate::service::catalog::harness::claude::Claude;
     use crate::service::catalog::model::Asset;
-    use crate::service::catalog::repo::{self, Catalog};
+    #[cfg(unix)]
+    use crate::service::catalog::repo;
+    use crate::service::catalog::repo::Catalog;
     use crate::service::catalog::sync::plan::{self, PlanFilter};
 
     fn w(path: &str, bytes: &[u8]) -> GuardedWrite {
@@ -1661,7 +1663,9 @@ mod tests {
     /// Restores `HOME` when the test (or a panic) ends: it is process-wide,
     /// and leaking a temp dir into it breaks every other test that spawns a
     /// child (see `provision::expand_home_local_expands_tilde`).
+    #[cfg(unix)]
     struct HomeGuard(Option<String>);
+    #[cfg(unix)]
     impl Drop for HomeGuard {
         fn drop(&mut self) {
             match self.0.take() {
@@ -1671,6 +1675,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn write_catalog(root: &std::path::Path, files: &[(&str, &str)]) -> Catalog {
         std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
         for (rel, body) in files {
@@ -1681,10 +1686,12 @@ mod tests {
         repo::load_dir(root).unwrap()
     }
 
+    #[cfg(unix)]
     async fn plan_for(ssh: &Arc<SshClient>, catalog: &Catalog) -> HostPlan {
         plan_with_secrets(ssh, catalog, &BTreeMap::new()).await
     }
 
+    #[cfg(unix)]
     async fn plan_with_secrets(
         ssh: &Arc<SshClient>,
         catalog: &Catalog,
@@ -1705,10 +1712,12 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     fn read_json(p: &std::path::Path) -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(p).unwrap()).expect("valid JSON")
     }
 
+    #[cfg(unix)]
     fn backups(dir: &std::path::Path) -> Vec<String> {
         let Ok(rd) = std::fs::read_dir(dir) else {
             return Vec::new();
@@ -1730,6 +1739,7 @@ mod tests {
     /// `CATALOG_TEST_LOCK` serialises the process-global `HOME` mutation
     /// against the other catalog tests; it guards nothing the runtime needs,
     /// so holding it across awaits is safe.
+    #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn applies_creates_conflicts_overwrites_removals_and_merges_locally() {
@@ -2028,6 +2038,7 @@ mod tests {
 
     /// Repeated overwrites of the same file prune `.fleet-bak-*` backups
     /// down to the [`BACKUP_KEEP`] newest, dropping the oldest first.
+    #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn repeated_overwrites_prune_backups_to_the_newest_three() {
@@ -2112,6 +2123,7 @@ mod tests {
     /// A manifest key `split_key` cannot parse (garbage, or a foreign
     /// schema) is dropped the next time this host's manifest is rewritten,
     /// while the parseable, just-synced entry survives.
+    #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn apply_drops_unparseable_manifest_keys_on_rewrite() {
@@ -2179,6 +2191,7 @@ mod tests {
 
     /// A file the previous sync wrote that the asset no longer renders is
     /// deleted (after a backup) in the same batch that writes the new ones.
+    #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_file_dropped_from_an_asset_is_deleted_with_the_update() {

@@ -5,7 +5,7 @@
 //! * **Bounded.** At most [`RETENTION_TICK_CAP`] rows per table per sweep,
 //!   deleted [`RETENTION_BATCH`] at a time, each batch under its own lock;
 //!   a backlog drains over later ticks.
-//! * **Settings only** (D23): four windows in days, `0` = keep forever; no
+//! * **Settings only** (D23): three windows in days, `0` = keep forever; no
 //!   per-org override.
 //! * **Hub-internal.** The GC tick runs it; the only other trigger is the
 //!   master's `work_admin { action: sweep_now }` (and the standalone
@@ -25,14 +25,12 @@ pub const RETENTION_TICK_CAP: usize = 2_000;
 /// so no settings path can write it.
 pub const LAST_SWEEP_KEY: &str = "internal.work_retention_last_sweep";
 
-/// The four windows, in days (`0` = forever).
+/// The three windows, in days (`0` = forever).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetentionDays {
     pub journal: i64,
     pub tracker_items: i64,
     pub timeline_work_events: i64,
-    /// The tracker write outbox (M13.4e).
-    pub write_outbox: i64,
 }
 
 fn days_of(s: &Store, key: &str) -> i64 {
@@ -66,7 +64,6 @@ impl RetentionDays {
             journal,
             tracker_items: days_of(s, settings::WORK_RETENTION_TRACKER_ITEMS_DAYS),
             timeline_work_events: days_of(s, settings::WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS),
-            write_outbox: days_of(s, settings::WORK_RETENTION_WRITE_OUTBOX_DAYS),
         }
     }
 
@@ -75,7 +72,6 @@ impl RetentionDays {
             RetentionTable::Journal => self.journal,
             RetentionTable::TrackerItems => self.tracker_items,
             RetentionTable::WorkEvents => self.timeline_work_events,
-            RetentionTable::WriteOutbox => self.write_outbox,
         }
     }
 }
@@ -85,7 +81,6 @@ fn setting_of(t: RetentionTable) -> &'static str {
         RetentionTable::Journal => settings::WORK_RETENTION_JOURNAL_DAYS,
         RetentionTable::TrackerItems => settings::WORK_RETENTION_TRACKER_ITEMS_DAYS,
         RetentionTable::WorkEvents => settings::WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS,
-        RetentionTable::WriteOutbox => settings::WORK_RETENTION_WRITE_OUTBOX_DAYS,
     }
 }
 
@@ -99,8 +94,10 @@ pub struct RetentionSweep {
     pub tracker_items: usize,
     #[serde(default)]
     pub timeline_work_events: usize,
+    /// Settled rows of the write-back outbox (M13.4e), by the journal's
+    /// window.
     #[serde(default)]
-    pub write_outbox: usize,
+    pub tracker_writes: usize,
 }
 
 impl RetentionSweep {
@@ -109,7 +106,6 @@ impl RetentionSweep {
             RetentionTable::Journal => self.journal += n,
             RetentionTable::TrackerItems => self.tracker_items += n,
             RetentionTable::WorkEvents => self.timeline_work_events += n,
-            RetentionTable::WriteOutbox => self.write_outbox += n,
         }
     }
 }
@@ -200,6 +196,31 @@ pub fn sweep_capped(store: &Mutex<Store>, now: i64, batch: usize, cap: usize) ->
         }
         out.add(t, done);
     }
+    // The write-back outbox (M13.4e, D3): settled rows, by the journal's
+    // window, here rather than in a tracker's pass so a failing tracker's
+    // outbox still shrinks.
+    if days.journal > 0 {
+        let cutoff = now - days.journal * 86_400;
+        while out.tracker_writes < cap {
+            let want = batch.min(cap - out.tracker_writes);
+            let n = match store.lock() {
+                Ok(s) => s.sweep_tracker_writes(cutoff, want),
+                Err(_) => break,
+            };
+            match n {
+                Ok(n) => {
+                    out.tracker_writes += n;
+                    if n < want {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "[gc] tracker write outbox sweep failed");
+                    break;
+                }
+            }
+        }
+    }
     if let Ok(s) = store.lock() {
         if let Ok(v) = serde_json::to_string(&out) {
             if let Err(e) = s.set_setting(LAST_SWEEP_KEY, &v) {
@@ -227,8 +248,7 @@ mod tests {
             RetentionDays {
                 journal: 365,
                 tracker_items: 180,
-                timeline_work_events: 180,
-                write_outbox: 90
+                timeline_work_events: 180
             }
         );
         let legacy = |v: &str| {
@@ -279,6 +299,65 @@ mod tests {
         assert_eq!(status(&st, now).unwrap().tables[0].rows, 0);
     }
 
+    /// M13.4e: the write-back outbox is swept here, by the journal's window,
+    /// capped per tick like the tables: settled rows go, a pending one never
+    /// does, and `0` keeps them all.
+    #[test]
+    fn the_write_back_outbox_is_swept_capped_and_pending_rows_stay() {
+        let st = store();
+        let t = st
+            .lock()
+            .unwrap()
+            .add_tracker("jira", "J", "https://acme.atlassian.net")
+            .unwrap()
+            .id;
+        for i in 0..5 {
+            let url = format!("https://github.com/o/r/pull/{i}");
+            st.lock()
+                .unwrap()
+                .enqueue_tracker_write(&crate::store::NewTrackerWrite {
+                    tracker_id: t,
+                    item_key: "ABC-1",
+                    op: crate::store::WRITE_OP_PR_REMOTE_LINK,
+                    url: &url,
+                    title: "PR",
+                    link_id: None,
+                    claude_session_id: None,
+                    session_org_id: None,
+                })
+                .unwrap();
+        }
+        {
+            let s = st.lock().unwrap();
+            let due = s
+                .due_tracker_writes(t, crate::service::catalog::now_secs() + 1, 10)
+                .unwrap();
+            // Four settled, one left pending.
+            for w in &due[..4] {
+                s.finish_tracker_write(w.id).unwrap();
+            }
+        }
+        let now = crate::service::catalog::now_secs() + 400 * 86_400;
+        assert_eq!(sweep_capped(&st, now, 2, 3).tracker_writes, 3, "the cap");
+        assert_eq!(sweep_capped(&st, now, 2, 3).tracker_writes, 1);
+        assert_eq!(sweep_capped(&st, now, 2, 3).tracker_writes, 0);
+        let left = st.lock().unwrap().due_tracker_writes(t, now, 10).unwrap();
+        assert_eq!(left.len(), 1, "the pending write is never swept");
+
+        settings::set(
+            &st.lock().unwrap(),
+            settings::WORK_RETENTION_JOURNAL_DAYS,
+            "0",
+        )
+        .unwrap();
+        st.lock().unwrap().finish_tracker_write(left[0].id).unwrap();
+        assert_eq!(
+            sweep(&st, now + 4_000 * 86_400).tracker_writes,
+            0,
+            "0 keeps forever"
+        );
+    }
+
     #[test]
     fn zero_keeps_forever_through_the_settings() {
         let st = store();
@@ -311,12 +390,7 @@ mod tests {
                 .iter()
                 .map(|t| t.table.as_str())
                 .collect::<Vec<_>>(),
-            [
-                "work_journal",
-                "work_items",
-                "session_events",
-                "tracker_write_outbox"
-            ]
+            ["work_journal", "work_items", "session_events"]
         );
         assert_eq!(s.tick_cap, RETENTION_TICK_CAP);
         // The record is not a setting anyone can write.

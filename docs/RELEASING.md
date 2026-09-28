@@ -60,7 +60,10 @@ generated from it.
    or if [CI is not green on `HEAD`](#the-ci-gate). When it pauses, open
    `CHANGELOG.md`, polish the generated section (the bullets are raw commit
    subjects), save, and press Enter — **that text becomes the release notes
-   verbatim**, so it is worth the minute.
+   verbatim**, so it is worth the minute. Notes written ahead of time under
+   an `## [Unreleased]` heading are not lost: the script gives that section
+   the version's header, keeps its text, and adds the generated bullets
+   after it (without one, it inserts a fresh section as before).
 
 4. Push the release commit and tag:
 
@@ -229,13 +232,14 @@ before you do it:
 
 ### The assets
 
-11 per release, every one version-bearing:
+12 per release from 0.3.4 (11 before it), every one version-bearing:
 
 | asset | built by |
 |-------|----------|
 | `claude-fleet_<v>_aarch64.dmg`, `claude-fleet_<v>_aarch64.app.tar.gz` | `build`, `macos-latest` / `aarch64-apple-darwin` |
 | `claude-fleet_<v>_x64.dmg`, `claude-fleet_<v>_x64.app.tar.gz` | `build`, `macos-latest` / `x86_64-apple-darwin` |
 | `claude-fleet_<v>_amd64.deb`, `claude-fleet_<v>_amd64.AppImage` | `build`, `ubuntu-24.04` |
+| `claude-fleet_<v>_x64-setup.exe` (from 0.3.4; bundles Microsoft's ConPTY, fetched and SHA-256-checked by `scripts/fetch-conpty.sh`) | `build`, `windows-latest` |
 | `fleet-agent-<v>-x86_64-unknown-linux-gnu.tar.gz`, `fleet-hub-<v>-…` | `agent-hub-binaries`, `ubuntu-22.04` |
 | `fleet-agent-<v>-aarch64-unknown-linux-gnu.tar.gz`, `fleet-hub-<v>-…` | `agent-hub-binaries`, `ubuntu-22.04-arm` |
 | `SHA256SUMS` | `checksums` |
@@ -249,9 +253,14 @@ the releases API), leaving `tauri-action`'s own build and upload untouched.
 The new name comes from `scripts/release-assets.sh`, the same table
 `verify-release` checks against.
 
+A leg added after the first release carries a `since` version in that table
+(the Windows installer: 0.3.4). `assets` leaves it out for older versions, so
+adding a leg does not turn every earlier release into an incomplete one for
+`verify-release` and [the drift check](#the-drift-check).
+
 ### fleet-agent and fleet-hub binaries
 
-`agent-hub-binaries` runs in parallel with the three desktop legs (no
+`agent-hub-binaries` runs in parallel with the four desktop legs (no
 dependency on or from `build`). It builds `fleet-agent` and `fleet-hub`
 `--release --locked` for `x86_64-unknown-linux-gnu` and
 `aarch64-unknown-linux-gnu` on native `ubuntu-22.04` / `ubuntu-22.04-arm`
@@ -475,29 +484,48 @@ exact rule and the image name/tag scheme.
 
 ### Signing caveat
 
-**Nothing is code-signed or notarized.** There is no Apple Developer ID for
-this project yet, so `release.yml` deliberately contains no signing step
-(ad-hoc signing would only fake provenance). Until that changes:
+**macOS bundles are signed, not notarized.** `release.yml` signs them with the
+owner's free Personal Team *Apple Development* certificate (secrets
+`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`);
+there is no Apple Developer ID, so nothing is notarized.
 
-- macOS: Gatekeeper blocks the downloaded app on first launch with
-  *"claude-fleet.app is damaged and can't be opened"*. Copy the app to
+- **Why sign at all:** the desktop keeps its hub token in the login keychain,
+  and macOS scopes a keychain item to a *partition* derived from the signer's
+  Team ID. Unsigned or ad-hoc builds — and self-signed ones, which were tried —
+  have no Team ID, so the partition falls back to the build's cdhash and every
+  update asked for keychain access again. With a Team ID, *Always Allow*
+  survives updates. It is a stable identity, not provenance for anyone else.
+- **The workflow fails closed:** a macOS leg stops if the secrets are missing,
+  installs Apple's WWDR G3 intermediate (pinned by hash; without it `codesign`
+  fails with `errSecInternalComponent`), and the *Verify the macOS signature*
+  step turns a bundle without a Team ID into a red leg.
+- **`hardenedRuntime` is off** in `tauri.conf.json`: it only matters for
+  notarization.
+- **Yearly renewal:** the certificate expires after a year. Renew it in Xcode
+  (Settings → Accounts → your team → Manage Certificates → + Apple
+  Development), export the identity with `security export -t identities -f
+  pkcs12` from the login keychain, and replace the three secrets. The current
+  export and its password are backed up in the owner's keychain
+  (`claude-fleet-apple-dev-p12-base64`, `claude-fleet-apple-dev-p12-password`).
+- **The certificate name is public:** it carries the Apple ID's email, which
+  every signed bundle shows under `codesign -dv`.
+- **Gatekeeper still blocks a download** on first launch. Copy the app to
   `/Applications`, then clear the quarantine flag:
 
   ```bash
   xattr -dr com.apple.quarantine /Applications/claude-fleet.app
   ```
 
-  Right-click → **Open** and the **Open Anyway** button in System Settings are
-  the bypass for a *signed but un-notarized* app; they are unreliable for an
-  unsigned one, so point users at `xattr`. The user-facing version of this is
-  in the README's *Installing a release build* section.
+  The user-facing version of this is in the README's *Installing a release
+  build* section.
 
 - Linux: the AppImage and `.deb` are unsigned, which is normal for those
   formats. Mark the AppImage executable (`chmod +x`) before running it.
 
-When a Developer ID exists, add the `APPLE_*` secrets documented at
-https://v2.tauri.app/distribute/sign/macos/ and pass them via `env:` on the
-`tauri-action` step; nothing else in the workflow needs to change.
+With a Developer ID later, replace the certificate secrets and add `APPLE_ID`
+/ `APPLE_PASSWORD` / `APPLE_TEAM_ID` for notarization
+(https://v2.tauri.app/distribute/sign/macos/); nothing else in the workflow
+needs to change.
 
 ## What the script touches
 

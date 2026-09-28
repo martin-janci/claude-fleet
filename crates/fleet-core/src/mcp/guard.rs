@@ -381,6 +381,13 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Lifecycle,
     },
     ToolPolicy {
+        name: "rewind_conversation",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
         name: "spawn_review",
         access: Access::Client,
         readonly: false,
@@ -597,6 +604,26 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         readonly: true,
         confirm: false,
         deadline: Deadline::Lifecycle,
+    },
+    // Clones or creates a repository on a host: a write, and a long one — a
+    // clone's wall clock is 600 s (`service::add_project::CLONE_WALL_CLOCK`),
+    // which the lifecycle cap (300 s) would cut in half, so it takes the
+    // long-poll cap. Not `confirm`: `create_remote` has its own single-use
+    // token (`service::add_project::ConfirmTokens`).
+    ToolPolicy {
+        name: "add_project",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::LongPoll,
+    },
+    // `gh repo list` on one host: a read with a 30 s wall clock.
+    ToolPolicy {
+        name: "list_github_repos",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
     },
     ToolPolicy {
         name: "list_worktrees",
@@ -856,6 +883,7 @@ pub const OPERATOR_CONFIRMS: &[&str] = &[
     "restore_host_sessions",
     "recreate_session",
     "restart_session",
+    "rewind_conversation",
     "safe_kill_session",
     "work_link",
 ];

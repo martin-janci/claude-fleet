@@ -13,6 +13,12 @@ Register a host. transport "ssh" (default) is probed first and persisted only if
 
 Parameters: `alias`, `ssh_alias`, `transport`
 
+### `add_project`
+
+Add a project on a host: clone a GitHub URL, adopt a folder (the hub's local host only) or create a new repository (create_remote is refused once with a confirm token to send back). git and gh run on the host with its own credentials. Returns the project row.
+
+Parameters: `host_alias`, `source`
+
 ### `agent_status`
 
 Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false where no agents are accepted (the desktop).
@@ -75,7 +81,7 @@ Ensure the UX agent's operator session exists; returns its row.
 
 ### `fleet_health`
 
-Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers.
+Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers. hub: uptime and last reconcile pass; tunnels_mode none|reverse; peer_links_total.
 
 ### `get_clipboard`
 
@@ -124,6 +130,12 @@ The asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each as
 Paired client devices and what each token may do. The token digest is never returned: a token exists in plaintext only in the /pair response that minted it. Read-only but master token only (it names every paired device). Rows: { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at }.
 
 Parameters: `include_revoked`
+
+### `list_github_repos`
+
+Repositories gh on the host can see, for choosing what to clone with add_project.
+
+Parameters: `host_alias`
 
 ### `list_host_worktrees`
 
@@ -197,9 +209,9 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 ### `pair_client`
 
-Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. Master token only. Returns { url, code, expires_in_s, name, mode, trusted }.
+Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.
 
-Parameters: `mode`, `name`, `trusted`, `ttl_s`
+Parameters: `mode`, `name`, `org_id`, `trusted`, `ttl_s`
 
 ### `peer_exchange`
 
@@ -359,6 +371,12 @@ Revoke a paired client's token by name: its next request is refused and the name
 
 Parameters: `name`
 
+### `rewind_conversation`
+
+Truncate a session's transcript into a new conversation: "fork" starts a new session there, "rewind" restarts this one. The original is unchanged. Returns the row (a fork's is the new session).
+
+Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
+
 ### `run_prompt`
 
 send_prompt + wait_for_session(turn_gt) + session_transcript in one call. Returns { turn_seq, status: satisfied | timeout, transcript } (the reply as plain text; null with transcript_error when unreadable). Marked untrusted unless raw=true (master token only).
@@ -469,7 +487,7 @@ Parameters: `confirm_nonce`, `prompt`, `source_session_id`
 
 ### `usage_report`
 
-ESTIMATED token usage and cost per session, host and UTC day, from each session's transcript (collected every usage.interval_secs). Costs are micro-USD from a built-in price table (usage.prices_json), not a bill. total and by_host sum live rows over their lifetime; by_day is the durable daily roll-up (killed sessions included). Sessions sorted by cost, at most 200. A per-host token only sees its own host.
+ESTIMATED token usage and cost per session, host and UTC day, from each session's transcript (collected every usage.interval_secs). Costs are micro-USD from a built-in price table (usage.prices_json), not a bill. total and by_host sum live rows over their lifetime; by_day is the durable daily roll-up (killed sessions included). Sessions sorted by cost, at most 200. A per-host token only sees its own host. by_day.backfill_cost_micros: history a first read booked, apart from live cost.
 
 Parameters: `host_alias`, `since_secs`
 
@@ -499,21 +517,21 @@ Parameters: `tmux_name`
 
 ### `work`
 
-Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; tidy; reopened.
+Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; tidy; reopened. Work view: tree {filters, cursor}; task {task_id}; session_tasks; review; rules; rule_preview {rule}; views; org_impact.
 
-Parameters: `action`, `host_alias`, `host_aliases`, `key`, `limit`, `link_id`, `project_id`, `query`, `session_id`, `since`, `tracker_id`, `url`, `view`, `with_brief`
+Parameters: `action`, `cursor`, `filters`, `host_alias`, `host_aliases`, `key`, `limit`, `link_id`, `org_id`, `per_task`, `project_id`, `query`, `rule`, `session_id`, `since`, `task_id`, `tracker_id`, `url`, `view`, `with_brief`
 
 ### `work_admin`
 
 Trackers, orgs, retention and usage counts; see action. Never returns a secret.
 
-Parameters: `action`, `auth_kind`, `auto_tidy`, `color`, `confirm_nonce`, `credential_ref`, `days`, `host_alias`, `isolate_sessions`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `site_url`, `tracker_id`, `transport`, `username`
+Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `color`, `confirm_nonce`, `credential_ref`, `days`, `host_alias`, `isolate_sessions`, `jev`, `name`, `org_id`, `owner`, `path_prefix`, `provider`, `repo`, `rule_id`, `secret`, `settings`, `site_url`, `tracker_id`, `transport`, `username`
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo). handover {session_id}: ask it to write its hand-off. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty).
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo). handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
 
-Parameters: `action`, `brief`, `confirm_nonce`, `days`, `force_cross_org`, `host_alias`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `on`, `project_id`, `project_ids`, `session_id`, `source`, `title`, `url`, `with_brief`, `worktree`
+Parameters: `action`, `brief`, `confirm_nonce`, `days`, `decisions`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `impact_token`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `note`, `on`, `org_id`, `primary`, `project_id`, `project_ids`, `rule`, `rule_id`, `session_id`, `source`, `task_id`, `title`, `url`, `view`, `view_id`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -559,15 +577,36 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::work_today`
 - `commands::work::work_ticket_card`
 - `commands::work::request_work_handover`
+- `commands::work::summarize_past_work`
 - `commands::work::list_local_work_items`
 - `commands::work::name_session_work`
 - `commands::work::rename_work_item`
+- `commands::work_view::work_tree`
+- `commands::work_view::work_task`
+- `commands::work_view::work_session_tasks`
+- `commands::work_view::work_review`
+- `commands::work_view::work_rules`
+- `commands::work_view::work_rule_preview`
+- `commands::work_view::work_views`
+- `commands::work_view::work_org_impact`
+- `commands::work_view::set_primary_work`
+- `commands::work_view::reconsider_work_link`
+- `commands::work_view::ack_work_link`
+- `commands::work_view::decide_work_batch`
+- `commands::work_view::place_work`
+- `commands::work_view::assign_work_org`
+- `commands::work_view::save_work_rule`
+- `commands::work_view::delete_work_rule`
+- `commands::work_view::save_work_view`
+- `commands::work_view::delete_work_view`
 - `commands::trackers::add_tracker`
 - `commands::trackers::update_tracker`
 - `commands::trackers::set_tracker_credential`
 - `commands::trackers::test_tracker`
 - `commands::trackers::remove_tracker`
 - `commands::trackers::tracker_sync_metrics`
+- `commands::trackers::status_map_proposals`
+- `commands::trackers::decide_status_map_proposal`
 - `commands::trackers::work_retention_status`
 - `commands::trackers::work_retention_sweep`
 - `commands::trackers::work_usage`
@@ -592,6 +631,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::session_tool_detail`
 - `commands::sessions::session_activity`
 - `commands::sessions::restart_session`
+- `commands::sessions::rewind_conversation`
 - `commands::sessions::send_prompt`
 - `commands::sessions::spawn_review`
 - `commands::sessions::recreate_session`

@@ -421,23 +421,9 @@ fn zero_days_keeps_every_table_forever() {
     let s = Store::open_in_memory().unwrap();
     let (sid, _) = session(&s, "a");
     journal(&s, Some("gone"), None, "progress", OLD, None);
-    let tracker = s
-        .add_tracker("jira", "A", "https://acme.atlassian.net")
-        .unwrap()
-        .id;
-    item(&s, Some(tracker), "A-1", "done", OLD);
+    item(&s, Some(1), "A-1", "done", OLD);
     event(&s, sid, "gc_tidied", OLD);
     event(&s, sid, "gc_tidied", OLD + 1);
-    // A settled tracker write with no link (M13.4e).
-    s.conn
-        .execute(
-            "INSERT INTO tracker_write_outbox (tracker_id, issue_id, op, global_id, url, title, \
-                                               state, next_attempt_at, created_at, updated_at) \
-             VALUES (?1, '1', 'pr_remote_link', 'fleet:pr:https://x.example/p', \
-                     'https://x.example/p', 'Pull request', 'done', ?2, ?2, ?2)",
-            rusqlite::params![tracker, OLD],
-        )
-        .unwrap();
     for t in RetentionTable::ALL {
         assert!(s.retention_eligible(t, NOW, 1).unwrap() > 0, "{t:?}");
         assert_eq!(s.retention_eligible(t, NOW, 0).unwrap(), 0, "{t:?}");

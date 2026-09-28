@@ -1,0 +1,231 @@
+{
+  "generated_at": 1790518155,
+  "groups": [
+    {
+      "count": 1,
+      "group": {
+        "editable": true,
+        "id": "label:Security",
+        "label": "Security",
+        "source": "manual",
+        "tracker_value": "TP"
+      },
+      "org_id": 1,
+      "org_name": "Acme"
+    },
+    {
+      "count": 2,
+      "group": {
+        "editable": true,
+        "id": "tracker:1:TP",
+        "label": "TP",
+        "source": "tracker",
+        "tracker_value": "TP"
+      },
+      "org_id": 1,
+      "org_name": "Acme"
+    }
+  ],
+  "orgs": [
+    {
+      "id": 1,
+      "name": "Acme"
+    },
+    {
+      "id": 2,
+      "name": "Beta"
+    }
+  ],
+  "tasks": [
+    {
+      "counts": {
+        "active": 1,
+        "ended": 0,
+        "suggested": 0
+      },
+      "group": {
+        "editable": true,
+        "id": "label:Security",
+        "label": "Security",
+        "source": "manual",
+        "tracker_value": "TP"
+      },
+      "item_id": 2,
+      "key": "TK-2",
+      "kind": "tracker",
+      "last_activity_at": 1790518155,
+      "mine": true,
+      "needs_you": false,
+      "org_fenced": true,
+      "org_id": 1,
+      "org_mixed": false,
+      "org_source": "tracker",
+      "placement_version": 1,
+      "provider": "jira",
+      "repos": [
+        "acme/api"
+      ],
+      "review": false,
+      "sessions": [
+        {
+          "archived": false,
+          "created_at": 1790518155,
+          "cross_org": false,
+          "decided_at": 1790518155,
+          "host": "h1",
+          "link_id": 2,
+          "link_version": 1,
+          "name": "one",
+          "needs_you": false,
+          "other_tasks": 1,
+          "primary": false,
+          "resumable": true,
+          "session_id": 1,
+          "source": "manual",
+          "state": "active",
+          "strength": "explicit",
+          "why": "linked by a person"
+        }
+      ],
+      "sessions_more": 0,
+      "status_category": "in_progress",
+      "status_name": "In Progress",
+      "task_id": "item:2",
+      "title": "Audit log",
+      "tracker_id": 1,
+      "tracker_name": "Jira (acme)",
+      "tracker_state": "unconfigured",
+      "unavailable": false
+    },
+    {
+      "counts": {
+        "active": 1,
+        "ended": 0,
+        "suggested": 0
+      },
+      "group": {
+        "editable": true,
+        "id": "tracker:1:TP",
+        "label": "TP",
+        "source": "tracker",
+        "tracker_value": "TP"
+      },
+      "item_id": 1,
+      "key": "TK-1",
+      "kind": "tracker",
+      "last_activity_at": 1790518155,
+      "mine": true,
+      "needs_you": false,
+      "org_fenced": true,
+      "org_id": 1,
+      "org_mixed": false,
+      "org_source": "tracker",
+      "placement_version": 0,
+      "provider": "jira",
+      "repos": [
+        "acme/api"
+      ],
+      "review": false,
+      "sessions": [
+        {
+          "archived": false,
+          "created_at": 1790518155,
+          "cross_org": false,
+          "decided_at": 1790518155,
+          "host": "h1",
+          "link_id": 1,
+          "link_version": 1,
+          "name": "one",
+          "needs_you": false,
+          "other_tasks": 1,
+          "primary": true,
+          "resumable": true,
+          "session_id": 1,
+          "source": "manual",
+          "state": "active",
+          "strength": "explicit",
+          "why": "linked by a person"
+        }
+      ],
+      "sessions_more": 0,
+      "status_category": "in_progress",
+      "status_name": "In Progress",
+      "task_id": "item:1",
+      "title": "Login fails",
+      "tracker_id": 1,
+      "tracker_name": "Jira (acme)",
+      "tracker_state": "unconfigured",
+      "unavailable": false
+    },
+    {
+      "counts": {
+        "active": 0,
+        "ended": 0,
+        "suggested": 1
+      },
+      "group": {
+        "editable": true,
+        "id": "tracker:1:TP",
+        "label": "TP",
+        "source": "tracker",
+        "tracker_value": "TP"
+      },
+      "item_id": 3,
+      "key": "TK-3",
+      "kind": "tracker",
+      "last_activity_at": 1790518155,
+      "mine": true,
+      "needs_you": false,
+      "org_fenced": true,
+      "org_id": 1,
+      "org_mixed": false,
+      "org_source": "tracker",
+      "placement_version": 0,
+      "provider": "jira",
+      "repos": [
+        "acme/api"
+      ],
+      "review": true,
+      "sessions": [
+        {
+          "archived": false,
+          "created_at": 1790518155,
+          "cross_org": false,
+          "host": "h1",
+          "link_id": 3,
+          "link_version": 1,
+          "name": "two",
+          "needs_you": false,
+          "other_tasks": 0,
+          "primary": false,
+          "resumable": true,
+          "rule": "R6",
+          "session_id": 2,
+          "source": "prompt",
+          "state": "suggested",
+          "strength": "weak",
+          "why": "mentioned in a prompt TK-3 · R6"
+        }
+      ],
+      "sessions_more": 0,
+      "status_category": "in_progress",
+      "status_name": "In Progress",
+      "task_id": "item:3",
+      "title": "Nobody on it yet",
+      "tracker_id": 1,
+      "tracker_name": "Jira (acme)",
+      "tracker_state": "unconfigured",
+      "unavailable": false
+    }
+  ],
+  "total": 3,
+  "trackers": [
+    {
+      "id": 1,
+      "name": "Jira (acme)",
+      "org_id": 1,
+      "provider": "jira",
+      "state": "unconfigured"
+    }
+  ]
+}

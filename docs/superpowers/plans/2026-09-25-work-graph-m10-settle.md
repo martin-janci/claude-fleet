@@ -267,3 +267,15 @@ M10.6 (independent; reuses M10.2's fake tracker)
   labels and `fleet-hub` commands were taken from the code on `main`
   (v0.3.0). **Not run**: it waits on the user's run, whose filled-in copy
   is committed as the record and updates the decisions table.
+- 2026-09-27: **M10.5 finished** in fleet-mobile.
+  martin-janci/fleet-mobile#36 had shipped Today, *Share standup* (one
+  formatter, a shared fixture) and the card in the Tickets sheet; martin-janci/fleet-mobile#48 adds the rest of §M10.5:
+  - the ticket card in `SessionScreen`'s work sheet, read when it opens
+    (`work card`, gated on the hub's action list, a read for any token,
+    silent on failure, only the chip's ticket);
+  - *Copy*, never *Send*, on every card (key, title, status, an http(s)
+    link and the criteria as plain text; `composer_text` is never read);
+  - the org colour bar on session rows while the org chips show.
+
+  No contract bump, no new tool or action. Tests with recorded hub JSON;
+  `:shared:jvmTest` 1,007 passing.

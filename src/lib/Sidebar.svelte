@@ -36,6 +36,7 @@
     newSessionHostRequest,
     requestHostsView,
     settingsOpen,
+    workViewChordLabel,
   } from './app_views';
   import { hintAnchor } from './hints';
   import {
@@ -84,6 +85,7 @@
   import SidebarFilters from './SidebarFilters.svelte';
   import SessionRowItem from './SessionRowItem.svelte';
   import ResumeButton from './ResumeButton.svelte';
+  import SummarizeButton from './SummarizeButton.svelte';
   import {
     reopenedBadge,
     reopenedByKey,
@@ -100,9 +102,13 @@
   } from './work';
   import { timeAgo } from './session_status';
   import NewBgSessionDialog from './NewBgSessionDialog.svelte';
+  import WorkTree from './WorkTree.svelte';
+  import { sidebarView } from './work_view';
+  import { detectMac } from './terminal_keys';
   import { isRecency, matchesRecency, type Recency } from './session_status';
 
   let showTasks = $state(false);
+  const workViewChord = workViewChordLabel(detectMac(typeof navigator === 'undefined' ? undefined : navigator));
 
   // Optional collapse handler injected by the parent (App.svelte). When
   // present, a ‹ button appears in the sidebar header so the user can
@@ -628,10 +634,11 @@
   /** Host to preselect in NewSessionDialog: where Add project put the project. */
   let dialogHost: string | undefined = $state(undefined);
 
-  // Both act on a checkout using this machine's SSH (and, for Add project,
-  // GitHub credentials): neither has a hub tool, so both refuse with
-  // E_LOCAL_ONLY in remote mode (`commands/projects.rs`, `commands/sessions.rs`).
-  const addProjectBlocked = $derived(hubBlock('add_project', $hubStatus));
+  // Add project ROUTES to the hub now (the clone runs on the host through the
+  // hub's transport), so it is gated on the live link like every other routed
+  // mutation. Purge still uses this machine's SSH and stays refused with
+  // E_LOCAL_ONLY in remote mode (`commands/sessions.rs`).
+  const addProjectBlocked = $derived(hubActionBlocked('add_project', $hubStatus, $hubConnection));
   const purgeProjectBlocked = $derived(hubBlock('purge_project', $hubStatus));
 
   // While the hub's wire contract is outside this build's range, every list
@@ -998,7 +1005,34 @@
     />
   {/snippet}
 
+  <!-- Work graph M14: two projections of one graph — Sessions (host /
+       project → session → its tasks) and Work (org → group → task → its
+       sessions). ⌘⇧W / Ctrl+Shift+W flips them. -->
+  <div class="view-switch" role="tablist" aria-label="Sidebar view" data-testid="sidebar-view-switch">
+    <button
+      class="btn btn--chip btn--toggle"
+      role="tab"
+      aria-selected={$sidebarView === 'sessions'}
+      class:is-active={$sidebarView === 'sessions'}
+      data-testid="sidebar-view-sessions"
+      title={`Sessions (${workViewChord})`}
+      onclick={() => sidebarView.set('sessions')}>Sessions</button
+    >
+    <button
+      class="btn btn--chip btn--toggle"
+      role="tab"
+      aria-selected={$sidebarView === 'work'}
+      class:is-active={$sidebarView === 'work'}
+      data-testid="sidebar-view-work"
+      title={`Work: organisation → group → task → its sessions (${workViewChord})`}
+      onclick={() => sidebarView.set('work')}>Work</button
+    >
+  </div>
+
+  <!-- The shared chrome (Refresh, Needs you, bulk actions, Tasks, Settings,
+       Attention) stays in both views; only the list below swaps. -->
   <SidebarFilters
+    listView={$sidebarView}
     bind:search
     bind:recency
     bind:needsYouOnly
@@ -1019,6 +1053,9 @@
     {clearSelected}
   />
 
+  {#if $sidebarView === 'work'}
+  <WorkTree />
+  {:else}
   <div class="scroller">
     {#if !$onboardingDismissed}
       <OnboardingCard onaddhost={openAddHost} onnewsession={openNewSession} />
@@ -1037,6 +1074,7 @@
         >
         {#if l.resumable === false}<span class="past-purged" title="Its transcripts were purged: only a fresh start is possible">purged</span>{/if}
         <ResumeButton workKey={key} link={l} />
+        <SummarizeButton workKey={key} link={l} />
       </div>
     {/snippet}
     {#if workGroups.length > 0 || pastOnlyGroups.length > 0}
@@ -1269,6 +1307,7 @@
       </div>
     {/if}
   </div>
+  {/if}
 
   <footer class="sidebar-footer" data-testid="sidebar-chrome-bottom">
     <div class="footer-row">
@@ -1445,6 +1484,13 @@
 {/if}
 
 <style>
+  .view-switch {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.4rem 0.6rem 0;
+    background: var(--bg-pane);
+  }
   .sidebar {
     display: flex;
     flex-direction: column;
@@ -1595,6 +1641,7 @@
   }
   .past-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.4rem;
     padding: 0.15rem 0.5rem 0.15rem 1.6rem;

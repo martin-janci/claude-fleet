@@ -139,7 +139,7 @@ fn stale_reason(row: &SessionRow, now: i64) -> Option<&'static str> {
     }
 }
 
-fn session_of(row: &SessionRow, now: i64) -> TodaySession {
+fn session_of(row: &SessionRow, now: i64, context_red_pct: f64) -> TodaySession {
     TodaySession {
         id: row.id,
         name: row
@@ -149,7 +149,7 @@ fn session_of(row: &SessionRow, now: i64) -> TodaySession {
             .unwrap_or_else(|| row.tmux_name.clone()),
         host_alias: row.host_alias.clone(),
         org_id: row.org_id,
-        attention: crate::service::attention::needs_attention(row)
+        attention: crate::service::attention::needs_attention_with(row, context_red_pct)
             .map(|a| a.reason.as_str().into()),
         stale: stale_reason(row, now).map(str::to_string),
         claude_status: row.claude_status.clone(),
@@ -167,12 +167,13 @@ pub fn digest(
     ended: &[EndedWork],
     now: i64,
     since: i64,
+    context_red_pct: f64,
 ) -> Today {
     // Group by work key; no-work sessions by bucket.
     let mut by_key: BTreeMap<String, (TodayGroup, Vec<TodaySession>)> = BTreeMap::new();
     let mut no_work: Vec<TodaySession> = Vec::new();
     for row in rows {
-        let s = session_of(row, now);
+        let s = session_of(row, now, context_red_pct);
         match row.work.as_ref().and_then(|w| w.key.clone()) {
             Some(key) => {
                 let w = row.work.as_ref().cloned().unwrap_or_default();
@@ -342,7 +343,8 @@ pub fn today(
         .filter(|r| counts(r, operator.as_ref()))
         .filter(|r| match scope.host() {
             Some(h) => r.host_alias == h && scope.sees_row(r),
-            None => true,
+            // `All` sees every row; a bound client (M14) its org's.
+            None => scope.sees_row(r),
         })
         .collect();
     for r in &mut rows {
@@ -394,12 +396,14 @@ pub fn today(
             link,
         });
     }
-    Ok(digest(&rows, &done, &ended, now, since))
+    let red = crate::service::health::context_red_pct(&s);
+    Ok(digest(&rows, &done, &ended, now, since, red))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::attention::DEFAULT_CONTEXT_RED_PCT;
     use crate::store::WorkSummary;
 
     const NOW: i64 = 10_000_000;
@@ -451,6 +455,7 @@ mod tests {
             &[],
             NOW,
             SINCE,
+            DEFAULT_CONTEXT_RED_PCT,
         );
         assert_eq!(bucket_of(&t, Some("PAY-7")), vec!["waiting"]);
         // One session is recent: the group is not stale.
@@ -480,7 +485,7 @@ mod tests {
         let mut c = row(3, None);
         c.last_activity_at = NOW - STALE_AFTER_SECS - 10;
         let d = row(4, Some("K-1"));
-        let t = digest(&[a, b, c, d], &[], &[], NOW, SINCE);
+        let t = digest(&[a, b, c, d], &[], &[], NOW, SINCE, DEFAULT_CONTEXT_RED_PCT);
         assert_eq!(
             bucket_of(&t, None),
             vec!["waiting", "in_progress", "stale"],
@@ -575,6 +580,7 @@ mod tests {
             ],
             NOW,
             SINCE,
+            DEFAULT_CONTEXT_RED_PCT,
         );
         let got: Vec<(&str, Option<&str>, Option<&str>)> = t
             .shipped

@@ -1,7 +1,7 @@
 //! Detection end to end over an in-memory store: signals in, links out.
 
 use super::*;
-use crate::store::{StartSource, TrackerConfig, WorkTarget};
+use crate::store::{Decider, StartSource, TrackerConfig, WorkTarget};
 
 struct Fx {
     s: Store,
@@ -103,7 +103,7 @@ fn not_this_is_final_for_every_signal() {
     let sid = session(&f, "dev", "c1");
     on_prompt(&f.s, sid, "see ABC-99", true).unwrap();
     let id = f.s.session_work_links(sid).unwrap()[0].id;
-    decide(&f.s, sid, id, false).unwrap();
+    decide(&f.s, sid, id, false, Decider::Person).unwrap();
     // Again from a prompt, a URL, the branch and the PR: never re-proposed.
     on_prompt(&f.s, sid, "ABC-99 again", false).unwrap();
     on_prompt(&f.s, sid, "https://acme.atlassian.net/browse/ABC-99", false).unwrap();
@@ -269,7 +269,7 @@ fn an_untrusted_branch_is_a_suggestion_and_three_confirmations_trust_the_project
                 .unwrap();
         assert_eq!(sg.rule.as_deref(), Some("R3b"));
         assert!(sg.preselected);
-        let became = decide(&f.s, sid, sg.link_id, true).unwrap();
+        let became = decide(&f.s, sid, sg.link_id, true, Decider::Person).unwrap();
         assert_eq!(became, i == 2, "trusted after the third");
     }
     assert!(trusted_projects(&f.s).contains(&f.project));
@@ -278,6 +278,47 @@ fn an_untrusted_branch_is_a_suggestion_and_three_confirmations_trust_the_project
     resolve_session(&f.s, sid).unwrap();
     let w = f.s.get_session_by_id(sid).unwrap().unwrap().work.unwrap();
     assert_eq!(w.rule.as_deref(), Some("R3"));
+}
+
+/// Auto-trust counts only BRANCH suggestions a PERSON confirmed: three a
+/// pull request alone proposed, or three an agent confirmed, trust nothing.
+#[test]
+fn only_a_persons_branch_confirmations_count_toward_trust() {
+    let f = fx();
+    for i in 0..3 {
+        let name = format!("pr{i}");
+        let sid = session(&f, &name, &format!("c{i}"));
+        let sig = PrSignals {
+            head: Some(format!("abc-{}-x", i + 1)),
+            ..Default::default()
+        };
+        f.s.set_pr_signals("h", &name, Some(&serde_json::to_string(&sig).unwrap()))
+            .unwrap();
+        resolve_session(&f.s, sid).unwrap();
+        let sg =
+            f.s.get_session_by_id(sid)
+                .unwrap()
+                .unwrap()
+                .work_suggested
+                .unwrap();
+        assert_eq!(sg.rule.as_deref(), Some("R3b"), "a sole PR head");
+        assert!(!decide(&f.s, sid, sg.link_id, true, Decider::Person).unwrap());
+    }
+    for i in 3..6 {
+        let sid = session(&f, &format!("ag{i}"), &format!("c{i}"));
+        f.s.set_current_branch(sid, &format!("abc-{}-y", i + 1))
+            .unwrap();
+        resolve_session(&f.s, sid).unwrap();
+        let sg =
+            f.s.get_session_by_id(sid)
+                .unwrap()
+                .unwrap()
+                .work_suggested
+                .unwrap();
+        assert!(!decide(&f.s, sid, sg.link_id, true, Decider::Agent).unwrap());
+    }
+    assert_eq!(f.s.confirmed_branch_suggestions(f.project).unwrap(), 0);
+    assert!(!trusted_projects(&f.s).contains(&f.project));
 }
 
 #[test]
@@ -328,6 +369,151 @@ fn a_weak_suggestion_decays_at_the_next_conversation_unless_seen_again() {
             .map(|l| l.ref_key)
             .collect();
     assert_eq!(keys, vec![Some("ABC-9".to_string())]);
+}
+
+/// D34: a suggestion detection takes back (R6 decay, R7 withdraw) loses its
+/// row, but leaves a timeline event with ids and vocabulary words only —
+/// the negative a label set would otherwise lose.
+#[test]
+fn a_withdrawn_or_decayed_suggestion_leaves_an_event_of_ids_only() {
+    let withdrawn = |s: &Store, sid: i64| -> Vec<serde_json::Value> {
+        s.list_session_events(sid, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == crate::store::WORK_SUGGESTION_WITHDRAWN)
+            .map(|e| serde_json::from_str(e.detail.as_deref().unwrap()).unwrap())
+            .collect()
+    };
+    // Decay: ABC-8, mentioned in c1, not again in c2.
+    let f = fx();
+    let sid = session(&f, "dev", "c1");
+    on_prompt(&f.s, sid, "first task", true).unwrap();
+    on_prompt(&f.s, sid, "also ABC-8 and ABC-9", false).unwrap();
+    let abc8 =
+        f.s.session_work_links(sid)
+            .unwrap()
+            .into_iter()
+            .find(|l| l.ref_key.as_deref() == Some("ABC-8"))
+            .unwrap();
+    assert!(withdrawn(&f.s, sid).is_empty(), "nothing taken back yet");
+    f.s.rebind_conversation(sid, "c2", StartSource::Clear, None, None)
+        .unwrap();
+    on_prompt(&f.s, sid, "keep going on ABC-9", true).unwrap();
+    let ev = withdrawn(&f.s, sid);
+    assert_eq!(
+        ev,
+        vec![serde_json::json!({
+            "link_id": abc8.id, "item_id": null, "rule": "R6", "reason": "decay"
+        })]
+    );
+    let event = f.s.list_session_events(sid, 100).unwrap();
+    let e = event
+        .iter()
+        .find(|e| e.kind == crate::store::WORK_SUGGESTION_WITHDRAWN)
+        .unwrap();
+    assert_eq!(e.claude_session_id.as_deref(), Some("c2"));
+    assert!(!e.detail.as_deref().unwrap().contains("ABC"), "no key");
+
+    // Withdraw: the PR's state and text suggestions go with the PR.
+    let sid = session(&f, "pr", "c3");
+    let sig = PrSignals {
+        head: Some("feature/login".into()),
+        closing: vec!["acme/api#42".into()],
+        text: vec!["ABC-5".into()],
+        trailers: vec![],
+        state: None,
+    };
+    f.s.set_pr_signals("h", "pr", Some(&serde_json::to_string(&sig).unwrap()))
+        .unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    f.s.set_pr_signals("h", "pr", None).unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    let mut rules: Vec<(String, String)> = withdrawn(&f.s, sid)
+        .into_iter()
+        .map(|v| {
+            assert_eq!(
+                v.as_object().unwrap().keys().collect::<Vec<_>>(),
+                vec!["item_id", "link_id", "reason", "rule"]
+            );
+            (
+                v["rule"].as_str().unwrap().to_string(),
+                v["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    rules.sort();
+    assert_eq!(
+        rules,
+        vec![
+            ("R3u".to_string(), "withdraw".to_string()),
+            ("R6".to_string(), "withdraw".to_string())
+        ]
+    );
+    assert!(f.s.session_work_links(sid).unwrap().is_empty());
+}
+
+/// D34: a carry (resume, fork, inherit) settles a live suggestion of the
+/// same work; its row goes, but it leaves the same ids-only event, reason
+/// `carried`, on the session that gained the carried link.
+#[test]
+fn a_suggestion_a_carry_settles_leaves_a_carried_event() {
+    let carried = |s: &Store, sid: i64| -> Vec<serde_json::Value> {
+        s.list_session_events(sid, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == crate::store::WORK_SUGGESTION_WITHDRAWN)
+            .map(|e| {
+                // Tagged with the session's current conversation.
+                assert!(e.claude_session_id.is_some());
+                serde_json::from_str(e.detail.as_deref().unwrap()).unwrap()
+            })
+            .collect()
+    };
+    let suggestion = |s: &Store, sid: i64, key: &str| -> i64 {
+        on_prompt(s, sid, "first task", true).unwrap();
+        on_prompt(s, sid, &format!("see {key} too"), false).unwrap();
+        let l = s.session_work_links(sid).unwrap();
+        assert_eq!(l.len(), 1);
+        assert_eq!(
+            (l[0].state.as_str(), l[0].rule.as_deref()),
+            ("suggested", Some("R6"))
+        );
+        l[0].id
+    };
+    let f = fx();
+
+    // A resume carries ABC-7 onto a session that only had it suggested.
+    let sid = session(&f, "dev", "c1");
+    let id = suggestion(&f.s, sid, "ABC-7");
+    assert!(f.s.link_resumed_work(sid, "ABC-7").unwrap());
+    let l = f.s.session_work_links(sid).unwrap();
+    assert_eq!(
+        l.iter()
+            .map(|l| (l.state.as_str(), l.source.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("confirmed", "resumed")]
+    );
+    assert_eq!(
+        carried(&f.s, sid),
+        vec![serde_json::json!({
+            "link_id": id, "item_id": null, "rule": "R6", "reason": "carried"
+        })]
+    );
+
+    // A fork carries its source's work over the target's suggestion.
+    let target = session(&f, "fork", "c2");
+    let id = suggestion(&f.s, target, "ABC-7");
+    assert_eq!(f.s.copy_work_links(sid, target).unwrap(), 1);
+    assert_eq!(
+        carried(&f.s, target),
+        vec![serde_json::json!({
+            "link_id": id, "item_id": null, "rule": "R6", "reason": "carried"
+        })]
+    );
+    // A carry that finds no suggestion records nothing.
+    let other = session(&f, "other", "c3");
+    assert_eq!(f.s.copy_work_links(sid, other).unwrap(), 1);
+    assert!(carried(&f.s, other).is_empty());
 }
 
 #[test]
@@ -776,7 +962,7 @@ fn a_session_with_confirmed_work_surfaces_only_strong_suggestions() {
         .work_suggested
         .expect("weak suggestions show while no work is confirmed");
     assert_eq!(sg.suggestions, 3);
-    decide(&f.s, sid, sg.link_id, true).unwrap();
+    decide(&f.s, sid, sg.link_id, true, Decider::Person).unwrap();
     let row = f.s.get_session_by_id(sid).unwrap().unwrap();
     assert!(row.work.is_some());
     assert_eq!(row.work_suggested, None, "the other mentions stay quiet");
@@ -787,4 +973,250 @@ fn a_session_with_confirmed_work_surfaces_only_strong_suggestions() {
     let sg = f.s.get_session_by_id(sid).unwrap().unwrap().work_suggested;
     let sg = sg.expect("a strong suggestion still asks");
     assert_eq!((sg.key.as_deref(), sg.suggestions), (Some("ABC-7"), 1));
+}
+
+// ── R9u: a person's "Clear work" holds against the unchanged state ──────
+
+/// `work_link { action: unlink }` as `decider`, through the service entry
+/// the MCP tool and the desktop share; the session's row after it.
+fn unlink_as(
+    st: &std::sync::Mutex<Store>,
+    sid: i64,
+    link_id: i64,
+    decider: Decider,
+) -> crate::store::SessionRow {
+    crate::service::work::work_link_as(
+        &crate::service::work::WorkLinkArgs {
+            action: "unlink".into(),
+            session_id: Some(sid),
+            link_id: Some(link_id),
+            ..Default::default()
+        },
+        st,
+        &crate::service::orgs::OrgScope::All,
+        decider,
+    )
+    .unwrap()
+}
+
+fn live(st: &std::sync::Mutex<Store>, sid: i64) -> Vec<(String, String, String, Option<String>)> {
+    links(&st.lock().unwrap(), sid)
+}
+
+fn holds(st: &std::sync::Mutex<Store>) -> i64 {
+    st.lock()
+        .unwrap()
+        .conn_for_test()
+        .query_row("SELECT COUNT(*) FROM work_unlinks", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// D34 / R9u: in a trusted project, a person clearing the link a branch
+/// made (R3) is not undone by the next resolve while the branch is the
+/// same; another branch detects normally; the same branch again stays
+/// cleared; a branch of the same key but another name links again. An
+/// agent's unlink writes no hold, so the branch links it again. Prompt
+/// events are never held, and the hold goes with the participant.
+#[test]
+fn clearing_a_branch_link_holds_while_the_branch_is_unchanged() {
+    let f = fx();
+    trust(&f);
+    let sid = session(&f, "dev", "c1");
+    f.s.set_current_branch(sid, "abc-1-login").unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    let link = f.s.session_work_links(sid).unwrap()[0].clone();
+    assert_eq!(
+        (
+            link.state.as_str(),
+            link.source.as_str(),
+            link.rule.as_deref()
+        ),
+        ("confirmed", "branch", Some("R3"))
+    );
+    let st = std::sync::Mutex::new(f.s);
+
+    // The person clears it: gone, and the decision's own re-resolve did
+    // not make it again.
+    let row = unlink_as(&st, sid, link.id, Decider::Person);
+    assert_eq!(row.work, None);
+    assert!(live(&st, sid).is_empty());
+    assert_eq!(holds(&st), 1);
+    // Nor does a later run on the same branch — not even as a suggestion.
+    resolve_session(&st.lock().unwrap(), sid).unwrap();
+    assert!(live(&st, sid).is_empty());
+    let row = st.lock().unwrap().get_session_by_id(sid).unwrap().unwrap();
+    assert_eq!(row.work_suggested, None);
+
+    // Another branch: normal detection.
+    {
+        let s = st.lock().unwrap();
+        s.set_current_branch(sid, "abc-2-other").unwrap();
+        resolve_session(&s, sid).unwrap();
+    }
+    assert_eq!(
+        live(&st, sid),
+        vec![(
+            "ABC-2".into(),
+            "confirmed".into(),
+            "branch".into(),
+            Some("R3".into())
+        )]
+    );
+    // Back to the cleared branch: ABC-2's automatic link ends (R7), and
+    // ABC-1 stays cleared — the same value is held.
+    {
+        let s = st.lock().unwrap();
+        s.set_current_branch(sid, "abc-1-login").unwrap();
+        resolve_session(&s, sid).unwrap();
+    }
+    assert!(live(&st, sid).is_empty(), "{:?}", live(&st, sid));
+    // A branch of the same key under another name is another value.
+    {
+        let s = st.lock().unwrap();
+        s.set_current_branch(sid, "abc-1-login-v2").unwrap();
+        resolve_session(&s, sid).unwrap();
+    }
+    let again = st.lock().unwrap().session_work_links(sid).unwrap();
+    assert_eq!(
+        again
+            .iter()
+            .map(|l| (l.ref_key.as_deref(), l.state.as_str(), l.source.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(Some("ABC-1"), "confirmed", "branch")]
+    );
+
+    // An agent's unlink stays a plain unlink: no hold, and the unchanged
+    // branch links it again at once.
+    let row = unlink_as(&st, sid, again[0].id, Decider::Agent);
+    assert_eq!(holds(&st), 1, "an agent writes no hold");
+    assert_eq!(
+        row.work.and_then(|w| w.key).as_deref(),
+        Some("ABC-1"),
+        "relinked by the branch"
+    );
+
+    // Event candidates are never held: a prompt naming ABC-1 on the held
+    // branch still proposes it.
+    {
+        let s = st.lock().unwrap();
+        s.set_current_branch(sid, "abc-1-login").unwrap();
+        resolve_session(&s, sid).unwrap();
+        assert!(links(&s, sid).is_empty(), "the -v2 link ended (R7)");
+        on_prompt(&s, sid, "see ABC-1 again", false).unwrap();
+    }
+    assert_eq!(
+        live(&st, sid),
+        vec![(
+            "ABC-1".into(),
+            "suggested".into(),
+            "prompt".into(),
+            Some("R6".into())
+        )]
+    );
+
+    // The hold goes when the participant retires.
+    {
+        let s = st.lock().unwrap();
+        let p = s.participant_for_session(sid).unwrap().unwrap().id;
+        s.retire_participant(p).unwrap();
+    }
+    assert_eq!(holds(&st), 0);
+}
+
+/// R9u in an untrusted project: the branch's suggestion (R3b), confirmed
+/// by the person and then cleared, is not proposed again from that branch.
+#[test]
+fn clearing_a_confirmed_branch_suggestion_does_not_bring_it_back() {
+    let f = fx();
+    let sid = session(&f, "dev", "c1");
+    f.s.set_current_branch(sid, "abc-3-fix").unwrap();
+    resolve_session(&f.s, sid).unwrap();
+    let sg = f.s.session_work_links(sid).unwrap()[0].clone();
+    assert_eq!(
+        (sg.state.as_str(), sg.rule.as_deref()),
+        ("suggested", Some("R3b"))
+    );
+    decide(&f.s, sid, sg.id, true, Decider::Person).unwrap();
+    let st = std::sync::Mutex::new(f.s);
+    unlink_as(&st, sid, sg.id, Decider::Person);
+    assert!(live(&st, sid).is_empty(), "{:?}", live(&st, sid));
+    resolve_session(&st.lock().unwrap(), sid).unwrap();
+    assert!(live(&st, sid).is_empty());
+}
+
+/// R9u for a pull request: a link its closing reference made is held while
+/// it is the same PR; another PR closing the same ticket links it again.
+/// Clearing a link no state signal names (a person's own) holds nothing.
+#[test]
+fn clearing_a_pr_link_holds_for_that_pr_only() {
+    let f = fx();
+    trust(&f);
+    let sid = session(&f, "dev", "c1");
+    let pr = |s: &Store, url: &str| {
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET pr_url = ?1 WHERE id = ?2",
+                rusqlite::params![url, sid],
+            )
+            .unwrap();
+        s.set_pr_signals("h", "dev", Some(r#"{"closing":["ABC-5"]}"#))
+            .unwrap();
+        resolve_session(s, sid).unwrap();
+    };
+    pr(&f.s, "https://github.com/acme/api/pull/1");
+    let link = f.s.session_work_links(sid).unwrap()[0].clone();
+    assert_eq!(
+        (link.source.as_str(), link.rule.as_deref()),
+        ("pr", Some("R3"))
+    );
+    let project = f.project;
+    let st = std::sync::Mutex::new(f.s);
+    unlink_as(&st, sid, link.id, Decider::Person);
+    assert!(live(&st, sid).is_empty());
+    let (signal, value): (String, String) = st
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .query_row("SELECT signal, value FROM work_unlinks", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(
+        (signal.as_str(), value.as_str()),
+        ("pr", "https://github.com/acme/api/pull/1")
+    );
+    resolve_session(&st.lock().unwrap(), sid).unwrap();
+    assert!(live(&st, sid).is_empty(), "the same PR stays cleared");
+    // Another PR closing the same ticket is another value.
+    pr(&st.lock().unwrap(), "https://github.com/acme/api/pull/2");
+    assert_eq!(
+        live(&st, sid),
+        vec![(
+            "ABC-5".into(),
+            "confirmed".into(),
+            "pr".into(),
+            Some("R3".into())
+        )]
+    );
+
+    // A person's own link on a session no signal names: a plain unlink.
+    let other = {
+        let s = st.lock().unwrap();
+        let id = s
+            .upsert_session("other", "h", Some(project), None, 1, 1, "running", None)
+            .unwrap();
+        s.link_session_work(id, WorkTarget::Key("ABC-9"), "manual")
+            .unwrap()
+            .id
+    };
+    let other_sid = st
+        .lock()
+        .unwrap()
+        .get_session("other", "h")
+        .unwrap()
+        .unwrap()
+        .id;
+    unlink_as(&st, other_sid, other, Decider::Person);
+    assert!(live(&st, other_sid).is_empty());
+    assert_eq!(holds(&st), 1, "only the PR's");
 }

@@ -414,6 +414,8 @@ fn sample_session_row() -> SessionRow {
         ci_status: None,
         turn_seq: 7,
         last_stop_at: None,
+        stale_working_at: None,
+        work_rev: 0,
         parent_session_id: None,
         tags: vec!["review".into()],
         row_version: 0,

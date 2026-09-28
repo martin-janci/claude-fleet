@@ -35,12 +35,6 @@
 //!   (`newest_session_event_of`, a pending handover) and `MAX(id)` (the
 //!   M11.3 keep in `tidy_sessions`) — so a clock step cannot drop either.
 //!
-//! * **`tracker_write_outbox`** (`work.retention.write_outbox_days`, by
-//!   `updated_at`, work graph M13.4e): only SETTLED rows (`done`, `failed`,
-//!   `cancelled`, never `pending`), and only while their link is gone or
-//!   ended before the window — so a live link's written PR is never queued
-//!   and written again, and neither is one inside the ended-link grace.
-//!
 //! There is no pinned-note concept in the schema; a note is kept by the
 //! journal rules above. `0` days keeps a table forever.
 
@@ -48,8 +42,9 @@ use super::Store;
 use crate::ipc_error::IpcError;
 
 /// Timeline kinds the work graph writes: agent handover (M9.3), the
-/// start-prompt handover of a resume (M2), the classification nudge (M4.6)
-/// and tidy (M7). Detection writes no timeline event.
+/// start-prompt handover of a resume (M2), the classification nudge (M4.6),
+/// tidy (M7), and the one detection event: a suggestion withdrawn, decayed
+/// or settled by a carry (D34).
 pub const WORK_EVENT_KINDS: &[&str] = &[
     "handover_requested",
     "handover_written",
@@ -61,6 +56,8 @@ pub const WORK_EVENT_KINDS: &[&str] = &[
     "gc_tidied",
     // A per-session keep (M11.3): its detail is the second it holds until.
     "tidy_kept",
+    // `work_detect::WORK_SUGGESTION_WITHDRAWN`.
+    "work_suggestion_withdrawn",
 ];
 
 /// One retention-swept table.
@@ -69,15 +66,13 @@ pub enum RetentionTable {
     Journal,
     TrackerItems,
     WorkEvents,
-    WriteOutbox,
 }
 
 impl RetentionTable {
-    pub const ALL: [RetentionTable; 4] = [
+    pub const ALL: [RetentionTable; 3] = [
         RetentionTable::Journal,
         RetentionTable::TrackerItems,
         RetentionTable::WorkEvents,
-        RetentionTable::WriteOutbox,
     ];
 
     /// The SQL table.
@@ -86,7 +81,6 @@ impl RetentionTable {
             RetentionTable::Journal => "work_journal",
             RetentionTable::TrackerItems => "work_items",
             RetentionTable::WorkEvents => "session_events",
-            RetentionTable::WriteOutbox => "tracker_write_outbox",
         }
     }
 
@@ -96,7 +90,6 @@ impl RetentionTable {
             RetentionTable::Journal => JOURNAL_CTE.to_string(),
             RetentionTable::TrackerItems => ITEMS_CTE.to_string(),
             RetentionTable::WorkEvents => events_cte(),
-            RetentionTable::WriteOutbox => OUTBOX_CTE.to_string(),
         }
     }
 
@@ -111,7 +104,6 @@ impl RetentionTable {
                 "SELECT COUNT(*) FROM session_events WHERE kind IN ({})",
                 kinds_sql()
             ),
-            RetentionTable::WriteOutbox => "SELECT COUNT(*) FROM tracker_write_outbox".into(),
         }
     }
 }
@@ -163,13 +155,6 @@ const ITEMS_CTE: &str = "\
         WHERE w.parent_id IS NOT NULL), \
     eligible(id) AS ( \
       SELECT id FROM base WHERE id NOT IN (SELECT id FROM kept WHERE id IS NOT NULL))";
-
-const OUTBOX_CTE: &str = "\
-    WITH eligible(id) AS ( \
-      SELECT o.id FROM tracker_write_outbox o \
-      WHERE o.state != 'pending' AND o.updated_at < ?1 \
-        AND NOT EXISTS (SELECT 1 FROM work_links l WHERE l.id = o.link_id \
-                        AND (l.ended_at IS NULL OR l.ended_at >= ?1)))";
 
 fn kinds_sql() -> String {
     WORK_EVENT_KINDS

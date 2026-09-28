@@ -93,6 +93,24 @@ pub enum RowChange {
     TrackerUpdated(crate::store::TrackerRow),
     /// A tracker was removed.
     TrackerRemoved(i64),
+    /// The Work view's structure changed (work graph M14): a placement, a
+    /// placement rule, a saved view, or a local item's org. Ids only — a
+    /// client re-reads what it shows. Kind `work`, so never sent to a
+    /// host-bound or org-bound stream.
+    WorkChanged(WorkChanged),
+}
+
+/// The payload of `work:changed`.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct WorkChanged {
+    /// placement | rule | view | org
+    pub what: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view_id: Option<i64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -261,6 +279,7 @@ impl RowChange {
             RowChange::WorkItemUpdated(_) => "work:item",
             RowChange::TrackerUpdated(_) => "work:tracker",
             RowChange::TrackerRemoved(_) => "work:tracker_removed",
+            RowChange::WorkChanged(_) => "work:changed",
         }
     }
 
@@ -309,6 +328,7 @@ impl RowChange {
             RowChange::WorkItemUpdated(r) => to_value(r),
             RowChange::TrackerUpdated(r) => to_value(r),
             RowChange::TrackerRemoved(id) => serde_json::json!({ "id": id }),
+            RowChange::WorkChanged(w) => to_value(w),
         }
     }
 }
@@ -482,7 +502,7 @@ pub struct BroadcastEventBus {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 23] = [
+pub const EVENT_NAMES: [&str; 24] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -506,6 +526,7 @@ pub const EVENT_NAMES: [&str; 23] = [
     "work:item",
     "work:tracker",
     "work:tracker_removed",
+    "work:changed",
 ];
 
 /// Every event kind — the part of a [`RowChange::name`] before the `:`, which
@@ -621,6 +642,14 @@ impl BroadcastEventBus {
     pub fn receiver_count(&self) -> usize {
         self.tx.receiver_count()
     }
+
+    /// Test-only: as though the last subscriber left longer ago than
+    /// [`RING_GRACE_SECS`], without waiting fifteen minutes for it.
+    #[cfg(test)]
+    pub(crate) fn expire_grace_for_test(&self) {
+        self.last_subscriber_at
+            .store(unix_now() - RING_GRACE_SECS - 1, Ordering::Relaxed);
+    }
 }
 
 impl Default for BroadcastEventBus {
@@ -646,6 +675,15 @@ impl EventBus for BroadcastEventBus {
         let now = unix_now();
         if self.receiver_count() == 0 {
             if now - self.last_subscriber_at.load(Ordering::Relaxed) > RING_GRACE_SECS {
+                // Not rendered — but not forgotten either. The event still
+                // takes a number, and the ring is emptied, so a client
+                // resuming from before it finds a hole (`replay_after` answers
+                // `None`) and re-lists, instead of a ring that still reaches
+                // back to its id and replays "nothing missed".
+                if let Ok(mut ring) = self.ring.lock() {
+                    ring.clear();
+                    self.seq.fetch_add(1, Ordering::Relaxed);
+                }
                 return;
             }
         } else {
@@ -663,11 +701,14 @@ impl EventBus for BroadcastEventBus {
         // clearing is untouched.
         let mut payload = e.payload();
         crate::json::strip_nulls(&mut payload);
-        // The same derived `needs_attention` `list_sessions` stamps, so a
-        // phone that listed once and then follows this stream keeps the
-        // hub's answer instead of losing it on the row's first change. Here
-        // and not in `payload()`: the desktop's Tauri bus shares that, and
-        // deserialises the payload straight back into `SessionRow`.
+        // The derived `needs_attention` `list_sessions` stamps, so a phone
+        // that listed once and then follows this stream keeps the hub's
+        // answer instead of losing it on the row's first change. Here and
+        // not in `payload()`: the desktop's Tauri bus shares that, and
+        // deserialises the payload straight back into `SessionRow`. The bus
+        // holds no store, so `context_full` is judged at the default
+        // threshold, not `health.context_red_pct` — the one reader that
+        // still can differ from `list_sessions` when the setting moves.
         if let RowChange::SessionCreated(row) | RowChange::SessionUpdated(row) = e {
             if let (Some(att), serde_json::Value::Object(map)) = (
                 crate::service::attention::needs_attention(row),
@@ -768,6 +809,13 @@ impl EventBus for RecordingEventBus {
             RowChange::WorkItemUpdated(r) => r.id.to_string(),
             RowChange::TrackerUpdated(r) => format!("{}:{}", r.id, r.state),
             RowChange::TrackerRemoved(id) => id.to_string(),
+            RowChange::WorkChanged(w) => format!(
+                "{}:{}:{:?}:{:?}",
+                w.what,
+                w.task_id.as_deref().unwrap_or_default(),
+                w.rule_id,
+                w.view_id
+            ),
         };
         self.names.lock().unwrap().push(e.name());
         self.events
@@ -961,6 +1009,7 @@ mod tests {
                 RowChange::WorkItemUpdated(_) => pinned_name!("work:item"),
                 RowChange::TrackerUpdated(_) => pinned_name!("work:tracker"),
                 RowChange::TrackerRemoved(_) => pinned_name!("work:tracker_removed"),
+                RowChange::WorkChanged(_) => pinned_name!("work:changed"),
             }
         }
         // And for every variant a test can build without a full store row,
@@ -1210,6 +1259,35 @@ mod tests {
             1,
             "the event that arrived while the phone was away is replayable"
         );
+    }
+
+    /// Past the grace window the bus stops recording — and an event it does
+    /// not record must still count as one a resuming client missed. It used
+    /// to be dropped without a sequence number, so the ring still reached
+    /// back to the client's id and the replay answered "nothing missed": a
+    /// phone away for twenty minutes resumed as current and never re-listed
+    /// the session that was killed while it was gone.
+    #[tokio::test]
+    async fn an_event_dropped_after_the_grace_window_refuses_a_resume_from_before_it() {
+        let bus = BroadcastEventBus::new(16);
+        let rx = bus.subscribe();
+        bus.emit(&RowChange::SessionKilled(1));
+        drop(rx);
+        bus.expire_grace_for_test();
+
+        // Nobody listening and the window gone: not recorded.
+        bus.emit(&RowChange::SessionKilled(2));
+
+        assert!(
+            bus.replay_after(bus.generation(), 1).is_none(),
+            "a client that saw 1 missed 2, so its resume must be refused"
+        );
+        // A fresh subscriber is unaffected, and what follows is replayable
+        // again from the ids it hands out.
+        let _rx = bus.subscribe();
+        bus.emit(&RowChange::SessionKilled(3));
+        let after = bus.replay_after(bus.generation(), 3);
+        assert_eq!(after.map(|v| v.len()), Some(0), "caught up at 3");
     }
 
     #[tokio::test]

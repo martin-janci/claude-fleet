@@ -62,6 +62,42 @@ fn skipped_agents_pass_only_lets_the_pane_report_blocked() {
     assert_eq!(status_candidate(true, None, None), None);
 }
 
+/// F2: the cached `claude agents` status reports a session with live
+/// subagents as `working` — the very signal that kept two rows `working`
+/// for 40 h. Once the tick has demoted a row, only the pane's own spinner
+/// may lift the demotion.
+#[test]
+fn a_stale_working_demotion_is_not_undone_by_the_cached_agents_status() {
+    use crate::service::pane_intel::ClaudeStatus;
+    let agents_working = Some(ClaudeStatus::Working);
+    assert_eq!(
+        stale_working_veto(false, agents_working, None),
+        agents_working
+    );
+    assert_eq!(
+        stale_working_veto(true, agents_working, None),
+        None,
+        "keeps the stored idle"
+    );
+    assert_eq!(
+        stale_working_veto(true, agents_working, Some(ClaudeStatus::Idle)),
+        None
+    );
+    assert_eq!(
+        stale_working_veto(true, agents_working, Some(ClaudeStatus::Working)),
+        Some(ClaudeStatus::Working),
+        "the pane's spinner is real"
+    );
+    assert_eq!(
+        stale_working_veto(true, agents_working, Some(ClaudeStatus::Blocked)),
+        Some(ClaudeStatus::Blocked)
+    );
+    assert_eq!(
+        stale_working_veto(true, Some(ClaudeStatus::Idle), None),
+        Some(ClaudeStatus::Idle)
+    );
+}
+
 fn job_agent(session_id: &str, job_id: Option<&str>) -> crate::claude_agents::ClaudeAgentRow {
     crate::claude_agents::ClaudeAgentRow {
         session_id: Some(session_id.into()),
@@ -215,6 +251,8 @@ fn row(
         ci_status: None,
         turn_seq: 0,
         last_stop_at: None,
+        stale_working_at: None,
+        work_rev: 0,
         parent_session_id: None,
         tags: Vec::new(),
         usage: Default::default(),
@@ -2028,6 +2066,59 @@ async fn fleet_reconcile_completes_when_one_host_never_answers() {
     assert_eq!(local[0].tmux_name, "local-live");
 }
 
+/// perf-logs §3: the pass joined EVERY probe before writing any host, so one
+/// 65 s probe timeout froze the freshness of the whole fleet (63 such
+/// timeouts in the log window). A host's rows now land as its probe ends.
+#[tokio::test]
+async fn a_fast_hosts_rows_land_while_a_slow_host_is_still_being_probed() {
+    use std::time::Duration;
+    let store = Arc::new(Mutex::new(Store::open_in_memory().expect("store")));
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("wedged").unwrap();
+    }
+    let (deps, _probes) = scripted_deps(
+        vec![tmux_session("local-live")],
+        Duration::from_millis(10),
+        Duration::from_millis(600),
+    );
+    let pass = {
+        let store = Arc::clone(&store);
+        tokio::spawn(async move { reconcile_sessions_with(&store, &deps).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !pass.is_finished(),
+        "the wedged host is still inside its probe budget"
+    );
+    {
+        let s = store.lock().unwrap();
+        let local = s.list_sessions_for_host("local").unwrap();
+        assert_eq!(
+            local
+                .iter()
+                .map(|r| r.tmux_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["local-live"],
+            "the healthy host's rows are written before the slow host's probe ends"
+        );
+    }
+    pass.await
+        .unwrap()
+        .expect("the pass completes once the slow host times out");
+    let s = store.lock().unwrap();
+    let wedged = s
+        .list_hosts()
+        .unwrap()
+        .into_iter()
+        .find(|h| h.alias == "wedged")
+        .unwrap();
+    assert!(
+        !wedged.reachable,
+        "the timed-out host is still marked unreachable"
+    );
+}
+
 #[tokio::test]
 async fn reconcile_links_the_local_account_when_it_becomes_known() {
     // The bug: `local` is auto-created by `reconcile_sessions_with`'s
@@ -3530,6 +3621,7 @@ fn worktree_add_script_blank_base_normalizes_to_default() {
 
 // ── create_worktree_local integration test ────────────────────────────────
 
+#[cfg(unix)]
 #[tokio::test]
 async fn create_worktree_local_creates_and_is_idempotent() {
     use std::process::Command;
@@ -4676,6 +4768,7 @@ async fn ensure_remote_project_keeps_other_git_failures_verbatim() {
 /// Runs the real mirror script against local git repos: a bare `origin`, a
 /// `source` clone that pushes one branch and keeps another local-only, and a
 /// `remote` clone standing in for the other host.
+#[cfg(unix)]
 #[tokio::test]
 async fn ensure_remote_project_script_mirrors_pushed_branches_and_refuses_unpushed_ones() {
     use std::process::Command;
@@ -6011,12 +6104,14 @@ fn an_unchanged_identity_is_not_written_again() {
     assert_eq!(s.get_host_identity("vps").unwrap().tmux_server_pid, Some(8));
 }
 
-/// Requirement 3 (ruling: fold `last_reconciled_at` into the upsert): a pass
-/// that observes exactly what the store holds bumps each live row's
-/// `row_version` once — the upsert's physical UPDATE — not a second time
-/// for a separate freshness stamp. The stamp itself still moves.
+/// A pass that observes exactly what the store holds leaves every live
+/// row's `row_version` where it was (migration 063: the counter moves only
+/// on a client-visible change), so a `fresh_for` snapshot of full rows can
+/// answer `unchanged` across an idle tick. The freshness stamp
+/// `last_reconciled_at` — not a `SessionRow` field, and the ghost guards'
+/// evidence — still moves every pass.
 #[test]
-fn an_unchanged_pass_bumps_each_row_version_exactly_once() {
+fn an_unchanged_pass_leaves_each_row_version_alone() {
     let mut s = Store::open_in_memory().unwrap();
     s.upsert_host("vps").unwrap();
     let projects = s.list_projects().unwrap();
@@ -6036,8 +6131,8 @@ fn an_unchanged_pass_bumps_each_row_version_exactly_once() {
     let after = [row_version_of(&s, "dev-a"), row_version_of(&s, "dev-b")];
     assert_eq!(
         [after[0] - before[0], after[1] - before[1]],
-        [1, 1],
-        "an unchanged pass bumps each row_version exactly once"
+        [0, 0],
+        "an unchanged pass must not bump any row_version"
     );
     let stamp: i64 = s
         .conn_for_test()
@@ -6051,6 +6146,49 @@ fn an_unchanged_pass_bumps_each_row_version_exactly_once() {
         stamp >= probe.started_at,
         "the pass still stamps last_reconciled_at ({stamp} < {})",
         probe.started_at
+    );
+}
+
+/// The other half: a pass that changes a field a client sees (here
+/// `last_activity_at`, from tmux's `session_activity`) bumps that row's
+/// `row_version` exactly once — one physical UPDATE — and leaves the
+/// unchanged row beside it alone.
+#[test]
+fn a_pass_that_changes_a_visible_field_bumps_that_row_version_once() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let projects = s.list_projects().unwrap();
+    let probe = vps_probe(
+        &s,
+        vec![tmux_session("dev-a"), tmux_session("dev-b")],
+        None,
+        vec![],
+        PrInfoMap::new(),
+    );
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    let before = [row_version_of(&s, "dev-a"), row_version_of(&s, "dev-b")];
+    let mut active = tmux_session("dev-a");
+    active.last_activity = 50;
+    let probe = vps_probe(
+        &s,
+        vec![active, tmux_session("dev-b")],
+        None,
+        vec![],
+        PrInfoMap::new(),
+    );
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    let after = [row_version_of(&s, "dev-a"), row_version_of(&s, "dev-b")];
+    assert_eq!(
+        [after[0] - before[0], after[1] - before[1]],
+        [1, 0],
+        "only the row whose last_activity_at moved bumps, and by one"
+    );
+    assert_eq!(
+        s.get_session("dev-a", "vps")
+            .unwrap()
+            .unwrap()
+            .last_activity_at,
+        50
     );
 }
 
@@ -6412,5 +6550,82 @@ async fn list_and_refresh_never_probe_a_resume_transcript() {
     assert!(
         commands.iter().all(|c| !c.contains(TRANSCRIPT_PROBE_TAG)),
         "{commands:?}"
+    );
+}
+
+/// perf-logs §5: a stuck transition was a `session_events` row and nothing
+/// in the log. One INFO line names host, session and kind.
+#[tokio::test]
+async fn a_stuck_transition_is_logged_with_host_session_and_kind() {
+    struct StuckTmux;
+    #[async_trait::async_trait]
+    impl TmuxExec for StuckTmux {
+        async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+            Ok(vec![tmux_session("dev-stuck")])
+        }
+        async fn new_session(
+            &self,
+            _n: &str,
+            _c: &std::path::Path,
+            _p: &str,
+        ) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn restart_session(&self, _n: &str, _p: &str) -> Result<(), IpcError> {
+            Ok(())
+        }
+        async fn capture_pane(&self, _n: &str) -> Result<String, IpcError> {
+            Ok(STUCK_PANE.to_string())
+        }
+        // The default `probe_snapshot` reads the tail through THIS call.
+        async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
+            Ok(STUCK_PANE.to_string())
+        }
+        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+            Some(vec![])
+        }
+    }
+    // The one pane shape `pane_intel` classifies as `press_enter` (its
+    // `press_enter_detected` test); the permission fixtures are `blocked`
+    // with no `stuck_kind`.
+    const STUCK_PANE: &str = "Update available.\nPress Enter to continue\n";
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let deps = ReconcileDeps::fake(|_| Box::new(StuckTmux), std::time::Duration::from_secs(5));
+    // First pass creates the row (no prior → no transition event).
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        let row = s.get_session("dev-stuck", "local").unwrap().unwrap();
+        assert!(
+            row.stuck_kind.is_some(),
+            "the pane must classify as stuck: {row:?}"
+        );
+    }
+    // Clear the flag, then let the next pass re-detect it: that is the transition.
+    {
+        let s = store.lock().unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET stuck_kind = NULL WHERE tmux_name = 'dev-stuck'",
+                [],
+            )
+            .unwrap();
+    }
+    let log = crate::logging::capture::start();
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let text = log.text();
+    assert!(
+        text.contains("INFO") && text.contains("[reconcile] stuck"),
+        "{text}"
+    );
+    assert!(
+        text.contains("host=local") && text.contains("session=dev-stuck"),
+        "{text}"
     );
 }

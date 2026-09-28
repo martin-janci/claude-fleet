@@ -5,9 +5,10 @@
  * "not ok".
  */
 
-import { get, writable } from 'svelte/store';
+import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { acceptCommandRow, type SessionRow } from './sessions';
+import { bumpWorkChanged } from './work';
 
 /** `trackers.state`. Anything else a newer hub sends is treated as not ok. */
 export type TrackerState =
@@ -52,18 +53,8 @@ export interface TrackerSettings {
   /** GitHub Enterprise Server (work graph M11.4): the instance `gh
    *  --hostname` is pointed at, `host[:port]`. Absent: github.com. */
   hostname?: string | null;
-  /** Jira Cloud / Data Center (work graph M13.4e, decision D3): add the
-   *  session's PR to its ticket as a remote link, for work a person linked
-   *  or started. Off by default; fleet's only tracker write. */
-  pr_remote_link?: boolean;
-}
-
-/** The providers that take the PR remote link (`REMOTE_LINK_PROVIDERS`). */
-export const REMOTE_LINK_PROVIDERS: readonly string[] = ['jira', 'jira_dc'];
-
-/** Whether `t` can write the PR remote link at all (M13.4e). */
-export function takesPrRemoteLink(t: Pick<TrackerRow, 'provider'>): boolean {
-  return REMOTE_LINK_PROVIDERS.includes(t.provider);
+  /** Jira (work graph M13.4e, D3): what fleet may write. Absent: nothing. */
+  write_back?: { pr_remote_link?: boolean };
 }
 
 /** A tracker as every read returns it: never a secret, only a hint. */
@@ -189,7 +180,10 @@ export interface StartWorkArgs {
  *  (details.session_id) means the key already has a live session. */
 export async function startWork(args: StartWorkArgs): Promise<Result<SessionRow>> {
   const r = await invokeCmd<SessionRow>('start_work', { args });
-  if (r.ok) acceptCommandRow(r.value);
+  if (r.ok) {
+    acceptCommandRow(r.value);
+    bumpWorkChanged();
+  }
   return r;
 }
 
@@ -269,6 +263,131 @@ export interface SyncMetrics {
  *  LocalOnly on a paired desktop. */
 export function trackerSyncMetrics(): Promise<Result<SyncMetrics[]>> {
   return invokeCmd<SyncMetrics[]>('tracker_sync_metrics');
+}
+
+// ---------------------------------------------------------------------------
+// Jev `status_map` (J3) in assist: the decision model proposes a category for
+// an Asana section the keyword rule could not classify; a person applies it,
+// applies another category, or rejects it. Mirrors `TrackerProposals` in
+// `service/decide/status_map.rs`. Section names are the tracker's own
+// (third-party) text: render them as plain text only.
+
+/** One section's proposal. */
+export interface SectionProposal {
+  /** The section's name, from the tracker's stored config. */
+  section: string;
+  /** The model's option: todo | in_progress | done | not_planned | unsure. */
+  answer: string;
+  /** What applying it puts in the map (`not_planned` → `done`); null for `unsure`. */
+  applies_as?: string | null;
+  confidence?: number | null;
+  /** The decision run: what a person's action names. */
+  run_id: number;
+  at: number;
+  /** The person's category, when their map already holds the section. */
+  person?: string | null;
+  followup?: string | null;
+  /** The answer's two most probable options, most probable first. */
+  top?: [string, number][];
+}
+
+/** One shadow comparison: the keyword rule and the model on a section. */
+export interface ShadowLine {
+  section: string;
+  /** The rule's category, or `none` where it abstained. */
+  rule: string;
+  model: string;
+  confidence?: number | null;
+  run_id: number;
+}
+
+export interface TrackerProposals {
+  tracker_id: number;
+  name: string;
+  org_id?: number | null;
+  /** `decide.jev.status_map` now: off | shadow | assist. */
+  mode: string;
+  proposals: SectionProposal[];
+  shadow: ShadowLine[];
+  unknown_sections: number;
+  /** Sections whose answer a person rejected: hidden until a new answer. */
+  rejected?: number;
+}
+
+export type ProposalAction = 'apply' | 'apply_as' | 'reject';
+
+export interface ProposalOutcome {
+  run_id: number;
+  tracker_id: number;
+  section: string;
+  action: ProposalAction;
+  category?: string | null;
+  followup?: string | null;
+  corrected_to?: string | null;
+}
+
+/** Tracker administration: LocalOnly on a paired desktop. */
+export function statusMapProposals(trackerId?: number): Promise<Result<TrackerProposals[]>> {
+  return invokeCmd<TrackerProposals[]>('status_map_proposals', {
+    args: trackerId === undefined ? {} : { tracker_id: trackerId },
+  });
+}
+
+/** Apply a proposal, apply it as another category, or reject it (by run id).
+ *  An apply confirms the tracker's section map, as Confirm does. */
+export function decideStatusMapProposal(
+  runId: number,
+  action: ProposalAction,
+  category?: string,
+): Promise<Result<ProposalOutcome>> {
+  return invokeCmd<ProposalOutcome>('decide_status_map_proposal', {
+    args: { run_id: runId, action, ...(action === 'apply_as' ? { category } : {}) },
+  });
+}
+
+/** The categories a section map takes. */
+export const SECTION_CATEGORIES = ['todo', 'in_progress', 'done'] as const;
+
+const CATEGORY_LABELS: Record<string, string> = {
+  todo: 'to do',
+  in_progress: 'in progress',
+  done: 'done',
+  not_planned: 'not planned',
+  unsure: 'unsure',
+};
+
+/** A category or option as a person reads it. */
+export function categoryLabel(c: string | null | undefined): string {
+  return (c && CATEGORY_LABELS[c]) || (c ?? '');
+}
+
+/** The proposals still up to a person: not in their map, not decided. */
+export function pendingProposals(tp: TrackerProposals | null | undefined): SectionProposal[] {
+  if (!tp || tp.mode !== 'assist') return [];
+  return tp.proposals.filter((p) => !p.person && !p.followup);
+}
+
+/** A confidence as two decimals ("0.82"), or "–". */
+export function formatConfidence(c: number | null | undefined): string {
+  return typeof c === 'number' && Number.isFinite(c) ? c.toFixed(2) : '–';
+}
+
+/** The why: the answer's two most probable options ("to do 0.82 · unsure 0.11"). */
+export function proposalWhy(p: SectionProposal): string {
+  return (p.top ?? [])
+    .slice(0, 2)
+    .map(([k, v]) => `${categoryLabel(k)} ${formatConfidence(v)}`)
+    .join(' · ');
+}
+
+/** Shadow: how often the model agreed with the keyword rule where the rule
+ *  classified a section; null when there is no such comparison. */
+export function shadowAgreement(
+  tp: TrackerProposals | null | undefined,
+): { compared: number; agreed: number } | null {
+  const ruled = (tp?.shadow ?? []).filter((l) => l.rule !== 'none');
+  if (ruled.length === 0) return null;
+  return { compared: ruled.length, agreed: ruled.filter((l) => l.rule === l.model).length };
 }
 
 // ---------------------------------------------------------------------------
@@ -766,9 +885,4 @@ export function sessionsMentioning(
     }
   }
   return { count, prefixes: [...hit].sort() };
-}
-
-/** Re-exported for callers that only import this module. */
-export function currentTrackers(): TrackerRow[] {
-  return get(trackers);
 }

@@ -155,6 +155,10 @@ describe('tracker attention items (pure)', () => {
     );
     expect(trackersSummary({ trackers: [], failing: 0, degraded: 0, detection_backlog: 0 })).toBe('');
     expect(trackersSummary(null)).toBe('');
+    // M13.4e: writes given up on are summed across trackers.
+    expect(
+      trackersSummary({ trackers: [{ tracker_id: 1, write_failures: 2 }, { tracker_id: 2, write_failures: 1 }] }),
+    ).toBe('trackers: 3 writes not sent');
   });
 });
 

@@ -33,11 +33,21 @@
     trackerStateBadge,
     syncedAgo,
     ghesHostname,
-    takesPrRemoteLink,
     trackerSyncMetrics,
     describeSyncMetrics,
+    statusMapProposals,
+    decideStatusMapProposal,
+    pendingProposals,
+    proposalWhy,
+    formatConfidence,
+    categoryLabel,
+    shadowAgreement,
+    SECTION_CATEGORIES,
+    type ProposalAction,
     type ProviderId,
+    type SectionProposal,
     type SyncMetrics,
+    type TrackerProposals,
     type TrackerRow,
   } from './trackers';
   import { hosts } from './hosts';
@@ -99,7 +109,9 @@
   });
 
   onMount(() => {
-    void loadTrackers();
+    void loadTrackers().then(() => {
+      if (owns) void loadProposals();
+    });
     if (owns) void loadMetrics();
     if (initialUrl) connecting = true;
   });
@@ -217,17 +229,16 @@
     await loadTrackers();
   }
 
-  // --- Jira: the PR remote link (work graph M13.4e, decision D3), per
-  // tracker, off by default. The one write fleet makes to a tracker.
-  let savingPrLink = $state<number | null>(null);
-  async function setPrRemoteLink(t: TrackerRow, on: boolean) {
-    savingPrLink = t.id;
+  // --- Write-back (work graph M13.4e, D3): the PR remote link, per Jira
+  // tracker, off by default. The rest of the settings are kept as they are.
+  async function setWriteBack(t: TrackerRow, on: boolean) {
     const u = await updateTracker(t.id, {
-      settings: { ...(t.settings ?? {}), pr_remote_link: on },
+      settings: { ...(t.settings ?? {}), write_back: { pr_remote_link: on } },
     });
-    savingPrLink = null;
     if (!u.ok) {
-      pushError(u.error, 'Saving the PR link setting failed');
+      pushError(u.error, 'Saving write-back failed');
+      await loadTrackers();
+      return;
     }
     await loadTrackers();
   }
@@ -254,6 +265,36 @@
     sectionEdits = rest;
     await loadTrackers();
     push({ kind: 'success', message: `${t.name}: statuses follow your section map from the next sync.` });
+  }
+
+  // --- Jev `status_map` in assist: proposals for the Asana sections the
+  // keyword rule could not classify. A person applies one, applies another
+  // category, or says "not this"; nothing is applied by itself. Only the
+  // owner of the fleet reads them (tracker administration).
+  let proposals = $state<Record<number, TrackerProposals>>({});
+  let deciding = $state<number | null>(null);
+
+  /** Quiet when there is no Asana tracker, or this process cannot say. */
+  async function loadProposals() {
+    if (!$trackers.some((t) => t.provider === 'asana')) return;
+    const r = await statusMapProposals();
+    if (!r.ok || !Array.isArray(r.value)) return;
+    proposals = Object.fromEntries(r.value.map((p) => [p.tracker_id, p]));
+  }
+
+  async function decideProposal(t: TrackerRow, p: SectionProposal, action: ProposalAction, category?: string) {
+    if (deciding !== null) return;
+    deciding = p.run_id;
+    const r = await decideStatusMapProposal(p.run_id, action, category);
+    deciding = null;
+    if (!r.ok) pushError(r.error, 'Deciding the proposal failed');
+    else if (action !== 'reject')
+      push({
+        kind: 'success',
+        message: `${t.name}: “${p.section}” is ${categoryLabel(r.value.category)} in your section map from the next sync.`,
+      });
+    await loadTrackers();
+    await loadProposals();
   }
 </script>
 
@@ -326,26 +367,17 @@
         {:else if t.state === 'unreachable' && t.last_error}
           <li class="hint" data-testid="tracker-unreachable">{t.last_error}</li>
         {/if}
-        {#if takesPrRemoteLink(t) && owns}
-          <li class="hint" data-testid="tracker-pr-link">
-            <label class="section-row">
+        {#if (t.provider === 'jira' || t.provider === 'jira_dc') && owns}
+          <li class="hint" data-testid="tracker-write-back">
+            <label class="toggle">
               <input
                 type="checkbox"
-                data-testid="tracker-pr-link-toggle"
-                checked={!!t.settings?.pr_remote_link}
-                disabled={savingPrLink === t.id}
-                onchange={(e) => void setPrRemoteLink(t, (e.currentTarget as HTMLInputElement).checked)}
-              />
-              <span>Add a session's pull request to its ticket as a link</span>
+                data-testid="tracker-write-back-pr"
+                checked={t.settings?.write_back?.pr_remote_link === true}
+                onchange={(e) => void setWriteBack(t, (e.currentTarget as HTMLInputElement).checked)} />
+              Add a session's pull request to its ticket as a link (only for work you linked or
+              started; the token needs permission to edit issues)
             </label>
-            <span class="hint"
-              >Only for work you linked or started, only on this tracker's own org's tickets.
-              Needs a token that may edit issues; nothing else is ever written.</span
-            >
-          </li>
-        {:else if takesPrRemoteLink(t) && t.settings?.pr_remote_link}
-          <li class="hint" data-testid="tracker-pr-link-on">
-            The hub adds a session's pull request to its ticket as a link.
           </li>
         {/if}
         {#if t.provider === 'asana' && owns && sectionMapRows(t).length > 0 && !t.settings?.section_map_confirmed}
@@ -371,6 +403,68 @@
             >
           </li>
         {/if}
+        {#if t.provider === 'asana' && owns && pendingProposals(proposals[t.id]).length > 0}
+          {@const agreement = shadowAgreement(proposals[t.id])}
+          <li class="sections" data-testid="jev-proposals">
+            <span class="hint"
+              >Proposed by Jev (assist) for sections the keyword rule could not classify. Nothing is
+              applied until you choose; applying one confirms your section map.</span
+            >
+            {#if agreement}
+              <span class="hint" data-testid="jev-shadow-agreement"
+                >In shadow, Jev agreed with the keyword rule on {agreement.agreed} of {agreement.compared}
+                sections the rule classified.</span
+              >
+            {/if}
+            {#each pendingProposals(proposals[t.id]) as p (p.run_id)}
+              <div class="section-row" data-testid="jev-proposal">
+                <span data-testid="jev-proposal-section">{p.section}</span>
+                <span data-testid="jev-proposal-category"
+                  >→ {categoryLabel(p.answer)}{p.applies_as && p.applies_as !== p.answer
+                    ? ` (applies as ${categoryLabel(p.applies_as)})`
+                    : ''}</span
+                >
+                <span class="conf" data-testid="jev-proposal-confidence" title="confidence"
+                  >{formatConfidence(p.confidence)}</span
+                >
+                {#if proposalWhy(p)}
+                  <span class="why" data-testid="jev-proposal-why">why: {proposalWhy(p)}</span>
+                {/if}
+                {#if p.applies_as}
+                  <button
+                    class="btn"
+                    data-testid="jev-apply"
+                    disabled={deciding !== null}
+                    onclick={() => void decideProposal(t, p, 'apply')}>Apply</button
+                  >
+                {/if}
+                <select
+                  data-testid="jev-apply-as"
+                  aria-label="Apply as…"
+                  disabled={deciding !== null}
+                  value=""
+                  onchange={(e) => {
+                    const sel = e.currentTarget as HTMLSelectElement;
+                    const c = sel.value;
+                    sel.value = '';
+                    if (c) void decideProposal(t, p, 'apply_as', c);
+                  }}
+                >
+                  <option value="">Apply as…</option>
+                  {#each SECTION_CATEGORIES as c (c)}
+                    <option value={c}>{categoryLabel(c)}</option>
+                  {/each}
+                </select>
+                <button
+                  class="btn"
+                  data-testid="jev-reject"
+                  disabled={deciding !== null}
+                  onclick={() => void decideProposal(t, p, 'reject')}>Not this</button
+                >
+              </div>
+            {/each}
+          </li>
+        {/if}
       {/each}
     </ul>
   {/if}
@@ -381,7 +475,8 @@
       <code>fleet-hub tracker add &lt;ticket-url&gt;</code> (GitHub:
       <code>--via-cli &lt;host with gh&gt;</code>; Enterprise: also
       <code>--hostname &lt;host[:port]&gt;</code>), then
-      <code>fleet-hub tracker set-credential &lt;id&gt; [--email &lt;you&gt;] &lt; token.txt</code>.
+      <code>fleet-hub tracker set-credential &lt;id&gt; [--email &lt;you&gt;] &lt; token.txt</code>. Jev's
+      Asana section proposals: <code>fleet-hub decide proposals</code>.
     </p>
   {:else if !connecting}
     <button class="btn" data-testid="connect-jira" onclick={() => (connecting = true)}
@@ -583,8 +678,14 @@
   }
   .section-row {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.5rem;
     align-items: center;
+  }
+  .conf,
+  .why {
+    color: var(--fg-muted);
+    font-size: 0.72rem;
   }
   .connect select,
   .connect textarea {

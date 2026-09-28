@@ -193,11 +193,12 @@ fn the_real_tasks_module_spawns_each_of_the_three_exactly_once() {
 // process must not become a second brain for the same fleet — it owns nothing
 // until the hub is usable again or the operator disconnects.
 
-use crate::backend::token_store::{InMemoryTokenStore, TokenStore};
+use crate::backend::token_store::{BoundedTokenStore, InMemoryTokenStore, TokenStore};
 use crate::backend::{ALLOW_PLAINTEXT_KEY, REMOTE_URL_KEY};
 use fleet_core::events::NoopEventBus;
 use fleet_core::store::Store;
 use std::sync::Arc;
+use std::time::Duration;
 
 fn store_with(settings: &[(&str, &str)]) -> (tempfile::TempDir, Mutex<Store>) {
     let dir = tempfile::tempdir().unwrap();
@@ -337,4 +338,57 @@ fn with_no_hub_configured_the_resolved_app_still_starts_all_three() {
             );
         }
     }
+}
+
+/// A token store whose read blocks — the macOS keychain with a prompt
+/// pending (perf-logs §4: 41 s, 2 m 41 s and 11 h 44 m between `starting`
+/// and the next log line, the app a dead window meanwhile).
+struct StallingTokenStore;
+
+impl TokenStore for StallingTokenStore {
+    fn get(&self) -> Result<Option<String>, String> {
+        std::thread::sleep(Duration::from_secs(5));
+        Ok(Some("cl_late".into()))
+    }
+    fn set(&self, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn clear(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_token_store_that_does_not_answer_in_time_makes_the_hub_unusable_not_standalone() {
+    let (_dir, store) = store_with(&[(REMOTE_URL_KEY, "https://fleet.example.com")]);
+    let bounded = BoundedTokenStore::new(Arc::new(StallingTokenStore), Duration::from_millis(100));
+    let started = std::time::Instant::now();
+    let backend = Backend::resolve(&store, &bounded);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the wait is bounded; took {:?}",
+        started.elapsed()
+    );
+    let hub = backend
+        .unavailable()
+        .expect("a configured hub whose token never came is unusable, never standalone");
+    assert!(hub.reason.contains("did not answer"), "{}", hub.reason);
+    let recorder = Recorder::default();
+    start_background_tasks(&backend, &recorder);
+    assert_eq!(
+        recorder.started(),
+        NOTHING,
+        "{}",
+        two_brains("the token store stalled")
+    );
+}
+
+#[test]
+fn a_prompt_token_store_passes_through_the_bound_unchanged() {
+    let (_dir, store) = store_with(&[(REMOTE_URL_KEY, "https://fleet.example.com")]);
+    let bounded = BoundedTokenStore::new(
+        Arc::new(InMemoryTokenStore::with_token("cl_tok")),
+        Duration::from_secs(1),
+    );
+    assert!(Backend::resolve(&store, &bounded).is_remote());
 }

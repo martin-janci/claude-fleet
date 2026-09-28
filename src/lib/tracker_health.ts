@@ -12,6 +12,7 @@
 //   a credential problem, so never "Reconnect".
 //
 // Pure helpers plus one store; `TrackerAttention.svelte` polls and renders.
+import { setContextRedPct } from './attention';
 import { writable } from 'svelte/store';
 import { healthCheck } from './ipc';
 
@@ -42,6 +43,9 @@ export interface TrackerHealth {
   last_error?: string | null;
   last_success_at?: number | null;
   last_pass_at?: number | null;
+  /** Writes fleet gave up on (M13.4e: a PR remote link); absent from an
+   *  older hub. Never changes `health`. */
+  write_failures?: number;
 }
 
 /** `Health.trackers` (`service::health::TrackersHealth`); absent from an
@@ -62,7 +66,10 @@ export const trackersHealth = writable<TrackersHealth | null>(null);
  *  item that blinks out on a hub hiccup would be worse than a stale one. */
 export async function refreshTrackersHealth(): Promise<void> {
   const r = await healthCheck();
-  if (r.ok) trackersHealth.set(r.value.trackers ?? null);
+  if (r.ok) {
+    trackersHealth.set(r.value.trackers ?? null);
+    setContextRedPct(r.value.context_red_pct);
+  }
 }
 
 const PROVIDER_SHORT: Record<string, string> = {
@@ -108,6 +115,13 @@ const FENCE_END = '[claude-fleet: end of untrusted input]';
  *  agent, not for a person, so the two marker lines are dropped here. Svelte
  *  renders it as text either way. */
 export function plainTrackerError(e: string | null | undefined): string {
+  return plainUntrusted(e);
+}
+
+/** Text fenced as untrusted (`mcp::guard::fence_untrusted`), for a person:
+ *  the two marker lines dropped, anything else unchanged. Svelte renders the
+ *  rest as text. Shared by tracker errors and past-work summaries. */
+export function plainUntrusted(e: string | null | undefined): string {
   if (!e) return '';
   const lines = e.split('\n');
   if (lines.length >= 2 && FENCE_OPEN.test(lines[0]) && lines[lines.length - 1] === FENCE_END) {
@@ -181,5 +195,7 @@ export function trackersSummary(h: TrackersHealth | null | undefined): string {
   if (h.detection_backlog) {
     parts.push(`${h.detection_backlog} suggestion${h.detection_backlog === 1 ? '' : 's'} undecided > ${days} d`);
   }
+  const writes = (h.trackers ?? []).reduce((n, t) => n + (t.write_failures ?? 0), 0);
+  if (writes) parts.push(`${writes} write${writes === 1 ? '' : 's'} not sent`);
   return parts.length > 0 ? `trackers: ${parts.join(' · ')}` : '';
 }

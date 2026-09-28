@@ -28,6 +28,7 @@ it.
 | A tracker shows **auth_failed** / **unreachable** / **rate_limited**, or chips show ◷ | The token expired or was revoked, the site or the `gh` host cannot be reached, or the tracker is throttling | Read the tracker's error in **Settings → Work** (or `fleet-hub tracker status`). See [Tracker sync fails](#tracker-sync-fails). |
 | **⚠ Sync skipping items — <tracker>**, or a tracker's last pass says `… skipped` | One item (or a few) cannot be stored; the rest of the tracker syncs, the item is retried every pass | Find the item in the log (the view and the external id) and the reason in `last_error`. See [Sync skips items](#sync-skips-items). |
 | A phone or `/events` client got **`lagged`** (or `resumed: false`) right after a tracker was added | The first sync of a new tracker sends one `work:item` frame per ticket and briefly fills the replay ring | Expected once per tracker (decision D18): the client re-lists and carries on. See [`lagged` after a first sync](#lagged-after-a-trackers-first-sync). |
+| Start or Resume says **"… is being started or resumed already"** | Another device (or a double click) is starting or resuming the same ticket right now; fleet refuses the second so the key never gets two sessions (`E_EXISTS`) | Wait for that session to come up, then jump to it; retry only if it failed. |
 | **Why is this session linked to X?** | Detection linked or suggested it from a branch, a URL, a prompt or the PR | Click the work chip: the popover lists each link's evidence and rule. See [Why is this session linked to X?](#why-is-this-session-linked-to-x) |
 | *(Developers)* `Failed to resolve import "@tauri-apps/plugin-clipboard-manager"` in `App.test.ts` / `clipboard_native.test.ts` | Stale `node_modules` after pulling | Run `pnpm install --frozen-lockfile` (pnpm 10; `corepack pnpm@10 install --frozen-lockfile` if your pnpm is older), then re-run `pnpm test`. `localStorage` is polyfilled in `vitest.setup.ts`, so a missing-`localStorage` failure is not expected. |
 
@@ -254,6 +255,18 @@ If the sidebar looks stale, click Refresh first. If Refresh does not change
 anything, check the log for `reconcile failed` lines and probe the host from
 Settings.
 
+### Session state thresholds
+
+Four settings tune how the tick reads a session's state (Settings, or
+`set_setting` over MCP):
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `reconcile.stale_working_secs` | `1800` | A `working` row with no hook, turn, transcript growth or pane output for this long turns `idle` and is flagged `stale_working`. `0` turns the rule off. |
+| `health.context_red_pct` | `85` | The context-window percentage at or past which a session reads `context_full`, counts as `context_red` in `fleet_health` and draws red on the desktop (1–100). |
+| `playbooks.oom_max_attempts` | `2` | How many recreates the `oom` playbook may run on one session per 24 h (0–20). `0` refuses every recreate but keeps the refusals on the timeline. |
+| `gc.external_lost_ttl_secs` | `3600` | How long a lost `external` row (a Claude fleet only observes) is kept before the GC sweep deletes it. `0` reaps it on the next pass. |
+
 ### After laptop sleep / wake
 
 When the laptop sleeps, the SSH ControlMaster connections (one per host,
@@ -470,40 +483,6 @@ characters; it names no ticket. Once the cause is gone (a fixed trigger, a
 corrected ticket), the next pass stores the item and the tracker is `ok`
 again. If every item a pass tries fails, the pass itself fails as before
 (the tracker's error is set), still with `reason: items_skipped`.
-
-#### The PR link is not on the ticket
-
-The PR link (work graph M13.4e, off by default) is explained in the
-[work guide](work-graph.md#the-pr-link-off-by-default). When a session has
-a PR and its Jira ticket does not show it, check in this order:
-
-1. **The opt-in.** Settings → Work: the tracker's *Add a session's pull
-   request to its ticket as a link* is ticked (on a hub: its settings carry
-   `pr_remote_link: true`). Only Jira Cloud and Data Center have it.
-2. **The link.** The session's work chip: the link must be one a person
-   made (**Link work**, a confirmed suggestion, or **Start work**). A
-   suggestion, a resumed, forked or inherited link, and anything a per-host
-   token linked or confirmed, never writes; link it again by hand.
-3. **The org.** The session's org must be the tracker's (an unassigned
-   session only writes to an unassigned tracker). A link forced across orgs
-   never writes.
-4. **The sync.** The link is added on the next tracker sync pass (every
-   `work.sync_interval_secs`), and only while the tracker's reads work: an
-   `auth_failed` tracker writes nothing either.
-5. **The outbox.** `fleet-hub tracker status` prints, per opted-in tracker,
-   `PR links: N written, N pending, N failed, N cancelled — <newest
-   error>` (`work_admin { action: status }` → `write_back`).
-
-| What status says | Meaning | Fix |
-|---|---|---|
-| `pending` with `not permitted: 403` | the token may read but not edit issues | give the account *Edit issues* / *Link issues* on the project, or a token that has them; it retries with a backoff |
-| `failed` | eight attempts failed; fleet gave up on that PR | fix the cause; a new PR, or the record swept after `work.retention.write_outbox_days`, is tried afresh |
-| `cancelled` | the link changed before the write was sent (unlinked, re-decided by a per-host token, moved to another org) | nothing, or link the work again by hand |
-| `pending` with `rate-limited` | Jira answered 429 | nothing: it waits for `Retry-After` |
-
-The session's work journal also has a `write_back` row for each link
-written and for each one fleet gave up on. Removing the tracker removes its
-queue.
 
 #### `lagged` after a tracker's first sync
 

@@ -7,10 +7,6 @@
 //! Trackers **enrich and never gate**: every function here is reached only
 //! from the sync tick, `work_admin`'s `test`, or a `work { lookup }` that
 //! falls through the cache. Nothing in M1/M2 waits on a tracker.
-//!
-//! The one write (work graph M13.4e, decision D3) is the PR remote link,
-//! Jira Cloud / Data Center only, sent by the sync tick from an outbox
-//! ([`write_back`]); every other provider refuses [`TrackerProvider::write`].
 
 pub mod admin;
 pub mod asana;
@@ -74,9 +70,7 @@ pub struct Caps {
     pub multi_container: bool,
     #[serde(default)]
     pub incremental: Incremental,
-    /// [`TrackerProvider::write`] is implemented: only Jira Cloud / Data
-    /// Center, for the PR remote link (M13.4e). Every other provider is
-    /// read-only.
+    /// Always false in M3–M6: read-only.
     #[serde(default)]
     pub write: bool,
 }
@@ -212,27 +206,6 @@ pub struct RefCtx<'a> {
     pub repo: Option<&'a str>,
 }
 
-/// The one write a tracker may be asked for (work graph M13.4e, decision
-/// D3): the PR remote link. No transition, no worklog, no comment.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WriteOp {
-    /// Add (or update, idempotently by `global_id`) a remote link on the
-    /// issue whose tracker id is `issue_id`.
-    PrRemoteLink {
-        issue_id: String,
-        /// `fleet:pr:<url>`: the tracker upserts by it.
-        global_id: String,
-        url: String,
-        /// Fleet's own text, never third-party text.
-        title: String,
-    },
-}
-
-/// What [`TrackerProvider::write`] answers for a provider without writes.
-pub const WRITE_UNSUPPORTED: &str =
-    "this tracker does not support writes: only Jira Cloud and Jira Data Center \
-     take the PR remote link";
-
 /// What [`TrackerProvider::changes`] found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Changes {
@@ -366,11 +339,26 @@ pub trait TrackerProvider: Send + Sync {
             ..Default::default()
         })
     }
-    /// Perform `op` (M13.4e). The default refuses without sending anything:
-    /// only a provider whose `caps.write` is true overrides it.
+    /// Write `op` to the tracker (work graph M13.4e, decision D3 / D29).
+    /// Only a provider whose `caps.write` is true implements it; the default
+    /// refuses, so a write can never reach a read-only provider.
     async fn write(&self, _op: &WriteOp) -> Result<(), TrackerError> {
-        Err(TrackerError::Refused(WRITE_UNSUPPORTED.into()))
+        Err(TrackerError::Refused(
+            "this tracker does not accept writes".into(),
+        ))
     }
+}
+
+/// A write fleet may make to a tracker (work graph M13.4e). Only one today.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteOp {
+    /// Add `url` to item `key` as a remote link titled `title`, idempotent
+    /// by a global id derived from the URL.
+    PrRemoteLink {
+        key: String,
+        url: String,
+        title: String,
+    },
 }
 
 /// The provider for `row`, over the transport `net` picks for it. `cred` is

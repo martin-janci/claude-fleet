@@ -8,7 +8,7 @@
 //! links (`service::work::local`), never here.
 
 use super::work::{link_columns_prefixed, map_item, map_link, ITEM_COLUMNS, LINK_COLUMN_COUNT};
-use super::{now_unix, Store, WorkItemRow, WorkLinkRow};
+use super::{now_unix, Decider, Store, WorkItemRow, WorkLinkRow};
 use crate::ipc_error::{codes, IpcError};
 
 /// Longest title "Name this work…" accepts. Shorter than the store's
@@ -109,12 +109,26 @@ impl Store {
     /// One transaction; emits `work:item` and the session's row.
     ///
     /// `E_EXISTS` when a local item already carries `key` (the unique
-    /// index); `E_NOTFOUND` for a session row that does not exist.
+    /// index); `E_NOTFOUND` for a session row that does not exist. Test
+    /// shorthand for a person's: production names its decider.
+    #[cfg(test)]
     pub fn name_session_work(
         &self,
         session_id: i64,
         key: Option<&str>,
         title: &str,
+    ) -> Result<(WorkItemRow, WorkLinkRow), IpcError> {
+        self.name_session_work_by(session_id, key, title, Decider::Person)
+    }
+
+    /// [`Self::name_session_work`] named by `decider`: the link records
+    /// `manual` for a person, `agent` for an agent (D34).
+    pub fn name_session_work_by(
+        &self,
+        session_id: i64,
+        key: Option<&str>,
+        title: &str,
+        decider: Decider,
     ) -> Result<(WorkItemRow, WorkLinkRow), IpcError> {
         let title = validate_local_work_title(title)?;
         if let Some(k) = key {
@@ -144,9 +158,16 @@ impl Store {
             "INSERT INTO work_links (item_id, ref_key, participant_id, state, source, \
                                      is_primary, created_at, decided_at, strength, \
                                      claude_session_id) \
-             VALUES (?1, NULL, ?2, 'confirmed', 'manual', ?3, ?4, ?4, 'explicit', \
+             VALUES (?1, NULL, ?2, 'confirmed', ?6, ?3, ?4, ?4, 'explicit', \
                      (SELECT claude_session_id FROM sessions WHERE id = ?5))",
-            rusqlite::params![item_id, participant, (!has_primary) as i64, now, session_id],
+            rusqlite::params![
+                item_id,
+                participant,
+                (!has_primary) as i64,
+                now,
+                session_id,
+                decider.source()
+            ],
         )?;
         let link_id = self.conn.last_insert_rowid();
         self.bump_session_for_work(session_id)?;

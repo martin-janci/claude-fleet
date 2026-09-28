@@ -264,15 +264,17 @@ pub struct GcReport {
     /// Work timeline events past `work.retention.timeline_work_events_days`.
     #[serde(default)]
     pub swept_work_events: usize,
-    /// Settled tracker writes past `work.retention.write_outbox_days`
-    /// (work graph M13.4e).
-    #[serde(default)]
-    pub swept_write_outbox: usize,
     /// Sessions auto-tidy acted on this sweep (work graph M7: only with
     /// `work.auto_tidy` on; safe kill or archive of the allowed reasons).
     /// `#[serde(default)]` for the same wire reason.
     #[serde(default)]
     pub tidied: usize,
+    /// `decision_runs` rows past `decide.retention_days` swept this sweep
+    /// (`service::decide::sweep_runs`, the Jev evaluation's record).
+    /// Ungated like the retention sweeps above; `#[serde(default)]` for the
+    /// same wire reason.
+    #[serde(default)]
+    pub swept_decision_runs: usize,
 }
 
 /// Run one sweep against `exec`. Reads rows/hosts/controller under one brief
@@ -413,7 +415,9 @@ pub async fn sweep_with(
     report.swept_journal = r.journal;
     report.swept_tracker_items = r.tracker_items;
     report.swept_work_events = r.timeline_work_events;
-    report.swept_write_outbox = r.write_outbox;
+    // The decision record (Jev evaluation, D37): `decide.retention_days`
+    // (0 = forever), bounded per tick, one batch per lock.
+    report.swept_decision_runs = crate::service::decide::sweep_runs(store, now);
     report
 }
 
@@ -503,6 +507,7 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
             swept_tracker_items = report.swept_tracker_items,
             swept_work_events = report.swept_work_events,
             tidied = report.tidied,
+            swept_decision_runs = report.swept_decision_runs,
             "[gc] sweep"
         );
     }
@@ -584,6 +589,8 @@ mod tests {
             ci_status: None,
             turn_seq: 0,
             last_stop_at: None,
+            stale_working_at: None,
+            work_rev: 0,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
@@ -829,8 +836,8 @@ mod tests {
                 swept_journal: 0,
                 swept_tracker_items: 0,
                 swept_work_events: 0,
-                swept_write_outbox: 0,
                 tidied: 0,
+                swept_decision_runs: 0,
             }
         );
         assert_eq!(exec.inspects.load(Ordering::SeqCst), 1);
@@ -858,8 +865,8 @@ mod tests {
                 swept_journal: 0,
                 swept_tracker_items: 0,
                 swept_work_events: 0,
-                swept_write_outbox: 0,
                 tidied: 0,
+                swept_decision_runs: 0,
             }
         );
         assert_eq!(exec.kills.load(Ordering::SeqCst), 0);
@@ -917,8 +924,8 @@ mod tests {
                 swept_journal: 0,
                 swept_tracker_items: 0,
                 swept_work_events: 0,
-                swept_write_outbox: 0,
                 tidied: 0,
+                swept_decision_runs: 0,
             }
         );
         let s = store.lock().unwrap();
@@ -977,8 +984,8 @@ mod tests {
                 swept_journal: 0,
                 swept_tracker_items: 0,
                 swept_work_events: 0,
-                swept_write_outbox: 0,
                 tidied: 0,
+                swept_decision_runs: 0,
             },
             "the retention sweep must run regardless of gc.enabled"
         );

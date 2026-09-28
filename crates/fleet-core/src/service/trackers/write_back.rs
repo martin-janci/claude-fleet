@@ -1,216 +1,237 @@
-//! Tracker write-back (work graph M13.4e, decision D3 = yes): the PR remote
-//! link, and nothing else — no transition, no worklog, no comment.
+//! Write-back to trackers (work graph M13.4e, decisions D3 / D29): the PR
+//! remote link, and nothing else.
 //!
-//! The sync tick runs [`run`] at the end of each tracker's pass, and it is
-//! the ONLY caller: no tool triggers a write, so there is no new MCP action,
-//! and nothing a per-host token does can cause one (a link whose latest
-//! decision was a per-host token's is never a candidate — see
-//! `store::write_outbox`). The pass:
+//! When the PR probe sees a pull request on a session, [`on_pr`] queues one
+//! write per item the session is linked to — only where all of these hold:
 //!
-//! 1. does nothing unless the tracker's admin opted in
-//!    (`settings.pr_remote_link`, Jira Cloud / Data Center only, off by
-//!    default) — not even queue;
-//! 2. queues every candidate link's PR (`INSERT OR IGNORE`: a repeated
-//!    trigger is a no-op);
-//! 3. sends at most [`WRITE_MAX_PER_PASS`] due rows, each re-checked
-//!    against this pass's candidates first: a row whose link no longer
-//!    allows the write (unlinked, re-decided by a per-host token, moved to
-//!    another org) is `cancelled`, never sent;
-//! 4. settles each: `done` (plus a `write_back` journal row), or retried
-//!    with a backoff, `failed` after [`MAX_ATTEMPTS`]. A 429 honours
-//!    `Retry-After`, is not counted as an attempt, and ends the pass's
-//!    writes; so does any error that says the tracker as a whole is in
-//!    trouble.
+//! * the link is **confirmed** and a person made it (`manual` / `started`,
+//!   [`PERSON_SOURCES`]), never a detection guess, an agent's inference, or
+//!   an agent's link or start (`agent` / `agent_started`, D34);
+//! * the item belongs to a Jira tracker (Cloud or Data Center) whose admin
+//!   turned on `write_back.pr_remote_link` (off by default);
+//! * the session's org is the tracker's org (both known and different
+//!   refuses; there is no `force_cross_org` for a write);
+//! * the PR URL has the `https://<host>/<owner>/<repo>/pull/<n>` shape.
 //!
-//! A write never changes the tracker's `state`: reads decide that.
+//! The outbox (migration 061) makes a repeat a no-op, and the sync pass
+//! drains it ([`drain`]) with the credential it already holds, re-checking
+//! the setting and the org first. The remote link's global id is the PR's
+//! URL, so Jira upserts it: even a write that is sent twice adds one link.
+//! Nothing a transcript or a tracker wrote is ever sent: only the URL and
+//! fleet's own title.
+//!
+//! No caller triggers a write: the toggle is `work_admin` (master only), and
+//! the trigger is the PR probe. A per-host token can do neither.
 
 use super::{TrackerError, TrackerProvider, WriteOp};
-use crate::ipc_error::lock;
-use crate::store::{
-    pr_global_id, RemoteLinkCandidate, Store, TrackerRow, WriteOutboxCounts, OP_PR_REMOTE_LINK,
-    REMOTE_LINK_PROVIDERS,
-};
+use crate::ipc_error::{lock, IpcError};
+use crate::store::{NewTrackerWrite, Store, TrackerRow, PERSON_SOURCES, WRITE_OP_PR_REMOTE_LINK};
 use std::sync::Mutex;
 
-/// Rows sent per tracker per pass.
-pub const WRITE_MAX_PER_PASS: usize = 20;
-/// Attempts before a row is `failed` (about two hours of backoff).
-pub const MAX_ATTEMPTS: i64 = 8;
-/// The first retry's wait; doubled per attempt, capped at
-/// [`RETRY_MAX_SECS`].
-pub const RETRY_BASE_SECS: i64 = 60;
-pub const RETRY_MAX_SECS: i64 = 3600;
+/// Writes one pass sends per tracker, at most.
+pub const DRAIN_BATCH: usize = 20;
 
-/// What one pass's write-back did (logs and tests).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct WriteBackPass {
-    pub queued: usize,
-    pub written: usize,
-    pub retried: usize,
-    pub failed: usize,
-    pub cancelled: usize,
-}
+/// The longest a failed write waits before its next try.
+const MAX_BACKOFF_SECS: i64 = 6 * 3_600;
 
-/// The tracker opted in to the PR remote link, and its provider takes it.
-pub fn enabled(t: &TrackerRow) -> bool {
-    t.settings.pr_remote_link && REMOTE_LINK_PROVIDERS.contains(&t.provider.as_str())
-}
-
-/// The wait before retry number `attempts` (1-based).
-pub fn backoff_secs(attempts: i64) -> i64 {
-    let shift = attempts.clamp(1, 16) - 1;
-    (RETRY_BASE_SECS << shift).min(RETRY_MAX_SECS)
-}
-
-/// One pass of write-back for `t` over `provider`. Best-effort: store
-/// errors are logged and end the pass; nothing here fails the sync.
-pub async fn run(
-    t: &TrackerRow,
-    provider: &dyn TrackerProvider,
-    store: &Mutex<Store>,
-    now: i64,
-) -> WriteBackPass {
-    let mut pass = WriteBackPass::default();
-    if !enabled(t) {
-        return pass;
+/// PURE: fleet's title for a PR URL, `PR: owner/repo#n`, or `None` when the
+/// URL is not a pull request's (`https://<host>/<owner>/<repo>/pull/<n>`,
+/// nothing after the number but an optional `/`).
+pub fn pr_title(url: &str) -> Option<String> {
+    if url.len() > 2_048 || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return None;
     }
-    match run_inner(t, provider, store, now, &mut pass).await {
-        Ok(()) => {}
-        Err(e) => {
-            tracing::warn!(tracker_id = t.id, error = %e.message, "[work] tracker write-back stopped");
-        }
-    }
-    if pass != WriteBackPass::default() {
-        tracing::info!(
-            tracker_id = t.id,
-            queued = pass.queued,
-            written = pass.written,
-            retried = pass.retried,
-            failed = pass.failed,
-            cancelled = pass.cancelled,
-            "[work] tracker write-back"
-        );
-    }
-    pass
-}
-
-async fn run_inner(
-    t: &TrackerRow,
-    provider: &dyn TrackerProvider,
-    store: &Mutex<Store>,
-    now: i64,
-    pass: &mut WriteBackPass,
-) -> Result<(), crate::ipc_error::IpcError> {
-    let (candidates, due) = {
-        let s = lock(store)?;
-        let candidates = s.pr_remote_link_candidates(t.id, t.org_id, now)?;
-        for c in &candidates {
-            if pr_global_id(&c.pr_url).chars().count() > super::jira_common::GLOBAL_ID_MAX_CHARS {
-                tracing::debug!(link_id = c.link_id, "[work] PR URL too long for a globalId");
-                continue;
-            }
-            if s.enqueue_pr_remote_link(t.id, c, now)? {
-                pass.queued += 1;
-            }
-        }
-        let due = s.due_outbox_writes(t.id, now, WRITE_MAX_PER_PASS)?;
-        (candidates, due)
+    let rest = url.strip_prefix("https://")?;
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
+    let parts: Vec<&str> = rest.split('/').collect();
+    let [host, owner, repo, "pull", n] = parts.as_slice() else {
+        return None;
     };
-    for row in due {
-        let allowed: Option<&RemoteLinkCandidate> = candidates.iter().find(|c| {
-            Some(c.link_id) == row.link_id
-                && c.issue_id == row.issue_id
-                && pr_global_id(&c.pr_url) == row.global_id
-        });
-        let Some(cand) = allowed.filter(|_| row.op == OP_PR_REMOTE_LINK) else {
-            lock(store)?.settle_outbox_write(
-                row.id,
-                "cancelled",
-                Some("the work link no longer allows this write"),
-                false,
-            )?;
-            pass.cancelled += 1;
+    let name = |p: &str| {
+        !p.is_empty()
+            && p.len() <= 100
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            && p != "."
+            && p != ".."
+    };
+    let host_ok = !host.is_empty()
+        && host.len() <= 253
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'));
+    let n_ok = !n.is_empty() && n.len() <= 12 && n.chars().all(|c| c.is_ascii_digit());
+    (host_ok && name(owner) && name(repo) && n_ok).then(|| format!("PR: {owner}/{repo}#{n}"))
+}
+
+/// A session gained (or re-signalled) the pull request `pr_url`: queue its
+/// remote link on each item it may be written to. Returns how many writes
+/// were newly queued. Best-effort: the caller logs an error and goes on.
+pub fn on_pr(s: &Store, session_id: i64, pr_url: &str) -> Result<usize, IpcError> {
+    let Some(title) = pr_title(pr_url) else {
+        return Ok(0);
+    };
+    let Some(participant) = s.participant_for_session(session_id)? else {
+        return Ok(0);
+    };
+    let session_org = s.session_org(session_id)?;
+    let claude_session_id = s
+        .get_session_by_id(session_id)?
+        .and_then(|r| r.claude_session_id);
+    let mut queued = 0;
+    for (link, _) in s.detection_links(participant.id)? {
+        if link.state != "confirmed" || !PERSON_SOURCES.contains(&link.source.as_str()) {
+            continue;
+        }
+        let Some(item_id) = link.item_id else {
             continue;
         };
-        let op = WriteOp::PrRemoteLink {
-            issue_id: row.issue_id.clone(),
-            global_id: row.global_id.clone(),
-            url: row.url.clone(),
-            title: row.title.clone(),
+        let Some(item) = s.get_work_item(item_id)? else {
+            continue;
         };
-        // The HTTP exchange runs with no lock held.
-        let result = provider.write(&op).await;
-        let s = lock(store)?;
-        let key = row.issue_key.as_deref().unwrap_or(&row.issue_id);
-        match result {
+        let (Some(tracker_id), Some(key)) = (item.tracker_id, item.key.as_deref()) else {
+            continue;
+        };
+        let Some(t) = s.get_tracker(tracker_id)? else {
+            continue;
+        };
+        if !writes_pr_links(&t) || crosses(session_org, t.org_id) {
+            continue;
+        }
+        if s.enqueue_tracker_write(&NewTrackerWrite {
+            tracker_id,
+            item_key: key,
+            op: WRITE_OP_PR_REMOTE_LINK,
+            url: pr_url,
+            title: &title,
+            link_id: Some(link.id),
+            claude_session_id: claude_session_id.as_deref(),
+            session_org_id: session_org,
+        })? {
+            queued += 1;
+        }
+    }
+    Ok(queued)
+}
+
+/// The tracker is a Jira whose admin turned the PR remote link on.
+fn writes_pr_links(t: &TrackerRow) -> bool {
+    matches!(t.provider.as_str(), "jira" | "jira_dc") && t.settings.write_back.pr_remote_link
+}
+
+/// Both orgs known and different: never write there.
+fn crosses(session_org: Option<i64>, tracker_org: Option<i64>) -> bool {
+    matches!((session_org, tracker_org), (Some(a), Some(b)) if a != b)
+}
+
+/// PURE: how long a write waits after its `attempts`-th failure: a minute,
+/// doubling, at most [`MAX_BACKOFF_SECS`].
+pub fn backoff_secs(attempts: i64) -> i64 {
+    let shift = attempts.clamp(0, 16) as u32;
+    (60_i64 << shift).min(MAX_BACKOFF_SECS)
+}
+
+/// What one drain did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DrainReport {
+    pub sent: usize,
+    pub retrying: usize,
+    pub given_up: usize,
+}
+
+/// Send `t`'s due writes through `provider` (the sync pass's own). Every
+/// write re-checks the setting and the org; a rate limit stops the drain
+/// and spends no attempt. Errors are per row: nothing here fails the read
+/// pass. Settled rows are dropped by the GC retention sweep (M12.3), which
+/// runs whether or not this tracker's pass succeeds.
+pub async fn drain(
+    t: &TrackerRow,
+    provider: &dyn TrackerProvider,
+    store: &Mutex<Store>,
+    now: i64,
+) -> DrainReport {
+    let mut report = DrainReport::default();
+    let due = match lock(store).and_then(|s| s.due_tracker_writes(t.id, now, DRAIN_BATCH)) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::debug!(tracker = t.id, error = %e.message, "[write-back] outbox unreadable");
+            return report;
+        }
+    };
+    for w in due {
+        let settle = |r: Result<(), IpcError>| {
+            if let Err(e) = r {
+                tracing::debug!(write = w.id, error = %e.message, "[write-back] not settled");
+            }
+        };
+        // Re-checked at send time: the admin may have turned it off, or
+        // moved the tracker to another org, since the write was queued.
+        if !writes_pr_links(t) {
+            continue;
+        }
+        if crosses(w.session_org_id, t.org_id) {
+            settle(lock(store).and_then(|s| {
+                s.retry_tracker_write(w.id, "the session's org is not this tracker's", None, true)
+            }));
+            report.given_up += 1;
+            continue;
+        }
+        let op = WriteOp::PrRemoteLink {
+            key: w.item_key.clone(),
+            url: w.url.clone(),
+            title: w.title.clone(),
+        };
+        match provider.write(&op).await {
             Ok(()) => {
-                s.settle_outbox_write(row.id, "done", None, true)?;
-                pass.written += 1;
-                journal(
-                    &s,
-                    cand,
-                    &format!("PR linked on {key} (remote link): {}", row.url),
-                );
+                settle(lock(store).and_then(|s| {
+                    s.finish_tracker_write(w.id)?;
+                    if let Some(cid) = w.claude_session_id.as_deref() {
+                        let body = format!("Added {} to {} as a remote link", w.url, w.item_key);
+                        let meta =
+                            serde_json::json!({ "tracker_id": t.id, "op": w.op }).to_string();
+                        s.append_journal(
+                            Some(cid),
+                            None,
+                            "write_back",
+                            "fleet",
+                            Some(&body),
+                            Some(&meta),
+                        )?;
+                    }
+                    Ok(())
+                }));
+                report.sent += 1;
             }
             Err(TrackerError::RateLimited { retry_after_secs }) => {
-                let wait = retry_after_secs
-                    .map(|w| w as i64)
-                    .unwrap_or(RETRY_BASE_SECS)
-                    .clamp(1, RETRY_MAX_SECS);
-                let msg = s.mask_tracker_error(
-                    t.id,
-                    &TrackerError::RateLimited { retry_after_secs }.explain(),
-                )?;
-                // The tracker said "later": not an attempt, and no more
-                // writes to it this pass.
-                s.retry_outbox_write(row.id, now + wait, &msg, false)?;
-                pass.retried += 1;
+                let wait = retry_after_secs.map_or(60, |s| s as i64).max(1);
+                settle(lock(store).and_then(|s| {
+                    s.retry_tracker_write(w.id, "rate limited", Some(now + wait), false)
+                }));
+                report.retrying += 1;
+                // The rest would meet the same limit.
                 break;
             }
             Err(e) => {
-                let msg = s.mask_tracker_error(t.id, &e.explain())?;
-                if row.attempts + 1 >= MAX_ATTEMPTS {
-                    s.settle_outbox_write(row.id, "failed", Some(&msg), true)?;
-                    pass.failed += 1;
-                    journal(&s, cand, &format!("PR not linked on {key}; gave up: {msg}"));
+                let msg = crate::service::trackers::sync::metric_error(&e.explain());
+                // A refusal no retry can fix gives up now; anything that
+                // may heal (a credential, the network) backs off.
+                let next = match e {
+                    TrackerError::Forbidden(_)
+                    | TrackerError::NotFound
+                    | TrackerError::Invalid(_) => None,
+                    _ => Some(now + backoff_secs(w.attempts)),
+                };
+                if next.is_none() || w.attempts + 1 >= crate::store::WRITE_MAX_ATTEMPTS {
+                    report.given_up += 1;
                 } else {
-                    s.retry_outbox_write(row.id, now + backoff_secs(row.attempts + 1), &msg, true)?;
-                    pass.retried += 1;
+                    report.retrying += 1;
                 }
-                // A tracker-wide failure (auth, unreachable …): stop here.
-                if e.state().is_some() {
-                    break;
-                }
+                settle(lock(store).and_then(|s| s.retry_tracker_write(w.id, &msg, next, true)));
             }
         }
     }
-    Ok(())
-}
-
-/// Per tracker that opted in or has outbox rows: rows per state and the
-/// newest failure (`work_admin { status }`'s `write_back`; master-only).
-pub fn status(store: &Mutex<Store>) -> Result<Vec<WriteOutboxCounts>, crate::ipc_error::IpcError> {
-    let trackers = lock(store)?.list_trackers()?;
-    let mut out = Vec::new();
-    for t in trackers {
-        let c = lock(store)?.outbox_counts(t.id)?;
-        if enabled(&t) || c.pending + c.done + c.failed + c.cancelled > 0 {
-            out.push(c);
-        }
-    }
-    Ok(out)
-}
-
-/// The `write_back` journal row on the link's conversation, when known.
-fn journal(s: &Store, c: &RemoteLinkCandidate, body: &str) {
-    if let Some(conv) = c.claude_session_id.as_deref() {
-        if let Err(e) = s.append_journal(Some(conv), None, "write_back", "fleet", Some(body), None)
-        {
-            tracing::debug!(error = %e.message, "[work] write_back journal row failed");
-        }
-    }
+    report
 }
 
 #[cfg(test)]
-#[path = "tests_write_back.rs"]
 mod tests;

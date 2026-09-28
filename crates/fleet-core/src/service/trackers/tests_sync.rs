@@ -1814,58 +1814,96 @@ async fn a_poison_view_does_not_stall_the_rest_of_the_pass() {
     assert_eq!(b.watermark, Some(2), "view B's watermark advances normally");
 }
 
-/// Work graph M13.4e: the write-back runs at the end of a good pass of a
-/// tracker that opted in — once per (ticket, PR) — and not at all before
-/// the opt-in.
+/// Work graph M13.4e: a tracker's queued PR remote link goes out at the
+/// end of a good pass, once, and only after the tracker opted in.
 #[tokio::test]
-async fn a_good_pass_of_an_opted_in_tracker_writes_the_pr_remote_link_once() {
+async fn an_opted_in_tracker_drains_its_write_outbox_once_after_a_good_pass() {
     let fx = Fx::new();
-    let sync = fx.sync(|| T0);
+    // Just past the queued write's `next_at`.
+    let sync = fx.sync(|| crate::store::now_unix() + 60);
+    let wid = queue_pr_link(&fx);
     let empty = || Ok(Response::json(200, &json!({"issues": [], "isLast": true})));
-    fx.fake
-        .once(Method::Post, "/search/jql", ok("search_mine_p1.json"));
-    fx.fake.once(Method::Post, "/search/jql", empty());
+    fx.fake.always(Method::Post, "/search/jql", empty()).always(
+        Method::Post,
+        "/remotelink",
+        Ok(Response::new(201, r#"{"id":1}"#)),
+    );
+    // Off by default: the pass sends nothing and the write waits.
     sync.run_pass(&fx.store).await.unwrap();
-    let sid = fx.session("dev");
-    {
-        let s = fx.store.lock().unwrap();
-        s.conn_for_test()
-            .execute(
-                "UPDATE sessions SET pr_url = 'https://github.com/acme/api/pull/7' WHERE id = ?1",
-                [sid],
-            )
-            .unwrap();
-        s.link_session_work(sid, WorkTarget::Key("ABC-101"), "manual")
-            .unwrap();
-    }
-    fx.fake.clear_routes();
+    assert_eq!(fx.fake.count("/remotelink"), 0);
+    assert_eq!(write_state(&fx, wid), "pending");
+    opt_in(&fx);
+    sync.run_pass(&fx.store).await.unwrap();
+    assert_eq!(fx.fake.count("/issue/ABC-1/remotelink"), 1);
+    assert_eq!(write_state(&fx, wid), "done");
+    // Done: the next pass sends nothing.
+    sync.run_pass(&fx.store).await.unwrap();
+    assert_eq!(fx.fake.count("/remotelink"), 1, "idempotent");
+}
+
+/// Work graph M13.4e: a read pass that failed (here, a refused credential)
+/// sends no write.
+#[tokio::test]
+async fn a_failed_read_pass_sends_no_write() {
+    let fx = Fx::new();
+    let sync = fx.sync(|| crate::store::now_unix() + 60);
+    let wid = queue_pr_link(&fx);
+    opt_in(&fx);
+    // The credential is refused: the read pass fails.
     fx.fake
-        .always(Method::Post, "/search/jql", empty())
-        .always(Method::Post, "/issue/bulkfetch", ok("bulkfetch.json"))
+        .always(Method::Post, "/search/jql", Ok(Response::new(401, "")))
         .always(
             Method::Post,
             "/remotelink",
             Ok(Response::new(201, r#"{"id":1}"#)),
         );
     let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
-    assert_eq!(p.write_back, Default::default(), "off by default: {p:?}");
+    assert!(p.error.is_some(), "{p:?}");
     assert_eq!(fx.fake.count("/remotelink"), 0);
+    assert_eq!(write_state(&fx, wid), "pending");
+}
+
+fn queue_pr_link(fx: &Fx) -> i64 {
+    let s = fx.store.lock().unwrap();
+    assert!(s
+        .enqueue_tracker_write(&crate::store::NewTrackerWrite {
+            tracker_id: fx.tracker,
+            item_key: "ABC-1",
+            op: crate::store::WRITE_OP_PR_REMOTE_LINK,
+            url: "https://github.com/acme/api/pull/7",
+            title: "PR: acme/api#7",
+            link_id: None,
+            claude_session_id: None,
+            session_org_id: None,
+        })
+        .unwrap());
+    s.conn_ref()
+        .query_row("SELECT MAX(id) FROM tracker_writes", [], |r| r.get(0))
+        .unwrap()
+}
+
+fn opt_in(fx: &Fx) {
     fx.store
         .lock()
         .unwrap()
         .set_tracker_settings(
             fx.tracker,
             &crate::store::TrackerSettings {
-                pr_remote_link: true,
+                write_back: crate::store::WriteBack {
+                    pr_remote_link: true,
+                },
                 ..Default::default()
             },
         )
         .unwrap();
-    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
-    assert_eq!((p.write_back.queued, p.write_back.written), (1, 1), "{p:?}");
-    let id = fx.item("ABC-101").external_id.unwrap();
-    assert_eq!(fx.fake.count(&format!("/issue/{id}/remotelink")), 1);
-    let p = sync.run_pass(&fx.store).await.unwrap().remove(0);
-    assert_eq!(p.write_back, Default::default(), "{p:?}");
-    assert_eq!(fx.fake.count("/remotelink"), 1, "idempotent");
+}
+
+fn write_state(fx: &Fx, id: i64) -> String {
+    fx.store
+        .lock()
+        .unwrap()
+        .tracker_write(id)
+        .unwrap()
+        .unwrap()
+        .state
 }

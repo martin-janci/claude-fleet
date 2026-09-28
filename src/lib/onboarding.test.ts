@@ -44,6 +44,19 @@ describe('deriveSteps', () => {
     expect(byId(steps, 'add-host').status).toBe('active');
   });
 
+  it('a machine with no local host (Windows) has nothing to install', () => {
+    const none: LocalPrereqs = {
+      ...okPrereqs,
+      claude_ok: false,
+      tmux_ok: false,
+      projects_readable: false,
+      local_host: false,
+    };
+    const p = byId(deriveSteps({ ...base, prereqs: none }), 'prereqs');
+    expect(p.status).toBe('done');
+    expect(p.sublabel).toContain('client');
+  });
+
   it('lists missing tools in the prereq sublabel', () => {
     const steps = deriveSteps({ ...base, prereqs: { ...okPrereqs, tmux_ok: false } });
     expect(byId(steps, 'prereqs').status).not.toBe('done');

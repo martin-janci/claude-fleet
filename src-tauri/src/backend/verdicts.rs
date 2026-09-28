@@ -8,8 +8,8 @@
 //! Four of them said the same thing in four vocabularies and the fifth said
 //! it in English. This is the one that the rest are checked against.
 //!
-//! The rows are in `generate_handler!` order, so [`VERDICTS`] and `lib.rs`
-//! read side by side. `every_command_has_a_verdict` (in
+//! The rows are grouped as in `generate_handler!` (near enough its order),
+//! so [`VERDICTS`] and `lib.rs` read side by side. `every_command_has_a_verdict` (in
 //! [`tests_routing`](super::tests_routing)) holds the two to exactly the same
 //! set of names, and `every_commands_body_does_what_its_row_says` holds each
 //! body to its row.
@@ -69,8 +69,6 @@ impl Verdict {
     }
 }
 
-/// The verdict of `command`, or `None` when the table has no row for it —
-/// which the tests make unshippable.
 /// Why the whole attachment family is the same in both modes: the composer
 /// reads, measures and previews files on THIS machine's disk and copies them
 /// over THIS machine's ssh, exactly as `upload_to_session` does behind the
@@ -79,6 +77,8 @@ impl Verdict {
 /// to the hub is the fleet's database and hosts, not this machine.
 const WHY_ATTACH: &str = "the same story as `upload_to_session`: this machine has the disk, the file dialog and the `ssh` that carries the bytes, and the session is addressed by the alias passed in, reading no state.db. Being a window onto a hub does not take this machine away";
 
+/// The verdict of `command`, or `None` when the table has no row for it —
+/// which the tests make unshippable.
 pub fn verdict(command: &str) -> Option<&'static Verdict> {
     VERDICTS
         .iter()
@@ -86,7 +86,6 @@ pub fn verdict(command: &str) -> Option<&'static Verdict> {
         .map(|(_, v)| v)
 }
 
-/// The Assets commands that all refuse for the same reason.
 /// Organisations (work graph M5.2): the hub's `work_admin` is master-only.
 const ORGS_ARE_ADMIN: &str = "organisations, their rules and which org a host or tracker belongs \
      to are the hosts' security boundary and fleet administration: the hub's work_admin is \
@@ -98,6 +97,13 @@ const TRACKERS_ARE_ADMIN: &str = "trackers and their credentials are fleet admin
      hub's work_admin is master-only, and a paired client is never the fleet's administrator; \
      configure them on the hub with `fleet-hub tracker add|set-credential|test`";
 
+/// Jev's section proposals (Asana `status_map`): applying one writes the
+/// tracker's settings, which is `work_admin`, master-only.
+const SECTION_PROPOSALS_ARE_ADMIN: &str = "the decision model's Asana section proposals are \
+     tracker administration: applying one writes the tracker's section map through the hub's \
+     work_admin, master-only, and a paired client is never the fleet's administrator; decide them \
+     on the hub with `fleet-hub decide proposals apply|reject`";
+
 /// Retention (work graph M12.3): the hub sweeps its own store.
 const RETENTION_IS_ADMIN: &str = "work retention is the hub's own sweep of its store: its \
      status and sweep_now are the hub's work_admin, master-only, and a paired client is never \
@@ -108,6 +114,7 @@ const USAGE_IS_ADMIN: &str = "the work graph's usage counts are the hub's work_a
      master-only, and a paired client is never the fleet's administrator; read them on the hub \
      with fleet-hub work usage";
 
+/// The Assets commands that all refuse for the same reason.
 const CATALOG_IS_A_CHECKOUT: &str =
     "the asset catalog is a git checkout on the machine that owns the fleet, and the hub has \
      no tool for this; work on the catalog there";
@@ -117,7 +124,7 @@ const NO_GIT_WRITE_TOOL: &str =
     "the hub exposes no git-write tool — a remote client must not stage or commit under a \
      running agent; do it in the session, or from a standalone app";
 
-/// Every command in `generate_handler!`, in that order, with its verdict.
+/// Every command in `generate_handler!`, grouped as there, with its verdict.
 pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── health and this app's own logs ──────────────────────────────────────
     (
@@ -154,16 +161,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "add_project",
-        Verdict::LocalOnly {
-            instead: "it clones or adopts a checkout using this machine's SSH and GitHub \
-                      credentials; add the project on the hub, then it appears here",
+        Verdict::Routed {
+            tool: "add_project",
         },
     ),
     (
         "list_github_repos",
-        Verdict::LocalOnly {
-            instead: "it runs `gh` over this machine's SSH connection to the host; browse \
-                      repositories from the hub or a standalone app",
+        Verdict::Routed {
+            tool: "list_github_repos",
         },
     ),
     // ── sessions ────────────────────────────────────────────────────────────
@@ -310,6 +315,10 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "request_work_handover",
         Verdict::Routed { tool: "work_link" },
     ),
+    // Work graph M13.4c: a Claude-written summary of past work (on demand,
+    // D10). Routed: the run happens on the session's own host, which the
+    // hub reaches.
+    ("summarize_past_work", Verdict::Routed { tool: "work_link" }),
     // Work graph M9.6: one ticket, one sibling session per repository.
     ("start_work_multi", Verdict::Routed { tool: "work_link" }),
     // Work graph M11.1: "Name this work…" — local work items, listed from
@@ -317,6 +326,29 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("list_local_work_items", Verdict::Routed { tool: "work" }),
     ("name_session_work", Verdict::Routed { tool: "work_link" }),
     ("rename_work_item", Verdict::Routed { tool: "work_link" }),
+    // Work graph M14: the Work view — eight reads of `work` and ten
+    // decisions of `work_link`, every one the same on a paired desktop.
+    ("work_tree", Verdict::Routed { tool: "work" }),
+    ("work_task", Verdict::Routed { tool: "work" }),
+    ("work_session_tasks", Verdict::Routed { tool: "work" }),
+    ("work_review", Verdict::Routed { tool: "work" }),
+    ("work_rules", Verdict::Routed { tool: "work" }),
+    ("work_rule_preview", Verdict::Routed { tool: "work" }),
+    ("work_views", Verdict::Routed { tool: "work" }),
+    ("work_org_impact", Verdict::Routed { tool: "work" }),
+    ("set_primary_work", Verdict::Routed { tool: "work_link" }),
+    (
+        "reconsider_work_link",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    ("ack_work_link", Verdict::Routed { tool: "work_link" }),
+    ("decide_work_batch", Verdict::Routed { tool: "work_link" }),
+    ("place_work", Verdict::Routed { tool: "work_link" }),
+    ("assign_work_org", Verdict::Routed { tool: "work_link" }),
+    ("save_work_rule", Verdict::Routed { tool: "work_link" }),
+    ("delete_work_rule", Verdict::Routed { tool: "work_link" }),
+    ("save_work_view", Verdict::Routed { tool: "work_link" }),
+    ("delete_work_view", Verdict::Routed { tool: "work_link" }),
     // Work graph M3.1: trackers and their credentials are fleet
     // administration. The hub's `work_admin` is master-only, and a paired
     // desktop is a client, never the master (review C17).
@@ -356,6 +388,21 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "tracker_sync_metrics",
         Verdict::LocalOnly {
             instead: TRACKERS_ARE_ADMIN,
+        },
+    ),
+    // Jev `status_map` in assist: reading and deciding the section
+    // proposals is tracker administration (an apply is `work_admin
+    // update`); the hub's operator uses the CLI.
+    (
+        "status_map_proposals",
+        Verdict::LocalOnly {
+            instead: SECTION_PROPOSALS_ARE_ADMIN,
+        },
+    ),
+    (
+        "decide_status_map_proposal",
+        Verdict::LocalOnly {
+            instead: SECTION_PROPOSALS_ARE_ADMIN,
         },
     ),
     // Work graph M12.3: retention is the hub's own sweep; its status and
@@ -456,6 +503,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "restart_session",
         Verdict::Routed {
             tool: "restart_session",
+        },
+    ),
+    (
+        "rewind_conversation",
+        Verdict::Routed {
+            tool: "rewind_conversation",
         },
     ),
     (

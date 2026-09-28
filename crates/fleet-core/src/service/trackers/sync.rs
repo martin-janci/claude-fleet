@@ -102,9 +102,6 @@ pub struct TrackerPass {
     /// pass stored nothing at all), not a running log — a later item
     /// overwrites it, and it says nothing about which item or view failed.
     pub last_item_error: Option<String>,
-    /// The PR remote links this pass queued and sent (work graph M13.4e);
-    /// all zero unless the tracker opted in.
-    pub write_back: super::write_back::WriteBackPass,
 }
 
 /// One tracker's last sync pass (work graph M11.4), as `work_admin {
@@ -477,8 +474,19 @@ impl TrackerSync {
             return Err(TrackerError::Unconfigured);
         }
         let provider = provider_for(t, cred, &self.net)?;
-        self.run_provider(t, provider.as_ref(), views, store, now, pass)
-            .await
+        let read = self
+            .run_provider(t, provider.as_ref(), views, store, now, pass)
+            .await;
+        // Write-back (M13.4e): after a pass that worked, with the same
+        // provider and credential. Its failures are per write, never the
+        // pass's.
+        if read.is_ok() && provider.caps().write {
+            let r = super::write_back::drain(t, provider.as_ref(), store, now).await;
+            if r != super::write_back::DrainReport::default() {
+                tracing::debug!(tracker = t.id, ?r, "[write-back] drained");
+            }
+        }
+        read
     }
 
     /// The pass proper, over the provider `run_tracker` built (tests hand
@@ -654,20 +662,18 @@ impl TrackerSync {
         }
 
         // 5. bind.
-        {
-            let s = self
-                .lock(store)
-                .map_err(|e| TrackerError::Invalid(e.message))?;
-            let bound = s
-                .bind_tracker_refs(t.id)
-                .map_err(|e| TrackerError::Invalid(e.message))?;
-            pass.bound_sessions = bound.len();
-            // A key that became known late re-resolves its sessions (work
-            // graph M4.3); only the sessions this bind touched.
-            for sid in bound {
-                if let Err(e) = crate::service::work::detect::resolve_session(&s, sid) {
-                    tracing::debug!(error = %e.message, "[work] resolve after bind failed");
-                }
+        let s = self
+            .lock(store)
+            .map_err(|e| TrackerError::Invalid(e.message))?;
+        let bound = s
+            .bind_tracker_refs(t.id)
+            .map_err(|e| TrackerError::Invalid(e.message))?;
+        pass.bound_sessions = bound.len();
+        // A key that became known late re-resolves its sessions (work graph
+        // M4.3); only the sessions this bind touched.
+        for sid in bound {
+            if let Err(e) = crate::service::work::detect::resolve_session(&s, sid) {
+                tracing::debug!(error = %e.message, "[work] resolve after bind failed");
             }
         }
         // The pass-wide visibility rule (see this method's doc comment):
@@ -681,9 +687,6 @@ impl TrackerSync {
                     .unwrap_or_else(|| "every item this pass tried to store failed".to_string()),
             ));
         }
-        // 6. write-back (M13.4e): only after a pass that could read, only
-        // for a tracker that opted in; never fails the pass.
-        pass.write_back = super::write_back::run(t, provider, store, now).await;
         Ok(())
     }
 
@@ -969,6 +972,12 @@ pub fn spawn_tracker_sync(
     };
     tracing::info!("tracker sync every {}s", period.as_secs());
     let sync = Arc::new(TrackerSync::new(net).with_metrics(process_metrics()));
+    // J3 (docs/decisions.md): after a clean pass, an Asana tracker's
+    // sections may be put to the decision model — gated (off by default),
+    // at most daily, in a task of its own; it never touches the pass.
+    let status_map = crate::service::decide::status_map::StatusMapTrigger::new(
+        crate::service::decide::DecideCtx::jev(Arc::clone(&store)),
+    );
     Some(crate::rt::spawn(async move {
         let mut ticker = tokio::time::interval(period);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -978,7 +987,9 @@ pub fn spawn_tracker_sync(
                 _ = token.cancelled() => break,
                 _ = ticker.tick() => {}
             }
-            let _ = sync.run_pass(&store).await;
+            if let Some(passes) = sync.run_pass(&store).await {
+                let _ = status_map.after_pass(&passes);
+            }
         }
     }))
 }

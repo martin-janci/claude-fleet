@@ -1,0 +1,32 @@
+{
+  "items": [
+    {
+      "created_at": 1790518155,
+      "host": "h1",
+      "kind": "suggestion",
+      "link_id": 3,
+      "link_version": 1,
+      "preselected": false,
+      "review_id": "link:3",
+      "rule": "R6",
+      "session_id": 2,
+      "session_name": "two",
+      "strength": "weak",
+      "task": {
+        "key": "TK-3",
+        "kind": "tracker",
+        "org_id": 1,
+        "status_category": "in_progress",
+        "status_name": "In Progress",
+        "task_id": "item:3",
+        "title": "Nobody on it yet",
+        "tracker_name": "Jira (acme)",
+        "unavailable": false
+      },
+      "why": [
+        "mentioned in a prompt TK-3 · R6"
+      ]
+    }
+  ],
+  "total": 1
+}

@@ -68,21 +68,30 @@ name: release
 # `rename-updater-asset.sh` renames tauri-action's output to, and the set
 # `verify-release.sh` requires — one table, with no second list to drift.
 #
-# CODE SIGNING IS INTENTIONALLY ABSENT. There is no Apple Developer ID
-# (and no Windows certificate) for this project yet, so nothing here is
-# signed or notarized. Consequences:
-#   - macOS Gatekeeper refuses the .app/.dmg on first launch, reporting it as
-#     "damaged". Users must clear the quarantine flag after copying it to
-#     /Applications (right-click -> Open does not reliably work for an
-#     unsigned app):
+# MACOS SIGNING: APPLE DEVELOPMENT, NOT NOTARIZED. The macOS bundles are
+# signed with the owner's free Personal Team "Apple Development" certificate
+# (secrets APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD /
+# APPLE_SIGNING_IDENTITY, read by tauri's bundler). What that buys is a
+# STABLE TEAM ID, not provenance for anyone else:
+#   - The desktop keeps its hub token in the login keychain. macOS scopes a
+#     keychain item to a partition built from the signer's Team ID; with no
+#     Team ID (ad-hoc, or a self-signed certificate — tried, rejected) it
+#     falls back to the build's cdhash, so every update asked "allow access"
+#     again. Signed with a Team ID, "Always Allow" holds across releases.
+#   - It is not notarized (no Developer Program), so Gatekeeper still blocks
+#     the first launch of a download; clear the quarantine flag:
 #       xattr -dr com.apple.quarantine /Applications/claude-fleet.app
 #     The user-facing instructions live in the README.
+#   - hardenedRuntime is off in tauri.conf.json: it only matters for
+#     notarization, and off keeps the app's runtime exactly what it was.
+#   - The certificate expires yearly; renew it in Xcode (Settings → Accounts
+#     → Manage Certificates), re-export, and replace the three secrets. The
+#     `Verify the macOS signature` step fails the leg if a bundle ever comes
+#     out without a Team ID again.
 #   - The Linux AppImage/.deb are unsigned; that is normal for those formats.
-# When a Developer ID exists, add APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD
-# / APPLE_SIGNING_IDENTITY / APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID secrets
-# and pass them through `env:` on the tauri-action step (see
-# https://v2.tauri.app/distribute/sign/macos/). Do not add ad-hoc signing
-# here; it would give users a false sense of provenance.
+# With a Developer ID later, swap the certificate secrets and add APPLE_ID /
+# APPLE_PASSWORD / APPLE_TEAM_ID for notarization
+# (https://v2.tauri.app/distribute/sign/macos/).
 
 on:
   push:
@@ -194,13 +203,13 @@ jobs:
               '',
               '---',
               '',
-              'Unsigned builds (no Apple Developer ID yet). On macOS the first launch reports the app as *"damaged and can\'t be opened"* — it is not damaged. Drag it to `/Applications`, then clear the quarantine flag:',
+              'The macOS builds are signed with an Apple Development certificate but not notarized (no Apple Developer ID yet), so Gatekeeper blocks the first launch of a download. Drag the app to `/Applications`, then clear the quarantine flag:',
               '',
               '```bash',
               'xattr -dr com.apple.quarantine /Applications/claude-fleet.app',
               '```',
               '',
-              `Right-click → **Open** does not help here: that is the bypass for a signed-but-unnotarized app. Full instructions: [Installing a release build](https://github.com/${owner}/${repo}/blob/${tag}/README.md#installing-a-release-build).`,
+              `Full instructions: [Installing a release build](https://github.com/${owner}/${repo}/blob/${tag}/README.md#installing-a-release-build).`,
               '',
               `Every version's notes: [CHANGELOG.md](https://github.com/${owner}/${repo}/blob/${tag}/CHANGELOG.md).`,
               '',
@@ -280,16 +289,94 @@ jobs:
           workspaces: .
           key: ${{ matrix.os }}-${{ matrix.target || 'native' }}
       - run: pnpm install --frozen-lockfile
+      # The Windows leg bundles Microsoft's ConPTY (the leg's args carry
+      # --config src-tauri/tauri.conpty.conf.json; scripts/fetch-conpty.sh
+      # says why). Pinned by version and SHA-256, so a changed package stops
+      # the release instead of shipping.
+      - name: Fetch ConPTY for the Windows bundle
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash scripts/fetch-conpty.sh
+      # A macOS bundle must come out signed with the Team ID (see the header);
+      # without these tauri silently falls back to ad-hoc, which is exactly
+      # the per-update keychain prompt this signing exists to stop. Names
+      # only are logged, never values.
+      - name: Require the macOS signing secrets
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -z "$APPLE_CERTIFICATE" ]] && missing+=("APPLE_CERTIFICATE")
+          [[ -z "$APPLE_CERTIFICATE_PASSWORD" ]] && missing+=("APPLE_CERTIFICATE_PASSWORD")
+          [[ -z "$APPLE_SIGNING_IDENTITY" ]] && missing+=("APPLE_SIGNING_IDENTITY")
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "::error::missing secret(s): ${missing[*]} — a macOS release must be signed with the Team ID" >&2
+            exit 1
+          fi
+      # The exported .p12 carries the leaf only. Without Apple's "Worldwide
+      # Developer Relations G3" intermediate codesign cannot build the chain
+      # and fails with errSecInternalComponent, so install it — pinned by
+      # hash, since it is fetched at build time. Already present is fine.
+      - name: Install the Apple WWDR G3 intermediate
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          cer="$RUNNER_TEMP/AppleWWDRCAG3.cer"
+          curl -fsSL -o "$cer" https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer
+          echo "dcf21878c77f4198e4b4614f03d696d89c66c66008d4244e1b99161aac91601f  $cer" | shasum -a 256 -c -
+          sudo security import "$cer" -k /Library/Keychains/System.keychain 2>&1 \
+            | grep -v 'already exists' || true
       # tauri-action runs `beforeBuildCommand` (pnpm build) from
       # src-tauri/tauri.conf.json, then `cargo tauri build`, and uploads the
       # bundles to the draft created by the create-release job. All matrix
-      # legs attach to that same draft.
+      # legs attach to that same draft. The APPLE_* values sign the macOS
+      # legs; the Linux leg's bundler ignores them.
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
+      - name: Verify ConPTY is in the Windows build
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in conpty.dll OpenConsole.exe licenses/ConPTY-LICENSE.txt; do
+            test -s "target/release/$f" || { echo "::error::target/release/$f missing: the installer would ship without ConPTY"; exit 1; }
+          done
+      # The signing config can fail to apply without failing the build (tauri
+      # falls back to ad-hoc). This turns that into a red leg: the bundle must
+      # name the expected identity and carry a Team ID.
+      - name: Verify the macOS signature
+        if: runner.os == 'macOS'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          # Only the target dirs that exist: `find` on a missing path exits
+          # non-zero, and under pipefail that killed this step silently
+          # (v0.3.3) before it checked anything.
+          roots=(); for d in target src-tauri/target; do if [[ -d "$d" ]]; then roots+=("$d"); fi; done
+          [[ ${#roots[@]} -gt 0 ]] || { echo "::error::no cargo target directory" >&2; exit 1; }
+          app=$(find "${roots[@]}" -maxdepth 6 -type d -path '*/bundle/macos/claude-fleet.app' | head -1 || true)
+          [[ -n "$app" ]] || { echo "::error::no claude-fleet.app bundle found" >&2; exit 1; }
+          info=$(codesign -dvvv "$app" 2>&1)
+          codesign --verify --deep --strict "$app"
+          team=$(sed -n 's/^TeamIdentifier=//p' <<<"$info")
+          if [[ -z "$team" || "$team" == "not set" ]]; then
+            echo "::error::$app has no Team ID — signing did not apply" >&2; exit 1
+          fi
+          grep -qxF "Authority=$APPLE_SIGNING_IDENTITY" <<<"$info" \
+            || { echo "::error::$app is not signed by the configured identity" >&2; exit 1; }
+          echo "signed: $app (Team ID $team)"
       # tauri-action names the macOS updater bundle `claude-fleet_<arch>
       # .app.tar.gz` — the one asset on the release with no version in its
       # filename, which is why v0.2.21/.23/.26/.32/.33/.34 all published
@@ -306,6 +393,8 @@ jobs:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           TAG: ${{ github.ref_name }}
           LEG: ${{ matrix.leg }}
+        # bash on every leg: the Windows runner's default shell is pwsh.
+        shell: bash
         run: scripts/rename-updater-asset.sh
 
   # fleet-agent and a bare fleet-hub, packaged for a Linux host with no

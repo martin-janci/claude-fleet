@@ -116,9 +116,9 @@ pub(super) const KIND_PANE_LESS: &str = "kind IN ('bg','external')";
 /// `PartialEq` covers every wire field including `row_version`. For the
 /// no-op-reconcile-pass check `upsert_session_in_tx` wants (a real change vs.
 /// a pass that observed exactly what is already stored), use
-/// [`SessionRow::eq_ignoring_row_version`] instead: the migration 042 trigger
-/// bumps `row_version` on every physical UPDATE, no-op or not, so plain `==`
-/// would make every pass look like a change.
+/// [`SessionRow::eq_ignoring_row_version`] instead: `row_version` also moves
+/// for a change the wire row does not show (a non-wire column, or an
+/// explicit bump), so plain `==` can call two equal-content reads different.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SessionRow {
     pub id: i64,
@@ -207,6 +207,12 @@ pub struct SessionRow {
     /// reconcile pass's pane observation wins over the pane heuristic).
     #[serde(default)]
     pub last_stop_at: Option<i64>,
+    /// When the tick demoted this row from a stale `working` to `idle`
+    /// (migration 065, lifecycle F2); `None` otherwise. Cleared by the next
+    /// hook or a pane that shows a live turn. `#[serde(default)]`: a hub
+    /// older than the column sends none.
+    #[serde(default)]
+    pub stale_working_at: Option<i64>,
     /// The requester session that dispatched the task this row is working
     /// on; NULL for top-level sessions.
     #[serde(default)]
@@ -215,9 +221,11 @@ pub struct SessionRow {
     /// (NULL ⇒ empty) and always surfaced as a list on the wire.
     #[serde(default)]
     pub tags: Vec<String>,
-    /// Bumped by a trigger on every UPDATE (migration 042). The frontend's
-    /// merge guard orders a command's return value against a row event by
-    /// it. `#[serde(default)]`: a hub older than the column sends none.
+    /// Bumped by a trigger on every UPDATE that changes a column other than
+    /// the reconcile's `last_reconciled_at` stamp (migrations 042 and 063),
+    /// and explicitly for a `work` / org change. The frontend's merge guard
+    /// orders a command's return value against a row event by it.
+    /// `#[serde(default)]`: a hub older than the column sends none.
     #[serde(default)]
     pub row_version: i64,
     /// How many UserPromptSubmit hooks this row has recorded (migration
@@ -267,6 +275,18 @@ pub struct SessionRow {
     /// and emitted rows agree. Absent from an older hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// A checksum of the session's live links — their ids and versions
+    /// (work graph M14). `work` / `work_suggested` show only the primary and
+    /// the top guess; this moves on every link change, a secondary's too, so
+    /// a client knows when to re-read the session's tasks. Opaque; `0` (and
+    /// absent) when the session has no live link. Never sent to a scoped
+    /// caller (`OrgScope::redact_row`): another org's link would move it.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub work_rev: i64,
+}
+
+fn is_zero_i64(n: &i64) -> bool {
+    *n == 0
 }
 
 impl SessionRow {
@@ -274,11 +294,11 @@ impl SessionRow {
     /// this row carry the same user-visible content.
     ///
     /// See the note above the `PartialEq` derive: plain `==` cannot answer
-    /// that question, because migration 042's trigger bumps `row_version` on
-    /// every physical UPDATE regardless of whether any other field changed.
+    /// that question, because `row_version` also moves for a change no wire
+    /// field shows (a non-wire column, an explicit bump).
     ///
-    /// The equal-version case — every no-op reconcile pass, which is what
-    /// calls this — compares in place. Only a genuine version difference
+    /// The equal-version case — every no-op reconcile pass since migration
+    /// 063, which is what calls this — compares in place. Only a genuine version difference
     /// pays for a clone, and then for one row rather than two: this runs
     /// once per session per pass, and a `SessionRow` is some forty fields
     /// with a dozen heap allocations among them.
@@ -292,6 +312,12 @@ impl SessionRow {
         } == *other
     }
 }
+
+/// What losing a session clears, in every path that loses one (a host's
+/// sessions lost, a kill, a reconcile ghosting): the pane-derived state and
+/// the stale-working stamp, none of which a dead row can act on.
+pub(super) const LOSS_CLEARS: &str = "claude_status=NULL, stuck_kind=NULL, stuck_since=NULL, \
+     current_activity=NULL, pending_input=NULL, stale_working_at=NULL";
 
 /// The `sessions` column list every `SessionRow` read shares, in the order
 /// `map_session_row` consumes it. One definition so a new column is added in
@@ -319,7 +345,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                                                   THEN 'true' ELSE 'false' END), \
                          'state', l.state, 'strength', l.strength, 'rule', l.rule, \
                          'archived_at', l.archived_at, \
-                         'org_id', (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id)) \
+                         'org_id', COALESCE((SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id), CASE WHEN i.tracker_id IS NULL THEN i.org_id END)) \
         FROM participants p \
         JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
                          AND l.is_primary = 1 AND l.state = 'confirmed' \
@@ -351,7 +377,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                                                      AND c.ended_at IS NULL \
                                                      AND c.is_primary = 1 \
                                                      AND c.state = 'confirmed'))), \
-                         'org_id', (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id)) \
+                         'org_id', COALESCE((SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id), CASE WHEN i.tracker_id IS NULL THEN i.org_id END)) \
         FROM participants p \
         JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
                          AND l.state = 'suggested' \
@@ -366,7 +392,10 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                 COALESCE(l.decided_at, l.created_at) DESC, l.id DESC \
        LIMIT 1) AS work_suggested, ",
     crate::session_org_sql!("sessions"),
-    " AS org_id, prompt_submit_seq"
+    " AS org_id, prompt_submit_seq, stale_working_at, \
+     (SELECT COALESCE(SUM(l.version * 1000003 + l.id), 0) FROM work_links l \
+        JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+       WHERE p.session_id = sessions.id AND l.ended_at IS NULL) AS work_rev"
 );
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
@@ -458,6 +487,8 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         work_suggested: decode_work(row.get(56)?),
         org_id: row.get(57)?,
         prompt_submit_seq: row.get(58)?,
+        stale_working_at: row.get(59)?,
+        work_rev: row.get(60)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
@@ -621,6 +652,16 @@ pub(super) fn map_usage_cursor(row: &rusqlite::Row<'_>) -> rusqlite::Result<Usag
     })
 }
 
+/// One UTC day's slice of a [`UsageDelta`], priced. `backfill` marks history
+/// a fresh cursor read in one go (perf-logs §6a): kept apart in
+/// `usage_daily` so a takeover day never reads as a $850 day.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DayDelta {
+    pub day: i64,
+    pub totals: UsageTotals,
+    pub backfill: bool,
+}
+
 /// One usage pass's result for a session, applied by `Store::apply_usage`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageDelta {
@@ -633,11 +674,22 @@ pub struct UsageDelta {
     pub last_msg_id: Option<String>,
     pub last_msg_usage: Option<String>,
     pub now: i64,
+    /// Per-day slices of `totals`; empty means "book everything to the day
+    /// of `now`" (a reader without `D` lines).
+    pub by_day: Vec<DayDelta>,
 }
 
 /// `claude_status` values that mean "no turn in progress" — the states
 /// `idle_since` is stamped on (see migration 019).
 pub const IDLE_STATUSES: [&str; 3] = ["idle", "completed", "stopped"];
+
+/// A `claude_status` whose turn is over: an idle status, or `failed` (a turn
+/// that ended in an error). What `wait_for_session { until: idle }`,
+/// `run_prompt` and a move's source check all wait for — one set, so a new
+/// terminal status cannot reach one and not the others.
+pub fn turn_over(status: Option<&str>) -> bool {
+    status.is_some_and(|s| IDLE_STATUSES.contains(&s) || s == "failed")
+}
 
 /// SQL fragment: the new `idle_since` given the OLD row's `idle_since` and the
 /// status expression `{st}` (which must resolve to the post-write status).
@@ -821,6 +873,8 @@ pub struct ClientTokenRow {
     pub last_seen_at: Option<i64>,
     pub revoked_at: Option<i64>,
     pub trusted_at: Option<i64>,
+    /// The org the client is bound to (migration 066), `None` unbound.
+    pub org_id: Option<i64>,
 }
 
 /// One inter-session message (migration 015). The store is the source of
@@ -1053,9 +1107,10 @@ pub struct HostReconcile<'a> {
     /// Stamp `last_reconciled_at` with this value on every session the
     /// upsert writes (the live set this pass observed): the Task H freshness
     /// marker and the BE-3 ghost guard's evidence. Folded into the upsert
-    /// rather than written by a second UPDATE, so a pass bumps a row's
-    /// `row_version` once, not twice. `None` (the default, store-level
-    /// tests) leaves the stored stamp alone.
+    /// rather than written by a second UPDATE, so a pass is one physical
+    /// UPDATE per row; the stamp alone does not bump `row_version`
+    /// (migration 065). `None` (the default, store-level tests) leaves the
+    /// stored stamp alone.
     pub reconciled_at: Option<i64>,
 }
 

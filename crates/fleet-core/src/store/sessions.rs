@@ -218,6 +218,7 @@ impl Store {
         keep_names: &[String],
         now: i64,
         lost_ttl_cutoff: Option<i64>,
+        external_grace_cutoff: Option<i64>,
     ) -> Result<(), rusqlite::Error> {
         let changes = self.in_savepoint("ghost_and_clean_bg_sessions", |tx| {
             let mut changes: Vec<RowChange> = Vec::new();
@@ -229,6 +230,7 @@ impl Store {
                 KIND_PANE_LESS,
                 None,
                 lost_ttl_cutoff,
+                external_grace_cutoff,
                 &mut changes,
             )?;
             Ok::<_, rusqlite::Error>(changes)
@@ -243,7 +245,9 @@ impl Store {
 
     /// One-shot: mark every non-ghost row of `host_alias` NOT in `keep_names`
     /// as lost, recording WHY (`reason`, one of `host_reboot` /
-    /// `tmux_server_gone` / `missing`). Called by the reboot/vanished-tmux
+    /// `tmux_server_gone` / `missing`). Loss also clears `claude_status`,
+    /// `stuck_kind`/`stuck_since`, `current_activity` and `pending_input`: a
+    /// ghost has no pane to vouch for them (F4). Called by the reboot/vanished-tmux
     /// detector (Task 6) instead of waiting out the normal one-cycle ghost
     /// grace, so the resume path can tell a reboot apart from a routine probe
     /// miss.
@@ -336,7 +340,7 @@ impl Store {
                 .query_map(params.as_slice(), |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let sql = format!(
-                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2, {LOSS_CLEARS}
                  WHERE host_alias=?3 AND status!='ghost' AND {kind_filter}
                    AND COALESCE(last_reconciled_at, 0) < ?4{not_in}
                  RETURNING id"
@@ -408,8 +412,10 @@ impl Store {
         now: i64,
     ) -> Result<Option<SessionRow>, rusqlite::Error> {
         let changed = self.conn.execute(
-            "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='killed'
-             WHERE id=?2 AND status!='ghost'",
+            &format!(
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='killed', \
+                 {LOSS_CLEARS} WHERE id=?2 AND status!='ghost'"
+            ),
             rusqlite::params![now, id],
         )?;
         let row = fetch_session_by_id(&self.conn, id)?;
@@ -998,6 +1004,22 @@ impl Store {
         self.emit_session(id)
     }
 
+    /// How many times the `oom` playbook recreated session `id` — or tried
+    /// and failed — since `since`: `playbook_applied` rows whose detail is
+    /// exactly `oom:recreate` or starts with `oom:recreate:failed:`. A
+    /// refusal (`…:skipped:…`) is not an attempt.
+    pub fn count_oom_recreates_since(&self, id: i64, since: i64) -> Result<u32, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_events \
+                 WHERE session_id = ?1 AND kind = 'playbook_applied' AND at >= ?2 \
+                   AND (detail = 'oom:recreate' OR detail LIKE 'oom:recreate:failed:%')",
+                rusqlite::params![id, since],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n as u32)
+    }
+
     /// Carry the row `(host_alias, old)` over to `new` after fleet renamed its
     /// tmux session (`rename_session`). Returns the renamed row, or `None`
     /// when no row held `old`.
@@ -1202,13 +1224,17 @@ impl Store {
             &format!(
                 "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
-                     idle_since = COALESCE(idle_since, ?2), pending_input = NULL{END_COMPACTING} \
+                     idle_since = COALESCE(idle_since, ?2), pending_input = NULL, \
+                     stale_working_at = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],
         )?;
         if changed == 0 {
             return Ok(None);
+        }
+        if let Err(e) = self.insert_session_event(row_id, "status_change", Some("idle")) {
+            tracing::warn!(session_id = row_id, error = %e, "[hook] status_change not recorded");
         }
         Ok(self.emit_session(row_id)?)
     }
@@ -1241,12 +1267,15 @@ impl Store {
             &format!(
                 "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
                      last_hook_at = ?2, prompt_submit_seq = prompt_submit_seq + 1, \
-                     pending_input = NULL{END_COMPACTING} WHERE id = ?1"
+                     pending_input = NULL, stale_working_at = NULL{END_COMPACTING} WHERE id = ?1"
             ),
             rusqlite::params![row_id, now_unix()],
         )?;
         if changed == 0 {
             return Ok(None);
+        }
+        if let Err(e) = self.insert_session_event(row_id, "status_change", Some("working")) {
+            tracing::warn!(session_id = row_id, error = %e, "[hook] status_change not recorded");
         }
         // A person's prompt is a touch (work graph M7): it protects the
         // session from tidy-up for an hour and un-archives it.
@@ -1289,25 +1318,99 @@ impl Store {
         let changed = self.conn.execute(
             "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
                  last_hook_at = ?2, idle_since = COALESCE(idle_since, ?2), \
-                 stuck_kind = NULL, stuck_since = NULL, pending_input = NULL \
+                 stuck_kind = NULL, stuck_since = NULL, pending_input = NULL, \
+                 stale_working_at = NULL \
                  WHERE id = ?1",
             rusqlite::params![row_id, now],
         )?;
         if changed == 0 {
             return Ok(None);
         }
+        if let Err(e) = self.insert_session_event(row_id, "status_change", Some("stopped")) {
+            tracing::warn!(session_id = row_id, error = %e, "[hook] status_change not recorded");
+        }
         Ok(self.emit_session(row_id)?)
     }
 
-    /// The StopFailure hook's write: the turn ended in an API error. The row
-    /// effect is exactly `Stop`'s (idle, `turn_seq` bump, stamps) so waiters
-    /// return and read the error from the transcript; the handler records
-    /// the `stop_failure` timeline event that tells the two apart.
+    /// The StopFailure hook's write: the turn ended in an API error (F3).
+    /// The Stop stamps are all made (`turn_seq`, `last_stop_at`,
+    /// `last_turn_at`, `last_hook_at`, `idle_since`, `pending_input`) so
+    /// waiters return and the GC clocks run, but the row reads `failed`
+    /// — until the next UserPromptSubmit (`working`) or Stop (`idle`), and
+    /// through reconcile's pane reads of the input box the failure left
+    /// behind (`store/reconcile.rs`, `NEW_STATUS`). The handler records the
+    /// `stop_failure` timeline event that says which error.
     pub fn record_stop_failure_hook_for_row(
         &self,
         row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
-        self.record_stop_hook_for_row(row_id)
+        let now = now_unix();
+        let changed = self.conn.execute(
+            &format!(
+                "UPDATE sessions SET claude_status = 'failed', turn_seq = turn_seq + 1, \
+                     last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
+                     idle_since = COALESCE(idle_since, ?2), pending_input = NULL, \
+                     stale_working_at = NULL{END_COMPACTING} \
+                 WHERE id = ?1"
+            ),
+            rusqlite::params![row_id, now],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        if let Err(e) = self.insert_session_event(row_id, "status_change", Some("failed")) {
+            tracing::warn!(session_id = row_id, error = %e, "[hook] status_change not recorded");
+        }
+        Ok(self.emit_session(row_id)?)
+    }
+
+    /// The tick's stale-`working` rule (lifecycle F2): a live tmux row that
+    /// says `working` but has had no hook, no turn, no transcript growth
+    /// (`context_at`, `usage_updated_at`) and no pane output
+    /// (`last_activity_at`) for `stale_secs` is demoted to `idle` and stamped
+    /// `stale_working_at = now`, which is what the attention model reads.
+    /// Pane-less and `shell` rows are never judged (no hooks or turns to
+    /// miss); a stamped row is not judged twice; `stale_secs <= 0` is off.
+    /// Returns the demoted rows; each gets `session_updated`, a
+    /// `status_change idle` and a `stale_working` timeline entry.
+    pub fn age_out_stale_working(
+        &self,
+        now: i64,
+        stale_secs: i64,
+    ) -> Result<Vec<SessionRow>, rusqlite::Error> {
+        if stale_secs <= 0 {
+            return Ok(Vec::new());
+        }
+        let cutoff = now - stale_secs;
+        let ids: Vec<i64> = self
+            .conn
+            .prepare(
+                "UPDATE sessions SET claude_status = 'idle', idle_since = ?1, stale_working_at = ?1 \
+                 WHERE status = 'running' AND claude_status = 'working' \
+                   AND kind NOT IN ('bg','external','shell') AND stale_working_at IS NULL \
+                   AND COALESCE(last_hook_at, 0) < ?2 AND COALESCE(last_turn_at, 0) < ?2 \
+                   AND COALESCE(context_at, 0) < ?2 AND COALESCE(usage_updated_at, 0) < ?2 \
+                   AND last_activity_at < ?2 AND created_at < ?2 \
+                 RETURNING id",
+            )?
+            .query_map(rusqlite::params![now, cutoff], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut out = Vec::with_capacity(ids.len());
+        let detail = format!("no hook, turn, transcript growth or pane output for {stale_secs}s");
+        for id in ids {
+            for (kind, d) in [
+                ("status_change", "idle"),
+                ("stale_working", detail.as_str()),
+            ] {
+                if let Err(e) = self.insert_session_event(id, kind, Some(d)) {
+                    tracing::warn!(session_id = id, kind, error = %e, "[reconcile] session_event insert failed");
+                }
+            }
+            if let Some(row) = self.emit_session(id)? {
+                out.push(row);
+            }
+        }
+        Ok(out)
     }
 
     /// The Notification hook's write. `status` is the mapped status;
@@ -1338,7 +1441,7 @@ impl Store {
         };
         let sql = format!(
             "UPDATE sessions SET claude_status = ?4, last_hook_at = ?2, \
-             idle_since = {idle}{stuck_sql} WHERE id = ?1",
+             stale_working_at = NULL, idle_since = {idle}{stuck_sql} WHERE id = ?1",
             idle = idle_since_sql("?4", "?2"),
         );
         let kind = match stuck {
@@ -1350,6 +1453,9 @@ impl Store {
             .execute(&sql, rusqlite::params![row_id, now, kind, status])?;
         if changed == 0 {
             return Ok(None);
+        }
+        if let Err(e) = self.insert_session_event(row_id, "status_change", Some(status)) {
+            tracing::warn!(session_id = row_id, error = %e, "[hook] status_change not recorded");
         }
         Ok(self.emit_session(row_id)?)
     }
@@ -1521,8 +1627,8 @@ impl Store {
     /// `claude_session_id` is still its current conversation. A repeat of
     /// the same path is a no-op write (Task 3: every hook of a conversation
     /// resends the same `transcript_path`, and an unconditional write here
-    /// bumped `row_version` — see migration 042's trigger — on every one of
-    /// them).
+    /// was a physical UPDATE under the store lock on every one of them —
+    /// which, before migration 063, also bumped `row_version`).
     pub fn set_transcript_path_for_row(
         &self,
         row_id: i64,
@@ -1823,15 +1929,72 @@ mod tests {
         let s = store();
         s.upsert_bg_session("local", "bg:e1", None, "e1", Some("idle"), 1, "external", 1)
             .unwrap();
-        s.ghost_and_clean_bg_sessions("local", &[], 10, None)
+        s.ghost_and_clean_bg_sessions("local", &[], 10, None, None)
             .unwrap();
         assert_eq!(
             s.get_session("bg:e1", "local").unwrap().unwrap().status,
             "ghost"
         );
-        s.ghost_and_clean_bg_sessions("local", &[], 20, None)
+        s.ghost_and_clean_bg_sessions("local", &[], 20, None, None)
             .unwrap();
         assert!(s.get_session("bg:e1", "local").unwrap().is_none());
+    }
+
+    /// F4: `local` ghosts said `working` a day after loss and a `mac` ghost
+    /// said `blocked` — a dialog nobody can answer. Loss keeps identity
+    /// (`claude_session_id`, names, project) and drops what only a live pane
+    /// can vouch for.
+    #[test]
+    fn mark_host_sessions_lost_clears_the_fields_only_a_live_pane_can_vouch_for() {
+        let mut s = store();
+        let r = reconcile_one(&mut s, "a", Some("blocked"), Some("press_enter"), None);
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET current_activity = 'waiting for permission: rm -rf' WHERE id = ?1",
+                [r.id],
+            )
+            .unwrap();
+        s.mark_host_sessions_lost("local", "host_reboot", &[], 500, 0)
+            .unwrap();
+        let g = s.get_session("a", "local").unwrap().unwrap();
+        assert_eq!(g.status, "ghost");
+        assert_eq!(
+            g.claude_status, None,
+            "nobody can answer a dead pane's dialog"
+        );
+        assert_eq!(g.stuck_kind, None);
+        assert_eq!(g.stuck_since, None);
+        assert_eq!(g.current_activity, None);
+        assert_eq!(g.pending_input, None);
+        assert_eq!(
+            crate::service::attention::needs_attention(&g).map(|a| a.reason),
+            Some(crate::service::attention::Reason::Lifecycle)
+        );
+    }
+
+    /// F6: an `external` row (a Code-tab / terminal Claude fleet only
+    /// observes) can never be resumed, so the 14 d TTL bought nothing — but a
+    /// desktop merely restarting must not lose its rows either. One hour.
+    #[test]
+    fn a_lost_external_row_is_kept_for_the_grace_then_reaped() {
+        let s = store();
+        s.upsert_host("h").unwrap();
+        s.upsert_bg_session("h", "bg:e1", None, "e1", Some("idle"), 1, "external", 1)
+            .unwrap();
+        s.mark_host_sessions_lost("h", "host_reboot", &[], 500, 0)
+            .unwrap();
+        // Inside the grace (lost at 500, grace cutoff 400): kept, though it
+        // was already ghost before this pass.
+        s.ghost_and_clean_bg_sessions("h", &[], 600, None, Some(400))
+            .unwrap();
+        assert!(
+            s.get_session("bg:e1", "h").unwrap().is_some(),
+            "a desktop restart must not reap its rows"
+        );
+        // Past it (cutoff 700 > lost_at 500): gone.
+        s.ghost_and_clean_bg_sessions("h", &[], 4200, None, Some(700))
+            .unwrap();
+        assert!(s.get_session("bg:e1", "h").unwrap().is_none());
     }
 
     #[test]
@@ -1853,7 +2016,7 @@ mod tests {
         assert_eq!(lost.marked.len(), 2);
 
         let cutoff = Some(100); // lost_at 500 is well inside the TTL
-        s.ghost_and_clean_bg_sessions("h", &[], 600, cutoff)
+        s.ghost_and_clean_bg_sessions("h", &[], 600, cutoff, None)
             .unwrap();
         assert!(
             s.get_session("bg:e1", "h").unwrap().is_none(),
@@ -2254,7 +2417,7 @@ mod tests {
 
         // Pass 1: agent vanished → row is ghosted (soft), not deleted.
         store
-            .ghost_and_clean_bg_sessions("alpha", &[], 200, None)
+            .ghost_and_clean_bg_sessions("alpha", &[], 200, None, None)
             .unwrap();
         let row = store.get_session_by_id(id).unwrap().expect("still present");
         assert_eq!(row.status, "ghost");
@@ -2263,7 +2426,7 @@ mod tests {
 
         // Pass 2: still vanished → hard-deleted, events reaped, kill emitted.
         store
-            .ghost_and_clean_bg_sessions("alpha", &[], 300, None)
+            .ghost_and_clean_bg_sessions("alpha", &[], 300, None, None)
             .unwrap();
         assert!(store.get_session_by_id(id).unwrap().is_none());
         let orphans: i64 = store
@@ -2306,10 +2469,10 @@ mod tests {
 
         let keep = vec!["bg:live".to_string()];
         store
-            .ghost_and_clean_bg_sessions("alpha", &keep, 200, None)
+            .ghost_and_clean_bg_sessions("alpha", &keep, 200, None, None)
             .unwrap();
         store
-            .ghost_and_clean_bg_sessions("alpha", &keep, 300, None)
+            .ghost_and_clean_bg_sessions("alpha", &keep, 300, None, None)
             .unwrap();
 
         let rows = store.list_sessions_for_host("alpha").unwrap();
@@ -2339,7 +2502,7 @@ mod tests {
                 100,
             )
             .unwrap();
-        s.ghost_and_clean_bg_sessions("alpha", &[], 200, None)
+        s.ghost_and_clean_bg_sessions("alpha", &[], 200, None, None)
             .unwrap();
         assert_eq!(s.get_session_by_id(id).unwrap().unwrap().status, "ghost");
 
@@ -2371,7 +2534,7 @@ mod tests {
         let id = s
             .upsert_bg_session("alpha", "bg:u1", None, "u1", Some("working"), 1, "bg", 1)
             .unwrap();
-        s.ghost_and_clean_bg_sessions("alpha", &[], lost_at, None)
+        s.ghost_and_clean_bg_sessions("alpha", &[], lost_at, None, None)
             .unwrap();
         assert_eq!(
             s.get_session_by_id(id).unwrap().unwrap().status,
@@ -2501,7 +2664,7 @@ mod tests {
                 100,
             )
             .unwrap();
-        s.ghost_and_clean_bg_sessions("alpha", &[], 200, None)
+        s.ghost_and_clean_bg_sessions("alpha", &[], 200, None, None)
             .unwrap();
         assert_eq!(
             lost_reason_of(&s, id),
@@ -2568,14 +2731,14 @@ mod tests {
         let participant = store.participant_for_session(bg).unwrap().unwrap().id;
         // Two passes without the agent: ghost, then hard-delete.
         store
-            .ghost_and_clean_bg_sessions("alpha", &[], 10, None)
+            .ghost_and_clean_bg_sessions("alpha", &[], 10, None, None)
             .unwrap();
         assert!(
             store.get_session_by_id(bg).unwrap().is_some(),
             "ghosted first"
         );
         store
-            .ghost_and_clean_bg_sessions("alpha", &[], 20, None)
+            .ghost_and_clean_bg_sessions("alpha", &[], 20, None, None)
             .unwrap();
         assert!(store.get_session_by_id(bg).unwrap().is_none());
         assert!(
@@ -3338,6 +3501,102 @@ mod tests {
             .any(|e| e.kind == "playbook_applied" && e.detail.as_deref() == Some("oom:recreate")));
     }
 
+    /// F2: two `working` rows on trn had not moved for ~40 h.
+    #[test]
+    fn age_out_stale_working_demotes_a_quiet_working_row_and_leaves_the_rest() {
+        let s = store();
+        let quiet = s
+            .upsert_session("quiet", "local", None, None, 1, 1_000, "running", None)
+            .unwrap();
+        let busy = s
+            .upsert_session("busy", "local", None, None, 1, 9_500, "running", None)
+            .unwrap();
+        let sh = s
+            .upsert_session("sh-term", "local", None, None, 1, 1_000, "running", None)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'working' WHERE id IN (?1, ?2, ?3)",
+                rusqlite::params![quiet, busy, sh],
+            )
+            .unwrap();
+        s.conn_ref()
+            .execute("UPDATE sessions SET kind = 'shell' WHERE id = ?1", [sh])
+            .unwrap();
+
+        let demoted = s.age_out_stale_working(10_000, 1_800).unwrap();
+        assert_eq!(
+            demoted.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![quiet]
+        );
+        let q = s.get_session_by_id(quiet).unwrap().unwrap();
+        assert_eq!(q.claude_status.as_deref(), Some("idle"));
+        assert_eq!(q.stale_working_at, Some(10_000));
+        assert_eq!(q.idle_since, Some(10_000));
+        assert_eq!(
+            s.get_session_by_id(busy)
+                .unwrap()
+                .unwrap()
+                .claude_status
+                .as_deref(),
+            Some("working"),
+            "pane output 500 s ago is not stale"
+        );
+        assert_eq!(
+            s.get_session_by_id(sh).unwrap().unwrap().stale_working_at,
+            None,
+            "a shell has no turns to miss"
+        );
+        let kinds: Vec<String> = s
+            .list_session_events(quiet, 10)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect();
+        assert!(kinds.contains(&"stale_working".to_string()));
+        assert!(kinds.contains(&"status_change".to_string()));
+        // Stamped rows are not judged again: a later sweep demotes only
+        // `busy` (unstamped, and quiet since 9_500 by then), never `quiet`
+        // a second time; `0` turns the rule off.
+        assert_eq!(
+            s.age_out_stale_working(20_000, 1_800)
+                .unwrap()
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![busy]
+        );
+        assert!(s.age_out_stale_working(40_000, 0).unwrap().is_empty());
+        // The next prompt clears the stamp.
+        s.record_prompt_submit_hook_for_row(quiet).unwrap();
+        assert_eq!(
+            s.get_session_by_id(quiet)
+                .unwrap()
+                .unwrap()
+                .stale_working_at,
+            None
+        );
+    }
+
+    #[test]
+    fn count_oom_recreates_since_counts_recreates_and_failures_not_refusals() {
+        let s = store();
+        let id = s
+            .upsert_session("a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        for detail in [
+            "oom:recreate",
+            "oom:recreate:failed:boom",
+            "oom:recreate:skipped:working",
+            "press_enter:press_enter",
+        ] {
+            s.mark_playbook_applied(id, 100, detail).unwrap();
+        }
+        let now = now_unix();
+        assert_eq!(s.count_oom_recreates_since(id, now - 60).unwrap(), 2);
+        assert_eq!(s.count_oom_recreates_since(id, now + 60).unwrap(), 0);
+    }
+
     // ---- hook writes: SessionEnd / StopFailure / Notification ----
 
     fn hooked_session(s: &Store) -> i64 {
@@ -3382,14 +3641,17 @@ mod tests {
         assert!(s.record_session_end_hook("nope").unwrap().is_none());
     }
 
+    /// The Stop stamps are all made, but the row reads `failed` (F3), so a
+    /// 429 no longer hides as a plain idle prompt.
     #[test]
-    fn record_stop_failure_hook_writes_like_stop() {
+    fn record_stop_failure_hook_stamps_like_stop_but_reads_failed() {
         let s = Store::open_in_memory().unwrap();
         hooked_session(&s);
         let a = s.record_stop_failure_hook("uuid-h").unwrap().unwrap();
-        assert_eq!(a.claude_status.as_deref(), Some("idle"));
+        assert_eq!(a.claude_status.as_deref(), Some("failed"));
         assert_eq!(a.turn_seq, 1);
         assert_eq!(a.last_stop_at, a.last_turn_at);
+        assert_eq!(a.last_stop_at, last_hook_at(&s));
         let b = s.record_stop_failure_hook("uuid-h").unwrap().unwrap();
         assert_eq!(b.turn_seq, 2);
     }
@@ -3477,28 +3739,73 @@ mod tests {
         assert_eq!(bus.take(), vec!["move:progress:7:git:done"]);
     }
 
+    /// Migration 063: `row_version` moves once per UPDATE that changes a
+    /// column, and not for one that changes nothing (or only the
+    /// reconcile's `last_reconciled_at` stamp). An explicit
+    /// `row_version + 1` (a `work` change the row's own columns do not
+    /// show) still moves it by exactly one.
     #[test]
-    fn row_version_bumps_on_every_update_and_rides_the_row() {
+    fn row_version_bumps_once_per_visible_change_and_rides_the_row() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("local").unwrap();
         let id = s
             .upsert_session("sess", "local", None, None, 1, 1, "running", None)
             .unwrap();
-        let v0 = s.get_session_by_id(id).unwrap().unwrap().row_version;
+        let v = || s.get_session_by_id(id).unwrap().unwrap().row_version;
+        let v0 = v();
         s.set_friendly_name("local", "sess", Some("one")).unwrap();
-        let v1 = s.get_session_by_id(id).unwrap().unwrap().row_version;
+        let v1 = v();
         s.set_started_at(id, 99).unwrap();
-        let v2 = s.get_session_by_id(id).unwrap().unwrap().row_version;
-        assert!(v1 > v0, "an UPDATE must bump row_version ({v0} -> {v1})");
-        assert!(v2 > v1, "every UPDATE bumps it ({v1} -> {v2})");
+        let v2 = v();
+        assert_eq!(v1, v0 + 1, "a changing UPDATE bumps row_version by one");
+        assert_eq!(v2, v1 + 1, "every changing UPDATE bumps it");
         // The upsert's DO UPDATE arm is an UPDATE too.
         s.upsert_session("sess", "local", None, None, 1, 2, "running", None)
             .unwrap();
-        let v3 = s.get_session_by_id(id).unwrap().unwrap().row_version;
-        assert!(
-            v3 > v2,
-            "an upsert of an existing row bumps it ({v2} -> {v3})"
+        let v3 = v();
+        assert_eq!(v3, v2 + 1, "an upsert that changes the row bumps it");
+
+        // Same values back: no client-visible change, no bump.
+        s.upsert_session("sess", "local", None, None, 1, 2, "running", None)
+            .unwrap();
+        s.conn
+            .execute(
+                "UPDATE sessions SET status = status, friendly_name = 'one' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        assert_eq!(v(), v3, "a same-value UPDATE must not bump row_version");
+        // The reconcile's freshness stamp alone is bookkeeping, not a change.
+        s.conn
+            .execute(
+                "UPDATE sessions SET last_reconciled_at = 12345 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        assert_eq!(
+            v(),
+            v3,
+            "a last_reconciled_at-only UPDATE must not bump row_version"
         );
+        // The explicit bump still counts exactly once (the trigger's WHEN
+        // sees row_version itself moved and stays out of it).
+        s.conn
+            .execute(
+                "UPDATE sessions SET row_version = row_version + 1 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        assert_eq!(v(), v3 + 1, "an explicit bump moves row_version by one");
+        // A column that is not on the wire but is not the reconcile's
+        // per-pass stamp either (here `transcript_path`) still counts: only
+        // the listed bookkeeping columns are exempt.
+        s.conn
+            .execute(
+                "UPDATE sessions SET transcript_path = '/t.jsonl' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        assert_eq!(v(), v3 + 2, "a real change to any other column bumps");
     }
 
     #[test]

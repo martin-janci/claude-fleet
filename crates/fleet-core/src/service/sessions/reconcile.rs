@@ -75,6 +75,23 @@ pub(super) fn read_lost_ttl_cutoff(raw: Option<String>, now: i64) -> Option<i64>
     }
 }
 
+/// Resolve the external-ghost grace from the raw `gc.external_lost_ttl_secs`
+/// value, like [`read_lost_ttl_cutoff`]: `<= 0` disables the grace (`None`,
+/// reaped on the next pass); otherwise the cutoff is `now - grace`.
+pub(super) fn read_external_grace_cutoff(raw: Option<String>, now: i64) -> Option<i64> {
+    let grace = crate::service::settings::resolve(
+        crate::service::settings::GC_EXTERNAL_LOST_TTL_SECS,
+        raw.as_deref(),
+    )
+    .parse::<i64>()
+    .unwrap_or(3600);
+    if grace <= 0 {
+        None
+    } else {
+        Some(now - grace)
+    }
+}
+
 /// Why every session on a reachable host should be treated as lost this
 /// pass, or `None` for a normal pass. Each comparison needs BOTH sides
 /// known, so a first probe after upgrade or a failed identity read never
@@ -703,37 +720,48 @@ fn write_reachable_host(
             .as_deref()
             .and_then(|s| s.parse::<crate::service::pane_intel::ClaudeStatus>().ok());
         let pane_status = pane.and_then(|p| p.derived_status);
+        // Transition-detection: remember the PRIOR stored values (the
+        // upsert below overwrites them). A first sighting skips the
+        // status/stuck detection but still opens its conversation; a
+        // read failure skips the session entirely. Read here, before the
+        // candidate, because the stale-working veto needs the stored stamp.
+        let prior_read = s.get_session(&sess.name, &host.alias);
+        if let Err(e) = &prior_read {
+            tracing::warn!(
+                host = %host.alias,
+                session = %sess.name,
+                error = %e,
+                "[reconcile] prior row read failed"
+            );
+            s.ensure_in_tx()?;
+        }
+        let prior_row = prior_read.as_ref().ok().cloned().flatten();
+        let stale = prior_row
+            .as_ref()
+            .is_some_and(|p| p.stale_working_at.is_some());
         // Prefer the authoritative `claude agents` status; fall back to
         // the pane heuristic per `status_candidate` — full weight when
         // this pass actually asked, `Blocked`-only otherwise (a
         // cadence-skipped or unanswerable pass must not let a weak
-        // pane guess overwrite the stored status every time).
-        let claude_status =
-            status_candidate(probe.agent_rows.is_some(), agent_status_typed, pane_status)
-                .map(|s| s.as_str().to_string());
+        // pane guess overwrite the stored status every time). A row the
+        // tick demoted for staleness keeps its `idle` unless the pane
+        // itself shows a turn (`stale_working_veto`, F2).
+        let claude_status = stale_working_veto(
+            stale,
+            status_candidate(probe.agent_rows.is_some(), agent_status_typed, pane_status),
+            pane_status,
+        )
+        .map(|s| s.as_str().to_string());
         let stuck_kind = pane.and_then(|p| p.stuck.map(|k| k.as_str().to_string()));
-        // Transition-detection: remember the PRIOR stored values (the
-        // upsert below overwrites them). A first sighting skips the
-        // status/stuck detection but still opens its conversation; a
-        // read failure skips the session entirely.
-        match s.get_session(&sess.name, &host.alias) {
-            Ok(prior) => priors.push((
+        if prior_read.is_ok() {
+            priors.push((
                 sess.name.clone(),
-                prior.map(|p| Prior {
+                prior_row.map(|p| Prior {
                     claude_status: p.claude_status,
                     stuck_kind: p.stuck_kind,
                     claude_session_id: p.claude_session_id,
                 }),
-            )),
-            Err(e) => {
-                tracing::warn!(
-                    host = %host.alias,
-                    session = %sess.name,
-                    error = %e,
-                    "[reconcile] prior row read failed"
-                );
-                s.ensure_in_tx()?;
-            }
+            ));
         }
         sessions.push(ReconcileSession {
             tmux_name: &sess.name,
@@ -882,7 +910,7 @@ fn write_reachable_host(
         // current and the UI can dim rows whose host has gone quiet. It is
         // also the BE-3 ghost guard's evidence (`probe_started_at` above).
         // Carried by the upsert itself (Task 4), not a second UPDATE after
-        // it, so an unchanged pass bumps each row's `row_version` once.
+        // it; an unchanged pass bumps no `row_version` (migration 063).
         reconciled_at: Some(now),
     })?;
     // Work detection (M4.2): the PR probe's signals, written outside
@@ -901,6 +929,14 @@ fn write_reachable_host(
                 if let Err(e) = crate::service::work::detect::resolve_session(s, sid) {
                     tracing::debug!(error = %e.message, "[work] PR resolve failed");
                     s.ensure_in_tx()?;
+                }
+                // Write-back (M13.4e): after the links settled, queue the
+                // PR's remote link where an admin allows it. Idempotent.
+                if let Some(url) = info.pr_url.as_deref() {
+                    if let Err(e) = crate::service::trackers::write_back::on_pr(s, sid, url) {
+                        tracing::debug!(error = %e.message, "[work] PR write-back not queued");
+                        s.ensure_in_tx()?;
+                    }
                 }
             }
             Ok(None) => {}
@@ -940,6 +976,13 @@ fn write_reachable_host(
         // A newly-set (or changed) stuck_kind is the alert-worthy
         // event; clearing it back to None is not recorded.
         if row.stuck_kind.is_some() && row.stuck_kind != prior.stuck_kind {
+            tracing::info!(
+                host = %host.alias,
+                session = %tmux_name,
+                kind = row.stuck_kind.as_deref().unwrap_or("?"),
+                was = prior.stuck_kind.as_deref().unwrap_or("none"),
+                "[reconcile] stuck"
+            );
             events.push(("stuck", row.stuck_kind.as_deref()));
         }
         for (kind, detail) in events {
@@ -1275,9 +1318,20 @@ pub(super) fn reconcile_agent_rows(
         .get_setting(crate::service::settings::SESSIONS_LOST_TTL_SECS)
         .ok()
         .flatten();
+    let grace_raw = s
+        .get_setting(crate::service::settings::GC_EXTERNAL_LOST_TTL_SECS)
+        .ok()
+        .flatten();
     s.ensure_in_tx()?;
     let lost_ttl_cutoff = read_lost_ttl_cutoff(lost_ttl_raw, now);
-    if let Err(e) = s.ghost_and_clean_bg_sessions(host_alias, &keep, now, lost_ttl_cutoff) {
+    let external_grace_cutoff = read_external_grace_cutoff(grace_raw, now);
+    if let Err(e) = s.ghost_and_clean_bg_sessions(
+        host_alias,
+        &keep,
+        now,
+        lost_ttl_cutoff,
+        external_grace_cutoff,
+    ) {
         tracing::warn!(host = %host_alias, error = %e, "[reconcile] bg cleanup failed");
         s.ensure_in_tx()?;
     }
@@ -1491,8 +1545,9 @@ pub(super) async fn probe_with_timeout(
     probe
 }
 
-/// Full fleet pass: probe every non-hidden host in parallel, then apply each
-/// host's result under its own short store-lock window. Callers are expected
+/// Full fleet pass: probe every non-hidden host in parallel and apply each
+/// host's result as its probe completes, under its own short store-lock
+/// window — a slow host delays only its own rows. Callers are expected
 /// to hold a `ReconcilePass` from the shared gate (see `run_full_reconcile`);
 /// this function does not take the gate itself so tests can drive it directly.
 pub(crate) async fn reconcile_sessions_with(
@@ -1555,40 +1610,37 @@ pub(crate) async fn reconcile_sessions_with(
     //    `JoinSet::drop` aborts the futures but does NOT kill spawned ssh
     //    children by itself; the ssh layer's own wall clock
     //    (`SshClient::run_child`) kills and reaps them and resets the master.
-    let mut set = tokio::task::JoinSet::new();
-    for (host, paths) in hosts.into_iter().filter(|(h, _)| !h.hidden) {
-        let deps = Arc::clone(deps);
-        set.spawn(async move { probe_one_host(host, paths, &deps).await });
-    }
-
-    // Collect per-host probe results. Join errors (task panics) are logged
-    // and skipped — they don't abort the rest of reconcile.
-    let mut probed: Vec<HostProbe> = Vec::new();
-    while let Some(join) = set.join_next().await {
-        match join {
-            Ok(probe) => probed.push(probe),
-            Err(e) => tracing::error!(error = %e, "[reconcile] probe task panicked"),
-        }
-    }
-
-    // 3. Apply writes, taking the store lock ONCE PER HOST rather than once
-    //    for the whole loop (BE-12): a command or the PTY poller waiting on
-    //    the store only ever queues behind one host's transaction. Each
-    //    host's whole write — account link, mass-loss marks, boot identity,
-    //    the `apply_host_reconcile_in_tx` burst (host probe, upserts, touches,
-    //    ghosting), PR signals, timeline events, conversation rebinds and bg
-    //    rows — runs in `reconcile_write_one_host` under ONE
-    //    `Store::atomically` transaction (one commit), whose events are held
-    //    until it commits — so a mid-write error rolls the host back as a
-    //    whole and emits nothing for it.
-    //
     //    The project list is identical for every host — fetch it once here
     //    rather than re-querying inside `find_project_id_for_path` per session.
     let projects = {
         let s = lock(store)?;
         s.list_projects()?
     };
-    for probe in &probed {
+    let mut set = tokio::task::JoinSet::new();
+    for (host, paths) in hosts.into_iter().filter(|(h, _)| !h.hidden) {
+        let deps = Arc::clone(deps);
+        set.spawn(async move { probe_one_host(host, paths, &deps).await });
+    }
+
+    // 3. Apply each host's result AS ITS PROBE COMPLETES, taking the store
+    //    lock once per host (BE-12), rather than after every host has
+    //    joined: `HOST_PROBE_TIMEOUT` (65 s) is far past the 20 s tick, and
+    //    one wedged host used to hold every other host's rows back for that
+    //    long (perf-logs §3). The write is unchanged — each host's whole
+    //    write (account link, mass-loss marks, boot identity, the
+    //    `apply_host_reconcile_in_tx` burst, PR signals, timeline events,
+    //    conversation rebinds and bg rows) runs in `reconcile_write_one_host`
+    //    under ONE `Store::atomically` transaction, events held until it
+    //    commits, a failed host rolled back alone. Join errors (task panics)
+    //    are logged and skipped — they don't abort the rest of reconcile.
+    while let Some(join) = set.join_next().await {
+        let probe = match join {
+            Ok(probe) => probe,
+            Err(e) => {
+                tracing::error!(error = %e, "[reconcile] probe task panicked");
+                continue;
+            }
+        };
         {
             let mut s = lock(store)?;
             // Per-host isolation: one host's DB write failure (e.g. an FK
@@ -1596,7 +1648,7 @@ pub(crate) async fn reconcile_sessions_with(
             // for every other host. The host's whole write is one
             // transaction, so a failed host rolls back cleanly; we log it
             // and carry on.
-            if let Err(e) = reconcile_write_one_host(&mut s, probe, &projects) {
+            if let Err(e) = reconcile_write_one_host(&mut s, &probe, &projects) {
                 tracing::error!(
                     host = %probe.host.alias,
                     error = %e,
@@ -1850,12 +1902,18 @@ pub async fn reconcile_now(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
 }
 
 /// `hub.local_host` for this pass; a poisoned lock counts as "true" (the
-/// desktop default) so reconcile keeps its old behaviour on error.
+/// desktop default) so reconcile keeps its old behaviour on error. Off, too,
+/// whenever the process has no local host at all
+/// ([`crate::service::hub::local_host_enabled`]): a Windows desktop never
+/// writes the setting, and reading only the setting re-marked its hidden
+/// `local` row reachable and linked the Windows Claude account to it every
+/// pass.
 pub(super) fn local_host(store: &Mutex<Store>) -> bool {
-    store
-        .lock()
-        .map(|s| crate::service::hub::read_local_host(&s))
-        .unwrap_or(true)
+    crate::service::hub::local_host_enabled()
+        && store
+            .lock()
+            .map(|s| crate::service::hub::read_local_host(&s))
+            .unwrap_or(true)
 }
 
 /// Pure interval-guard decision for the background reconcile tick.
@@ -1929,5 +1987,56 @@ pub(super) fn status_candidate(
             Some(crate::service::pane_intel::ClaudeStatus::Blocked)
         }
         _ => None,
+    }
+}
+
+/// A row the tick demoted for staleness (`stale_working_at` set) is not
+/// handed back to `working` by the cached `claude agents` status alone.
+/// Only the pane's own spinner (`Working`) lifts the demotion; a `Blocked`
+/// pane still surfaces; anything else yields `None` so the upsert keeps
+/// the stored `idle`.
+pub(super) fn stale_working_veto(
+    stale: bool,
+    candidate: Option<crate::service::pane_intel::ClaudeStatus>,
+    pane: Option<crate::service::pane_intel::ClaudeStatus>,
+) -> Option<crate::service::pane_intel::ClaudeStatus> {
+    use crate::service::pane_intel::ClaudeStatus;
+    if !stale {
+        return candidate;
+    }
+    match (candidate, pane) {
+        (Some(ClaudeStatus::Working), Some(ClaudeStatus::Working)) => Some(ClaudeStatus::Working),
+        (Some(ClaudeStatus::Working), Some(ClaudeStatus::Blocked)) => Some(ClaudeStatus::Blocked),
+        (Some(ClaudeStatus::Working), _) => None,
+        (other, _) => other,
+    }
+}
+
+/// The tick's stale-`working` sweep: reads `reconcile.stale_working_secs`
+/// and demotes every qualifying row (`Store::age_out_stale_working`).
+/// Best-effort; returns how many rows were demoted.
+pub fn age_out_stale_working(store: &Mutex<Store>) -> usize {
+    let Ok(s) = store.lock() else {
+        return 0;
+    };
+    let secs = crate::service::settings::get_secs(
+        &s,
+        crate::service::settings::RECONCILE_STALE_WORKING_SECS,
+    ) as i64;
+    match s.age_out_stale_working(now_unix(), secs) {
+        Ok(rows) => {
+            for r in &rows {
+                tracing::info!(
+                    host = %r.host_alias,
+                    session = %r.tmux_name,
+                    "[reconcile] stale working demoted to idle"
+                );
+            }
+            rows.len()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "[reconcile] stale-working sweep failed");
+            0
+        }
     }
 }

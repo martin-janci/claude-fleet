@@ -87,6 +87,58 @@ pub enum TrackerCmd {
         /// The tracker's id, from `tracker list`.
         id: i64,
     },
+    /// Asana: set sections' status categories and confirm the section map
+    /// (what Settings → Work's Confirm does). The inferred map is kept
+    /// under your entries; `fleet-hub decide proposals` prints this line
+    /// for the decision model's proposals.
+    SectionMap {
+        /// The tracker's id, from `tracker list`.
+        id: i64,
+        /// NAME=CATEGORY, the category todo, in_progress or done
+        /// (repeatable). The name is matched case-insensitively.
+        #[arg(long = "set", value_name = "NAME=CATEGORY", required = true)]
+        sets: Vec<String>,
+    },
+}
+
+/// `NAME=CATEGORY` → `(name, category)`: split at the last `=`, the name
+/// trimmed and lower-cased, the category one a section map takes.
+fn parse_section_set(raw: &str) -> Result<(String, String), String> {
+    let (name, cat) = raw
+        .rsplit_once('=')
+        .ok_or_else(|| format!("--set {raw:?}: expected NAME=CATEGORY"))?;
+    let name = name.trim().to_lowercase();
+    let cat = cat.trim();
+    if name.is_empty() {
+        return Err(format!("--set {raw:?}: the section name is empty"));
+    }
+    if !matches!(cat, "todo" | "in_progress" | "done") {
+        return Err(format!(
+            "--set {raw:?}: the category is todo, in_progress or done, not {cat:?}"
+        ));
+    }
+    Ok((name, cat.to_string()))
+}
+
+/// The `work_admin update` arguments that confirm `row`'s map with `sets`.
+fn section_map_args(row: &Value, sets: &[String]) -> Result<Value, String> {
+    let row: fleet_core::store::TrackerRow =
+        serde_json::from_value(row.clone()).map_err(|e| format!("read the tracker: {e}"))?;
+    if row.provider != "asana" {
+        return Err(format!(
+            "tracker {} is {}; a section map is an Asana setting",
+            row.id, row.provider
+        ));
+    }
+    let sets = sets
+        .iter()
+        .map(|s| parse_section_set(s))
+        .collect::<Result<Vec<_>, _>>()?;
+    use fleet_core::service::decide::status_map;
+    Ok(status_map::apply_args(
+        &row,
+        &status_map::merged_section_map(&row, &sets),
+    ))
 }
 
 /// Where `set-credential` gets the secret from.
@@ -175,31 +227,6 @@ fn status_line(m: &Value) -> String {
 
 /// The retention half of `status` (work graph M12.3): one line per swept
 /// table, then the last sweep. Nothing for an older hub.
-/// One line per tracker that writes the PR remote link (work graph
-/// M13.4e): its outbox by state, and the newest failure. Nothing from an
-/// older hub.
-fn write_back_lines(w: &Value) -> Vec<String> {
-    w.as_array()
-        .into_iter()
-        .flatten()
-        .map(|c| {
-            let n = |k: &str| c[k].as_i64().unwrap_or_default();
-            let mut line = format!(
-                "tracker {} PR links: {} written, {} pending, {} failed, {} cancelled",
-                n("tracker_id"),
-                n("done"),
-                n("pending"),
-                n("failed"),
-                n("cancelled")
-            );
-            if let Some(e) = c["last_error"].as_str() {
-                line.push_str(&format!(" — {e}"));
-            }
-            line
-        })
-        .collect()
-}
-
 fn retention_lines(r: &Value) -> Vec<String> {
     let Some(tables) = r["tables"].as_array() else {
         return Vec::new();
@@ -227,13 +254,16 @@ fn retention_lines(r: &Value) -> Vec<String> {
     out.push(if s.is_null() {
         "retention: no sweep since the hub started keeping a record".to_string()
     } else {
+        let outbox = match s["tracker_writes"].as_u64().unwrap_or_default() {
+            0 => String::new(),
+            n => format!(", {n} PR links"),
+        };
         format!(
-            "retention: last sweep {} deleted {} journal, {} tickets, {} events, {} tracker writes",
+            "retention: last sweep {} deleted {} journal, {} tickets, {} events{outbox}",
             fmt_time(s["at"].as_i64()),
             s["journal"].as_u64().unwrap_or_default(),
             s["tracker_items"].as_u64().unwrap_or_default(),
             s["timeline_work_events"].as_u64().unwrap_or_default(),
-            s["write_outbox"].as_u64().unwrap_or_default(),
         )
     });
     out
@@ -408,9 +438,6 @@ pub async fn run(
             for l in retention_lines(&v["retention"]) {
                 out::line(&l);
             }
-            for l in write_back_lines(&v["write_back"]) {
-                out::line(&l);
-            }
         }
         TrackerCmd::Remove { id } => {
             call_tool(
@@ -422,6 +449,28 @@ pub async fn run(
             out::line(&format!(
                 "removed tracker {id}; its items stay, marked unavailable"
             ));
+        }
+        TrackerCmd::SectionMap { id, sets } => {
+            let v = call_tool(&conn, "work_admin", json!({ "action": "list" })).await?;
+            let row = v
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|t| t["id"].as_i64() == Some(id))
+                .ok_or_else(|| format!("no tracker {id}; see `fleet-hub tracker list`"))?;
+            let args = section_map_args(row, &sets)?;
+            let t = call_tool(&conn, "work_admin", args).await?;
+            out::line(&tracker_line(&t));
+            let map = t["settings"]["section_map"]
+                .as_object()
+                .map(|m| {
+                    m.iter()
+                        .map(|(k, v)| format!("{k:?}={}", v.as_str().unwrap_or("?")))
+                        .collect::<Vec<_>>()
+                        .join("  ")
+                })
+                .unwrap_or_default();
+            out::line(&format!("section map confirmed: {map}"));
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -521,22 +570,6 @@ mod tests {
             "h"
         ])
         .is_ok());
-    }
-
-    #[test]
-    fn write_back_lines_say_what_the_outbox_holds() {
-        assert!(write_back_lines(&Value::Null).is_empty(), "an older hub");
-        assert_eq!(
-            write_back_lines(&json!([
-                {"tracker_id": 2, "done": 3, "pending": 1, "failed": 0, "cancelled": 0},
-                {"tracker_id": 4, "done": 0, "pending": 0, "failed": 1, "cancelled": 2,
-                 "last_error": "not permitted: 403"},
-            ])),
-            [
-                "tracker 2 PR links: 3 written, 1 pending, 0 failed, 0 cancelled",
-                "tracker 4 PR links: 0 written, 0 pending, 1 failed, 2 cancelled — not permitted: 403",
-            ]
-        );
     }
 
     #[test]
@@ -645,5 +678,48 @@ mod tests {
         assert!(line.contains("me@x.com"));
         let none = tracker_line(&json!({"id": 1, "state": "unconfigured"}));
         assert!(none.contains("no credential"));
+    }
+
+    #[test]
+    fn section_map_sets_keep_the_inferred_map_under_yours_and_confirm_it() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct T {
+            #[command(subcommand)]
+            cmd: TrackerCmd,
+        }
+        assert_eq!(
+            parse_section_set(" Ideas = todo").unwrap(),
+            ("ideas".to_string(), "todo".to_string())
+        );
+        assert_eq!(parse_section_set("a=b=done").unwrap().0, "a=b");
+        assert!(parse_section_set("ideas").is_err());
+        assert!(parse_section_set("=todo").is_err());
+        assert!(parse_section_set("ideas=not_planned").is_err());
+        let row = json!({
+            "id": 4, "provider": "asana", "name": "B",
+            "site_url": "https://app.asana.com", "state": "ok", "created_at": 1,
+            "config": { "section_map": { "doing": "in_progress", "done": "done" } },
+        });
+        let a = section_map_args(&row, &["Parked=done".into(), "doing=todo".into()]).unwrap();
+        assert_eq!(
+            a,
+            json!({
+                "action": "update", "tracker_id": 4,
+                "settings": {
+                    "section_map": { "doing": "todo", "done": "done", "parked": "done" },
+                    "section_map_confirmed": true,
+                },
+            })
+        );
+        let mut jira = row.clone();
+        jira["provider"] = json!("jira");
+        assert!(section_map_args(&jira, &["a=todo".into()]).is_err());
+        let T { cmd } = T::try_parse_from(["t", "section-map", "4", "--set", "x=done"]).unwrap();
+        assert!(matches!(cmd, TrackerCmd::SectionMap { id: 4, sets } if sets == ["x=done"]));
+        assert!(
+            T::try_parse_from(["t", "section-map", "4"]).is_err(),
+            "--set is required"
+        );
     }
 }

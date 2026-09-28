@@ -425,6 +425,77 @@ fn spawn_on(
     }
 }
 
+/// D34: the caller decides whose start it is. A person's start links
+/// `started` (and so may write back the PR link); an agent's start (a
+/// per-host token, the operator) links `agent_started`: the same start,
+/// but no tracker write, and the usage summary never reads it as a
+/// person's.
+#[tokio::test]
+async fn an_agents_start_is_recorded_as_the_agents_and_never_writes_back() {
+    use crate::service::work::{start_args_as, WorkLinkArgs};
+    use crate::store::{Decider, TrackerSettings, WriteBack};
+    const PR: &str = "https://github.com/acme/app/pull/7";
+    for (decider, source, queued) in [
+        (Decider::Person, "started", 1),
+        (Decider::Agent, "agent_started", 0),
+    ] {
+        let fx = Fx::new();
+        {
+            let s = fx.store.lock().unwrap();
+            let t = s.list_trackers().unwrap()[0].id;
+            s.set_tracker_settings(
+                t,
+                &TrackerSettings {
+                    write_back: WriteBack {
+                        pr_remote_link: true,
+                    },
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        // The MCP tool's start arguments carry the caller's decider.
+        let args = StartArgs {
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            ..start_args_as(
+                &WorkLinkArgs {
+                    action: "start".into(),
+                    key: Some("ABC-1".into()),
+                    ..Default::default()
+                },
+                decider,
+            )
+        };
+        assert_eq!(args.decider, decider);
+        let plan = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
+            .await
+            .unwrap();
+        let (row, _) = start_with(&fx.store, &plan, None, &OrgScope::All, spawn_on(&fx.store))
+            .await
+            .unwrap();
+        let w = row.work.expect("linked");
+        assert_eq!(
+            (w.key.as_deref(), w.source.as_str()),
+            (Some("ABC-1"), source),
+            "{decider:?}"
+        );
+        let s = fx.store.lock().unwrap();
+        assert_eq!(
+            crate::service::trackers::write_back::on_pr(&s, row.id, PR).unwrap(),
+            queued,
+            "{decider:?}"
+        );
+        let now = crate::service::catalog::now_secs();
+        let u = crate::service::work::usage::usage(&s, 1, now, &|_| Vec::new()).unwrap();
+        assert_eq!(
+            u.links.by_source.keys().collect::<Vec<_>>(),
+            vec![source],
+            "{decider:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn start_resolves_project_and_host_from_past_work_and_links_started() {
     let fx = Fx::new();
@@ -1628,4 +1699,263 @@ fn multi_start_arguments_are_checked_on_their_own() {
     let mut eight: Vec<i64> = (1..=8).collect();
     eight.push(1);
     assert_eq!(multi_start_ids(None, &eight).unwrap().len(), 8);
+}
+
+// --- the start race (work graph M14.1a) ---------------------------------------
+
+/// A plan for `key` on host A in the fixture's project.
+async fn plan_for(fx: &Fx, key: &str) -> StartPlan {
+    plan_start(
+        &fx.store,
+        &StartArgs {
+            reference: Some(key.into()),
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        },
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap()
+}
+
+/// A spawn that makes session `name`, counted in `n`, once `gate` opens.
+fn parked(
+    store: &Arc<Mutex<Store>>,
+    name: &'static str,
+    n: Arc<std::sync::atomic::AtomicUsize>,
+    gate: tokio::sync::oneshot::Receiver<()>,
+) -> impl FnOnce(
+    crate::service::sessions::NewSessionArgs,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<SessionRow, IpcError>>>> {
+    let store = Arc::clone(store);
+    move |a| {
+        n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async move {
+            // Parked mid-spawn (the SSH round trip) until the test says so.
+            gate.await.unwrap();
+            let s = store.lock().unwrap();
+            let id = s
+                .upsert_session(name, &a.host_alias, None, None, 1, 1, "running", None)
+                .unwrap();
+            Ok(s.get_session_by_id(id).unwrap().unwrap())
+        })
+    }
+}
+
+/// Two devices start one ticket at once: both pass `plan_start`, but the
+/// second is refused while the first spawns — one spawn, one session, one
+/// `E_EXISTS` — instead of spawning a session that loses at the link.
+#[tokio::test]
+async fn two_concurrent_starts_of_one_key_spawn_once() {
+    let fx = Fx::new();
+    let plan = plan_for(&fx, "ABC-1").await;
+    let again = plan_for(&fx, "ABC-1").await;
+    let spawns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let first = start_with(
+        &fx.store,
+        &plan,
+        None,
+        &OrgScope::All,
+        parked(&fx.store, "first", Arc::clone(&spawns), rx),
+    );
+    let second = async {
+        // Let the first reach its spawn before the second starts.
+        while spawns.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        let e = start_with(&fx.store, &again, None, &OrgScope::All, |_| async {
+            panic!("the second start never spawns")
+        })
+        .await
+        .unwrap_err();
+        tx.send(()).unwrap();
+        e
+    };
+    let (first, e) = tokio::join!(first, second);
+    assert_eq!(e.code, codes::E_EXISTS, "{}", e.message);
+    assert!(e.message.contains("started or resumed"), "{}", e.message);
+    let (row, _) = first.expect("the first start completes");
+    assert_eq!(row.tmux_name, "first");
+    assert_eq!(row.work.unwrap().source, "started");
+    assert_eq!(spawns.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let live = fx
+        .store
+        .lock()
+        .unwrap()
+        .live_work_sessions_for_key("ABC-1")
+        .unwrap();
+    assert_eq!(live.len(), 1, "one session for the key");
+}
+
+/// A start planned before another start of the key claimed, linked and
+/// released is refused before its spawn, not after it.
+#[tokio::test]
+async fn a_start_planned_before_a_finished_start_does_not_spawn() {
+    let fx = Fx::new();
+    let stale = plan_for(&fx, "ABC-1").await;
+    let plan = plan_for(&fx, "ABC-1").await;
+    let (row, _) = start_with(&fx.store, &plan, None, &OrgScope::All, spawn_on(&fx.store))
+        .await
+        .unwrap();
+    let e = start_with(&fx.store, &stale, None, &OrgScope::All, |_| async {
+        panic!("a stale plan never spawns")
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS);
+    assert_eq!(e.details.unwrap()["session_id"], row.id);
+}
+
+/// The claim is released on an error (here the spawn's), so a retry of
+/// the same key starts.
+#[tokio::test]
+async fn a_failed_start_releases_its_claim() {
+    let fx = Fx::new();
+    let plan = plan_for(&fx, "ABC-1").await;
+    let e = start_with(&fx.store, &plan, None, &OrgScope::All, |_| async {
+        Err(IpcError::new(codes::E_SSH, "host unreachable"))
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_SSH);
+    let (row, _) = start_with(&fx.store, &plan, None, &OrgScope::All, spawn_on(&fx.store))
+        .await
+        .expect("the retry is not refused as busy");
+    assert_eq!(row.work.unwrap().key.as_deref(), Some("ABC-1"));
+}
+
+/// A start dropped mid-spawn (the caller cancelled) releases its claim too.
+#[tokio::test]
+async fn a_cancelled_start_releases_its_claim() {
+    let fx = Fx::new();
+    let plan = plan_for(&fx, "ABC-1").await;
+    let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let spawns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let parked_start = start_with(
+        &fx.store,
+        &plan,
+        None,
+        &OrgScope::All,
+        parked(&fx.store, "never", Arc::clone(&spawns), rx),
+    );
+    tokio::select! {
+        _ = parked_start => panic!("the gate never opens"),
+        _ = async {
+            while spawns.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        } => {}
+    }
+    start_with(&fx.store, &plan, None, &OrgScope::All, spawn_on(&fx.store))
+        .await
+        .expect("the dropped start's claim is gone");
+}
+
+/// Starts of different keys do not fence each other.
+#[tokio::test]
+async fn starts_of_different_keys_run_concurrently() {
+    let fx = Fx::new();
+    let one = plan_for(&fx, "ABC-1").await;
+    let three = plan_for(&fx, "ABC-3").await;
+    let spawns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let first = start_with(
+        &fx.store,
+        &one,
+        None,
+        &OrgScope::All,
+        parked(&fx.store, "one", Arc::clone(&spawns), rx),
+    );
+    let second = async {
+        while spawns.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        // ABC-1 is still mid-spawn: ABC-3 starts all the same.
+        let store = Arc::clone(&fx.store);
+        let r = start_with(&fx.store, &three, None, &OrgScope::All, move |a| {
+            let s = store.lock().unwrap();
+            let id = s
+                .upsert_session("three", &a.host_alias, None, None, 1, 1, "running", None)
+                .unwrap();
+            std::future::ready(Ok(s.get_session_by_id(id).unwrap().unwrap()))
+        })
+        .await;
+        tx.send(()).unwrap();
+        r
+    };
+    let (a, b) = tokio::join!(first, second);
+    assert_eq!(a.unwrap().0.tmux_name, "one");
+    assert_eq!(b.expect("another key is not busy").0.tmux_name, "three");
+}
+
+/// A multi-repo start holds the key for the whole batch: a start (or
+/// resume) of it meanwhile is refused, and it is free again afterwards.
+#[tokio::test]
+async fn a_multi_repo_start_holds_the_key_for_the_batch() {
+    let fx = Fx::new();
+    let pid2 = fx
+        .store
+        .lock()
+        .unwrap()
+        .upsert_project("acme", "web", "/p/acme/web")
+        .unwrap();
+    let args = StartArgs {
+        reference: Some("ABC-3".into()),
+        host_alias: Some("hosta".into()),
+        ..Default::default()
+    };
+    // While another start holds the key, the whole batch is refused.
+    let held = InFlight::claim(&fx.store.lock().unwrap(), "ABC-3").unwrap();
+    let e = many(&fx, &args, &[fx.pid, pid2], &OrgScope::All, |_| async {
+        panic!("a refused batch never spawns")
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS, "{}", e.message);
+    drop(held);
+    let busy = Arc::new(Mutex::new(Vec::new()));
+    let (b, store) = (Arc::clone(&busy), Arc::clone(&fx.store));
+    let mut n = 0;
+    let (out, _) = many(&fx, &args, &[fx.pid, pid2], &OrgScope::All, move |a| {
+        let s = store.lock().unwrap();
+        // Mid-batch, before each sibling's spawn: the key is held.
+        b.lock().unwrap().push(
+            InFlight::claim(&s, "abc-3")
+                .map(drop)
+                .map_err(|e| e.code.to_string()),
+        );
+        n += 1;
+        let id = s
+            .upsert_session(
+                &format!("sib-{n}"),
+                &a.host_alias,
+                Some(a.project_id),
+                None,
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        std::future::ready(Ok(s.get_session_by_id(id).unwrap().unwrap()))
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        out.started.len(),
+        2,
+        "distinct projects both start: {out:?}"
+    );
+    assert_eq!(
+        *busy.lock().unwrap(),
+        vec![
+            Err(codes::E_EXISTS.to_string()),
+            Err(codes::E_EXISTS.to_string())
+        ]
+    );
+    let s = fx.store.lock().unwrap();
+    InFlight::claim(&s, "ABC-3").expect("released once the batch ends");
 }

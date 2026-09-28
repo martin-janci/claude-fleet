@@ -59,6 +59,10 @@ pub struct Spec {
 
 // ── keys ──
 pub const RECONCILE_INTERVAL_SECS: &str = "reconcile.interval_secs";
+/// A `working` row with no hook, no turn, no transcript growth and no pane
+/// output for this long is demoted to `idle` by the tick (lifecycle F2).
+/// `0` turns the rule off.
+pub const RECONCILE_STALE_WORKING_SECS: &str = "reconcile.stale_working_secs";
 /// How long a resumable mass-loss row (`lost_reason` `host_reboot` /
 /// `tmux_server_gone`, with a `claude_session_id`, any kind but `external`)
 /// is kept before Phase 2
@@ -75,11 +79,19 @@ pub const RESTORE_BATCH_SIZE: &str = "restore.batch_size";
 pub const RESTORE_STAGGER_MS: &str = "restore.stagger_ms";
 pub const PLAYBOOK_PRESS_ENTER: &str = "playbooks.press_enter";
 pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
+/// Recreates the `oom` playbook may run on one session per 24 h
+/// (`service::playbooks::OOM_ATTEMPT_WINDOW_SECS`). `0` refuses every
+/// recreate while keeping the refusals on the timeline.
+pub const PLAYBOOK_OOM_MAX_ATTEMPTS: &str = "playbooks.oom_max_attempts";
 pub const GC_ENABLED: &str = "gc.enabled";
 pub const GC_BG_IDLE_SECS: &str = "gc.bg_idle_secs";
 pub const GC_SHELL_IDLE_SECS: &str = "gc.shell_idle_secs";
 pub const GC_WORK_IDLE_SECS: &str = "gc.work_idle_secs";
 pub const GC_SWEEP_INTERVAL_SECS: &str = "gc.sweep_interval_secs";
+/// How long a lost `external` row (a Claude fleet only observes, never
+/// resumable) is kept before Phase 2 deletes it — long enough for the
+/// desktop that owns it to restart, no longer. `0` reaps it on the next pass.
+pub const GC_EXTERNAL_LOST_TTL_SECS: &str = "gc.external_lost_ttl_secs";
 /// Opt-in reconcile-tick repair: re-adds deleted worktrees without anyone
 /// opening them. Dropping a stale entry first (tick or click) always needs
 /// the vanished-directory guard, including the parent fingerprint match.
@@ -162,6 +174,12 @@ pub const REPORTS_MAX_ROWS: &str = "reports.max_rows";
 /// Rows older than this are swept on the tick; `0` disables the age sweep.
 pub const REPORTS_MAX_AGE_SECS: &str = "reports.max_age_secs";
 
+/// Percent of the context window at or past which a session counts as
+/// `context_red` in `fleet_health`, reads `context_full` in
+/// `needs_attention`, and draws red on the desktop. One number for all
+/// three (ux F-09: the hub said 85 while the desktop said 70/90).
+pub const HEALTH_CONTEXT_RED_PCT: &str = "health.context_red_pct";
+
 /// Retention (work graph M12.3, `store::work_retention`): days a work
 /// journal row is kept once nothing live points at it. `0` keeps forever.
 pub const WORK_RETENTION_JOURNAL_DAYS: &str = "work.retention.journal_days";
@@ -171,10 +189,6 @@ pub const WORK_RETENTION_TRACKER_ITEMS_DAYS: &str = "work.retention.tracker_item
 /// kept; the newest of each kind per session always stays. `0` forever.
 pub const WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS: &str =
     "work.retention.timeline_work_events_days";
-/// Retention (work graph M13.4e): days a settled tracker write (the PR
-/// remote link: written, given up or cancelled) is kept once its link is
-/// gone or ended. Pending writes always stay. `0` forever.
-pub const WORK_RETENTION_WRITE_OUTBOX_DAYS: &str = "work.retention.write_outbox_days";
 /// M2's journal window, superseded by [`WORK_RETENTION_JOURNAL_DAYS`] and no
 /// longer writable. While the new key is unset, a stored `0` still keeps
 /// forever and a longer window still stands (`service::work::retention`).
@@ -205,6 +219,12 @@ pub const WORK_SESSION_START_CONTEXT: &str = "work.session_start_context";
 /// (`work_link { source: agent_inferred }` — only ever a suggestion). Off by
 /// default: it spends context on a guess. Read on every prompt.
 pub const WORK_CLASSIFY_NUDGE: &str = "work.classify_nudge";
+/// The model a dead session's on-demand summary runs on (work graph M13.4c,
+/// decisions D10 / D27), on the session's own host and account. A choice of
+/// Claude Code's model aliases, never free text: it ends up in a command.
+pub const WORK_SUMMARY_MODEL: &str = "work.summary_model";
+/// The aliases [`WORK_SUMMARY_MODEL`] accepts.
+pub const SUMMARY_MODELS: &[&str] = &["haiku", "sonnet", "opus"];
 
 /// Tidy-up (work graph M7): a session whose linked item has been done at
 /// least this many days (and that is idle, below) is suggested for tidying.
@@ -227,11 +247,45 @@ pub const WORK_AUTO_TIDY_REASONS: &str = "work.auto_tidy_reasons";
 /// never killed, so neither is automatic.
 pub const AUTO_TIDY_REASONS: &[&str] = &["done_idle", "pr_merged_idle", "not_planned"];
 
+// ── decisions (Jev evaluation, D35-D37; `service::decide`) ──
+/// The kill switch: with it off no decision-model call is ever made. Off by
+/// default; the Settings dialog's "Decisions (Jev)" toggle.
+pub const DECIDE_JEV_ENABLED: &str = "decide.jev.enabled";
+/// `status_map`'s mode (Asana section → status category proposals).
+pub const DECIDE_JEV_STATUS_MAP: &str = "decide.jev.status_map";
+/// `work_link`'s mode (choosing a work item for an unlinked session).
+pub const DECIDE_JEV_WORK_LINK: &str = "decide.jev.work_link";
+/// What a feature's mode may be. `auto` is not offered: no feature has
+/// passed acceptance (D36).
+pub const DECIDE_MODES: &[&str] = &["off", "shadow", "assist"];
+/// Sessions and items with no org may be sent too (D31). Off by default.
+pub const DECIDE_JEV_UNASSIGNED: &str = "decide.jev.unassigned";
+/// One call's whole budget, in milliseconds.
+pub const DECIDE_JEV_TIMEOUT_MS: &str = "decide.jev.timeout_ms";
+/// Consecutive failed calls that open the circuit breaker.
+pub const DECIDE_JEV_BREAKER_FAILURES: &str = "decide.jev.breaker_failures";
+/// How long an open breaker refuses calls, in seconds.
+pub const DECIDE_JEV_BREAKER_OPEN_SECS: &str = "decide.jev.breaker_open_secs";
+/// Input tokens the decision model may be sent per UTC day (`0` = none).
+pub const DECIDE_JEV_DAILY_TOKEN_BUDGET: &str = "decide.jev.daily_token_budget";
+/// The model version a request names. Pinned by default: TypeSafe advises
+/// pinning when thresholds are tuned against a version.
+pub const DECIDE_JEV_MODEL: &str = "decide.jev.model";
+/// What [`DECIDE_JEV_MODEL`] may be (never free text: it goes on the wire).
+pub const DECIDE_JEV_MODELS: &[&str] = &["jev-1.13.0", "jev-latest"];
+/// Days a `decision_runs` row is kept (`0` = forever).
+pub const DECIDE_RETENTION_DAYS: &str = "decide.retention_days";
+
 /// Every editable setting. Order is the display order.
 pub const SPECS: &[Spec] = &[
     Spec {
         key: RECONCILE_INTERVAL_SECS,
         default: "20",
+        kind: Kind::Secs,
+    },
+    Spec {
+        key: RECONCILE_STALE_WORKING_SECS,
+        default: "1800",
         kind: Kind::Secs,
     },
     Spec {
@@ -260,6 +314,11 @@ pub const SPECS: &[Spec] = &[
         kind: Kind::Bool,
     },
     Spec {
+        key: PLAYBOOK_OOM_MAX_ATTEMPTS,
+        default: "2",
+        kind: Kind::Int { min: 0, max: 20 },
+    },
+    Spec {
         key: GC_ENABLED,
         default: "false",
         kind: Kind::Bool,
@@ -282,6 +341,11 @@ pub const SPECS: &[Spec] = &[
     Spec {
         key: GC_SWEEP_INTERVAL_SECS,
         default: "300",
+        kind: Kind::Secs,
+    },
+    Spec {
+        key: GC_EXTERNAL_LOST_TTL_SECS,
+        default: "3600",
         kind: Kind::Secs,
     },
     Spec {
@@ -386,6 +450,11 @@ pub const SPECS: &[Spec] = &[
         kind: Kind::Secs,
     },
     Spec {
+        key: HEALTH_CONTEXT_RED_PCT,
+        default: "85",
+        kind: Kind::Int { min: 1, max: 100 },
+    },
+    Spec {
         key: WORK_RETENTION_JOURNAL_DAYS,
         default: "365",
         kind: Kind::Int { min: 0, max: 3650 },
@@ -398,11 +467,6 @@ pub const SPECS: &[Spec] = &[
     Spec {
         key: WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS,
         default: "180",
-        kind: Kind::Int { min: 0, max: 3650 },
-    },
-    Spec {
-        key: WORK_RETENTION_WRITE_OUTBOX_DAYS,
-        default: "90",
         kind: Kind::Int { min: 0, max: 3650 },
     },
     Spec {
@@ -436,6 +500,11 @@ pub const SPECS: &[Spec] = &[
         kind: Kind::Bool,
     },
     Spec {
+        key: WORK_SUMMARY_MODEL,
+        default: "haiku",
+        kind: Kind::Choice(SUMMARY_MODELS),
+    },
+    Spec {
         key: WORK_TIDY_DONE_DAYS,
         default: "2",
         kind: Kind::Int { min: 1, max: 365 },
@@ -459,6 +528,65 @@ pub const SPECS: &[Spec] = &[
         key: WORK_AUTO_TIDY_REASONS,
         default: "done_idle,pr_merged_idle",
         kind: Kind::ChoiceSet(AUTO_TIDY_REASONS),
+    },
+    Spec {
+        key: DECIDE_JEV_ENABLED,
+        default: "false",
+        kind: Kind::Bool,
+    },
+    Spec {
+        key: DECIDE_JEV_STATUS_MAP,
+        default: "off",
+        kind: Kind::Choice(DECIDE_MODES),
+    },
+    Spec {
+        key: DECIDE_JEV_WORK_LINK,
+        default: "off",
+        kind: Kind::Choice(DECIDE_MODES),
+    },
+    Spec {
+        key: DECIDE_JEV_UNASSIGNED,
+        default: "false",
+        kind: Kind::Bool,
+    },
+    Spec {
+        key: DECIDE_JEV_TIMEOUT_MS,
+        default: "1500",
+        kind: Kind::Int {
+            min: 100,
+            max: 30_000,
+        },
+    },
+    Spec {
+        key: DECIDE_JEV_BREAKER_FAILURES,
+        default: "5",
+        kind: Kind::Int { min: 1, max: 100 },
+    },
+    Spec {
+        key: DECIDE_JEV_BREAKER_OPEN_SECS,
+        default: "300",
+        kind: Kind::Int {
+            min: 10,
+            max: 86_400,
+        },
+    },
+    Spec {
+        key: DECIDE_JEV_DAILY_TOKEN_BUDGET,
+        default: "2000000",
+        kind: Kind::Int {
+            min: 0,
+            max: 1_000_000_000,
+        },
+    },
+    Spec {
+        key: DECIDE_JEV_MODEL,
+        default: "jev-1.13.0",
+        kind: Kind::Choice(DECIDE_JEV_MODELS),
+    },
+    Spec {
+        key: DECIDE_RETENTION_DAYS,
+        default: "90",
+        kind: Kind::Int { min: 0, max: 3650 },
     },
 ];
 
@@ -786,7 +914,6 @@ mod tests {
             (WORK_RETENTION_JOURNAL_DAYS, "365"),
             (WORK_RETENTION_TRACKER_ITEMS_DAYS, "180"),
             (WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS, "180"),
-            (WORK_RETENTION_WRITE_OUTBOX_DAYS, "90"),
         ] {
             assert_eq!(resolve(key, None), default, "{key}");
             for ok in ["0", "1", "3650"] {
@@ -1118,6 +1245,65 @@ mod tests {
         }
         assert!(validate(REPAIR_TICK_INTERVAL_SECS, &MAX_SECS.to_string()).is_ok());
         assert_eq!(resolve(REPAIR_TICK_INTERVAL_SECS, Some("0")), "600");
+    }
+
+    #[test]
+    fn decide_settings_default_to_off() {
+        assert_eq!(resolve(DECIDE_JEV_ENABLED, None), "false");
+        assert_eq!(resolve(DECIDE_JEV_UNASSIGNED, None), "false");
+        assert_eq!(resolve(DECIDE_JEV_STATUS_MAP, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_WORK_LINK, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_MODEL, None), "jev-1.13.0");
+        assert_eq!(resolve(DECIDE_RETENTION_DAYS, None), "90");
+        // `auto` is not offered yet (D36), nor is a free-text model.
+        assert!(validate(DECIDE_JEV_WORK_LINK, "auto").is_err());
+        assert!(validate(DECIDE_JEV_STATUS_MAP, "shadow").is_ok());
+        assert!(validate(DECIDE_JEV_MODEL, "jev-9; rm -rf").is_err());
+        assert!(validate(DECIDE_JEV_TIMEOUT_MS, "50").is_err());
+        assert!(validate(DECIDE_JEV_DAILY_TOKEN_BUDGET, "0").is_ok());
+    }
+
+    /// The decisions guide (`docs/decisions.md`): its settings table names
+    /// every registered `decide.*` setting with its default, and nothing
+    /// else, like [`work_settings_are_in_the_user_guide`].
+    #[test]
+    fn decide_settings_are_in_the_user_guide() {
+        const GUIDE: &str = include_str!("../../../../docs/decisions.md");
+        let rows: BTreeMap<&str, &str> = GUIDE
+            .lines()
+            .filter_map(|l| {
+                let rest = l.strip_prefix("| `decide.")?;
+                let key_len = rest.find('`')?;
+                Some((&l[3..3 + "decide.".len() + key_len], l))
+            })
+            .collect();
+        let specs: Vec<&Spec> = SPECS
+            .iter()
+            .filter(|s| s.key.starts_with("decide."))
+            .collect();
+        assert!(!specs.is_empty(), "no decide.* settings registered");
+        for spec in &specs {
+            let row = rows.get(spec.key).unwrap_or_else(|| {
+                panic!(
+                    "docs/decisions.md → Settings has no row for `{}` (default `{}`); add one",
+                    spec.key, spec.default
+                )
+            });
+            let cells: Vec<&str> = row.split('|').map(str::trim).collect();
+            assert_eq!(
+                cells.get(2).copied(),
+                Some(format!("`{}`", spec.default).as_str()),
+                "docs/decisions.md: the default of `{}` is `{}` in code",
+                spec.key,
+                spec.default
+            );
+        }
+        for key in rows.keys() {
+            assert!(
+                specs.iter().any(|s| s.key == *key),
+                "docs/decisions.md lists `{key}`, which is not a registered setting"
+            );
+        }
     }
 
     /// The user guide (`docs/work-graph.md`), compiled in like

@@ -93,6 +93,17 @@ pub struct TrackerConfig {
     /// confirms goes to `TrackerSettings::section_map`, which wins.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub section_map: std::collections::BTreeMap<String, String>,
+    /// Asana: the section names (lower case, trimmed, deduplicated, at most
+    /// `asana::MAX_UNMAPPED_SECTIONS`) the keyword rule could NOT classify —
+    /// today's `todo`. What the `status_map` decision adapter may propose a
+    /// category for (docs/decisions.md). Older rows parse without it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmapped_sections: Vec<String>,
+    /// Asana: each project's section names in board order (lower case),
+    /// as `(project gid, names)`, at most `asana::MAX_SECTIONS_PER_PROJECT`
+    /// per project. A section's position is a strong hint of its stage.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_sections: Vec<(String, Vec<String>)>,
 }
 
 /// What the ADMIN set for a tracker (migration 050, work graph M6), kept
@@ -124,17 +135,27 @@ pub struct TrackerSettings {
     /// [`validate_ghes_hostname`]; its host part is always the site URL's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
-    /// Jira Cloud / Data Center (work graph M13.4e, decision D3): add a
-    /// remote link to the ticket when a session linked to it by a person
-    /// (`manual` / `started`) has a pull request. Off by default; the only
-    /// write fleet ever makes to a tracker, and it needs a token that may
-    /// write.
+    /// Write-back (work graph M13.4e, decision D3 / D29): what fleet may
+    /// write to this tracker. Off unless an admin turns it on; Jira only.
+    #[serde(default, skip_serializing_if = "WriteBack::is_off")]
+    pub write_back: WriteBack,
+}
+
+/// The write-back operations a tracker allows (work graph M13.4e). Every
+/// one is off by default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriteBack {
+    /// Add the pull request of a session a person linked (`manual` /
+    /// `started`) to the item as a remote link, once per PR.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pr_remote_link: bool,
 }
 
-/// The providers that take the PR remote link (M13.4e).
-pub const REMOTE_LINK_PROVIDERS: &[&str] = &["jira", "jira_dc"];
+impl WriteBack {
+    pub fn is_off(&self) -> bool {
+        !self.pr_remote_link
+    }
+}
 
 impl TrackerSettings {
     pub fn is_default(&self) -> bool {
@@ -699,11 +720,11 @@ pub fn validate_tracker_settings(
             "extra_ca and allow_private_network are Jira Data Center settings".into(),
         ));
     }
-    if s.pr_remote_link && !REMOTE_LINK_PROVIDERS.contains(&provider) {
-        return Err(bad(format!(
-            "pr_remote_link is not supported for {provider} trackers: only Jira Cloud and \
-             Jira Data Center take the PR remote link"
-        )));
+    if !s.write_back.is_off() && !matches!(provider, "jira" | "jira_dc") {
+        return Err(bad(
+            "write_back is a Jira setting: only Jira Cloud and Data Center accept a PR remote link"
+                .into(),
+        ));
     }
     if let Some(h) = &s.hostname {
         if provider != "github" {
@@ -750,7 +771,9 @@ pub fn is_allowed_tracker_host(host: &str) -> bool {
 }
 
 /// Validate a credential reference: `env:NAME` (`[A-Za-z_][A-Za-z0-9_]*`) or
-/// `file:/absolute/path` (no `..`, no control characters).
+/// `file:/absolute/path` (no `..`, no control characters). Absolute by this
+/// machine's rules: the file is read here, so on a Windows desktop that is
+/// `file:C:\\…`.
 pub fn validate_credential_ref(r: &str) -> Result<(), IpcError> {
     let bad = |why: &str| {
         IpcError::new(
@@ -769,8 +792,14 @@ pub fn validate_credential_ref(r: &str) -> Result<(), IpcError> {
         return Ok(());
     }
     if let Some(path) = r.strip_prefix("file:") {
-        if !path.starts_with('/')
-            || path.split('/').any(|c| c == "..")
+        let p = std::path::Path::new(path);
+        // A Windows UNC path (`\\server\share`) is absolute too, but
+        // reading it opens an SMB session that hands the server the user's
+        // NTLM credentials. A credential file is local.
+        let unc = cfg!(windows) && (path.starts_with("\\\\") || path.starts_with("//"));
+        if unc
+            || !p.is_absolute()
+            || p.components().any(|c| c == std::path::Component::ParentDir)
             || path.chars().any(char::is_control)
         {
             return Err(bad("must name an absolute path without .."));
@@ -783,14 +812,14 @@ pub fn validate_credential_ref(r: &str) -> Result<(), IpcError> {
 /// Read a credential reference. `None` when it cannot be read (unset
 /// variable, missing file, empty value); the reason is logged without the
 /// value.
-fn read_credential_ref(r: &str) -> Option<String> {
+pub(super) fn read_credential_ref(r: &str) -> Option<String> {
     let value = if let Some(name) = r.strip_prefix("env:") {
         std::env::var(name).ok()
     } else if let Some(path) = r.strip_prefix("file:") {
         match std::fs::read_to_string(path) {
             Ok(v) => Some(v),
             Err(e) => {
-                tracing::warn!("tracker credential file {path} unreadable: {}", e.kind());
+                tracing::warn!("credential file {path} unreadable: {}", e.kind());
                 None
             }
         }
@@ -1009,6 +1038,10 @@ impl Store {
                 rusqlite::params![id],
             )?;
             tx.execute(
+                "DELETE FROM tracker_writes WHERE tracker_id = ?1",
+                rusqlite::params![id],
+            )?;
+            tx.execute(
                 "UPDATE work_items SET unavailable_at = COALESCE(unavailable_at, ?2), \
                         unavailable_reason = 'tracker_removed' WHERE tracker_id = ?1",
                 rusqlite::params![id, now_unix()],
@@ -1151,20 +1184,6 @@ impl Store {
             }
         }
         Ok(out)
-    }
-
-    /// `e` as a tracker error may be stored: redacted by pattern and of
-    /// tracker `id`'s own credential literals, capped (the write outbox's
-    /// `last_error`, M13.4e — the same masking as `last_error` here).
-    pub fn mask_tracker_error(&self, id: i64, e: &str) -> Result<String, IpcError> {
-        let secrets = self
-            .resolve_tracker_credential(id)?
-            .map(|c| c.literals())
-            .unwrap_or_default();
-        Ok(crate::logging::redact_secrets(e, &secrets)
-            .chars()
-            .take(LAST_ERROR_MAX_CHARS)
-            .collect())
     }
 
     /// Record a tracker's state and error (redacted, capped). `true` when

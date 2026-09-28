@@ -20,7 +20,7 @@
 //! | 8 | recognise | keys, URLs, repo-relative `#n` per caps |
 //! | 9 | errors | 401, 403 on one view, 429 + Retry-After, offline, garbage |
 //! | 10 | no secret | in any `Debug`, request line, snapshot or error |
-//! | 11 | write (M13.4e) | without `caps.write`: refused, nothing sent; with it: one remote link by `globalId`, no secret in the body |
+//! | 11 | write | only a `caps.write` provider writes: one idempotent PR remote link, 429 / 403 mapped, a bad key sends nothing |
 //!
 //! **Snapshot golden.** Scenario 2 compares the normalised listing with
 //! `testdata/<provider>/golden_list.json`, so a provider API change shows
@@ -32,7 +32,7 @@
 
 use super::{
     list_all, Fetched, ItemRef, RefCtx, TrackerError, TrackerProvider, ViewDef, WorkItemSnapshot,
-    WriteOp, NOT_FOUND_OR_NO_PERMISSION, WRITE_UNSUPPORTED,
+    WriteOp, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{FakeTransport, Method, Request, Response};
 use serde_json::{json, Value};
@@ -514,10 +514,23 @@ pub async fn no_secret<H: Harness>(h: &H) {
 }
 
 /// Row 11 (work graph M13.4e, decision D3): the only write is the PR remote
-/// link. A provider without `caps.write` refuses it without sending a
-/// byte; one with it sends exactly one request, to the issue's remote
-/// links, carrying the `globalId` it upserts by — and no secret in it.
+/// link. A provider without `caps.write` refuses it without sending a byte.
+/// One with it sends exactly one request, to the issue's remote links, with
+/// the `globalId` Jira upserts by (so a repeat changes nothing) and no
+/// secret in the body; maps 429 to a rate limit with its `Retry-After` and
+/// 403 to a refusal; and never builds a path from a key it does not accept.
 pub async fn write<H: Harness>(h: &H) {
+    let url = "https://github.com/acme/api/pull/12";
+    let key = h
+        .expect()
+        .prefixes
+        .first()
+        .map_or_else(|| "ABC-1".to_string(), |p| format!("{p}-1"));
+    let op = |key: &str| WriteOp::PrRemoteLink {
+        key: key.to_string(),
+        url: url.into(),
+        title: "PR: acme/api#12".into(),
+    };
     let f = FakeTransport::new();
     f.always(
         Method::Post,
@@ -525,66 +538,82 @@ pub async fn write<H: Harness>(h: &H) {
         Ok(Response::new(201, r#"{"id":10000}"#)),
     );
     let p = h.provider(&f);
-    let url = "https://github.com/acme/api/pull/12";
-    let op = WriteOp::PrRemoteLink {
-        issue_id: "10001".into(),
-        global_id: format!("fleet:pr:{url}"),
-        url: url.into(),
-        title: "Pull request acme/api#12".into(),
-    };
-    let got = p.write(&op).await;
+    let got = p.write(&op(&key)).await;
     if !p.caps().write {
-        assert_eq!(
-            got,
-            Err(TrackerError::Refused(WRITE_UNSUPPORTED.into())),
-            "{}: a read-only provider refuses every write",
+        assert!(
+            matches!(got, Err(TrackerError::Refused(_))),
+            "{}: a read-only provider refuses every write: {got:?}",
             h.name()
         );
         assert!(f.requests().is_empty(), "{}: nothing sent", h.name());
         return;
     }
     got.unwrap_or_else(|e| panic!("{}: the remote link failed: {e:?}", h.name()));
+    // Twice: the same globalId both times, which is what makes it idempotent.
+    p.write(&op(&key)).await.unwrap();
     let sent = f.requests();
-    assert_eq!(sent.len(), 1, "{}", h.name());
-    assert_eq!(sent[0].method, Method::Post, "{}", h.name());
-    assert!(
-        sent[0].url.ends_with("/issue/10001/remotelink"),
-        "{}: {}",
-        h.name(),
-        sent[0].url
+    assert_eq!(sent.len(), 2, "{}", h.name());
+    let mut ids = Vec::new();
+    for r in &sent {
+        assert_eq!(r.method, Method::Post, "{}", h.name());
+        assert!(
+            r.url.ends_with(&format!("/issue/{key}/remotelink")),
+            "{}: {}",
+            h.name(),
+            r.url
+        );
+        let body = String::from_utf8_lossy(r.body.as_deref().unwrap_or_default()).into_owned();
+        if let Some(secret) = h.expect().secret {
+            assert!(
+                !body.contains(secret),
+                "{}: the secret in the body",
+                h.name()
+            );
+        }
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["object"]["url"], json!(url), "{}", h.name());
+        ids.push(v["globalId"].clone());
+    }
+    assert_eq!(ids[0], json!(format!("fleet:pr:{url}")), "{}", h.name());
+    assert_eq!(ids[0], ids[1], "{}: one globalId per PR", h.name());
+
+    let f = FakeTransport::new();
+    f.always(
+        Method::Post,
+        "/remotelink",
+        Ok(Response::new(429, "").with_header("Retry-After", "30")),
     );
-    let body = String::from_utf8_lossy(sent[0].body.as_deref().unwrap_or_default()).into_owned();
-    let v: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(
-        v["globalId"],
-        json!(format!("fleet:pr:{url}")),
+        h.provider(&f).write(&op(&key)).await,
+        Err(TrackerError::RateLimited {
+            retry_after_secs: Some(30)
+        }),
         "{}",
         h.name()
     );
-    assert_eq!(v["object"]["url"], json!(url), "{}", h.name());
-    if let Some(secret) = h.expect().secret {
+    let f = FakeTransport::new();
+    f.always(Method::Post, "/remotelink", Ok(Response::new(403, "")));
+    assert!(
+        matches!(
+            h.provider(&f).write(&op(&key)).await,
+            Err(TrackerError::Forbidden(_))
+        ),
+        "{}",
+        h.name()
+    );
+
+    let f = FakeTransport::new();
+    let p = h.provider(&f);
+    for bad in ["../../myself", "ABC-1/../x", "", "abc 1"] {
         assert!(
-            !body.contains(secret),
-            "{}: the secret in the body",
+            p.write(&op(bad)).await.is_err(),
+            "{}: {bad:?} must be refused",
             h.name()
         );
     }
-    // A path is never built from anything but a numeric issue id.
-    let bad = WriteOp::PrRemoteLink {
-        issue_id: "../../myself".into(),
-        global_id: format!("fleet:pr:{url}"),
-        url: url.into(),
-        title: "x".into(),
-    };
     assert!(
-        matches!(p.write(&bad).await, Err(TrackerError::Refused(_))),
-        "{}",
-        h.name()
-    );
-    assert_eq!(
-        f.requests().len(),
-        1,
-        "{}: the bad id sent nothing",
+        f.requests().is_empty(),
+        "{}: a bad key sent nothing",
         h.name()
     );
 }
@@ -638,7 +667,7 @@ macro_rules! conformance_suite {
                 c::no_secret(&$harness).await
             }
             #[tokio::test]
-            async fn c11_write_only_where_supported() {
+            async fn c11_write() {
                 c::write(&$harness).await
             }
         }

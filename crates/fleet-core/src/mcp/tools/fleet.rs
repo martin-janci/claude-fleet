@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::ipc_error::lock;
+use crate::service::orgs::OrgScope;
 
 #[tool_router(router = fleet_router, vis = "pub(super)")]
 impl FleetTools {
@@ -12,7 +13,9 @@ impl FleetTools {
         (micro-USD) per host and UTC day for 7 days, and trackers (each \
         ok/degraded/failing, failures in a row, last error and success; \
         detection_backlog: suggestions undecided for detection_backlog_days). \
-        A per-host token sees its own host's usage and its org's trackers.")]
+        A per-host token sees its own host's usage and its org's trackers. \
+        hub: uptime and last reconcile pass; tunnels_mode none|reverse; \
+        peer_links_total.")]
     pub(super) async fn fleet_health(
         &self,
         Extension(caller): Extension<Caller>,
@@ -40,6 +43,29 @@ impl FleetTools {
                 }
                 Err(_) => h.trackers = Default::default(),
             }
+        } else if caller.is_scoped() {
+            // Work graph M14: a client bound to an org sees its org's
+            // trackers only, as a host token does, and every roll-up that
+            // sums across hosts is re-derived over the hosts it sees.
+            match self.reader().lock() {
+                Ok(s) => match caller.org_scope(&s) {
+                    Ok(scope) => {
+                        health::scope_to_org(&mut h, &s, &scope);
+                        health::scope_trackers(&mut h, &s, &scope)
+                    }
+                    Err(_) => health::blank_rollups(&mut h),
+                },
+                Err(_) => health::blank_rollups(&mut h),
+            }
+        }
+        // The last reconcile error is the hub's own text about any host —
+        // another org's too; a scoped caller gets that it failed, not why.
+        if caller.is_scoped() {
+            if let Some(r) = h.hub.as_mut().map(|hub| &mut hub.reconcile) {
+                if r.last_error.is_some() {
+                    r.last_error = Some("reconcile failed (details on the hub)".into());
+                }
+            }
         }
         // An agent reads it: a tracker's error is the tracker's text.
         h.trackers.fence_errors();
@@ -52,7 +78,8 @@ impl FleetTools {
         table (usage.prices_json), not a bill. total and by_host sum live \
         rows over their lifetime; by_day is the durable daily roll-up \
         (killed sessions included). Sessions sorted by cost, at most 200. A \
-        per-host token only sees its own host.")]
+        per-host token only sees its own host. by_day.backfill_cost_micros: \
+        history a first read booked, apart from live cost.")]
     pub(super) async fn usage_report(
         &self,
         Extension(caller): Extension<Caller>,
@@ -69,7 +96,24 @@ impl FleetTools {
             .unwrap_or(0);
         let report = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            usage::report(&s, host.as_deref(), p.since_secs, now).map_err(to_mcp_err)?
+            // Work graph M14: a client bound to an org sees its org's sessions
+            // and hosts only, as in `fleet_health`; a host outside them
+            // answers as an unknown one. (A per-host token is pinned to its
+            // host by `usage_scope`.)
+            let scope = if caller.is_scoped() && caller.host_alias.is_none() {
+                caller.org_scope(&s).map_err(to_mcp_err)?
+            } else {
+                OrgScope::All
+            };
+            if let (Some(h), false) = (host.as_deref(), scope.is_all()) {
+                if !health::hosts_in_scope(&s, &scope)
+                    .iter()
+                    .any(|x| x.alias == h)
+                {
+                    return Err(mcp_err("E_NOTFOUND", format!("no host {h:?}"), None));
+                }
+            }
+            usage::report_on(&s, host.as_deref(), p.since_secs, now, &scope).map_err(to_mcp_err)?
         };
         ok_json_compact(&report)
     }
@@ -221,8 +265,8 @@ impl FleetTools {
         full drives sessions fleet-wide, readonly observes, peer is another \
         hub's link (see peer_exchange); fleet-admin tools stay out of a \
         client's reach. Codes are in memory only: a hub restart voids them. \
-        Master token only. Returns { url, code, expires_in_s, name, mode, \
-        trusted }.")]
+        org_id binds it to one org (its work and sessions only). Master token \
+        only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.")]
     // The master-only gate is `enforce_admin` in `call_tool` (`pair_client`
     // is in `guard::ADMIN_TOOLS`), so no caller extractor is needed here.
     pub(super) async fn pair_client(
@@ -243,11 +287,18 @@ impl FleetTools {
                 None,
             ));
         }
+        if mode == "peer" && p.org_id.is_some() {
+            return Err(mcp_err(
+                codes::E_VALIDATE,
+                "a peer hub link is never bound to an org; drop org_id",
+                None,
+            ));
+        }
         audit(
             "pair_client",
             &format!(
-                "name={name} mode={mode} trusted={} ttl_s={:?}",
-                p.trusted, p.ttl_s
+                "name={name} mode={mode} trusted={} ttl_s={:?} org_id={:?}",
+                p.trusted, p.ttl_s, p.org_id
             ),
         );
         let ttl = pair_ttl(p.ttl_s);
@@ -272,9 +323,21 @@ impl FleetTools {
                     None,
                 ));
             }
+            if let Some(org) = p.org_id {
+                if s.get_org(org).map_err(to_mcp_err)?.is_none() {
+                    return Err(mcp_err(
+                        codes::E_NOTFOUND,
+                        format!("org {org} not found"),
+                        None,
+                    ));
+                }
+            }
             crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?
         };
-        let req = self.guards.pairings.mint(&name, &mode, p.trusted, ttl);
+        let req = self
+            .guards
+            .pairings
+            .mint_bound(&name, &mode, p.trusted, p.org_id, ttl);
         ok_json(&serde_json::json!({
             "url": crate::mcp::pair_url(&base.url, &req.code),
             "code": req.code,
@@ -282,6 +345,7 @@ impl FleetTools {
             "name": req.name,
             "mode": req.mode,
             "trusted": req.trusted,
+            "org_id": req.org_id,
         }))
     }
 

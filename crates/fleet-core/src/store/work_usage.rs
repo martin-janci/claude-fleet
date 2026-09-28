@@ -20,6 +20,9 @@ use crate::ipc_error::IpcError;
 pub struct DetectionCounts {
     pub suggested: u64,
     pub confirmed_by_person: u64,
+    /// Confirmed by an agent (a per-host token or the operator): source
+    /// `agent` (D34).
+    pub confirmed_by_agent: u64,
     pub promoted: u64,
     pub rejected: u64,
     pub expired: u64,
@@ -77,10 +80,13 @@ impl Store {
 
     /// Detection outcomes in the window. A suggestion is a link a resolver
     /// rule made (`rule` set) that was not confirmed on the spot; a person's
-    /// decision rewrites `source` to one of `person` and keeps the rule; a
+    /// decision rewrites `source` to one of `person` and keeps the rule, an
+    /// agent's to `agent`; a
     /// promotion keeps an `auto` source and is decided after it was made;
     /// an expired suggestion is one whose session ended undecided. Withdrawn
-    /// and decayed suggestions are deleted, so `suggested` is a floor.
+    /// and decayed suggestions are deleted, so this `suggested` counts only
+    /// the stored ones: the caller adds their `work_suggestion_withdrawn`
+    /// timeline events.
     pub fn usage_detection(
         &self,
         since: i64,
@@ -101,13 +107,16 @@ impl Store {
                    AND decided_at >= ?1 AND decided_at < ?2), 0),
                COALESCE(SUM(state = 'rejected' AND rule IS NOT NULL
                    AND decided_at >= ?1 AND decided_at < ?2), 0),
-               COALESCE(SUM(state = 'suggested' AND ended_at >= ?1 AND ended_at < ?2), 0)
+               COALESCE(SUM(state = 'suggested' AND ended_at >= ?1 AND ended_at < ?2), 0),
+               COALESCE(SUM(state = 'confirmed' AND source = 'agent' AND rule IS NOT NULL
+                   AND decided_at >= ?1 AND decided_at < ?2), 0)
              FROM work_links"
         );
         Ok(self.conn.query_row(&sql, [since, until], |r| {
             Ok(DetectionCounts {
                 suggested: count(r.get(0)?),
                 confirmed_by_person: count(r.get(1)?),
+                confirmed_by_agent: count(r.get(5)?),
                 promoted: count(r.get(2)?),
                 rejected: count(r.get(3)?),
                 expired: count(r.get(4)?),
@@ -134,6 +143,25 @@ impl Store {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([since, until], |r| r.get::<_, i64>(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// `work_suggestion_withdrawn` events in the window whose `reason` is
+    /// `carried` (a resume, fork or inherit settled the suggestion, D34),
+    /// apart from the ones detection took back.
+    pub fn usage_carried_suggestions(&self, since: i64, until: i64) -> Result<u64, IpcError> {
+        let n: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM session_events
+              WHERE at >= ?1 AND at < ?2 AND kind = ?3
+                AND json_valid(detail) AND json_extract(detail, '$.reason') = ?4",
+            rusqlite::params![
+                since,
+                until,
+                super::WORK_SUGGESTION_WITHDRAWN,
+                super::WITHDRAWN_CARRIED
+            ],
+            |r| r.get(0),
+        )?;
+        Ok(count(n))
     }
 
     /// Timeline events of `kinds` in the window, per kind.

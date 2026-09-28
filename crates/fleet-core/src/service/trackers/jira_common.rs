@@ -3,9 +3,26 @@
 //! ADF → text, and key recognition. Everything else — the API version,
 //! paging, bulk fetch, the epic — is each adapter's own.
 
-use super::{CallKind as Call, TrackerError, WriteOp, DESCRIPTION_MAX_CHARS, MAX_RETRY_AFTER_SECS};
-use crate::net::https::{Request, Response};
-use serde_json::{json, Value};
+use super::{CallKind as Call, TrackerError, DESCRIPTION_MAX_CHARS, MAX_RETRY_AFTER_SECS};
+use crate::net::https::Response;
+use serde_json::Value;
+
+/// The remote link's global id for a PR (work graph M13.4e): Jira upserts
+/// a remote link by it, so writing the same PR twice changes nothing.
+pub fn pr_global_id(url: &str) -> String {
+    format!("fleet:pr:{url}")
+}
+
+/// The body of `POST …/issue/{key}/remotelink` for a PR. Only fleet's own
+/// words and the PR's URL: nothing from a transcript or a tracker.
+pub fn pr_remote_link_body(url: &str, title: &str) -> Value {
+    serde_json::json!({
+        "globalId": pr_global_id(url),
+        "application": { "type": "claude-fleet", "name": "claude-fleet" },
+        "relationship": "pull request",
+        "object": { "url": url, "title": title },
+    })
+}
 
 /// The sprint field's `schema.custom`.
 pub const SPRINT_FIELD_SCHEMA: &str = "com.pyxis.greenhopper.jira:gh-sprint";
@@ -46,47 +63,6 @@ pub(crate) fn check(resp: &Response, call: Call) -> Result<(), TrackerError> {
         )),
         s => TrackerError::Invalid(format!("HTTP {s}")),
     })
-}
-
-/// Jira caps a remote link's `globalId` at 255 characters.
-pub const GLOBAL_ID_MAX_CHARS: usize = 255;
-
-/// The remote-link request for `op` against `site` (`api` is `3` on Cloud,
-/// `2` on Data Center): `POST …/issue/<id>/remotelink`, which Jira upserts
-/// by `globalId`, so sending it twice leaves one link (M13.4e). The issue
-/// is addressed by its numeric id only (never a path fragment from text).
-pub(crate) fn remote_link_request(
-    site: &str,
-    api: u8,
-    op: &WriteOp,
-) -> Result<Request, TrackerError> {
-    let WriteOp::PrRemoteLink {
-        issue_id,
-        global_id,
-        url,
-        title,
-    } = op;
-    if issue_id.is_empty() || !issue_id.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(TrackerError::Refused(format!(
-            "{issue_id:?} is not a Jira issue id"
-        )));
-    }
-    if global_id.chars().count() > GLOBAL_ID_MAX_CHARS {
-        return Err(TrackerError::Refused(format!(
-            "the remote link's globalId is over {GLOBAL_ID_MAX_CHARS} characters"
-        )));
-    }
-    if !url.starts_with("https://") {
-        return Err(TrackerError::Refused("a PR link must be https".into()));
-    }
-    let body = json!({
-        "globalId": global_id,
-        "object": { "url": url, "title": title },
-    });
-    Ok(Request::post_json(
-        format!("{site}/rest/api/{api}/issue/{issue_id}/remotelink"),
-        &body,
-    ))
 }
 
 /// `statusCategory.key` → fleet's category. `undefined` (C26) and anything

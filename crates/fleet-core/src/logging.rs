@@ -567,6 +567,60 @@ pub fn init_stderr_fallback() {
         .try_init();
 }
 
+/// Test-only: run code under a scoped subscriber that writes to a buffer,
+/// so a test can assert a log LINE (its level and fields), not only a side
+/// effect. Thread-local (`set_default`), so it also covers a
+/// `current_thread` `#[tokio::test]`.
+#[cfg(test)]
+pub(crate) mod capture {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    pub struct Buf(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+
+    pub struct Captured {
+        buf: Buf,
+        _guard: tracing::subscriber::DefaultGuard,
+    }
+
+    impl Captured {
+        pub fn text(&self) -> String {
+            String::from_utf8(self.buf.0.lock().unwrap().clone()).unwrap_or_default()
+        }
+    }
+
+    /// Everything logged at DEBUG and above on this thread until the guard drops.
+    pub fn start() -> Captured {
+        let buf = Buf::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .finish();
+        Captured {
+            buf,
+            _guard: tracing::subscriber::set_default(sub),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

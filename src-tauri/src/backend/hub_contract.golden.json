@@ -1,5 +1,5 @@
 {
-  "revision": 4,
+  "revision": 5,
   "types": {
     "AccountRow": [
       "display_name",
@@ -114,6 +114,7 @@
       "ended_at",
       "items",
       "prompt",
+      "prompt_uuid",
       "reminders"
     ],
     "Conversation": [
@@ -138,6 +139,7 @@
       "turns"
     ],
     "DayUsage": [
+      "backfill_cost_micros",
       "cache_read_tokens",
       "cache_write_tokens",
       "cost_micros",
@@ -163,23 +165,46 @@
       "kind",
       "name"
     ],
+    "GithubRepo": [
+      "description",
+      "is_private",
+      "name_with_owner",
+      "updated_at"
+    ],
     "Health": [
       "by_status",
       "context_red",
+      "context_red_pct",
       "db_ready",
       "ghosts",
       "hosts_reachable",
       "hosts_total",
+      "hub",
       "peer_links_down",
+      "peer_links_total",
       "schema_version",
       "sessions_total",
       "stuck",
       "trackers",
       "tunnels",
       "tunnels_flapping",
+      "tunnels_mode",
       "usage_by_day",
       "usage_by_host",
       "version"
+    ],
+    "Health.hub": [
+      "reconcile",
+      "started_at",
+      "uptime_secs"
+    ],
+    "Health.hub.reconcile": [
+      "consecutive_failures",
+      "failures_total",
+      "last_duration_ms",
+      "last_error",
+      "last_finished_at",
+      "last_started_at"
     ],
     "Health.trackers": [
       "degraded",
@@ -202,7 +227,8 @@
       "provider",
       "reason",
       "state",
-      "tracker_id"
+      "tracker_id",
+      "write_failures"
     ],
     "HostRow": [
       "account_uuid",
@@ -330,6 +356,7 @@
       "safe_kill_nonce",
       "safe_kill_requested_at",
       "safe_kill_state",
+      "stale_working_at",
       "started_at",
       "status",
       "stuck_kind",
@@ -347,6 +374,7 @@
       "usage_updated_at",
       "work",
       "work_rejected",
+      "work_rev",
       "work_suggested",
       "worktree_id",
       "worktree_key"

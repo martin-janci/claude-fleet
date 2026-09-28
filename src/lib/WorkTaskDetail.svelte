@@ -1,0 +1,592 @@
+<script lang="ts">
+  // A task in Details (work graph M14), opened from the Work view: what the
+  // tracker says (title, status, link, assignees, a description excerpt),
+  // where its organisation and its group come from, its repositories, EVERY
+  // session it has had — active, suggested, past, rejected — each with its
+  // state and why, and the last outcome. Open / Continue / Start new act on
+  // it; Place in group…, Assign org… (local tasks, with the impact dialog)
+  // and Make a rule… (with a preview) correct it.
+  //
+  // Tracker text and Claude's summaries are third-party text: rendered as
+  // plain text, never as markup.
+  import { onDestroy } from 'svelte';
+  import { get } from 'svelte/store';
+  import { sessions } from './sessions';
+  import { selectSessionExplicitly } from './selection';
+  import { orgs as orgStore } from './orgs';
+  import { openExternal } from './open_external';
+  import { timeAgo } from './session_status';
+  import { describeEvidence, onWorkChangedDebounced, resumeWork } from './work';
+  import { providerInfo, startWork, unavailableLabel } from './trackers';
+  import { hubStatus, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
+  import WorkPlaceDialog from './WorkPlaceDialog.svelte';
+  import WorkOrgDialog from './WorkOrgDialog.svelte';
+  import WorkRuleEditor from './WorkRuleEditor.svelte';
+  import {
+    groupSessionLinks,
+    groupSourceText,
+    occurrenceKind,
+    orgSourceText,
+    placementNote,
+    readErrorText,
+    selectedTaskId,
+    taskStatus,
+    trackerDown,
+    trackerDownLabel,
+    workRules,
+    workTask,
+    workTreeMeta,
+    type TaskDetail,
+    type WorkRule,
+    type WorkRuleDraft,
+    type WorkTask,
+    type WorkTaskLink,
+  } from './work_view';
+  import type { IpcError } from './result';
+
+  let {
+    taskId,
+    onclose,
+    closeLabel = 'Close',
+    /** The refetch debounce, ms; injectable for tests. */
+    debounceMs = 500,
+  }: { taskId: string; onclose?: () => void; closeLabel?: string; debounceMs?: number } = $props();
+
+  const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
+  const placeBlocked = $derived(hubActionBlocked('place_work', $hubStatus, $hubConnection));
+  const orgBlocked = $derived(hubActionBlocked('assign_work_org', $hubStatus, $hubConnection));
+  const ruleBlocked = $derived(hubActionBlocked('save_work_rule', $hubStatus, $hubConnection));
+
+  let detail = $state<TaskDetail | null>(null);
+  let error = $state<IpcError | null>(null);
+  let loading = $state(false);
+  let rules = $state<WorkRule[]>([]);
+  let actionError = $state<string | null>(null);
+  let existingSession = $state<number | null>(null);
+  let acting = $state(false);
+  let placing = $state(false);
+  let assigning = $state(false);
+  let ruleDraft = $state<WorkRuleDraft | null>(null);
+
+  let loadSeq = 0;
+  async function load(id: string) {
+    const mine = ++loadSeq;
+    loading = true;
+    const r = await workTask(id);
+    if (mine !== loadSeq) return;
+    loading = false;
+    if (!r.ok) {
+      error = r.error;
+      detail = null;
+      return;
+    }
+    error = null;
+    detail = r.value && r.value.task ? r.value : null;
+    // A bare key a sync bound to a ticket answers as the ticket: follow it,
+    // so the selection survives.
+    const now = detail?.task.task_id;
+    if (now && now !== id && (detail?.aliases ?? []).includes(id)) selectedTaskId.set(now);
+  }
+
+  // A placement saved: show the task and its placement line as the hub
+  // answered at once (not the old "Placed …" until the next read), then
+  // re-read the whole detail.
+  function placed(t: WorkTask, note: string | null) {
+    if (detail) {
+      const version = t.placement_version ?? 0;
+      detail = {
+        ...detail,
+        task: { ...t, sessions: t.sessions ?? detail.task.sessions },
+        placement:
+          version > 0 ? { group: t.group?.label ?? '', note, version, updated_at: null, updated_by: null } : null,
+      };
+    }
+    void load(taskId);
+  }
+
+  let loadedFor: string | null = null;
+  $effect(() => {
+    const id = taskId;
+    if (id === loadedFor) return;
+    loadedFor = id;
+    detail = null;
+    error = null;
+    actionError = null;
+    existingSession = null;
+    void load(id);
+  });
+
+  async function loadRules() {
+    const r = await workRules();
+    rules = r.ok && Array.isArray(r.value) ? r.value : [];
+  }
+  void loadRules();
+
+  const off = onWorkChangedDebounced(() => {
+    void load(taskId);
+    void loadRules();
+  }, () => debounceMs);
+  onDestroy(off);
+
+  const task: WorkTask | null = $derived(detail?.task ?? null);
+  const grouped = $derived(groupSessionLinks(task?.sessions ?? []));
+  const liveLink = $derived(grouped.active.find((l) => l.session_id != null && $sessions.some((r) => r.id === l.session_id)) ?? null);
+  const lastPast = $derived(grouped.past.find((l) => l.resumable !== false) ?? null);
+  const ruleName = $derived(task?.group?.rule_id != null ? (rules.find((r) => r.id === task.group.rule_id)?.name ?? null) : null);
+  const matchingRules = $derived((detail?.rules ?? []).map((id) => rules.find((r) => r.id === id)?.name ?? `rule ${id}`));
+
+  function orgName(id: number | null | undefined): string {
+    if (id == null) return 'Unassigned';
+    return (
+      $workTreeMeta.orgs.find((o) => o.id === id)?.name ?? $orgStore.find((o) => o.id === id)?.name ?? `Organisation ${id}`
+    );
+  }
+
+  function stateLabel(l: WorkTaskLink): string {
+    switch (occurrenceKind(l)) {
+      case 'primary':
+        return 'active · primary';
+      case 'secondary':
+        return 'active · secondary';
+      case 'suggested':
+        return 'suggested';
+      case 'rejected':
+        return 'rejected';
+      default:
+        return l.ended_at ? `ended ${timeAgo(l.ended_at)}` : 'ended';
+    }
+  }
+
+  function openLink(l: WorkTaskLink) {
+    const row = l.session_id != null ? get(sessions).find((r) => r.id === l.session_id) : undefined;
+    if (row) selectSessionExplicitly(row);
+  }
+
+  async function continueWork() {
+    const t = task;
+    const l = lastPast;
+    if (!t?.key || !l || acting) return;
+    acting = true;
+    actionError = null;
+    const r = await resumeWork({ key: t.key, mode: 'last', linkId: l.link_id });
+    acting = false;
+    if (r.ok) selectSessionExplicitly(r.value);
+    else actionError = r.error.message;
+  }
+
+  async function startNew() {
+    const t = task;
+    if (!t || acting) return;
+    acting = true;
+    actionError = null;
+    existingSession = null;
+    const r = await startWork(t.item_id != null ? { item_id: t.item_id } : { reference: t.key ?? '' });
+    acting = false;
+    if (r.ok) {
+      selectSessionExplicitly(r.value);
+      return;
+    }
+    actionError = r.error.message;
+    const sid = (r.error.details as { session_id?: number } | undefined)?.session_id;
+    if (r.error.code === 'E_EXISTS' && typeof sid === 'number') existingSession = sid;
+  }
+
+  function openExisting() {
+    const row = get(sessions).find((r) => r.id === existingSession);
+    if (row) selectSessionExplicitly(row);
+  }
+
+  function makeRuleDraft(t: WorkTask): WorkRuleDraft {
+    const g = t.group;
+    const prefix = t.key && /^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(t.key) ? t.key.split('-')[0] : null;
+    return {
+      name: '',
+      enabled: true,
+      group: g && g.source !== 'none' ? g.label : '',
+      expected_version: 0,
+      conditions: {
+        tracker_id: t.kind === 'tracker' ? (t.tracker_id ?? null) : null,
+        container: g?.source === 'tracker' ? (g.tracker_value ?? g.label) : null,
+        key_prefix: g?.source !== 'tracker' && prefix ? prefix : null,
+        repo: g?.source === 'repo' ? g.label : null,
+        title_contains: null,
+      },
+    };
+  }
+</script>
+
+<section class="task-detail" data-testid="work-task-detail" aria-label="Task">
+  <header>
+    <h2>
+      {#if task?.key}<span class="key">{task.key}</span>{/if}
+      <span class="title" class:unavailable={task?.unavailable}>{task ? task.title || (task.key ? '' : task.task_id) : 'Task'}</span>
+    </h2>
+    <div class="head-actions">
+      <button class="btn btn--quiet" type="button" disabled={loading} data-testid="work-task-refresh" onclick={() => void load(taskId)}
+        >Refresh</button
+      >
+      {#if onclose}
+        <button class="btn btn--quiet" type="button" data-testid="work-task-close" onclick={onclose}>{closeLabel}</button>
+      {/if}
+    </div>
+  </header>
+
+  {#if error}
+    <div class="error" role="alert" data-testid="work-task-error">
+      <p>{error.code === 'E_NOTFOUND' ? 'This task no longer exists, or is not visible from here.' : readErrorText(error)}</p>
+      <button class="btn" type="button" onclick={() => void load(taskId)}>Retry</button>
+    </div>
+  {:else if !task}
+    <p class="muted" data-testid="work-task-loading">Loading…</p>
+  {:else}
+    <div class="meta">
+      <span class="badge" title={task.provider ?? task.kind}
+        >{task.kind === 'local' ? 'local work' : task.kind === 'ref' ? 'bare key' : `${providerInfo(task.provider)?.label ?? task.provider ?? 'tracker'}`}</span
+      >
+      {#if task.tracker_name}<span>{task.tracker_name}</span>{/if}
+      {#if taskStatus(task)}<span class="status" data-testid="work-task-status">{taskStatus(task)}</span>{/if}
+      {#if task.resolution}<span class="muted">({task.resolution})</span>{/if}
+      {#if trackerDown(task)}<span class="warn" data-testid="work-task-tracker-down">{trackerDownLabel(task)} — what is shown is the last sync</span>{/if}
+      {#if task.url}
+        <button class="btn btn--quiet" type="button" data-testid="work-task-open-url" onclick={() => void openExternal(task.url ?? '')}
+          >Open in tracker</button
+        >
+      {/if}
+    </div>
+    {#if task.unavailable}
+      <p class="warn" data-testid="work-task-unavailable">Unavailable: {unavailableLabel(task.unavailable_reason)}</p>
+    {/if}
+    {#if (task.assignees ?? []).length > 0}
+      <p class="line" data-testid="work-task-assignees">Assignees: {(task.assignees ?? []).join(', ')}{#if task.mine}&nbsp;(you){/if}</p>
+    {/if}
+    {#if detail?.description}
+      <p class="excerpt" data-testid="work-task-description">{detail.description}</p>
+    {/if}
+
+    <dl class="prov">
+      <dt>Organisation</dt>
+      <dd data-testid="work-task-org">
+        <strong>{orgName(task.org_id)}</strong> — {orgSourceText(task)}
+      </dd>
+      <dt>Group</dt>
+      <dd data-testid="work-task-group">
+        <strong>{task.group?.source === 'none' ? 'No group' : task.group?.label}</strong> — {groupSourceText(task.group, task, ruleName)}
+        <div class="muted small" data-testid="work-task-group-note">{placementNote(task.group, task)}</div>
+        {#if detail?.placement}
+          <div class="muted small" data-testid="work-task-placement">
+            Placed{#if detail.placement.updated_by}&nbsp;by {detail.placement.updated_by}{/if}{#if detail.placement.updated_at}&nbsp;{timeAgo(detail.placement.updated_at)}{/if}{#if detail.placement.note}: “{detail.placement.note}”{/if}
+          </div>
+        {/if}
+        {#if matchingRules.length > 0}
+          <div class="muted small" data-testid="work-task-rules">Matching rules: {matchingRules.join(', ')}</div>
+        {/if}
+      </dd>
+      {#if (task.repos ?? []).length > 0}
+        <dt>Repositories</dt>
+        <dd data-testid="work-task-repos">{(task.repos ?? []).join(', ')}</dd>
+      {/if}
+    </dl>
+
+    <div class="actions">
+      <button
+        class="btn btn--primary"
+        type="button"
+        data-testid="work-task-open"
+        disabled={!liveLink}
+        title={liveLink ? `Open ${liveLink.name ?? 'the session'}` : 'No live session'}
+        onclick={() => liveLink && openLink(liveLink)}>Open</button
+      >
+      <button
+        class="btn"
+        type="button"
+        data-testid="work-task-continue"
+        disabled={!task.key || !lastPast || acting || startBlocked !== null}
+        title={startBlocked ?? (!task.key ? 'Only work with a key can be resumed' : lastPast ? `Resume the last conversation of ${lastPast.name ?? 'the last session'}` : 'No past session to continue')}
+        onclick={() => void continueWork()}>Continue</button
+      >
+      <button
+        class="btn"
+        type="button"
+        data-testid="work-task-start"
+        disabled={(!task.item_id && !task.key) || acting || startBlocked !== null}
+        title={startBlocked ?? 'Start a new session for this task'}
+        onclick={() => void startNew()}>Start new</button
+      >
+    </div>
+    {#if actionError}
+      <p class="err" role="alert" data-testid="work-task-action-error">
+        {actionError}
+        {#if existingSession !== null}
+          <button class="btn btn--quiet" type="button" onclick={openExisting}>Open it</button>
+        {/if}
+      </p>
+    {/if}
+    <div class="actions edits">
+      <button
+        class="btn btn--quiet"
+        type="button"
+        data-testid="work-task-place"
+        disabled={placeBlocked !== null}
+        title={placeBlocked ?? 'Put this task under a group of the Work view (local to fleet)'}
+        onclick={() => (placing = true)}>Place in group…</button
+      >
+      {#if task.kind === 'local'}
+        <button
+          class="btn btn--quiet"
+          type="button"
+          data-testid="work-task-assign-org"
+          disabled={orgBlocked !== null}
+          title={orgBlocked ?? 'Move this task to another organisation (the impact is shown first)'}
+          onclick={() => (assigning = true)}>Assign org…</button
+        >
+      {/if}
+      <button
+        class="btn btn--quiet"
+        type="button"
+        data-testid="work-task-make-rule"
+        disabled={ruleBlocked !== null}
+        title={ruleBlocked ?? 'A rule for tasks like this one (previewed before it is saved)'}
+        onclick={() => (ruleDraft = makeRuleDraft(task))}>Make a rule…</button
+      >
+    </div>
+
+    <h3>Sessions</h3>
+    {#snippet linkList(list: WorkTaskLink[], label: string)}
+      {#if list.length > 0}
+        <h4>{label}</h4>
+        <ul class="links">
+          {#each list as l (l.link_id)}
+            {@const kind = occurrenceKind(l)}
+            <li class="link link--{kind}" data-testid="work-task-link" data-kind={kind}>
+              <div class="lhead">
+                <span class="mark" aria-hidden="true">{kind === 'primary' ? '★' : kind === 'suggested' ? '?' : kind === 'past' ? '·' : '○'}</span>
+                {#if l.session_id != null && $sessions.some((r) => r.id === l.session_id) && kind !== 'past'}
+                  <button class="name link-btn" type="button" data-testid="work-task-link-open" onclick={() => openLink(l)}>{l.name ?? `session ${l.session_id}`}</button>
+                {:else}
+                  <span class="name">{l.name ?? `session ${l.session_id ?? l.link_id}`}</span>
+                {/if}
+                {#if l.host}<span class="muted">{l.host}</span>{/if}
+                <span class="state" data-testid="work-task-link-state">{stateLabel(l)}</span>
+                {#if l.cross_org}<span class="warn">cross-org</span>{/if}
+                {#if l.needs_you}<span class="warn">needs you</span>{/if}
+                {#if (l.other_tasks ?? 0) > 0}<span class="muted">+{l.other_tasks} other task{l.other_tasks === 1 ? '' : 's'}</span>{/if}
+              </div>
+              {#if l.why}<p class="why" data-testid="work-task-link-why">{l.why}</p>{/if}
+              {#each l.evidence ?? [] as ev, i (i)}
+                <p class="evidence" data-testid="work-task-evidence">{describeEvidence(ev)}</p>
+              {/each}
+              <p class="small muted">
+                {#if l.branch}branch {l.branch} · {/if}{#if l.created_at}linked {timeAgo(l.created_at)}{/if}{#if l.end_reason} · ended: {l.end_reason}{/if}{#if l.resumable === false} · not resumable{/if}
+                {#if l.pr_url}
+                  · <button class="link-btn" type="button" onclick={() => void openExternal(l.pr_url ?? '')}>PR</button>
+                {/if}
+              </p>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    {/snippet}
+    {#if (task.sessions ?? []).length === 0}
+      <p class="muted" data-testid="work-task-no-sessions">No session has worked on this task yet.</p>
+    {/if}
+    {@render linkList(grouped.active, 'Active')}
+    {@render linkList(grouped.suggested, 'Suggested')}
+    {@render linkList(grouped.past, 'Past')}
+    {@render linkList(grouped.rejected, 'Rejected')}
+    {#if (task.sessions_more ?? 0) > 0}
+      <p class="muted">…and {task.sessions_more} more.</p>
+    {/if}
+
+    {#if detail?.last_outcome}
+      {@const o = detail.last_outcome}
+      <h3>Last outcome</h3>
+      <div class="outcome" data-testid="work-task-outcome">
+        <p class="small muted">
+          {timeAgo(o.at)}{#if o.name}&nbsp;· {o.name}{/if}{#if o.host}&nbsp;· {o.host}{/if}{#if o.branch}&nbsp;· branch {o.branch}{/if}
+          {#if o.pr_url}
+            · <button class="link-btn" type="button" onclick={() => void openExternal(o.pr_url ?? '')}>PR</button>
+          {/if}
+        </p>
+        {#if o.summary}<p class="excerpt">{o.summary}</p>{/if}
+      </div>
+    {/if}
+  {/if}
+</section>
+
+{#if placing && task}
+  <WorkPlaceDialog
+    {task}
+    currentNote={detail?.placement?.note ?? null}
+    onclose={() => (placing = false)}
+    ondone={placed}
+    onreload={() => void load(taskId)}
+    onmakerule={(d) => (ruleDraft = d)}
+  />
+{/if}
+{#if assigning && task}
+  <WorkOrgDialog {task} onclose={() => (assigning = false)} ondone={() => void load(taskId)} />
+{/if}
+{#if ruleDraft}
+  <WorkRuleEditor
+    initial={ruleDraft}
+    onclose={() => (ruleDraft = null)}
+    onsaved={() => {
+      void loadRules();
+      void load(taskId);
+    }}
+  />
+{/if}
+
+<style>
+  .task-detail {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    font-size: 0.9rem;
+  }
+  header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  h2 {
+    margin: 0;
+    font-size: 1rem;
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    align-items: baseline;
+  }
+  h3 {
+    margin: 0.6rem 0 0.2rem;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--fg-muted);
+  }
+  h4 {
+    margin: 0.3rem 0 0.1rem;
+    font-size: 0.78rem;
+    color: var(--fg-muted);
+  }
+  .head-actions,
+  .actions,
+  .meta {
+    display: flex;
+    gap: 0.35rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .key {
+    font-family: var(--mono);
+  }
+  .title {
+    font-weight: normal;
+    overflow-wrap: anywhere;
+  }
+  .title.unavailable {
+    text-decoration: line-through;
+  }
+  .badge {
+    font-size: 0.72rem;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0 0.3rem;
+    color: var(--fg-muted);
+  }
+  .status {
+    font-weight: 600;
+  }
+  .line,
+  .excerpt {
+    margin: 0;
+  }
+  .excerpt {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    border-left: 2px solid var(--border);
+    padding-left: 0.5rem;
+    color: var(--fg-muted);
+  }
+  .prov {
+    margin: 0.2rem 0;
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.2rem 0.6rem;
+  }
+  .prov dt {
+    color: var(--fg-muted);
+    font-size: 0.8rem;
+  }
+  .prov dd {
+    margin: 0;
+  }
+  .links {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .link {
+    padding: 0.25rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .link--suggested {
+    border-bottom-style: dashed;
+  }
+  .link--past,
+  .link--rejected {
+    opacity: 0.7;
+  }
+  .lhead {
+    display: flex;
+    gap: 0.4rem;
+    align-items: baseline;
+    flex-wrap: wrap;
+  }
+  .link--primary .mark {
+    color: var(--accent);
+  }
+  .name {
+    font-weight: 600;
+  }
+  .state {
+    font-size: 0.78rem;
+    color: var(--fg-muted);
+  }
+  .why,
+  .evidence {
+    margin: 0 0 0 1.1rem;
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+  }
+  .link-btn {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    cursor: pointer;
+  }
+  .small {
+    font-size: 0.78rem;
+    margin: 0;
+  }
+  .muted {
+    color: var(--fg-muted);
+  }
+  .warn {
+    color: var(--usage-warn, #b45309);
+  }
+  .err,
+  .error {
+    color: var(--usage-crit, #c62828);
+  }
+  .error p {
+    margin: 0 0 0.4rem;
+  }
+  .edits {
+    margin-top: 0.1rem;
+  }
+</style>

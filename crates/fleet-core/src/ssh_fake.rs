@@ -17,14 +17,14 @@
 //! wins over both and surfaces as `E_CANCELLED`. `remote_home` runs
 //! `printenv HOME` through the log like the real client and caches per host.
 
+use crate::agent::transport::exit_status;
 use crate::ipc_error::{codes, IpcError};
 use crate::ssh::{
     home_from_output, wall_clock_error, HostToolchain, SshClient, SshExec, UPLOAD_WALL_CLOCK,
 };
 use std::collections::HashMap;
-use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{ExitStatus, Output};
+use std::process::Output;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -384,12 +384,12 @@ impl FakeSsh {
                 stdout,
                 stderr,
             } => Ok(Output {
-                status: ExitStatus::from_raw(code << 8),
+                status: exit_status(code),
                 stdout,
                 stderr,
             }),
             Reply::Unreachable => Ok(Output {
-                status: ExitStatus::from_raw(255 << 8),
+                status: exit_status(255),
                 stdout: Vec::new(),
                 stderr: format!("ssh: connect to host {host} port 22: No route to host\r\n")
                     .into_bytes(),
@@ -410,7 +410,7 @@ impl FakeSsh {
                     _ = cancelled => Err(IpcError::new(codes::E_CANCELLED, format!("ssh {host} cancelled"))),
                     _ = tokio::time::sleep(wall_clock) => Err(wall_clock_error(host, wall_clock, false)),
                     _ = tokio::time::sleep(for_) => Ok(Output {
-                        status: ExitStatus::from_raw(0),
+                        status: exit_status(0),
                         stdout: Vec::new(),
                         stderr: Vec::new(),
                     }),

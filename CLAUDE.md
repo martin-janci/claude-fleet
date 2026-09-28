@@ -109,8 +109,8 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 173
-  commands; `backend/tests_routing.rs` holds the handler list, each command's
+  verdict is written down once, in `backend/verdicts.rs`, for all 204
+  commands; `backend/tests_routing.rs` reads the handler list from `lib.rs`, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
   in `docs/hub.md`. Adding a command means: a row, then `route`/
@@ -128,6 +128,10 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   SSH/bash command string MUST be quoted with it. The former duplicate copies
   (`shell_quote`/`shell_quote_str`/`shell_escape`) were consolidated — do not
   reintroduce them.
+- Every child process is built by `fleet_core::proc::command` /
+  `std_command`, never `Command::new`: on Windows they set `CREATE_NO_WINDOW`,
+  without which each `ssh.exe` a probe spawns flashes a console window.
+  `no_eprintln_tests::production_code_spawns_through_proc` enforces it.
 - SQLite access goes through `Store` behind a `std::sync::Mutex`. Never hold the
   guard across an `.await`.
 - No blocking I/O under `Mutex<PtyState>` and none on a sync Tauri command (a
@@ -160,7 +164,9 @@ paths.
 
 The headless `fleet-hub` daemon, `fleet-agent` for hosts the hub cannot reach
 over SSH, paired-client access for phones/browsers, and hub-client mode
-(pairing the desktop itself to a hub) are landed; see `docs/hub.md`. Host
+(pairing the desktop itself to a hub) are landed; see `docs/hub.md`. Since contract revision 5 a hub client adds
+projects through the hub (`add_project` / `list_github_repos` tools), per
+`docs/superpowers/specs/2026-09-27-hub-add-project-design.md`. Host
 reboot handling is landed in both halves, per
 `docs/superpowers/specs/2026-09-17-host-reboot-session-survival-design.md` and
 `docs/superpowers/plans/2026-09-19-host-reboot-recovery.md`: **survival**
@@ -237,9 +243,22 @@ Insert into composer with the hub-fenced `composer_text` — never sent).
 M9.7 (the operator's starts and kills always confirmed; refused on a hub),
 M9.3 (agent-written handover on demand, `work_link { action: handover }`)
 and M9.6 (multi-repo start, `work_link start { project_ids }`) are landed
-too. Write-back (D3 none), dead-session summaries (D10 off) and webhooks
-(D13 no) are decided against and not built; see
-`docs/superpowers/plans/2026-09-24-work-graph-m9-beyond.md`.
+too. Write-back (D3), dead-session summaries (D10) and webhooks (D13) were
+decided against; the user said yes to D3, D10 and D20 on 2026-09-27, as
+M13.4e, M13.4c and M13.4a of M13. D13 stays no: its build (M13.4f) reached
+`main` and was removed again (migration 062 stays, 064 drops its table;
+build notes:
+`docs/superpowers/plans/2026-09-26-work-graph-m13-decided-yes.md`).
+M13.4c (D10) is landed (#327, fixed in #331):
+`work_link { action: summarize }`, on demand only, one tool-less
+print-mode fork on the session's own host (`service/work/summary.rs`,
+`work.summary_model`), stored as a journal `summary` and fenced in the
+brief.
+M13.4e (D3) is landed too (#327, fixed in #332; tests #334): the PR
+remote link on Jira only, per tracker `settings.write_back.pr_remote_link` (off), queued by the PR probe
+for `manual` / `started` confirmed links in the tracker's own org, through
+the outbox `tracker_writes` (migration 061) drained by the sync pass
+(`service/trackers/write_back.rs`, `TrackerProvider::write`).
 Work graph M10 (`docs/superpowers/plans/2026-09-25-work-graph-m10-settle.md`):
 M10.4 is landed — Today's Stale opens Tidy-up narrowed to those sessions,
 and the M5.5 filters (tracker / status / mine / has-session / archived)
@@ -259,16 +278,113 @@ downgrade guard (`store::testgen`), the scale fixture and budget tests
 (`service/work/scale_tests.rs`, migration 058), the `work.retention.*`
 windows (`store/work_retention.rs`), trackers in `fleet_health` with a
 Reconnect Attention item, and the review of the decided-against list
-(`reviews/2026-09-26-work-graph-decisions-revisited.md`).
-M13 (live use) is next: `docs/superpowers/plans/2026-09-26-work-graph-m13-live-use.md`;
-open decisions are the roadmap's table, and a decision-gated feature starts
-only on the user's "yes".
+(`docs/superpowers/reviews/2026-09-26-work-graph-decisions-revisited.md`).
+M13 (live use, `docs/superpowers/plans/2026-09-26-work-graph-m13-live-use.md`)
+is closed (M13.5, #337): M13.1 (partial sync failures, #320), M13.2
+(`work_admin { usage }`, #323 / #324), M13.4c and M13.4e above are on
+`main`; M13.4a (D20) and M13.4d (D15, multi-start) are on fleet-mobile
+(#51, #50). The work graph is *operating* (D26): new work is issues and
+small plans. Two items stay open, waiting on the owner: the acceptance run
+and its triage (M13.3), and D5 (M13.4b). Open decisions are the roadmap's table, and a decision-gated
+feature starts only on the user's "yes".
+Work graph M14 (the Work view: org → group → task → every session, and a
+phone paired to one org) is the one milestone after it (roadmap D36): plan
+`docs/superpowers/plans/2026-09-27-work-graph-m14-work-view.md`, design
+`docs/superpowers/specs/2026-09-27-work-view-design.md`. M14.1a–d (the
+backend: `work { tree | task | session_tasks | review | rules | … }` in
+`service/work/view.rs`, `work_link { set_primary | place | assign_org | … }`
+in `service/work/structure.rs`, migrations 066–067, org-bound clients as
+`OrgScope::Org`, compare-and-set with `E_CONFLICT`, the desktop commands
+and `work:changed`) and M14.2–M14.4 (the desktop Work view — `WorkTree`,
+`WorkTaskDetail`, `WorkReview`, the rules / place / org dialogs, state in
+`src/lib/work_view.ts` — and fleet-mobile's *My work*) are landed; the
+desktop re-reads on `onWorkChanged` and the `workChanged` tick in
+`work.ts`. `scripts/hub-e2e.sh` hub W section 10 runs the contract on a
+real hub. M14.5, the acceptance run (Part R), waits on the owner.
+
+The Jev evaluation (TypeSafe's decision model as an optional reader for
+closed-set decisions) has started with a local language census: `fleet-hub
+census languages` over `service::nl` (cargo feature `nl-detect`, lingua, ON
+only in fleet-hub — the models add ~45 MB, kept there by D47). The decision
+envelope is built and OFF (Jev spec D35–D37; the roadmap's D31–D36 are other decisions): `service::decide` (`gate` / `decide`,
+`DecisionBackend`, `jev.rs` fenced to api.typesafe.ai), `decide.*` settings,
+per-org consent `orgs.jev_allowed` (migration 068), the record
+`decision_runs` + key `decision_secrets` (069; the key is read ONLY by
+`Store::resolve_decision_credential`, never raw text in a run), `fleet-hub
+decide`; guide `docs/decisions.md` (every `decide.*` setting must be in its
+table). The first use case, J3 `status_map`, is built (shadow / assist
+only, off): the Asana probe keeps `config.unmapped_sections` /
+`project_sections`, `service/decide/status_map.rs` asks one Choice per
+unclassified section after a clean sync (`StatusMapTrigger`, daily), and
+`fleet-hub decide proposals` lists what a person applies with `fleet-hub
+tracker section-map`; follow-ups are recorded in `work_admin update`.
+Assist is usable one proposal at a time (`status_map::decide_proposal`,
+by run id: apply / apply_as through `work_admin update`, reject → the
+follow-up only, hidden until a new answer): Settings → Work on a
+standalone desktop (`status_map_proposals` / `decide_status_map_proposal`,
+`LocalOnly` when paired) and `fleet-hub decide proposals apply|reject`.
+Phase 0 (offline) is built for J1 `work_link` and J3: `fleet-hub decide bench
+work-link | status-map` (`service/decide/bench/`: BM25, leakage guard, time
+split, calibration, the test map's acceptance lines, D39 `--export-unlinked`
+/ `--labels`) with the `claude -p haiku` baseline (D33,
+`service/decide/haiku.rs`: a named host of the SAME org only, prompt on
+stdin). J1 has no live adapter: it waits on its acceptance lines. Label
+hygiene (D34) is built: an agent never overturns a person's rejection,
+`store::Decider` records `agent` / `agent_started` vs `manual` / `started`
+(`PERSON_SOURCES` gate write-back, auto-trust and person counts), and a
+person's Clear work holds against the unchanged branch / PR (R9u, migration
+070 `work_unlinks`). The test map is
+`docs/superpowers/specs/2026-09-27-jev-test-map.md`.
+Decisions D31–D47 and what is still open
+are in `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
+
+Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
+here under each reply; Fork, Rewind and Retry are one operation,
+`rewind_conversation` (`service/rewind.rs`), which copies the transcript up
+to the anchor into a new conversation and never changes the original. Spec
+`docs/superpowers/specs/2026-09-26-reply-actions-design.md`.
+
+Session state machine hardening (plan A, #343) is landed: a `working` row
+with no activity for `reconcile.stale_working_secs` turns `idle` with
+`stale_working_at` (migration 065); a StopFailure reads as failed; one
+threshold, `health.context_red_pct`, drives `context_full`; the `oom`
+playbook is capped by `playbooks.oom_max_attempts`; `gc.external_lost_ttl_secs`
+ages out lost external rows. Attention reasons `stop_failed`,
+`context_full`, `stale_working`, `ci_failing`. Plan
+`docs/superpowers/plans/2026-09-27-session-state-machine.md`.
+
+Hub ops and accounting (plan D, #344) is landed: `fleet_health.hub`
+(uptime, reconcile timing), process gauges on `/metrics`, a transcript's
+first read booked as `backfill` apart from the day's live cost (migration
+071 re-keys `usage_daily` by `(day, host_alias, backfill)`), and
+`deploy/hub/backup.sh` / `upgrade.sh` and the `behind-proxy` compose; see
+`docs/hub.md` → *Backups* / *Upgrade with the script*, plan
+`docs/superpowers/plans/2026-09-27-hub-ops-accounting.md`.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;
 `/clear`, `/resume` and compaction tracked as conversation switches;
 `session_conversations` API; the Conversations UI panel), per
 `docs/superpowers/specs/2026-09-18-conversation-events-design.md`.
+
+The desktop builds for Windows as a **client** (plan
+`docs/superpowers/plans/2026-09-27-windows-desktop.md`, user guide
+`docs/windows.md`): no `local` host (`retire_local_host`, as on a hub with
+`hub.local_host=false`), no ssh multiplexing (`ssh::mux_supported`, off
+there), the home/cache dirs through `fleet_core::home` only, and the hub
+token in Credential Manager. Unix-only code and tests stay `#[cfg(unix)]`
+(for a test module: a `#[cfg(unix)]` line above a bare `#[cfg(test)]`, the
+form `no_eprintln_tests` recognises); `rust-windows` in CI keeps clippy and
+the tests green there. `fleet-agent` and `fleet-hub` stay Unix-only.
+On Windows a WSL distribution is a host (`fleet_core::wsl`, alias
+`wsl-<name>`): `SshClient::remote_command` and the PTY attach run it through
+`wsl.exe … sh -c` instead of `ssh`, and it gets no reverse tunnel. The `ssh`
+program is `ssh::default_ssh_binary()` everywhere (probes, PTY, tunnels):
+`CLAUDE_FLEET_SSH`, else the Windows OpenSSH, else PATH. The Windows
+bundle ships Microsoft's ConPTY (`conpty.dll`/`OpenConsole.exe`, which
+portable-pty prefers to the built-in one) via `scripts/fetch-conpty.sh`
+(pinned version + SHA-256) and `--config src-tauri/tauri.conpty.conf.json`
+in release.yml and ci.yml; plain dev builds use the system ConPTY.
 
 Hub↔hub federation (cycle 3) is landed: two `fleet-hub` daemons link with
 `fleet-hub pair --mode peer` / `peer add|list|remove`, a dialer supervisor

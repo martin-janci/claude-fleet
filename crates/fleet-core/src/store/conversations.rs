@@ -278,6 +278,47 @@ impl Store {
         Ok(self.emit_session(session_id)?)
     }
 
+    /// Relabel a just-recorded conversation's origin, for a start whose real
+    /// source only the caller knows and only AFTER the start has run.
+    ///
+    /// A fork's spawn goes `new_session` → [`Store::set_claude_session_id`] →
+    /// [`Self::rebind_conversation`] with [`StartSource::Fleet`], which is
+    /// both the wrong label (`fork` is what the clients render for a forked
+    /// conversation, and what a rewind already gets) and a
+    /// [`StartSource::resets_context`] source — so the new row would report 0
+    /// context for a transcript it inherited whole.
+    /// `rebind_conversation`'s own same-id upgrade deliberately lifts only
+    /// `unknown`, so this is a statement of its own rather than a widening of
+    /// that rule.
+    ///
+    /// The context is marked STALE rather than guessed: its size is the
+    /// inherited transcript's, and only a hook or a transcript read knows it.
+    pub fn relabel_conversation(
+        &self,
+        session_id: i64,
+        claude_session_id: &str,
+        source: StartSource,
+        transcript_path: Option<&str>,
+    ) -> Result<Option<SessionRow>, IpcError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE conversations SET start_source = ?3,                  transcript_path = COALESCE(?4, transcript_path)              WHERE session_id = ?1 AND claude_session_id = ?2",
+            rusqlite::params![
+                session_id,
+                claude_session_id,
+                source.as_str(),
+                transcript_path
+            ],
+        )?;
+        tx.execute(
+            "UPDATE sessions SET transcript_path = COALESCE(?2, transcript_path),                  context_tokens = 0, context_pct = 0, context_stale = 1              WHERE id = ?1 AND claude_session_id = ?3",
+            rusqlite::params![session_id, transcript_path, claude_session_id],
+        )?;
+        tx.commit()?;
+        self.bus.conversations_changed(session_id);
+        Ok(self.emit_session(session_id)?)
+    }
+
     /// Record that the conversation ended (SessionEnd / kill). The session's
     /// `claude_session_id` is untouched: the next rebind replaces it.
     pub fn close_conversation(
@@ -326,6 +367,41 @@ impl Store {
             "UPDATE sessions SET last_hook_at = ?2 WHERE id = ?1",
             rusqlite::params![session_id, now_unix()],
         )?;
+        Ok(())
+    }
+
+    /// A genuine SessionStart: the turn state the previous process left ends
+    /// with it — `failed` reads `idle`, the stale-working stamp goes — and
+    /// `last_hook_at` is stamped, so a reconcile pass already in flight keeps
+    /// this (the MCP-1 guard) and the StopFailure guard (`last_hook_at =
+    /// last_stop_at`) no longer holds. Any other status is left as it is; a
+    /// row with nothing to end is not written.
+    pub fn clear_ended_turn_state(&self, session_id: i64) -> Result<(), IpcError> {
+        let was_failed: Option<bool> = self
+            .conn
+            .query_row(
+                "SELECT claude_status = 'failed' FROM sessions \
+                 WHERE id = ?1 AND (claude_status = 'failed' OR stale_working_at IS NOT NULL)",
+                [session_id],
+                |r| r.get::<_, Option<bool>>(0).map(|b| b.unwrap_or(false)),
+            )
+            .optional()?;
+        let Some(was_failed) = was_failed else {
+            return Ok(());
+        };
+        self.conn.execute(
+            "UPDATE sessions SET last_hook_at = ?2, stale_working_at = NULL, \
+                 claude_status = CASE WHEN claude_status = 'failed' THEN 'idle' \
+                                      ELSE claude_status END \
+             WHERE id = ?1",
+            rusqlite::params![session_id, now_unix()],
+        )?;
+        if was_failed {
+            if let Err(e) = self.insert_session_event(session_id, "status_change", Some("idle")) {
+                tracing::warn!(session_id, error = %e, "[hook] status_change not recorded");
+            }
+        }
+        self.emit_session(session_id)?;
         Ok(())
     }
 
@@ -576,15 +652,6 @@ impl Store {
         Ok(self.emit_session(session_id)?)
     }
 
-    /// Flag the session's context size as out of date (compaction, resume).
-    pub fn mark_context_stale(&self, session_id: i64) -> Result<Option<SessionRow>, IpcError> {
-        self.conn.execute(
-            "UPDATE sessions SET context_stale = 1 WHERE id = ?1",
-            [session_id],
-        )?;
-        Ok(self.emit_session(session_id)?)
-    }
-
     /// `start_source` of the session's current open conversation.
     pub fn current_conversation_source(&self, session_id: i64) -> Result<Option<String>, IpcError> {
         Ok(self
@@ -638,6 +705,56 @@ mod tests {
         assert_eq!(row.end_reason, None);
         assert_eq!(row.model, None);
         assert_eq!(row.first_prompt, None);
+    }
+
+    /// M1: a fork's spawn records its conversation through
+    /// `set_claude_session_id`, i.e. as `fleet` — the wrong label, and a
+    /// `resets_context()` source, so the row reports 0 context for a
+    /// transcript it inherited whole. `relabel_conversation` is what makes it
+    /// read `fork`; `rebind_conversation` cannot, because its same-id upgrade
+    /// deliberately lifts only `unknown`.
+    #[test]
+    fn relabelling_a_conversation_makes_a_fork_read_as_a_fork() {
+        let (s, _bus) = store_with_recorder();
+        let id = session(&s);
+        s.set_claude_session_id(id, A).unwrap();
+        let source = |s: &Store| -> String {
+            s.conn
+                .query_row(
+                    "SELECT start_source FROM conversations WHERE session_id = ?1                      AND claude_session_id = ?2",
+                    rusqlite::params![id, A],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(source(&s), "fleet", "what new_session records");
+        // A plain rebind cannot fix it: the same-id upgrade only lifts
+        // `unknown`. This is the gap the new method closes.
+        s.rebind_conversation(id, A, StartSource::Fork, None, None)
+            .unwrap();
+        assert_eq!(source(&s), "fleet");
+
+        let row = s
+            .relabel_conversation(id, A, StartSource::Fork, Some("/p/new.jsonl"))
+            .unwrap()
+            .expect("the session row comes back");
+        assert_eq!(source(&s), "fork");
+        assert_eq!(
+            s.session_transcript_path(id).unwrap().as_deref(),
+            Some("/p/new.jsonl"),
+            "the path the fork script actually wrote"
+        );
+        assert!(
+            row.context.context_stale,
+            "an inherited transcript's size is unknown until it is read, not 0"
+        );
+        // A conversation the session is no longer on is left alone.
+        s.relabel_conversation(id, B, StartSource::Fork, Some("/p/other.jsonl"))
+            .unwrap();
+        assert_eq!(
+            s.session_transcript_path(id).unwrap().as_deref(),
+            Some("/p/new.jsonl")
+        );
     }
 
     /// Work graph M4.6: the classification nudge is stamped per

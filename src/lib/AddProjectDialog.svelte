@@ -3,6 +3,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { addProject, confirmTokenOf, type AddProjectSource, type ProjectTreeRow } from './projects';
   import { defaultHost, hosts, isPickableHost } from './hosts';
+  import { hubStatus } from './hub';
   import { readPref, writePref } from './prefs';
   import { isComponent, parseRepoUrl } from './repo_url';
   import Modal from './Modal.svelte';
@@ -34,12 +35,15 @@
 
   // ── Modes ────────────────────────────────────────────────────────────
   type Mode = 'clone' | 'github' | 'folder' | 'new';
-  const MODES: { id: Mode; label: string }[] = [
+  const ALL_MODES: { id: Mode; label: string }[] = [
     { id: 'clone', label: 'Clone URL' },
     { id: 'github', label: 'My GitHub' },
     { id: 'folder', label: 'Existing folder' },
     { id: 'new', label: 'New project' },
   ];
+  // On a hub client `local` is the hub's machine, and the folder picker is
+  // this machine's — so an existing folder cannot be offered there.
+  const MODES = $derived($hubStatus.remote ? ALL_MODES.filter((m) => m.id !== 'folder') : ALL_MODES);
   let mode = $state<Mode>('clone');
   /** The mode was chosen by click/Enter (the GitHub browser takes focus)
    *  rather than arrowed onto (focus stays on the control). */
@@ -61,6 +65,9 @@
     writePref('last-host', chosenHost);
   });
   const host = $derived(mode === 'folder' ? 'local' : chosenHost);
+  /** Whether stopping cannot reach the run: any host but this machine's own
+   *  `local`. On a hub client every host is remote, `local` included. */
+  const hostIsRemote = (h: string) => h !== 'local' || $hubStatus.remote;
 
   // ── Fields ───────────────────────────────────────────────────────────
   let url = $state('');
@@ -145,7 +152,7 @@
    *  host only when it is remote; nothing for a local clone or folder. */
   const inflightNote = $derived.by((): string | null => {
     if (!inflight) return null;
-    if (inflight.host === 'local') {
+    if (!hostIsRemote(inflight.host)) {
       return inflight.github ? 'Cancelling may come too late: the GitHub repository may already have been created.' : null;
     }
     const what = inflight.github
@@ -196,7 +203,7 @@
     if (r.error.code === 'E_CANCELLED') {
       // A cancelled GitHub creation may have happened anyway: the backend's
       // message says so, and it must not be swallowed.
-      error = remote ? r.error.message : h === 'local' ? 'Cancelled.' : `Stopped waiting — ${h} may still finish.`;
+      error = remote ? r.error.message : !hostIsRemote(h) ? 'Cancelled.' : `Stopped waiting — ${h} may still finish.`;
       return;
     }
     // Keep every field (an E_GH retry resumes the same owner/repo).
@@ -323,7 +330,7 @@
   <AddProjectActions
     {busy}
     {stopping}
-    remote={inflight !== null && inflight.host !== 'local'}
+    remote={inflight !== null && hostIsRemote(inflight.host)}
     note={inflightNote}
     {canCreate}
     oncreate={submit}

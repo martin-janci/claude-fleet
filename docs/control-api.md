@@ -260,6 +260,8 @@ Index by area (names only; see the reference for details):
   `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
   connected; see *`/agent`* above).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
+  `add_project` (clone, adopt or create a repository on a host — `git` and
+  `gh` run there), `list_github_repos` (what `gh` on a host can see),
   `list_worktrees`, `list_host_worktrees` (one host scanned over SSH, for the
   worktrees fleet's own rows do not cover), `delete_worktree`.
 - **Sessions** — `list_sessions`, `related_sessions`, `new_session`,
@@ -279,7 +281,10 @@ Index by area (names only; see the reference for details):
   one), `send_message`, `inbox`. Rows with
   `kind: external` are interactive Claude sessions running outside tmux:
   fleet can read them (`session_transcript`) but not control them.
-- **Lifecycle & recovery** — `restart_session`, `recreate_session`,
+- **Lifecycle & recovery** — `restart_session`, `rewind_conversation`
+  (truncate a session's Claude transcript into a new conversation: mode
+  `fork` starts a new session from that point, mode `rewind` restarts this
+  one there; the original transcript is never changed), `recreate_session`,
   `repair_session` (explicit repair, same as the Repair workspace button:
   may unregister this worktree's stale entry, adopt a moved checkout,
   recreate the branch and respawn the pane; behind the desktop confirmation
@@ -350,7 +355,10 @@ Index by area (names only; see the reference for details):
   the session that did it), `work_link` (`{session_id, action}`: `link` a key
   or `item_id` — it becomes the session's primary work, `source` `manual` by
   default or `agent` from the in-session agent; `reject` — a sticky "not
-  this"; `unlink` a `link_id`). Returns the updated row; a session row's
+  this"; `unlink` a `link_id` — a person's unlink (the master, a paired
+  person's client) also keeps the unchanged branch / PR that named the key
+  from linking it again, rule R9u; a per-host token's or the operator's is a
+  plain unlink). Returns the updated row; a session row's
   `work` carries its primary link. A per-host token reads and decides only
   its own host's sessions. With neither `session_id` nor `key`, `work`
   lists the links that ended within `work.recent_days`.
@@ -386,7 +394,7 @@ Index by area (names only; see the reference for details):
   suggestion (with `suggestions`, the count), kept apart so a guess never
   groups a session. A branch or PR change ends the automatic link it made
   (`end_reason` `branch_changed` | `pr_changed`, snapshotted as past work);
-  manual, `started` and `agent` links are never ended by it, and a rejected
+  manual, `started`, `agent` and `agent_started` links are never ended by it, and a rejected
   (session, target) pair is never proposed again. Decide with `work_link
   { session_id, action: "confirm", link_id }` or `{ action: "reject",
   link_id }`; `work_link { action: "trust_project", project_id, on }` lets a
@@ -425,7 +433,13 @@ Index by area (names only; see the reference for details):
   (`owner/repo` list narrowing the owner scope), Asana `section_map`
   (section → `todo` | `in_progress` | `done`) and `section_map_confirmed`,
   Jira Data Center `extra_ca` (PEM) and `allow_private_network` (the site may
-  resolve to a loopback / link-local address, refused otherwise). Keys are
+  resolve to a loopback / link-local address, refused otherwise), and for
+  Jira (Cloud and Data Center) `write_back: { pr_remote_link }` (work graph
+  M13.4e, D3: off by default; with it on, a PR seen on a session a person
+  linked to one of the tracker's items is added to that item once as a
+  remote link, `globalId` `fleet:pr:<url>`, through an outbox drained by the
+  sync pass; `fleet_health.trackers[].write_failures` counts the writes
+  given up). `update` replaces the whole `settings` object. Keys are
   the tracker's own: `ABC-123` (Jira, Linear team keys), `owner/repo#42`
   (GitHub), `asana:<task gid>` (Asana, which has no human keys — detection is
   by URL); `lookup` and `start` take any of them, or the item's URL.
@@ -443,7 +457,8 @@ Index by area (names only; see the reference for details):
   it — jump, do not start a second); the project defaults to where that key
   prefix last ran (else `E_AMBIGUOUS` with candidates), the host likewise;
   the worktree is `slug(key + title)`, the session's name `KEY title`, and it
-  is linked `started`. With a brief, the ticket's context (its description
+  is linked `started` (`agent_started` for a per-host token or the operator).
+  With a brief, the ticket's context (its description
   fenced as untrusted) rides the first hook's `additionalContext` and a short
   start prompt is typed only into a ready REPL. A per-host token reads,
   looks up and starts only tickets linked to sessions on its own host, and
@@ -451,7 +466,11 @@ Index by area (names only; see the reference for details):
   frames on `/events`. Events: `work:item`, `work:tracker`,
   `work:tracker_removed` — emitted only when something a reader sees
   changed; a session's `work` carries its item's `status_category`,
-  `status_name`, `url` and `unavailable`.
+  `status_name`, `url` and `unavailable`. `work:changed` (work graph M14)
+  carries ids only — `{ what: placement | rule | view | org, task_id?,
+  rule_id?, view_id? }` — after a Work view structure write; a client
+  re-reads what it shows. Like every `work:*` frame it never reaches a
+  per-host token or an org-bound client.
   Organisations (roadmap M5): `work { action: "scopes" }` lists the scope
   selector's entries (named orgs, then GitHub owners no org covers, then
   the unassigned rest, each with `session_count` and `needs_you`), `work
@@ -530,6 +549,23 @@ Index by area (names only; see the reference for details):
   stuck, without work, when a request is already pending (30 min), and for
   the operator's own session. Timeline: `handover_requested`,
   `handover_written`, `handover_missing`, `handover_send_failed`.
+  `work_link { action: "summarize", key, link_id }` (M13.4c, on demand only)
+  is the dead-session counterpart: a Claude-written summary of past work
+  `link_id` (an ended link of `key`, from `work { links }` or the resume
+  plan). One `claude -p --resume <id> --fork-session
+  --no-session-persistence --tools '' --strict-mcp-config` run on the
+  session's own host, in the directory its transcript recorded, with the
+  model `work.summary_model` names and fleet's hooks off. The answer is
+  redacted, capped at 4,000 characters, stored as that conversation's one
+  journal `summary` (asking again replaces it) and returned fenced as
+  untrusted in `summary`; the resume brief shows it after the agent
+  handover. `E_NO_TRANSCRIPT` when the transcript is gone or was purged,
+  `E_NOTFOUND` when its directory is gone, `E_CLAUDE_CLI` when `claude` is
+  missing or fails, `E_TIMEOUT` past 170 s, `E_EXISTS` while another
+  summary runs on that host, and `E_INVALID` when a live session still
+  holds the conversation (ask it for a `handover`). A per-host token may
+  summarise only its own host's past work in its org; the operator's
+  request waits for confirmation, and is refused on a hub.
   `work_link { action: "start", …, project_ids: [..] }` (M9.6) starts one
   ticket in several repositories at once — up to 8 — one sibling session
   per project, all on the same branch name (`slug(key + title)`, or the
@@ -558,8 +594,8 @@ Index by area (names only; see the reference for details):
   its own host's sessions inside its org — any other session answers as an
   unknown one — and sees (lists, renames) a local item only through a live
   link on its host's sessions or a past one whose session ran there, inside
-  its org; the count is of its host's sessions. The phone does not name
-  work (D20).
+  its org; the count is of its host's sessions. The phone names and
+  renames work with a full token (D20, fleet-mobile M13.4a).
 - **Paired clients** — `pair_client` (mint a single-use pairing code and the
   URL to show as a QR; master token only), `list_clients` (the paired devices
   and what each one's token may do — the stored token digest is never

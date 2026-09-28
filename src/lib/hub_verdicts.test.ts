@@ -88,7 +88,7 @@ describe('REASONS against the generated local_only commands', () => {
     }
   });
 
-  it('the five non-command REASONS keys really are not command names', () => {
+  it('the non-command REASONS keys really are not command names', () => {
     for (const key of REASONS_KEYS_THAT_ARE_NOT_COMMANDS) {
       expect(allCommands.has(key), key).toBe(false);
     }
@@ -181,9 +181,6 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   // Gated by HostDetail.svelte's own `host_tokens` gate (see the
   // REASONS_KEYS_THAT_ARE_NOT_COMMANDS comment above).
   gatedByHostDetail: ['list_host_tokens', 'set_host_token_mode', 'rotate_host_token'],
-  // GithubRepoBrowser.svelte only mounts inside AddProjectDialog, whose
-  // opener (`+ Add project…`) is disabled via `hubBlock('add_project', …)`.
-  gatedByAddProjectDialog: ['list_github_repos'],
   // AddHostPicker.svelte only mounts inside the Add-host dialog, whose
   // opener (`+ Add host`) is disabled via `hubBlock('add_host', …)`.
   gatedByAddHostDialog: ['probe_ssh_alias'],

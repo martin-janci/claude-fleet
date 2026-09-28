@@ -21,6 +21,7 @@ use fleet_core::ipc_error::IpcError;
 use fleet_core::service::work::card::TicketCard;
 use fleet_core::service::work::local::LocalWorkItem;
 use fleet_core::service::work::resume::ResumePlan;
+use fleet_core::service::work::summary::SummaryOutcome;
 use fleet_core::service::work::tidy::{TidyApplyItem, TidyApplyReport, TidyReport};
 use fleet_core::service::work::today::Today;
 use fleet_core::service::work::{self, Dismissed, PurgeImpact, WorkArgs, WorkLinkArgs};
@@ -42,6 +43,13 @@ pub struct LinkSessionWorkArgs {
     /// refusal and meant it.
     #[serde(default)]
     pub force_cross_org: bool,
+    /// `false`: a secondary link, the primary stays (work graph M14).
+    #[serde(default)]
+    pub primary: Option<bool>,
+    /// The version of the link being replaced that the person saw (work
+    /// graph M14); absent: no check.
+    #[serde(default)]
+    pub expected_version: Option<i64>,
 }
 
 /// Say a session does NOT work on a key or item (sticky) — or, with
@@ -55,6 +63,9 @@ pub struct RejectSessionWorkArgs {
     pub item_id: Option<i64>,
     #[serde(default)]
     pub link_id: Option<i64>,
+    /// The link's version the person saw (work graph M14).
+    #[serde(default)]
+    pub expected_version: Option<i64>,
 }
 
 /// Confirm one detected suggestion: it becomes the session's primary work.
@@ -65,6 +76,12 @@ pub struct ConfirmSessionWorkArgs {
     /// Confirm a suggestion of another org anyway (work graph M5).
     #[serde(default)]
     pub force_cross_org: bool,
+    /// `false`: confirm as a secondary link (work graph M14).
+    #[serde(default)]
+    pub primary: Option<bool>,
+    /// The link's version the person saw (work graph M14).
+    #[serde(default)]
+    pub expected_version: Option<i64>,
 }
 
 /// Trust (or stop trusting) branch keys in a project (rule R3).
@@ -79,6 +96,9 @@ pub struct SetWorkProjectTrustArgs {
 pub struct UnlinkSessionWorkArgs {
     pub session_id: i64,
     pub link_id: i64,
+    /// The link's version the person saw (work graph M14).
+    #[serde(default)]
+    pub expected_version: Option<i64>,
 }
 
 /// What a resume of a work key would do, and which modes are possible.
@@ -302,6 +322,24 @@ pub async fn request_work_handover(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<SessionRow, IpcError> {
     routed::request_work_handover(&backend, args, &store, &ssh).await
+}
+
+/// A Claude-written summary of past work (work graph M13.4c, on demand):
+/// ended link `link_id` of `key`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SummarizePastWorkArgs {
+    pub key: String,
+    pub link_id: i64,
+}
+
+#[tauri::command]
+pub async fn summarize_past_work(
+    args: SummarizePastWorkArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<SummaryOutcome, IpcError> {
+    routed::summarize_past_work(&backend, args, &store, &ssh).await
 }
 
 /// The Today view's digest (work graph M9.1). `since` is the viewer's local
@@ -626,6 +664,8 @@ pub(crate) mod routed {
             link_id: None,
             source: Some("manual".into()),
             force_cross_org: args.force_cross_org.then_some(true),
+            primary: args.primary,
+            expected_version: args.expected_version,
             ..Default::default()
         };
         match backend.hub() {
@@ -646,6 +686,7 @@ pub(crate) mod routed {
             item_id: args.item_id,
             link_id: args.link_id,
             source: None,
+            expected_version: args.expected_version,
             ..Default::default()
         };
         match backend.hub() {
@@ -664,6 +705,8 @@ pub(crate) mod routed {
             action: "confirm".into(),
             link_id: Some(args.link_id),
             force_cross_org: args.force_cross_org.then_some(true),
+            primary: args.primary,
+            expected_version: args.expected_version,
             ..Default::default()
         };
         match backend.hub() {
@@ -701,6 +744,7 @@ pub(crate) mod routed {
             item_id: None,
             link_id: Some(args.link_id),
             source: None,
+            expected_version: args.expected_version,
             ..Default::default()
         };
         match backend.hub() {
@@ -750,6 +794,33 @@ pub(crate) mod routed {
                     store,
                     ssh,
                     args.session_id,
+                    &fleet_core::service::orgs::OrgScope::All,
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn summarize_past_work(
+        backend: &FleetBackend,
+        args: SummarizePastWorkArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<SummaryOutcome, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "summarize".into(),
+            key: Some(args.key.clone()),
+            link_id: Some(args.link_id),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("summarize_past_work", &wire).await,
+            None => {
+                work::summary::summarize(
+                    store,
+                    ssh.as_ref(),
+                    &args.key,
+                    args.link_id,
                     &fleet_core::service::orgs::OrgScope::All,
                 )
                 .await

@@ -9,6 +9,7 @@ import type { AccountUsageSnapshot } from './account_usage_store';
 import type { AssetInventoryRow, CatalogSummary, SyncProgress } from './assets';
 import type { MoveProgress } from './moveProgress';
 import type { TrackerRow, WorkEvent, WorkItemRow } from './trackers';
+import { parseWorkChanged, type WorkChanged } from './work_view';
 
 /**
  * How long a flush waits for more events after the first one arrives. Tauri
@@ -70,6 +71,10 @@ export type RowEventHandlers = {
   onConversationsChanged?: (sessionIds: number[]) => void;
   /** One call per flush with every `work:*` frame (work graph M3), in order. */
   onWorkEvents?: (events: WorkEvent[]) => void;
+  /** One call per flush with every well-formed `work:changed` (work graph
+   *  M14.1d: ids only), in order. A `resync` among them means reload the
+   *  whole Work view (`needsFullReload`); anything else, re-read what shows. */
+  onWorkChanged?: (changes: WorkChanged[]) => void;
 };
 
 type Queued =
@@ -93,7 +98,8 @@ type Queued =
   | { name: 'move:progress'; payload: MoveProgress }
   | { name: 'work:item'; payload: WorkItemRow }
   | { name: 'work:tracker'; payload: TrackerRow }
-  | { name: 'work:tracker_removed'; payload: { id: number } };
+  | { name: 'work:tracker_removed'; payload: { id: number } }
+  | { name: 'work:changed'; payload: unknown };
 
 /**
  * Subscribe to every row-change event from the backend. Returns a single
@@ -131,6 +137,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     const timelineEvents: TimelineEvent[] = [];
     const conversationsChangedIds: number[] = [];
     const workEvents: WorkEvent[] = [];
+    const workChanges: WorkChanged[] = [];
     for (const ev of batch) {
       switch (ev.name) {
         case 'session:created':
@@ -215,6 +222,11 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
         case 'work:tracker_removed':
           workEvents.push({ type: 'tracker_removed', id: ev.payload.id });
           break;
+        case 'work:changed': {
+          const c = parseWorkChanged(ev.payload);
+          if (c) workChanges.push(c);
+          break;
+        }
       }
     }
     if (sessionEvents.length > 0) handlers.onSessionEvents?.(sessionEvents);
@@ -226,6 +238,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     if (timelineEvents.length > 0) handlers.onTimelineEvents?.(timelineEvents);
     if (conversationsChangedIds.length > 0) handlers.onConversationsChanged?.(conversationsChangedIds);
     if (workEvents.length > 0) handlers.onWorkEvents?.(workEvents);
+    if (workChanges.length > 0) handlers.onWorkChanged?.(workChanges);
   };
 
   const enqueue = (ev: Queued) => {
@@ -263,6 +276,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     syncProgress: !!handlers.onSyncProgress,
     moveProgress: !!handlers.onMoveProgress,
     work: !!handlers.onWorkEvents,
+    workChanged: !!handlers.onWorkChanged,
   };
 
   const sub = <N extends Queued['name']>(
@@ -300,6 +314,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('work:item', wanted.work),
     sub('work:tracker', wanted.work),
     sub('work:tracker_removed', wanted.work),
+    sub('work:changed', wanted.workChanged),
   ]);
   return () => {
     disposed = true;

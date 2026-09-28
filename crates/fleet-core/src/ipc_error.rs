@@ -154,6 +154,11 @@ pub mod codes {
     /// says how (auth_failed | rate_limited | unreachable | captcha |
     /// unconfigured). The cache still answers; this is only a live call.
     pub const E_TRACKER: &str = "E_TRACKER";
+    /// A write named a version of a work-graph row (a link, a placement, a
+    /// rule, a view, a primary, an org-move impact) that someone else
+    /// changed meanwhile (work graph M14.1c). Nothing was written;
+    /// `details` carry the current value to reload and decide again.
+    pub const E_CONFLICT: &str = "E_CONFLICT";
     /// `move_session` with `strict: true` only: the source worktree has
     /// uncommitted changes (`details.dirty_files`). Without `strict` a move
     /// carries them instead of refusing.

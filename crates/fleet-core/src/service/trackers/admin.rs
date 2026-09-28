@@ -20,7 +20,7 @@ use std::sync::Mutex;
 #[derive(Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "WorkAdminParams")]
 pub struct WorkAdminArgs {
-    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|sweep_now|usage
+    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|assign_client|sweep_now|usage
     pub action: String,
     /// Tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -49,7 +49,7 @@ pub struct WorkAdminArgs {
     /// direct|via_host:HOST|via_cli:HOST
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<String>,
-    /// Provider settings object; pr_remote_link (Jira) opts in to PR links.
+    /// Provider settings object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<serde_json::Value>,
     /// For remove.
@@ -82,6 +82,12 @@ pub struct WorkAdminArgs {
     /// on|off|inherit
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_tidy: Option<String>,
+    /// Org Jev consent: on|off
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev: Option<String>,
+    /// D31: bound clients see unassigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_sees_unassigned: Option<bool>,
     /// usage window, 1-365 (30)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub days: Option<i64>,
@@ -113,6 +119,8 @@ impl fmt::Debug for WorkAdminArgs {
             .field("host_alias", &self.host_alias)
             .field("rule_id", &self.rule_id)
             .field("auto_tidy", &self.auto_tidy)
+            .field("jev", &self.jev)
+            .field("bound_sees_unassigned", &self.bound_sees_unassigned)
             .field("days", &self.days)
             .finish()
     }
@@ -125,7 +133,7 @@ impl WorkAdminArgs {
             "action={} tracker_id={:?} provider={:?} site_url={:?} auth_kind={:?} \
              credential_ref={:?} transport={:?} settings={} secret={} org_id={:?} \
              rule_id={:?} host_alias={:?} owner={:?} repo={:?} path_prefix={:?} \
-             isolate_sessions={:?} auto_tidy={:?} days={:?}",
+             isolate_sessions={:?} auto_tidy={:?} jev={:?} bound_sees_unassigned={:?} days={:?}",
             self.action,
             self.tracker_id,
             self.provider,
@@ -151,6 +159,8 @@ impl WorkAdminArgs {
             self.path_prefix,
             self.isolate_sessions,
             self.auto_tidy,
+            self.jev,
+            self.bound_sees_unassigned,
             self.days,
         )
     }
@@ -207,6 +217,7 @@ impl AdminAction {
         "assign_host",
         "unassign_host",
         "assign_tracker",
+        "assign_client",
         "sweep_now",
         "usage",
     ];
@@ -515,11 +526,29 @@ pub fn admin_sync(
                 check_host_transport(&s, &t)?;
                 s.set_tracker_transport(id, &t)?;
             }
+            let changed_settings = settings.is_some();
             if let Some(st) = settings {
                 s.set_tracker_settings(id, &st)?;
             }
             s.emit_tracker(id)?;
-            json(&s.require_tracker(id)?)
+            let updated = s.require_tracker(id)?;
+            if changed_settings {
+                // J3: a person's section map is the reference the
+                // `status_map` proposals are measured against. Never fails
+                // the update.
+                if let Err(e) = crate::service::decide::status_map::record_followups(
+                    &s,
+                    &updated,
+                    crate::store::now_unix(),
+                ) {
+                    tracing::debug!(
+                        tracker_id = id,
+                        "[decide] status_map follow-up not recorded: {}",
+                        e.message
+                    );
+                }
+            }
+            json(&updated)
         }
         AdminAction::SetCredential => {
             let id = args.tracker()?;

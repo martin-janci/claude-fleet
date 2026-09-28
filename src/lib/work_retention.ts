@@ -22,9 +22,8 @@ export interface RetentionSweep {
   journal: number;
   tracker_items: number;
   timeline_work_events: number;
-  /** Settled PR remote link records (work graph M13.4e); absent from an
-   *  older backend. */
-  write_outbox?: number;
+  /** Settled write-back outbox rows (M13.4e); absent from an older hub. */
+  tracker_writes?: number;
 }
 
 export interface RetentionStatus {
@@ -46,7 +45,6 @@ export const RETENTION_TABLE_LABELS: Readonly<Record<string, string>> = {
   work_journal: 'journal',
   work_items: 'done tickets',
   session_events: 'work timeline',
-  tracker_write_outbox: 'PR links written',
 };
 
 export function retentionTableLabel(table: string): string {
@@ -65,6 +63,6 @@ export function lastSweepLine(s: RetentionSweep | null | undefined, now: number)
   if (!s) return 'no sweep yet';
   const mins = Math.max(0, Math.round((now - s.at) / 60));
   const ago = mins < 60 ? `${mins} min ago` : mins < 2880 ? `${Math.round(mins / 60)} h ago` : `${Math.round(mins / 1440)} d ago`;
-  const writes = s.write_outbox ? `, ${s.write_outbox} PR link records` : '';
-  return `last sweep ${ago}: ${s.journal} journal, ${s.tracker_items} tickets, ${s.timeline_work_events} events${writes} deleted`;
+  const outbox = s.tracker_writes ? `, ${s.tracker_writes} PR links` : '';
+  return `last sweep ${ago}: ${s.journal} journal, ${s.tracker_items} tickets, ${s.timeline_work_events} events${outbox} deleted`;
 }

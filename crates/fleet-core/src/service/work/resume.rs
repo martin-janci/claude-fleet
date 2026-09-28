@@ -431,6 +431,22 @@ pub fn transcript_probe_script(
     stored_path: Option<&str>,
     claude_session_id: &str,
 ) -> Result<String, String> {
+    let paths = transcript_candidates(stored_path, claude_session_id)?;
+    Ok(format!(
+        "for f in {}; do if [ -f \"$f\" ]; then echo {TRANSCRIPT_PROBE_TAG}present; exit 0; fi; done; echo {TRANSCRIPT_PROBE_TAG}absent",
+        paths.join(" ")
+    ))
+}
+
+/// PURE: the shell words, quoted and validated, where `claude_session_id`'s
+/// transcript may be: the path a conversation row recorded (when it still
+/// validates), then the glob under every project of the host's
+/// `$HOME/.claude/projects`. Shared by the transcript probe and the
+/// summary run (work graph M13.4c).
+pub fn transcript_candidates(
+    stored_path: Option<&str>,
+    claude_session_id: &str,
+) -> Result<Vec<String>, String> {
     let mut paths = Vec::new();
     if let Some(p) =
         stored_path.filter(|p| crate::service::hooks::valid_transcript_path(p, claude_session_id))
@@ -448,10 +464,7 @@ pub fn transcript_probe_script(
         None,
         claude_session_id,
     )?);
-    Ok(format!(
-        "for f in {}; do if [ -f \"$f\" ]; then echo {TRANSCRIPT_PROBE_TAG}present; exit 0; fi; done; echo {TRANSCRIPT_PROBE_TAG}absent",
-        paths.join(" ")
-    ))
+    Ok(paths)
 }
 
 /// What the transcript probe found.
@@ -745,37 +758,47 @@ pub fn resume_session_args(
     })
 }
 
-/// Keys with a resume between its re-checked guards and its link, per
+/// Keys with a resume (or a `start`, work graph M14) between its re-checked
+/// guards and its link, per
 /// store (`Store::instance_id` tells one fleet's registry from another's,
 /// which only matters to tests — and, unlike the store's address, is never
 /// reused by a store built where a dropped one was): a second resume of one
 /// of them meanwhile is refused with `E_EXISTS` (the store lock is not held
 /// across the spawn, so the guards alone would let two callers spawn two
-/// sessions on one conversation).
+/// sessions on one conversation). A start claims the same keys, so a start
+/// and a resume of one key, or two starts from two devices, never spawn two
+/// sessions for it.
 static IN_FLIGHT: Mutex<std::collections::BTreeSet<(u64, String)>> =
     Mutex::new(std::collections::BTreeSet::new());
 
-/// One key's claim; released on drop, whatever the resume's outcome.
+/// One key's claim; released on drop, whatever the resume's (or start's)
+/// outcome: success, an error, a `?`, a cancelled future or a panic.
 #[derive(Debug)]
-struct InFlight(u64, String);
+pub(crate) struct InFlight(u64, String);
 
 fn store_key(store: &Store) -> u64 {
     store.instance_id()
 }
 
 impl InFlight {
-    fn claim(store: &Store, key: &str) -> Result<Self, IpcError> {
+    /// Claim `key` in its one spelling (a start's `abc-1` and a resume's
+    /// `ABC-1` are one key), or `E_EXISTS` while another holds it.
+    pub(crate) fn claim(store: &Store, key: &str) -> Result<Self, IpcError> {
+        let key = crate::store::normalize_work_ref(key)?;
         let mut set = IN_FLIGHT
             .lock()
             .map_err(|_| IpcError::new(codes::E_LOCK, "the resume registry is poisoned"))?;
         let id = store_key(store);
-        if !set.insert((id, key.to_string())) {
+        if !set.insert((id, key.clone())) {
             return Err(IpcError::new(
                 codes::E_EXISTS,
-                format!("{key} is being resumed already; wait for that session, then jump to it"),
+                format!(
+                    "{key} is being started or resumed already; wait for that session, then \
+                     jump to it"
+                ),
             ));
         }
-        Ok(InFlight(id, key.to_string()))
+        Ok(InFlight(id, key))
     }
 }
 
@@ -785,6 +808,21 @@ impl Drop for InFlight {
             set.remove(&(self.0, std::mem::take(&mut self.1)));
         }
     }
+}
+
+/// `e`, for a resume whose session `row` exists but is not linked: the
+/// message says so and `details.orphan_session_id` names it, the shape
+/// `tickets::start_with` reports a lost start in.
+fn orphaned(e: IpcError, row: &SessionRow) -> IpcError {
+    let mut d = e.details.clone().unwrap_or_else(|| serde_json::json!({}));
+    if let Some(o) = d.as_object_mut() {
+        o.insert("orphan_session_id".into(), row.id.into());
+    }
+    let message = format!(
+        "{}; the session this resume made ({}) is not linked to it",
+        e.message, row.tmux_name
+    );
+    IpcError { message, ..e }.with_details(d)
 }
 
 /// The brief a caller edited, blank counting as none: the Resume dialog
@@ -855,6 +893,22 @@ where
             ));
         }
     }
+    // A client bound to an org (M14) resumes only where the new session
+    // would be its org's (the landing host can be overridden).
+    // (With D31 off, an unassigned one is not its to see either.)
+    if let (Some(_), Some(host), Some(pid)) = (
+        scope.bound_org(),
+        plan.host_alias.as_deref(),
+        plan.project_id,
+    ) {
+        let org = lock(store)?.org_for_new_session(host, pid)?;
+        if !scope.sees_org(org) {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "a client bound to an org resumes work only on its own org's projects and hosts",
+            ));
+        }
+    }
     let (new_args, _claim) = {
         let s = lock(store)?;
         // The plan's guards (no live session for the key; for `last`, the
@@ -921,9 +975,43 @@ where
         (new_args, claim)
     };
     let row = spawn(new_args).await?;
+    // From here on a session exists: any failure names it, as a start's
+    // does, rather than leaving it running unlinked and unreported.
+    let orphaned = |e: IpcError| orphaned(e, &row);
     let handover = {
-        let s = lock(store)?;
-        s.link_resumed_work(row.id, &plan.key)?;
+        let s = lock(store).map_err(orphaned)?;
+        // The claim above fences other resumes and starts, not a person's
+        // own link of the key (or a start that claimed and linked before
+        // this plan's guards), which may have landed meanwhile. Re-check
+        // under the guard that writes the link, so the key never ends with
+        // two.
+        let now = plan_resume(
+            &s,
+            &plan.key,
+            plan.link_id,
+            args.host_alias.as_deref(),
+            scope,
+        )
+        .map_err(orphaned)?;
+        if let Some(l) = now.live.iter().find(|l| l.session_id != row.id) {
+            return Err(orphaned(
+                IpcError::new(
+                    codes::E_EXISTS,
+                    format!(
+                        "{} is live in {} on {} — jump to it",
+                        plan.key,
+                        l.friendly_name.as_deref().unwrap_or(&l.tmux_name),
+                        l.host_alias
+                    ),
+                )
+                .with_details(serde_json::json!({
+                    "session_id": l.session_id,
+                    "host_alias": l.host_alias,
+                    "tmux_name": l.tmux_name,
+                })),
+            ));
+        }
+        s.link_resumed_work(row.id, &plan.key).map_err(orphaned)?;
         if args.mode == "brief" {
             let body = edited.or(plan.brief.clone()).unwrap_or_default();
             let body: String = body.chars().take(handover::BRIEF_MAX_CHARS).collect();
@@ -1630,6 +1718,7 @@ mod tests {
 
     /// The generated script run against a real directory tree, as `local`
     /// runs it: present when the file is there, absent when it is not.
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_probe_script_answers_on_a_real_tree() {
         let home = tempfile::tempdir().unwrap();
@@ -1730,7 +1819,11 @@ mod tests {
         };
         let (first, err) = tokio::join!(first, second);
         assert_eq!(err.code, codes::E_EXISTS, "{}", err.message);
-        assert!(err.message.contains("being resumed"), "{}", err.message);
+        assert!(
+            err.message.contains("started or resumed"),
+            "{}",
+            err.message
+        );
         let (row, _) = first.expect("the first resume completes");
         assert_eq!(row.tmux_name, "dev-new");
         // Afterwards the key is live: a resume is blocked by the plan (Jump),
@@ -1743,6 +1836,195 @@ mod tests {
         assert!(err.message.contains("jump"), "{}", err.message);
         let key = store_key(&st.lock().unwrap());
         assert!(!IN_FLIGHT.lock().unwrap().iter().any(|(id, _)| *id == key));
+    }
+
+    /// A start of a key while a resume of it is mid-spawn (the phone's
+    /// Start while the desktop's Resume spawns) is refused by the shared
+    /// claim before it spawns: one session for the key, not a race lost at
+    /// the link.
+    #[tokio::test]
+    async fn a_start_while_a_resume_of_the_key_is_in_flight_is_refused() {
+        let (st, pid) = fixture();
+        let ssh = Arc::new(SshClient::new());
+        let args = ResumeArgs {
+            key: "abc-1".into(),
+            mode: "fresh".into(),
+            ..Default::default()
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let (at_spawn_tx, at_spawn) = tokio::sync::oneshot::channel::<()>();
+        let st1 = Arc::clone(&st);
+        let resume = resume_with(&st, &ssh, &args, &OrgScope::All, |a| async move {
+            at_spawn_tx.send(()).unwrap();
+            rx.await.unwrap();
+            let s = st1.lock().unwrap();
+            let id = s
+                .upsert_session("dev-new", &a.host_alias, None, None, 1, 1, "running", None)
+                .unwrap();
+            Ok(s.get_session_by_id(id).unwrap().unwrap())
+        });
+        let plan = crate::service::trackers::tickets::StartPlan {
+            key: "ABC-1".into(),
+            title: String::new(),
+            item_id: None,
+            project_id: pid,
+            host_alias: "h".into(),
+            branch: "abc-1".into(),
+            worktree_id: None,
+            name: "ABC-1".into(),
+            per_project: false,
+            decider: crate::store::Decider::Person,
+        };
+        let start = async {
+            at_spawn.await.unwrap();
+            let e = crate::service::trackers::tickets::start_with(
+                &st,
+                &plan,
+                None,
+                &OrgScope::All,
+                |_| async { panic!("the start never spawns") },
+            )
+            .await
+            .unwrap_err();
+            tx.send(()).unwrap();
+            e
+        };
+        let (resumed, e) = tokio::join!(resume, start);
+        assert_eq!(e.code, codes::E_EXISTS, "{}", e.message);
+        assert!(e.message.contains("started or resumed"), "{}", e.message);
+        let (row, _) = resumed.expect("the resume completes");
+        assert_eq!(row.tmux_name, "dev-new");
+    }
+
+    /// A link of the same key that lands while the resume is mid-spawn (a
+    /// start claims the key since M14, but a person's own link does not, and
+    /// neither did a start before it). The resume must re-check at its link,
+    /// or the
+    /// key ends with two live confirmed sessions — and the one it made must
+    /// be named, not left running unlinked and unreported.
+    #[tokio::test]
+    async fn a_start_that_links_during_the_spawn_refuses_the_resume_and_names_its_orphan() {
+        let (st, pid) = fixture();
+        let ssh = Arc::new(SshClient::new());
+        let args = ResumeArgs {
+            key: "abc-1".into(),
+            mode: "fresh".into(),
+            ..Default::default()
+        };
+        let st1 = Arc::clone(&st);
+        let err = resume_with(&st, &ssh, &args, &OrgScope::All, |a| async move {
+            let s = st1.lock().unwrap();
+            // The start wins while this spawn is in flight.
+            let winner = s
+                .upsert_session(
+                    "dev-started",
+                    &a.host_alias,
+                    None,
+                    None,
+                    1,
+                    1,
+                    "running",
+                    None,
+                )
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET project_id = ?1 WHERE id = ?2",
+                    rusqlite::params![pid, winner],
+                )
+                .unwrap();
+            s.link_session_work(winner, WorkTarget::Key("ABC-1"), "started")
+                .unwrap();
+            let id = s
+                .upsert_session(
+                    "dev-resumed",
+                    &a.host_alias,
+                    None,
+                    None,
+                    1,
+                    1,
+                    "running",
+                    None,
+                )
+                .unwrap();
+            Ok(s.get_session_by_id(id).unwrap().unwrap())
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code, codes::E_EXISTS, "{}", err.message);
+        let s = st.lock().unwrap();
+        let live = s.live_work_sessions_for_key("ABC-1").unwrap();
+        assert_eq!(
+            live.iter()
+                .map(|(_, r)| r.tmux_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dev-started"],
+            "one live session on the key"
+        );
+        let orphan: i64 = s
+            .conn_ref()
+            .query_row(
+                "SELECT id FROM sessions WHERE tmux_name = 'dev-resumed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            err.details
+                .as_ref()
+                .and_then(|d| d["orphan_session_id"].as_i64()),
+            Some(orphan),
+            "the session the resume made is named: {:?}",
+            err.details
+        );
+        assert!(err.message.contains("dev-resumed"), "{}", err.message);
+    }
+
+    /// A link that fails after the spawn (the store, a poisoned lock) is
+    /// reported with the session it leaves behind, as a start's is.
+    #[tokio::test]
+    async fn a_resume_whose_link_fails_after_the_spawn_names_the_session() {
+        let (st, _) = fixture();
+        let ssh = Arc::new(SshClient::new());
+        let args = ResumeArgs {
+            key: "abc-1".into(),
+            mode: "fresh".into(),
+            ..Default::default()
+        };
+        let st1 = Arc::clone(&st);
+        let err = resume_with(&st, &ssh, &args, &OrgScope::All, |a| async move {
+            let s = st1.lock().unwrap();
+            let id = s
+                .upsert_session(
+                    "dev-resumed",
+                    &a.host_alias,
+                    None,
+                    None,
+                    1,
+                    1,
+                    "running",
+                    None,
+                )
+                .unwrap();
+            let row = s.get_session_by_id(id).unwrap().unwrap();
+            // The row goes away before the link can be written.
+            s.conn_ref()
+                .execute("DELETE FROM sessions WHERE id = ?1", [id])
+                .unwrap();
+            Ok(row)
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            err.details
+                .as_ref()
+                .and_then(|d| d["orphan_session_id"].as_i64())
+                .is_some(),
+            "{}: {:?}",
+            err.message,
+            err.details
+        );
     }
 
     /// The registry is keyed by the store's instance id, never its address:

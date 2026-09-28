@@ -7,10 +7,9 @@ mod pty;
 pub use app_events::AppHandleEventBus;
 
 use backend::{Backend, OsTokenStore};
-use bootstrap::env::{
-    appdata_dir, backfill_locale_for_gui_launch, backfill_path_for_gui_launch, env_looks_complete,
-    import_login_shell_env,
-};
+use bootstrap::env::{appdata_dir, backfill_locale_for_gui_launch};
+#[cfg(unix)]
+use bootstrap::env::{backfill_path_for_gui_launch, env_looks_complete, import_login_shell_env};
 use bootstrap::singleton::kill_other_instances;
 use commands::cancel::cancel_command;
 use fleet_core::store::Store;
@@ -66,10 +65,17 @@ pub fn run() {
     // Step 1 spawns a login shell (~100-500ms). Skip it when the env already
     // looks like a terminal launch — the common dev case — so startup stays
     // snappy; the backfills below still run as a safety net.
-    if !env_looks_complete() {
-        import_login_shell_env();
+    //
+    // Steps 1 and 2 are Unix-only: Windows has no login shell to ask, and a
+    // Git Bash `$SHELL` would hand back a POSIX-style PATH that breaks every
+    // spawn.
+    #[cfg(unix)]
+    {
+        if !env_looks_complete() {
+            import_login_shell_env();
+        }
+        backfill_path_for_gui_launch();
     }
-    backfill_path_for_gui_launch();
     backfill_locale_for_gui_launch();
 
     let ssh_client = std::sync::Arc::new(fleet_core::ssh::SshClient::new());
@@ -174,6 +180,48 @@ pub fn run() {
                     Err(e) => tracing::warn!("friendly_name backfill failed: {e}"),
                 }
             }
+            // Windows is a client, never a fleet host: no tmux, no bash, no
+            // Claude Code sessions of its own (docs/windows.md). `local` goes
+            // off the way it does on a hub with `hub.local_host=false`, before
+            // the ticks and the control API start: every command naming it is
+            // refused with E_NOTFOUND, and the seeded row is hidden.
+            #[cfg(windows)]
+            {
+                // WSL distributions become hosts (`fleet_core::wsl`). Found
+                // before the ticks start, so the first reconcile pass already
+                // routes `wsl-<name>` through wsl.exe; bounded, because a WSL
+                // service that is still starting can take seconds.
+                let ssh_aliases: Vec<String> = fleet_core::ssh_config::load_user_config()
+                    .into_iter()
+                    .map(|h| h.alias)
+                    .collect();
+                fleet_core::wsl::refresh(&ssh_aliases, std::time::Duration::from_secs(3));
+                // portable-pty prefers a conpty.dll beside the exe (the one the
+                // installer ships) to the built-in ConPTY; say which this run
+                // got, since bracketed paste and the mouse depend on it.
+                let bundled_conpty = std::env::current_exe()
+                    .ok()
+                    .and_then(|exe| exe.parent().map(|d| d.join("conpty.dll").is_file()))
+                    .unwrap_or(false);
+                tracing::info!(
+                    wsl_hosts = ?fleet_core::wsl::hosts(),
+                    ssh = %fleet_core::ssh::default_ssh_binary().display(),
+                    conpty = if bundled_conpty { "bundled" } else { "system" },
+                    "[startup] Windows host sources"
+                );
+                fleet_core::service::hub::disable_local_host();
+                if let Ok(s) = store.lock() {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    match fleet_core::service::hub::retire_local_host(&s, now) {
+                        Ok(0) => {}
+                        Ok(n) => tracing::info!("retired {n} session(s) on the local host"),
+                        Err(e) => tracing::warn!("could not retire the local host: {e}"),
+                    }
+                }
+            }
             app.manage(std::sync::Arc::clone(&store));
             app.manage(Mutex::new(fleet_core::mcp::McpRuntime::default()));
             app.manage(std::sync::Arc::clone(&bus_for_usage));
@@ -196,7 +244,21 @@ pub fn run() {
             // be exactly one implementation of "where the token lives".
             let tokens: std::sync::Arc<dyn backend::TokenStore> =
                 std::sync::Arc::new(OsTokenStore::new(data_dir.clone()));
-            let backend = Backend::resolve(&store, tokens.as_ref());
+            tracing::info!("startup: resolving backend (hub.remote_url, then the client token)");
+            let resolving = std::time::Instant::now();
+            let backend = Backend::resolve(
+                &store,
+                &backend::token_store::BoundedTokenStore::new(
+                    std::sync::Arc::clone(&tokens),
+                    backend::token_store::KEYCHAIN_WAIT,
+                ),
+            );
+            tracing::info!(
+                elapsed_ms = resolving.elapsed().as_millis() as u64,
+                remote = backend.is_remote(),
+                unavailable = backend.unavailable().is_some(),
+                "startup: backend resolved"
+            );
             app.manage(std::sync::Arc::clone(&tokens));
             // Whether this window's live link to the hub is up — the
             // disconnected banner. Standalone it never moves off
@@ -310,15 +372,36 @@ pub fn run() {
             commands::work::work_today,
             commands::work::work_ticket_card,
             commands::work::request_work_handover,
+            commands::work::summarize_past_work,
             commands::work::list_local_work_items,
             commands::work::name_session_work,
             commands::work::rename_work_item,
+            commands::work_view::work_tree,
+            commands::work_view::work_task,
+            commands::work_view::work_session_tasks,
+            commands::work_view::work_review,
+            commands::work_view::work_rules,
+            commands::work_view::work_rule_preview,
+            commands::work_view::work_views,
+            commands::work_view::work_org_impact,
+            commands::work_view::set_primary_work,
+            commands::work_view::reconsider_work_link,
+            commands::work_view::ack_work_link,
+            commands::work_view::decide_work_batch,
+            commands::work_view::place_work,
+            commands::work_view::assign_work_org,
+            commands::work_view::save_work_rule,
+            commands::work_view::delete_work_rule,
+            commands::work_view::save_work_view,
+            commands::work_view::delete_work_view,
             commands::trackers::add_tracker,
             commands::trackers::update_tracker,
             commands::trackers::set_tracker_credential,
             commands::trackers::test_tracker,
             commands::trackers::remove_tracker,
             commands::trackers::tracker_sync_metrics,
+            commands::trackers::status_map_proposals,
+            commands::trackers::decide_status_map_proposal,
             commands::trackers::work_retention_status,
             commands::trackers::work_retention_sweep,
             commands::trackers::work_usage,
@@ -343,6 +426,7 @@ pub fn run() {
             commands::sessions::session_tool_detail,
             commands::sessions::session_activity,
             commands::sessions::restart_session,
+            commands::sessions::rewind_conversation,
             commands::sessions::send_prompt,
             commands::sessions::spawn_review,
             commands::sessions::recreate_session,
