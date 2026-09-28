@@ -346,7 +346,11 @@ Retry (the client's rewind + `send_prompt`) is offered only when
 `ConvTurn.prompt_partial` is false. A rewind is refused unless the session
 is quiet (live pane probe first) and without an anchor; a failed restart
 reverts the binding (`Store::revert_rebind`) and removes the copy. Fork into
-a NEW worktree is open: refused `E_UNSUPPORTED`, shown disabled. Spec
+a NEW worktree (`new_worktree`, the Fork sheet's default) creates the
+worktree first — a fresh branch at the source's HEAD, uncommitted changes
+not carried — then writes the copy under its `pwd -P`, then starts in it;
+a failure after the worktree removes the copy, the tree, the branch and
+the row. Spec
 `docs/superpowers/specs/2026-09-26-reply-actions-design.md`.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row

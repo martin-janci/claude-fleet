@@ -3,12 +3,18 @@
 Date: 2026-09-26
 Status: implemented on the desktop and hub (#338 and follow-up fixes);
 fleet-mobile follows separately.
-As built, where it differs from the design below: a fork writes its
-transcript beside the source's and reuses the source's worktree — "New
-worktree" (§5.2) ships disabled and the tool parameter, `new_worktree`
-(§6 calls it `worktree`), answers `E_UNSUPPORTED` (a new worktree's physical
-path exists only after `new_session` creates it, too late for the transcript
-rewrite); Retry resends the prompt's text only, not its images; a fork
+As built, where it differs from the design below: the tool parameter is
+`new_worktree` (§6 calls it `worktree`). "New worktree" (§5.2) shipped
+disabled in #338 — a new worktree's physical path existed only after
+`new_session` created it, too late for the transcript rewrite — and is now
+built by reordering: the fork creates the worktree first (a fresh branch at
+the source's HEAD, never an existing name — `E_CONFLICT`; uncommitted
+changes are not carried, and the sheet says so), writes the copy under its
+`pwd -P` with `cwd` rewritten, records the worktree row, then starts the
+session in that existing worktree; a failure after the worktree exists
+removes the copy, the tree and branch (no `--force`), and the row. A hub
+older than this answers `E_UNSUPPORTED`, which the sheet shows as "update
+the hub". Retry resends the prompt's text only, not its images; a fork
 carries the source's confirmed work links (source `forked`), as
 `move_session { keep_source }` does.
 Repos: `claude-fleet` (fleet first), `fleet-mobile` (follows)
