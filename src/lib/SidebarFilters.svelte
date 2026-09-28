@@ -417,7 +417,7 @@
       </div>
     </div>
 
-    <ActiveFilters facets={stripFacets} onclear={clearFacet} onclearall={clearAll} />
+    <ActiveFilters facets={stripFacets} onclear={clearFacet} onclearall={clearAll} emptyFocus={() => filtersBtn} />
 
     {#if panelOpen}
       <div
