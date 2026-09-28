@@ -9,9 +9,11 @@ impl FleetTools {
     #[tool(description = "The asset catalog (skills, agents, hooks, MCP \
         servers, plugin refs) with each asset's per-host drift state from \
         the last scan, plus unmanaged assets on hosts and catalog parse \
-        problems. Requires catalog_configure + catalog_load in the app.")]
+        problems. E_CATALOG_NOT_CONFIGURED until a catalog is set (in the \
+        app, or `fleet-hub catalog set` on a hub).")]
     pub(super) async fn list_assets(&self) -> Result<CallToolResult, McpError> {
         audit("list_assets", "");
+        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
         ok_json_compact(&catalog::list_assets(&self.store).map_err(to_mcp_err)?)
     }
 
@@ -27,6 +29,7 @@ impl FleetTools {
             "scan_assets",
             &format!("host_alias={}", p.host_alias.as_deref().unwrap_or("*")),
         );
+        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
         let res = catalog::inventory::scan_hosts(&self.store, &self.ssh, p.host_alias.as_deref())
             .await
             .map_err(to_mcp_err)?;
@@ -86,6 +89,7 @@ impl FleetTools {
             kind,
             name: p.name,
         };
+        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
         let plan = catalog::sync::plan_sync(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -166,6 +170,7 @@ impl FleetTools {
         catalog_configure + catalog_load in the app.")]
     pub(super) async fn list_layers(&self) -> Result<CallToolResult, McpError> {
         audit("list_layers", "");
+        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
         let out = catalog::list_layers(&self.store).map_err(to_mcp_err)?;
         ok_json_compact(&out)
     }
@@ -180,6 +185,7 @@ impl FleetTools {
         Parameters(p): Parameters<ResolvePreviewParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("resolve_preview", &format!("host_alias={}", p.host_alias));
+        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
         let res = catalog::resolve_preview(&p.host_alias, &self.store).map_err(to_mcp_err)?;
         // Project to a summary shape at the MCP boundary: `Resolution` is a
         // full `Catalog`, and `Asset`'s serializer emits `body` in full plus
@@ -213,14 +219,15 @@ impl FleetTools {
         Read-only.")]
     pub(super) async fn propose_layers(&self) -> Result<CallToolResult, McpError> {
         audit("propose_layers", "");
+        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
         let out = catalog::propose::propose_layers(&self.store).map_err(to_mcp_err)?;
         ok_json_compact(&out)
     }
 
     #[tool(description = "Replace a host's layer assignment: one optional \
         role plus context layers. Edits fleet state only, never catalog \
-        files. Requires catalog_configure + catalog_load in the app. Master \
-        token only.")]
+        files. Requires a configured catalog (in the app, or `fleet-hub \
+        catalog set` on a hub). Master token only.")]
     pub(super) async fn set_host_layers(
         &self,
         Parameters(p): Parameters<SetHostLayersParams>,
@@ -241,6 +248,7 @@ impl FleetTools {
                 p.contexts.len()
             ),
         );
+        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
         let out = catalog::set_host_layers(
             &p.host_alias,
             p.role.as_deref(),

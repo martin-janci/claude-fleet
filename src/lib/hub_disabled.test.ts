@@ -219,6 +219,8 @@ describe('the asset catalog on a hub client', () => {
     });
     render(AssetsPanel, { props: { visible: true } });
     expect((await screen.findByTestId('assets-hub-failed')).textContent).toContain('no asset catalog yet');
+    // ...and says how to set one, rather than only that someone should.
+    expect(screen.getByTestId('assets-hub-setup-cmd').textContent).toContain('fleet-hub catalog set');
   });
 
   it('standalone is untouched: it still loads the catalog', async () => {

@@ -270,7 +270,8 @@
         <p class="muted note" data-testid="assets-remote-note">
           Read-only here. Editing assets, Sync and Secrets are fleet
           administration: they run where the catalog's git checkout and the
-          sync secrets live — on the hub's machine. A paired client never
+          sync secrets live — on the hub's machine (<code>fleet-hub catalog
+          set|reload</code> there, then Refresh). A paired client never
           writes to the hosts.
         </p>
         {#if error}<p class="error">{error}</p>{/if}
@@ -283,7 +284,9 @@
         {#if overviewLoad === 'failed'}
           <div class="load-failed" data-testid="assets-hub-failed">
             {#if overviewNotConfigured}
-              <p class="muted">The hub has no asset catalog yet. Point it at one on the hub's machine, then Refresh.</p>
+              <p class="muted">The hub has no asset catalog yet. It is a git checkout on the hub's machine, set there — then Refresh here:</p>
+              <pre class="cmd" data-testid="assets-hub-setup-cmd">fleet-hub catalog set ~/agent-assets --remote git@github.com:you/agent-assets.git</pre>
+              <p class="muted">The remote is cloned when the path is empty. In the Docker setup, prefix it with <code>docker compose exec fleet-hub</code> and keep the checkout on the data volume, e.g. <code>/var/lib/fleet-hub/agent-assets</code>.</p>
             {:else}
               <p class="muted">The hub's asset catalog could not be loaded.</p>
               {#if overviewError}<p class="error">{overviewError}</p>{/if}
@@ -442,6 +445,7 @@
   .filter { margin-left: auto; width: 160px; }
   .hub-overview { display: flex; flex-direction: column; flex: 1; min-height: 0; }
   .hub-overview .note { margin: 6px 10px; font-size: 12px; }
+  .cmd { margin: 0; padding: 6px 8px; font-family: ui-monospace, monospace; font-size: 12px; background: var(--bg-pane); border-radius: 4px; white-space: pre-wrap; word-break: break-all; user-select: text; }
   .overview-list { flex: 1; min-height: 0; }
   .body { display: grid; grid-template-columns: 300px 1fr; flex: 1; min-height: 0; }
   .left { border-right: 1px solid var(--border); min-height: 0; overflow: auto; }

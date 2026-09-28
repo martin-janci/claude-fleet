@@ -1991,6 +1991,38 @@ Code writes is refused (`E_PROVISION`) before anything is written — that
 refusal ends the birth with no token committed and no session started, and
 the next press retries.
 
+## Asset catalog
+
+The asset catalog — skills, agents, hooks, MCP servers and plugin refs that
+Sync installs on hosts — is a git checkout on the hub's machine. The desktop
+sets it in its Assets tab; on a hub, set it with `fleet-hub catalog`. A
+running hub is not needed, and does not need a restart: it picks the change
+up at its next catalog call (on a paired client, Assets → Refresh).
+
+```bash
+# Docker: keep the checkout on the data volume so it survives the container.
+docker compose exec fleet-hub fleet-hub catalog set /var/lib/fleet-hub/agent-assets \
+  --remote git@github.com:you/agent-assets.git
+docker compose exec fleet-hub fleet-hub catalog show
+docker compose exec fleet-hub fleet-hub catalog reload --pull   # after a push to the remote
+```
+
+- `set <path> [--remote <url>]` records the path and loads it. A path with
+  no checkout is cloned from `--remote`, with this machine's git
+  credentials: for an SSH remote, allow the key `fleet-hub ssh-key` prints
+  to read the repository.
+- `reload [--pull]` re-reads the checkout (optionally `git pull --ff-only`
+  first). Nothing pulls on its own.
+- `show` prints the path, remote and last loaded commit.
+
+The hub also loads the configured catalog when it starts. A desktop whose
+`state.db` was copied over (*Migrating from the desktop*) brings its
+catalog path with it; if that path is not on the hub's machine, `set` it
+again.
+
+A paired client sees the catalog read-only (see *What is different from
+standalone*); editing it is `git` in the checkout, followed by `reload`.
+
 ## Migrating from the desktop
 
 1. Quit the desktop app.
@@ -2193,7 +2225,8 @@ standalone exactly as before.
   a Scan hosts button through `scan_assets`, both open to any paired client.
   Editing assets, Sync and Secrets need the catalog's git checkout and the
   sync secrets, which live on the hub's machine, so the panel does not offer
-  them.
+  them. The catalog itself is set on that machine with `fleet-hub catalog
+  set` (see *Asset catalog*).
 - **The setup checklist** is about the machine that owns the fleet, so it
   shows the reason instead of its panel.
 - **A revoked or rotated token** comes back `E_UNAUTHORIZED` on every call;

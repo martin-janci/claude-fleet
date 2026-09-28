@@ -123,7 +123,7 @@ The cached Claude accounts seen across hosts.
 
 ### `list_assets`
 
-The asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each asset's per-host drift state from the last scan, plus unmanaged assets on hosts and catalog parse problems. Requires catalog_configure + catalog_load in the app.
+The asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each asset's per-host drift state from the last scan, plus unmanaged assets on hosts and catalog parse problems. E_CATALOG_NOT_CONFIGURED until a catalog is set (in the app, or `fleet-hub catalog set` on a hub).
 
 ### `list_clients`
 
@@ -457,7 +457,7 @@ Parameters: `friendly_name`, `host_alias`, `session_id`, `tmux_name`
 
 ### `set_host_layers`
 
-Replace a host's layer assignment: one optional role plus context layers. Edits fleet state only, never catalog files. Requires catalog_configure + catalog_load in the app. Master token only.
+Replace a host's layer assignment: one optional role plus context layers. Edits fleet state only, never catalog files. Requires a configured catalog (in the app, or `fleet-hub catalog set` on a hub). Master token only.
 
 Parameters: `contexts`, `host_alias`, `role`
 

@@ -1,6 +1,7 @@
 //! `fleet-hub` — claude-fleet without the desktop app. See `docs/hub.md`.
 
 mod bench;
+mod catalog;
 mod census;
 mod config;
 mod decide;
@@ -129,6 +130,15 @@ enum Cmd {
     Work {
         #[command(subcommand)]
         cmd: work::WorkCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Point the hub at its asset catalog (a git checkout on this machine),
+    /// show it, or reload it. No running hub needed; a running one picks the
+    /// change up at its next catalog call.
+    Catalog {
+        #[command(subcommand)]
+        cmd: catalog::CatalogCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -317,6 +327,7 @@ async fn main() -> ExitCode {
         Cmd::Tracker { cmd, opts } => tracker::run(cmd, &opts, &env).await,
         Cmd::Org { cmd, opts } => org::run(cmd, &opts, &env).await,
         Cmd::Work { cmd, opts } => work::run(cmd, &opts, &env).await,
+        Cmd::Catalog { cmd, opts } => catalog::run(cmd, &opts, &env),
         Cmd::Census { cmd, opts } => census::run(cmd, &opts, &env),
         Cmd::Decide { cmd, opts } => decide::run(cmd, &opts, &env).await,
         Cmd::Reports {
