@@ -424,11 +424,10 @@ async fn status_map(
             )
         }
     };
-    let rows = sm::parse_labels(&raw).map_err(|e| match labels {
+    let mut rows = sm::parse_labels(&raw).map_err(|e| match labels {
         Some(f) => format!("{}: {e}", f.display()),
         None => format!("the built-in set: {e}"),
     })?;
-    let (cases, dropped) = sm::cases(&rows);
     let providers = parse_sm_providers(providers)?;
     let max_calls = max_calls.unwrap_or(sm::DEFAULT_MAX_CALLS);
     let haiku = match haiku_args.config(providers.contains(&sm::Provider::Haiku))? {
@@ -440,6 +439,19 @@ async fn status_map(
         }
         None => None,
     };
+    // Before anything is sent, each row's org comes from the database (the
+    // gate's consent and the haiku org fence rest on it), never from the
+    // file alone.
+    if providers.iter().any(|p| p.is_model()) {
+        let path = db_path(db, opts, env)?;
+        let s = Store::open_read_only(&path)
+            .map_err(|e| format!("open {} read-only: {e}", path.display()))?;
+        sm::resolve_label_orgs(&s, &mut rows).map_err(|e| match labels {
+            Some(f) => format!("{}: {e}", f.display()),
+            None => format!("the built-in set: {e}"),
+        })?;
+    }
+    let (cases, dropped) = sm::cases(&rows);
     let note = haiku.as_ref().map(Haiku::consent_note);
     let outs = if providers.contains(&sm::Provider::Jev) {
         let path = db_path(db, opts, env)?;
@@ -806,6 +818,30 @@ mod tests {
         .await
         .unwrap_err();
         assert!(e.contains("stranger"), "{e}");
+        assert!(fake.hosts().is_empty());
+        // A row whose org the database does not bear out: refused before
+        // anything is sent (the file alone never sets a case's org).
+        let bad = dir.path().join("bad.jsonl");
+        std::fs::write(
+            &bad,
+            "{\"section\":\"Hotovo\",\"expect\":\"done\",\"lang\":\"sk\",\"org_id\":4242}\n",
+        )
+        .unwrap();
+        let fake = canned();
+        let e = super::status_map(
+            Some(&bad),
+            false,
+            &providers,
+            &on("acme-box"),
+            &fake,
+            None,
+            Some(&db),
+            &HubOptions::default(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(e.contains("row 1") && e.contains("no org 4242"), "{e}");
         assert!(fake.hosts().is_empty());
         // Without the host nothing is sent.
         let fake = Canned::default();

@@ -490,7 +490,13 @@ fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provi
 `expect` is `todo`, `in_progress`, `done` or `not_planned`; `lang` is `en`,
 `sk`, `cs`, `de` or `mixed`; a `note` containing `ambiguous` marks a case a
 reasonable person could label otherwise, reported apart; `org_id` (optional)
-is the org whose consent a Jev call needs. Names are normalised as the
+is the org whose consent a Jev call needs, and `tracker_id` (optional) the
+Asana tracker the section is on. **The org is checked against the database
+before anything is sent** (with `--provider jev` or `haiku`): a row with a
+`tracker_id` takes that tracker's org and is refused when its `org_id`
+says otherwise; a row with only an `org_id` must name an org the database
+knows, and when Asana trackers there list the section, one of them must be
+of that org (else it is refused: give the row its `tracker_id`). Names are normalised as the
 probe stores them (trimmed, lower case; the board de-duplicated), and the
 Jev request is **the adapter's own** (`status_map::question_for`: the
 section and at most 30 board names), so the benchmark measures what
