@@ -129,6 +129,19 @@ pub async fn describe(
     };
 
     let now = crate::service::catalog::now_secs();
+    // WARNING for future edits: `lock(store)?` here is a temporary of this
+    // `if let`'s SCRUTINEE, and for `if let` / `match` (unlike a plain `let`
+    // statement) such a temporary's drop is deferred to the end of the whole
+    // arm — so the store stays locked for this entire block, not just for
+    // evaluating `cached_description`. Do not add a second `lock(store)?`
+    // anywhere inside this block: it would try to re-acquire this same,
+    // still-held, non-reentrant `std::sync::Mutex` on one thread and hang
+    // forever — the exact shape of bug that deadlocked
+    // `service::work::retention::status` (two `lock`s as sibling struct-field
+    // initializers of one statement) before it was caught. Do not add an
+    // `.await` inside this block either: it would hold the guard across an
+    // await, which this module's own discipline (see the module doc) forbids.
+    // Both are safe once this block has returned or fallen through.
     if let Some(body) = lock(store)?.cached_description(item_id, ttl_secs, now)? {
         let chars = body.chars().count() as i64;
         return Ok(Described {
