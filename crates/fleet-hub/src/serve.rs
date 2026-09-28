@@ -696,6 +696,9 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             tracing::warn!(error = %e, "file logging unavailable; logging to stderr only");
         }
     }
+    if let Some(warning) = crate::config::plaintext_exposure_warning(&r) {
+        tracing::warn!("{warning}");
+    }
     persist(&store, &r)?;
     if !r.local_host {
         // Before the control API and the ticks start: from here on every
@@ -825,6 +828,8 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     // using mid-pass (issue #144). One token for both: SIGTERM has no reason
     // to stop them at different times.
     let ticks_cancel = CancellationToken::new();
+    // Pin started_at to the serve start, not to the first fleet_health.
+    let _ = fleet_core::service::tick::tick_stats();
     let reconcile_handle = fleet_core::service::tick::spawn_reconcile_tick(
         Arc::clone(&store),
         Arc::clone(&ssh),

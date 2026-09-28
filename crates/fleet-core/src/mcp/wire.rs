@@ -32,6 +32,9 @@ pub struct SseFrame {
     /// The `data:` field(s), joined with `\n`. Never empty: an event whose
     /// data buffer is empty is not dispatched, per the SSE spec.
     pub data: String,
+    /// The `id:` field, when the server sent one — what a client hands back
+    /// as `Last-Event-ID`.
+    pub id: Option<String>,
 }
 
 /// Default `event:` name per the SSE spec, when a frame carries none.
@@ -55,6 +58,8 @@ pub struct SseDecoder {
     data: Vec<String>,
     /// Its `event:` name, if one was given.
     name: Option<String>,
+    /// Its `id:`, if one was given.
+    id: Option<String>,
 }
 
 impl SseDecoder {
@@ -116,9 +121,9 @@ impl SseDecoder {
         match field {
             "data" => self.data.push(value.to_string()),
             "event" => self.name = Some(value.to_string()),
-            // `id` and `retry` are reconnection bookkeeping this client does
-            // not use (it re-lists after a gap rather than replaying), and an
-            // unknown field is ignored by the spec.
+            // The spec ignores an id holding U+0000; `retry` stays unused,
+            // and an unknown field is ignored by the spec.
+            "id" if !value.contains('\0') => self.id = Some(value.to_string()),
             _ => {}
         }
         None
@@ -135,6 +140,7 @@ impl SseDecoder {
         Some(SseFrame {
             name: name.unwrap_or_else(|| DEFAULT_EVENT_NAME.to_string()),
             data: std::mem::take(&mut self.data).join("\n"),
+            id: self.id.take(),
         })
     }
 }
@@ -197,6 +203,7 @@ mod tests {
         SseFrame {
             name: name.to_string(),
             data: data.to_string(),
+            id: None,
         }
     }
 
@@ -206,6 +213,20 @@ mod tests {
         assert_eq!(
             d.feed("event: session:updated\ndata: {\"id\":1}\n\n"),
             vec![frame("session:updated", "{\"id\":1}")]
+        );
+    }
+
+    #[test]
+    fn an_id_line_rides_on_its_frame_and_only_that_frame() {
+        let mut d = SseDecoder::new();
+        let frames = d.feed(
+            "event: session:updated\nid: 7-42\ndata: {\"id\":1}\n\nevent: ready\ndata: {}\n\n",
+        );
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].id.as_deref(), Some("7-42"));
+        assert_eq!(
+            frames[1].id, None,
+            "`ready` carries no id; nothing is inherited"
         );
     }
 

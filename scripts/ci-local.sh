@@ -193,6 +193,10 @@ release_assets_smoke() {
 }
 step release_assets_smoke
 
+# The hub deploy scripts (backup.sh / upgrade.sh) against a fake docker:
+# bash + sqlite3 only, a few seconds.
+step bash scripts/hub-deploy-scripts-test.sh
+
 [[ "$RUN_RUST" == 1 ]] && run_rust
 [[ "$RUN_FRONTEND" == 1 ]] && run_frontend
 [[ "$RUN_HUB_E2E" == 1 ]] && run_hub_e2e

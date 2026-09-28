@@ -192,6 +192,10 @@ check "/healthz needs no token and no allowlisted Host" '[ "$(code "http://127.0
 check "/healthz answers the liveness body and nothing else" 'curl -s -m 10 "http://127.0.0.1:$PA/healthz" | grep -qx "fleet-hub ok"' "$(curl -s -m 10 "http://127.0.0.1:$PA/healthz")"
 check "/healthz refuses a non-GET with 405" '[ "$(code -X POST "http://127.0.0.1:$PA/healthz")" = 405 ]' "$(code -X POST "http://127.0.0.1:$PA/healthz")"
 check "no token -> 401" '[ "$(code -X POST "http://127.0.0.1:$PA/mcp" -H "Host: $PUB")" = 401 ]' ""
+# A second bad bearer from one address inside AUTH_FAIL_INTERVAL (1 s) is
+# 429, not 401 (mcp::tests_auth_limit); these checks assert the 401 itself,
+# so each waits the interval out after the previous refusal.
+sleep 1.1
 check "wrong token -> 401" '[ "$(code -X POST "http://127.0.0.1:$PA/mcp" -H "Host: $PUB" -H "Authorization: Bearer nope")" = 401 ]' ""
 check "foreign Host -> 403" '[ "$(code -X POST "http://127.0.0.1:$PA/mcp" -H "Host: evil.example.com" -H "Authorization: Bearer $TOKA")" = 403 ]' ""
 init=$(rpc "$PA" "$PUB" "$TOKA" initialize '{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}')
@@ -325,7 +329,11 @@ gs_c=$(tool "$PA" "$PUB" "$CTOK" get_settings '{}')
 check "a client is refused set_setting and get_settings" 'echo "$ss_c" | grep -q E_FORBIDDEN && echo "$gs_c" | grep -q E_FORBIDDEN' "${ss_c:0:300} / ${gs_c:0:300}"
 
 # --- GET /events -------------------------------------------------------------
-check "/events needs a token like /mcp" '[ "$(code "http://127.0.0.1:$PA/events" -H "Host: $PUB")" = 401 ]' "$(code "http://127.0.0.1:$PA/events" -H "Host: $PUB")"
+# One request, captured once: a second one inside AUTH_FAIL_INTERVAL would be
+# the 429 the failed-bearer limiter answers, not the 401 under test.
+sleep 1.1
+ev_code="$(code "http://127.0.0.1:$PA/events" -H "Host: $PUB")"
+check "/events needs a token like /mcp" '[ "$ev_code" = 401 ]' "$ev_code"
 SSE="$ROOT/events.sse"
 # `-m` only bounds a stream nothing ever closes; every wait below is its own
 # bounded poll, and the subscriber is killed as soon as the checks are done.
@@ -369,7 +377,9 @@ tbl=$("$BIN" client list --data-dir "$ROOT/a" --port "$PA" 2>&1)
 check "fleet-hub client list shows both paired clients and no digest" 'echo "$tbl" | grep -q "e2e phone" && echo "$tbl" | grep -q "e2e kiosk" && ! echo "$tbl" | grep -qi token' "$tbl"
 rev=$("$BIN" client revoke "e2e phone" --data-dir "$ROOT/a" --port "$PA" 2>&1); rc=$?
 check "fleet-hub client revoke reports the revoked client" '[ $rc -eq 0 ] && echo "$rev" | grep -q "e2e phone"' "$rev"
-check "a revoked client's token is refused -> 401" '[ "$(code -X POST "http://127.0.0.1:$PA/mcp" -H "Host: $PUB" -H "Authorization: Bearer $CTOK")" = 401 ]' "$(code -X POST "http://127.0.0.1:$PA/mcp" -H "Host: $PUB" -H "Authorization: Bearer $CTOK")"
+sleep 1.1
+revoked_code="$(code -X POST "http://127.0.0.1:$PA/mcp" -H "Host: $PUB" -H "Authorization: Bearer $CTOK")"
+check "a revoked client's token is refused -> 401" '[ "$revoked_code" = 401 ]' "$revoked_code"
 check "the other client still works" '[ "$(code -X POST "http://127.0.0.1:$PA/mcp" -H "Host: $PUB" -H "Authorization: Bearer $RTOK" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}")" = 200 ]' ""
 tbl2=$("$BIN" client list --include-revoked --data-dir "$ROOT/a" --port "$PA" 2>&1)
 check "a revoked client stays listed for the audit trail" 'echo "$tbl2" | grep -q "e2e phone"' "$tbl2"

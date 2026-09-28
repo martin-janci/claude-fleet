@@ -68,7 +68,7 @@
   import { loadComposerPresets } from './lib/composer_presets';
   import { hubStatus, loadHubStatus } from './lib/hub';
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
-  import { startHubConnection } from './lib/hub_connection';
+  import { startHubConnection, setGapHandler } from './lib/hub_connection';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
   import { get } from 'svelte/store';
 
@@ -289,6 +289,13 @@
     // Trackers (work graph M3): their state badges, chip staleness and the
     // quick switcher's tickets. A hub older than M3 has no answer.
     void loadTrackers();
+    // A hub reconnect the hub could not replay: the backend re-lists rows
+    // itself; projects/worktrees and trackers/work have list shapes their
+    // events cannot carry, so this window re-fetches them here.
+    setGapHandler(() => {
+      void loadProjects();
+      void loadTrackers();
+    });
     // The composer's chip row. Fleet state since it moved off `localStorage`
     // (so the phone and this window share one list), and never on the
     // critical path: the cached copy is already on screen, and a failed read
@@ -404,6 +411,7 @@
     unsubOpened();
     unsubHostsClose();
     unlistenEvents?.();
+    setGapHandler(null);
   });
 
   function onResizeSidebar(delta: number) {
