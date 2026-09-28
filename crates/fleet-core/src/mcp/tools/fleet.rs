@@ -154,10 +154,12 @@ impl FleetTools {
     #[tool(description = "Read or replace the fleet's quick replies: the \
         chip row the desktop and phone composers draw above the prompt box, \
         as [{label, text, auto_send}] in order. No arguments reads; `set` \
-        replaces the whole list (max 24, [] restores the defaults). \
-        Errors: E_INVALID.")]
+        replaces the whole list (max 24, [] restores the defaults; not a \
+        host token or the operator). \
+        Errors: E_INVALID, E_CONFLICT, E_FORBIDDEN.")]
     pub(super) async fn quick_replies(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<QuickRepliesParams>,
     ) -> Result<CallToolResult, McpError> {
         // Chip TEXT is a prompt the operator wrote; the count is the whole
@@ -169,8 +171,21 @@ impl FleetTools {
                 None => "read".to_string(),
             },
         );
+        // The chips are a PERSON's buttons, on every screen of the fleet, and
+        // an auto-send chip is a prompt one tap away. A per-host token is a
+        // host's own Claude and the operator is the UX agent: letting either
+        // rewrite the list would let an agent plant a prompt the person then
+        // sends without reading. Reads stay open to both.
+        if p.set.is_some() && (caller.host_alias.is_some() || caller.is_operator()) {
+            return Err(to_mcp_err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "quick replies are the person's: an agent token may read them, not replace them",
+            )));
+        }
         let entries = match p.set {
-            Some(entries) => quick_replies::replace(&self.store, entries).map_err(to_mcp_err)?,
+            Some(entries) => {
+                quick_replies::replace(&self.store, entries, p.expected).map_err(to_mcp_err)?
+            }
             None => quick_replies::list(&self.store).map_err(to_mcp_err)?,
         };
         ok_json_compact(&entries)

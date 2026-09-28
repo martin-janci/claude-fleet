@@ -905,7 +905,11 @@ What a client may do:
   itself is fleet state in the hub's database, not a device preference, so a
   chip written on the laptop is on the phone and the other way round — its
   order and each chip's `auto_send` (a tap sends at once instead of only
-  filling the box) included.
+  filling the box) included. Only a person's token replaces it: a per-host
+  token and the operator may read the list but get `E_FORBIDDEN` on `set`,
+  since an auto-send chip is a prompt one tap away. A `set` may name the list
+  it last read as `expected`; if another device saved in between, it answers
+  `E_CONFLICT` instead of overwriting that edit.
 - **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
   `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `set_host_layers`,
   `pair_client`, `revoke_client`, `set_client_trust` and `list_clients` are
