@@ -20,14 +20,14 @@ pub use fetch::HttpsFetch;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use fleet_update::channel::{attach_evidence, RawDoc};
+use fleet_update::channel::{attach_evidence, CheckOutcome, RawDoc};
 use fleet_update::decide::{decide, DecideInput, HubSpeaks, Pin, Policy};
 use fleet_update::verify::verify_channel;
-use fleet_update::wire::{CheckRequest, Decision, Report, Speaks, Status, UPDATE_PROTO};
+use fleet_update::wire::{CheckRequest, Decision, Installed, Report, Speaks, Status, UPDATE_PROTO};
 use fleet_update::{
     fetch_channel, fetch_manifests, verify_listed_manifest, wanted_versions, Component, Fetch,
-    Manifests, Mode, Platform, Source, Track, TrustedKeys, UpdateError, VerifiedChannel, Version,
-    Window,
+    GitUpdateChannel, Manifests, MemorySequenceStore, Mode, Platform, SequenceStore, Source, Track,
+    TrustedKeys, UpdateChannel, UpdateError, UpdatePhase, VerifiedChannel, Version, Window,
 };
 use serde::Serialize;
 
@@ -633,6 +633,98 @@ pub fn unpin(store: &Mutex<Store>, component: &str, target: &str) -> Result<bool
     lock(store)?.clear_update_desired(c.as_str(), target)
 }
 
+// ── Git mode: a standalone check ──
+
+/// A standalone check (Git mode, design §7 F1): no hub above, so the
+/// published channel is read directly and decided under a local policy.
+/// What `fleet-hub update check` runs for the hub itself, and what a
+/// standalone desktop will run for its own build (S7).
+#[derive(Debug, Clone)]
+pub struct GitCheck {
+    /// Where `<track>.json` lives ([`channel_base_url`]).
+    pub base_url: String,
+    pub track: Track,
+    pub policy: Policy,
+    /// The highest channel sequence already trusted (the replay guard).
+    pub seen: u64,
+}
+
+impl GitCheck {
+    /// The settings, pin and last-seen sequence of `store` when there is
+    /// one, the defaults otherwise; `track` overrides `update.track`.
+    pub fn from_store(
+        store: Option<&Store>,
+        component: Component,
+        target: &str,
+        track_override: Option<Track>,
+    ) -> Result<GitCheck, IpcError> {
+        let track = track_override.unwrap_or_else(|| store.map_or(Track::Stable, track));
+        let (policy, seen) = match store {
+            Some(s) => (
+                policy(s, component, target)?,
+                s.update_doc("channel", track.as_str())?
+                    .and_then(|d| d.sequence)
+                    .map_or(0, |q| q.max(0) as u64),
+            ),
+            None => (Policy::default(), 0),
+        };
+        Ok(GitCheck {
+            base_url: channel_base_url(),
+            track,
+            policy,
+            seen,
+        })
+    }
+}
+
+/// The check request for this running hub build.
+pub fn hub_self_request(installed: Installed) -> CheckRequest {
+    CheckRequest {
+        update_proto: UPDATE_PROTO,
+        component: Component::Hub,
+        platform: hub_platform(),
+        installed,
+        speaks: Speaks::default(),
+        phase: UpdatePhase::Idle,
+        attempt: None,
+    }
+}
+
+/// Decide `req` from the published channel ([`GitUpdateChannel`]), and
+/// prove a target it names against the signed documents. A channel that
+/// is not published yet is `E_HUB_UNAVAILABLE`, saying so; one no trusted
+/// key signed, or an older one than `check.seen`, is `E_UPDATE_UNVERIFIED`.
+pub async fn git_check<F: Fetch + 'static>(
+    fetch: F,
+    check: GitCheck,
+    keys: TrustedKeys,
+    req: &CheckRequest,
+    now: i64,
+) -> Result<CheckOutcome, IpcError> {
+    let url = fleet_update::channel::channel_url(&check.base_url, check.track);
+    let seen = MemorySequenceStore::default();
+    seen.record(check.track, check.seen);
+    let channel = GitUpdateChannel::new(
+        fetch,
+        check.base_url,
+        check.track,
+        check.policy,
+        keys,
+        Box::new(seen),
+    )
+    .with_clock(move || now);
+    channel.check(req).await.map_err(|e| match e {
+        UpdateError::Http { status: 404, .. } => IpcError::new(
+            codes::E_HUB_UNAVAILABLE,
+            format!(
+                "no {} channel is published yet (nothing at {url})",
+                check.track.as_str()
+            ),
+        ),
+        other => update_err(other),
+    })
+}
+
 // ── refresh ──
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -770,21 +862,23 @@ pub struct HubSelf {
     pub build_id: String,
 }
 
-fn record_hub_self(store: &Store, me: &HubSelf, now: i64) -> Result<(), IpcError> {
+/// This hub's platform: in a container it is updated as an image, else as
+/// the release tarball.
+pub fn hub_platform() -> Platform {
     let variant = if std::path::Path::new("/.dockerenv").exists() {
         "oci"
     } else {
         "tarball"
     };
+    Platform::new(std::env::consts::OS, std::env::consts::ARCH, variant)
+}
+
+fn record_hub_self(store: &Store, me: &HubSelf, now: i64) -> Result<(), IpcError> {
     let prev = store.update_observed("hub:self")?;
     store.upsert_update_observed(&UpdateObservedRow {
         target: "hub:self".into(),
         component: "hub".into(),
-        platform: json(&Platform::new(
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            variant,
-        )),
+        platform: json(&hub_platform()),
         version: me.version.clone(),
         commit_sha: Some(me.commit.clone()),
         build_id: Some(me.build_id.clone()),
@@ -826,8 +920,8 @@ pub fn spawn_refresh_tick(
                     fetched = o.fetched,
                     "update channel refreshed"
                 ),
-                // Debug, not warn: until the release key exists every refresh
-                // fails verification, and that is the expected state.
+                // Debug, not warn: until a release publishes the track's
+                // channel every refresh fails, and that is the expected state.
                 Err(e) => {
                     tracing::debug!(code = %e.code, error = %e.message, "update channel refresh failed")
                 }

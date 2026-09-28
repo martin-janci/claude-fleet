@@ -214,6 +214,11 @@ which exact image — not just which version — is running:
 docker inspect --format '{{index .RepoDigests 0}}' "$(docker compose ps -q fleet-hub)"
 ```
 
+**Is there a newer one?** `docker compose exec fleet-hub fleet-hub update check`
+reads the signed release channel and names the version (and image digest) this
+hub should run; see `docs/updates.md` → *Operating it*. It only reports: the
+upgrade is still the edit below.
+
 **Back up `state.db` first.** It lives in the `hub-data` volume at
 `/var/lib/fleet-hub/state.db` and carries the master token, every host, every
 session and the asset catalog. Copy it with the container stopped, so you are
