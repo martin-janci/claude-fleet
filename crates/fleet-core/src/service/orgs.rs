@@ -473,7 +473,8 @@ pub fn scopes(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<ScopeEntry>,
         .into_iter()
         .filter(|r| r.status != "ghost" && scope.sees_row(r) && scope.sees_org(r.org_id))
         .collect();
-    let needs = |r: &SessionRow| crate::service::attention::needs_attention(r).is_some();
+    let red = crate::service::health::context_red_pct(&s);
+    let needs = |r: &SessionRow| crate::service::attention::needs_attention_with(r, red).is_some();
     let mut out = Vec::new();
     for o in orgs.iter().filter(|o| scope.sees_org(Some(o.id))) {
         let mine: Vec<&SessionRow> = rows.iter().filter(|r| r.org_id == Some(o.id)).collect();

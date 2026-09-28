@@ -214,8 +214,10 @@ export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
   if (isWaiting(s)) return 'waiting';
   if (s.stuck_kind) return 'stuck';
   if (s.claude_status === 'failed') return s.kind === 'bg' ? 'failed' : 'stop_failed';
-  if (contextLevel(s.context_pct) === 'crit') return 'context_full';
-  if ((s.stale_working_at ?? null) !== null) return 'stale_working';
+  // A dead row keeps its last context reading; a lost one reads `lifecycle`.
+  const live = s.status !== 'ghost' && s.lost_at === null;
+  if (live && contextLevel(s.context_pct) === 'crit') return 'context_full';
+  if (live && (s.stale_working_at ?? null) !== null) return 'stale_working';
   if (s.ci_status === 'failing' && isIdleStatus(s.claude_status)) return 'ci_failing';
   if (isDoneUnread(s)) return 'done_unread';
   if (isLifecycleBroken(s)) return 'lifecycle';

@@ -313,6 +313,12 @@ impl SessionRow {
     }
 }
 
+/// What losing a session clears, in every path that loses one (a host's
+/// sessions lost, a kill, a reconcile ghosting): the pane-derived state and
+/// the stale-working stamp, none of which a dead row can act on.
+pub(super) const LOSS_CLEARS: &str = "claude_status=NULL, stuck_kind=NULL, stuck_since=NULL, \
+     current_activity=NULL, pending_input=NULL, stale_working_at=NULL";
+
 /// The `sessions` column list every `SessionRow` read shares, in the order
 /// `map_session_row` consumes it. One definition so a new column is added in
 /// exactly two places (here and the mapper) instead of six.

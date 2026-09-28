@@ -1806,6 +1806,16 @@ async fn run_prompt_refuses_a_session_that_is_not_between_turns() {
     s.record_stop_hook("uuid-w").unwrap();
     let row = s.get_session_by_id(id).unwrap().unwrap();
     assert!(run_prompt_ready(&row).is_ok());
+    // A turn that ended in an API error has ended: re-prompt it.
+    let failed = crate::store::SessionRow {
+        claude_status: Some("failed".into()),
+        ..row
+    };
+    assert!(run_prompt_ready(&failed).is_ok());
+    assert!(crate::service::tasks::session_satisfies(
+        &failed,
+        crate::service::tasks::WaitCond::Idle
+    ));
 }
 
 #[tokio::test]

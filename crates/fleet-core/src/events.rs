@@ -701,11 +701,14 @@ impl EventBus for BroadcastEventBus {
         // clearing is untouched.
         let mut payload = e.payload();
         crate::json::strip_nulls(&mut payload);
-        // The same derived `needs_attention` `list_sessions` stamps, so a
-        // phone that listed once and then follows this stream keeps the
-        // hub's answer instead of losing it on the row's first change. Here
-        // and not in `payload()`: the desktop's Tauri bus shares that, and
-        // deserialises the payload straight back into `SessionRow`.
+        // The derived `needs_attention` `list_sessions` stamps, so a phone
+        // that listed once and then follows this stream keeps the hub's
+        // answer instead of losing it on the row's first change. Here and
+        // not in `payload()`: the desktop's Tauri bus shares that, and
+        // deserialises the payload straight back into `SessionRow`. The bus
+        // holds no store, so `context_full` is judged at the default
+        // threshold, not `health.context_red_pct` — the one reader that
+        // still can differ from `list_sessions` when the setting moves.
         if let RowChange::SessionCreated(row) | RowChange::SessionUpdated(row) = e {
             if let (Some(att), serde_json::Value::Object(map)) = (
                 crate::service::attention::needs_attention(row),
