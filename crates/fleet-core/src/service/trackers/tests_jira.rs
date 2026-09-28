@@ -620,18 +620,27 @@ fn resolutions_are_told_apart_conservatively() {
     assert_eq!(map_status_category(None), "todo");
 }
 
-/// `adf_walk`'s node-by-node count of a description's true length is allowed
-/// a few characters of drift from an exact, fully whitespace-normalised
-/// count (its trailing per-block separator is counted even where the final
-/// `.trim()` would later erase it) — the field exists to say "there is
-/// more", not to be byte-exact. `within` is a generous tolerance against
-/// that drift, not a measurement of it.
-fn assert_length_near(actual: Option<i64>, expected: i64) {
-    let actual = actual.expect("a true length");
-    let within = 5;
-    assert!(
-        (actual - expected).abs() <= within,
-        "expected {expected} plus or minus {within}, got {actual}"
+/// A description the excerpt CUT reports more than it shows, by the block
+/// separators `adf_walk` counts on its way past the cap: that number only
+/// has to say "there is more". The figures here are exact all the same — the
+/// walk is deterministic, and the tolerance this helper used to allow (±5)
+/// is what let the over-count of a COMPLETE description ship, firing the
+/// notice on every Jira ticket. A complete description's length is asserted
+/// against the text it returns, with `==`, by
+/// [`assert_reports_the_length_it_returns`].
+fn assert_cut_length(actual: Option<i64>, expected: i64) {
+    assert_eq!(actual, Some(expected));
+}
+
+/// A snapshot whose description was NOT cut: `description_chars` must equal
+/// the length of the description actually returned, or `fence_ticket` writes
+/// a "there is more" notice for a whole description.
+fn assert_reports_the_length_it_returns(snap: &WorkItemSnapshot) {
+    let d = snap.description.as_deref().expect("a description");
+    assert_eq!(
+        snap.description_chars,
+        Some(d.chars().count() as i64),
+        "a complete description must report exactly what it returns: {d:?}"
     );
 }
 
@@ -641,7 +650,8 @@ fn adf_excerpts_are_capped() {
         {"type":"text","text": "x".repeat(DESCRIPTION_MAX_CHARS * 2)}]}]});
     let (excerpt, chars) = adf_excerpt(&long);
     assert_eq!(excerpt.unwrap().chars().count(), DESCRIPTION_MAX_CHARS);
-    assert_length_near(chars, (DESCRIPTION_MAX_CHARS * 2) as i64);
+    // The text, plus the one paragraph's separator.
+    assert_cut_length(chars, (DESCRIPTION_MAX_CHARS * 2 + 1) as i64);
     assert_eq!(adf_excerpt(&Value::Null), (None, None));
     assert_eq!(
         adf_excerpt(&json!({"type":"doc","content":[]})),
@@ -689,7 +699,50 @@ async fn a_long_jira_description_reports_its_true_length() {
         snap.description.as_ref().map(|d| d.chars().count()),
         Some(DESCRIPTION_MAX_CHARS)
     );
-    assert_length_near(snap.description_chars, (DESCRIPTION_MAX_CHARS * 2) as i64);
+    assert_cut_length(
+        snap.description_chars,
+        (DESCRIPTION_MAX_CHARS * 2 + 1) as i64,
+    );
+}
+
+/// The case the branch's own signal depends on and no test drove through an
+/// adapter: a description the tracker holds WHOLE. Its reported length must
+/// equal the description returned, exactly — `fence_ticket` compares
+/// `full > shown`, so one character of drift puts a "there is more" notice on
+/// every complete Jira ticket. `lookup`'s end of it is
+/// `tests_tickets.rs::a_complete_jira_cloud_description_gets_no_notice`.
+#[tokio::test]
+async fn a_complete_jira_description_reports_the_length_it_returns() {
+    // One paragraph, well under the cap.
+    let snap = fetch_one_with_description("Ship the refund flow.").await;
+    assert_eq!(
+        snap.description.as_deref(),
+        Some("Ship the refund flow."),
+        "nothing was cut"
+    );
+    assert_reports_the_length_it_returns(&snap);
+    // Several blocks: the separators between them are part of the text that
+    // is returned, so they are part of the length reported.
+    let snap = fetch_one_with_body(json!({"type":"doc","content":[
+        {"type":"heading","content":[{"type":"text","text":"Context"}]},
+        {"type":"paragraph","content":[{"type":"text","text":"Refunds fail."}]},
+        {"type":"paragraph","content":[{"type":"text","text":"Fix them."}]}]}))
+    .await;
+    assert_eq!(
+        snap.description.as_deref(),
+        Some("Context\nRefunds fail.\nFix them.")
+    );
+    assert_reports_the_length_it_returns(&snap);
+}
+
+/// The Jira Data Center shape of the same rule: a v2 body arrives as a plain
+/// string, and its trailing newline used to be counted into the length while
+/// the excerpt's `.trim()` removed it.
+#[tokio::test]
+async fn a_complete_plain_string_description_reports_the_length_it_returns() {
+    let snap = fetch_one_with_body(json!("Ship the refund flow.\n\n")).await;
+    assert_eq!(snap.description.as_deref(), Some("Ship the refund flow."));
+    assert_reports_the_length_it_returns(&snap);
 }
 
 #[tokio::test]
@@ -715,10 +768,9 @@ async fn a_jira_description_spread_across_many_small_nodes_counts_them_all() {
         Some(DESCRIPTION_MAX_CHARS),
         "the excerpt itself is still capped"
     );
-    // 4000 characters of text plus a separator between each of the 40
-    // paragraphs (39): the true length, not the ~2000 the excerpt stopped
-    // appending at.
-    assert_length_near(snap.description_chars, 4000 + 39);
+    // 4000 characters of text plus one separator per paragraph: the true
+    // length, not the ~2000 the excerpt stopped appending at.
+    assert_cut_length(snap.description_chars, 4000 + 40);
 }
 
 /// `describe` reads the single-issue endpoint directly (not `bulkfetch`),

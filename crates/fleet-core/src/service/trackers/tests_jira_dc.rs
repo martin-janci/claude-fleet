@@ -332,6 +332,35 @@ async fn the_dc_shapes_normalise_the_epic_link_legacy_sprints_and_plain_text() {
     assert_eq!(body["jql"], "id in (40002) OR key in (OPS-4,PLAT-999)");
 }
 
+/// C1's plain-string half, through Data Center's own `snapshot()`: a v2
+/// description arrives as a `Value::String`, so its trailing whitespace used
+/// to be counted into `description_chars` while the excerpt's own `.trim()`
+/// removed it — one character of over-count is a "there is more" notice on a
+/// description nothing was cut from. Every described item of the list
+/// fixture: each is well under the cap, so each must report exactly the
+/// description it returns.
+#[tokio::test]
+async fn a_complete_dc_description_reports_the_length_it_returns() {
+    let f = FakeTransport::new();
+    DcHarness.script_list(&f);
+    let items = list_all(&dc(&f), &mine(), None).await.unwrap();
+    let mut described = 0;
+    for it in &items {
+        let Some(d) = it.description.as_deref() else {
+            continue;
+        };
+        assert!(d.chars().count() < DESCRIPTION_MAX_CHARS, "{:?}", it.key);
+        assert_eq!(
+            it.description_chars,
+            Some(d.chars().count() as i64),
+            "{:?} reports a length its own description does not have: {d:?}",
+            it.key
+        );
+        described += 1;
+    }
+    assert!(described > 0, "the fixture has described items");
+}
+
 /// A moved key is recognised when other references share its chunk: the
 /// one answer nothing asked for is its issue (`warningMessages` name the
 /// keys the site does not have), and two moved keys are searched for

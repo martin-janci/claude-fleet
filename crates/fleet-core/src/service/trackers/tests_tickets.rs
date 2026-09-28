@@ -277,6 +277,81 @@ fn a_pre_upgrade_row_with_no_known_length_gets_no_notice() {
     );
 }
 
+/// [`seeded_with_description`], but the excerpt AND its length come from the
+/// Jira adapters' own extraction — `jira_common::adf_excerpt`, the exact call
+/// `jira.rs` and `jira_dc.rs` make at their snapshot sites (an ADF document
+/// on Cloud, a plain v2 string on Data Center) — instead of being hand-fed.
+/// Every other notice test in this file seeds `description_chars` by hand,
+/// which is why the adapter's own over-count (C1: one per block separator,
+/// so a "there is more" notice on EVERY complete Jira description) reached
+/// `lookup` with nothing failing.
+fn seeded_from_a_jira_body(body: serde_json::Value) -> Fx {
+    let (description, description_chars) =
+        crate::service::trackers::jira_common::adf_excerpt(&body);
+    seeded_with_description(&description.expect("a description"), description_chars)
+}
+
+/// C1, end to end on the path it broke: a Jira Cloud description the tracker
+/// holds WHOLE must reach an agent with no notice at all — not "shown 1234 of
+/// 1235". Asserted as exact equality with `fence_untrusted`, the shape
+/// `a_pre_upgrade_row_with_no_known_length_gets_no_notice` uses.
+#[test]
+fn a_complete_jira_cloud_description_gets_no_notice() {
+    let text = "Refunds fail on partial captures.\nFix the capture path.";
+    let fx = seeded_from_a_jira_body(json!({"type":"doc","content":[
+        {"type":"paragraph","content":[{"type":"text","text":"Refunds fail on partial captures."}]},
+        {"type":"paragraph","content":[{"type":"text","text":"Fix the capture path."}]}]}));
+    let d = fx.lookup_as_host("ABC-1").description.unwrap();
+    assert!(!d.contains("shown"), "{d}");
+    assert!(!d.contains("open the ticket"), "{d}");
+    assert!(!d.contains("action: describe"), "{d}");
+    assert_eq!(
+        d,
+        crate::mcp::guard::fence_untrusted(
+            text,
+            "a tracker ticket",
+            crate::service::trackers::DESCRIPTION_MAX_CHARS
+        )
+    );
+}
+
+/// The Data Center shape of the same: a v2 body is a plain string, and its
+/// trailing whitespace used to be counted into the length the excerpt trims
+/// away.
+#[test]
+fn a_complete_jira_data_center_description_gets_no_notice() {
+    let fx = seeded_from_a_jira_body(json!("Plain text on Data Center.\n\n"));
+    let d = fx.lookup_as_host("ABC-1").description.unwrap();
+    assert!(!d.contains("shown"), "{d}");
+    assert!(!d.contains("open the ticket"), "{d}");
+    assert_eq!(
+        d,
+        crate::mcp::guard::fence_untrusted(
+            "Plain text on Data Center.",
+            "a tracker ticket",
+            crate::service::trackers::DESCRIPTION_MAX_CHARS
+        )
+    );
+}
+
+/// And the signal still fires where it must: a description the adapter really
+/// did cut says so, from the same adapter path, for both Jira shapes.
+#[test]
+fn a_cut_jira_description_still_gets_a_notice_from_the_adapter() {
+    let long = "x".repeat(crate::service::trackers::DESCRIPTION_MAX_CHARS + 500);
+    let adf = seeded_from_a_jira_body(json!({"type":"doc","content":[
+        {"type":"paragraph","content":[{"type":"text","text": long.clone()}]}]}));
+    let d = adf.lookup_as_host("ABC-1").description.unwrap();
+    assert!(d.contains("shown 2000 of 2501 chars"), "{d}");
+    assert!(
+        d.contains(r#"work { action: describe, key: "ABC-1" }"#),
+        "{d}"
+    );
+    let v2 = seeded_from_a_jira_body(json!(long));
+    let d = v2.lookup_as_host("ABC-1").description.unwrap();
+    assert!(d.contains("shown 2000 of 2500 chars"), "{d}");
+}
+
 /// The other half of Task 4's honesty requirement: a provider whose
 /// `caps.describe` is true (Jira, the fixture's default tracker) IS offered,
 /// by its flattened key, once the cache kept less than the tracker holds.
