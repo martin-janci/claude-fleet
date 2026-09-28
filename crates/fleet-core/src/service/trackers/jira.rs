@@ -24,6 +24,7 @@
 //!   and dedupes on `(id, updated)`.
 //! * **Descriptions** are ADF; only a plain-text excerpt is kept.
 
+use super::jira_common::adf_text;
 pub use super::jira_common::{
     adf_excerpt, keys_in_prose, keys_in_text, map_status_category, normalize_resolution,
     SPRINT_FIELD_SCHEMA,
@@ -297,6 +298,29 @@ impl JiraCloud {
             description_chars,
         })
     }
+
+    /// The key or id `describe` may put straight into a URL path: a Jira key
+    /// ([`is_key`]), the numeric internal id (digits only), or a URL on this
+    /// site. `None` for anything else — third-party text (a `work { action:
+    /// describe }` caller's own reference) must never reach a request unless
+    /// it is one of these validated shapes, the same fence `write`'s key
+    /// check gives a write.
+    fn describe_key(&self, r: &ItemRef) -> Option<String> {
+        match r {
+            ItemRef::Id(id) if id.bytes().all(|b| b.is_ascii_digit()) && !id.is_empty() => {
+                Some(id.clone())
+            }
+            ItemRef::Key(k) if is_key(k) => Some(k.to_ascii_uppercase()),
+            ItemRef::Url(u) => {
+                let site_host = self.site.trim_start_matches("https://");
+                u.strip_prefix("https://")
+                    .and_then(|rest| rest.split_once('/'))
+                    .filter(|(h, _)| h.eq_ignore_ascii_case(site_host))
+                    .and_then(|(_, path)| key_in_path(path))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// `https://<site>.atlassian.net/browse/ABC-123` (or a board URL with
@@ -323,6 +347,7 @@ impl TrackerProvider for JiraCloud {
             multi_container: false,
             incremental: Incremental::Watermark,
             write: true,
+            describe: true,
         }
     }
 
@@ -572,6 +597,22 @@ impl TrackerProvider for JiraCloud {
             }
         }
         out
+    }
+
+    async fn describe(&self, r: &ItemRef) -> Result<Option<String>, TrackerError> {
+        let Some(key) = self.describe_key(r) else {
+            return Ok(None);
+        };
+        let v = self
+            .call(
+                Request::get(self.url(&format!("/rest/api/3/issue/{key}?fields=description"))),
+                Call::Other,
+            )
+            .await?;
+        Ok(adf_text(
+            &v["fields"]["description"],
+            super::DESCRIBE_MAX_CHARS,
+        ))
     }
 }
 

@@ -363,6 +363,9 @@ impl TrackerProvider for Asana {
             multi_container: true,
             incremental: Incremental::SyncToken,
             write: false,
+            // Asana keeps the default here: it degrades to "open the
+            // ticket", which is what the capability is for.
+            describe: false,
         }
     }
 

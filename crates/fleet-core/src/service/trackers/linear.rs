@@ -352,6 +352,9 @@ impl TrackerProvider for Linear {
             multi_container: false,
             incremental: Incremental::Watermark,
             write: false,
+            // Linear keeps the default here: it degrades to "open the
+            // ticket", which is what the capability is for.
+            describe: false,
         }
     }
 

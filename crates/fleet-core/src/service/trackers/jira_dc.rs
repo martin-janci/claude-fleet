@@ -20,8 +20,8 @@
 //!   favourite filters, CAPTCHA — is Cloud's, through [`super::jira_common`].
 
 use super::jira_common::{
-    adf_excerpt, check, current_sprint, is_key, key_in_path, keys_in_prose, map_status_category,
-    normalize_resolution, EPIC_LINK_SCHEMA, SPRINT_FIELD_SCHEMA,
+    adf_excerpt, adf_text, check, current_sprint, is_key, key_in_path, keys_in_prose,
+    map_status_category, normalize_resolution, EPIC_LINK_SCHEMA, SPRINT_FIELD_SCHEMA,
 };
 use super::{
     map_transport, CallKind, Caps, Fetched, Incremental, ItemRef, Page, RefCtx, StatusSnapshot,
@@ -324,6 +324,24 @@ impl JiraDc {
         })
     }
 
+    /// The key or id `describe` may put straight into a URL path: a Jira key
+    /// (`is_key`), the numeric internal id (digits only), or a URL on this
+    /// site (`key_of_site_url`, its context path included). `None` for
+    /// anything else — third-party text (a `work { action: describe }`
+    /// caller's own reference) must never reach a request unless it is one
+    /// of these validated shapes, the same fence `write`'s key check gives a
+    /// write.
+    fn describe_key(&self, r: &ItemRef) -> Option<String> {
+        match r {
+            ItemRef::Id(id) if id.bytes().all(|b| b.is_ascii_digit()) && !id.is_empty() => {
+                Some(id.clone())
+            }
+            ItemRef::Key(k) if is_key(k) => Some(k.to_ascii_uppercase()),
+            ItemRef::Key(u) | ItemRef::Url(u) => self.key_of_site_url(u),
+            _ => None,
+        }
+    }
+
     /// Snapshots of a page, epics linked by key resolved to their ids when
     /// the epic is in the same page.
     fn snapshots(&self, issues: &[Value]) -> Vec<WorkItemSnapshot> {
@@ -356,6 +374,7 @@ impl TrackerProvider for JiraDc {
             multi_container: false,
             incremental: Incremental::Watermark,
             write: true,
+            describe: true,
         }
     }
 
@@ -635,6 +654,22 @@ impl TrackerProvider for JiraDc {
             }
         }
         out
+    }
+
+    async fn describe(&self, r: &ItemRef) -> Result<Option<String>, TrackerError> {
+        let Some(key) = self.describe_key(r) else {
+            return Ok(None);
+        };
+        let v = self
+            .call(
+                Request::get(self.url(&format!("/rest/api/2/issue/{key}?fields=description"))),
+                CallKind::Other,
+            )
+            .await?;
+        Ok(adf_text(
+            &v["fields"]["description"],
+            super::DESCRIBE_MAX_CHARS,
+        ))
     }
 }
 

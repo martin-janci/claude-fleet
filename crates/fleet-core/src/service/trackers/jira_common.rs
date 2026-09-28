@@ -180,7 +180,7 @@ pub fn adf_excerpt(v: &Value) -> (Option<String>, Option<i64>) {
             out.push_str(s);
             total = s.chars().count() as i64;
         }
-        Value::Object(_) => adf_walk(v, &mut out, &mut total),
+        Value::Object(_) => adf_walk(v, &mut out, &mut total, DESCRIPTION_MAX_CHARS),
         _ => return (None, None),
     }
     let text = out
@@ -202,9 +202,13 @@ pub fn adf_excerpt(v: &Value) -> (Option<String>, Option<i64>) {
 /// `total` accumulates every node's contributed text unconditionally (a few
 /// characters of drift from `out`'s whitespace normalisation is fine — the
 /// number exists to say "there is more", not to be byte-exact); `out` is
-/// only ever appended to while it is still at or under the cap, so its final
+/// only ever appended to while it is still at or under `cap`, so its final
 /// content is exactly what it was before `total` existed.
-fn adf_walk(node: &Value, out: &mut String, total: &mut i64) {
+///
+/// `cap` is [`DESCRIPTION_MAX_CHARS`] for [`adf_excerpt`]'s 2k excerpt, and
+/// [`super::DESCRIBE_MAX_CHARS`] for [`adf_text`]'s whole-description answer
+/// — the same walk, stopped at a different ceiling.
+fn adf_walk(node: &Value, out: &mut String, total: &mut i64, cap: usize) {
     let attrs = &node["attrs"];
     let contribution: &str = match node["type"].as_str().unwrap_or_default() {
         "text" => node["text"].as_str().unwrap_or_default(),
@@ -217,12 +221,12 @@ fn adf_walk(node: &Value, out: &mut String, total: &mut i64) {
         _ => "",
     };
     *total += contribution.chars().count() as i64;
-    if out.chars().count() <= DESCRIPTION_MAX_CHARS {
+    if out.chars().count() <= cap {
         out.push_str(contribution);
     }
     if let Some(children) = node["content"].as_array() {
         for c in children {
-            adf_walk(c, out, total);
+            adf_walk(c, out, total, cap);
         }
     }
     if matches!(
@@ -230,10 +234,33 @@ fn adf_walk(node: &Value, out: &mut String, total: &mut i64) {
         Some("paragraph" | "heading" | "codeBlock" | "blockquote" | "rule" | "listItem")
     ) {
         *total += 1;
-        if out.chars().count() <= DESCRIPTION_MAX_CHARS && !out.ends_with('\n') {
+        if out.chars().count() <= cap && !out.ends_with('\n') {
             out.push('\n');
         }
     }
+}
+
+/// The WHOLE plain text of an ADF value, at most `cap` characters — unlike
+/// [`adf_excerpt`], this is not the 2k excerpt plus a true length: `describe`
+/// wants the full description (capped much higher, at
+/// [`super::DESCRIBE_MAX_CHARS`]), and has no separate use for "how much more
+/// there is" once it is serving all of it up to `cap`.
+pub fn adf_text(v: &Value, cap: usize) -> Option<String> {
+    let mut out = String::new();
+    let mut total: i64 = 0;
+    match v {
+        Value::String(s) => out.push_str(s),
+        Value::Object(_) => adf_walk(v, &mut out, &mut total, cap),
+        _ => return None,
+    }
+    let text = out
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    (!text.is_empty()).then(|| text.chars().take(cap).collect())
 }
 
 /// The issue key a Jira URL path names.
@@ -386,5 +413,27 @@ mod tests {
         let v = json!([{"state": "future", "name": "Next"}]);
         assert_eq!(current_sprint(&v), (Some("Next".into()), false));
         assert_eq!(current_sprint(&json!(["garbage"])), (None, false));
+    }
+
+    /// `adf_text` serves the WHOLE description, not the 2k excerpt: a body
+    /// past [`DESCRIPTION_MAX_CHARS`] is not cut there, only at its own `cap`.
+    #[test]
+    fn adf_text_is_capped_at_its_own_ceiling_not_the_excerpts() {
+        let long = json!({"type":"doc","content":[{"type":"paragraph","content":[
+            {"type":"text","text": "x".repeat(DESCRIPTION_MAX_CHARS * 3)}]}]});
+        let cap = DESCRIPTION_MAX_CHARS * 2;
+        let text = adf_text(&long, cap).unwrap();
+        assert_eq!(text.chars().count(), cap);
+        // Under the cap: the whole thing, past DESCRIPTION_MAX_CHARS.
+        let short_of_cap = json!({"type":"doc","content":[{"type":"paragraph","content":[
+            {"type":"text","text": "x".repeat(DESCRIPTION_MAX_CHARS + 500)}]}]});
+        let text = adf_text(&short_of_cap, cap).unwrap();
+        assert_eq!(text.chars().count(), DESCRIPTION_MAX_CHARS + 500);
+        assert_eq!(adf_text(&Value::Null, cap), None);
+        assert_eq!(adf_text(&json!({"type":"doc","content":[]}), cap), None);
+        assert_eq!(
+            adf_text(&json!("plain string body"), cap).as_deref(),
+            Some("plain string body")
+        );
     }
 }

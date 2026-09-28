@@ -177,6 +177,72 @@ fn seeded_with_description(description: &str, description_chars: Option<i64>) ->
     fx
 }
 
+/// [`seeded_with_description`], but the ticket's tracker is `provider`
+/// (added alongside the fixture's default Jira, not replacing it) instead of
+/// Jira: for `describe_offer`'s per-provider honesty (Task 4) — a tracker
+/// whose `caps.describe` is false must still say "open the ticket", never
+/// name a `describe` key. The item's key is `<PROVIDER>-1` (`ASANA-1` for
+/// `"asana"`), a stand-in fleet can still resolve by key prefix even though
+/// the real provider has no human keys.
+fn seeded_with_description_on(
+    provider: &str,
+    description: &str,
+    description_chars: Option<i64>,
+) -> Fx {
+    let site = match provider {
+        "asana" => "https://app.asana.com",
+        "linear" => "https://linear.app/other",
+        "github" => "https://github.com/other",
+        "jira_dc" => "https://jira.other.example",
+        _ => "https://other.atlassian.net",
+    };
+    let fx = Fx::new();
+    let t = {
+        let s = fx.store.lock().unwrap();
+        let t = s.add_tracker(provider, "Other", site).unwrap().id;
+        s.set_tracker_probe(
+            t,
+            None,
+            &TrackerConfig {
+                key_prefixes: vec![provider.to_ascii_uppercase()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        s.set_tracker_state(t, "ok", None).unwrap();
+        t
+    };
+    let key = format!("{}-1", provider.to_ascii_uppercase());
+    let mut w = item(
+        "other-1",
+        &key,
+        ("In Progress", "in_progress"),
+        true,
+        crate::service::catalog::now_secs(),
+    );
+    w.description = Some(description.to_string());
+    w.description_chars = description_chars;
+    fx.store.lock().unwrap().upsert_tracker_item(t, &w).unwrap();
+    let sid = fx.session_on("hosta", "dev-other");
+    fx.store
+        .lock()
+        .unwrap()
+        .link_session_work(sid, WorkTarget::Key(&key), "manual")
+        .unwrap();
+    // Past work, not a live session (see `seeded_with_description`): hosta's
+    // fence still sees it.
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute(
+            "UPDATE participants SET retired_at = 9 WHERE session_id = ?1",
+            [sid],
+        )
+        .unwrap();
+    fx
+}
+
 /// Work graph M3.5: `lookup`, as an agent sees it, and the start brief both
 /// say when the cache kept less of the description than the tracker holds.
 #[test]
@@ -209,6 +275,35 @@ fn a_pre_upgrade_row_with_no_known_length_gets_no_notice() {
             crate::service::trackers::DESCRIPTION_MAX_CHARS
         )
     );
+}
+
+/// The other half of Task 4's honesty requirement: a provider whose
+/// `caps.describe` is true (Jira, the fixture's default tracker) IS offered,
+/// by its flattened key, once the cache kept less than the tracker holds.
+#[test]
+fn a_jira_ticket_is_offered_describe_by_key() {
+    let w = seeded_with_description(&"x".repeat(2000), Some(6812));
+    let d = w.lookup_as_host("ABC-1").description.unwrap();
+    assert!(
+        d.contains(r#"work { action: describe, key: "ABC-1" }"#),
+        "{d}"
+    );
+    assert!(!d.contains("open the ticket"));
+}
+
+/// Task 4's honesty requirement: a provider whose `caps.describe` is false
+/// (Asana) is never offered as a `describe` source, even though its
+/// description was cut exactly like a Jira one would be — the notice must
+/// still say "open the ticket". This would fail if `describe_offer` read the
+/// capability as `true` for every provider.
+#[test]
+fn an_asana_ticket_is_not_offered_describe() {
+    let w = seeded_with_description_on("asana", &"x".repeat(2000), Some(9000));
+    assert!(w
+        .lookup_as_host("ASANA-1")
+        .description
+        .unwrap()
+        .contains("open the ticket"));
 }
 
 #[test]
@@ -1144,10 +1239,12 @@ async fn the_retry_still_fits_when_it_shrinks_the_budget_to_zero() {
         "{}",
         brief.chars().count()
     );
+    // Task 4: the fixture's tracker is Jira (`caps.describe` true), so the
+    // notice names the `describe` call instead of "open the ticket".
     assert!(
-        brief
-            .trim_end()
-            .ends_with("[the description did not fit — open the ticket]"),
+        brief.trim_end().ends_with(
+            "[the description did not fit — work { action: describe, key: \"ABC-69\" }]"
+        ),
         "{}",
         &brief[brief.len().saturating_sub(80)..]
     );
@@ -1201,10 +1298,12 @@ async fn a_long_description_still_ends_the_fence() {
         "{}",
         &brief[brief.len() - 200..]
     );
+    // Task 4: the fixture's tracker is Jira (`caps.describe` true), so the
+    // notice names the `describe` call instead of "open the ticket".
     assert!(
-        brief
-            .trim_end()
-            .ends_with("of the description — open the ticket for the rest]"),
+        brief.trim_end().ends_with(
+            "of the description — work { action: describe, key: \"ABC-67\" } for the rest]"
+        ),
         "{}",
         &brief[brief.len() - 80..]
     );

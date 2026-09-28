@@ -41,20 +41,23 @@ pub const TICKETS_MAX_LIMIT: usize = 200;
 pub const RECENT_DAYS: i64 = 14;
 
 /// Whether this item's tracker can serve a full description, and under which
-/// key. A tracker fleet cannot identify, or one whose provider does not
-/// implement `describe`, points at the ticket instead.
+/// key. A tracker fleet cannot identify, one with no key to name, or one
+/// whose provider does not implement `describe`, points at the ticket
+/// instead.
 ///
 /// `pub(crate)`: all three callers that fence a description share this one
 /// decision — `lookup` and `ticket_brief_with` here, and
-/// `service::work::card::card` — so Task 4 changes exactly this function
-/// body (wiring `super::provider_caps`) and every caller picks it up.
-#[allow(unused_variables)]
+/// `service::work::card::card`.
 pub(crate) fn describe_offer<'a>(
     tracker: Option<&crate::store::TrackerRow>,
     key: Option<&'a str>,
 ) -> crate::mcp::guard::DescribeOffer<'a> {
-    // Task 4 wires the cap
-    crate::mcp::guard::DescribeOffer::None
+    match (tracker, key) {
+        (Some(t), Some(k)) if super::provider_caps(t).describe => {
+            crate::mcp::guard::DescribeOffer::Key(k)
+        }
+        _ => crate::mcp::guard::DescribeOffer::None,
+    }
 }
 
 /// One ticket as `tickets` and `lookup` return it: the item, and the live

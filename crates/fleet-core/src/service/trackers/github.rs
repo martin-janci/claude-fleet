@@ -351,6 +351,7 @@ impl TrackerProvider for GitHub {
             multi_container: false,
             incremental: Incremental::Watermark,
             write: false,
+            describe: true,
         }
     }
 
@@ -573,6 +574,40 @@ impl TrackerProvider for GitHub {
             }
         }
         out
+    }
+
+    async fn describe(&self, r: &ItemRef) -> Result<Option<String>, TrackerError> {
+        // The same node fetched by `fetch` — by node id, or by repository and
+        // number — but its `body` read straight off the GraphQL answer,
+        // never through `snapshot` (which cuts it at DESCRIPTION_MAX_CHARS).
+        let node = if let ItemRef::Id(id) = r {
+            let query =
+                format!("query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ...I }} }} {ISSUE_FIELDS}");
+            let data = self
+                .gql(&query, json!({ "ids": [id] }), CallKind::Other)
+                .await?;
+            data["nodes"].get(0).cloned().unwrap_or(Value::Null)
+        } else if let Some((o, name, n)) = self.repo_number(r) {
+            let query = format!(
+                "query($o: String!, $r: String!, $n: Int!) {{ repository(owner: $o, name: $r) \
+                 {{ issue(number: $n) {{ ...I }} }} }} {ISSUE_FIELDS}"
+            );
+            let data = self
+                .gql(
+                    &query,
+                    json!({ "o": o, "r": name, "n": n }),
+                    CallKind::Other,
+                )
+                .await?;
+            data["repository"]["issue"].clone()
+        } else {
+            return Ok(None);
+        };
+        Ok(node["body"]
+            .as_str()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .map(|b| b.chars().take(super::DESCRIBE_MAX_CHARS).collect()))
     }
 }
 

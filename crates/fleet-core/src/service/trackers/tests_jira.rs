@@ -721,6 +721,55 @@ async fn a_jira_description_spread_across_many_small_nodes_counts_them_all() {
     assert_length_near(snap.description_chars, 4000 + 39);
 }
 
+/// `describe` reads the single-issue endpoint directly (not `bulkfetch`),
+/// asks only for `description`, and is uncapped by `DESCRIPTION_MAX_CHARS` —
+/// capped only at `DESCRIBE_MAX_CHARS`.
+#[tokio::test]
+async fn describe_reads_the_single_issue_endpoint_uncapped() {
+    let f = FakeTransport::new();
+    let long = "x".repeat(DESCRIPTION_MAX_CHARS + 500);
+    let body = json!({
+        "id": "10101",
+        "key": "ABC-101",
+        "fields": { "description": {"type":"doc","content":[
+            {"type":"paragraph","content":[{"type":"text","text": long}]}
+        ]} }
+    });
+    f.once(
+        Method::Get,
+        "/issue/ABC-101?fields=description",
+        Ok(Response::json(200, &body)),
+    );
+    let p = jira(&f);
+    assert!(p.caps().describe, "Jira Cloud implements describe");
+    let out = p
+        .describe(&ItemRef::Key("ABC-101".into()))
+        .await
+        .unwrap()
+        .expect("a describe answer");
+    assert_eq!(out.chars().count(), DESCRIPTION_MAX_CHARS + 500);
+    let sent = f.requests();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].method, Method::Get);
+    assert!(
+        sent[0]
+            .url
+            .ends_with("/rest/api/3/issue/ABC-101?fields=description"),
+        "{}",
+        sent[0].url
+    );
+
+    // A key shape a real Jira key can never be: refused, not interpolated
+    // into a path (the same fence `write` gives a bad key).
+    let f = FakeTransport::new();
+    assert!(jira(&f)
+        .describe(&ItemRef::Key("../../myself".into()))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(f.requests().is_empty());
+}
+
 // --- the provider conformance suite (M6.0) -----------------------------------
 
 struct JiraHarness;
@@ -847,6 +896,16 @@ impl crate::service::trackers::conformance::Harness for JiraHarness {
                 );
             }
         }
+    }
+
+    async fn provider_for_describe(&self) -> Box<dyn TrackerProvider> {
+        let f = FakeTransport::new();
+        f.once(Method::Get, "/issue/ABC-101", ok("issue_description.json"));
+        self.provider(&f)
+    }
+
+    fn describe_ref(&self) -> &'static str {
+        "ABC-101"
     }
 }
 
