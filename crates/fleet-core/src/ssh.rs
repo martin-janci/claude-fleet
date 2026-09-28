@@ -1954,6 +1954,8 @@ mod tests {
             [
                 "--distribution",
                 "Ubuntu",
+                "--cd",
+                "~",
                 "--exec",
                 "sh",
                 "-c",
