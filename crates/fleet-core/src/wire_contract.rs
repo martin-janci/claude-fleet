@@ -93,4 +93,9 @@
 //!   neither: the sidebar's "Add project" would be enabled and every attempt
 //!   would fail with an unknown-tool error. `GithubRepo` also joins the
 //!   report types the desktop deserialises.
+//!
+//!   `rewind_conversation` (reply actions: Rewind here, Fork here, Retry)
+//!   belongs here too. v0.3.3 shipped it as a routed hub tool while still
+//!   on revision 4, so a revision-4 hub may or may not serve it — the same
+//!   skew revision 5 exists to refuse; from 5 on every hub serves it.
 pub const CONTRACT_REVISION: u32 = 5;

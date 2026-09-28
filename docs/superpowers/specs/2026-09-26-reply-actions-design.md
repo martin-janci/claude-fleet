@@ -1,7 +1,12 @@
 # Reply actions: Copy, Quote, Retry, Fork here, Rewind here
 
 Date: 2026-09-26
-Status: approved design, not yet implemented
+Status: built in `claude-fleet` (PR #338 and follow-up fixes): Copy, Quote,
+Retry, Fork here into the SAME worktree, and Rewind here, over one
+`rewind_conversation` tool. **Open:** Fork into a NEW worktree (§5.2) — the
+engine refuses it `E_UNSUPPORTED` (a new worktree's physical path exists
+only after `new_session` creates it, too late for the transcript rewrite),
+and the fork sheet shows it disabled. `fleet-mobile` follows separately.
 Repos: `claude-fleet` (fleet first), `fleet-mobile` (follows)
 
 ## 1. What this adds
@@ -156,9 +161,10 @@ pub async fn rewind_conversation(
 
 | Condition | Code | Says |
 | --- | --- | --- |
-| anchor not in the transcript (compacted away, rotated) | `E_NOTFOUND` | that reply is no longer in the transcript |
+| anchor not in the transcript (rewound past, compacted away, rotated) | `E_NOTFOUND` | the conversation was rewound (or compacted) past this turn; reload it |
+| `rewind` with no anchor (would copy the whole file: a no-op) | `E_INVALID` | rewind needs `anchor_uuid` |
 | no transcript at all | existing `read_script` sentinel path | unchanged |
-| `claude_status == "working"` and mode is `rewind` | `E_INVALID` | interrupt the session first |
+| mode is `rewind` and the session is not quiet (`working`, `blocked`, or unknown — the live pane probe first, the stored status as fallback) | `E_INVALID` | interrupt the session first |
 | session is the fleet controller | `guard_not_controller` | as `restart_session` already does |
 | `rewind` on the **first** turn | `E_INVALID` | nothing before this turn to rewind to; use `/clear` |
 
@@ -201,6 +207,12 @@ Two gating details an implementer will otherwise get wrong:
   A missing anchor legitimately means "keep the whole file" for Fork on the
   last turn, so absence cannot double as "unsupported". Use the
   `HubContract.kt:87` version pattern, as `send_prompt { keys }` does.
+
+- **Retry needs the whole prompt.** `ConvTurn.prompt_partial` (serde
+  default `false`) is set when the prompt was cut to fit the read budget or
+  carried an image / document block the text drops; Retry is then shown
+  disabled with the reason, since re-sending `prompt` would send something
+  else. Rewind stays.
 
 Desktop: a new `ReplyActions.svelte` beside `CopyButton.svelte`, dropped into
 the `.text` block at `ConversationPanel.svelte:1832`. Quote goes through the
