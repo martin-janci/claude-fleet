@@ -45,10 +45,11 @@ describe('WorkFiltersBar', () => {
   it('every control writes the filters; the search is debounced', async () => {
     render(WorkFiltersBar, { orgs, trackers, searchDebounceMs: 5 });
     await flush();
-    await fireEvent.change(screen.getByTestId('work-filter-org'), { target: { value: 'none' } });
-    await fireEvent.change(screen.getByTestId('work-filter-tracker'), { target: { value: '1' } });
-    await fireEvent.change(screen.getByTestId('work-filter-status'), { target: { value: 'in_progress' } });
-    await fireEvent.change(screen.getByTestId('work-filter-has'), { target: { value: 'past_only' } });
+    await fireEvent.click(screen.getByTestId('work-filters-open'));
+    await fireEvent.click(screen.getByTestId('work-filter-org-none'));
+    await fireEvent.click(screen.getByTestId('work-filter-tracker-1'));
+    await fireEvent.click(screen.getByTestId('work-filter-status-in_progress'));
+    await fireEvent.click(screen.getByTestId('work-filter-has-past_only'));
     await fireEvent.click(screen.getByTestId('work-filter-mine'));
     await fireEvent.click(screen.getByTestId('work-filter-review'));
     await fireEvent.input(screen.getByTestId('work-search'), { target: { value: 'login' } });
@@ -63,10 +64,22 @@ describe('WorkFiltersBar', () => {
       review: true,
       query: 'login',
     });
-    await fireEvent.change(screen.getByTestId('work-filter-status'), { target: { value: 'any' } });
+    // The panel counts what it holds; the strip names every filter.
+    expect(screen.getByTestId('work-filters-open')).toHaveAttribute('aria-label', 'Filters, 4 active');
+    expect(screen.getByTestId('facet-org')).toHaveTextContent('Org: Unassigned');
+    expect(screen.getByTestId('facet-tracker')).toHaveTextContent('Tracker: Jira (acme)');
+    // Search and the two toggles show their own state: no chip for them.
+    expect(screen.queryByTestId('facet-query')).toBeNull();
+    expect(screen.queryByTestId('facet-mine')).toBeNull();
+    await fireEvent.click(screen.getByTestId('work-filter-status-any'));
     expect(get(workViewFilters).status).toBeUndefined();
+    // A chip's × removes just that filter.
+    await fireEvent.click(screen.getByTestId('facet-org'));
+    expect(get(workViewFilters).org).toBeUndefined();
+    expect(get(workViewFilters).tracker).toBe(1);
     await fireEvent.click(screen.getByTestId('work-filter-clear'));
     expect(get(workViewFilters)).toEqual({});
+    expect((screen.getByTestId('work-search') as HTMLInputElement).value).toBe('');
   });
 
   it('a filter changing while the search is typed does not overwrite the typing', async () => {

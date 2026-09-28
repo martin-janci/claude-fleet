@@ -64,6 +64,16 @@ const isString = (v: unknown): v is string => typeof v === 'string';
 export const hostFilter = writable<string>(readPref('host-filter', 'all', isString));
 hostFilter.subscribe((v) => writePref('host-filter', v));
 
+/** The host filter as it applies: a remembered alias that is no longer a
+ *  visible host (removed, or hidden) reads as `'all'` — otherwise no host
+ *  pill is active and the list is silently empty. Before the hosts load
+ *  (an empty list) the remembered value stands. */
+export function effectiveHostOf(filter: string, list: readonly Pick<HostRow, 'alias' | 'hidden'>[]): string {
+  if (filter === 'all' || list.length === 0) return filter;
+  return list.some((h) => h.alias === filter && !h.hidden) ? filter : 'all';
+}
+export const effectiveHostFilter = derived([hostFilter, hosts], ([f, list]) => effectiveHostOf(f, list));
+
 export async function loadHosts(): Promise<Result<HostRow[]>> {
   const r = await invokeCmd<HostRow[]>('list_hosts');
   if (r.ok) hosts.set(r.value);

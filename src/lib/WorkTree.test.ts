@@ -233,6 +233,32 @@ describe('WorkTree', () => {
     expect(screen.getByTestId('work-tree-error').textContent).toContain(NEWER_HUB);
   });
 
+  it('archived tasks: hidden by default with a count, one click shows them, and back', async () => {
+    treeImpl = (a) => ({ ...firstPage, archived_hidden: a.filters?.archived ? 0 : 5 });
+    render(WorkTree);
+    await flush();
+    expect(treeCalls().at(-1)?.filters).toEqual({});
+    expect(screen.getByTestId('work-archived-row').textContent).toContain('5 archived tasks hidden');
+    await fireEvent.click(screen.getByTestId('work-archived-toggle'));
+    await flush();
+    expect(get(workViewFilters)).toEqual({ archived: true });
+    expect(treeCalls().at(-1)?.filters).toEqual({ archived: true });
+    expect(screen.getByTestId('work-archived-row').textContent).toContain('Showing archived tasks');
+    await fireEvent.click(screen.getByTestId('work-archived-toggle'));
+    await flush();
+    expect(get(workViewFilters)).toEqual({});
+  });
+
+  it('when every match is archived, the empty state offers them', async () => {
+    treeImpl = (a) => (a.filters?.archived ? firstPage : { ...firstPage, tasks: [], groups: [], total: 0, archived_hidden: 2 });
+    render(WorkTree);
+    await flush();
+    expect(screen.getByTestId('work-tree-empty').textContent).not.toContain('No work yet');
+    await fireEvent.click(screen.getByTestId('work-archived-toggle'));
+    await flush();
+    expect(screen.getAllByTestId('work-task')).toHaveLength(2);
+  });
+
   it('filters reload the view; work:changed re-reads it once, debounced', async () => {
     render(WorkTree, { debounceMs: 5 });
     await flush();
@@ -334,7 +360,8 @@ describe('WorkTree', () => {
     treeImpl = () => {
       throw { code: 'E_HUB_DOWN', message: 'hub unreachable' };
     };
-    await fireEvent.click(screen.getByTestId('work-refresh'));
+    bumpWorkChanged();
+    await new Promise((r) => setTimeout(r, 30));
     await flush();
     expect(ids()).toEqual(['item:12', 'item:13']);
     expect(screen.queryByTestId('work-tree-error')).toBeNull();

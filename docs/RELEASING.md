@@ -239,7 +239,7 @@ before you do it:
 | `claude-fleet_<v>_aarch64.dmg`, `claude-fleet_<v>_aarch64.app.tar.gz` | `build`, `macos-latest` / `aarch64-apple-darwin` |
 | `claude-fleet_<v>_x64.dmg`, `claude-fleet_<v>_x64.app.tar.gz` | `build`, `macos-latest` / `x86_64-apple-darwin` |
 | `claude-fleet_<v>_amd64.deb`, `claude-fleet_<v>_amd64.AppImage` | `build`, `ubuntu-24.04` |
-| `claude-fleet_<v>_x64-setup.exe` (from 0.3.4) | `build`, `windows-latest` |
+| `claude-fleet_<v>_x64-setup.exe` (from 0.3.4; bundles Microsoft's ConPTY, fetched and SHA-256-checked by `scripts/fetch-conpty.sh`) | `build`, `windows-latest` |
 | `fleet-agent-<v>-x86_64-unknown-linux-gnu.tar.gz`, `fleet-hub-<v>-…` | `agent-hub-binaries`, `ubuntu-22.04` |
 | `fleet-agent-<v>-aarch64-unknown-linux-gnu.tar.gz`, `fleet-hub-<v>-…` | `agent-hub-binaries`, `ubuntu-22.04-arm` |
 | `SHA256SUMS` | `checksums` |

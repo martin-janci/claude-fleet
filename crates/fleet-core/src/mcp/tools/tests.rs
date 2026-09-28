@@ -3254,10 +3254,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// measured apart never cover the merged surface, so a merge that trips
     /// this re-measures. The why of each raise belongs in its commit
     /// message (`git log -L` on this constant), not here: a log in this
-    /// comment conflicted on every merge. Measured at 62,269 on 2026-09-28
-    /// (#352's `add_project` / `list_github_repos` over #348, plan D, reply
-    /// actions and M14).
-    const BUDGET_BYTES: usize = 62_369;
+    /// comment conflicted on every merge. Measured at 62,445 on 2026-09-28
+    /// (#359's `confirm_nonce` / `new_worktree` over main's quick-reply and
+    /// Work-tree filter changes).
+    const BUDGET_BYTES: usize = 62_545;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

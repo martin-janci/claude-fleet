@@ -389,7 +389,11 @@ On Windows a WSL distribution is a host (`fleet_core::wsl`, alias
 `wsl-<name>`): `SshClient::remote_command` and the PTY attach run it through
 `wsl.exe … sh -c` instead of `ssh`, and it gets no reverse tunnel. The `ssh`
 program is `ssh::default_ssh_binary()` everywhere (probes, PTY, tunnels):
-`CLAUDE_FLEET_SSH`, else the Windows OpenSSH, else PATH.
+`CLAUDE_FLEET_SSH`, else the Windows OpenSSH, else PATH. The Windows
+bundle ships Microsoft's ConPTY (`conpty.dll`/`OpenConsole.exe`, which
+portable-pty prefers to the built-in one) via `scripts/fetch-conpty.sh`
+(pinned version + SHA-256) and `--config src-tauri/tauri.conpty.conf.json`
+in release.yml and ci.yml; plain dev builds use the system ConPTY.
 
 Hub↔hub federation (cycle 3) is landed: two `fleet-hub` daemons link with
 `fleet-hub pair --mode peer` / `peer add|list|remove`, a dialer supervisor

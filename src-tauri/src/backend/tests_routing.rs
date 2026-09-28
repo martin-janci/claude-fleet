@@ -500,6 +500,7 @@ fn routed_read_cases() -> Vec<Case> {
                     vec![fleet_core::service::quick_replies::QuickReply {
                         label: "Tests".into(),
                         text: "run the tests".into(),
+                        auto_send: None,
                     }],
                     s,
                 ))

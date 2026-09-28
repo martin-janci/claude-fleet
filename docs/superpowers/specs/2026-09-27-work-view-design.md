@@ -206,7 +206,8 @@ changes shape. `CONTRACT_REVISION` stays 4.
   "has": "active",     // any (default) | active | past_only | none (no session at all) | suggested
   "review": true,      // only tasks with something to review
   "query": "login",    // case-insensitive substring of key or title
-  "group": "tracker:1:ABC"   // one group only (a section being expanded)
+  "group": "tracker:1:ABC",  // one group only (a section being expanded)
+  "archived": true     // include archived tasks (absent/false hides them; `status: done` shows done ones)
 }
 
 // GroupRef
@@ -250,7 +251,8 @@ changes shape. `CONTRACT_REVISION` stays 4.
   "repos": ["acme/api"],
   "placement_version": 0,                 // 0 = no placement
   "sessions": [ WorkTaskLink … ],         // active (primary first), suggested, ended newest first
-  "sessions_more": 0
+  "sessions_more": 0,
+  "archived": false                       // no active session, and done or every link (one past) archived
 }
 ```
 
@@ -258,7 +260,7 @@ changes shape. `CONTRACT_REVISION` stays 4.
 
 | Action | Parameters | Answer |
 |---|---|---|
-| `tree` | `filters?`, `cursor?`, `limit?` (1–200, default 50), `per_task?` (0–50, default 8) | `{ tasks: [WorkTask], groups: [{org_id, org_name, group: GroupRef, count}], orgs: [{id, name, color}], trackers: [{id, name, provider, state, org_id}], total, next_cursor, generated_at }` |
+| `tree` | `filters?`, `cursor?`, `limit?` (1–200, default 50), `per_task?` (0–50, default 8) | `{ tasks: [WorkTask], groups: [{org_id, org_name, group: GroupRef, count}], orgs: [{id, name, color}], trackers: [{id, name, provider, state, org_id}], total, archived_hidden, next_cursor, generated_at }` (`archived_hidden`: tasks every other filter passed but hidden as archived, over the whole result) |
 | `task` | `task_id` | `{ task: WorkTask (all sessions, with evidence), aliases: [task_id], description: string? (tracker text, fenced for an agent, ≤ 600 chars), last_outcome: {at, name, host, branch, pr_url, summary?}?, placement: {group, note, version, updated_at, updated_by}?, rules: [rule ids that match] }` |
 | `session_tasks` | `session_id` | `{ session_id, org_id, primary_link_id, links: [WorkTaskLink + task: {task_id, key, title, kind, status_category, status_name, url, unavailable, org_id, tracker_name}] }` — live, suggested, rejected and ended links of the session's participant |
 | `review` | `cursor?`, `limit?` | `{ items: [ReviewItem], total, next_cursor }` |

@@ -12,6 +12,7 @@
     addPreset,
     updatePreset,
     removePreset,
+    movePreset,
     flushComposerPresets,
   } from './composer_presets';
   import { copyOnSelect } from './prefs';
@@ -793,9 +794,10 @@
       <h4>Conversation composer</h4>
       <div class="hook-section">
         <p class="hook-desc">
-          Quick-action chips above the prompt box in the Conversation tab. A
-          click fills the box; Shift+click sends at once. Chips with an empty
-          label or text are not shown.
+          Quick-action chips above the prompt box in the Conversation tab and
+          on the phone, in this order. A click fills the box; with
+          <em>Send</em> ticked it sends at once (Shift+click does the other
+          one). Chips with an empty label or text are not shown.
         </p>
         {#each $composerPresets as p, i (i)}
           <div class="preset-row">
@@ -814,6 +816,29 @@
               value={p.text}
               oninput={(e) => updatePreset(i, { text: e.currentTarget.value })}
             ></textarea>
+            <label class="preset-send" title="Send on click instead of only filling the box">
+              <input
+                type="checkbox"
+                data-testid="preset-auto-send"
+                checked={p.auto_send === true}
+                onchange={(e) => updatePreset(i, { auto_send: e.currentTarget.checked })}
+              />
+              Send
+            </label>
+            <button
+              class="hook-btn"
+              data-testid="preset-up"
+              title="Move up"
+              aria-label="Move up"
+              disabled={i === 0}
+              onclick={() => movePreset(i, -1)}>↑</button>
+            <button
+              class="hook-btn"
+              data-testid="preset-down"
+              title="Move down"
+              aria-label="Move down"
+              disabled={i === $composerPresets.length - 1}
+              onclick={() => movePreset(i, 1)}>↓</button>
             <button class="hook-btn" data-testid="preset-remove" title="Remove" onclick={() => removePreset(i)}>×</button>
           </div>
         {/each}
