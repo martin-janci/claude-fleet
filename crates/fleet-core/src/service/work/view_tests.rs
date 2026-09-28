@@ -1250,3 +1250,88 @@ fn archived_hidden_counts_the_whole_result() {
     );
     assert_eq!(open.archived_hidden, 0, "open already excludes done");
 }
+
+// --- native item status (design 2026-09-28 §2): the live precedence the
+// tree projects through `service::work::status::effective_status`, given
+// `has_working_session` from one join over the whole page. ---------------
+
+/// Mark `sid`'s session as presently working, the way a live Claude turn
+/// does (`crate::service::work::tidy::tests::seed_session_and_item`'s
+/// pattern): a `claude_session_id`, then its `claude_status`.
+fn mark_working(w: &W, sid: i64, claude_session_id: &str) {
+    let s = w.st.lock().unwrap();
+    s.set_claude_session_id(sid, claude_session_id).unwrap();
+    s.set_claude_status_by_session_id(claude_session_id, "working")
+        .unwrap();
+}
+
+/// A working session lifts a LOCAL item's `todo` to `in_progress` in the
+/// tree — the live signal `effective_status` computes from one join, never
+/// a query per row.
+#[test]
+fn a_working_session_shows_a_local_item_as_in_progress() {
+    let w = world();
+    w.st.lock()
+        .unwrap()
+        .name_session_work(w.s1, Some("LOC-77"), "Refactor billing")
+        .unwrap();
+    mark_working(&w, w.s1, "c-loc-77");
+
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(
+        task_of(&p, "LOC-77").status_category.as_deref(),
+        Some("in_progress")
+    );
+}
+
+/// A person's status is final: a working session does not lift it back to
+/// `in_progress` (§2 rule 1 outranks rule 3).
+#[test]
+fn a_persons_status_is_not_lifted_by_a_working_session() {
+    let w = world();
+    let (item, _) =
+        w.st.lock()
+            .unwrap()
+            .name_session_work(w.s1, Some("LOC-78"), "Something else")
+            .unwrap();
+    w.st.lock()
+        .unwrap()
+        .set_item_status(item.id, "todo")
+        .unwrap();
+    mark_working(&w, w.s1, "c-loc-78");
+
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(
+        task_of(&p, "LOC-78").status_category.as_deref(),
+        Some("todo")
+    );
+}
+
+/// A tracker item's status is its tracker's: a working session must never
+/// move it (§2, "who may be overridden").
+#[test]
+fn a_working_session_never_lifts_a_tracker_item() {
+    let w = world();
+    let t4 =
+        w.st.lock()
+            .unwrap()
+            .upsert_tracker_item(
+                w.tracker,
+                &TrackerItemWrite {
+                    external_id: "4".into(),
+                    key: Some("TK-4".into()),
+                    title: "Not started".into(),
+                    status_name: "To Do".into(),
+                    status_category: "todo".into(),
+                    containers: vec!["TP".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id;
+    link(&w, w.s1, t4, true);
+    mark_working(&w, w.s1, "c-tk-4");
+
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(task_of(&p, "TK-4").status_category.as_deref(), Some("todo"));
+}

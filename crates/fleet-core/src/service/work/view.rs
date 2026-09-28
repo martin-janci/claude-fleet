@@ -26,6 +26,7 @@
 //! decisions); ended suggestions and rejections are dropped altogether.
 
 use super::resolve::Evidence;
+use super::status::effective_status;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::attention;
 use crate::service::orgs::OrgScope;
@@ -427,6 +428,10 @@ pub(crate) struct Graph {
     pub(crate) rules: Vec<WorkRule>,
     /// `health.context_red_pct`: `needs_you` agrees with `list_sessions`.
     pub(crate) context_red_pct: f64,
+    /// Item ids with a live confirmed link whose session is presently
+    /// working (native item status §2 rule 3) — one join for the whole
+    /// page, looked up per task instead of queried per row.
+    pub(crate) working_session_items: BTreeSet<i64>,
 }
 
 impl Graph {
@@ -454,6 +459,7 @@ impl Graph {
                 .collect(),
             rules: s.work_rules()?,
             context_red_pct: crate::service::health::context_red_pct(s),
+            working_session_items: s.work_items_with_working_session()?,
         })
     }
 
@@ -1063,9 +1069,19 @@ fn to_task(
         }
     }
     counts.active = active_sessions.len() as u32;
-    let status_category = item
-        .map(|i| i.item.status_category.clone())
-        .filter(|c| !c.is_empty());
+    // The live precedence (§2): a person's setting or a stamped `done` is
+    // final; otherwise a working session lifts a local item to
+    // `in_progress`; otherwise the stored value. `working_session_items` is
+    // the whole page's one join, looked up here rather than queried again.
+    let status_category = item.map(|i| {
+        effective_status(
+            &i.item.status_category,
+            i.item.status_set_by.as_deref(),
+            &i.item.source,
+            g.working_session_items.contains(&i.item.id),
+        )
+        .to_string()
+    });
     let archived = counts.active == 0
         && (status_category.as_deref() == Some("done") || all_links_archived(&b.visible));
     if let Some(i) = item {

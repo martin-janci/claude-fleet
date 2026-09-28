@@ -15,6 +15,7 @@ use crate::events::{EventBus as _, RowChange, WorkChanged};
 use crate::ipc_error::{codes, IpcError};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// One work item as the Work view reads it: the row, its meta (assignee,
 /// description), the tracker's containers (project / team keys, Asana
@@ -199,6 +200,30 @@ impl Store {
     /// Every link, with the live session its participant is on.
     pub fn work_view_links(&self) -> Result<Vec<ViewLink>, IpcError> {
         self.view_links_where("1 = 1", rusqlite::params![])
+    }
+
+    /// Every item id with a live confirmed link whose session is presently
+    /// working (native item status, design 2026-09-28 §2 rule 3): what
+    /// `service::work::status::effective_status` lifts to `in_progress`
+    /// (for a local item; the function itself gates on `source`). One query
+    /// for the whole page — the shape `Store::tidy_sessions`'s
+    /// `in_progress` set already uses, joined through `sessions` instead of
+    /// filtered by the item's own stored category.
+    ///
+    /// `l.item_id IS NOT NULL`: a `work_links` row may name a bare
+    /// `ref_key` with no item yet (migration 046's CHECK allows either), so
+    /// `SELECT DISTINCT l.item_id` would otherwise yield a NULL into the
+    /// set.
+    pub fn work_items_with_working_session(&self) -> Result<BTreeSet<i64>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT l.item_id FROM work_links l \
+             JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+             JOIN sessions s     ON s.id = p.session_id \
+             WHERE l.ended_at IS NULL AND l.state = 'confirmed' \
+               AND s.claude_status = 'working' AND l.item_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+        Ok(rows.collect::<rusqlite::Result<BTreeSet<_>>>()?)
     }
 
     /// The links of one session's participant (live, suggested, rejected
