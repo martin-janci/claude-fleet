@@ -665,6 +665,14 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/067_org_bound_sees_unassigned.sql"),
         already_applied: Some(orgs_has_bound_sees_unassigned),
     },
+    // Task 5: the describe cache (`work_item_descriptions`) — one item's
+    // whole description, held for `work.describe_cache_secs`. `CREATE TABLE
+    // IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` are idempotent on their
+    // own, so this needs no `already_applied` guard.
+    Migration::plain(
+        68,
+        include_str!("../../migrations/068_describe_cache.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

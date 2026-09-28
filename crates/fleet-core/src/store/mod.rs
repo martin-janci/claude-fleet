@@ -37,6 +37,7 @@ mod tracker_writes;
 mod trackers;
 mod usage;
 mod work;
+mod work_describe;
 mod work_detect;
 mod work_journal;
 mod work_local;
