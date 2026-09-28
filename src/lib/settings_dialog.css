@@ -135,6 +135,14 @@
   background: var(--bg);
   color: var(--fg);
 }
+.settings-dialog .preset-send {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  padding-top: 0.3rem;
+}
 .settings-dialog .preset-actions {
   display: flex;
   gap: 0.4rem;

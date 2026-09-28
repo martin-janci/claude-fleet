@@ -72,8 +72,23 @@ import { onboardingDismissed } from './onboarding';
 import { toasts, clearToasts } from './toasts';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
-import { workFilters, mineItemIds, DEFAULT_WORK_FILTERS } from './work_filters';
+import { workFilters, mineItemIds, mineLoaded, DEFAULT_WORK_FILTERS } from './work_filters';
 import { trackers } from './trackers';
+
+/** Open the sidebar's Filters panel (hosts, recency, work filters, include). */
+async function openFilters() {
+  if (!document.querySelector('[data-testid="filter-panel"]')) {
+    await fireEvent.click(screen.getByTestId('filters-open'));
+    await tick();
+  }
+}
+/** Open the ⋯ view-options menu (grouping, friendly names, row details). */
+async function openViewOptions() {
+  if (!document.querySelector('[data-testid="view-options"]')) {
+    await fireEvent.click(screen.getByTestId('view-options-open'));
+    await tick();
+  }
+}
 
 function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof sessionFor>[]) {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: { args?: { id?: number; new_name?: string; alias?: string } }) => {
@@ -800,7 +815,8 @@ describe('Sidebar (sessions-grouped view)', () => {
     render(Sidebar);
     await tick(); await tick();
     // Apply a restrictive filter.
-    await fireEvent.click(screen.getByText('1d'));
+    await openFilters();
+    await fireEvent.click(screen.getByTestId('recency-1d'));
     await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'phone' } });
     await tick();
     // Open the picker.
@@ -947,15 +963,17 @@ describe('Sidebar (sessions-grouped view)', () => {
     mockBackend(fakeProjects, []);
     render(Sidebar);
     await tick(); await tick();
+    await openFilters();
     expect(screen.queryByText('today')).toBeNull();
-    expect(screen.getByText('1d')).toBeInTheDocument();
+    expect(screen.getByTestId('recency-1d')).toHaveTextContent('1d');
   });
 
   it('persists the chosen recency to localStorage', async () => {
     mockBackend(fakeProjects, []);
     render(Sidebar);
     await tick(); await tick();
-    await fireEvent.click(screen.getByText('7d'));
+    await openFilters();
+    await fireEvent.click(screen.getByTestId('recency-7d'));
     await tick();
     expect(localStorage.getItem('cf:pref:recency')).toBe('"7d"');
   });
@@ -965,8 +983,11 @@ describe('Sidebar (sessions-grouped view)', () => {
     mockBackend(fakeProjects, []);
     render(Sidebar);
     await tick(); await tick();
-    // Scope to recency pills — host filter has its own active "all" pill.
-    const activePill = document.querySelector('.recency .pill.active');
+    // Shown as an active-filter chip without opening the panel…
+    expect(screen.getByTestId('facet-recency')).toHaveTextContent('Last 30d');
+    // …and pressed in the panel. Scoped to recency — hosts have their own "Any".
+    await openFilters();
+    const activePill = document.querySelector(".recency [aria-pressed='true']");
     expect(activePill?.textContent?.trim()).toBe('30d');
   });
 
@@ -1013,8 +1034,9 @@ describe('Sidebar (sessions-grouped view)', () => {
     await Promise.all([loadProjects(), loadSessions(), loadHosts(), loadAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
+    await openFilters();
     const hostsBar = document.querySelector('.hosts');
-    expect(hostsBar?.textContent).toContain('all');
+    expect(hostsBar?.textContent).toContain('Any');
     expect(hostsBar?.textContent).toContain('local');
     expect(hostsBar?.textContent).toContain('mefistos');
     expect(hostsBar?.textContent).not.toContain('old');
@@ -1036,7 +1058,8 @@ describe('Sidebar (sessions-grouped view)', () => {
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
     expect(screen.queryAllByTestId('sess-row')).toHaveLength(2);
-    const pills = document.querySelectorAll('.hosts .pill');
+    await openFilters();
+    const pills = document.querySelectorAll('.hosts button');
     // [all, local, mefistos] → click "mefistos"
     const mefistos = Array.from(pills).find((p) => p.textContent?.includes('mefistos'))!;
     await fireEvent.click(mefistos);
@@ -1062,7 +1085,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(badges[0].closest('[data-testid="sess-details"]')).not.toBeNull();
   });
 
-  it('a host almost out of disk gets a red dot on its pill and the meter in its tooltip', async () => {
+  it('a host almost out of disk gets a red mark on its filter chip and the meter in its tooltip', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
       if (cmd === 'list_projects') return fakeProjects;
       if (cmd === 'list_sessions') return [];
@@ -1075,8 +1098,10 @@ describe('Sidebar (sessions-grouped view)', () => {
     await Promise.all([loadProjects(), loadSessions(), loadHosts(), loadAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
-    expect(screen.getAllByTestId('host-pill-disk')).toHaveLength(1);
-    const pills = document.querySelectorAll('.hosts .pill');
+    await openFilters();
+    expect(screen.getByTestId('filter-host-mefistos-alert')).toBeTruthy();
+    expect(screen.queryByTestId('filter-host-oci-alert')).toBeNull();
+    const pills = document.querySelectorAll('.hosts button');
     const mef = Array.from(pills).find((p) => p.textContent?.includes('mefistos'));
     expect(mef!.getAttribute('title')).toContain('disk 98%');
   });
@@ -1113,7 +1138,8 @@ describe('Sidebar (sessions-grouped view)', () => {
     await Promise.all([loadProjects(), loadSessions(), loadHosts(), loadAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
-    const pills = document.querySelectorAll('.hosts .pill');
+    await openFilters();
+    const pills = document.querySelectorAll('.hosts button');
     const mef = Array.from(pills).find((p) => p.textContent?.includes('mefistos'));
     expect(mef).toBeDefined();
     expect(mef!.getAttribute('title')).toContain('m-janci@users.noreply.github.com');
@@ -1142,7 +1168,8 @@ describe('Sidebar (sessions-grouped view)', () => {
     await Promise.all([loadProjects(), loadSessions(), loadHosts(), loadAccounts()]);
     render(Sidebar);
     for (let i = 0; i < 8; i++) await tick();
-    const pills = document.querySelectorAll('.hosts .pill');
+    await openFilters();
+    const pills = document.querySelectorAll('.hosts button');
     const noaccount = Array.from(pills).find((p) => p.textContent?.includes('noaccount'));
     expect(noaccount).toBeDefined();
     const title = noaccount!.getAttribute('title') ?? '';
@@ -1390,7 +1417,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     render(Sidebar);
     await tick(); await tick();
     const pill = screen.getByTestId('needs-you-filter');
-    expect(pill).toHaveTextContent('Needs you (1)');
+    expect(pill).toHaveTextContent('Needs you 1');
     expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
     await fireEvent.click(pill);
     await tick();
@@ -1458,7 +1485,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     render(Sidebar);
     await tick(); await tick();
     const pill = screen.getByTestId('needs-you-filter');
-    expect(pill).toHaveTextContent('Needs you (1)');
+    expect(pill).toHaveTextContent('Needs you 1');
   });
 
   it('the "Needs you" queue keeps stuck, safe-kill, ghost and failed rows', async () => {
@@ -1471,7 +1498,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     render(Sidebar);
     await tick(); await tick();
     const pill = screen.getByTestId('needs-you-filter');
-    expect(pill).toHaveTextContent('Needs you (4)');
+    expect(pill).toHaveTextContent('Needs you 4');
     await fireEvent.click(pill);
     await tick();
     const names = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
@@ -1605,18 +1632,19 @@ describe('Sidebar triage (W2 Track D)', () => {
     render(Sidebar);
     await tick(); await tick();
     expect(screen.getByTestId('sess-details')).toBeInTheDocument();
+    await openViewOptions();
     const pill = screen.getByTestId('toggle-row-details');
-    expect(pill).toHaveAttribute('aria-pressed', 'true');
+    expect(pill).toHaveAttribute('aria-checked', 'true');
     await fireEvent.click(pill);
     await tick();
     expect(screen.queryByTestId('sess-details')).toBeNull();
-    expect(pill).toHaveAttribute('aria-pressed', 'false');
+    expect(pill).toHaveAttribute('aria-checked', 'false');
     expect(JSON.parse(localStorage.getItem('cf:pref:rows.details')!)).toBe(false);
     // Clicking again re-shows it — only the hide direction is exercised above.
     await fireEvent.click(pill);
     await tick();
     expect(screen.getByTestId('sess-details')).toBeInTheDocument();
-    expect(pill).toHaveAttribute('aria-pressed', 'true');
+    expect(pill).toHaveAttribute('aria-checked', 'true');
     expect(JSON.parse(localStorage.getItem('cf:pref:rows.details')!)).toBe(true);
   });
 
@@ -1626,7 +1654,8 @@ describe('Sidebar triage (W2 Track D)', () => {
     render(Sidebar);
     await tick(); await tick();
     expect(screen.getByTestId('sess-details')).toBeInTheDocument();
-    expect(screen.getByTestId('toggle-row-details')).toHaveAttribute('aria-pressed', 'true');
+    await openViewOptions();
+    expect(screen.getByTestId('toggle-row-details')).toHaveAttribute('aria-checked', 'true');
   });
 
   it('a ghost row stays one line with an unbracketed host badge', async () => {
@@ -1922,6 +1951,9 @@ describe('Sidebar — group by work (roadmap M1)', () => {
 
   beforeEach(() => {
     sidebarGroupBy.set('project');
+    // These cases are about past and archived work: show it (it is hidden
+    // by default — see "archived is hidden by default" below).
+    workFilters.set({ ...DEFAULT_WORK_FILTERS, archived: true });
   });
 
   it('project mode keeps the tree, and shows the work key as a chip on the row', async () => {
@@ -1944,6 +1976,7 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     render(Sidebar);
     await tick(); await tick();
 
+    await openViewOptions();
     await fireEvent.click(screen.getByTestId('group-by-toggle'));
     await tick();
 
@@ -2290,13 +2323,16 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     workFilters.set({ ...DEFAULT_WORK_FILTERS });
     trackers.set([]);
     mineItemIds.set(new Set());
+    mineLoaded.set(false);
   });
 
-  it('no chrome without work to filter', async () => {
+  it('no work group in the panel without work to filter', async () => {
     mockBackend(fakeProjects, [sessionFor(1, 'dev-a')]);
     render(Sidebar);
     await tick();
-    expect(screen.queryByTestId('work-filters-toggle')).toBeNull();
+    await openFilters();
+    expect(screen.queryByTestId('work-filters-sessions')).toBeNull();
+    expect(screen.getByTestId('bg-toggle')).toBeTruthy();
   });
 
   it('status chips filter the tree, count on the pill, and persist', async () => {
@@ -2305,8 +2341,8 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     mockBackend(fakeProjects, [a, b]);
     render(Sidebar);
     await tick();
-    expect(screen.queryByTestId('work-filters')).toBeNull();
-    await fireEvent.click(screen.getByTestId('work-filters-toggle'));
+    expect(screen.queryByTestId('work-filters-sessions')).toBeNull();
+    await openFilters();
     // Has-session is work mode only; one tracker needs no tracker chips.
     expect(screen.queryByTestId('wf-session-no')).toBeNull();
     expect(screen.queryByTestId('wf-tracker-all')).toBeNull();
@@ -2314,9 +2350,11 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     await tick();
     expect(names().some((n) => n.includes('dev-b'))).toBe(true);
     expect(names().some((n) => n.includes('dev-a'))).toBe(false);
-    expect(screen.getByTestId('work-filters-toggle')).toHaveTextContent('⚑ work (1)');
+    // Counted on the Filters button, and named in the strip of chips.
+    expect(screen.getByTestId('filters-open')).toHaveAttribute('aria-label', 'Filters, 1 active');
+    expect(screen.getByTestId('facet-wf-status')).toHaveTextContent('Status: To do');
     const isAny = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null;
-    expect(readPref('sidebar.work-filters', {}, isAny)).toMatchObject({ status: 'todo' });
+    expect(readPref('sidebar.work-filters.v2', {}, isAny)).toMatchObject({ status: 'todo' });
     await fireEvent.click(screen.getByTestId('wf-clear'));
     await tick();
     expect(names()).toHaveLength(2);
@@ -2330,7 +2368,7 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     mockBackend(fakeProjects, [a, b, c]);
     render(Sidebar);
     await tick();
-    await fireEvent.click(screen.getByTestId('work-filters-toggle'));
+    await openFilters();
     const chips = screen.getAllByTestId('wf-status-name').map((c) => c.textContent);
     // Workflow order (to do, in progress), then by name.
     expect(chips).toEqual(['To Do', 'In Progress', 'QA Review']);
@@ -2366,7 +2404,7 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     );
     render(Sidebar);
     await tick();
-    await fireEvent.click(screen.getByTestId('work-filters-toggle'));
+    await openFilters();
     await fireEvent.click(screen.getByTestId('wf-mine'));
     await waitFor(() => expect(names()).toHaveLength(1));
     expect(names()[0]).toContain('dev-b');
@@ -2384,14 +2422,14 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     trackers.set([jira(1, 'PAY'), jira(2, 'OPS')] as never);
     render(Sidebar);
     await tick();
-    await fireEvent.click(screen.getByTestId('work-filters-toggle'));
+    await openFilters();
     await fireEvent.click(screen.getByTestId('wf-tracker-2'));
     await tick();
     expect(names()).toHaveLength(1);
     expect(names()[0]).toContain('dev-b');
   });
 
-  it('work mode: past only and hide archived act on past work', async () => {
+  it('work mode: archived past work is hidden by default, counted, and one click away', async () => {
     const nowSec = Math.floor(Date.now() / 1000);
     const a = { ...sessionFor(1, 'dev-a'), tags: ['PAY-7'] };
     mockBackend(fakeProjects, [a]);
@@ -2406,9 +2444,16 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     });
     sidebarGroupBy.set('work');
     render(Sidebar);
+    // Hidden, but the list says so and brings it back.
+    const row = await screen.findByTestId('archived-row');
+    expect(row).toHaveTextContent('1 archived hidden');
+    expect(screen.queryByTestId('past-work-group')).toBeNull();
+    await fireEvent.click(screen.getByTestId('archived-toggle'));
     await screen.findByTestId('past-work-group');
+    expect(screen.getByTestId('archived-row')).toHaveTextContent('Showing archived work');
     expect(names()).toHaveLength(1);
-    await fireEvent.click(screen.getByTestId('work-filters-toggle'));
+    await openFilters();
+    expect(screen.getByTestId('wf-hide-archived')).toHaveAttribute('aria-checked', 'true');
     await fireEvent.click(screen.getByTestId('wf-session-no'));
     await tick();
     expect(names()).toHaveLength(0);
@@ -2422,5 +2467,114 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     await tick();
     expect(names()).toHaveLength(1);
     expect(screen.queryByTestId('past-work-group')).toBeNull();
+  });
+});
+
+describe('Sidebar filters: one set of rules for every section', () => {
+  const names = () => screen.queryAllByTestId('sess-row').map((r) => r.textContent ?? '');
+  const pastLink = (ref_key: string, snap_host: string) => ({
+    id: 9, ref_key, state: 'confirmed', source: 'manual', created_at: 1,
+    ended_at: Math.floor(Date.now() / 1000) - 60, snap_host, snap_name: `old-${snap_host}`,
+  });
+  function withPastWork(links: unknown[]) {
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, x?: { args?: { key?: string } }) =>
+      cmd === 'session_work_links' ? (x?.args?.key === undefined ? links : []) : base(cmd, x),
+    );
+  }
+
+  beforeEach(() => {
+    sidebarGroupBy.set('project');
+    hostFilter.set('all');
+    workFilters.set({ ...DEFAULT_WORK_FILTERS, archived: true });
+  });
+
+  it('an empty list names the filters that hide it and clears them', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a')]);
+    hostFilter.set('mefistos');
+    render(Sidebar);
+    await tick(); await tick();
+    expect(names()).toHaveLength(0);
+    expect(screen.getByTestId('sidebar-empty')).toHaveTextContent('No sessions match Host: mefistos');
+    expect(screen.getByTestId('facet-host')).toHaveTextContent('Host: mefistos');
+    await fireEvent.click(screen.getByTestId('sidebar-empty-clear'));
+    await tick();
+    expect(names()).toHaveLength(1);
+    expect(get(hostFilter)).toBe('all');
+  });
+
+  it('a chip in the strip removes its one filter', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a')]);
+    hostFilter.set('mefistos');
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('facet-host'));
+    await tick();
+    expect(screen.queryByTestId('active-filters')).toBeNull();
+    expect(names()).toHaveLength(1);
+  });
+
+  it('search narrows Other sessions too', async () => {
+    mockBackend(fakeProjects, [sessionFor(null, 'loose-alpha'), sessionFor(null, 'loose-beta')]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(names()).toHaveLength(2);
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'beta' } });
+    await waitFor(() => expect(names()).toHaveLength(1));
+    expect(names()[0]).toContain('loose-beta');
+  });
+
+  it('a work group’s Done follows the host filter, like a past-only group', async () => {
+    mockBackend(fakeProjects, [{ ...sessionFor(1, 'dev-a'), tags: ['PAY-7'] }]);
+    withPastWork([pastLink('PAY-7', 'mefistos')]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await screen.findByTestId('work-done');
+    hostFilter.set('local');
+    await tick(); await tick();
+    expect(screen.queryByTestId('work-done')).toBeNull();
+    expect(names()).toHaveLength(1);
+  });
+
+  it('the selection drops a row a filter hides: bulk actions reach only what you see', async () => {
+    const a = sessionFor(1, 'dev-a');
+    const b = { ...sessionFor(1, 'dev-b'), host_alias: 'mefistos' };
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('select-mode'));
+    await tick();
+    for (const box of screen.getAllByTestId('select-box')) await fireEvent.click(box);
+    await tick();
+    expect(screen.getByTestId('bulk-bar')).toHaveTextContent('2 selected');
+    hostFilter.set('local');
+    await tick(); await tick();
+    expect(screen.getByTestId('bulk-bar')).toHaveTextContent('1 selected');
+  });
+
+  it('Last active narrows Other sessions too, by each session’s own activity', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    mockBackend(fakeProjects, [
+      { ...sessionFor(null, 'loose-fresh'), last_activity_at: now - 60 },
+      { ...sessionFor(null, 'loose-stale'), last_activity_at: now - 40 * 86400 },
+    ]);
+    localStorage.setItem('cf:pref:recency', '"1d"');
+    render(Sidebar);
+    await tick(); await tick();
+    expect(names()).toHaveLength(1);
+    expect(names()[0]).toContain('loose-fresh');
+    localStorage.removeItem('cf:pref:recency');
+  });
+
+  it('Needs you hides past work: an ended session never waits on you', async () => {
+    mockBackend(fakeProjects, [{ ...sessionFor(1, 'dev-stuck'), stuck_kind: 'oom' as const }]);
+    withPastWork([pastLink('ABC-9', 'local')]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await screen.findByTestId('past-work-group');
+    await fireEvent.click(screen.getByTestId('needs-you-filter'));
+    await tick();
+    expect(screen.queryByTestId('past-work-group')).toBeNull();
+    expect(names()).toHaveLength(1);
   });
 });

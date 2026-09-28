@@ -23,6 +23,7 @@
   import { workViewChordLabel } from './app_views';
   import { detectMac } from './terminal_keys';
   import WorkFiltersBar from './WorkFiltersBar.svelte';
+  import { facetSentence, workFacets } from './filter_facets';
   import WorkReview from './WorkReview.svelte';
   import WorkRules from './WorkRules.svelte';
   import {
@@ -52,6 +53,8 @@
     workTreeSessionIds,
     workViewFilters,
     workViewKey,
+    activeWorkViewId,
+    normalizeFilters,
     type GroupSection,
     type OrgSection,
     type SectionState,
@@ -63,17 +66,23 @@
   import type { IpcError } from './result';
 
   let {
-    onCollapse,
     /** Tasks per page; injectable for tests. */
     pageSize = 50,
     /** The refetch debounce, ms; injectable for tests. */
     debounceMs = 500,
-  }: { onCollapse?: () => void; pageSize?: number; debounceMs?: number } = $props();
+  }: { pageSize?: number; debounceMs?: number } = $props();
 
   const chord = workViewChordLabel(detectMac(typeof navigator === 'undefined' ? undefined : navigator));
 
   let tab = $state<'tasks' | 'review'>('tasks');
   let page = $state.raw<WorkTreePage | null>(null);
+  const archivedHidden = $derived(page?.archived_hidden ?? 0);
+  function setArchived(on: boolean) {
+    workViewFilters.update((f) => {
+      const { group: _g, archived: _a, ...rest } = normalizeFilters(f);
+      return on ? { ...rest, archived: true } : rest;
+    });
+  }
   let states = $state.raw<Map<string, SectionState>>(new Map());
   let loading = $state(false);
   let error = $state<IpcError | null>(null);
@@ -104,6 +113,7 @@
       orgs: Array.isArray(v?.orgs) ? v.orgs : [],
       trackers: Array.isArray(v?.trackers) ? v.trackers : [],
       total: typeof v?.total === 'number' ? v.total : 0,
+      archived_hidden: typeof v?.archived_hidden === 'number' ? v.archived_hidden : 0,
       next_cursor: v?.next_cursor ?? null,
       generated_at: v?.generated_at,
     };
@@ -345,7 +355,7 @@
   }
 </script>
 
-<div class="work-tree" data-testid="work-tree" bind:this={root}>
+<div class="work-tree" data-testid="work-tree" aria-busy={loading} bind:this={root}>
   <header class="work-header">
     <div class="row">
       <div class="tabs" role="tablist" aria-label="Work view">
@@ -374,28 +384,8 @@
         data-testid="work-rules-open"
         onclick={() => (rulesOpen = true)}>⚙</button
       >
-      <button
-        class="btn btn--quiet btn--icon"
-        type="button"
-        title="Refresh"
-        aria-label="Refresh the Work view"
-        data-testid="work-refresh"
-        disabled={loading}
-        onclick={() => {
-          void load();
-          void loadReviewCount();
-        }}>{loading ? '…' : '↻'}</button
-      >
-      {#if onCollapse}
-        <button
-          class="btn btn--quiet btn--icon"
-          type="button"
-          title="Hide sidebar (more room for terminal)"
-          aria-label="Hide sidebar"
-          data-testid="work-collapse"
-          onclick={onCollapse}>‹</button
-        >
-      {/if}
+      <!-- Refresh is the sidebar's ↻ (it re-reads this view too), and
+           collapse is the sidebar's ‹: one of each. -->
     </div>
     {#if tab === 'tasks'}
       <WorkFiltersBar orgs={page?.orgs ?? []} trackers={page?.trackers ?? []} />
@@ -413,9 +403,29 @@
     {:else if !page}
       <p class="state muted" data-testid="work-tree-loading">Loading work…</p>
     {:else if sections.length === 0}
-      <p class="state muted" data-testid="work-tree-empty">
-        No tasks match. Clear a filter, or switch back to Sessions ({chord}).
-      </p>
+      {@const facets = workFacets($workViewFilters, {
+        orgName: (id) => page?.orgs.find((o) => o.id === id)?.name,
+        trackerName: (id) => page?.trackers.find((t) => t.id === id)?.name,
+      })}
+      <div class="state muted empty" data-testid="work-tree-empty">
+        {#if facets.length > 0}
+          <p>No tasks match <strong>{facetSentence(facets)}</strong>.</p>
+          <button
+            class="btn btn--quiet is-bounded"
+            type="button"
+            data-testid="work-tree-empty-clear"
+            onclick={() => {
+              activeWorkViewId.set(null);
+              workViewFilters.set({});
+            }}>Clear filters</button
+          >
+        {:else if archivedHidden === 0}
+          <p>No work yet. Tasks appear here once a session is linked to a ticket, or you name its work. Back to Sessions: {chord}.</p>
+        {/if}
+        {#if archivedHidden > 0}
+          {@render archivedRow()}
+        {/if}
+      </div>
     {:else}
       <ul class="orgs" aria-label="Work">
         {#each sections as o (o.key)}
@@ -532,9 +542,30 @@
           </li>
         {/each}
       </ul>
+      {#if archivedHidden > 0 || $workViewFilters.archived}
+        {@render archivedRow()}
+      {/if}
     {/if}
   </div>
 </div>
+
+{#snippet archivedRow()}
+  <!-- Archived tasks (done, or every session archived, and nothing
+       running) stay out of the way; one click brings them all back. -->
+  <div class="archived-row" data-testid="work-archived-row">
+    {#if $workViewFilters.archived}
+      <span>Showing archived tasks</span>
+      <button class="btn btn--quiet" type="button" data-testid="work-archived-toggle" onclick={() => setArchived(false)}
+        >Hide archived</button
+      >
+    {:else}
+      <span>{archivedHidden} archived task{archivedHidden === 1 ? '' : 's'} hidden</span>
+      <button class="btn btn--quiet" type="button" data-testid="work-archived-toggle" onclick={() => setArchived(true)}
+        >Show archived</button
+      >
+    {/if}
+  </div>
+{/snippet}
 
 {#if rulesOpen}
   <WorkRules onclose={() => (rulesOpen = false)} />
@@ -755,6 +786,32 @@
   }
   .state {
     padding: 0.4rem 0.2rem;
+  }
+  .archived-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 6px 0 4px;
+    padding: 4px 6px;
+    border-top: 1px dashed var(--border);
+    color: var(--fg-muted);
+    font-size: var(--control-font);
+  }
+  .archived-row span {
+    flex: 1;
+  }
+  .empty {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .empty p {
+    margin: 0;
+  }
+  .empty strong {
+    color: var(--fg);
+    font-weight: 500;
   }
   .muted {
     color: var(--fg-muted);

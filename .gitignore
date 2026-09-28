@@ -45,3 +45,6 @@ vite.config.ts.timestamp-*
 # them would publish exactly what they exist to keep out.
 /.githooks/pre-commit.local
 
+
+# Microsoft ConPTY for the Windows bundle, fetched by scripts/fetch-conpty.sh
+/src-tauri/vendor/

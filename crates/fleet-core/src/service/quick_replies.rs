@@ -25,6 +25,19 @@
 //! desktop paired to a hub, and these are the opposite — a per-fleet UI
 //! preference every paired client may both read and write.
 //!
+//! # Order and auto-send
+//!
+//! The list's order IS the chip row's order — every client draws the chips
+//! as they come, so reordering is a `replace` with the entries moved.
+//!
+//! `auto_send` decides what a plain tap does: off (the default, and how every
+//! chip behaved before the flag existed) fills the composer so the prompt can
+//! be edited first; on sends the prompt at once. A `replace` entry that does
+//! not carry the flag at all — a client from before it existed, such as a
+//! phone whose chips are plain strings — keeps the flag the stored chip with
+//! the same text already has, so an older editor saving the list does not
+//! silently switch every auto-send chip back off.
+//!
 //! # Defaults
 //!
 //! [`defaults`] is the answer when nothing is stored, and storing something
@@ -56,7 +69,7 @@ pub const MAX_LABEL: usize = 40;
 /// the list can never become a way to store a document in a settings row.
 pub const MAX_TEXT: usize = 4000;
 
-/// One chip: what the button says, and what it sends.
+/// One chip: what the button says, what it sends, and whether a tap sends it.
 ///
 /// `label` is allowed to equal `text`, and does whenever a client that has no
 /// separate label (fleet-mobile's chips were plain strings) writes one.
@@ -69,6 +82,11 @@ pub struct QuickReply {
     pub label: String,
     /// The prompt the chip sends.
     pub text: String,
+    // A tap sends (true) or only fills the composer. Omitted in a `replace`
+    // entry: the stored chip's flag. A plain comment, not a doc: the doc
+    // would ride in the MCP tool schema, whose byte budget is tight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_send: Option<bool>,
 }
 
 impl QuickReply {
@@ -76,7 +94,13 @@ impl QuickReply {
         Self {
             label: label.to_string(),
             text: text.to_string(),
+            auto_send: Some(false),
         }
+    }
+
+    /// Whether a tap sends the chip at once.
+    pub fn auto_send(&self) -> bool {
+        self.auto_send.unwrap_or(false)
     }
 }
 
@@ -126,7 +150,13 @@ pub fn list(store: &Mutex<Store>) -> Result<Vec<QuickReply>, IpcError> {
         return Ok(defaults());
     };
     match serde_json::from_str::<Vec<QuickReply>>(&raw) {
-        Ok(entries) => Ok(normalize(entries)),
+        Ok(entries) => Ok(normalize(entries)
+            .into_iter()
+            .map(|e| QuickReply {
+                auto_send: Some(e.auto_send()),
+                ..e
+            })
+            .collect()),
         Err(e) => {
             tracing::warn!(error = %e, "quick replies: stored list is unreadable, serving defaults");
             Ok(defaults())
@@ -175,7 +205,19 @@ pub fn replace(
         }
     }
 
-    let entries = normalize(entries);
+    let mut entries = normalize(entries);
+    if entries.iter().any(|e| e.auto_send.is_none()) {
+        // Before the lock: `list` takes it too.
+        let stored = list(store)?;
+        for e in entries.iter_mut().filter(|e| e.auto_send.is_none()) {
+            e.auto_send = Some(
+                stored
+                    .iter()
+                    .find(|k| k.text == e.text)
+                    .is_some_and(QuickReply::auto_send),
+            );
+        }
+    }
     let s = crate::ipc_error::lock(store)?;
     if entries.is_empty() || entries == defaults() {
         // Storing a copy of the defaults would pin them forever: a later
@@ -190,7 +232,7 @@ pub fn replace(
     Ok(entries)
 }
 
-/// Trim, drop the empty, de-duplicate by text, and cap.
+/// Trim, drop the empty, de-duplicate by text, and cap. Order is kept.
 ///
 /// Applied on the way in AND on the way out, so a list written by an older
 /// build (or by hand) is served under today's rules rather than handed to a
@@ -218,7 +260,11 @@ fn normalize(entries: Vec<QuickReply>) -> Vec<QuickReply> {
         if out.iter().any(|k| k.text == text) {
             continue;
         }
-        out.push(QuickReply { label, text });
+        out.push(QuickReply {
+            label,
+            text,
+            auto_send: e.auto_send,
+        });
         if out.len() == MAX_ENTRIES {
             break;
         }
@@ -315,6 +361,78 @@ mod tests {
             .collect();
         let e = replace(&s, many).unwrap_err();
         assert_eq!(e.code, codes::E_INVALID);
+    }
+
+    fn chip(label: &str, text: &str, auto_send: Option<bool>) -> QuickReply {
+        QuickReply {
+            auto_send,
+            ..QuickReply::new(label, text)
+        }
+    }
+
+    #[test]
+    fn auto_send_and_order_round_trip() {
+        let s = store();
+        let mine = vec![
+            chip("Go", "go on", Some(true)),
+            chip("Tests", "run the tests", Some(false)),
+        ];
+        assert_eq!(replace(&s, mine.clone()).unwrap(), mine);
+        let reordered = vec![mine[1].clone(), mine[0].clone()];
+        assert_eq!(replace(&s, reordered.clone()).unwrap(), reordered);
+        assert_eq!(list(&s).unwrap(), reordered);
+    }
+
+    #[test]
+    fn an_entry_without_the_flag_keeps_the_stored_one() {
+        // An older client (the phone's plain-string chips) saving the list
+        // must not switch every auto-send chip back off.
+        let s = store();
+        replace(
+            &s,
+            vec![
+                chip("Go", "go on", Some(true)),
+                chip("Tests", "run the tests", Some(false)),
+            ],
+        )
+        .unwrap();
+        let out = replace(
+            &s,
+            vec![
+                chip("go on", "go on", None),
+                chip("new", "something new", None),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            vec![
+                chip("go on", "go on", Some(true)),
+                chip("new", "something new", Some(false)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_list_stored_before_the_flag_is_served_with_it_off() {
+        let s = store();
+        {
+            let g = s.lock().unwrap();
+            g.set_setting(SETTING_KEY, r#"[{"label":"Go","text":"go on"}]"#)
+                .unwrap();
+        }
+        assert_eq!(list(&s).unwrap(), vec![chip("Go", "go on", Some(false))]);
+    }
+
+    #[test]
+    fn served_chips_always_carry_the_flag() {
+        let s = store();
+        let json = serde_json::to_value(list(&s).unwrap()).unwrap();
+        assert!(json
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c.get("auto_send").is_some_and(|v| v.is_boolean())));
     }
 
     #[test]

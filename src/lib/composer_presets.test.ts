@@ -15,6 +15,8 @@ import {
   addPreset,
   updatePreset,
   removePreset,
+  movePreset,
+  presetSendsNow,
   PRESETS_PREF,
 } from './composer_presets';
 
@@ -106,7 +108,45 @@ describe('composer presets', () => {
     expect(invoked()).toHaveBeenCalledWith('set_quick_replies', { entries: SERVED });
     // …and the row being typed into is still there.
     expect(get(composerPresets)).toHaveLength(SERVED.length + 1);
-    expect(get(composerPresets)[2]).toEqual({ label: 'Ship', text: '' });
+    expect(get(composerPresets)[2]).toEqual({ label: 'Ship', text: '', auto_send: false });
+  });
+
+  it('moves a chip and saves the list in its new order', async () => {
+    await loadComposerPresets();
+    invoked().mockClear();
+    movePreset(1, -1);
+    await flushComposerPresets();
+    const swapped = [SERVED[1], SERVED[0]];
+    expect(invoked()).toHaveBeenCalledWith('set_quick_replies', { entries: swapped });
+    expect(get(composerPresets)).toEqual(swapped);
+  });
+
+  it('does not move a chip past either end', async () => {
+    await loadComposerPresets();
+    invoked().mockClear();
+    movePreset(0, -1);
+    movePreset(SERVED.length - 1, 1);
+    await flushComposerPresets();
+    expect(invoked()).not.toHaveBeenCalled();
+    expect(get(composerPresets)).toEqual(SERVED);
+  });
+
+  it('saves the auto-send flag with the chip', async () => {
+    await loadComposerPresets();
+    invoked().mockClear();
+    updatePreset(0, { auto_send: true });
+    await flushComposerPresets();
+    expect(invoked()).toHaveBeenCalledWith('set_quick_replies', {
+      entries: [{ ...SERVED[0], auto_send: true }, SERVED[1]],
+    });
+  });
+
+  it('an auto-send chip sends on a click and fills on Shift+click; the rest the other way', () => {
+    expect(presetSendsNow({ label: 'a', text: 'b', auto_send: true }, false)).toBe(true);
+    expect(presetSendsNow({ label: 'a', text: 'b', auto_send: true }, true)).toBe(false);
+    expect(presetSendsNow({ label: 'a', text: 'b', auto_send: false }, false)).toBe(false);
+    expect(presetSendsNow({ label: 'a', text: 'b' }, true)).toBe(true);
+    expect(isPresetArray([{ label: 'a', text: 'b', auto_send: 'yes' }])).toBe(false);
   });
 
   it('removes a chip and saves the shortened list', async () => {

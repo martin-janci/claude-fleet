@@ -2403,11 +2403,12 @@ async fn run_matrix(isolate: bool) {
     }
     // The tree: each caller its own orgs' tasks; the forced cross-org link
     // (s_x, an A session, on B's BB-1) never names s_x to an org-B reader
-    // nor BB-1 to an org-A one.
+    // nor BB-1 to an org-A one. Archived tasks included (BB-3 is done with
+    // only a past session), so the fence is checked over every task.
     m.row(
         "work",
         "tree",
-        |_, _| json!({ "action": "tree", "limit": 200 }),
+        |_, _| json!({ "action": "tree", "limit": 200, "filters": { "archived": true } }),
         move |_, who, a| {
             is_ok(who, a, "tree");
             let v: Value = serde_json::from_str(text(a)).unwrap();

@@ -261,7 +261,7 @@ Parameters: `content_only`, `host`, `rotate`
 
 ### `quick_replies`
 
-Read or replace the fleet's quick replies: the chip row the desktop and phone composers draw above the prompt box, as [{label, text}]. No arguments reads; `set` replaces the whole list (max 24, [] restores the defaults). Errors: E_INVALID.
+Read or replace the fleet's quick replies: the chip row the desktop and phone composers draw above the prompt box, as [{label, text, auto_send}] in order. No arguments reads; `set` replaces the whole list (max 24, [] restores the defaults). Errors: E_INVALID.
 
 Parameters: `set`
 

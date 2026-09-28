@@ -20,7 +20,7 @@
   import AnswerPrompt from './AnswerPrompt.svelte';
   import { pendingInputFor } from './pending_input';
   import { hintAnchor } from './hints';
-  import { composerPresets, type ComposerPreset } from './composer_presets';
+  import { composerPresets, presetSendsNow, type ComposerPreset } from './composer_presets';
   import { needsMore, wrapsPastOneLine } from './composer_overflow';
   import { contextLevel } from './attention';
   import { timeAgo } from './session_status';
@@ -1151,8 +1151,9 @@
     if (slashIndex >= slashMatches.length) slashIndex = 0;
   });
 
-  /** A chip fills the box (Shift+click sends at once). A filled command does
-   *  not pop the slash menu: the user picked it already. */
+  /** A chip fills the box, or sends at once when it is an auto-send chip;
+   *  Shift+click does the other one. A filled command does not pop the slash
+   *  menu: the user picked it already. */
   function usePreset(p: ComposerPreset, sendNow: boolean) {
     // A gated composer (see `blockWhileBusy`) degrades Shift+click to a
     // plain click rather than swallowing it: the chip still fills the box,
@@ -2169,11 +2170,15 @@
               class:btn--warn={suggested}
               data-testid="conv-chip"
               data-suggested={suggested || undefined}
-              title={suggested
-                ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.\n\nClick fills the box; Shift+click sends now.`
-                : `${p.text}\n\nClick fills the box; Shift+click sends now.`}
+              data-auto-send={p.auto_send || undefined}
+              title={`${suggested
+                ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.`
+                : p.text}\n\n${p.auto_send
+                ? 'Click sends now; Shift+click fills the box.'
+                : 'Click fills the box; Shift+click sends now.'}`}
               disabled={viewing !== null}
-              onclick={(e) => usePreset(p, e.shiftKey)}>{p.label}</button
+              onclick={(e) => usePreset(p, presetSendsNow(p, e.shiftKey))}
+              >{p.label}{#if p.auto_send}<span class="chip-send" aria-hidden="true">&nbsp;↵</span>{/if}</button
             >
           {/if}
         {/each}
@@ -2380,6 +2385,10 @@
     /* One row by default; growth is a deliberate toggle, not a reflow. */
     flex-wrap: nowrap;
     overflow: hidden;
+  }
+  /* Marks an auto-send chip: a click sends rather than fills. */
+  .chip-send {
+    opacity: 0.6;
   }
   .chips[data-expanded='true'] {
     flex-wrap: wrap;

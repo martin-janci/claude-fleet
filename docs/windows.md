@@ -116,6 +116,21 @@ The fix is **hub-client mode**. Run `fleet-hub` on a Linux machine (see
 hub does all the SSH work from Linux, with multiplexing. The Windows app
 then opens SSH only for the terminal you are looking at.
 
+## The terminal
+
+The terminal pane runs `ssh.exe` (or `wsl.exe`) in a Windows pseudo console
+(ConPTY). The installer ships Microsoft's current ConPTY, `conpty.dll` and
+`OpenConsole.exe` from the Windows Terminal project (MIT), next to
+`claude-fleet.exe`. The app uses that copy instead of the one built into
+Windows. The built-in one, on Windows 10 especially, redraws the screen
+itself and drops tmux's bracketed-paste and mouse modes. Without those, a
+multi-line paste into Claude submits at its first line and the mouse wheel
+does nothing in the pane.
+
+When you build from source, `pnpm tauri dev` uses the built-in ConPTY. For
+the shipped behaviour, run `bash scripts/fetch-conpty.sh` once, then
+`pnpm tauri dev --config src-tauri/tauri.conpty.conf.json`.
+
 ## Where things are kept
 
 | What | Where |
@@ -134,10 +149,5 @@ Manager → Windows Credentials**.
 - The terminal on ConPTY has had no long manual test yet: resizing, pasting
   large blocks and fast session switching are the places to watch. Please
   report what you see.
-- The app uses the ConPTY built into Windows. On Windows 10 in particular it
-  may not pass tmux's bracketed-paste and mouse modes through, so a
-  multi-line paste can submit at its first line and mouse scrolling in the
-  pane may not work. Shipping Microsoft's own `conpty.dll` /
-  `OpenConsole.exe` beside the app would fix it; that is not done yet.
 - There is no auto-update on any platform yet; install a new release over
   the old one.
