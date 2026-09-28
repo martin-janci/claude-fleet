@@ -6679,6 +6679,7 @@ fn a_host_write_failing_late_rolls_back_pr_signals_events_and_bg_rows() {
                 head: Some("feat/x".into()),
                 ..Default::default()
             }),
+            evidence: None,
         },
     );
     let agents = vec![
@@ -6888,6 +6889,7 @@ fn a_host_write_lost_at_the_trusted_projects_read_writes_no_pr_signals() {
                     head: Some("feat/x".into()),
                     ..Default::default()
                 }),
+                evidence: None,
             },
         );
     }
