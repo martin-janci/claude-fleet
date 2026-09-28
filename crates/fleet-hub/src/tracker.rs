@@ -13,7 +13,7 @@
 
 use crate::config::HubOptions;
 use crate::out;
-use crate::pair::{call_tool, fmt_time, hub_conn};
+use crate::pair::{call_tool, call_tool_within, fmt_time, hub_conn, SLOW_CALL_TIMEOUT};
 use clap::Subcommand;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -402,10 +402,13 @@ pub async fn run(
             ));
         }
         TrackerCmd::Test { id } => {
-            let r = call_tool(
+            // The one tracker action that waits on the provider (several
+            // requests); the rest are store-only and keep the fast limit.
+            let r = call_tool_within(
                 &conn,
                 "work_admin",
                 json!({ "action": "test", "tracker_id": id }),
+                SLOW_CALL_TIMEOUT,
             )
             .await?;
             out::line(&tracker_line(&r["tracker"]));
