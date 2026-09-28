@@ -372,6 +372,8 @@ jobs:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           TAG: ${{ github.ref_name }}
           LEG: ${{ matrix.leg }}
+        # bash on every leg: the Windows runner's default shell is pwsh.
+        shell: bash
         run: scripts/rename-updater-asset.sh
 
   # fleet-agent and a bare fleet-hub, packaged for a Linux host with no
