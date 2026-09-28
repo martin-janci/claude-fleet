@@ -499,6 +499,11 @@ pub(super) const ITEM_COLUMNS: &str =
      assignees, iteration, updated_ext, status_changed_at, fetched_at, unavailable_at, \
      unavailable_reason, status_set_by, status_set_at";
 
+/// How many columns [`ITEM_COLUMNS`] names. A query that appends its own
+/// columns after the list indexes them as `ITEM_COLUMN_COUNT + n` — never a
+/// literal, because a literal silently shifts when a column is added here.
+pub(super) const ITEM_COLUMN_COUNT: usize = 25;
+
 /// A JSON array column as a list; anything unreadable is empty.
 fn json_list(raw: Option<String>) -> Vec<String> {
     raw.and_then(|s| serde_json::from_str(&s).ok())
@@ -2360,5 +2365,15 @@ mod tests {
         assert_eq!(row.status_category, "done");
         assert_eq!(row.status_set_by.as_deref(), Some("person"));
         assert_eq!(row.status_set_at, Some(1700));
+    }
+
+    #[test]
+    fn item_column_count_matches_the_column_list() {
+        assert_eq!(
+            ITEM_COLUMNS.split(',').count(),
+            ITEM_COLUMN_COUNT,
+            "ITEM_COLUMN_COUNT must equal the columns ITEM_COLUMNS names, or every \
+             query that appends its own columns decodes the wrong index"
+        );
     }
 }

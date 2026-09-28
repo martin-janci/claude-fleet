@@ -7,7 +7,9 @@
 //! Nothing here decides visibility: `service::work::view` filters by the
 //! caller's `OrgScope`, and `service::work::structure` gates the writes.
 
-use super::work::{link_columns_prefixed, map_item, map_link, ITEM_COLUMNS, LINK_COLUMN_COUNT};
+use super::work::{
+    link_columns_prefixed, map_item, map_link, ITEM_COLUMNS, ITEM_COLUMN_COUNT, LINK_COLUMN_COUNT,
+};
 use super::{now_unix, ItemMeta, Store, WorkItemRow, WorkLinkRow};
 use crate::events::{EventBus as _, RowChange, WorkChanged};
 use crate::ipc_error::{codes, IpcError};
@@ -183,12 +185,12 @@ impl Store {
                 OR EXISTS (SELECT 1 FROM work_links l WHERE l.item_id = w.id)"
         ))?;
         let rows = stmt.query_map([], |r| {
-            let meta: Option<String> = r.get(25)?;
+            let meta: Option<String> = r.get(ITEM_COLUMN_COUNT)?;
             Ok(ViewItem {
                 item: map_item(r)?,
                 meta: ItemMeta::parse(meta.as_deref()),
-                containers: json_list(r.get(26)?),
-                own_org: r.get(27)?,
+                containers: json_list(r.get(ITEM_COLUMN_COUNT + 1)?),
+                own_org: r.get(ITEM_COLUMN_COUNT + 2)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
