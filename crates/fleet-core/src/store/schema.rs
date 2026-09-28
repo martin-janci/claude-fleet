@@ -729,6 +729,11 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/072_usage_backfill_until.sql"),
         already_applied: Some(sessions_has_usage_backfill_until),
     },
+    // Task 5: the describe cache (`work_item_descriptions`) — one item's
+    // whole description, held for `work.describe_cache_secs`. `CREATE TABLE
+    // IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` are idempotent on their
+    // own, so this needs no `already_applied` guard.
+    Migration::plain(73, include_str!("../../migrations/073_describe_cache.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

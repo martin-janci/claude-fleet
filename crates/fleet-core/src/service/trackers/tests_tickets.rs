@@ -112,6 +112,273 @@ impl Fx {
     fn net(&self) -> crate::service::trackers::TrackerNet {
         crate::service::trackers::TrackerNet::fake(Arc::new(self.fake.clone()))
     }
+
+    /// `lookup` as a per-host token on `hosta` would see it (M3's fence).
+    fn lookup_as_host(&self, key: &str) -> Ticket {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(lookup(&self.store, key, &host_scope("hosta"), &self.net()))
+            .unwrap()
+    }
+
+    /// The queued brief for starting work on `key`, on host A in the
+    /// fixture's own project.
+    fn start_brief(&self, key: &str) -> String {
+        let args = StartArgs {
+            reference: Some(key.into()),
+            project_id: Some(self.pid),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        };
+        let plan = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(plan_start(&self.store, &args, &OrgScope::All, &self.net()))
+            .unwrap();
+        ticket_brief(&self.store, &plan).unwrap()
+    }
+}
+
+/// `Fx::new()` with ABC-1's description overridden to `description` (as the
+/// sync would already have narrowed it) and `description_chars` (the
+/// tracker's true length before that narrowing), linked to a session on
+/// `hosta` so `lookup_as_host` sees it as a per-host token would.
+fn seeded_with_description(description: &str, description_chars: Option<i64>) -> Fx {
+    let fx = Fx::new();
+    let t = fx_tracker(&fx);
+    let mut w = item(
+        "1",
+        "ABC-1",
+        ("In Progress", "in_progress"),
+        true,
+        crate::service::catalog::now_secs(),
+    );
+    w.description = Some(description.to_string());
+    w.description_chars = description_chars;
+    fx.store.lock().unwrap().upsert_tracker_item(t, &w).unwrap();
+    let sid = fx.session_on("hosta", "dev");
+    fx.store
+        .lock()
+        .unwrap()
+        .link_session_work(sid, WorkTarget::Key("ABC-1"), "manual")
+        .unwrap();
+    // Past work, not a live session: hosta's fence still sees ABC-1 (as
+    // `a_host_token_sees_only_its_own_hosts_tickets` shows for an ended
+    // link), but `start_brief` on the same key must not trip start's
+    // duplicate check.
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute(
+            "UPDATE participants SET retired_at = 9 WHERE session_id = ?1",
+            [sid],
+        )
+        .unwrap();
+    fx
+}
+
+/// [`seeded_with_description`], but the ticket's tracker is `provider`
+/// (added alongside the fixture's default Jira, not replacing it) instead of
+/// Jira: for `describe_offer`'s per-provider honesty (Task 4) — a tracker
+/// whose `caps.describe` is false must still say "open the ticket", never
+/// name a `describe` key. The item's key is `<PROVIDER>-1` (`ASANA-1` for
+/// `"asana"`), a stand-in fleet can still resolve by key prefix even though
+/// the real provider has no human keys.
+fn seeded_with_description_on(
+    provider: &str,
+    description: &str,
+    description_chars: Option<i64>,
+) -> Fx {
+    let site = match provider {
+        "asana" => "https://app.asana.com",
+        "linear" => "https://linear.app/other",
+        "github" => "https://github.com/other",
+        "jira_dc" => "https://jira.other.example",
+        _ => "https://other.atlassian.net",
+    };
+    let fx = Fx::new();
+    let t = {
+        let s = fx.store.lock().unwrap();
+        let t = s.add_tracker(provider, "Other", site).unwrap().id;
+        s.set_tracker_probe(
+            t,
+            None,
+            &TrackerConfig {
+                key_prefixes: vec![provider.to_ascii_uppercase()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        s.set_tracker_state(t, "ok", None).unwrap();
+        t
+    };
+    let key = format!("{}-1", provider.to_ascii_uppercase());
+    let mut w = item(
+        "other-1",
+        &key,
+        ("In Progress", "in_progress"),
+        true,
+        crate::service::catalog::now_secs(),
+    );
+    w.description = Some(description.to_string());
+    w.description_chars = description_chars;
+    fx.store.lock().unwrap().upsert_tracker_item(t, &w).unwrap();
+    let sid = fx.session_on("hosta", "dev-other");
+    fx.store
+        .lock()
+        .unwrap()
+        .link_session_work(sid, WorkTarget::Key(&key), "manual")
+        .unwrap();
+    // Past work, not a live session (see `seeded_with_description`): hosta's
+    // fence still sees it.
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute(
+            "UPDATE participants SET retired_at = 9 WHERE session_id = ?1",
+            [sid],
+        )
+        .unwrap();
+    fx
+}
+
+/// Work graph M3.5: `lookup`, as an agent sees it, and the start brief both
+/// say when the cache kept less of the description than the tracker holds.
+#[test]
+fn every_path_that_carries_a_description_says_it_cut() {
+    let w = seeded_with_description(&"x".repeat(2000), Some(6812));
+    // lookup, as an agent sees it
+    let t = w.lookup_as_host("ABC-1");
+    assert!(t.description.unwrap().contains("shown 2000 of 6812 chars"));
+    // the start brief
+    let brief = w.start_brief("ABC-1");
+    assert!(brief.contains("shown ") && brief.contains(" of 6812 chars"));
+}
+
+/// A row synced before this branch has no `description_chars` (Task 1: it is
+/// `None` for every existing row). `lookup` must not invent a notice for it —
+/// the excerpt it already cached is served exactly as it always was.
+#[test]
+fn a_pre_upgrade_row_with_no_known_length_gets_no_notice() {
+    let cached = "x".repeat(2000);
+    let w = seeded_with_description(&cached, None);
+    let t = w.lookup_as_host("ABC-1");
+    let d = t.description.unwrap();
+    assert!(!d.contains("shown"));
+    assert!(!d.contains("open the ticket"));
+    assert_eq!(
+        d,
+        crate::mcp::guard::fence_untrusted(
+            &cached,
+            "a tracker ticket",
+            crate::service::trackers::DESCRIPTION_MAX_CHARS
+        )
+    );
+}
+
+/// [`seeded_with_description`], but the excerpt AND its length come from the
+/// Jira adapters' own extraction — `jira_common::adf_excerpt`, the exact call
+/// `jira.rs` and `jira_dc.rs` make at their snapshot sites (an ADF document
+/// on Cloud, a plain v2 string on Data Center) — instead of being hand-fed.
+/// Every other notice test in this file seeds `description_chars` by hand,
+/// which is why the adapter's own over-count (C1: one per block separator,
+/// so a "there is more" notice on EVERY complete Jira description) reached
+/// `lookup` with nothing failing.
+fn seeded_from_a_jira_body(body: serde_json::Value) -> Fx {
+    let (description, description_chars) =
+        crate::service::trackers::jira_common::adf_excerpt(&body);
+    seeded_with_description(&description.expect("a description"), description_chars)
+}
+
+/// C1, end to end on the path it broke: a Jira Cloud description the tracker
+/// holds WHOLE must reach an agent with no notice at all — not "shown 1234 of
+/// 1235". Asserted as exact equality with `fence_untrusted`, the shape
+/// `a_pre_upgrade_row_with_no_known_length_gets_no_notice` uses.
+#[test]
+fn a_complete_jira_cloud_description_gets_no_notice() {
+    let text = "Refunds fail on partial captures.\nFix the capture path.";
+    let fx = seeded_from_a_jira_body(json!({"type":"doc","content":[
+        {"type":"paragraph","content":[{"type":"text","text":"Refunds fail on partial captures."}]},
+        {"type":"paragraph","content":[{"type":"text","text":"Fix the capture path."}]}]}));
+    let d = fx.lookup_as_host("ABC-1").description.unwrap();
+    assert!(!d.contains("shown"), "{d}");
+    assert!(!d.contains("open the ticket"), "{d}");
+    assert!(!d.contains("action: describe"), "{d}");
+    assert_eq!(
+        d,
+        crate::mcp::guard::fence_untrusted(
+            text,
+            "a tracker ticket",
+            crate::service::trackers::DESCRIPTION_MAX_CHARS
+        )
+    );
+}
+
+/// The Data Center shape of the same: a v2 body is a plain string, and its
+/// trailing whitespace used to be counted into the length the excerpt trims
+/// away.
+#[test]
+fn a_complete_jira_data_center_description_gets_no_notice() {
+    let fx = seeded_from_a_jira_body(json!("Plain text on Data Center.\n\n"));
+    let d = fx.lookup_as_host("ABC-1").description.unwrap();
+    assert!(!d.contains("shown"), "{d}");
+    assert!(!d.contains("open the ticket"), "{d}");
+    assert_eq!(
+        d,
+        crate::mcp::guard::fence_untrusted(
+            "Plain text on Data Center.",
+            "a tracker ticket",
+            crate::service::trackers::DESCRIPTION_MAX_CHARS
+        )
+    );
+}
+
+/// And the signal still fires where it must: a description the adapter really
+/// did cut says so, from the same adapter path, for both Jira shapes.
+#[test]
+fn a_cut_jira_description_still_gets_a_notice_from_the_adapter() {
+    let long = "x".repeat(crate::service::trackers::DESCRIPTION_MAX_CHARS + 500);
+    let adf = seeded_from_a_jira_body(json!({"type":"doc","content":[
+        {"type":"paragraph","content":[{"type":"text","text": long.clone()}]}]}));
+    let d = adf.lookup_as_host("ABC-1").description.unwrap();
+    assert!(d.contains("shown 2000 of 2501 chars"), "{d}");
+    assert!(
+        d.contains(r#"work { action: describe, key: "ABC-1" }"#),
+        "{d}"
+    );
+    let v2 = seeded_from_a_jira_body(json!(long));
+    let d = v2.lookup_as_host("ABC-1").description.unwrap();
+    assert!(d.contains("shown 2000 of 2500 chars"), "{d}");
+}
+
+/// The other half of Task 4's honesty requirement: a provider whose
+/// `caps.describe` is true (Jira, the fixture's default tracker) IS offered,
+/// by its flattened key, once the cache kept less than the tracker holds.
+#[test]
+fn a_jira_ticket_is_offered_describe_by_key() {
+    let w = seeded_with_description(&"x".repeat(2000), Some(6812));
+    let d = w.lookup_as_host("ABC-1").description.unwrap();
+    assert!(
+        d.contains(r#"work { action: describe, key: "ABC-1" }"#),
+        "{d}"
+    );
+    assert!(!d.contains("open the ticket"));
+}
+
+/// Task 4's honesty requirement: a provider whose `caps.describe` is false
+/// (Asana) is never offered as a `describe` source, even though its
+/// description was cut exactly like a Jira one would be — the notice must
+/// still say "open the ticket". This would fail if `describe_offer` read the
+/// capability as `true` for every provider.
+#[test]
+fn an_asana_ticket_is_not_offered_describe() {
+    let w = seeded_with_description_on("asana", &"x".repeat(2000), Some(9000));
+    assert!(w
+        .lookup_as_host("ASANA-1")
+        .description
+        .unwrap()
+        .contains("open the ticket"));
 }
 
 #[test]
@@ -1080,6 +1347,55 @@ async fn a_hostile_key_is_flattened_wherever_fleet_writes_it() {
     assert!(start_prompt(&"K".repeat(200)).len() < 200 + 100);
 }
 
+/// Fix round 1, A-1 (continued): when the retry's shrink saturates `budget`
+/// all the way to 0, `fence_ticket`'s zero-budget branch (notice only, no
+/// fence) must still land the whole brief under `BRIEF_MAX_CHARS` — the
+/// `saturating_sub` must not let an over-large shrink silently do nothing.
+/// A big `extra` (this function's multi-repo siblings line, artificially
+/// stretched here) leaves only a sliver of budget for the description —
+/// small enough that the retry's shrink saturates to 0.
+#[tokio::test]
+async fn the_retry_still_fits_when_it_shrinks_the_budget_to_zero() {
+    let fx = Fx::new();
+    let mut w = item("69", "ABC-69", ("To Do", "todo"), true, 1);
+    w.description = Some("x".repeat(10_000));
+    let tracker = fx_tracker(&fx);
+    fx.store
+        .lock()
+        .unwrap()
+        .upsert_tracker_item(tracker, &w)
+        .unwrap();
+    let plan = plan_start(
+        &fx.store,
+        &StartArgs {
+            reference: Some("ABC-69".into()),
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        },
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap();
+    let extra = "E".repeat(3700);
+    let brief = ticket_brief_with(&fx.store, &plan, &extra).unwrap();
+    assert!(
+        brief.chars().count() <= crate::service::work::handover::BRIEF_MAX_CHARS,
+        "{}",
+        brief.chars().count()
+    );
+    // Task 4: the fixture's tracker is Jira (`caps.describe` true), so the
+    // notice names the `describe` call instead of "open the ticket".
+    assert!(
+        brief.trim_end().ends_with(
+            "[the description did not fit — work { action: describe, key: \"ABC-69\" }]"
+        ),
+        "{}",
+        &brief[brief.len().saturating_sub(80)..]
+    );
+}
+
 #[tokio::test]
 async fn a_long_description_still_ends_the_fence() {
     use crate::mcp::guard::UNTRUSTED_END;
@@ -1121,11 +1437,118 @@ async fn a_long_description_still_ends_the_fence() {
         "{}",
         brief.chars().count()
     );
+    // The fence still ends properly; the cut notice (outside it) is what the
+    // brief now ends with.
     assert!(
-        brief.trim_end().ends_with(UNTRUSTED_END),
+        brief.contains(&format!("{UNTRUSTED_END}\n[shown")),
+        "{}",
+        &brief[brief.len() - 200..]
+    );
+    // Task 4: the fixture's tracker is Jira (`caps.describe` true), so the
+    // notice names the `describe` call instead of "open the ticket".
+    assert!(
+        brief.trim_end().ends_with(
+            "of the description — work { action: describe, key: \"ABC-67\" } for the rest]"
+        ),
         "{}",
         &brief[brief.len() - 80..]
     );
+}
+
+/// Fix round 1, A-1: the retry must not over-cut. Its arithmetic once
+/// double-counted the fence's own fixed overhead (~130 chars, an empty
+/// `fence_untrusted`'s marker + end-marker), which shrank `budget` far more
+/// than the real overflow demanded. A correct retry lands close to
+/// `BRIEF_MAX_CHARS` — the exact figure moves with the digit width of
+/// `shown`/`full`, so this asserts a range, not an equality.
+#[tokio::test]
+async fn a_long_descriptions_retry_lands_close_to_the_budget_not_far_under_it() {
+    let fx = Fx::new();
+    let mut w = item("68", "ABC-68", ("To Do", "todo"), true, 1);
+    w.description = Some("x".repeat(10_000));
+    let tracker = fx_tracker(&fx);
+    fx.store
+        .lock()
+        .unwrap()
+        .upsert_tracker_item(tracker, &w)
+        .unwrap();
+    // The store keeps what the provider gave; set a long one by hand too.
+    fx.store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute(
+            "UPDATE work_items SET meta = json_set(meta, '$.description', ?1) WHERE key = 'ABC-68'",
+            ["y".repeat(10_000)],
+        )
+        .unwrap();
+    let plan = plan_start(
+        &fx.store,
+        &StartArgs {
+            reference: Some("ABC-68".into()),
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        },
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap();
+    let brief = ticket_brief(&fx.store, &plan).unwrap();
+    let len = brief.chars().count();
+    let max = crate::service::work::handover::BRIEF_MAX_CHARS;
+    // A buggy double-counted retry undershoots by roughly the fence's own
+    // fixed overhead (~130 chars) — far outside this range.
+    assert!((max - 40..=max).contains(&len), "{len} vs budget {max}");
+}
+
+/// Fix round 2, A-1 (the real bug): a stored description is capped at
+/// exactly `DESCRIPTION_MAX_CHARS` by Task 1, so in the common case `shown`
+/// is content-bound (`len(text) < budget`), not budget-bound. Shrinking
+/// `budget` by the overshoot only starts reducing `shown` once the shrunk
+/// budget drops below the text's length, so a retry that shrinks `budget`
+/// can leave the brief over by up to `budget - shown`. That failure shows up
+/// only across a *band* of header sizes (whichever `extra` lengths put the
+/// pre-retry overshoot inside that wasted slack), not at any single fixed
+/// point — which is exactly why the round-1 test (a budget-bound, always
+/// 10,000-char description) could not catch it. Sweep the band and assert
+/// every point in it fits.
+#[tokio::test]
+async fn every_extra_length_in_the_overflow_band_still_fits_the_budget() {
+    let fx = Fx::new();
+    let mut w = item("70", "ABC-70", ("To Do", "todo"), true, 1);
+    w.description = Some("x".repeat(crate::service::trackers::DESCRIPTION_MAX_CHARS));
+    w.description_chars = Some(6812);
+    let tracker = fx_tracker(&fx);
+    fx.store
+        .lock()
+        .unwrap()
+        .upsert_tracker_item(tracker, &w)
+        .unwrap();
+    let plan = plan_start(
+        &fx.store,
+        &StartArgs {
+            reference: Some("ABC-70".into()),
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            ..Default::default()
+        },
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap();
+    let max = crate::service::work::handover::BRIEF_MAX_CHARS;
+    for n in 1600..=1800 {
+        let extra = "E".repeat(n);
+        let brief = ticket_brief_with(&fx.store, &plan, &extra).unwrap();
+        assert!(
+            brief.chars().count() <= max,
+            "extra len {n}: brief {} chars vs budget {max}",
+            brief.chars().count()
+        );
+    }
 }
 
 fn fx_tracker(fx: &Fx) -> i64 {

@@ -38,6 +38,21 @@ describe('work_retention lines', () => {
     expect(lastSweepLine({ ...status().last_sweep!, tracker_writes: 3 }, NOW)).toBe(
       'last sweep 10 min ago: 4 journal, 1 tickets, 2 events, 3 PR links deleted',
     );
+    // The describe cache, the same way `tracker_writes` does it: absent from
+    // an older hub, named when it deleted something.
+    expect(lastSweepLine({ ...status().last_sweep!, describe_cache: 2 }, NOW)).toBe(
+      'last sweep 10 min ago: 4 journal, 1 tickets, 2 events, 2 full descriptions deleted',
+    );
+    // Its window is pure age — no liveness rule, unlike every other row.
+    expect(
+      retentionLine({
+        table: 'work_item_descriptions',
+        setting: 'work.retention.tracker_items_days',
+        days: 30,
+        rows: 7,
+        would_delete: 4,
+      }),
+    ).toBe('full descriptions: 7 rows, 4 older than 30 d');
   });
 });
 

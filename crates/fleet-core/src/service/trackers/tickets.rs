@@ -41,6 +41,26 @@ pub const TICKETS_MAX_LIMIT: usize = 200;
 /// The `recent` view's window.
 pub const RECENT_DAYS: i64 = 14;
 
+/// Whether this item's tracker can serve a full description, and under which
+/// key. A tracker fleet cannot identify, one with no key to name, or one
+/// whose provider does not implement `describe`, points at the ticket
+/// instead.
+///
+/// `pub(crate)`: all four callers that fence a description share this one
+/// decision — `lookup` and `ticket_brief_with` here,
+/// `service::work::card::card`, and `service::work::view::task`.
+pub(crate) fn describe_offer<'a>(
+    tracker: Option<&crate::store::TrackerRow>,
+    key: Option<&'a str>,
+) -> crate::mcp::guard::DescribeOffer<'a> {
+    match (tracker, key) {
+        (Some(t), Some(k)) if super::provider_caps(t).describe => {
+            crate::mcp::guard::DescribeOffer::Key(k)
+        }
+        _ => crate::mcp::guard::DescribeOffer::None,
+    }
+}
+
 /// One ticket as `tickets` and `lookup` return it: the item, and the live
 /// sessions already working on it (Enter jumps instead of starting).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,11 +437,24 @@ pub async fn lookup(
         crate::service::catalog::now_secs(),
     );
     let live = live_ids(&s, scope, &item)?;
-    // An agent reads it: fenced on both sides, markers defused (M3 review).
+    // The key may end up in DescribeOffer::Key, which fence_ticket puts in
+    // fleet's own notice line: flatten it like every other tracker line does
+    // (defuse alone does not fold a newline).
+    let flat_key = item
+        .key
+        .as_deref()
+        .map(|k| k.split_whitespace().collect::<Vec<_>>().join(" "));
+    // An agent reads it: fenced on both sides, markers defused (M3 review),
+    // with a trailing notice when the cache kept less than the tracker holds
+    // (Task 1's 2k cap).
     let description = meta.description.map(|d| match scope {
-        OrgScope::Host { .. } => {
-            crate::mcp::guard::fence_untrusted(&d, "a tracker ticket", super::DESCRIPTION_MAX_CHARS)
-        }
+        OrgScope::Host { .. } => crate::mcp::guard::fence_ticket(
+            &d,
+            "a tracker ticket",
+            super::DESCRIPTION_MAX_CHARS,
+            meta.description_chars,
+            describe_offer(t.as_ref(), flat_key.as_deref()),
+        ),
         // A person reads it on a phone or the desktop (bound or not): as is.
         OrgScope::All | OrgScope::Org { .. } => d,
     });
@@ -917,16 +950,86 @@ pub fn ticket_brief_with(
         out.push_str(extra.trim_end());
         out.push('\n');
     }
-    if let Some(d) = meta.and_then(|m| m.description) {
-        let overhead = out.chars().count()
-            + crate::mcp::guard::fence_untrusted("", FROM, 0)
-                .chars()
-                .count()
-            + 2;
-        let budget = crate::service::work::handover::BRIEF_MAX_CHARS.saturating_sub(overhead);
-        if budget > 0 {
+    // The tracker that might serve a full description, mirroring `lookup`'s
+    // resolution: this function has no `t` of its own, only the item.
+    let tracker = s
+        .list_trackers()?
+        .into_iter()
+        .find(|t| Some(t.id) == item.as_ref().and_then(|i| i.tracker_id));
+    // The key may end up in DescribeOffer::Key, which fence_ticket puts in
+    // fleet's own notice line: flatten it like every other tracker line does
+    // (defuse alone does not fold a newline).
+    let flat_key = item
+        .as_ref()
+        .and_then(|i| i.key.as_deref())
+        .map(|k| k.split_whitespace().collect::<Vec<_>>().join(" "));
+    if let Some(m) = meta {
+        if let Some(d) = m.description.clone() {
+            let overhead = out.chars().count()
+                + crate::mcp::guard::fence_untrusted("", FROM, 0)
+                    .chars()
+                    .count()
+                + 2;
+            let max_total = crate::service::work::handover::BRIEF_MAX_CHARS;
+            let budget = max_total.saturating_sub(overhead);
+            // budget 0 no longer means silence: fence_ticket says it did not
+            // fit. The notice it may append sits outside `budget`, so a cut
+            // that fills the whole budget can push the total past
+            // `max_total` by the notice's own length; when it does, shrink
+            // the fence by exactly that much and let fence_ticket re-report
+            // a smaller `shown` (the doc comment's "always fits" promise).
+            //
+            // Computing the notice's length up front instead, to size
+            // `budget` correctly the first time, would be circular: the
+            // notice names `shown`, and `shown` *is* the budget once the
+            // text is actually being truncated — so the budget would depend
+            // on the notice's own length, which depends on the budget. One
+            // fixpoint iteration (build once, measure the real overflow,
+            // shrink, build once more) is the correct shape here. Do not
+            // "simplify" this back into a circle.
+            let mut fenced = crate::mcp::guard::fence_ticket(
+                &d,
+                FROM,
+                budget,
+                m.description_chars,
+                describe_offer(tracker.as_ref(), flat_key.as_deref()),
+            );
+            // The real total once pushed below is `out` as it stands now,
+            // plus the two newlines, plus `fenced` (which already carries
+            // its own fence overhead) — NOT `overhead + fenced.len()`:
+            // `overhead` already counts an (empty) fence's overhead once, so
+            // adding `fenced.len()` on top would count it twice and over-cut
+            // by the fence's own fixed overhead (~130 chars).
+            let total = out.chars().count() + 2 + fenced.chars().count();
+            let over = total.saturating_sub(max_total);
+            if over > 0 {
+                // `shown` is the number of characters actually inside the
+                // fence — `min(budget, len(text))` — not `budget` itself. A
+                // stored description is capped at `DESCRIPTION_MAX_CHARS`
+                // (Task 1), so it is usually *shorter* than `budget`
+                // (content-bound, not budget-bound): shrinking `budget` by
+                // `over` then only starts reducing `shown` once the shrunk
+                // budget drops below the text's length, wasting up to
+                // `budget - shown` of the shrink and leaving the brief still
+                // over by that much (this is exactly the failure a fix
+                // review caught: a band of `extra` lengths that stayed
+                // 1–76 chars over). `defuse` is a same-length substitution,
+                // so it never changes the character count: `shown` here
+                // matches exactly what `fence_ticket` computed internally.
+                // Shrinking `shown` itself, not `budget`, always lands on or
+                // under the limit in one step.
+                let shown = d.chars().count().min(budget);
+                let budget = shown.saturating_sub(over);
+                fenced = crate::mcp::guard::fence_ticket(
+                    &d,
+                    FROM,
+                    budget,
+                    m.description_chars,
+                    describe_offer(tracker.as_ref(), flat_key.as_deref()),
+                );
+            }
             out.push('\n');
-            out.push_str(&crate::mcp::guard::fence_untrusted(&d, FROM, budget));
+            out.push_str(&fenced);
             out.push('\n');
         }
     }

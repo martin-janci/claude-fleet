@@ -508,13 +508,29 @@ fn scale_retention_status_and_sweep_batches() {
     let dry = retention::status(&store, now).unwrap();
     let days = RetentionDays::from_store(&lock(&store).unwrap());
     let mut slowest = 0.0_f64;
-    for (t, row) in RetentionTable::ALL.iter().zip(&dry.tables) {
+    // Paired by IDENTITY, never by position: `zip`ping `RetentionTable::ALL`
+    // against `dry.tables` truncated to the shorter side, so a table that
+    // `status` reports and this loop does not was silently uncovered (the
+    // describe cache was, for the whole of this branch), and a reordering
+    // would have compared one table's sweep against another's dry run while
+    // still passing.
+    assert_eq!(
+        dry.tables.len(),
+        RetentionTable::ALL.len(),
+        "status must report exactly the swept tables"
+    );
+    for t in RetentionTable::ALL {
+        let row = dry
+            .tables
+            .iter()
+            .find(|r| r.table == t.table())
+            .unwrap_or_else(|| panic!("no status row for {t:?}"));
         let mut deleted = 0_i64;
         loop {
             let s = lock(&store).unwrap();
             let start = Instant::now();
             let n = s
-                .retention_delete_batch(*t, now, days.of(*t), RETENTION_BATCH)
+                .retention_delete_batch(t, now, days.of(t), RETENTION_BATCH)
                 .unwrap();
             slowest = slowest.max(start.elapsed().as_secs_f64() * 1_000.0);
             deleted += n as i64;

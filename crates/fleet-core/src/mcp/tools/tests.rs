@@ -4385,6 +4385,65 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
     );
 }
 
+/// Task 5 of the visible-truncation-and-describe plan: the describe cache
+/// (`work_item_descriptions`, one item's WHOLE, uncapped description) must
+/// never reach a session row, an event frame or the phone projection — only
+/// `work { action: describe }` reads it. Checked against the actual SOURCE
+/// TEXT of all three surfaces, not a derived field-name heuristic: a later
+/// join or column that reaches into the cache table fails this test, the
+/// same day it is written, rather than needing someone to notice a leak.
+///
+/// An earlier version of this test only checked that no
+/// `PHONE_SESSION_FIELDS` name contained `"desc"` — true today, but it would
+/// stay true even if `views.rs` joined the cache table under an unrelated
+/// column name, so it could never fail. The source greps below fix that for
+/// `store/rows.rs` (where a join or a new column really would show up as
+/// SQL text); `views.rs` and `events.rs` carry no SQL at all, so those two
+/// legs can never fail on their own — kept anyway, as a positive statement
+/// this test still means what it says for the day either file might. The
+/// field-name loop is kept alongside them rather than replaced: it is the
+/// only check here that would catch a new *field* added to the phone
+/// projection under a plausible name (fed from anywhere, not only a join
+/// text-matched by the grep), even though on its own it cannot tell a real
+/// leak from a coincidentally-named column.
+#[test]
+fn no_projection_carries_a_full_description() {
+    const TABLE: &str = "work_item_descriptions";
+    for (what, src) in [
+        (
+            "the phone projection (mcp/tools/views.rs)",
+            include_str!("views.rs"),
+        ),
+        (
+            "SessionRow (store/rows.rs)",
+            include_str!("../../store/rows.rs"),
+        ),
+        ("event frames (events.rs)", include_str!("../../events.rs")),
+        // The one file here that ALREADY projects a description (the Work
+        // view's task detail, `TaskDetail.description`), and therefore the
+        // likeliest place a future join into the cache would land — the leg
+        // with teeth, next to two that are positive statements about files
+        // holding no SQL at all.
+        (
+            "the Work view's task projection (service/work/view.rs)",
+            include_str!("../../service/work/view.rs"),
+        ),
+    ] {
+        assert!(
+            !src.contains(TABLE),
+            "{what} names {TABLE:?}: the describe cache's full text must \
+             reach the wire only through work {{ action: describe }}"
+        );
+    }
+    for f in PHONE_SESSION_FIELDS {
+        assert!(
+            !f.contains("desc"),
+            "{f} looks like a description field; the phone projection must \
+             never carry the describe cache's full text"
+        );
+    }
+}
+
 /// A view names fields by string, so a renamed column would not fail to
 /// compile — it would quietly project to nothing. Checked against the
 /// serialized row BEFORE `strip_nulls`, which is the only place a field that
