@@ -969,6 +969,8 @@ impl HubBackend {
                 "start_command": args.start_command,
                 "friendly_name": args.friendly_name,
                 "resume_claude_session_id": args.resume_claude_session_id,
+                "model": args.model,
+                "effort": args.effort,
             }),
         )
         .await

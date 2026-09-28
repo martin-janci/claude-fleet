@@ -398,6 +398,8 @@ impl FleetTools {
                         start_command: None,
                         friendly_name: None,
                         resume_claude_session_id: None,
+                        model: None,
+                        effort: None,
                     },
                     &self.store,
                     &self.ssh,

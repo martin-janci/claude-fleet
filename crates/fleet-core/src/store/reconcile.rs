@@ -486,7 +486,7 @@ impl Store {
                -- does not watch it, so it never bumps `row_version` either.
                last_reconciled_at=COALESCE(?23, last_reconciled_at),
                -- The pane showed a live turn this pass (?25): the stale-working
-               -- sweep's evidence of life (migration 074). Bookkeeping like
+               -- sweep's evidence of life (migration 076). Bookkeeping like
                -- `last_reconciled_at`: not a `SessionRow` field, not watched
                -- by the row_version trigger, so stamping it never emits.
                pane_working_at=CASE WHEN ?25 THEN ?19 ELSE pane_working_at END

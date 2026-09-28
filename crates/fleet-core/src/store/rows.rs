@@ -920,6 +920,10 @@ pub struct ClientTokenRow {
     pub trusted_at: Option<i64>,
     /// The org the client is bound to (migration 066), `None` unbound.
     pub org_id: Option<i64>,
+    /// Set when the operator lets this client manage the asset catalog
+    /// (migration 074, `fleet-hub client grant <name> assets`): the hub's
+    /// `catalog_admin` tool answers it as it answers the master.
+    pub assets_admin_at: Option<i64>,
 }
 
 /// One inter-session message (migration 015). The store is the source of
@@ -996,7 +1000,7 @@ pub struct TaskRow {
 
 /// Where the catalog repo lives and its last-loaded HEAD (migration 030).
 /// Singleton row (`id = 1`).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CatalogConfigRow {
     pub repo_path: String,
     pub remote_url: Option<String>,
@@ -1024,7 +1028,7 @@ pub struct AssetInventoryRow {
 /// A secret name known to the sync engine (migration 031). Never carries the
 /// value: `list_secrets` is for display, `secret_values_for_host` resolves
 /// actual values.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SecretRow {
     pub name: String,
     pub host_alias: Option<String>,
@@ -1112,7 +1116,7 @@ pub struct ReconcileSession<'a> {
     pub pending_input: Option<PendingInput>,
     /// The pane captured this pass shows a live turn (`derived_status ==
     /// Working`, the spinner's "esc to interrupt"). Stamps
-    /// `sessions.pane_working_at` (migration 074), which the stale-working
+    /// `sessions.pane_working_at` (migration 076), which the stale-working
     /// sweep respects: a row whose pane is visibly working is never demoted,
     /// whatever the agents cadence let the status say this pass.
     pub pane_working: bool,

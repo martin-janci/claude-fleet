@@ -85,7 +85,7 @@ pub struct PluginTarget {
 /// bare `RenderPlan`), the host hashes the plan was computed against (for
 /// an optimistic-concurrency re-check at apply time), and the manifest
 /// entry a `Remove` undoes.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Action {
     pub kind: String,
     pub name: String,
@@ -132,7 +132,7 @@ pub struct Action {
 /// Every action planned for one host under one harness. `snapshot` and
 /// `manifest` are the exact inputs the actions were computed from, kept so
 /// the applier can re-check and rewrite the manifest without re-scanning.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostPlan {
     pub host_alias: String,
     pub harness: String,
@@ -147,7 +147,7 @@ pub struct HostPlan {
 }
 
 /// A whole fleet-wide plan, as handed to the UI and stashed in the registry.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncPlan {
     pub id: String,
     pub computed_at: i64,

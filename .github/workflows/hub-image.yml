@@ -158,6 +158,12 @@ jobs:
           file: crates/fleet-hub/Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ needs.meta.outputs.labels }}
+          # The build context has no .git: fleet-hub's build.rs takes the
+          # commit and CI build from these (`healthcheck --ready`, update
+          # design U11).
+          build-args: |
+            FLEET_GIT_SHA=${{ github.sha }}
+            FLEET_BUILD_ID=gh-run-${{ github.run_id }}-${{ github.run_attempt }}
           outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/fleet-hub,push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}

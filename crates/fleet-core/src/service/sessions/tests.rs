@@ -3588,26 +3588,31 @@ fn worktree_key_non_repo_path_is_none() {
 fn recreate_pane_command_matches_kind_and_id() {
     let id = "550e8400-e29b-41d4-a716-446655440000";
     assert_eq!(
-        recreate_pane_command("shell", Some(id), "dev-x"),
+        recreate_pane_command("shell", Some(id), "dev-x", &Default::default()),
         crate::tmux::shell_pane_command(None)
     );
     assert_eq!(
-        recreate_pane_command("work", Some(id), "dev-x"),
+        recreate_pane_command("work", Some(id), "dev-x", &Default::default()),
         crate::tmux::pane_command_for(Some(id), "dev-x")
     );
     assert_eq!(
-        recreate_pane_command("work", None, "dev-x"),
+        recreate_pane_command("work", None, "dev-x", &Default::default()),
         crate::tmux::pane_command_for(None, "dev-x")
     );
     // A corrupt/non-UUID stored id must NOT inject — it degrades to the
     // --continue form (same as no id).
     assert_eq!(
-        recreate_pane_command("work", Some("not-a-uuid; rm -rf /"), "dev-x"),
+        recreate_pane_command(
+            "work",
+            Some("not-a-uuid; rm -rf /"),
+            "dev-x",
+            &Default::default()
+        ),
         crate::tmux::pane_command_for(None, "dev-x")
     );
     // "review" is a non-shell kind → same resume behavior as "work".
     assert_eq!(
-        recreate_pane_command("review", Some(id), "dev-x"),
+        recreate_pane_command("review", Some(id), "dev-x", &Default::default()),
         crate::tmux::pane_command_for(Some(id), "dev-x")
     );
 }
@@ -6717,4 +6722,92 @@ async fn a_stuck_transition_is_logged_with_host_session_and_kind() {
         text.contains("host=local") && text.contains("session=dev-stuck"),
         "{text}"
     );
+}
+
+#[test]
+fn launch_switch_reads_one_valid_argument_only() {
+    use super::prompt::{launch_switch, LaunchSwitch};
+    assert_eq!(
+        launch_switch("/model opus"),
+        Some(LaunchSwitch::Model(Some("opus")))
+    );
+    assert_eq!(
+        launch_switch("  /model sonnet[1m]\n"),
+        Some(LaunchSwitch::Model(Some("sonnet[1m]")))
+    );
+    assert_eq!(
+        launch_switch("/model default"),
+        Some(LaunchSwitch::Model(None))
+    );
+    assert_eq!(
+        launch_switch("/effort xhigh"),
+        Some(LaunchSwitch::Effort(Some("xhigh")))
+    );
+    assert_eq!(
+        launch_switch("/effort auto"),
+        Some(LaunchSwitch::Effort(None))
+    );
+    for other in [
+        "/model",
+        "/effort",
+        "/effort huge",
+        "/model --dangerously-skip-permissions",
+        "/model opus please",
+        "/model opus\nand then",
+        "use /model opus",
+        "/compact",
+    ] {
+        assert_eq!(launch_switch(other), None, "{other:?}");
+    }
+}
+
+/// A `/model` / `/effort` sent through fleet becomes the session's own, and
+/// recreate / restart launch with what is stored.
+#[test]
+fn a_sent_switch_is_stored_and_relaunched() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev-launch", "local", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    record_prompt_outcome(&store, "local", "dev-launch", "/model opus[1m]", false);
+    record_prompt_outcome(&store, "local", "dev-launch", "/effort high", false);
+    {
+        let s = store.lock().unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.effort_level.as_deref(), Some("high"));
+        let launch = stored_launch(&s, id);
+        assert_eq!(launch.model.as_deref(), Some("opus[1m]"));
+        let sid = "550e8400-e29b-41d4-a716-446655440000";
+        let pane = recreate_pane_command("work", Some(sid), "dev-launch", &launch);
+        assert_eq!(
+            pane.matches("--model 'opus[1m]' --effort 'high'").count(),
+            3,
+            "{pane}"
+        );
+    }
+    // Back to the host's defaults.
+    record_prompt_outcome(&store, "local", "dev-launch", "/model default", false);
+    record_prompt_outcome(&store, "local", "dev-launch", "/effort auto", false);
+    let s = store.lock().unwrap();
+    assert_eq!(stored_launch(&s, id), crate::tmux::ClaudeLaunch::default());
+    assert_eq!(s.get_session_by_id(id).unwrap().unwrap().effort_level, None);
+}
+
+/// A tampered stored value never reaches the pane command.
+#[test]
+fn stored_launch_drops_values_that_no_longer_validate() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("dev-bad", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.set_session_launch_model(id, Some("opus'; rm -rf ~; '"))
+        .unwrap();
+    s.set_session_effort(id, Some("huge")).unwrap();
+    assert_eq!(stored_launch(&s, id), crate::tmux::ClaudeLaunch::default());
+    s.set_session_launch_model(id, Some("sonnet")).unwrap();
+    assert_eq!(stored_launch(&s, id).model.as_deref(), Some("sonnet"));
 }

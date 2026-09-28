@@ -133,11 +133,11 @@ evaluation is judged on. They are few: one per decision a person made.
 ## Turning it off
 
 - **Instantly, everything:** Settings → *Decisions (Jev)* → off, or on a hub
-  `set_setting { key: "decide.jev.enabled", value: "false" }` with the
-  master token. The next call is refused; nothing in flight is retried.
+  `fleet-hub decide disable` (the same `set_setting` a master-token client
+  can send). The next call is refused; nothing in flight is retried.
 - **One org:** `fleet-hub org set <id> --jev off`, or its checkbox in
   Settings → Organisations.
-- **One feature:** its mode to `off`.
+- **One feature:** its mode to `off` (`fleet-hub decide mode status_map off`).
 - **The key:** `fleet-hub decide clear-key`.
 
 ## `status_map` — Asana section proposals (J3)
@@ -282,8 +282,10 @@ are yours).
 | `decide.retention_days` | `90` | Days a run is kept (`0` = forever). |
 
 On a standalone desktop they are in Settings → *Decisions (Jev)*. On a hub
-they are set over the API with `set_setting` (master token), like the
-`work.*` settings; a paired desktop shows them read-only there.
+they are set with `fleet-hub decide enable | disable | mode | unassigned |
+set` (below), which send `set_setting` to the running hub with the master
+token — the hub checks each value and audits the change; a paired desktop
+shows them read-only there.
 
 `decide.jev.work_link` has no live path yet (decision D32: J1 is measured
 offline only, until it passes its acceptance lines), so Settings shows it
@@ -292,6 +294,10 @@ read-only, with whatever value it holds; the benchmark does not need it.
 ## The command line (hub)
 
 ```bash
+fleet-hub decide enable                     # the kill switch on (disable: off, at once)
+fleet-hub decide mode status_map shadow     # a feature's mode: off | shadow | assist
+fleet-hub decide unassigned on              # rows with no org may be sent too (off by default)
+fleet-hub decide set decide.jev.timeout_ms 2000   # any other decide.* setting; the hub checks it
 fleet-hub decide set-key                    # the key on stdin (one line)
 fleet-hub decide set-key --from-env JEV_KEY # from this shell's variable
 fleet-hub decide set-key --ref file:/run/secrets/jev   # or env:NAME, read at use
@@ -498,6 +504,8 @@ fleet-hub decide bench status-map --fixture                     # the built-in s
 fleet-hub decide bench status-map --labels sections.jsonl       # the owner's hand set
 fleet-hub decide bench status-map --fixture --provider rule --provider jev [--max-calls 500] [--db FILE] [--json]
 fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host ALIAS
+fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host ALIAS \
+    [--split dev|test|all] [--question FILE]
 ```
 
 **The cases** are labeled sections, one JSON line each:
@@ -545,15 +553,57 @@ section and at most 30 board names), so the benchmark measures what
 | `none` | Always abstains. |
 | `todo` | Always `todo`: what fleet does today with a section the rule cannot classify. |
 | `rule` | The keyword rule `infer_section` (progress / doing / review / wip / started / active / testing / qa → in progress; done / shipped / complete / released / closed → done); abstains where it says nothing. |
-| `jev` | One Choice through the envelope — question version `status_map.bench.v1`, subject `bench:<case>`, baseline the rule's answer or `none`, the adapter's confidence floor 0.5. `unsure` and an answer under the floor are **abstentions**; a failed call (timeout, HTTP error, invalid answer) is skipped with its fallback. A case whose org the gate refuses is skipped and nothing is sent; `decide.jev.status_map` may stay `off` (in `shadow` or `assist` it would also start the daily live runs). At most `--max-calls` calls. |
+| `jev` | One Choice through the envelope — question version `status_map.bench.v1` (`status_map.bench.q.<version>` with `--question`, below), subject `bench:<case>`, baseline the rule's answer or `none`, the adapter's confidence floor 0.5. `unsure` and an answer under the floor are **abstentions**; a failed call (timeout, HTTP error, invalid answer) is skipped with its fallback. A case whose org the gate refuses is skipped and nothing is sent; `decide.jev.status_map` may stay `off` (in `shadow` or `assist` it would also start the daily live runs). At most `--max-calls` calls. |
 | `haiku` | The adapter's own request — the same redacted section, board and options — asked of `claude -p` on `--haiku-host` (below), at the same floor: `unsure`, an answer under 0.5 and an answer outside the options (counted as `invalid`) are abstentions; an answer that states no confidence stands and is left out of calibration. A failed call is skipped with its reason. A row whose org is not the host's is skipped as `other_org` (the built-in set has no org: it needs a host with no org). Not gated by the envelope; the database is opened read-only for the host's org; nothing is recorded. At most `--max-calls` calls. |
 
 Without `--provider jev` or `--provider haiku` no database is opened at
 all (`haiku` opens it read-only, for the host's org). With `jev`, the hub's
 database (or `--db FILE`) is opened for writing: it holds the gate's
 settings, and every call is recorded in `decision_runs`. No threshold is
-tuned on the set — the rule is fixed and Jev runs at the adapter's floor —
-so there is no dev/test split.
+tuned on the set — the rule is fixed and Jev runs at the adapter's floor.
+
+**A question file** (`--question FILE`) rewords the question for one run,
+so the wording can be tried on the hub (where the Jev key lives) without a
+release per attempt:
+
+```json
+{"version": "v2-draft1",
+ "instructions": "state.section is the name of one section … Choose unsure when …",
+ "options": {"todo": "…", "in_progress": "…", "done": "…", "not_planned": "…", "unsure": "…"}}
+```
+
+It replaces the instructions and each option's criterion for **both**
+`jev` and `haiku`; the option ids and their order, the confidence floor and
+the state (the section and its board window, redacted as ever) stay the
+adapter's, so what leaves the hub about a section does not change. The file
+must hold exactly those five options, no text may be empty, and `version`
+must match `^[a-z0-9][a-z0-9._-]{0,39}$`; otherwise the run is refused
+before anything is sent. It needs `--provider jev` or `--provider haiku`.
+Jev's runs are recorded with question version
+`status_map.bench.q.<version>` (never `status_map.bench.v1`, so the two
+wordings never mix in `decision_runs`), and the report's header names the
+question: `the adapter's status_map.v1` or `file <version>`. Without the
+flag nothing changes.
+
+**The dev/test split** (`--split dev|test|all`, default `all`) keeps a
+reworded question honest. It is by **board**, never by case: a case's
+board is its normalised section names in order (after the de-duplication
+above) joined with a newline, and the board is *dev* when the first 8 bytes
+of that key's SHA-256, read as a big-endian integer, are 0, 1 or 2 modulo
+10 — about 30% of the boards, the same on every run and machine. All
+sections of a board land on the same side, so a wording cannot learn a
+board's layout on dev and be scored on it in test. The report states the
+split and both sides' board and case counts; with `all` that line (and a
+note naming the split's purpose) is the only difference. The intended
+workflow: iterate the wording with `--split dev --question FILE`; when it
+is settled, run it **once** with `--split test` and read that verdict;
+then a code change adopts the wording in the adapter
+(`status_map::INSTRUCTIONS` / `OPTIONS`) as `status_map.v2`. Dev is kept
+small so the test side stays above the 200 cases the haiku line needs (it
+is judged over paired cases where the rule abstains). On the built-in set
+dev is 28 boards with 129 sections and test 63 boards with 262, 211 of
+them where the rule abstains; the owner's hand set is the built-in set
+plus the real rows.
 
 **Metrics** per provider: accuracy on answered and coverage over every case,
 and the same **where the rule abstains** (the sections that today silently
@@ -668,8 +718,9 @@ A checklist for the owner, on the hub, before any feature leaves `off`:
    `fleet-hub decide bench status-map --labels sections.jsonl` and
    `fleet-hub decide bench work-link --split all --labels h.jsonl`.
 4. **Jev, gated** — the key (`fleet-hub decide set-key`), the kill switch
-   on, and consent for the orgs to be measured (`fleet-hub org set <id>
-   --jev on`; `decide.jev.unassigned` for rows with no org). Leave the
+   on (`fleet-hub decide enable`), and consent for the orgs to be measured
+   (`fleet-hub org set <id> --jev on`; `fleet-hub decide unassigned on` for
+   rows with no org). Leave the
    features' modes `off`: the benchmark does not need them, and
    `decide.jev.status_map` at `shadow` would also start the daily live runs
    on every consenting org's Asana trackers. Then add `--provider jev` to the same commands (J1 with

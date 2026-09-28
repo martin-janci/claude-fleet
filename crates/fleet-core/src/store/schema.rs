@@ -58,6 +58,15 @@ fn usage_daily_has_backfill(conn: &Connection) -> rusqlite::Result<bool> {
 
 /// `already_applied` guard of migration 072: `sessions` already has its
 /// `usage_backfill_until` column.
+fn sessions_has_launch_model(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'launch_model'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn sessions_has_usage_backfill_until(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'usage_backfill_until'",
@@ -129,7 +138,7 @@ fn sessions_has_row_version(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 074: `sessions` already has its
+/// `already_applied` guard of migration 076: `sessions` already has its
 /// `pane_working_at` column, and `ALTER TABLE ... ADD COLUMN` would fail
 /// again. See [`Migration`].
 fn sessions_has_pane_working_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -285,6 +294,17 @@ fn orgs_has_jev_allowed(conn: &Connection) -> rusqlite::Result<bool> {
 fn client_tokens_has_org(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('client_tokens') WHERE name = 'org_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 074: `client_tokens` already has
+/// `assets_admin_at`, and `ALTER TABLE ... ADD COLUMN` would fail again.
+fn client_tokens_has_assets_admin(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('client_tokens') WHERE name = 'assets_admin_at'",
         [],
         |r| r.get(0),
     )?;
@@ -746,12 +766,26 @@ const MIGRATIONS: &[Migration] = &[
     // IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` are idempotent on their
     // own, so this needs no `already_applied` guard.
     Migration::plain(73, include_str!("../../migrations/073_describe_cache.sql")),
+    // `client_tokens.assets_admin_at` (a client allowed `catalog_admin`)
+    // and its auth-epoch trigger. One ADD COLUMN, its own guard.
+    Migration {
+        version: 74,
+        sql: include_str!("../../migrations/074_client_assets_admin.sql"),
+        already_applied: Some(client_tokens_has_assets_admin),
+    },
+    // `sessions.launch_model`: the `claude --model` recreate / restart pass
+    // again. One ADD COLUMN, its own guard.
+    Migration {
+        version: 75,
+        sql: include_str!("../../migrations/075_session_launch_model.sql"),
+        already_applied: Some(sessions_has_launch_model),
+    },
     // `sessions.pane_working_at`: the stale-working sweep's evidence that
     // the pane still shows a live turn, so one long tool call is not
     // demoted every tick. One ADD COLUMN, its own guard.
     Migration {
-        version: 74,
-        sql: include_str!("../../migrations/074_pane_working_at.sql"),
+        version: 76,
+        sql: include_str!("../../migrations/076_pane_working_at.sql"),
         already_applied: Some(sessions_has_pane_working_at),
     },
 ];
@@ -3133,7 +3167,10 @@ mod tests {
                 "trusted_at",
                 // Work graph M14 (migration 066): its own trigger,
                 // `auth_epoch_client_tokens_org`.
-                "org_id"
+                "org_id",
+                // Migration 074: its own trigger,
+                // `auth_epoch_client_tokens_assets_admin`.
+                "assets_admin_at"
             ],
             "client_tokens changed: add the column to auth_epoch_client_tokens_update \
              (migration 060) unless it is liveness-only like last_seen_at"
@@ -3212,13 +3249,14 @@ mod tests {
     /// deliberately does NOT watch: `row_version` itself (an explicit
     /// `row_version + 1` must not re-trigger), and per-pass bookkeeping that
     /// is not a `SessionRow` field (the reconcile's stamp, 072's usage
-    /// backfill mark, 074's pane spinner stamp). Every other column is
+    /// backfill mark, 076's pane spinner stamp). Every other column is
     /// watched, so a write that changes it bumps the counter.
-    const ROW_VERSION_UNWATCHED: [&str; 4] = [
+    const ROW_VERSION_UNWATCHED: [&str; 5] = [
         "row_version",
         "last_reconciled_at",
         "usage_backfill_until",
         "pane_working_at",
+        "launch_model",
     ];
 
     /// The SQL of `sessions_row_version_bump`, as the database holds it.

@@ -22,6 +22,8 @@ import {
   carriedCount,
   composerStatus,
   matchSlashCommands,
+  pickerCommand,
+  modelShortLabel,
   completeSlashCommand,
   SLASH_COMMANDS,
   isQuietStatus,
@@ -383,6 +385,24 @@ describe('composerStatus', () => {
     expect(composerStatus({ claude_status: 'working', stuck_kind: null })).toMatch(/working/);
     expect(composerStatus({ claude_status: 'idle', stuck_kind: null })).toBeNull();
     expect(composerStatus({ claude_status: null, stuck_kind: null })).toBeNull();
+  });
+});
+
+describe('pickerCommand / modelShortLabel', () => {
+  it('builds one-argument slash lines only', () => {
+    expect(pickerCommand('model', 'opus[1m]')).toBe('/model opus[1m]');
+    expect(pickerCommand('effort', ' high ')).toBe('/effort high');
+    expect(pickerCommand('effort', '')).toBeNull();
+    expect(pickerCommand('model', 'a b')).toBeNull();
+  });
+
+  it('shortens claude model ids and passes anything else through', () => {
+    expect(modelShortLabel('claude-opus-5-5')).toBe('opus 5.5');
+    expect(modelShortLabel('claude-sonnet-5')).toBe('sonnet 5');
+    expect(modelShortLabel('claude-haiku-4-5-20251001')).toBe('haiku 4.5');
+    expect(modelShortLabel('claude-sonnet-5[1m]')).toBe('sonnet 5 [1m]');
+    expect(modelShortLabel('gpt-x')).toBe('gpt-x');
+    expect(modelShortLabel(null)).toBeNull();
   });
 });
 

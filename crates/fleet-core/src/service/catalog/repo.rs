@@ -5,13 +5,13 @@ use super::model::{Asset, Kind, Problem, Resource};
 use super::{E_ASSET_EXISTS, E_ASSET_NOT_FOUND, E_CATALOG_GIT, E_CATALOG_PARSE};
 use crate::ipc_error::codes::E_INVALID;
 use crate::ipc_error::IpcError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u64 = 1;
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Catalog {
     pub assets: Vec<Asset>,
     pub problems: Vec<Problem>,
@@ -157,7 +157,7 @@ pub fn head(path: &Path) -> Result<String, IpcError> {
 
 /// Repo working-tree status: dirty file count plus ahead/behind versus the
 /// upstream (`None` for both when there is no upstream).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoStatus {
     pub head: String,
     pub dirty: usize,

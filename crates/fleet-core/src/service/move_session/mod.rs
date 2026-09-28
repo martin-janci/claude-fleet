@@ -1678,6 +1678,9 @@ async fn carry_memory(
 pub(super) struct Snapshot {
     pub(super) row: SessionRow,
     pub(super) claude_id: String,
+    /// The source's `claude --model` / `--effort`, relaunched on the target
+    /// and stored on its row.
+    pub(super) launch: crate::tmux::ClaudeLaunch,
     pub(super) branch: String,
     pub(super) project_id: i64,
     pub(super) worktree_id: i64,
@@ -1844,6 +1847,7 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
     .saturating_mul(1024 * 1024);
     let target_taken = target_rows.into_iter().map(|r| r.tmux_name).collect();
     Ok(Snapshot {
+        launch: crate::service::sessions::stored_launch(s, row.id),
         claude_id,
         branch,
         project_id,
@@ -2732,7 +2736,12 @@ async fn move_session_inner(
 
     let tmux_name = pick_target_name(&snap.row.tmux_name, &snap.target_taken)?;
     crate::validate::tmux_name(&tmux_name)?;
-    let pane_cmd = crate::service::sessions::recreate_pane_command("work", Some(&id), &tmux_name);
+    let pane_cmd = crate::service::sessions::recreate_pane_command(
+        "work",
+        Some(&id),
+        &tmux_name,
+        &snap.launch,
+    );
     let cwd = hooks
         .ensure_target_workspace(
             store,
@@ -3152,6 +3161,14 @@ async fn move_session_inner(
                 session_id = row.id,
                 error = %e,
                 "[move_session] storing claude_session_id failed"
+            );
+        }
+        // So a later recreate / restart on the target keeps them too.
+        if let Err(e) = crate::service::sessions::store_launch(&s, row.id, &snap.launch) {
+            tracing::warn!(
+                session_id = row.id,
+                error = %e,
+                "[move_session] storing the launch options failed"
             );
         }
         // Usage (G1): the target's transcript is a whole-line prefix copy of
