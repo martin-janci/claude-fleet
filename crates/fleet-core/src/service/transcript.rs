@@ -18,6 +18,13 @@
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::service::fresh;
+// A tag the harness wraps its own blocks in is exactly the list the hook's
+// prompt reader uses (`prompt_origin::is_harness_tag`), so an entry this
+// parser folds away is never stored as a conversation's first prompt, and a
+// person's `<my-widget>…</my-widget>` stays their prompt in both. (A shape
+// rule — "lowercase kebab-case" — used to stand in here, and the two readers
+// disagreed on every tag one accepted and the other did not.)
+use crate::service::prompt_origin::{self, is_harness_tag};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::{SessionEvent, SessionRow, Store};
@@ -834,33 +841,25 @@ fn unwrap_pasted(text: &str) -> String {
     out
 }
 
-/// The shape of a tag the harness wraps its own blocks in: lowercase
-/// kebab-case with at least one inner hyphen — `system-reminder`,
-/// `task-notification`, `command-name`, `local-command-stdout`,
-/// `bash-input`, and the ones this build has not met yet.
-///
-/// The rule is what the harness actually emits, not "anything hyphenated":
-/// the earlier `tag.contains('-') || tag.contains('_')` accepted
-/// `<my_config>`, so a config fragment pasted in to be analysed lost its
-/// prompt. Snake case is out (the one snake-cased block Claude Code writes,
-/// `<pasted_content …>`, has its own handling in [`unwrap_pasted`]); so are
-/// upper case and every unhyphenated HTML element.
-pub(crate) fn is_harness_tag(tag: &str) -> bool {
-    tag.len() >= 3
-        && tag.contains('-')
-        && !tag.starts_with('-')
-        && !tag.ends_with('-')
-        && !tag.contains("--")
-        && tag
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+/// An entry made only of listed harness blocks that [`lone_block`] does not
+/// take (several of them, one left unclosed, one with an attribute): the
+/// same "nobody's words" test the hook applies
+/// ([`prompt_origin::is_harness`]), folded under its first tag. A stray
+/// `<local-command-stdout>` with no open command lands here rather than
+/// reading as a prompt.
+fn harness_only(text: &str) -> Option<(String, String)> {
+    if !prompt_origin::is_harness(text) {
+        return None;
+    }
+    let (tag, inner) = prompt_origin::head_block(text.trim())?;
+    Some((tag.to_string(), inner.trim().to_string()))
 }
 
 /// A user entry that is nothing but one `<tag>…</tag>` element — the harness
 /// talking, not the human. Returns the tag name and the text inside.
 ///
 /// Deliberately narrow: the element must be the whole entry, the tag must
-/// look like one of the harness's own ([`is_harness_tag`]), and the open tag
+/// be one of the harness's own ([`is_harness_tag`]), and the open tag
 /// must carry no attributes — the harness writes none, and requiring that is
 /// also what keeps an attribute holding a `>` (`<a-b title="x>y">`) from
 /// leaking its tail into the body. A pasted HTML snippet (`<div>`, `<p>`),
@@ -1150,7 +1149,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                     }
                     // Anything else that is one lone harness block: folded
                     // under its tag rather than printed as raw XML.
-                    if let Some((tag, body)) = lone_block(&text) {
+                    if let Some((tag, body)) = lone_block(&text).or_else(|| harness_only(&text)) {
                         push(&mut turns, current.take());
                         tool_items.clear();
                         current = Some(ConvTurn {
@@ -4823,6 +4822,39 @@ mod tests {
                 body: "PR #12 checks failed".into(),
             }]
         );
+    }
+
+    /// The two readers of a user turn agree: a harness-shaped tag that is
+    /// not on the shared list is the person's (the hook would store it as
+    /// the first prompt, so the view shows it as one), and an entry of
+    /// listed blocks only is never a prompt, even when it is not one lone
+    /// block — a stray command output pair with no command open.
+    #[test]
+    fn the_transcript_and_the_hook_agree_on_what_a_prompt_is() {
+        for text in [
+            "<my-widget>x</my-widget> renders blank",
+            "<my-widget>x</my-widget>",
+        ] {
+            let t = parse_conversation(&jl(&[user(serde_json::json!(text)), asst("ok")]));
+            assert_eq!(t[0].prompt.as_deref(), Some(text));
+            assert!(!crate::service::prompt_origin::is_harness(text));
+        }
+        let stray = "<local-command-stdout>Set model to opus</local-command-stdout>\
+                     <local-command-stderr></local-command-stderr>";
+        let t = parse_conversation(&jl(&[user(serde_json::json!(stray)), asst("ok")]));
+        assert_eq!(t[0].prompt, None, "{:?}", t[0]);
+        assert_eq!(
+            t[0].items[0],
+            ConvItem::Harness {
+                tag: "local-command-stdout".into(),
+                body: "Set model to opus".into(),
+            }
+        );
+        assert!(crate::service::prompt_origin::is_harness(stray));
+        let ide = "<ide_selection>lines 3-9 of pay.rs</ide_selection>";
+        let t = parse_conversation(&jl(&[user(serde_json::json!(ide))]));
+        assert_eq!(t[0].prompt, None);
+        assert!(crate::service::prompt_origin::is_harness(ide));
     }
 
     /// The accepting case, which the two tests this replaces never reached:

@@ -294,6 +294,14 @@
     {/if}
     {#if detail?.description}
       <p class="excerpt" data-testid="work-task-description">{detail.description}</p>
+      {#if detail.description_truncated && detail.description_chars}
+        <p class="muted small" data-testid="work-task-description-cut">
+          Shown {[...detail.description].length} of {detail.description_chars} characters{#if task.url}&nbsp;—
+            <button class="btn btn--quiet" type="button" data-testid="work-task-description-open" onclick={() => void openExternal(task.url ?? '')}
+              >open the ticket</button
+            >{:else}&nbsp;— open the ticket in its tracker for the rest{/if}
+        </p>
+      {/if}
     {/if}
 
     <dl class="prov">

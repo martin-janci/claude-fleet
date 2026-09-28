@@ -14,6 +14,7 @@
     removePreset,
     movePreset,
     flushComposerPresets,
+    presetsConflict,
   } from './composer_presets';
   import { copyOnSelect } from './prefs';
   import { collectDiagnostics, copyDiagnostics, openLogFolder } from './diagnostics';
@@ -98,6 +99,49 @@
   function onClose() {
     void flushComposerPresets();
     closeDialog();
+  }
+
+  // A stable key per chip row, so a move re-orders the rows instead of
+  // rewriting every field in place under the cursor (keyed by index, the
+  // focused ↑ stayed at its index while the chip it moved went elsewhere).
+  // Kept beside the list rather than in it: the list is the backend's, and an
+  // id riding in it would be sent to the hub and cached as fleet state. A
+  // change of length the editor did not make (a reload, a conflict) deals
+  // fresh ids; the fields' values come from the list either way.
+  let nextRowId = 0;
+  let presetRowIds = $state<number[]>([]);
+  $effect(() => {
+    const n = $composerPresets.length;
+    if (presetRowIds.length !== n) presetRowIds = Array.from({ length: n }, () => nextRowId++);
+  });
+  const presetKey = (i: number) => presetRowIds[i] ?? `new-${i}`;
+  let presetRows: HTMLDivElement | undefined = $state();
+
+  async function onMovePreset(i: number, dir: -1 | 1) {
+    const to = i + dir;
+    if (to < 0 || to >= presetRowIds.length) return;
+    const id = presetRowIds[i];
+    const ids = [...presetRowIds];
+    [ids[i], ids[to]] = [ids[to], ids[i]];
+    presetRowIds = ids;
+    movePreset(i, dir);
+    await tick();
+    // Keep the keyboard on the chip that moved: its same arrow, or — at the
+    // end of the list, where that one is now disabled — the other one.
+    const row = presetRows?.querySelector<HTMLElement>(`[data-row-id="${id}"]`);
+    const same = row?.querySelector<HTMLButtonElement>(`[data-testid="preset-${dir === -1 ? 'up' : 'down'}"]`);
+    const other = row?.querySelector<HTMLButtonElement>(`[data-testid="preset-${dir === -1 ? 'down' : 'up'}"]`);
+    (same && !same.disabled ? same : other)?.focus();
+  }
+
+  function onRemovePreset(i: number) {
+    presetRowIds = presetRowIds.filter((_, k) => k !== i);
+    removePreset(i);
+  }
+
+  function onAddPreset() {
+    presetRowIds = [...presetRowIds, nextRowId++];
+    addPreset();
   }
 
   // Hosts live in the Hosts view; Settings keeps fleet-wide configuration and
@@ -824,10 +868,17 @@
           Quick-action chips above the prompt box in the Conversation tab and
           on the phone, in this order. A click fills the box; with
           <em>Send</em> ticked it sends at once (Shift+click does the other
-          one). Chips with an empty label or text are not shown.
+          one) — except while the session waits on an answer, when it only
+          fills. Chips with an empty label or text are not shown.
         </p>
-        {#each $composerPresets as p, i (i)}
-          <div class="preset-row">
+        {#if $presetsConflict}
+          <p class="hook-desc" role="status" data-testid="preset-conflict">
+            Another device changed the chips first. This is its list now; make your change again.
+          </p>
+        {/if}
+        <div class="preset-rows" bind:this={presetRows}>
+        {#each $composerPresets as p, i (presetKey(i))}
+          <div class="preset-row" data-row-id={presetKey(i)}>
             <input
               class="preset-label"
               data-testid="preset-label"
@@ -858,19 +909,20 @@
               title="Move up"
               aria-label="Move up"
               disabled={i === 0}
-              onclick={() => movePreset(i, -1)}>↑</button>
+              onclick={() => void onMovePreset(i, -1)}>↑</button>
             <button
               class="hook-btn"
               data-testid="preset-down"
               title="Move down"
               aria-label="Move down"
               disabled={i === $composerPresets.length - 1}
-              onclick={() => movePreset(i, 1)}>↓</button>
-            <button class="hook-btn" data-testid="preset-remove" title="Remove" onclick={() => removePreset(i)}>×</button>
+              onclick={() => void onMovePreset(i, 1)}>↓</button>
+            <button class="hook-btn" data-testid="preset-remove" title="Remove" onclick={() => onRemovePreset(i)}>×</button>
           </div>
         {/each}
+        </div>
         <div class="preset-actions">
-          <button class="hook-btn" data-testid="preset-add" onclick={addPreset}>Add chip</button>
+          <button class="hook-btn" data-testid="preset-add" onclick={onAddPreset}>Add chip</button>
           <button class="hook-btn" data-testid="preset-reset" onclick={resetComposerPresets}>Reset to defaults</button>
         </div>
       </div>
@@ -1053,7 +1105,7 @@
           disabled={automationBusy}
           data-testid="reconcile-stale-working-secs"
           onchange={(e) => onSecsChange(SETTING_KEYS.reconcileStaleWorkingSecs, e)} />
-        <span class="hook-desc">seconds a "working" session may go without a hook, a turn, transcript growth or pane output before it reads idle (0 = never)</span>
+        <span class="hook-desc">seconds a "working" session may go without a hook, a turn, transcript growth, spinner on its pane or tmux session activity before it reads idle (0 = never)</span>
       </div>
       <div class="mcp-field">
         <span class="lbl">stale ttl</span>

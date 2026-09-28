@@ -371,10 +371,8 @@ pub fn require_key(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcErro
     };
     let key = crate::store::normalize_work_ref(key)?;
     let refuse = || Err(not_visible_key(h, &key));
-    if let Some(item) = s.work_item_by_key(&key)? {
-        if !scope.sees_org(s.item_org(item.id)?) {
-            return refuse();
-        }
+    if let KeyItems::OnlyOthers = key_items(s, scope, &key)? {
+        return refuse();
     }
     let mut live: Vec<WorkLinkRow> = s
         .live_work_sessions_for_key(&key)?
@@ -400,6 +398,44 @@ pub fn require_key(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcErro
 /// unassigned local item) must have some work the client may see — a live
 /// or past link whose session is visible to it — or no work at all yet.
 /// Refused as a key nothing is linked to, whether it exists or not.
+/// What the items carrying a key are to `scope`.
+enum KeyItems {
+    /// No item carries the key.
+    None,
+    /// At least one does and `scope` sees its org: the first such item's
+    /// org (`None` for an unassigned one).
+    Visible(Option<i64>),
+    /// Items carry it, every one in an org `scope` does not see.
+    OnlyOthers,
+}
+
+/// Every item carrying `key`, not just the store's first: two trackers can
+/// hold the same key (two Jira sites, one per org, both with `PAY`), and a
+/// caller of the second org must not be refused over the first org's
+/// ticket when its own is right there. An org-assigned item is preferred
+/// over an unassigned one, in the store's order otherwise.
+fn key_items(s: &Store, scope: &OrgScope, key: &str) -> Result<KeyItems, IpcError> {
+    let items = s.work_items_by_key(key)?;
+    if items.is_empty() {
+        return Ok(KeyItems::None);
+    }
+    let mut unassigned = false;
+    for item in &items {
+        let org = s.item_org(item.id)?;
+        if scope.sees_org(org) {
+            if org.is_some() {
+                return Ok(KeyItems::Visible(org));
+            }
+            unassigned = true;
+        }
+    }
+    Ok(if unassigned {
+        KeyItems::Visible(None)
+    } else {
+        KeyItems::OnlyOthers
+    })
+}
+
 fn require_key_bound(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcError> {
     let key = crate::store::normalize_work_ref(key)?;
     let refuse = || {
@@ -408,16 +444,14 @@ fn require_key_bound(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcEr
             format!("nothing is linked to {key}"),
         ))
     };
-    let item = s.work_item_by_key(&key)?;
-    if let Some(item) = &item {
-        let org = s.item_org(item.id)?;
-        if !scope.sees_org(org) {
-            return refuse();
-        }
-        if org.is_some() {
-            return Ok(());
-        }
-    }
+    // An org-assigned item this client sees answers at once; an unassigned
+    // one it sees still needs a link in scope, unless nothing links the key.
+    let has_item = match key_items(s, scope, &key)? {
+        KeyItems::OnlyOthers => return refuse(),
+        KeyItems::Visible(Some(_)) => return Ok(()),
+        KeyItems::Visible(None) => true,
+        KeyItems::None => false,
+    };
     let mut links: Vec<WorkLinkRow> = s
         .live_work_sessions_for_key(&key)?
         .into_iter()
@@ -425,7 +459,7 @@ fn require_key_bound(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcEr
         .collect();
     links.extend(s.ended_work_links_for_key(&key)?);
     if links.is_empty() {
-        return if item.is_some() { Ok(()) } else { refuse() };
+        return if has_item { Ok(()) } else { refuse() };
     }
     scope_links(s, scope, &mut links)?;
     if links.is_empty() {

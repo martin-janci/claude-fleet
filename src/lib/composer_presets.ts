@@ -61,11 +61,28 @@ function cache(list: ComposerPreset[]): void {
   writePref(PRESETS_PREF, list);
 }
 
+/**
+ * The list the backend last answered (a read or a write's echo): what a save
+ * names as `expected`, so the backend refuses it with `E_CONFLICT` when
+ * another device saved in between instead of overwriting that edit unseen.
+ * `null` until the first answer — a save from the cache alone is
+ * last-writer-wins, as every save was before.
+ */
+let served: ComposerPreset[] | null = null;
+
+/**
+ * True after a save was refused because another device changed the chips
+ * first. The editor has been reloaded with that device's list; the Settings
+ * dialog says so. Cleared by the next save that lands.
+ */
+export const presetsConflict = writable(false);
+
 /** Read the fleet's chips. Called at startup and after a hub reconnect. */
 export async function loadComposerPresets(): Promise<Result<ComposerPreset[]>> {
   const r = await invokeCmd<ComposerPreset[]>('quick_replies');
   if (r.ok && isPresetArray(r.value)) {
     composerPresets.set(r.value);
+    served = r.value;
     cache(r.value);
   }
   return r;
@@ -91,8 +108,17 @@ async function save(): Promise<Result<ComposerPreset[]>> {
   // the backend refuses one (it would send nothing), so it is left out of the
   // write and stays in the editor until it has a prompt.
   const entries = local.filter((p) => p.text.trim().length > 0);
-  const r = await invokeCmd<ComposerPreset[]>('set_quick_replies', { entries });
+  const r = await invokeCmd<ComposerPreset[]>('set_quick_replies', { entries, expected: served });
+  if (!r.ok && r.error.code === 'E_CONFLICT') {
+    // Another device saved first. Its list wins, visibly: the editor shows
+    // it, and the dialog says why the edit just made is gone.
+    presetsConflict.set(true);
+    await loadComposerPresets();
+    return r;
+  }
   if (r.ok && isPresetArray(r.value)) {
+    served = r.value;
+    presetsConflict.set(false);
     cache(r.value);
     // The backend normalises (trims, drops duplicate prompts, restores the
     // defaults for an empty list), so what it answers — not what was sent —
@@ -109,11 +135,26 @@ async function save(): Promise<Result<ComposerPreset[]>> {
   return r;
 }
 
+/**
+ * Saves run one after another: each names the previous one's answer as
+ * `expected`, so a save started while the last is still on the wire would
+ * name a list the backend no longer holds and conflict with itself.
+ */
+function saveAfterPrevious(): Promise<Result<ComposerPreset[]>> {
+  const prev = inFlight;
+  const next = prev ? prev.then(save, save) : save();
+  inFlight = next;
+  void next.finally(() => {
+    if (inFlight === next) inFlight = null;
+  });
+  return next;
+}
+
 function schedule(): void {
   if (timer !== null) clearTimeout(timer);
   timer = setTimeout(() => {
     timer = null;
-    inFlight = save();
+    saveAfterPrevious();
   }, SAVE_DEBOUNCE_MS);
 }
 
@@ -125,7 +166,7 @@ export async function flushComposerPresets(): Promise<void> {
   if (timer !== null) {
     clearTimeout(timer);
     timer = null;
-    inFlight = save();
+    saveAfterPrevious();
   }
   await inFlight;
 }

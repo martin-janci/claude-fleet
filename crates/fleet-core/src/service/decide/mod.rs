@@ -308,11 +308,13 @@ enum Caller {
     /// live mode on (for `status_map` that would start the daily live
     /// runs) — and the call counts as `shadow`: it never proposes. The
     /// owner, the flag, the org's consent, the key, the breaker and the
-    /// budget still apply, counted over every run.
+    /// budget still apply, the breaker counted over every run.
     Bench,
 }
 
 impl Caller {
+    /// The runs the BREAKER counts: a live feature's breaker never opens on
+    /// a benchmark's failures. The budget is not scoped: see [`clear`].
     fn scope(self) -> RunScope {
         match self {
             Caller::Live => RunScope::Live,
@@ -376,7 +378,11 @@ fn clear(
         Ok(b) if !b.open => {}
         _ => return Err(Fallback::BreakerOpen),
     }
-    match s.decision_usage_since(provider, day_start(now), caller.scope()) {
+    // ONE budget: `daily_token_budget` caps the day's spend, live and
+    // benchmark together, for every caller. Scoping it like the breaker let
+    // a benchmark and the live features each spend the whole budget, twice
+    // the setting a day.
+    match s.decision_usage_since(provider, day_start(now), RunScope::All) {
         Ok((used, _)) if used < cfg.daily_token_budget => {}
         _ => return Err(Fallback::Budget),
     }
@@ -483,8 +489,8 @@ pub struct DecideRequest {
     pub feature: Feature,
     /// What is decided about: `session`, `tracker`, `section`, … (a word).
     /// [`DECISION_BENCH_SUBJECT`] marks the offline benchmark's call: gated
-    /// as [`gate_bench_at`], never counted by the live breaker, budget or
-    /// stats.
+    /// as [`gate_bench_at`], never counted by the live breaker or stats (the
+    /// daily budget counts every run).
     pub subject_kind: String,
     /// Its id (a word).
     pub subject_id: String,
@@ -1021,12 +1027,13 @@ impl DecideHealth {
 pub struct TodayUsage {
     /// The UTC day's start.
     pub since: i64,
-    /// The live adapters' spend: what the budget counts.
+    /// The live adapters' spend; the budget counts it together with the
+    /// benchmark's below.
     pub input_tokens: i64,
     pub cost_microusd: i64,
     pub budget: i64,
-    /// The offline benchmark's spend today, apart (a benchmark call is
-    /// gated on the live and its own spend together).
+    /// The offline benchmark's spend today, apart (every call, live or
+    /// benchmark, is gated on the live and the benchmark spend together).
     #[serde(default)]
     pub bench_input_tokens: i64,
     #[serde(default)]
@@ -1187,12 +1194,12 @@ impl DecideStatus {
             ),
             format!(
                 "today (UTC): {} of {} input tokens, {}{}",
-                self.today.input_tokens,
+                self.today.input_tokens + self.today.bench_input_tokens,
                 self.today.budget,
-                fmt_usd(self.today.cost_microusd),
+                fmt_usd(self.today.cost_microusd + self.today.bench_cost_microusd),
                 if self.today.bench_input_tokens > 0 || self.today.bench_cost_microusd > 0 {
                     format!(
-                        "   benchmark: {} input tokens, {}",
+                        "   of which benchmark: {} input tokens, {}",
                         self.today.bench_input_tokens,
                         fmt_usd(self.today.bench_cost_microusd)
                     )

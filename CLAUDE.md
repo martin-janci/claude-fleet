@@ -451,7 +451,19 @@ fixture `tests/decide_cases.json`, `UpdatePhase`, and `UpdateChannel` with
 - the `update.*` settings, with their Settings → Updates rows, and the user
   guide `docs/updates.md` (every `update.*` setting must be in its table).
 
-Trusted keys are `fleet_update::keys::RELEASE_KEYS`, which is empty until
-S2, so nothing is offered yet; an `e2e` build also reads
-`FLEET_UPDATE_E2E_KEYS`. S2, S3, S4b and S6–S9 are not built. The §13
-questions wait on the owner (S2 needs the release signing key).
+**S2 (publishing) is landed:** release.yml's `manifest` job signs
+`release-manifest.json` from 0.4.1 (`scripts/release-manifest.sh`, the
+windows from the shipped `fleet-hub compat`; `verify-release` requires it
+through the `manifest` leg of `release-assets.sh`), its `channel` job and
+`update-channels.yml` write the signed `stable` / `beta` channels on the
+orphan branch `update-channels` (`scripts/update-channels.sh`, the
+`fleet-release` bin of fleet-update), and every document is checked
+against `keys.rs` before it leaves the runner
+(`scripts/release-update-scripts-test.sh`, CI hub-headless). See
+`docs/RELEASING.md` → *Update manifest and channels*.
+
+Trusted keys are `fleet_update::keys::RELEASE_KEYS`, which stays empty
+until the owner runs `scripts/release-key.sh` (§13 question 1, answered
+yes; the key is made on the owner's machine only), so nothing is offered
+yet; an `e2e` build also reads `FLEET_UPDATE_E2E_KEYS`. S2b (nightly), S3,
+S4b and S6–S9 are not built; the other §13 questions wait on the owner.

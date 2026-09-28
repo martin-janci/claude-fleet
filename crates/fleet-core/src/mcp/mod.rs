@@ -342,7 +342,7 @@ async fn authorize(
 }
 
 /// The liveness body, exactly as `/healthz` answers it.
-const HEALTHZ_BODY: &str = "fleet-hub ok\n";
+pub(crate) const HEALTHZ_BODY: &str = "fleet-hub ok\n";
 
 /// `GET /healthz` — a liveness probe, deliberately **unauthenticated**.
 ///

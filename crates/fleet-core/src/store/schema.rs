@@ -138,6 +138,18 @@ fn sessions_has_row_version(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 081: `sessions` already has its
+/// `pane_working_at` column, and `ALTER TABLE ... ADD COLUMN` would fail
+/// again. See [`Migration`].
+fn sessions_has_pane_working_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'pane_working_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 065: `sessions` already has its
 /// `stale_working_at` column, and `ALTER TABLE ... ADD COLUMN` would fail
 /// again. See [`Migration`].
@@ -852,6 +864,14 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/080_stale_demoted.sql"),
         already_applied: Some(sessions_has_stale_demoted_at),
     },
+    // `sessions.pane_working_at`: the stale-working sweep's evidence that
+    // the pane still shows a live turn, so one long tool call is not
+    // demoted every tick. One ADD COLUMN, its own guard.
+    Migration {
+        version: 81,
+        sql: include_str!("../../migrations/081_pane_working_at.sql"),
+        already_applied: Some(sessions_has_pane_working_at),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -887,6 +907,13 @@ pub(crate) const LATEST_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].v
 
 /// The newest schema this build knows: the downgrade guard's bound.
 const KNOWN_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].version;
+
+/// [`KNOWN_SCHEMA_VERSION`], for the release manifest's `store.schema_to`
+/// (`fleet-hub compat`): the schema this build migrates a database to, and
+/// the newest it will open.
+pub fn known_schema_version() -> i64 {
+    KNOWN_SCHEMA_VERSION
+}
 
 /// `(version, sql)` of every migration up to and including `version`, in
 /// order: the historical files, for a test that builds an older database
@@ -3332,12 +3359,14 @@ mod tests {
     /// deliberately does NOT watch: `row_version` itself (an explicit
     /// `row_version + 1` must not re-trigger), and per-pass bookkeeping that
     /// is not a `SessionRow` field (the reconcile's stamp, 072's usage
-    /// backfill mark, 080's stale-working veto memory). Every other column is
+    /// backfill mark, 080's stale-working veto memory, 081's pane spinner
+    /// stamp). Every other column is
     /// watched, so a write that changes it bumps the counter.
-    const ROW_VERSION_UNWATCHED: [&str; 5] = [
+    const ROW_VERSION_UNWATCHED: [&str; 6] = [
         "row_version",
         "last_reconciled_at",
         "usage_backfill_until",
+        "pane_working_at",
         "launch_model",
         "stale_demoted_at",
     ];
@@ -3721,6 +3750,43 @@ mod tests {
         assert_eq!(rv2, rv, "the mark is bookkeeping: no row_version bump");
         s.conn
             .execute_batch("DELETE FROM schema_version WHERE version >= 72;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_081_adds_the_pane_working_stamp_and_is_safe_to_rerun() {
+        let s = store_at_version(80);
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias) VALUES ('h');
+                 INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status)
+                 VALUES ('a', 'h', 1, 1, 'running');",
+            )
+            .unwrap();
+        assert!(!sessions_has_pane_working_at(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let (at, rv): (Option<i64>, i64) = s
+            .conn
+            .query_row(
+                "SELECT pane_working_at, row_version FROM sessions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(at, None, "no pane has been seen working yet");
+        s.conn
+            .execute("UPDATE sessions SET pane_working_at = 9", [])
+            .unwrap();
+        let rv2: i64 = s
+            .conn
+            .query_row("SELECT row_version FROM sessions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rv2, rv, "the stamp is bookkeeping: no row_version bump");
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 81;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);

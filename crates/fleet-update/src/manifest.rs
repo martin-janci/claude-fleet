@@ -60,7 +60,11 @@ pub struct Compatibility {
 pub struct ContractCompat {
     pub hub_serves: u32,
     pub desktop_accepts: Window,
-    pub mobile_accepts: Window,
+    /// The phone's window. Absent until fleet-mobile's release amends the
+    /// manifest (design §4); a release without it is never offered to a
+    /// phone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mobile_accepts: Option<Window>,
 }
 
 /// Hub↔agent frame protocol (`PROTO_VERSION`, `MIN_SUPPORTED_PROTO`).

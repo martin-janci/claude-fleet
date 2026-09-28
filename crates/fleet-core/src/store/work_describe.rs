@@ -1,4 +1,4 @@
-//! The `describe` cache (see migration 068): one item's whole description,
+//! The `describe` cache (see migration 073): one item's whole description,
 //! held for `work.describe_cache_secs`. The only reader is
 //! `service::work::describe`; nothing projects it onto the wire.
 //!
@@ -28,16 +28,31 @@ impl Store {
         ttl_secs: i64,
         now: i64,
     ) -> Result<Option<String>, IpcError> {
+        Ok(self
+            .cached_description_with_chars(item_id, ttl_secs, now)?
+            .map(|(body, _)| body))
+    }
+
+    /// [`Store::cached_description`] with the length the tracker reported
+    /// when it was fetched (`chars`, at least the body's own: above it when
+    /// `DESCRIBE_MAX_CHARS` cut the body), so a cache hit can say it was cut
+    /// exactly as the fetch that filled it could.
+    pub fn cached_description_with_chars(
+        &self,
+        item_id: i64,
+        ttl_secs: i64,
+        now: i64,
+    ) -> Result<Option<(String, i64)>, IpcError> {
         if ttl_secs <= 0 {
             return Ok(None);
         }
         Ok(self
             .conn
             .query_row(
-                "SELECT body FROM work_item_descriptions \
+                "SELECT body, chars FROM work_item_descriptions \
                  WHERE item_id = ?1 AND fetched_at >= ?2",
                 rusqlite::params![item_id, now - ttl_secs],
-                |r| r.get::<_, String>(0),
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
             )
             .optional()?)
     }

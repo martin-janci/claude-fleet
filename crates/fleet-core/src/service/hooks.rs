@@ -529,6 +529,16 @@ fn prompt_nudge_locked(
     payload: &HookPayload,
     ctx: &HookContext,
 ) -> Option<(i64, String, String)> {
+    // A turn Claude Code submitted itself (a `<task-notification>`, a
+    // reminder) is nobody's prompt: the nudge is once per conversation, and
+    // spent on a turn no person sees it is gone for the one they do.
+    if payload
+        .prompt
+        .as_deref()
+        .is_some_and(crate::service::prompt_origin::is_harness)
+    {
+        return None;
+    }
     let (row, _) = resolve_hook_row(s, payload, ctx, false).ok()??;
     let current = row.claude_session_id.clone()?;
     if payload.session_id.as_deref() != Some(current.as_str()) {
@@ -1149,11 +1159,11 @@ fn apply_prompt_submit_hook(
             let first = s
                 .get_conversation(row.id, session_id)?
                 .is_none_or(|c| c.first_prompt.is_none());
-            s.conversation_set_first_prompt(row.id, session_id, p)?;
+            s.conversation_set_first_prompt(row.id, session_id, &p)?;
             // Work detection (M4.2): references in the full prompt become
             // suggestions with evidence; the prompt itself is never stored.
             // Best-effort: a detection failure never fails the hook.
-            if let Err(e) = crate::service::work::detect::on_prompt(s, row.id, p, first) {
+            if let Err(e) = crate::service::work::detect::on_prompt(s, row.id, &p, first) {
                 tracing::debug!(error = %e.message, "[work] prompt detection failed");
                 s.ensure_in_tx()?;
             }
@@ -4020,6 +4030,39 @@ mod tests {
 
         let second = prompt_submit_context(&store, &payload, &ctx).expect("the nudge alone");
         assert!(second.starts_with("[claude-fleet: work]"), "{second}");
+    }
+
+    /// A turn Claude Code submitted itself (a background task finishing)
+    /// never gets the nudge and does not use it up: the person's next prompt
+    /// does.
+    #[test]
+    fn a_harness_turn_never_gets_the_nudge() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (_, b, _) = nudge_ready(&store);
+        let ctx = HookContext {
+            caller: &Caller::master(),
+            pane_id: None,
+            sync_start: false,
+        };
+        let turn = |prompt: &str| HookPayload {
+            session_id: Some("conv-b".into()),
+            hook_event_name: Some("UserPromptSubmit".into()),
+            prompt: Some(prompt.into()),
+            ..Default::default()
+        };
+        let harness = turn(
+            "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n\
+             </task-notification>",
+        );
+        assert_eq!(prompt_submit_context(&store, &harness, &ctx), None);
+        assert!(!store
+            .lock()
+            .unwrap()
+            .conversation_nudged(b, "conv-b")
+            .unwrap());
+        let person = turn("fix the refund retries");
+        let text = prompt_submit_context(&store, &person, &ctx).expect("the nudge");
+        assert!(text.starts_with("[claude-fleet: work]"), "{text}");
     }
 
     /// A nested `claude -p` sharing the pane (another conversation id) never

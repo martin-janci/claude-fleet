@@ -46,8 +46,9 @@ export interface WorkTreeFilters {
   /** One group only (a section being expanded). */
   group?: string;
   /** Include archived tasks (done, or every session link archived, with no
-   *  active session). Absent: they are hidden, and the page says how many
-   *  (`archived_hidden`). An older hub ignores it and shows them all. */
+   *  active session). `false` hides them, and the page says how many
+   *  (`archived_hidden`); absent shows them (a client from before the
+   *  archive). `workTree` always sends it. An older hub ignores it. */
   archived?: boolean;
 }
 
@@ -228,6 +229,12 @@ export interface TaskDetail {
   aliases?: string[];
   /** Tracker text (plain, fenced for an agent, ≤ 600 chars). */
   description?: string | null;
+  /** The description's full length the hub knows (the tracker's count, else
+   *  the cached excerpt's), in characters. Absent from an older hub. */
+  description_chars?: number | null;
+  /** `description` shows less than `description_chars`. Absent means whole
+   *  (or an older hub, which never said). */
+  description_truncated?: boolean;
   last_outcome?: LastOutcome | null;
   placement?: Placement | null;
   /** Ids of the rules that match. */
@@ -398,8 +405,12 @@ export interface WorkTreeQuery {
   per_task?: number;
 }
 
+/** `archived` always goes on the wire: the hub hides archived tasks only
+ *  when asked (`archived: false`), so a phone from before the archive, which
+ *  never sends it, keeps seeing them. */
 export function workTree(q: WorkTreeQuery = {}): Promise<Result<WorkTreePage>> {
-  const filters = q.filters ? normalizeFilters(q.filters) : undefined;
+  const n = normalizeFilters(q.filters);
+  const filters: WorkTreeFilters = { ...n, archived: n.archived === true };
   return invokeCmd<WorkTreePage>('work_tree', {
     args: clean({ filters, cursor: q.cursor ?? undefined, limit: q.limit, per_task: q.per_task }),
   });

@@ -777,12 +777,18 @@ impl HubBackend {
     /// `route` takes the COMMAND name and looks the tool up, so each command
     /// has to name itself here. The answer is the stored list either way, so
     /// the write needs no follow-up read to see what the hub made of it.
+    /// `expected` is sent only when given: a hub from before it ignores the
+    /// key, and a write without it stays last-writer-wins.
     pub async fn set_quick_replies(
         &self,
         entries: Vec<fleet_core::service::quick_replies::QuickReply>,
+        expected: Option<Vec<fleet_core::service::quick_replies::QuickReply>>,
     ) -> Result<Vec<fleet_core::service::quick_replies::QuickReply>, IpcError> {
-        self.route("set_quick_replies", &json!({ "set": entries }))
-            .await
+        let args = match expected {
+            Some(expected) => json!({ "set": entries, "expected": expected }),
+            None => json!({ "set": entries }),
+        };
+        self.route("set_quick_replies", &args).await
     }
 
     /// `commands::tasks::list_tasks`.

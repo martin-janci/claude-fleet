@@ -39,12 +39,14 @@ and nothing is sent:
    rate limits) no call is made for `decide.jev.breaker_open_secs`; then one
    call goes through, and a success closes it.
 7. **Today's budget is not spent** (`budget`): `decide.jev.daily_token_budget`
-   input tokens per UTC day, counted from the record.
+   input tokens per UTC day, counted from the record — live and benchmark
+   runs together, so the setting is the day's whole spend.
 
-The breaker and the budget of the live features count their own runs only:
-a benchmark's runs (subject `bench`) never open the live breaker or spend
-the live budget. A benchmark call is gated on every run, its own and the
-live ones, so a failing API or a spent day stops it too.
+The breaker of the live features counts their own runs only: a benchmark's
+runs (subject `bench`) never open the live breaker. A benchmark call is
+gated on every run, its own and the live ones, so a failing API stops it
+too. The budget is one for both: a benchmark that spends the day's budget
+also stops the live features until the next UTC day.
 
 ## Modes
 
@@ -341,7 +343,7 @@ webhook`; the running hub reads the key at its next call. `status`,
 reads a desktop's `state.db`) and print ids, words and numbers only:
 the flag, the modes, which orgs consented, whether a key is configured
 (never the key), the live breaker, today's tokens and cost (the live
-features', which the budget counts, and the benchmark's apart), and runs
+features' and the benchmark's apart; the budget counts both), and runs
 per feature, `live` or `bench`, provider, fallback and org. Its `agreed
 X/Y` counts only the runs whose baseline decided: a section the keyword
 rule abstained on (baseline `none`) has nothing to agree with, so it is

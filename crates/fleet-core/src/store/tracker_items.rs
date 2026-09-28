@@ -471,6 +471,8 @@ impl Store {
         // description this excerpt was cut from, so a changed description
         // makes that cache stale (see the drop in the changed branch below).
         let description_before = meta.description.clone();
+        let description_chars_before = meta.description_chars;
+        let updated_ext_before = before.as_ref().and_then(|(v, _)| v.updated_ext);
         meta.description = w.description.clone();
         meta.description_chars = w.description_chars;
         meta.assignee_id = w.assignee_id.clone();
@@ -553,9 +555,17 @@ impl Store {
                 // "shown 2000 of 9000" while `work { action: describe }`
                 // served the text from before the edit, for as long as the
                 // TTL allows. Dropped here, inside the change the upsert has
-                // already detected, so there is no second comparison and the
-                // next `describe` fetches once.
-                if changed && description_before.as_deref() != w.description.as_deref() {
+                // already detected, so the next `describe` fetches once.
+                // The excerpt alone is not enough: an edit past its 2,000
+                // characters leaves it as it was, so the true length counts
+                // too, and — for a same-length edit there (a typo fixed in
+                // the tail) — the tracker's own "updated" stamp moving. An
+                // edit elsewhere in the ticket costs one re-fetch; serving a
+                // stale requirement would cost more.
+                let description_moved = description_before.as_deref() != w.description.as_deref()
+                    || description_chars_before != w.description_chars
+                    || (updated_ext_before.is_some() && updated_ext_before != w.updated_ext);
+                if changed && description_moved {
                     self.conn.execute(
                         "DELETE FROM work_item_descriptions WHERE item_id = ?1",
                         rusqlite::params![id],

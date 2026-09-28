@@ -692,11 +692,60 @@ pub struct UsageDelta {
 pub const IDLE_STATUSES: [&str; 3] = ["idle", "completed", "stopped"];
 
 /// A `claude_status` whose turn is over: an idle status, or `failed` (a turn
-/// that ended in an error). What `wait_for_session { until: idle }`,
-/// `run_prompt` and a move's source check all wait for — one set, so a new
-/// terminal status cannot reach one and not the others.
+/// that ended in an error) — [`ClaudeStatus::is_quiet`], the one definition
+/// (the frontend's `isQuietStatus` is held to it by the shared fixture
+/// `service/testdata/quiet_statuses.json`). An unknown value is not quiet.
+/// What `wait_for_session { until: idle }`, `run_prompt` and a move's source
+/// check all wait for — one set, so a new terminal status cannot reach one
+/// and not the others. Those callers read it through [`trusted_status`].
+///
+/// [`ClaudeStatus::is_quiet`]: crate::service::pane_intel::ClaudeStatus::is_quiet
 pub fn turn_over(status: Option<&str>) -> bool {
-    status.is_some_and(|s| IDLE_STATUSES.contains(&s) || s == "failed")
+    status
+        .and_then(|s| s.parse::<crate::service::pane_intel::ClaudeStatus>().ok())
+        .is_some_and(crate::service::pane_intel::ClaudeStatus::is_quiet)
+}
+
+/// The status a turn-over check may believe for `row`. A row the tick
+/// demoted for staleness reads `idle` only because nothing moved for
+/// `reconcile.stale_working_secs` — and one tool call running longer than
+/// that fires no hook and grows no transcript. Its `idle` is a guess, so for
+/// such a row this is `live`, the pane's own reading taken just now
+/// (`session_activity`), and `None` — unknown, never over — when nobody
+/// asked the pane or it could not tell. Any other row's stored status
+/// stands.
+///
+/// `demoted` is the demotion's own memory, `sessions.stale_demoted_at`
+/// (migration 080, read with `Store::stale_demoted_by_id`; not a
+/// `SessionRow` field): an attach or `reconcile.stale_working_ttl_secs`
+/// clears the `stale_working_at` attention stamp, but the stored `idle` is
+/// still a guess until a hook or the pane lifts the demotion. The stamp
+/// counts too, so a caller whose flag read failed errs towards asking.
+pub fn trusted_status<'a>(
+    row: &'a SessionRow,
+    demoted: bool,
+    live: Option<&'a str>,
+) -> Option<&'a str> {
+    let stored = row.claude_status.as_deref();
+    if needs_pane_confirmation(row, demoted) {
+        live
+    } else {
+        stored
+    }
+}
+
+/// [`turn_over`] of the row's [`trusted_status`] with no pane reading: a
+/// stale-demoted row is never over on its stored `idle` alone.
+pub fn turn_over_row(row: &SessionRow, demoted: bool) -> bool {
+    turn_over(trusted_status(row, demoted, None))
+}
+
+/// Whether `row` is stale-demoted (`demoted`, or its attention stamp still
+/// set) with a stored status that only a live pane reading can confirm (see
+/// [`trusted_status`]): the one case a turn-over check should spend a
+/// `session_activity` probe on.
+pub fn needs_pane_confirmation(row: &SessionRow, demoted: bool) -> bool {
+    (demoted || row.stale_working_at.is_some()) && turn_over(row.claude_status.as_deref())
 }
 
 /// SQL fragment: the new `idle_since` given the OLD row's `idle_since` and the
@@ -1172,6 +1221,12 @@ pub struct ReconcileSession<'a> {
     /// `None` CLEARS a stale dialog) when the pane was captured this pass,
     /// preserved when it was not.
     pub pending_input: Option<PendingInput>,
+    /// The pane captured this pass shows a live turn (`derived_status ==
+    /// Working`, the spinner's "esc to interrupt"). Stamps
+    /// `sessions.pane_working_at` (migration 081), which the stale-working
+    /// sweep respects: a row whose pane is visibly working is never demoted,
+    /// whatever the agents cadence let the status say this pass.
+    pub pane_working: bool,
 }
 
 /// All inputs for applying one host's probe result atomically. Consumed by

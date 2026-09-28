@@ -367,6 +367,42 @@ async fn a_host_token_gets_the_body_fenced_a_person_gets_it_plain() {
     assert_eq!(for_person.chars, for_host.chars);
 }
 
+/// fleet's OWN cap is not silent: a description past
+/// [`trackers::DESCRIBE_MAX_CHARS`] reports its true length in `chars`, and
+/// a per-host token's fenced body says "shown N of M" and points at the
+/// ticket — on the fresh fetch and on the cache hit alike (the cache keeps
+/// the tracker's length, not the capped body's).
+#[tokio::test]
+async fn a_description_past_fleets_own_cap_says_it_was_cut() {
+    let cap = trackers::DESCRIBE_MAX_CHARS;
+    let w = fake_jira_with_description(&"q".repeat(cap + 1234));
+    let net = w.net();
+    let host = OrgScope::for_host(&w.store.lock().unwrap(), "hosta").unwrap();
+    let first = describe(&w.store, &host, "ABC-1", &net).await.unwrap();
+    assert!(!first.from_cache);
+    // The walk's running total: the text plus the paragraph's separator.
+    let full = first.chars;
+    assert!(full >= (cap + 1234) as i64, "{full}");
+    let want = format!("shown {cap} of {full} chars");
+    assert!(
+        first.body.contains(&want),
+        "{}",
+        &first.body[first.body.len() - 200..]
+    );
+    assert!(first.body.ends_with("open the ticket for the rest]"));
+    let second = describe(&w.store, &host, "ABC-1", &net).await.unwrap();
+    assert!(second.from_cache);
+    assert_eq!(second.chars, full);
+    assert!(second.body.contains(&want));
+    // A person reads it plain, the length above the body's saying the same.
+    let person = describe(&w.store, &OrgScope::All, "ABC-1", &net)
+        .await
+        .unwrap();
+    assert_eq!(person.body.chars().count(), cap);
+    assert_eq!(person.chars, full);
+    assert_eq!(w.fetches(), 1);
+}
+
 /// Mirrors `tests_tickets.rs`'s `ticket_text_cannot_escape_the_fence`: a
 /// ticket cannot close the untrusted block early, forge a second one, or
 /// have its "Ignore previous instructions" line read as fleet's own — for
@@ -645,4 +681,78 @@ async fn a_sync_that_changes_the_description_drops_the_cached_copy() {
             .from_cache,
         "only a changed DESCRIPTION drops the cache"
     );
+}
+
+/// Two trackers, one per org, both holding `ABC-1`: a host of the SECOND
+/// org describes its own ticket rather than being refused over the first
+/// org's (the store's single "item for this key" is the oldest row).
+#[tokio::test]
+async fn a_key_two_orgs_share_describes_the_callers_own_item() {
+    let w = fake_jira_with_description("org B's requirement");
+    let (item_a, item_b) = {
+        let s = w.store.lock().unwrap();
+        let a = s.add_org("Company A", None, false).unwrap().id;
+        let b = s.add_org("Company B", None, false).unwrap().id;
+        let first = s.list_trackers().unwrap()[0].id;
+        s.set_tracker_org(first, Some(a)).unwrap();
+        s.set_host_org("hosta", Some(a)).unwrap();
+        let second = s
+            .add_tracker("jira", "Beta", "https://beta.atlassian.net")
+            .unwrap()
+            .id;
+        s.set_tracker_credential(
+            second,
+            "basic",
+            Some("me@x.com"),
+            Some("tok-0123456789abc"),
+            None,
+        )
+        .unwrap();
+        s.set_tracker_probe(
+            second,
+            None,
+            &TrackerConfig {
+                key_prefixes: vec!["ABC".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        s.set_tracker_state(second, "ok", None).unwrap();
+        s.set_tracker_org(second, Some(b)).unwrap();
+        let item_b = s
+            .upsert_tracker_item(
+                second,
+                &TrackerItemWrite {
+                    external_id: "1".into(),
+                    key: Some("ABC-1".into()),
+                    title: "Refund (B)".into(),
+                    status_name: "In Progress".into(),
+                    status_category: "in_progress".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id;
+        let item_a = s.work_item_by_key("ABC-1").unwrap().unwrap().id;
+        assert_ne!(item_a, item_b);
+        s.upsert_host("hostb").unwrap();
+        s.set_host_org("hostb", Some(b)).unwrap();
+        let sid = s
+            .upsert_session("dev-b", "hostb", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.link_session_work(sid, WorkTarget::Item(item_b), "manual")
+            .unwrap();
+        (item_a, item_b)
+    };
+    let net = w.net();
+    let host_b = OrgScope::for_host(&w.store.lock().unwrap(), "hostb").unwrap();
+    let got = describe(&w.store, &host_b, "ABC-1", &net).await.unwrap();
+    assert!(got.body.contains("org B's requirement"), "{}", got.body);
+    let s = w.store.lock().unwrap();
+    let now = crate::store::now_unix();
+    assert!(
+        s.cached_description(item_b, 300, now).unwrap().is_some(),
+        "cached against org B's item"
+    );
+    assert_eq!(s.cached_description(item_a, 300, now).unwrap(), None);
 }

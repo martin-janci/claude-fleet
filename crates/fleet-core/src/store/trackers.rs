@@ -1041,7 +1041,7 @@ impl Store {
                 "DELETE FROM tracker_writes WHERE tracker_id = ?1",
                 rusqlite::params![id],
             )?;
-            // The describe cache (migration 068) of this tracker's items: its
+            // The describe cache (migration 073) of this tracker's items: its
             // items are deliberately KEPT below (marked unavailable), so no FK
             // cascade reaches their cached full descriptions. Without this a
             // disconnected tracker's whole ticket text — up to

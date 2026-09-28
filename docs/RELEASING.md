@@ -185,9 +185,11 @@ The jobs, in order:
 | `create-release` | creates (or reuses) the one release, as a draft, with this version's CHANGELOG section as its notes and the build commit recorded | **no** |
 | `build` | three `tauri-action` legs; then renames the macOS updater bundle to carry the version | **no** |
 | `agent-hub-binaries` | two native Linux legs → four tarballs | yes (`continue-on-error`) |
+| `manifest` | writes, signs and uploads the update manifest (`release-manifest.json` + `.minisig`, from 0.4.1) — see *Update manifest and channels* | yes (`continue-on-error`; `verify-release` requires its two assets) |
 | `checksums` | downloads every asset on the release, hashes it, uploads `SHA256SUMS` | yes (`continue-on-error`) |
 | `verify-release` | the release is complete and fully checksummed | **no — this is the gate** |
 | `publish` | flips the draft to published | **no** — and it is skipped, leaving the draft, whenever anything above failed |
+| `channel` | lists the published release on its update tracks (the `update-channels` branch) | **no**, but the release is already published: a failure leaves it published and not yet offered |
 
 ### Why some legs are allowed to fail and the release is not
 
@@ -526,6 +528,81 @@ With a Developer ID later, replace the certificate secrets and add `APPLE_ID`
 / `APPLE_PASSWORD` / `APPLE_TEAM_ID` for notarization
 (https://v2.tauri.app/distribute/sign/macos/); nothing else in the workflow
 needs to change.
+
+### Update manifest and channels
+
+What the fleet's own updater reads (design
+`docs/superpowers/specs/2026-09-28-update-channel-design.md` §4–§5, §10;
+the operator's side is `docs/updates.md`). Two kinds of signed document:
+
+- **the release manifest** — `release-manifest.json` + `.minisig` on each
+  release from 0.4.1: every component's artifacts by digest (the hub image
+  by `sha256:` digest, the tarballs, the desktop downloads) and the
+  protocol windows the **released** fleet-hub states itself
+  (`fleet-hub compat`). Immutable, like the release. Written by
+  `scripts/release-manifest.sh` in the `manifest` job, before `checksums`,
+  so `SHA256SUMS` covers it. It waits up to 30 minutes for
+  `hub-image.yml`'s digest on the release body; without one the manifest
+  still ships, with the tarballs only, and the job warns;
+- **the channel documents** — `stable.json`, `beta.json` (and later
+  `nightly.json`), each with its `.minisig`, on the orphan branch
+  `update-channels`: what each track currently offers, recommends,
+  requires, and rolls back to, with a `sequence` (a replayed older document
+  is refused) and an `expires_at` 14 days out (an expired one is treated as
+  frozen). Written only by `scripts/update-channels.sh`: `add` from
+  release.yml's `channel` job after `publish` (a stable release goes on
+  stable **and** beta, an `-rc.N` on beta only), `resign` weekly from
+  `update-channels.yml`, and `edit` when you dispatch that workflow.
+
+Both are signed with the minisign key in the secret `RELEASE_SIGNING_KEY`
+and, before anything is uploaded or pushed, checked by fleet-update's own
+verifier (`fleet-release verify`) against the public key compiled into
+every build, `crates/fleet-update/src/keys.rs`. A document signed by any
+other key is never published.
+
+**Setting the key up (once, on your own machine).** Needs `minisign` and a
+logged-in `gh`:
+
+```bash
+scripts/release-key.sh              # macOS: backs the key up in the login keychain
+git add crates/fleet-update/src/keys.rs
+git commit -m "chore(update): trust the release key"
+```
+
+It generates the key pair, backs the secret key up **first** (keychain item
+`claude-fleet-release-signing-key`, base64; elsewhere or with
+`--no-keychain`, `~/claude-fleet-release.key` — move it somewhere safe),
+then stores it as the repository secret `RELEASE_SIGNING_KEY` (on stdin,
+never a command line), and writes the public key into `keys.rs`. The secret
+key never leaves your machine except into that secret. Merge the `keys.rs`
+change before tagging 0.4.1: without a key, the `manifest` job fails with
+an error naming this script and the release stays a draft.
+
+**Publisher's edits.** Actions → *update-channels* → Run workflow, with a
+track and one operation:
+
+| op | needs | effect |
+|----|-------|--------|
+| `resign` | — | fresh sequence and expiry on every track (also weekly) |
+| `withdraw` | version, reason | the release stays listed, marked withdrawn; refused for the recommended one — recommend another first |
+| `recommend` | version | what clients are offered by default |
+| `rollback` / `clear-rollback` | version | the target `fleet-updater` may roll back to |
+| `minimum` / `clear-minimum` | version, component | the lowest version the track still supports; below it an update is required |
+| `mandatory` | version, component(s), reason, deadline | a required update with a deadline |
+
+**Rotating the key.** A rotation is two releases, never one: add the new
+public key to `RELEASE_KEYS` beside the old one and release (every build
+now trusts both), then switch `RELEASE_SIGNING_KEY` to the new secret key,
+run `update-channels.yml` with `resign`, and in a later release drop the
+old public key. `scripts/release-key.sh` refuses to run once `keys.rs`
+names a key, because a second key is this procedure, not a re-run. A
+leaked key: remove it from `RELEASE_KEYS` in a release signed with the
+new one, and withdraw anything the old one signed after the leak.
+
+**Test it without a release:** `scripts/release-update-scripts-test.sh`
+(run by CI's hub-headless job and by `scripts/ci-local.sh`) drives the
+three scripts end to end with a throwaway key, a fake `gh` and a local bare
+remote.
 
 ## What the script touches
 

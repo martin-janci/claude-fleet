@@ -36,12 +36,20 @@ nobody could see:
   session link archived, with nothing running) stay out of the list. The end
   of each list says *N archived hidden · Show archived*, and the filter
   panel has an *Archived* switch. An explicit *Status: Done* (Work) or
-  *Session: Past only* (Sessions) shows them regardless. The Work tree gets
-  `filters.archived` and `archived_hidden` on the page; both are additive,
-  and an older hub ignores the filter and shows everything. The Sessions
-  pref moved to `sidebar.work-filters.v2`: every install had stored the old
-  default `archived: true`, so the rest of the filters carry over and the
-  new default applies.
+  *Past only* (*Session:* in Sessions, *Sessions:* in Work) shows them
+  regardless. The Work tree gets `filters.archived` and `archived_hidden`
+  on the page; both are additive. The hub hides archived tasks only when a
+  client asks with `archived: false` (the desktop always sends the field):
+  absent means "show", so a phone from before this change, which never
+  sends it and has no *N hidden* row, still sees its done tasks, and no
+  contract revision bump is needed. An older hub ignores the filter and
+  shows everything. Archived-ness is judged over every link of a task, not
+  only the caller's: a per-host or org-bound caller must not see a task as
+  archived while another host or org still works on it. The Sessions pref
+  moved to `sidebar.work-filters.v2`: every install had stored the old
+  default `archived: true`, so the rest of the filters carry over field by
+  field (a field missing from an older pref takes its default) and the new
+  archived default applies.
 - **Last active is one rule.** Every row is judged by its own time: a
   session by its last activity, a past link by when it ended. It used to
   weigh only a project's newest session, and only in the project tree.
@@ -96,8 +104,10 @@ R3  Host: gpu-box ×  Last 1d ×  Clear all            only while something narr
 - `SidebarFilters.svelte` holds R0 to R3 and the panel. `WorkFiltersBar.svelte`
   is the Work view's bar.
 - Stores and pref keys are unchanged (`host-filter`, `scope-filter`,
-  `recency`, `sidebar.work-filters`, `work.filters`, …), so a user's filters
-  survive the upgrade.
+  `recency`, `work.filters`, …), except the Sessions work filters, which
+  moved from `sidebar.work-filters` to `sidebar.work-filters.v2` (see
+  *Archived is hidden by default* above; v1 is read once, field by field),
+  so a user's filters survive the upgrade.
 
 ## fleet-mobile
 
@@ -112,4 +122,4 @@ fleet-mobile's `claude/serene-faraday-7loasz` branch:
 - Archived items are hidden by default. The filter prefs move to
   `sessions.filters.v2`, migrated the same way as on the desktop.
 - The Work tree reads the new `archived` filter and `archived_hidden`
-  count.
+  count, and sends `archived: false` to hide (absent shows everything).

@@ -41,6 +41,33 @@ static PENDING: AtomicBool = AtomicBool::new(false);
 /// Past it the command goes ahead with whatever the table holds.
 pub const SETTLE_WAIT: Duration = Duration::from_secs(20);
 
+/// Detection has been started on this machine at least once (the Windows
+/// desktop's startup does it). Until then a missing `wsl-` alias is never a
+/// reason to run `wsl.exe`: on every other platform nothing is detected.
+static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// The `~/.ssh/config` aliases the last detection left out: a miss on one of
+/// them is an SSH host, not a distribution to look for again.
+static TAKEN: RwLock<Vec<String>> = RwLock::new(Vec::new());
+
+/// When the last detection ended, and whether `wsl.exe` answered.
+static LAST_DETECTION: std::sync::Mutex<Option<(Instant, bool)>> = std::sync::Mutex::new(None);
+
+/// After a detection that answered, a `wsl-` alias missing from the table
+/// runs another one at most this often: a distribution installed since, or
+/// one renamed, is found without a restart, and a host that is simply gone
+/// does not spawn `wsl.exe` on every tick.
+pub const REDETECT_EVERY: Duration = Duration::from_secs(60);
+
+/// After a detection that did not answer (a WSL service still starting when
+/// the app did), the next miss may try again after this long. Without it a
+/// slow first `wsl.exe` would send every `wsl-` alias to `ssh` for the rest
+/// of the session.
+pub const REDETECT_AFTER_FAILURE: Duration = Duration::from_secs(10);
+
+/// The deadline of a re-detection (the startup one is the caller's).
+const REDETECT_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// The fleet alias for a distribution name: `wsl-` plus the name
 /// lower-cased, every character outside `[a-z0-9._-]` turned into `-`.
 /// `None` when nothing usable is left.
@@ -136,7 +163,15 @@ pub fn hosts() -> Vec<(String, String)> {
 /// the table. Aliases in `taken` stay SSH hosts. A failed or timed-out
 /// `wsl.exe` keeps the previous table rather than dropping hosts in use.
 pub fn refresh(taken: &[String], timeout: Duration) {
-    let Some(found) = detect(timeout) else {
+    *TAKEN
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = taken.to_vec();
+    let found = detect(timeout);
+    *LAST_DETECTION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((Instant::now(), found.is_some()));
+    let Some(found) = found else {
         tracing::warn!(
             timeout_ms = timeout.as_millis() as u64,
             "[wsl] wsl.exe --list did not answer; keeping the previous host table"
@@ -161,6 +196,7 @@ pub fn refresh_in_background(
     taken: impl FnOnce() -> Vec<String> + Send + 'static,
     timeout: Duration,
 ) {
+    ENABLED.store(true, Ordering::Release);
     PENDING.store(true, Ordering::Release);
     std::thread::spawn(move || {
         refresh(&taken(), timeout);
@@ -173,13 +209,83 @@ pub fn pending() -> bool {
     PENDING.load(Ordering::Acquire)
 }
 
+/// Whether a `wsl-` alias the table does not hold should start another
+/// detection: not while one is running, not for an `~/.ssh/config` alias,
+/// and not sooner than [`REDETECT_EVERY`] after a detection that answered
+/// ([`REDETECT_AFTER_FAILURE`] after one that did not). `last` is when the
+/// previous detection ended and whether it answered; `None` is never.
+pub fn redetect_due(
+    alias: &str,
+    known: bool,
+    taken: &[String],
+    pending: bool,
+    last: Option<(Instant, bool)>,
+    now: Instant,
+) -> bool {
+    if !alias.starts_with(ALIAS_PREFIX) || known || pending || taken.iter().any(|t| t == alias) {
+        return false;
+    }
+    match last {
+        None => true,
+        Some((at, answered)) => {
+            let every = if answered {
+                REDETECT_EVERY
+            } else {
+                REDETECT_AFTER_FAILURE
+            };
+            now.saturating_duration_since(at) >= every
+        }
+    }
+}
+
+/// Start a background detection when `alias` is a `wsl-` alias the table
+/// does not hold and [`redetect_due`] says one is due. Only once detection
+/// is in use on this machine ([`refresh_in_background`] ran).
+fn redetect_if_missing(alias: &str) {
+    if !ENABLED.load(Ordering::Acquire) || !alias.starts_with(ALIAS_PREFIX) {
+        return;
+    }
+    // Held across the decision and the start, so two callers missing at once
+    // start one detection, not two.
+    let last = LAST_DETECTION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let due = redetect_due(
+        alias,
+        distro_for(alias).is_some(),
+        &TAKEN
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        pending(),
+        *last,
+        Instant::now(),
+    );
+    if !due {
+        return;
+    }
+    tracing::info!(alias, "[wsl] alias not in the host table; detecting again");
+    // Marked pending before the lock is released: the next caller sees it.
+    PENDING.store(true, Ordering::Release);
+    drop(last);
+    std::thread::spawn(|| {
+        let taken: Vec<String> = crate::ssh_config::load_user_config()
+            .into_iter()
+            .map(|h| h.alias)
+            .collect();
+        refresh(&taken, REDETECT_TIMEOUT);
+        PENDING.store(false, Ordering::Release);
+    });
+}
+
 /// Wait, at most [`SETTLE_WAIT`], for a running detection when `alias` could
 /// be one of its hosts; return at once for any other alias, or when nothing
-/// is running.
+/// is running. A `wsl-` alias the table does not hold first starts another
+/// detection when one is due ([`redetect_due`]), and waits for that.
 pub async fn settled_for(alias: &str) {
     if !alias.starts_with(ALIAS_PREFIX) {
         return;
     }
+    redetect_if_missing(alias);
     let deadline = Instant::now() + SETTLE_WAIT;
     while pending() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -192,6 +298,7 @@ pub fn settled_for_blocking(alias: &str) {
     if !alias.starts_with(ALIAS_PREFIX) {
         return;
     }
+    redetect_if_missing(alias);
     let deadline = Instant::now() + SETTLE_WAIT;
     while pending() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(25));
@@ -264,10 +371,16 @@ fn list_with_deadline(mut cmd: std::process::Command, timeout: Duration) -> Opti
 
 /// The `wsl.exe` arguments that run `args` in `distro` the way `ssh` would
 /// run them on a host: the words joined by spaces, read by a shell.
+///
+/// `--cd ~` starts it in the Linux user's home, where `ssh` would: without
+/// it wsl.exe keeps the Windows working directory (`/mnt/c/...`), and every
+/// relative path fleet sends would resolve there.
 pub fn exec_args(distro: &str, args: &[&str]) -> Vec<String> {
     vec![
         "--distribution".into(),
         distro.into(),
+        "--cd".into(),
+        "~".into(),
         "--exec".into(),
         "sh".into(),
         "-c".into(),
@@ -294,6 +407,8 @@ pub fn attach_argv(distro: &str, script: &str) -> Vec<String> {
         wsl_binary().to_string_lossy().into_owned(),
         "--distribution".into(),
         distro.into(),
+        "--cd".into(),
+        "~".into(),
         "--exec".into(),
         "bash".into(),
         "-lc".into(),
@@ -388,6 +503,29 @@ mod tests {
         assert!(waited < SETTLE_WAIT, "{waited:?}");
     }
 
+    /// A slow first `wsl.exe` must not pin `wsl-` aliases to `ssh` for the
+    /// session: a miss after a failed detection tries again soon, after one
+    /// that answered only once a minute, and never for an SSH alias, another
+    /// alias, a known host or while a detection runs.
+    #[test]
+    fn a_missing_wsl_alias_redetects_rate_limited() {
+        let now = Instant::now() + Duration::from_secs(3600);
+        let ago = |s: u64| now - Duration::from_secs(s);
+        let due = |alias, known, pending, last| redetect_due(alias, known, &[], pending, last, now);
+        assert!(due("wsl-ubuntu", false, false, None));
+        assert!(due("wsl-ubuntu", false, false, Some((ago(11), false))));
+        assert!(!due("wsl-ubuntu", false, false, Some((ago(5), false))));
+        assert!(!due("wsl-ubuntu", false, false, Some((ago(30), true))));
+        assert!(due("wsl-ubuntu", false, false, Some((ago(61), true))));
+        assert!(!due("wsl-ubuntu", true, false, None), "known");
+        assert!(!due("wsl-ubuntu", false, true, None), "already running");
+        assert!(!due("mefistos", false, false, None), "not a wsl- alias");
+        assert!(
+            !redetect_due("wsl-box", false, &["wsl-box".into()], false, None, now),
+            "an ~/.ssh/config alias stays an SSH host"
+        );
+    }
+
     #[test]
     fn aliases_are_lower_case_slugs_under_the_prefix() {
         assert_eq!(
@@ -427,6 +565,8 @@ mod tests {
             vec![
                 "--distribution",
                 "Ubuntu",
+                "--cd",
+                "~",
                 "--exec",
                 "sh",
                 "-c",
@@ -440,6 +580,8 @@ mod tests {
             [
                 "--distribution",
                 "Ubuntu",
+                "--cd",
+                "~",
                 "--exec",
                 "bash",
                 "-lc",

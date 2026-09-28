@@ -1034,7 +1034,7 @@ fn the_benchmark_needs_no_live_mode_but_every_other_check() {
 }
 
 #[tokio::test]
-async fn a_benchmarks_spend_and_failures_never_stop_the_live_calls() {
+async fn a_benchmarks_failures_never_stop_the_live_calls_but_its_spend_does() {
     let w = world();
     w.all_on();
     w.set(settings::DECIDE_JEV_DAILY_TOKEN_BUDGET, "1000");
@@ -1064,7 +1064,12 @@ async fn a_benchmarks_spend_and_failures_never_stop_the_live_calls() {
         Some(Fallback::BreakerOpen)
     );
     w.set(settings::DECIDE_JEV_DAILY_TOKEN_BUDGET, "1000");
-    // The live path: its breaker is closed and its budget unspent.
+    // One budget: the benchmark's spend is the day's spend, so the live
+    // path is refused too — the setting is never spent twice a day.
+    let live = decide(&ctx, request(Feature::WorkLink, Some(w.org))).await;
+    assert_eq!(live.fallback, Some(Fallback::Budget));
+    // With room left, the live path goes: its breaker is closed.
+    w.set(settings::DECIDE_JEV_DAILY_TOKEN_BUDGET, "1300");
     let live = decide(&ctx, request(Feature::WorkLink, Some(w.org))).await;
     assert_eq!(live.fallback, None);
     assert_eq!(fake.calls(), 4);
@@ -1080,8 +1085,13 @@ async fn a_benchmarks_spend_and_failures_never_stop_the_live_calls() {
     assert_eq!(st.today.bench_input_tokens, 1_200);
     assert!(!st.breaker.open);
     let live_rows: i64 = st.stats.iter().filter(|r| !r.bench).map(|r| r.runs).sum();
-    assert_eq!(live_rows, 1);
+    assert_eq!(live_rows, 2, "the budget refusal and the call");
     assert!(st.lines().iter().any(|l| l.contains("bench")));
+    assert!(
+        st.lines().iter().any(|l| l.contains("1210 of 1300")),
+        "the day's spend is both: {:?}",
+        st.lines()
+    );
 }
 
 // --- health (test map §7) -------------------------------------------------------------

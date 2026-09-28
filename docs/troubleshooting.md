@@ -262,11 +262,30 @@ Five settings tune how the tick reads a session's state (Settings, or
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `reconcile.stale_working_secs` | `1800` | A `working` row with no hook, turn, transcript growth or pane output for this long turns `idle` and is flagged `stale_working`. `0` turns the rule off. |
+| `reconcile.stale_working_secs` | `1800` | A `working` row with no hook, turn, transcript growth, spinner on its pane or tmux session activity for this long turns `idle` and is flagged `stale_working`. `0` turns the rule off. |
 | `reconcile.stale_working_ttl_secs` | `86400` | How long the `stale_working` flag asks for a look before the tick lifts it on its own. An attach, any hook, or the row working again lifts it sooner. The demotion itself stays until a hook or the pane shows a live turn. `0` never lifts it by age. |
 | `health.context_red_pct` | `85` | The context-window percentage at or past which a session reads `context_full`, counts as `context_red` in `fleet_health` and draws red on the desktop (1–100). |
 | `playbooks.oom_max_attempts` | `2` | How many recreates the `oom` playbook may run on one session per 24 h (0–20). `0` refuses every recreate but keeps the refusals on the timeline. |
 | `gc.external_lost_ttl_secs` | `3600` | How long a lost `external` row (a Claude fleet only observes) is kept before the GC sweep deletes it. `0` reaps it on the next pass. |
+
+The `oom` budget is a **sliding 24 h window**, not a daily reset: before each
+recreate the playbook counts the session's `playbook_applied` timeline entries
+from the last 86,400 s that are a recreate (`oom:recreate`) or a failed one
+(`oom:recreate:failed:…`). A refusal (`oom:recreate:skipped:…`) is not an
+attempt. So with the default `2`, a third recreate runs only once the first
+of the two is more than 24 h old; recreates are also spaced at least 1 h
+apart, and none runs while the session is `working` or after a turn ended
+past the OOM text. The count reads the timeline, which keeps the newest 500
+entries per session.
+
+Tick passes whose pane capture shows Claude's spinner ("esc to interrupt")
+count as activity, so one long tool call is not demoted. A row that was
+demoted is `idle` only as a guess: `run_prompt`, a move's source check and
+`wait_for_session { until: "idle" }` look at its pane first and treat it as
+mid-turn unless the pane shows the REPL's idle prompt. That holds until a
+hook (the next prompt, Stop, …) or a pane showing a live turn lifts the
+demotion itself — an attach or `reconcile.stale_working_ttl_secs` ends only
+the `stale_working` flag, not the guess.
 
 ### After laptop sleep / wake
 
@@ -336,10 +355,19 @@ plain text and contains:
 - every host: reachability, last probe time, tmux/claude versions,
   provisioned, tunnel state, token **mode**;
 - session counts by host and status;
+- the hub: standalone, hub client (hub URL, client name, whether the live
+  link is up and why not, the hub's wire-contract verdict) or a configured
+  hub this launch cannot use, with the reason;
+- SSH ControlMaster resets since launch, per host;
+- warnings and errors from the last 5,000 log lines that have scrolled out
+  of the tail, repeats folded into one line with a count;
 - the last 200 log lines.
 
-Tokens are never included. The master token and every per-host token are
-masked even when they show up in a log line or error message. Hostnames, SSH
+Times are UTC (`2026-09-28T10:00:00Z`), the clock the log lines use.
+
+Tokens are never included. The master token, every per-host token, tracker
+credentials and a hub client's own token are masked even when they show up
+in a log line or error message. Hostnames, SSH
 aliases and file paths **are** included, so read the bundle before you post
 it publicly.
 ### Repairing a session whose directory vanished
