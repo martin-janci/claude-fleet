@@ -47,6 +47,11 @@ pub const DECISION_CALL_FAILURES: &[&str] = &["timeout", "http_error", "rate_lim
 /// its adapter.
 pub const DECISION_FOLLOWUPS: &[&str] = &["confirmed", "rejected", "corrected", "ignored"];
 
+/// The follow-ups a PERSON gave (`ignored` is fleet's: a newer answer took
+/// the proposal's place). A run carrying one is a label — and a rejection
+/// must keep holding (D37) — so the retention sweep keeps it.
+pub const DECISION_PERSON_FOLLOWUPS: &[&str] = &["confirmed", "rejected", "corrected"];
+
 /// `decision_runs.subject_kind` of an offline benchmark's call (`fleet-hub
 /// decide bench`). Such a run is not the live adapters': the live circuit
 /// breaker and daily budget never count it ([`RunScope::Live`]), and
@@ -550,10 +555,23 @@ impl Store {
     }
 
     /// Delete at most `limit` runs older than `cutoff`; the number deleted.
+    /// A run a person followed up ([`DECISION_PERSON_FOLLOWUPS`]) is kept
+    /// whatever its age: a rejection that disappeared would let the same
+    /// answer be proposed again, and a confirmation or correction is the
+    /// label record the evaluation is judged on.
     pub fn sweep_decision_runs(&self, cutoff: i64, limit: usize) -> Result<usize, IpcError> {
+        let kept = DECISION_PERSON_FOLLOWUPS
+            .iter()
+            .map(|f| format!("'{f}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
         Ok(self.conn.execute(
-            "DELETE FROM decision_runs WHERE id IN \
-             (SELECT id FROM decision_runs WHERE at < ?1 ORDER BY id LIMIT ?2)",
+            &format!(
+                "DELETE FROM decision_runs WHERE id IN \
+                 (SELECT id FROM decision_runs WHERE at < ?1 \
+                    AND (followup IS NULL OR followup NOT IN ({kept})) \
+                  ORDER BY id LIMIT ?2)"
+            ),
             rusqlite::params![cutoff, limit as i64],
         )?)
     }
@@ -987,6 +1005,36 @@ mod tests {
             (b.feature.as_str(), b.fallback.as_deref(), b.runs),
             ("work_link", Some("timeout"), 3)
         );
+    }
+
+    #[test]
+    fn the_sweep_keeps_what_a_person_decided() {
+        let s = Store::open_in_memory().unwrap();
+        let mut ids = BTreeMap::new();
+        for f in ["none", "confirmed", "rejected", "corrected", "ignored"] {
+            let id = s
+                .insert_decision_run(&NewDecisionRun {
+                    at: 100,
+                    ..run("status_map")
+                })
+                .unwrap();
+            if f != "none" {
+                let to = (f == "corrected").then_some("done");
+                assert!(s.set_decision_followup(id, f, to, 150).unwrap());
+            }
+            ids.insert(f, id);
+        }
+        assert_eq!(s.sweep_decision_runs(1_000, 100).unwrap(), 2);
+        for (f, id) in &ids {
+            let kept = s.get_decision_run(*id).unwrap().is_some();
+            assert_eq!(
+                kept,
+                DECISION_PERSON_FOLLOWUPS.contains(f),
+                "{f}: kept {kept}"
+            );
+        }
+        // Nothing more to sweep: the kept rows do not stall the batches.
+        assert_eq!(s.sweep_decision_runs(1_000, 100).unwrap(), 0);
     }
 
     const KEY: &str = "tsk_live_0123456789abcdefghijklmnop";

@@ -121,7 +121,10 @@ bundle.
 
 `decide.retention_days` (90 by default; `0` keeps them forever). The GC
 sweep deletes older runs a batch at a time, whether or not the GC's session
-killer is on.
+killer is on. A run a person followed up — `confirmed`, `corrected` or
+`rejected` — is **kept** whatever its age: a rejection must keep holding
+(the same answer is not proposed again), and those runs are the labels the
+evaluation is judged on. They are few: one per decision a person made.
 
 ## Turning it off
 

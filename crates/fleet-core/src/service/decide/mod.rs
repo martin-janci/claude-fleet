@@ -782,7 +782,8 @@ fn record(
 }
 
 /// Delete runs older than `decide.retention_days` (`0` keeps them), in
-/// batches, at most [`RETENTION_TICK_CAP`] per call. The GC tick runs it;
+/// batches, at most [`RETENTION_TICK_CAP`] per call. A run a person
+/// confirmed, corrected or rejected is kept (D37: a rejection holds). The GC tick runs it;
 /// ungated like the work retention sweep. Returns the rows deleted.
 pub fn sweep_runs(store: &Mutex<Store>, now: i64) -> usize {
     let days = match store.lock() {
