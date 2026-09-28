@@ -1015,6 +1015,88 @@ fn a_cursor_is_stable_under_concurrent_change() {
     assert_eq!(err.code, codes::E_INVALID);
 }
 
+/// Re-cache TK-1 with `description` as the excerpt the sync kept and
+/// `description_chars` as the tracker's true length beside it.
+fn recache_tk1_description(w: &W, description: &str, description_chars: Option<i64>) {
+    w.st.lock()
+        .unwrap()
+        .upsert_tracker_item(
+            w.tracker,
+            &TrackerItemWrite {
+                external_id: "1".into(),
+                key: Some("TK-1".into()),
+                title: "Login fails".into(),
+                status_name: "In Progress".into(),
+                status_category: "in_progress".into(),
+                containers: vec!["TP".into()],
+                assignee_id: Some("me".into()),
+                description: Some(description.to_string()),
+                description_chars,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+}
+
+/// `work { action: task }` is the FOURTH agent-facing path that carries a
+/// ticket's description, and it used to cut at `DESCRIPTION_MAX_CHARS` in
+/// silence through the bare `fence_untrusted` the rest of this branch
+/// replaced — an agent that read the Work view's task detail instead of
+/// `lookup` was exactly as blind as before the branch. It now uses the same
+/// `fence_ticket`: same audience, same cap, same marker, plus the notice and
+/// the `describe` offer. Mirrors `tests_tickets.rs`'s
+/// `every_path_that_carries_a_description_says_it_cut`.
+#[test]
+fn a_host_token_is_told_when_the_task_detail_cut_the_description() {
+    let w = world();
+    link(&w, w.s1, w.t1, true);
+    recache_tk1_description(&w, &"x".repeat(DESCRIPTION_MAX_CHARS), Some(6812));
+    let tid = format!("item:{}", w.t1);
+    let host = OrgScope::for_host(&w.st.lock().unwrap(), "h1").unwrap();
+    let d = task(&w.st, &host, &tid).unwrap().description.unwrap();
+    // This path's cap is the Work view's own (`DESCRIPTION_MAX_CHARS` = 600
+    // here, not the trackers' 2000), so the notice names what THIS answer
+    // shows of the tracker's 6812.
+    assert!(d.contains("shown 600 of 6812 chars"), "{d}");
+    assert!(
+        d.contains(r#"work { action: describe, key: "TK-1" }"#),
+        "{d}"
+    );
+    // The notice lives OUTSIDE the untrusted fence, as on every other path.
+    let end = d.find(crate::mcp::guard::UNTRUSTED_END).expect("fenced");
+    assert!(d.find("shown 600 of").unwrap() > end, "{d}");
+    // A person (the desktop, a phone, bound or not) still reads it plain:
+    // no fence, no notice.
+    let plain = task(&w.st, &OrgScope::All, &tid)
+        .unwrap()
+        .description
+        .unwrap();
+    assert!(!plain.contains("shown"), "{plain}");
+    assert!(!plain.contains("claude-fleet"), "{plain}");
+}
+
+/// The other half, C1's on this path: a description the tracker holds WHOLE
+/// reaches the same agent with no notice at all — byte-equal to the plain
+/// fence.
+#[test]
+fn a_whole_description_reaches_the_task_detail_without_a_notice() {
+    let w = world();
+    link(&w, w.s1, w.t1, true);
+    let text = "Login fails on partial captures.";
+    recache_tk1_description(&w, text, Some(text.chars().count() as i64));
+    let host = OrgScope::for_host(&w.st.lock().unwrap(), "h1").unwrap();
+    let d = task(&w.st, &host, &format!("item:{}", w.t1))
+        .unwrap()
+        .description
+        .unwrap();
+    assert!(!d.contains("shown"), "{d}");
+    assert!(!d.contains("open the ticket"), "{d}");
+    assert_eq!(
+        d,
+        crate::mcp::guard::fence_untrusted(text, "a tracker ticket", DESCRIPTION_MAX_CHARS)
+    );
+}
+
 #[path = "view_write_tests.rs"]
 mod writes;
 

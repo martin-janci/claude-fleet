@@ -70,7 +70,9 @@
     pageSize = 50,
     /** The refetch debounce, ms; injectable for tests. */
     debounceMs = 500,
-  }: { pageSize?: number; debounceMs?: number } = $props();
+    /** The longest a steady stream of changes may hold a refetch back, ms. */
+    maxWaitMs = 3000,
+  }: { pageSize?: number; debounceMs?: number; maxWaitMs?: number } = $props();
 
   const chord = workViewChordLabel(detectMac(typeof navigator === 'undefined' ? undefined : navigator));
 
@@ -86,6 +88,11 @@
   let states = $state.raw<Map<string, SectionState>>(new Map());
   let loading = $state(false);
   let error = $state<IpcError | null>(null);
+  // A re-read of the view already shown that failed: the tree stays, with a
+  // line to retry (the full error is for a first load, or new filters).
+  let refreshError = $state<IpcError | null>(null);
+  // The filters the page shown was read with.
+  let pageFiltersKey: string | null = null;
   let sectionBusy = $state.raw<Set<string>>(new Set());
   let sectionErrors = $state.raw<Map<string, string>>(new Map());
   let reviewTotal = $state<number | null>(null);
@@ -119,6 +126,9 @@
     };
   }
 
+  /** The most tasks one `work_tree` read returns. */
+  const PAGE_MAX = 200;
+
   let loadSeq = 0;
   async function load() {
     const mine = ++loadSeq;
@@ -132,14 +142,28 @@
     if (mine !== loadSeq) return;
     loading = false;
     if (!r.ok) {
-      error = r.error;
+      if (page && pageFiltersKey === fk) {
+        refreshError = r.error;
+      } else {
+        error = r.error;
+        refreshError = null;
+      }
       return;
     }
     error = null;
+    refreshError = null;
+    // A refresh of the view shown (same filters) keeps each open section it
+    // re-reads below until that read answers, so a failed or slow re-read
+    // never blanks what was loaded.
+    const sameView = pageFiltersKey === fk && fk === lastFiltersKey;
+    pageFiltersKey = fk;
     const p = pageOf(r.value);
-    const keptFilters = fk === lastFiltersKey;
     page = p;
-    states = distributeTasks(p);
+    const fresh = distributeTasks(p);
+    const openNow = get(workExpanded)[get(workViewKey)] ?? {};
+    const keep = new Map<string, SectionState>();
+    if (sameView) for (const [k, st] of states) if (st.own && openNow[k]) keep.set(k, st);
+    states = distributeTasks(p, keep);
     sectionErrors = new Map();
     // A section read still in flight answers for the view before this one:
     // cancel it (its answer is dropped), and re-issue it below when the
@@ -149,12 +173,16 @@
     // Open sections the first page did not cover load by themselves.
     for (const g of p.groups) {
       const k = sectionKey(g.org_id, g.group.id);
-      const open = (get(workExpanded)[get(workViewKey)] ?? {})[k] ?? states.has(k);
+      const open = openNow[k] ?? fresh.has(k);
       if (!open) continue;
-      const shown = states.get(k)?.tasks.length ?? 0;
-      if (shown >= g.count) continue;
-      const want = keptFilters ? Math.max(pageSize, had.get(k) ?? 0) : pageSize;
-      void loadSection(g, false, Math.min(200, want));
+      const shown = fresh.get(k)?.tasks.length ?? 0;
+      if (shown >= g.count) {
+        // The first page covers it all now: what was kept is stale.
+        if (states.get(k)?.own) states = new Map(states).set(k, fresh.get(k)!);
+        continue;
+      }
+      const want = sameView ? Math.max(pageSize, had.get(k) ?? 0) : pageSize;
+      void loadSection(g, false, want);
     }
     loadedOnce = true;
     flushReveal();
@@ -182,6 +210,9 @@
     return p;
   }
 
+  /** Read one section: `limit` tasks from its cursor (`more`) or from its
+   *  start, in pages of at most `PAGE_MAX` (a refresh re-reads as many as
+   *  were shown, so a section paged past one page does not shrink back). */
   async function readSection(g: WorkTreeGroup, k: string, more: boolean, limit: number) {
     const gen = (sectionGen.get(k) ?? 0) + 1;
     sectionGen.set(k, gen);
@@ -189,11 +220,25 @@
     const st = states.get(k);
     const cursor = more && st?.own ? st.cursor : null;
     sectionBusy = new Set(sectionBusy).add(k);
-    const r = await workTree({
-      filters: sectionFilters(get(workViewFilters), g.org_id ?? null, g.group.id),
-      cursor,
-      limit,
-    });
+    const filters = sectionFilters(get(workViewFilters), g.org_id ?? null, g.group.id);
+    let asked = Math.min(PAGE_MAX, limit);
+    let r = await workTree({ filters, cursor, limit: asked });
+    if (r.ok && !more) {
+      let got = pageOf(r.value);
+      let tasks = got.tasks;
+      // Only past a full page: a short page is all the hub had to give.
+      while (sectionGen.get(k) === gen && got.next_cursor && got.tasks.length >= asked && tasks.length < limit) {
+        asked = Math.min(PAGE_MAX, limit - tasks.length);
+        const next = await workTree({ filters, cursor: got.next_cursor, limit: asked });
+        if (!next.ok) {
+          r = next;
+          break;
+        }
+        got = pageOf(next.value);
+        tasks = mergeTasks(tasks, got.tasks);
+      }
+      if (r.ok) r = { ok: true, value: { ...got, tasks } };
+    }
     if (sectionGen.get(k) !== gen) return;
     sectionReq.delete(k);
     const busy = new Set(sectionBusy);
@@ -212,7 +257,9 @@
     sectionErrors = errs;
     const p = pageOf(r.value);
     const cur = states.get(k);
-    const tasks = more || cur ? mergeTasks(cur?.tasks ?? [], p.tasks) : p.tasks;
+    // A re-read from the start replaces what the section had loaded by
+    // itself (a task that left it goes); the first page's share is merged.
+    const tasks = more || (cur && !cur.own) ? mergeTasks(cur?.tasks ?? [], p.tasks) : p.tasks;
     states = new Map(states).set(k, { tasks, cursor: p.next_cursor ?? null, own: true });
   }
 
@@ -231,11 +278,17 @@
     void load();
   });
 
-  // `work:changed` / session events: one debounced re-read.
-  const offChanged = onWorkChangedDebounced(() => {
-    void load();
-    void loadReviewCount();
-  }, () => debounceMs);
+  // `work:changed` / session events: one debounced re-read — at most
+  // `maxWaitMs` after the first change it waits for, so a steady stream of
+  // changes (a busy fleet) cannot hold the view back forever.
+  const offChanged = onWorkChangedDebounced(
+    () => {
+      void load();
+      void loadReviewCount();
+    },
+    () => debounceMs,
+    () => maxWaitMs,
+  );
 
   onMount(() => {
     void load();
@@ -393,6 +446,12 @@
   </header>
 
   <div class="scroller">
+    {#if tab === 'tasks' && refreshError && page && !error}
+      <p class="refresh-error" role="status" data-testid="work-tree-refresh-error">
+        Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
+        <button class="btn btn--quiet" type="button" data-testid="work-tree-refresh-retry" onclick={() => void load()}>Retry</button>
+      </p>
+    {/if}
     {#if tab === 'review'}
       <WorkReview onchanged={() => void loadReviewCount()} />
     {:else if error}
@@ -815,6 +874,11 @@
   }
   .muted {
     color: var(--fg-muted);
+  }
+  .refresh-error {
+    margin: 0.2rem 0.4rem;
+    font-size: 0.75rem;
+    color: var(--usage-warn, #b45309);
   }
   .error {
     color: var(--usage-crit, #c62828);

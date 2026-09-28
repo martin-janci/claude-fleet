@@ -40,17 +40,28 @@ impl Store {
             i64,
             Option<String>,
             Option<String>,
+            i64,
         );
         let src: Option<Src> = self
             .conn
             .query_row(
                 "SELECT claude_session_id, usage_source, usage_offset_bytes, usage_last_msg_id, \
-                 usage_last_msg_usage FROM sessions WHERE id = ?1",
+                 usage_last_msg_usage, usage_backfill_until FROM sessions WHERE id = ?1",
                 rusqlite::params![source_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((Some(claude_id), source_file, offset, last_id, last_usage)) = src else {
+        let Some((Some(claude_id), source_file, offset, last_id, last_usage, backfill_until)) = src
+        else {
             return Ok(false);
         };
         let file = format!("{claude_id}.jsonl");
@@ -60,10 +71,18 @@ impl Store {
         } else {
             copied
         };
+        // The source's backfill mark (history still to read) carries over
+        // when it was reading this file, capped like the offset.
+        let until = if source_file.as_deref() == Some(file.as_str()) {
+            backfill_until.clamp(0, copied)
+        } else {
+            0
+        };
         let n = self.conn.execute(
             "UPDATE sessions SET usage_source = ?1, usage_offset_bytes = ?2, \
-             usage_last_msg_id = ?3, usage_last_msg_usage = ?4 WHERE id = ?5",
-            rusqlite::params![file, offset, last_id, last_usage, target_id],
+             usage_last_msg_id = ?3, usage_last_msg_usage = ?4, usage_backfill_until = ?6 \
+             WHERE id = ?5",
+            rusqlite::params![file, offset, last_id, last_usage, target_id, until],
         )?;
         Ok(n == 1)
     }
@@ -116,14 +135,16 @@ impl Store {
         };
         let n = self.conn.execute(
             "UPDATE sessions SET usage_offset_bytes = ?2, usage_last_msg_id = ?3, \
-             usage_last_msg_usage = ?4 \
+             usage_last_msg_usage = ?4, \
+             usage_backfill_until = MAX(usage_backfill_until, ?6) \
              WHERE id = ?1 AND usage_source = ?5 AND usage_offset_bytes < ?2",
             rusqlite::params![
                 target_id,
                 src.offset_bytes,
                 src.last_msg_id,
                 src.last_msg_usage,
-                file
+                file,
+                src.backfill_until
             ],
         )?;
         Ok(n == 1)
@@ -266,7 +287,8 @@ impl Store {
              usage_cache_write_tokens = ?3, usage_cache_read_tokens = ?4, usage_cost_micros = ?5, \
              usage_model = ?6, usage_offset_bytes = ?7, usage_source = ?8, usage_last_msg_id = ?9, \
              usage_updated_at = CASE WHEN ?10 THEN ?11 ELSE usage_updated_at END, \
-             usage_last_msg_usage = ?13 WHERE id = ?12",
+             usage_last_msg_usage = ?13, \
+             usage_backfill_until = COALESCE(?14, usage_backfill_until) WHERE id = ?12",
             rusqlite::params![
                 after.input_tokens,
                 after.output_tokens,
@@ -280,16 +302,24 @@ impl Store {
                 changed,
                 d.now,
                 session_id,
-                d.last_msg_usage
+                d.last_msg_usage,
+                d.backfill_until
             ],
         )?;
-        // A rewritten file (`reset`) has one growth figure that cannot be
-        // split by day; a reader without `D` lines has none — both book to
-        // the day of `now`, as before. Otherwise each day's slice goes to
-        // its own row, history from a fresh cursor to the backfill row.
-        if d.reset || d.by_day.is_empty() {
+        // A reader without `D` lines books everything to the day of `now`.
+        // A rewritten file (`reset`) has one growth figure over what was
+        // already counted: it is split over the pass's day slices by
+        // [`split_reset_growth`], so a rewrite's history lands in backfill
+        // rows like a first read's. Otherwise each day's slice goes to its
+        // own row, history from a fresh cursor to the backfill row.
+        let today = d.now.div_euclid(86_400);
+        if d.by_day.is_empty() {
             if !daily.is_zero() {
-                self.add_usage_daily(d.now.div_euclid(86_400), host_alias, false, &daily)?;
+                self.add_usage_daily(today, host_alias, false, &daily)?;
+            }
+        } else if d.reset {
+            for (day, backfill, t) in split_reset_growth(daily, &d.by_day, today) {
+                self.add_usage_daily(day, host_alias, backfill, &t)?;
             }
         } else {
             for slice in &d.by_day {
@@ -365,6 +395,45 @@ impl Store {
     }
 }
 
+/// Book a rewrite's growth (`growth`: field-wise new totals minus what the
+/// row already held) over the pass's day slices. Live slices take their
+/// share first, newest day first, so today's real spend stays live; what is
+/// left goes to the backfill slices, newest first; any remainder (rounding
+/// between the per-model and per-day prices) to today's live row. No slice
+/// takes more of a field than it counted. Returns the non-zero
+/// `(day, backfill, totals)` bookings.
+fn split_reset_growth(
+    growth: UsageTotals,
+    slices: &[DayDelta],
+    today: i64,
+) -> Vec<(i64, bool, UsageTotals)> {
+    let mut order: Vec<&DayDelta> = slices.iter().collect();
+    order.sort_by_key(|s| (s.backfill, std::cmp::Reverse(s.day)));
+    let mut left = growth;
+    let mut out = Vec::new();
+    for s in order {
+        let take = |left: &mut i64, want: i64| {
+            let t = (*left).min(want.max(0)).max(0);
+            *left -= t;
+            t
+        };
+        let t = UsageTotals {
+            input_tokens: take(&mut left.input_tokens, s.totals.input_tokens),
+            output_tokens: take(&mut left.output_tokens, s.totals.output_tokens),
+            cache_write_tokens: take(&mut left.cache_write_tokens, s.totals.cache_write_tokens),
+            cache_read_tokens: take(&mut left.cache_read_tokens, s.totals.cache_read_tokens),
+            cost_micros: take(&mut left.cost_micros, s.totals.cost_micros),
+        };
+        if !t.is_zero() {
+            out.push((s.day, s.backfill, t));
+        }
+    }
+    if !left.is_zero() {
+        out.push((today, false, left));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +470,7 @@ mod tests {
                 last_msg_usage: Some("40,4,0,0,0".into()),
                 now: 86_400,
                 by_day: Vec::new(),
+                backfill_until: None,
             },
         )
         .unwrap();
@@ -469,6 +539,7 @@ mod tests {
             last_msg_id: Some(last.into()),
             last_msg_usage: Some("1,0,0,0,0".into()),
             by_day: Vec::new(),
+            backfill_until: None,
             now: 1,
         };
         s.apply_usage(src, "a", &pass(100, "msg_a")).unwrap();
@@ -532,6 +603,7 @@ mod tests {
             last_msg_usage: Some("1,1,2,3,0".into()),
             now,
             by_day: Vec::new(),
+            backfill_until: None,
         };
         let _ = bus.take();
         let day0 = 20_000 * 86_400;
@@ -639,6 +711,7 @@ mod tests {
                     backfill: false,
                 },
             ],
+            backfill_until: None,
         };
         assert!(s.apply_usage(id, "vps", &d).unwrap());
         let rows: Vec<(i64, bool, i64)> = s
@@ -674,5 +747,109 @@ mod tests {
             .3
             .cost_micros;
         assert_eq!(live_today, 8);
+    }
+
+    /// A rewritten transcript (`reset`) re-reads its history from byte 0:
+    /// its growth over what the row held is split over the pass's day
+    /// slices — today's live slice first, the rest to the backfill rows —
+    /// instead of all landing on today's live row.
+    #[test]
+    fn a_reset_books_its_history_growth_as_backfill() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("vps").unwrap();
+        s.upsert_session("a", "vps", None, None, 1, 1, "running", None)
+            .unwrap();
+        let id = s.get_session("a", "vps").unwrap().unwrap().id;
+        let t = |n: i64| UsageTotals {
+            input_tokens: n,
+            cost_micros: n * 10,
+            ..Default::default()
+        };
+        let today = 20_716;
+        let now = today * 86_400 + 5;
+        let base = UsageDelta {
+            reset: false,
+            totals: t(30),
+            model: Some("claude-opus-5".into()),
+            offset: 10,
+            source: "x.jsonl".into(),
+            last_msg_id: None,
+            last_msg_usage: None,
+            now,
+            by_day: Vec::new(),
+            backfill_until: None,
+        };
+        // 30 already counted, live today.
+        assert!(s.apply_usage(id, "vps", &base).unwrap());
+        // The file is rewritten: 100 of history two days back, 7 today.
+        let reset = UsageDelta {
+            reset: true,
+            totals: t(107),
+            offset: 5,
+            by_day: vec![
+                DayDelta {
+                    day: today - 2,
+                    totals: t(100),
+                    backfill: true,
+                },
+                DayDelta {
+                    day: today,
+                    totals: t(7),
+                    backfill: false,
+                },
+            ],
+            backfill_until: Some(5),
+            ..base.clone()
+        };
+        assert!(s.apply_usage(id, "vps", &reset).unwrap());
+        let rows: Vec<(i64, bool, i64)> = s
+            .usage_daily_since(0, Some("vps"))
+            .unwrap()
+            .into_iter()
+            .map(|(day, _, backfill, t)| (day, backfill, t.input_tokens))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![(today - 2, true, 70), (today, false, 37)],
+            "growth 77: 7 live today, 70 to history"
+        );
+        let row = s.get_session("a", "vps").unwrap().unwrap();
+        assert_eq!(row.usage.usage_input_tokens, 107, "the totals are replaced");
+        assert_eq!(s.usage_cursor(id).unwrap().unwrap().backfill_until, 5);
+    }
+
+    #[test]
+    fn split_reset_growth_never_books_more_than_a_slice_counted() {
+        let t = |n: i64| UsageTotals {
+            input_tokens: n,
+            ..Default::default()
+        };
+        let slices = [
+            DayDelta {
+                day: 1,
+                totals: t(5),
+                backfill: true,
+            },
+            DayDelta {
+                day: 2,
+                totals: t(5),
+                backfill: true,
+            },
+            DayDelta {
+                day: 3,
+                totals: t(2),
+                backfill: false,
+            },
+        ];
+        assert_eq!(
+            split_reset_growth(t(9), &slices, 3),
+            vec![(3, false, t(2)), (2, true, t(5)), (1, true, t(2))],
+            "live first, then history newest first"
+        );
+        assert_eq!(
+            split_reset_growth(t(14), &slices, 3).last(),
+            Some(&(3, false, t(2))),
+            "a remainder past every slice books live today"
+        );
     }
 }

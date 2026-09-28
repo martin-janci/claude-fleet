@@ -72,10 +72,13 @@ pub struct PtyState {
 
 /// How long a child that has exited gets for its last output to be read
 /// before the drain reports EOF on its behalf (Windows, see
-/// [`PtyState::poll_child_exit`]). The bytes are already in the pipe when the
-/// process ends; the reader thread only has to pick them up.
+/// [`PtyState::poll_child_exit`]). ssh's last line ("Connection to … closed")
+/// is written before it exits, but it still has to pass through conhost's
+/// renderer to reach the reader thread; a re-attach after EOF swaps the
+/// buffer, so a line that arrives later is lost. A second is well past that
+/// and still an unnoticeable wait before re-attaching.
 #[cfg_attr(not(windows), allow(dead_code))]
-const CHILD_EXIT_GRACE: Duration = Duration::from_millis(300);
+const CHILD_EXIT_GRACE: Duration = Duration::from_secs(1);
 
 /// Everything one open shares with its reader thread. A FRESH one per open:
 /// a reader that is still winding down owns the previous `Arc` and can
@@ -240,6 +243,29 @@ impl PtyParts {
             *b = PtyBuffer::default();
         }
     }
+}
+
+/// Log, once per run, which ConPTY the first `openpty` loaded: portable-pty
+/// takes a `conpty.dll` beside the exe (the installer ships Microsoft's) and
+/// falls back to the built-in one when that is missing or fails to load (a
+/// DLL for another CPU). Bracketed paste and the mouse depend on which.
+#[cfg(windows)]
+fn log_conpty_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let name: Vec<u16> = "conpty.dll\0".encode_utf16().collect();
+        // SAFETY: a NUL-terminated name; no reference is taken on the module.
+        let module =
+            unsafe { windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(name.as_ptr()) };
+        tracing::info!(
+            conpty = if module.is_null() {
+                "system"
+            } else {
+                "bundled"
+            },
+            "[pty] pseudo console loaded"
+        );
+    });
 }
 
 /// Kill the child with SIGKILL, never portable-pty's SIGHUP.
@@ -595,7 +621,12 @@ pub fn pty_open(
         .openpty(clamp_size(args.cols, args.rows))
         .map_err(|e| IpcError::new(codes::E_PTY, format!("openpty: {e}")))?;
 
+    #[cfg(windows)]
+    log_conpty_once();
     let mux_opts = attach_mux_opts(&ssh, &args.host_alias);
+    // A `wsl-` host may still be being detected at startup; until it is, it
+    // would read as an SSH alias.
+    fleet_core::wsl::settled_for_blocking(&args.host_alias);
     let argv = attach_argv(
         &ssh.ssh_binary().to_string_lossy(),
         &args.host_alias,
@@ -606,6 +637,11 @@ pub fn pty_open(
     cmd.args(&argv[1..]);
     for (k, v) in attach_env(|k| std::env::var(k).ok()) {
         cmd.env(k, v);
+    }
+    // wsl.exe's own messages (a distribution that is gone) in UTF-8, not the
+    // UTF-16 that would reach the pane as NUL-riddled text.
+    if fleet_core::wsl::is_wsl_host(&args.host_alias) {
+        cmd.env("WSL_UTF8", "1");
     }
 
     let child = pair

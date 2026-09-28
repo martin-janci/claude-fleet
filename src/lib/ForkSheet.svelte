@@ -1,31 +1,27 @@
+<script module lang="ts">
+  /** Shown for an older hub's E_UNSUPPORTED on a new-worktree fork. */
+  export const NEW_WORKTREE_OLD_HUB =
+    "This hub can't fork into a new worktree yet — update fleet-hub, or pick Same worktree.";
+</script>
+
 <script lang="ts">
-  // Fork's confirmation sheet (Task 7). Opened from ReplyActions' fork
-  // button via ConversationPanel's `openForkSheet`; this dialog IS the
-  // confirmation — there is no second "are you sure?" on top of it.
+  // Fork's confirmation sheet. Opened from ReplyActions' fork button via
+  // ConversationPanel's `openForkSheet`; this dialog IS the confirmation —
+  // there is no second "are you sure?" on top of it (spec §5.2).
   //
-  // The backend does not implement a new-worktree fork yet:
-  // `rewind_conversation` refuses `mode: fork` + `new_worktree: Some(_)`
-  // with `E_UNSUPPORTED` (see crates/fleet-core/src/service/rewind.rs — a
-  // not-yet-created worktree's physical path is only known after
-  // `new_session` creates it, which is too late for the transcript rewrite
-  // that has to happen first).
-  //
-  // New worktree is the eventual right default (two live Claude sessions
-  // editing one checkout is the standard way to lose work) but it cannot be
-  // wired to a disabled option: a sheet whose only action is a dead button
-  // on open is worse than one that is honest about the risk it's taking. So
-  // "Same worktree" is what opens SELECTED and submittable, with its
-  // warning right there; "New worktree" stays visible, permanently
-  // disabled, with a note explaining why — present, not hidden, so the
-  // deferral reads as a fact about this build, not a missing feature no one
-  // can see. This is a deliberate, recorded reversal of the original
-  // new-worktree-by-default call, made only because the option isn't
-  // implemented, not because that preference was wrong.
+  // New worktree is the default: two live Claude sessions editing one
+  // checkout is the standard way to lose work. The backend creates the
+  // worktree first (a new branch at this session's HEAD), writes the
+  // truncated transcript under its path, then starts the session there —
+  // so uncommitted changes stay with this session, and the note says so.
+  // A hub older than this build answers E_UNSUPPORTED for it; that is shown
+  // as "update the hub", with Same worktree still one click away.
   import { untrack } from 'svelte';
   import Modal from './Modal.svelte';
   import { rewindConversation } from './sessions';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { finalizeBranchSlug, validateBranchName } from './branch-slug';
 
   let {
     sessionId,
@@ -41,10 +37,7 @@
     onclose: () => void;
   } = $props();
 
-  const NEW_WORKTREE_UNAVAILABLE =
-    "Forking into a new worktree isn't available yet — the new session would start with no history. Pick Same worktree below to fork now.";
-
-  let choice = $state<'new' | 'same'>('same');
+  let choice = $state<'new' | 'same'>('new');
   // Prefill only — a live-changing suggestion while the sheet is open would
   // stomp on whatever the user typed, so this is deliberately a one-time
   // snapshot, not a binding to the prop.
@@ -52,18 +45,25 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
 
+  const slug = $derived(finalizeBranchSlug(worktreeName));
+  const nameProblem = $derived.by(() => {
+    if (choice !== 'new') return null;
+    if (slug === 'main' || slug === 'master') return 'The worktree name cannot be main or master.';
+    return validateBranchName(slug);
+  });
+
   // The hub link can drop while the sheet is open.
   const blocked = $derived(hubActionBlocked('rewind_conversation', $hubStatus, $hubConnection));
-  const canSubmit = $derived(choice === 'same' && !busy && !blocked);
+  const canSubmit = $derived(!busy && !blocked && nameProblem === null);
 
   async function fork() {
     if (!canSubmit) return;
     busy = true;
     error = null;
-    const r = await rewindConversation(sessionId, 'fork', anchor, null);
+    const r = await rewindConversation(sessionId, 'fork', anchor, choice === 'new' ? slug : null);
     busy = false;
     if (!r.ok) {
-      error = r.error.message;
+      error = r.error.code === 'E_UNSUPPORTED' && choice === 'new' ? NEW_WORKTREE_OLD_HUB : r.error.message;
       return;
     }
     onclose();
@@ -78,26 +78,33 @@
   <fieldset class="choices">
     <legend class="sr-only">Worktree for the new session</legend>
 
-    <label class="choice off">
+    <label class="choice">
       <input
         type="radio"
         name="fork-worktree"
         data-testid="fork-new-worktree"
         checked={choice === 'new'}
-        disabled
+        disabled={busy}
+        onchange={() => (choice = 'new')}
       />
-      <span class="choice-label">New worktree <span class="recommended">(not available yet)</span></span>
+      <span class="choice-label">New worktree <span class="recommended">(recommended)</span></span>
     </label>
     <div class="new-worktree-fields">
-      <label for="fork-worktree-name">worktree name</label>
+      <label for="fork-worktree-name">worktree and branch name</label>
       <input
         id="fork-worktree-name"
         data-testid="fork-worktree-name"
         value={worktreeName}
         oninput={(e) => (worktreeName = (e.target as HTMLInputElement).value)}
-        disabled
+        disabled={busy || choice !== 'new'}
       />
-      <p class="unavailable" data-testid="fork-new-unavailable">{NEW_WORKTREE_UNAVAILABLE}</p>
+      {#if nameProblem}
+        <p class="problem" data-testid="fork-name-problem">{nameProblem}</p>
+      {/if}
+      <p class="note" data-testid="fork-new-note">
+        Branches off this session's last commit. Uncommitted changes stay here — commit them first to take
+        them along.
+      </p>
     </div>
 
     <label class="choice">
@@ -115,7 +122,7 @@
     </label>
   </fieldset>
 
-  {#if error}<p class="err">{error}</p>{:else if blocked}<p class="err">{blocked}</p>{/if}
+  {#if error}<p class="err" data-testid="fork-error">{error}</p>{:else if blocked}<p class="err">{blocked}</p>{/if}
 
   <div class="actions">
     <button type="button" onclick={onclose} disabled={busy}>Cancel</button>
@@ -155,10 +162,6 @@
     padding: 0.3rem 0;
     cursor: pointer;
   }
-  .choice.off {
-    cursor: not-allowed;
-    opacity: 0.7;
-  }
   .choice-label {
     line-height: 1.3;
   }
@@ -176,10 +179,15 @@
     font-size: 0.8em;
     color: var(--fg-muted, #999);
   }
-  .unavailable {
+  .note {
     margin: 0.2rem 0 0;
     font-size: 0.8em;
-    color: var(--warn, #f59e0b);
+    color: var(--fg-muted, #999);
+  }
+  .problem {
+    margin: 0.2rem 0 0;
+    font-size: 0.8em;
+    color: var(--danger, #e5534b);
   }
   .err {
     color: var(--danger, #e5534b);

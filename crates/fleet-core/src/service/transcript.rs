@@ -58,8 +58,9 @@ const AGENT_LAUNCH_ACK: &str = "Async agent launched successfully";
 /// Encode a working directory the way Claude Code names its per-project
 /// transcript directory: every char outside `[A-Za-z0-9]` becomes `-`.
 /// The read script does this on the host (after `pwd -P`) with an
-/// equivalent `sed`; this is the tested reference for that rule.
-#[cfg(test)]
+/// equivalent `sed`; this is the tested reference for that rule, and what
+/// a fork into a new worktree names its copy's directory with (the new
+/// tree's path is known here, as `pwd -P` printed it).
 pub fn encode_project_dir(cwd: &str) -> String {
     cwd.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -387,6 +388,17 @@ pub struct ConvTurn {
     /// `serde(default)` because a client may read a hub that predates it.
     #[serde(default)]
     pub prompt_uuid: Option<String>,
+    /// `true` when `prompt` is NOT the whole prompt that opened this turn:
+    /// its head was cut to fit the char budget ([`fit_last_turn`]), or the
+    /// entry carried blocks the text cannot hold (an image, a document) that
+    /// [`prompt_text`] / [`user_text`] drop. Retry re-sends `prompt` as "the
+    /// same prompt", so a client must not offer it on such a turn — it would
+    /// send something different from what the user approved.
+    ///
+    /// `serde(default)` because a client may read a hub that predates it; an
+    /// older hub's `false` is the old behaviour, not a new lie.
+    #[serde(default)]
+    pub prompt_partial: bool,
 }
 
 /// One line of a turn's reply.
@@ -726,6 +738,19 @@ fn prompt_text(content: Option<&serde_json::Value>) -> Option<String> {
     }
 }
 
+/// Whether a user entry's content holds any block that is not `text` — an
+/// image, a document — which [`user_text`] and [`prompt_text`] drop. The
+/// prompt text of such an entry is only part of what was sent
+/// ([`ConvTurn::prompt_partial`]).
+fn has_non_text_blocks(content: Option<&serde_json::Value>) -> bool {
+    match content {
+        Some(serde_json::Value::Array(blocks)) => blocks
+            .iter()
+            .any(|b| b.get("type").and_then(|t| t.as_str()) != Some("text")),
+        _ => false,
+    }
+}
+
 const REMINDER_OPEN: &str = "<system-reminder>";
 const REMINDER_CLOSE: &str = "</system-reminder>";
 
@@ -912,6 +937,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                     ended_at: None,
                     reminders: std::mem::take(&mut pending_reminders),
                     prompt_uuid: None,
+                    prompt_partial: false,
                     items: vec![ConvItem::Compact {
                         trigger: meta
                             .and_then(|m| m.get("trigger"))
@@ -1046,6 +1072,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                 ended_at: None,
                                 reminders: std::mem::take(&mut pending_reminders),
                                 prompt_uuid: None,
+                                prompt_partial: false,
                                 items: Vec::new(),
                             });
                         }
@@ -1070,6 +1097,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                             ended_at: None,
                             reminders: std::mem::take(&mut pending_reminders),
                             prompt_uuid: None,
+                            prompt_partial: false,
                             items: vec![ConvItem::Command {
                                 name,
                                 args: tag_text(&text, "command-args"),
@@ -1108,6 +1136,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                 ended_at: None,
                                 reminders: std::mem::take(&mut pending_reminders),
                                 prompt_uuid: None,
+                                prompt_partial: false,
                                 items: vec![ConvItem::Bash {
                                     command,
                                     stdout: tag_text(&text, "bash-stdout")
@@ -1130,6 +1159,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                             ended_at: None,
                             reminders: std::mem::take(&mut pending_reminders),
                             prompt_uuid: None,
+                            prompt_partial: false,
                             items: vec![ConvItem::Harness {
                                 tag,
                                 body: cap_chars(&body, COMMAND_OUTPUT_MAX_CHARS),
@@ -1149,6 +1179,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                             items: Vec::new(),
                             reminders: Vec::new(),
                             prompt_uuid: None,
+                            prompt_partial: false,
                         });
                         turn.items.push(ConvItem::Interrupt {
                             during_tool: text.contains("for tool use"),
@@ -1170,6 +1201,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                         items: Vec::new(),
                         reminders: std::mem::take(&mut pending_reminders),
                         prompt_uuid: v.get("uuid").and_then(|u| u.as_str()).map(String::from),
+                        prompt_partial: has_non_text_blocks(content),
                     });
                 }
             }
@@ -1182,6 +1214,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                         items: Vec::new(),
                         reminders: std::mem::take(&mut pending_reminders),
                         prompt_uuid: None,
+                        prompt_partial: false,
                     });
                     if let Some(ts) = at() {
                         turn.ended_at = Some(ts);
@@ -1543,6 +1576,9 @@ fn fit_last_turn(turn: &mut ConvTurn, max_chars: usize) -> bool {
     if let Some(prompt) = turn.prompt.as_mut() {
         if prompt.chars().count() > prompt_budget {
             *prompt = prompt.chars().take(prompt_budget).collect();
+            // What is left is not the prompt that was sent: Retry must not
+            // re-send it as if it were.
+            turn.prompt_partial = true;
             cut = true;
         }
     }
@@ -3842,6 +3878,7 @@ mod tests {
             ended_at: None,
             reminders: Vec::new(),
             prompt_uuid: None,
+            prompt_partial: false,
             items: vec![ConvItem::Text {
                 text: "x".repeat(n),
             }],
@@ -3885,6 +3922,7 @@ mod tests {
                 ended_at: None,
                 reminders: Vec::new(),
                 prompt_uuid: None,
+                prompt_partial: false,
                 items: vec![
                     ConvItem::Text { text: "hi".into() },
                     tool_item("Bash(command=ls)", false),
@@ -3896,7 +3934,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
-            serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","ended_at":null,"reminders":[],"prompt_uuid":null,"items":[
+            serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","ended_at":null,"reminders":[],"prompt_uuid":null,"prompt_partial":false,"items":[
                 {"kind":"text","text":"hi"},
                 {"kind":"tool","summary":"Bash(command=ls)","error":false,"id":null,"name":"","target":null,"at":null,"ended_at":null,"done":false}]}],
                 "truncated":false,"context":null,"events":[]})
@@ -3922,6 +3960,7 @@ mod tests {
             ended_at: None,
             reminders: Vec::new(),
             prompt_uuid: None,
+            prompt_partial: false,
             items: vec![
                 ConvItem::Text {
                     text: "a".repeat(10),
@@ -3965,6 +4004,7 @@ mod tests {
             ended_at: None,
             reminders: Vec::new(),
             prompt_uuid: None,
+            prompt_partial: false,
             items: vec![ConvItem::Text {
                 text: format!("{}END", "x".repeat(100)),
             }],
@@ -3988,6 +4028,7 @@ mod tests {
             ended_at: None,
             reminders: Vec::new(),
             prompt_uuid: None,
+            prompt_partial: false,
             items: vec![ConvItem::Text {
                 text: "earlier".into(),
             }],
@@ -3998,6 +4039,7 @@ mod tests {
             ended_at: None,
             reminders: Vec::new(),
             prompt_uuid: None,
+            prompt_partial: false,
             items: vec![
                 tool_item("Bash(command=ls)", false),
                 ConvItem::Text {
@@ -4028,6 +4070,7 @@ mod tests {
             ended_at: None,
             reminders: Vec::new(),
             prompt_uuid: None,
+            prompt_partial: false,
             items: vec![ConvItem::Text {
                 text: format!("{}END", "x".repeat(100)),
             }],
@@ -4048,6 +4091,7 @@ mod tests {
             ended_at: None,
             reminders: Vec::new(),
             prompt_uuid: None,
+            prompt_partial: false,
             items: vec![ConvItem::Text { text: "abc".into() }],
         };
         let c = trim_conversation(vec![tiny], 10, 1);
@@ -4875,6 +4919,7 @@ mod tests {
             }],
             reminders: vec!["r".repeat(500)],
             prompt_uuid: None,
+            prompt_partial: false,
         };
         // Two turns, ~1 022 chars of which 1 000 are reminders: a 100 budget
         // has to see them.
@@ -4999,5 +5044,52 @@ mod tests {
         let wire = r#"{"prompt":"hi","at":null,"ended_at":null,"items":[],"reminders":[]}"#;
         let turn: ConvTurn = serde_json::from_str(wire).expect("must decode without prompt_uuid");
         assert_eq!(turn.prompt_uuid, None);
+        assert!(
+            !turn.prompt_partial,
+            "an older hub sends no prompt_partial; it decodes as the old behaviour"
+        );
+    }
+
+    /// Retry re-sends `prompt` as "the same prompt": a prompt that carried an
+    /// image kept only its text, so re-sending it would send something else.
+    #[test]
+    fn a_prompt_with_an_image_block_is_marked_partial() {
+        let jsonl = concat!(
+            r#"{"type":"user","uuid":"aaaaaaaa-0000-0000-0000-000000000001","sessionId":"s","timestamp":"2026-09-26T09:00:00Z","message":{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"aaaaaaaa-0000-0000-0000-000000000002","sessionId":"s","timestamp":"2026-09-26T09:01:00Z","message":{"role":"user","content":[{"type":"text","text":"plain"}]}}"#,
+            "\n",
+        );
+        let turns = parse_conversation(jsonl);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].prompt.as_deref(), Some("what is this?"));
+        assert!(turns[0].prompt_partial, "the image is not in `prompt`");
+        assert!(
+            !turns[1].prompt_partial,
+            "a text-only block list is the whole prompt"
+        );
+    }
+
+    /// The other way `prompt` stops being the whole prompt: a lone turn over
+    /// budget has its prompt's tail cut off by `fit_last_turn`.
+    #[test]
+    fn a_prompt_cut_to_fit_the_budget_is_marked_partial() {
+        let turn = ConvTurn {
+            prompt: Some("p".repeat(500)),
+            at: None,
+            ended_at: None,
+            items: vec![ConvItem::Text {
+                text: "r".repeat(500),
+            }],
+            reminders: Vec::new(),
+            prompt_uuid: Some("aaaaaaaa-0000-0000-0000-000000000001".into()),
+            prompt_partial: false,
+        };
+        let c = trim_conversation(vec![turn.clone()], 10, 600);
+        assert!(c.truncated);
+        assert!(c.turns[0].prompt.as_deref().unwrap().len() < 500);
+        assert!(c.turns[0].prompt_partial, "a cut prompt is not the prompt");
+        let whole = trim_conversation(vec![turn], 10, 10_000);
+        assert!(!whole.turns[0].prompt_partial, "an uncut prompt is");
     }
 }

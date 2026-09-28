@@ -280,10 +280,7 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
          cd {root}\n\
          name={name}\n\
          basebr={basebr}\n\
-         if [ -d .worktrees ]; then base=.worktrees\n\
-         elif [ -d .claude/worktrees ]; then base=.claude/worktrees\n\
-         else base=.worktrees\n\
-         fi\n\
+         {WORKTREE_BASE_SNIPPET}\
          wt=\"$base/$name\"\n\
          if [ ! -e \"$wt\" ]; then\n\
          def=\"$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')\"\n\
@@ -302,6 +299,30 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
         root = quote(root),
         name = quote(name),
     )
+}
+
+/// Where a new worktree goes under a repo root (the script's cwd): the
+/// repo's `.worktrees/` unless it already uses `.claude/worktrees/`. Sets
+/// `$base`. Shared by [`worktree_add_script`] and the fork's own
+/// `service::rewind::fork_worktree_script`, so a forked checkout lands
+/// exactly where a `new_session { new_worktree }` one would.
+pub(crate) const WORKTREE_BASE_SNIPPET: &str = "if [ -d .worktrees ]; then base=.worktrees\n\
+     elif [ -d .claude/worktrees ]; then base=.claude/worktrees\n\
+     else base=.worktrees\n\
+     fi\n";
+
+/// The name rule for a NEW worktree (and so its branch): a valid git ref,
+/// never `main` / `master`. `new_session { new_worktree }` and a fork into
+/// a new worktree both apply it.
+pub(crate) fn validate_new_worktree_name(name: &str) -> Result<(), IpcError> {
+    crate::validate::git_ref(name)?;
+    if name == "main" || name == "master" {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "worktree name must not be 'main' or 'master'",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) async fn create_worktree_local(
@@ -358,13 +379,7 @@ pub async fn new_session(
     reject_lost_session_name(&*lock(store)?, &args.host_alias, &args.name)?;
 
     if let Some(name) = args.new_worktree.as_deref() {
-        crate::validate::git_ref(name)?;
-        if name == "main" || name == "master" {
-            return Err(IpcError::new(
-                codes::E_INVALID,
-                "worktree name must not be 'main' or 'master'",
-            ));
-        }
+        validate_new_worktree_name(name)?;
     }
 
     // Mint / bind a cancellation token for the duration of this command.

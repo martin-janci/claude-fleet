@@ -21,6 +21,7 @@
 //! | 9 | errors | 401, 403 on one view, 429 + Retry-After, offline, garbage |
 //! | 10 | no secret | in any `Debug`, request line, snapshot or error |
 //! | 11 | write | only a `caps.write` provider writes: one idempotent PR remote link, 429 / 403 mapped, a bad key sends nothing |
+//! | 12 | describe | only a `caps.describe` provider answers; the full text, capped at DESCRIBE_MAX_CHARS |
 //!
 //! **Snapshot golden.** Scenario 2 compares the normalised listing with
 //! `testdata/<provider>/golden_list.json`, so a provider API change shows
@@ -31,10 +32,11 @@
 //! [`FakeTransport`].
 
 use super::{
-    list_all, Fetched, ItemRef, RefCtx, TrackerError, TrackerProvider, ViewDef, WorkItemSnapshot,
-    WriteOp, NOT_FOUND_OR_NO_PERMISSION,
+    list_all, Caps, Fetched, ItemRef, Page, RefCtx, TrackerError, TrackerInfo, TrackerProvider,
+    ViewDef, WorkItemSnapshot, WriteOp, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{FakeTransport, Method, Request, Response};
+use crate::store::TrackerConfig;
 use serde_json::{json, Value};
 
 /// The error scenarios of row 9.
@@ -110,6 +112,59 @@ pub trait Harness: Send + Sync {
     /// (`probe` for Unauthorized and Offline, `list` of `expect().view` for
     /// the rest).
     fn script_error(&self, f: &FakeTransport, case: ErrorCase);
+    /// Scenario 12: a provider to call `describe` on, scripted over its own
+    /// [`FakeTransport`] (built and kept inside the returned box — nothing
+    /// here needs the caller's requests afterwards). The default builds
+    /// [`NoDescribeProvider`], whose `caps.describe` is false and which
+    /// scripts nothing: enough for every adapter that does not implement
+    /// `describe`; only Jira and GitHub override it.
+    async fn provider_for_describe(&self) -> Box<dyn TrackerProvider> {
+        Box::new(NoDescribeProvider)
+    }
+    /// The reference `describe` is asked about in scenario 12, parsed by
+    /// [`ItemRef::parse`]. Meaningless for the default provider above, which
+    /// never reads it.
+    fn describe_ref(&self) -> &'static str {
+        "NONE-0"
+    }
+}
+
+/// Scenario 12's default provider ([`Harness::provider_for_describe`]): every
+/// capability off, nothing scripted, nothing answered — the stand-in for the
+/// adapters that do not implement `describe`.
+pub struct NoDescribeProvider;
+
+#[async_trait::async_trait]
+impl TrackerProvider for NoDescribeProvider {
+    fn caps(&self) -> Caps {
+        Caps::default()
+    }
+    async fn probe(&self) -> Result<TrackerInfo, TrackerError> {
+        Err(TrackerError::Unconfigured)
+    }
+    async fn views(&self, _config: &TrackerConfig) -> Result<Vec<ViewDef>, TrackerError> {
+        Ok(Vec::new())
+    }
+    async fn list(
+        &self,
+        _view: &ViewDef,
+        _since: Option<i64>,
+        _cursor: Option<String>,
+    ) -> Result<Page, TrackerError> {
+        Ok(Page::default())
+    }
+    async fn fetch(&self, refs: &[ItemRef]) -> Result<Vec<Fetched>, TrackerError> {
+        Ok(refs
+            .iter()
+            .map(|r| Fetched::Unavailable {
+                reference: r.reference(),
+                reason: NOT_FOUND_OR_NO_PERMISSION.into(),
+            })
+            .collect())
+    }
+    fn recognize(&self, _text: &str, _ctx: RefCtx<'_>) -> Vec<ItemRef> {
+        Vec::new()
+    }
 }
 
 fn fixture_dir(name: &str) -> String {
@@ -618,6 +673,39 @@ pub async fn write<H: Harness>(h: &H) {
     );
 }
 
+/// Scenario 12 (work graph M6.0's describe capability): only a provider
+/// whose `caps.describe` is true answers `describe` with the full text — cut
+/// nowhere near [`DESCRIPTION_MAX_CHARS`], capped only at
+/// [`super::DESCRIBE_MAX_CHARS`]. A provider without the cap must answer
+/// `None`, never a fenced excerpt.
+pub async fn describe<H: Harness>(h: &H) {
+    let p = h.provider_for_describe().await;
+    let out = p
+        .describe(&ItemRef::parse(h.describe_ref()))
+        .await
+        .unwrap_or_else(|e| panic!("{}: describe failed: {e:?}", h.name()));
+    if p.caps().describe {
+        let text = out.unwrap_or_else(|| panic!("{}: a describe provider answers", h.name()));
+        let n = text.chars().count();
+        assert!(
+            n > super::DESCRIPTION_MAX_CHARS,
+            "{}: only {n} chars, not past the excerpt cap",
+            h.name()
+        );
+        assert!(
+            n <= super::DESCRIBE_MAX_CHARS,
+            "{}: {n} chars exceeds DESCRIBE_MAX_CHARS",
+            h.name()
+        );
+    } else {
+        assert!(
+            out.is_none(),
+            "{}: a provider without the cap must answer None",
+            h.name()
+        );
+    }
+}
+
 /// Expand to one `#[tokio::test]` per scenario for `$harness` (an
 /// expression of a type implementing [`Harness`]).
 #[macro_export]
@@ -669,6 +757,10 @@ macro_rules! conformance_suite {
             #[tokio::test]
             async fn c11_write() {
                 c::write(&$harness).await
+            }
+            #[tokio::test]
+            async fn c12_describe() {
+                c::describe(&$harness).await
             }
         }
     };

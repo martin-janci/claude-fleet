@@ -261,7 +261,10 @@ Index by area (names only; see the reference for details):
   connected; see *`/agent`* above).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
   `add_project` (clone, adopt or create a repository on a host — `git` and
-  `gh` run there), `list_github_repos` (what `gh` on a host can see),
+  `gh` run there; a per-host token acts on its own host only, and
+  `create_remote` — publishing on GitHub — needs a person's approval from
+  any caller but a paired client, refused outright on a hub with no
+  approver), `list_github_repos` (what `gh` on a host can see),
   `list_worktrees`, `list_host_worktrees` (one host scanned over SSH, for the
   worktrees fleet's own rows do not cover), `delete_worktree`.
 - **Sessions** — `list_sessions`, `related_sessions`, `new_session`,
@@ -285,8 +288,11 @@ Index by area (names only; see the reference for details):
   fleet can read them (`session_transcript`) but not control them.
 - **Lifecycle & recovery** — `restart_session`, `rewind_conversation`
   (truncate a session's Claude transcript into a new conversation: mode
-  `fork` starts a new session from that point, mode `rewind` restarts this
-  one there; the original transcript is never changed), `recreate_session`,
+  `fork` starts a new session from that point — in this worktree, or with
+  `new_worktree: "<name>"` in a new worktree and branch cut from the
+  session's HEAD (uncommitted changes stay behind; an existing name is
+  `E_CONFLICT`) — mode `rewind` restarts this one there; the original
+  transcript is never changed), `recreate_session`,
   `repair_session` (explicit repair, same as the Repair workspace button:
   may unregister this worktree's stale entry, adopt a moved checkout,
   recreate the branch and respawn the pane; behind the desktop confirmation

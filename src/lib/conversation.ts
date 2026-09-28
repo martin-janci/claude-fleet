@@ -63,6 +63,11 @@ export interface ConvTurn {
    *  turn's). `null`/absent for a turn no prompt opened, and for a hub that
    *  predates the field. */
   prompt_uuid?: string | null;
+  /** `true` when `prompt` is not the whole prompt that opened the turn: its
+   *  head was cut to fit the read budget, or it carried an image / document
+   *  the text cannot hold. Retry re-sends `prompt` as "the same prompt", so it
+   *  is not offered on such a turn. Absent from a hub that predates it. */
+  prompt_partial?: boolean;
 }
 
 /** Current-conversation context size, read from the same transcript tail. */

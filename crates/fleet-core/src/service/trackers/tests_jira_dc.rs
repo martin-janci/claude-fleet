@@ -6,6 +6,7 @@ use super::*;
 use crate::net::https::{FakeTransport, Method, Response, TransportError};
 use crate::service::trackers::conformance::{fixture, ErrorCase, Expect, Harness};
 use crate::service::trackers::list_all;
+use crate::service::trackers::DESCRIPTION_MAX_CHARS;
 
 const SITE: &str = "https://jira.corp.example/jira";
 
@@ -50,6 +51,63 @@ fn mine() -> ViewDef {
         label: "My work".into(),
         query: VIEW_MINE.into(),
     }
+}
+
+/// Data Center's `describe` is the v2 issue endpoint, uncapped by
+/// [`DESCRIPTION_MAX_CHARS`] and capped only by `DESCRIBE_MAX_CHARS` (not
+/// exercised through the conformance suite, which overrides only Jira Cloud
+/// and GitHub — the same `jira_common::adf_text` those two rely on, over the
+/// v2 API this adapter speaks).
+#[tokio::test]
+async fn describe_reads_the_v2_issue_endpoint_uncapped() {
+    let f = FakeTransport::new();
+    let long = "x".repeat(DESCRIPTION_MAX_CHARS + 500);
+    let body = json!({
+        "id": "40001",
+        "key": "OPS-1",
+        "fields": { "description": {"type":"doc","content":[
+            {"type":"paragraph","content":[{"type":"text","text": long}]}
+        ]} }
+    });
+    f.once(
+        Method::Get,
+        "/issue/OPS-1?fields=description",
+        Ok(Response::json(200, &body)),
+    );
+    let p = dc(&f);
+    assert!(p.caps().describe, "Jira Data Center implements describe");
+    let out = p
+        .describe(&ItemRef::Key("OPS-1".into()))
+        .await
+        .unwrap()
+        .expect("a describe answer");
+    assert_eq!(out.chars().count(), DESCRIPTION_MAX_CHARS + 500);
+    let sent = f.requests();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].method, Method::Get);
+    assert!(
+        sent[0]
+            .url
+            .ends_with("/rest/api/2/issue/OPS-1?fields=description"),
+        "{}",
+        sent[0].url
+    );
+    assert!(sent[0]
+        .header_value("Authorization")
+        .is_some_and(|a| a.starts_with("Bearer ")));
+
+    // A reference this adapter cannot turn into a request: no answer, no
+    // request sent.
+    let f = FakeTransport::new();
+    let out = dc(&f)
+        .describe(&ItemRef::RepoNumber {
+            repo: "acme/api".into(),
+            n: 1,
+        })
+        .await
+        .unwrap();
+    assert!(out.is_none());
+    assert!(f.requests().is_empty());
 }
 
 struct DcHarness;
@@ -272,6 +330,35 @@ async fn the_dc_shapes_normalise_the_epic_link_legacy_sprints_and_plain_text() {
     let body = f.requests()[0].json_body().unwrap();
     assert_eq!(body["validateQuery"], "warn");
     assert_eq!(body["jql"], "id in (40002) OR key in (OPS-4,PLAT-999)");
+}
+
+/// C1's plain-string half, through Data Center's own `snapshot()`: a v2
+/// description arrives as a `Value::String`, so its trailing whitespace used
+/// to be counted into `description_chars` while the excerpt's own `.trim()`
+/// removed it — one character of over-count is a "there is more" notice on a
+/// description nothing was cut from. Every described item of the list
+/// fixture: each is well under the cap, so each must report exactly the
+/// description it returns.
+#[tokio::test]
+async fn a_complete_dc_description_reports_the_length_it_returns() {
+    let f = FakeTransport::new();
+    DcHarness.script_list(&f);
+    let items = list_all(&dc(&f), &mine(), None).await.unwrap();
+    let mut described = 0;
+    for it in &items {
+        let Some(d) = it.description.as_deref() else {
+            continue;
+        };
+        assert!(d.chars().count() < DESCRIPTION_MAX_CHARS, "{:?}", it.key);
+        assert_eq!(
+            it.description_chars,
+            Some(d.chars().count() as i64),
+            "{:?} reports a length its own description does not have: {d:?}",
+            it.key
+        );
+        described += 1;
+    }
+    assert!(described > 0, "the fixture has described items");
 }
 
 /// A moved key is recognised when other references share its chunk: the

@@ -162,55 +162,167 @@ fn legacy_field(t: &str, key: &str) -> Option<String> {
 }
 
 /// Plain text out of an Atlassian Document Format value, at most
-/// [`DESCRIPTION_MAX_CHARS`] characters. A plain string (API v2, or a
-/// renderer) is taken as is.
-pub fn adf_excerpt(v: &Value) -> Option<String> {
-    let mut out = String::new();
+/// [`DESCRIPTION_MAX_CHARS`] characters, with the description's length at the
+/// tracker before that cap. A plain string (API v2, or a renderer) is taken
+/// as is.
+///
+/// **A COMPLETE description reports exactly the length of the text it
+/// returns.** `mcp::guard::fence_ticket` writes its "there is more" notice
+/// whenever the reported length exceeds what it shows, so a count even one
+/// character above the excerpt claims a cut on a description nothing was cut
+/// from — which the trailing block separator the normalisation below erases
+/// used to do for every ADF document, and a trailing newline for every v2
+/// string. So whenever the walk left nothing out and the normalised text
+/// still fits the cap, the length reported is that text's own, counted
+/// AFTER the same normalisation: the count and the string cannot drift.
+///
+/// Only a description that really was cut reports the walk's running total,
+/// which may run a few block separators above the text it returns — that
+/// number exists to say "there is more", and there genuinely is.
+///
+/// [`adf_walk`] stops *appending* to the excerpt once it reaches the cap (so
+/// this stays cheap on a huge document), but keeps *counting* every node's
+/// text regardless: the response is already downloaded and deserialised, so
+/// walking the rest of an in-memory [`Value`] is not the expensive part, and
+/// refusing to count would make the true length wrong for the common case of
+/// a description spread across several blocks (a heading, paragraphs, a
+/// list) that individually stay small but add up past the cap.
+pub fn adf_excerpt(v: &Value) -> (Option<String>, Option<i64>) {
+    let mut acc = Acc::default();
     match v {
-        Value::String(s) => out.push_str(s),
-        Value::Object(_) => adf_walk(v, &mut out),
-        _ => return None,
+        Value::String(s) => acc.take_string(s),
+        Value::Object(_) => adf_walk(v, &mut acc, DESCRIPTION_MAX_CHARS),
+        _ => return (None, None),
     }
-    let text = out
-        .lines()
+    let text = normalized(&acc.out);
+    if text.is_empty() {
+        return (None, None);
+    }
+    let shown = text.chars().count() as i64;
+    if !acc.cut && shown <= DESCRIPTION_MAX_CHARS as i64 {
+        // Nothing was left out of the walk, and the cap below will take
+        // nothing either: the whole description is what is returned.
+        return (Some(text), Some(shown));
+    }
+    (
+        Some(text.chars().take(DESCRIPTION_MAX_CHARS).collect()),
+        Some(acc.total.max(shown)),
+    )
+}
+
+/// One body's whitespace normalisation, shared by [`adf_excerpt`] and
+/// [`adf_text`]: trailing spaces off every line, then the ends trimmed.
+/// [`adf_excerpt`] counts a complete description AFTER this, so what it
+/// reports and what it returns are normalised the same way.
+fn normalized(out: &str) -> String {
+    out.lines()
         .map(str::trim_end)
         .collect::<Vec<_>>()
         .join("\n")
         .trim()
-        .to_string();
-    if text.is_empty() {
-        return None;
-    }
-    Some(text.chars().take(DESCRIPTION_MAX_CHARS).collect())
+        .to_string()
 }
 
-fn adf_walk(node: &Value, out: &mut String) {
-    if out.chars().count() > DESCRIPTION_MAX_CHARS {
-        return;
+/// What [`adf_walk`] accumulates: the excerpt, its length, the whole
+/// description's length, and whether anything was left out.
+#[derive(Default)]
+struct Acc {
+    /// The text so far, appended to only while it is at or under `cap`.
+    out: String,
+    /// `out`'s length in characters, TRACKED rather than recounted. The
+    /// guard is evaluated once per node, and an `out.chars().count()` there
+    /// made the walk O(nodes x cap) on tracker-controlled input.
+    shown: usize,
+    /// Every node's contribution, counted even after `out` stopped growing.
+    total: i64,
+    /// A node's text was left OUT because `out` was already at `cap`: the
+    /// text returned is then genuinely short of the description, whatever
+    /// the whitespace normalisation later does to its length.
+    cut: bool,
+}
+
+impl Acc {
+    /// A plain-string body (Jira API v2, or a renderer): taken whole, the
+    /// caller's cap applied to the normalised text.
+    fn take_string(&mut self, s: &str) {
+        self.out.push_str(s);
+        self.shown = s.chars().count();
+        self.total = self.shown as i64;
     }
+
+    /// One node's contributed text: always counted, appended while `out` has
+    /// not yet passed `cap`.
+    fn push(&mut self, s: &str, cap: usize) {
+        if s.is_empty() {
+            return;
+        }
+        let n = s.chars().count();
+        self.total += n as i64;
+        if self.shown <= cap {
+            self.out.push_str(s);
+            self.shown += n;
+        } else {
+            self.cut = true;
+        }
+    }
+
+    /// A block's trailing separator: counted like any contribution, but a
+    /// dropped one never counts as content cut — it is whitespace the
+    /// normalisation may erase anyway (and when real text is missing, the
+    /// text's own length is past the cap, which says so on its own).
+    fn end_block(&mut self, cap: usize) {
+        self.total += 1;
+        if self.shown <= cap && !self.out.ends_with('\n') {
+            self.out.push('\n');
+            self.shown += 1;
+        }
+    }
+}
+
+/// `cap` is [`DESCRIPTION_MAX_CHARS`] for [`adf_excerpt`]'s 2k excerpt, and
+/// [`super::DESCRIBE_MAX_CHARS`] for [`adf_text`]'s whole-description answer
+/// — the same walk, stopped at a different ceiling. See [`Acc`] for what
+/// each field of the accumulator promises.
+fn adf_walk(node: &Value, acc: &mut Acc, cap: usize) {
     let attrs = &node["attrs"];
-    match node["type"].as_str().unwrap_or_default() {
-        "text" => out.push_str(node["text"].as_str().unwrap_or_default()),
-        "hardBreak" => out.push('\n'),
-        "mention" => out.push_str(attrs["text"].as_str().unwrap_or("@someone")),
-        "emoji" => out.push_str(attrs["shortName"].as_str().unwrap_or_default()),
-        "inlineCard" | "blockCard" => out.push_str(attrs["url"].as_str().unwrap_or_default()),
-        "status" => out.push_str(attrs["text"].as_str().unwrap_or_default()),
-        "listItem" => out.push_str("- "),
-        _ => {}
-    }
+    let contribution: &str = match node["type"].as_str().unwrap_or_default() {
+        "text" => node["text"].as_str().unwrap_or_default(),
+        "hardBreak" => "\n",
+        "mention" => attrs["text"].as_str().unwrap_or("@someone"),
+        "emoji" => attrs["shortName"].as_str().unwrap_or_default(),
+        "inlineCard" | "blockCard" => attrs["url"].as_str().unwrap_or_default(),
+        "status" => attrs["text"].as_str().unwrap_or_default(),
+        "listItem" => "- ",
+        _ => "",
+    };
+    acc.push(contribution, cap);
     if let Some(children) = node["content"].as_array() {
         for c in children {
-            adf_walk(c, out);
+            adf_walk(c, acc, cap);
         }
     }
     if matches!(
         node["type"].as_str(),
         Some("paragraph" | "heading" | "codeBlock" | "blockquote" | "rule" | "listItem")
-    ) && !out.ends_with('\n')
-    {
-        out.push('\n');
+    ) {
+        acc.end_block(cap);
     }
+}
+
+/// The WHOLE plain text of an ADF value, at most `cap` characters — unlike
+/// [`adf_excerpt`], this is not the 2k excerpt plus a true length: `describe`
+/// wants the full description (capped much higher, at
+/// [`super::DESCRIBE_MAX_CHARS`]), and has no separate use for "how much more
+/// there is" once it is serving all of it up to `cap`.
+pub fn adf_text(v: &Value, cap: usize) -> Option<String> {
+    let mut acc = Acc::default();
+    match v {
+        Value::String(s) => acc.take_string(s),
+        Value::Object(_) => adf_walk(v, &mut acc, cap),
+        _ => return None,
+    }
+    let text = normalized(&acc.out);
+    (!text.is_empty()).then(|| text.chars().take(cap).collect())
 }
 
 /// The issue key a Jira URL path names.
@@ -363,5 +475,111 @@ mod tests {
         let v = json!([{"state": "future", "name": "Next"}]);
         assert_eq!(current_sprint(&v), (Some("Next".into()), false));
         assert_eq!(current_sprint(&json!(["garbage"])), (None, false));
+    }
+
+    /// `adf_text` serves the WHOLE description, not the 2k excerpt: a body
+    /// past [`DESCRIPTION_MAX_CHARS`] is not cut there, only at its own `cap`.
+    #[test]
+    fn adf_text_is_capped_at_its_own_ceiling_not_the_excerpts() {
+        let long = json!({"type":"doc","content":[{"type":"paragraph","content":[
+            {"type":"text","text": "x".repeat(DESCRIPTION_MAX_CHARS * 3)}]}]});
+        let cap = DESCRIPTION_MAX_CHARS * 2;
+        let text = adf_text(&long, cap).unwrap();
+        assert_eq!(text.chars().count(), cap);
+        // Under the cap: the whole thing, past DESCRIPTION_MAX_CHARS.
+        let short_of_cap = json!({"type":"doc","content":[{"type":"paragraph","content":[
+            {"type":"text","text": "x".repeat(DESCRIPTION_MAX_CHARS + 500)}]}]});
+        let text = adf_text(&short_of_cap, cap).unwrap();
+        assert_eq!(text.chars().count(), DESCRIPTION_MAX_CHARS + 500);
+        assert_eq!(adf_text(&Value::Null, cap), None);
+        assert_eq!(adf_text(&json!({"type":"doc","content":[]}), cap), None);
+        assert_eq!(
+            adf_text(&json!("plain string body"), cap).as_deref(),
+            Some("plain string body")
+        );
+    }
+
+    /// The C1 rule, at the unit the drift lived in: a description nothing was
+    /// cut from reports EXACTLY the length of the text it returns, so
+    /// `fence_ticket`'s `full > shown` comparison writes no notice. Both Jira
+    /// shapes: an ADF document (Cloud), where the trailing block separator
+    /// used to add one per block, and a plain v2 string (Data Center), where
+    /// trailing whitespace used to add its own.
+    #[test]
+    fn a_complete_description_reports_the_length_it_returns() {
+        for (what, body) in [
+            (
+                "one ADF paragraph",
+                json!({"type":"doc","content":[{"type":"paragraph","content":[
+                    {"type":"text","text":"hello"}]}]}),
+            ),
+            (
+                "three ADF paragraphs",
+                json!({"type":"doc","content":[
+                    {"type":"paragraph","content":[{"type":"text","text":"aaa"}]},
+                    {"type":"paragraph","content":[{"type":"text","text":"bbb"}]},
+                    {"type":"paragraph","content":[{"type":"text","text":"ccc"}]}]}),
+            ),
+            ("a plain v2 string", json!("hello")),
+            (
+                "a plain v2 string with trailing whitespace",
+                json!("hello  \n\n"),
+            ),
+            (
+                "an ADF list",
+                json!({"type":"doc","content":[
+                {"type":"bulletList","content":[
+                    {"type":"listItem","content":[{"type":"paragraph","content":[
+                        {"type":"text","text":"one"}]}]},
+                    {"type":"listItem","content":[{"type":"paragraph","content":[
+                        {"type":"text","text":"two"}]}]}]}]}),
+            ),
+        ] {
+            let (excerpt, chars) = adf_excerpt(&body);
+            let excerpt = excerpt.unwrap_or_else(|| panic!("{what}: a description"));
+            assert_eq!(
+                chars,
+                Some(excerpt.chars().count() as i64),
+                "{what}: a complete description must report its own length, \
+                 else fence_ticket cries wolf (got {excerpt:?})"
+            );
+        }
+        assert_eq!(
+            adf_excerpt(&json!("hello")),
+            (Some("hello".into()), Some(5))
+        );
+    }
+
+    /// The other half: a description that really was cut still reports more
+    /// than it shows, so the notice does fire. Exact figures, not a
+    /// tolerance — the walk's count is deterministic.
+    #[test]
+    fn a_cut_description_reports_more_than_it_shows() {
+        let long = "x".repeat(DESCRIPTION_MAX_CHARS + 500);
+        // One ADF paragraph: its text, plus the one block separator.
+        let (excerpt, chars) = adf_excerpt(
+            &json!({"type":"doc","content":[{"type":"paragraph","content":[
+                {"type":"text","text": long}]}]}),
+        );
+        assert_eq!(excerpt.unwrap().chars().count(), DESCRIPTION_MAX_CHARS);
+        assert_eq!(chars, Some((DESCRIPTION_MAX_CHARS + 500 + 1) as i64));
+        // A plain v2 string: its own length, nothing added.
+        let (excerpt, chars) = adf_excerpt(&json!(long));
+        assert_eq!(excerpt.unwrap().chars().count(), DESCRIPTION_MAX_CHARS);
+        assert_eq!(chars, Some((DESCRIPTION_MAX_CHARS + 500) as i64));
+    }
+
+    /// Many small blocks: the append guard stops the excerpt at the cap while
+    /// the walk keeps counting, so the reported length is the whole
+    /// description's (40 paragraphs of 100 characters, plus one separator
+    /// each), not the ~2000 the excerpt stopped at.
+    #[test]
+    fn many_small_blocks_are_all_counted() {
+        let paragraphs: Vec<Value> = (0..40)
+            .map(|_| json!({"type":"paragraph","content":[{"type":"text","text":"x".repeat(100)}]}))
+            .collect();
+        let (excerpt, chars) = adf_excerpt(&json!({"type":"doc","content": paragraphs}));
+        assert_eq!(excerpt.unwrap().chars().count(), DESCRIPTION_MAX_CHARS);
+        assert_eq!(chars, Some(40 * 100 + 40));
     }
 }
