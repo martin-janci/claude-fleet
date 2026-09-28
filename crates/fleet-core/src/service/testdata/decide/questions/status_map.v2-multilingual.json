@@ -1,0 +1,11 @@
+{
+  "version": "v2-multilingual",
+  "instructions": "state.section is the name of one section (a column) of an Asana project board, in lower case. The names may be in any language — often English, Slovak, Czech or German — written with or without diacritics, with an emoji or a number before them, and with typos. state.project_sections lists every section of that board in board order, first to last. Decide which status category the tasks placed in state.section are in, from what the name means in its own language and its position among state.project_sections: sections after an in-progress section are usually later stages, and the first sections are usually work not started. Ignore emoji and numbering. Choose unsure when the name and the position do not settle it.",
+  "options": {
+    "todo": "The tasks are not started yet (e.g. backlog, to do, zásobník, treba urobiť, k udělání, zu erledigen, ideen, nápady).",
+    "in_progress": "The tasks are being worked on, reviewed, tested or checked before they are finished (e.g. in progress, rozpracované, v riešení, rozpracováno, in arbeit, in prüfung).",
+    "done": "The tasks are finished (e.g. done, shipped, hotovo, dokončené, vyřízeno, erledigt, fertig, abgeschlossen).",
+    "not_planned": "The tasks will not be done (e.g. won't do, cancelled, zrušené, zamietnuté, zrušeno, verworfen, abgelehnt).",
+    "unsure": "The name and the position do not show which of todo, in_progress, done or not_planned applies."
+  }
+}

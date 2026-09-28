@@ -94,6 +94,12 @@ pub struct Health {
     /// Per-field default: an older hub omits it.
     #[serde(default)]
     pub hosts: Vec<HostHealthRow>,
+    /// The decision envelope (Jev): its live calls over the last hour and
+    /// whether they are failing (`degraded`, test map §7). `None` when it
+    /// is off, in a window onto a hub, and for a scoped caller. Per-field
+    /// default: an older hub omits it.
+    #[serde(default)]
+    pub decide: Option<crate::service::decide::DecideHealth>,
 }
 
 /// `fleet_health.hub`: this process's uptime and its last reconcile pass.
@@ -681,6 +687,7 @@ pub fn health_from_store(s: &Store) -> Health {
             crate::app_version::get(),
             now_unix(),
         ),
+        decide: crate::service::decide::health(s, now_unix()),
     }
 }
 
@@ -765,6 +772,7 @@ pub fn blank_rollups(h: &mut Health) {
     h.tunnels.clear();
     h.tunnels_flapping = 0;
     h.trackers = Default::default();
+    h.decide = None;
 }
 
 fn now_unix() -> i64 {
@@ -801,6 +809,7 @@ pub fn health_check(store: &Mutex<Store>) -> Health {
             tunnels_mode: None,
             peer_links_total: 0,
             hosts: Vec::new(),
+            decide: None,
         },
     }
 }
@@ -1266,6 +1275,7 @@ mod tests {
             tunnels_mode: None,
             peer_links_total: 0,
             hosts: Vec::new(),
+            decide: None,
         })
         .expect("Health serialises");
         let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");

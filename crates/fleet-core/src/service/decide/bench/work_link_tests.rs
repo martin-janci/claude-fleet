@@ -1796,3 +1796,89 @@ fn j1s_haiku_line_is_judged_at_haikus_coverage_when_both_ran() {
     assert_eq!(c.verdict, Verdict::NotJudged);
     assert!(c.measured.contains("--haiku-host"), "{}", c.measured);
 }
+
+// --- robustness (dataset C) -----------------------------------------------------
+
+use super::perturb::Perturbation;
+use super::work_link_robust as wr;
+
+#[test]
+fn a_prompt_variant_changes_the_state_only() {
+    let c = BenchCase {
+        id: "a7".into(),
+        dataset: Dataset::A,
+        at: 0,
+        org_id: Some(3),
+        tracker: "jira".into(),
+        state: "oprav prihlásenie\n```rust\nfn a() {}\n```\nprosím".into(),
+        candidates: vec![],
+        truth: Some("i1".into()),
+        dev: true,
+        nl_prompt: "sk",
+        nl_title: "en",
+        code: "low",
+        guard: Default::default(),
+    };
+    let f = wr::variant(&c, Perturbation::Fold).unwrap();
+    assert_eq!(f.id, "a7.fold");
+    assert!(f.state.starts_with("oprav prihlasenie"));
+    assert_eq!(
+        (f.truth, f.org_id, f.dev, f.nl_prompt),
+        (c.truth.clone(), c.org_id, c.dev, c.nl_prompt)
+    );
+    let k = wr::variant(&c, Perturbation::Code).unwrap();
+    assert_eq!(k.state, "oprav prihlásenie\n[code: rust, 1 lines]\nprosím");
+    assert_ne!(wr::variant(&c, Perturbation::Typo).unwrap().state, c.state);
+    // Nothing to change, or not a prompt perturbation: no variant.
+    let plain = BenchCase {
+        state: "fix the login".into(),
+        ..c.clone()
+    };
+    assert!(wr::variant(&plain, Perturbation::Fold).is_none());
+    assert!(wr::variant(&plain, Perturbation::Code).is_none());
+    assert!(wr::variant(&c, Perturbation::NoBoard).is_none());
+}
+
+#[tokio::test]
+async fn robustness_compares_each_variant_with_its_original_and_leaks_nothing() {
+    let w = seeded();
+    let o = opts(Split::All, vec![Provider::None, Provider::Bm25]);
+    let loaded = load(&w.s, &Words, &o, None).unwrap();
+    let outs = run_providers(&loaded, &o, None).await;
+    let mut rs = Vec::new();
+    for p in [Perturbation::Typo, Perturbation::Fold] {
+        let vl = wr::variants(&loaded, &o, p);
+        let vouts = run_providers(&vl, &o, None).await;
+        rs.push(wr::robustness(p, &loaded, &o, &outs, &vl, &vouts));
+    }
+    let typo = &rs[0];
+    assert_eq!(typo.cases.0, loaded.cases.len() as u64);
+    assert_eq!(typo.changed.0, loaded.cases.len() as u64);
+    let names: Vec<&str> = typo.providers.iter().map(|p| p.provider).collect();
+    assert_eq!(names, vec!["bm25"]);
+    assert_eq!(typo.providers[0].pairs, loaded.cases.len() as u64);
+    // English prompts have nothing to fold: no pair, no row.
+    assert_eq!(rs[1].changed.0, 0);
+    assert!(rs[1].providers.is_empty());
+    let r = report(&loaded, &o, &outs).with_robustness(rs);
+    let json = serde_json::to_string(&r).unwrap();
+    let lines = r.lines().join("\n");
+    assert!(lines.contains("robustness (dataset C"), "{lines}");
+    for out in [json, lines] {
+        for secret in [
+            "redirecting",
+            "Billing export",
+            "avatar",
+            "invoice",
+            "welcome",
+        ] {
+            assert!(
+                !out.to_lowercase().contains(&secret.to_lowercase()),
+                "{secret}"
+            );
+        }
+    }
+    // Without --perturb the report's JSON has no such key.
+    let plain = serde_json::to_value(report(&loaded, &o, &outs)).unwrap();
+    assert!(plain.get("robustness").is_none());
+}
