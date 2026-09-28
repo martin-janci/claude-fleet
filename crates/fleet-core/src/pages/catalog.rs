@@ -48,13 +48,15 @@ pub fn item_type(item: &Item) -> &'static str {
         Item::Notice { .. } => "notice",
         Item::Link { .. } => "link",
         Item::Custom { .. } => "custom",
+        Item::Action { .. } => "action",
     }
 }
 
 /// Most `custom` items all pages together may hold: the escape hatch stays
-/// small (design §8). Raised from 3 to 4 for `tracker_extras` (P4b); P5's
-/// review_apply layout pays it back.
-pub const MAX_CUSTOM: usize = 4;
+/// small (design §8). Raised from 3 to 4 for `tracker_extras` (P4b); P5 paid
+/// it back to 3 by expressing `work_retention` as a data source, a table and
+/// a page action.
+pub const MAX_CUSTOM: usize = 3;
 
 /// Whether this build can render `layout` at all. The resource layouts wait
 /// on the resource and action registries (design P4).
@@ -67,9 +69,13 @@ pub fn layout_supported(layout: Layout) -> bool {
 /// cannot render yet.
 pub fn layout_item_types(layout: Layout) -> &'static [&'static str] {
     match layout {
-        Layout::Category => &["field", "stat", "record", "notice", "link", "custom"],
+        Layout::Category => &[
+            "field", "stat", "record", "table", "action", "notice", "link", "custom",
+        ],
         Layout::Cards => &["stat", "record", "notice", "link"],
-        Layout::DataPage => &["stat", "record", "table", "chart", "notice", "link"],
+        Layout::DataPage => &[
+            "stat", "record", "table", "chart", "action", "notice", "link",
+        ],
         Layout::MasterDetail => &["field", "notice", "custom"],
         Layout::ReviewApply => &["notice", "link"],
         Layout::Flow | Layout::ObjectEditor => &[],

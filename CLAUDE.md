@@ -119,6 +119,13 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   are server-driven wizards — the backend decides each step, a secret is
   never stored; `tracker.connect` backs Settings → Trackers
   (`settings.trackers`), which replaced WorkSettings' tracker list.
+  P5: `set_setting { propose: true, why }` leaves a proposal, never a
+  write (`service/settings_review.rs`, migration 072); every registered
+  write is audited through `settings::set_by` with its `Actor`; layout L6
+  `review_apply` (Settings → Proposed changes, `fleet-hub settings`), a
+  field's inline suggestion and History, search as a plain-words command
+  (`settings_nl.ts`), and page actions (`pages/actions.rs`) — custom
+  items are capped at 3.
 - **Status vocabulary** (`claude_status`, `stuck_kind`) lives in the enums in
   `service/pane_intel.rs`; the MCP tool descriptions and the generated
   reference derive from them, so add values there, not in prose.
@@ -140,7 +147,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 211
+  verdict is written down once, in `backend/verdicts.rs`, for all 214
   commands; `backend/tests_routing.rs` holds the handler list, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table

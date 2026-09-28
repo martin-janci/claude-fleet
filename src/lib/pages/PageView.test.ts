@@ -194,3 +194,55 @@ describe('PageView — data and links', () => {
     expect(onnavigate).toHaveBeenCalledWith('settings.automation');
   });
 });
+
+describe('PageView — a page action (declarative pages P5)', () => {
+  it('shows work retention from its sources, and Sweep now runs the command and re-reads them', async () => {
+    const reads = () =>
+      inv.mock.calls.filter((c) => c[0] === 'fetch_page_source' && (c[1] as { id: string }).id === 'work.retention')
+        .length;
+    const page = bundle.pages.find((p) =>
+      JSON.stringify(p).includes('"action":"work.retention_sweep"'),
+    ) as Page;
+    render(PageView, {
+      props: {
+        page,
+        pages: bundle.pages,
+        descs,
+        values: defaults,
+        sources: bundle.sources,
+        actions: bundle.actions,
+        focusKey: 'work.retention.journal_days',
+        onnavigate: () => {},
+      },
+    });
+    const table = await screen.findByTestId('data-table-work.retention');
+    await waitFor(() => expect(within(table).getAllByRole('row')).toHaveLength(4));
+    expect(table.textContent).toContain('Work timeline');
+    expect(screen.getByTestId('data-record-work.retention_last').textContent).toContain('never');
+    const before = reads();
+    await fireEvent.click(screen.getByTestId('page-action-work.retention_sweep'));
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('work_retention_sweep', undefined));
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+  });
+
+  it('shows no action on a read-only page', async () => {
+    const page = bundle.pages.find((p) =>
+      JSON.stringify(p).includes('"action":"work.retention_sweep"'),
+    ) as Page;
+    render(PageView, {
+      props: {
+        page,
+        pages: bundle.pages,
+        descs,
+        values: defaults,
+        sources: bundle.sources,
+        actions: bundle.actions,
+        readonly: true,
+        focusKey: 'work.retention.journal_days',
+        onnavigate: () => {},
+      },
+    });
+    await screen.findByTestId('setting-row-work.retention.journal_days');
+    expect(screen.queryByTestId('page-action-work.retention_sweep')).toBeNull();
+  });
+});

@@ -317,6 +317,11 @@ fn check_item(
         }
         Item::Notice { text, .. } => cx.text(at, "text", text, MAX_TEXT),
         Item::Custom { .. } => {}
+        Item::Action { action } => {
+            if super::actions::action(action).is_none() {
+                cx.bad(at, format!("`{action}` is not a page action"));
+            }
+        }
         Item::Link { label, .. } => {
             if let Some(l) = label {
                 cx.text(at, "label", l, MAX_TITLE);

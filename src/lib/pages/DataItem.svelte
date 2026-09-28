@@ -1,7 +1,8 @@
 <script lang="ts">
   // A `stat`, `record`, `table` or `chart` item: reads its data source once
-  // when shown, and formats each value by the column type the source
-  // declares (`list_pages` carries the shapes).
+  // when shown (and again when a page action changes it), and formats each
+  // value by the column type the source declares (`list_pages` carries the
+  // shapes).
   import { onMount } from 'svelte';
   import Chart from './Chart.svelte';
   import { fetchSource, formatCell, type Column, type Item, type SourceSpec } from './pages';
@@ -9,20 +10,33 @@
   let {
     item,
     spec,
+    tick = 0,
   }: {
     item: Extract<Item, { type: 'stat' | 'record' | 'table' | 'chart' }>;
     spec: SourceSpec | undefined;
+    /** Bumped when the page's data changed (a page action ran): re-read. */
+    tick?: number;
   } = $props();
 
   let data = $state<unknown>(null);
   let error = $state<string | null>(null);
   let loaded = $state(false);
 
-  onMount(async () => {
+  async function read() {
     const r = await fetchSource(item.source);
     loaded = true;
+    error = null;
     if (r.ok) data = r.value;
     else error = r.error.message;
+  }
+
+  onMount(() => void read());
+  let seen = 0;
+  $effect(() => {
+    if (tick !== seen) {
+      seen = tick;
+      void read();
+    }
   });
 
   const testid = $derived(`data-${item.type}-${item.source.id}`);

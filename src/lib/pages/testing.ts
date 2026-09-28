@@ -11,6 +11,7 @@ export const bundle = {
   pages: registry.pages,
   sources: registry.sources,
   resources: registry.resources,
+  actions: registry.actions,
 } as unknown as PagesBundle;
 export const allDescriptors = registry.descriptors as unknown as Descriptor[];
 
@@ -34,6 +35,12 @@ export const SOURCE_DATA: Record<string, unknown> = {
     { day: '2026-09-27', cost_micros: 5_000_000, input_tokens: 20, output_tokens: 2 },
   ],
   'usage.by_host': [{ host: 'alpha', input_tokens: 10, output_tokens: 1, cost_micros: 300 }],
+  'work.retention': [
+    { kept: 'Work journal', days: 365, rows: 40, would_delete: 3 },
+    { kept: 'Done tickets', days: 0, rows: 12, would_delete: 0 },
+    { kept: 'Work timeline', days: 90, rows: 500, would_delete: 120 },
+  ],
+  'work.retention_last': { at: null, journal: 0, tracker_items: 0, timeline_work_events: 0, tracker_writes: 0 },
   'usage.by_model': [
     { model: 'claude-opus-5', sessions: 2, input_tokens: 20, output_tokens: 0, cost_micros: 3_000_000 },
   ],

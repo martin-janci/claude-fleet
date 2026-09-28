@@ -358,6 +358,7 @@
       values={$settingValues}
       selected={view}
       counts={ownsFleet ? { 'settings.review': $settingProposals.length } : {}}
+      canWrite={ownsFleet}
       onselect={select} />
     <div class="settings-content">
     {#if view === 'general'}
@@ -799,6 +800,7 @@
             values={$settingValues}
             sources={$pagesBundle.sources}
             resources={$pagesBundle.resources}
+            actions={$pagesBundle.actions}
             readonly
             reason={res?.update ? hubBlock(res.update.command as HubAction, $hubStatus) : null}
             onnavigate={(id) => select(id)} />
@@ -818,6 +820,7 @@
             values={$settingValues}
             sources={$pagesBundle.sources}
             resources={$pagesBundle.resources}
+            actions={$pagesBundle.actions}
             {focusKey}
             proposals={$settingProposals}
             onnavigate={(id) => select(id)}

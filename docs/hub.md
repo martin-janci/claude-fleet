@@ -1910,6 +1910,25 @@ with `set_setting` (master token; `get_settings` reads them all). It
 reaches only the settings registry, never the `hub.*` and `mcp.*` values
 in this table.
 
+**Proposed settings and their history** (declarative pages P5). An agent
+that should not change a setting on its own proposes it instead:
+`set_setting { key, value, propose: true, why }` stores a proposal and
+writes nothing. On the hub machine, the operator reviews them:
+
+```bash
+fleet-hub settings proposals            # key: now → proposed (who), and why
+fleet-hub settings apply 4 7            # apply by id
+fleet-hub settings reject 5             # reject by id
+fleet-hub settings history work.recent_days [--limit N] [--json]
+```
+
+These read and write `state.db` directly, as the person at the console:
+an applied proposal is recorded with actor `person` and its id. Every write
+of a registered setting is kept in that history, whoever made it (5,000
+rows at most). A change that needs confirming (`gc.enabled`,
+`work.auto_tidy`, `decide.jev.*`) is never proposed: set it with
+`set_setting` yourself.
+
 **Work retention** (work graph M12.3). The GC tick deletes a row only when
 it is ended or done, older than its window, and nothing live points at it.
 `0` keeps a table forever.

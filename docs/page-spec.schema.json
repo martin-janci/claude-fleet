@@ -155,11 +155,6 @@
       "description": "The registered hand-written components. Each one is a debt: when the\ncatalog can express it (a data source plus an action), it is replaced\nand removed from this list.",
       "oneOf": [
         {
-          "description": "Work retention's dry-run preview and \"Sweep now\" (work graph M12.3;\n`WorkRetention.svelte`). Waits on actions (P4).",
-          "type": "string",
-          "const": "work_retention"
-        },
-        {
           "description": "\"Show what auto-tidy would do\": the tidy candidates the ticked\nreasons would act on (work graph M7.3; `AutoTidyPreview.svelte`).\nWaits on a `work.tidy` data source with a param from the page.",
           "type": "string",
           "const": "auto_tidy_preview"
@@ -361,6 +356,24 @@
           "required": [
             "type",
             "component"
+          ]
+        },
+        {
+          "description": "A button that runs a page action (`pages::actions`), then re-reads\nthe page's data items.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "action"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "action"
           ]
         },
         {

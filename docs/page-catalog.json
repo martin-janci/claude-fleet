@@ -1,5 +1,13 @@
 {
   "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
+  "actions": [
+    {
+      "command": "work_retention_sweep",
+      "help": "Delete what is past its window now, as the GC tick would: at most 2,000 rows per table, the rest over later sweeps.",
+      "id": "work.retention_sweep",
+      "label": "Sweep now"
+    }
+  ],
   "layouts": [
     {
       "id": "category",
@@ -7,6 +15,8 @@
         "field",
         "stat",
         "record",
+        "table",
+        "action",
         "notice",
         "link",
         "custom"
@@ -57,6 +67,7 @@
         "record",
         "table",
         "chart",
+        "action",
         "notice",
         "link"
       ],
@@ -1865,6 +1876,69 @@
         }
       ],
       "shape": "rows"
+    },
+    {
+      "columns": [
+        {
+          "id": "kept",
+          "label": "Kept",
+          "ty": "text"
+        },
+        {
+          "id": "days",
+          "label": "Window (days, 0 = forever)",
+          "ty": "int"
+        },
+        {
+          "id": "rows",
+          "label": "Rows",
+          "ty": "int"
+        },
+        {
+          "id": "would_delete",
+          "label": "Would delete now",
+          "ty": "int"
+        }
+      ],
+      "help": "Per swept table: its window, its rows, and what a sweep would delete now (a dry run).",
+      "id": "work.retention",
+      "label": "Work retention",
+      "params": [],
+      "shape": "rows"
+    },
+    {
+      "fields": [
+        {
+          "id": "at",
+          "label": "Last sweep",
+          "ty": "time"
+        },
+        {
+          "id": "journal",
+          "label": "Journal entries",
+          "ty": "int"
+        },
+        {
+          "id": "tracker_items",
+          "label": "Done tickets",
+          "ty": "int"
+        },
+        {
+          "id": "timeline_work_events",
+          "label": "Timeline events",
+          "ty": "int"
+        },
+        {
+          "id": "tracker_writes",
+          "label": "PR links",
+          "ty": "int"
+        }
+      ],
+      "help": "When the last sweep ran and what it deleted.",
+      "id": "work.retention_last",
+      "label": "Last retention sweep",
+      "params": [],
+      "shape": "record"
     }
   ],
   "spec": "fleet.page/1",

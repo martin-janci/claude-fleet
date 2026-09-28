@@ -631,7 +631,20 @@ Index by area (names only; see the reference for details):
   value, `modified`, tags, danger, restart, AI policy, `owned_by` and option
   labels. This is the list `docs/settings-reference.md` is generated from.
   A write emits `settings:changed { key }`. Like `work:*`, it never reaches
-  a per-host token or an org-bound client.
+  a per-host token or an org-bound client. Every write of a registered key
+  is audited (who: `person`, `agent` for this API, or `system`; before →
+  after; the proposal it applied), and the desktop shows it as each
+  field's **History** (declarative pages P5).
+  `set_setting { propose: true, why? }` writes nothing: it validates the
+  value like a write and leaves a **proposal** a person applies or rejects
+  (Settings → Proposed changes on a standalone desktop, `fleet-hub
+  settings proposals | apply | reject` on a hub). Use it when a person
+  should decide — the work graph's rule R11 applied to settings. A key
+  whose AI policy is `never` (every change that needs confirming, and
+  every read-only key) cannot be proposed: `E_FORBIDDEN`. A value the key
+  already has is `E_INVALID`; a newer proposal for a key replaces its
+  pending one, and at most 50 wait (`E_RATE_LIMITED`). `why` is at most
+  500 characters and shown to the person as written.
 
   The ticks and sweeps read their settings every pass, so a change takes
   effect on the next one. On a hub, this is how `reports.*` and `work.*`,

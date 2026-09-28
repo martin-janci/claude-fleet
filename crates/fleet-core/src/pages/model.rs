@@ -164,6 +164,9 @@ pub enum Item {
     /// capped at [`crate::pages::catalog::MAX_CUSTOM`] uses across all
     /// pages.
     Custom { component: CustomComponent },
+    /// A button that runs a page action (`pages::actions`), then re-reads
+    /// the page's data items.
+    Action { action: String },
     /// A link to another page.
     Link {
         page: String,
@@ -208,9 +211,6 @@ pub enum Widget {
 #[schemars(crate = "rmcp::schemars")]
 #[serde(rename_all = "snake_case")]
 pub enum CustomComponent {
-    /// Work retention's dry-run preview and "Sweep now" (work graph M12.3;
-    /// `WorkRetention.svelte`). Waits on actions (P4).
-    WorkRetention,
     /// "Show what auto-tidy would do": the tidy candidates the ticked
     /// reasons would act on (work graph M7.3; `AutoTidyPreview.svelte`).
     /// Waits on a `work.tidy` data source with a param from the page.

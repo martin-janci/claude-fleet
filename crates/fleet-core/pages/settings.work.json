@@ -122,8 +122,20 @@
               "key": "work.retention.timeline_work_events_days"
             },
             {
-              "type": "custom",
-              "component": "work_retention"
+              "type": "table",
+              "source": {
+                "id": "work.retention"
+              }
+            },
+            {
+              "type": "record",
+              "source": {
+                "id": "work.retention_last"
+              }
+            },
+            {
+              "type": "action",
+              "action": "work.retention_sweep"
             }
           ]
         }

@@ -98,6 +98,8 @@ describe('formatting', () => {
     expect(formatCell('int', 1234)).toBe('1,234');
     expect(formatCell('day', '2026-09-27')).toBe('2026-09-27');
     expect(formatCell('text', null)).toBe('—');
+    expect(formatCell('time', null)).toBe('never');
+    expect(formatCell('time', 1000 - 7200, 1000)).toBe('2 h ago');
   });
 });
 

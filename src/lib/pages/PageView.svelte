@@ -9,13 +9,21 @@
   import DataItem from './DataItem.svelte';
   import Disclosure from './Disclosure.svelte';
   import Tabs from './Tabs.svelte';
-  import WorkRetention from '../WorkRetention.svelte';
   import AutoTidyPreview from '../AutoTidyPreview.svelte';
   import ResourcePage from './ResourcePage.svelte';
   import ReviewApply from './ReviewApply.svelte';
+  import PageActionButton from './PageActionButton.svelte';
   import type { SettingProposal } from './review';
   import type { ResourceType } from './resources';
-  import { evalCondition, sectionsOf, type Descriptor, type Page, type Section, type SourceSpec } from './pages';
+  import {
+    evalCondition,
+    sectionsOf,
+    type Descriptor,
+    type Page,
+    type PageAction,
+    type Section,
+    type SourceSpec,
+  } from './pages';
 
   let {
     page,
@@ -24,6 +32,7 @@
     values,
     sources,
     resources = [],
+    actions = [],
     focusKey = null,
     readonly = false,
     reason = null,
@@ -37,6 +46,8 @@
     values: Record<string, string>;
     sources: SourceSpec[];
     resources?: ResourceType[];
+    /** The page actions an `action` item names. */
+    actions?: PageAction[];
     /** Why the page is read-only (a paired desktop), for a resource page. */
     reason?: string | null;
     /** A setting to bring into view and highlight (a search hit). */
@@ -52,6 +63,8 @@
   } = $props();
 
   const proposalOf = $derived(new Map(proposals.map((p) => [p.key, p])));
+  /** Bumped after a page action ran: every data item re-reads. */
+  let dataTick = $state(0);
 
   const tabs = $derived((page.tabs ?? []).filter((t) => evalCondition(t.when, values)));
   let tab = $state(0);
@@ -154,13 +167,14 @@
       {:else if item.type === 'custom'}
         {#if readonly}
           <!-- Custom components call local-only commands; nothing to show. -->
-        {:else if item.component === 'work_retention'}
-          <WorkRetention />
         {:else if item.component === 'auto_tidy_preview'}
           <AutoTidyPreview />
         {/if}
+      {:else if item.type === 'action'}
+        {@const action = actions.find((a) => a.id === item.action)}
+        {#if action && !readonly}<PageActionButton {action} onran={() => dataTick++} />{/if}
       {:else if !readonly}
-        <DataItem {item} spec={sourceOf(item.source.id)} />
+        <DataItem {item} spec={sourceOf(item.source.id)} tick={dataTick} />
       {/if}
     {/each}
   </div>

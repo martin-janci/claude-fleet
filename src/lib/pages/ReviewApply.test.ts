@@ -98,10 +98,17 @@ describe('the review page (review_apply)', () => {
   it('leaves a value that moved since it was proposed unticked, and applies only what is ticked', async () => {
     show('settings.review', [
       proposal(),
-      proposal({ id: 2, key: 'playbooks.press_enter', value: 'true', before: 'false', current: 'true' }),
+      proposal({ id: 2, key: 'playbooks.press_enter', value: 'true', before: 'false', current: 'false' }),
+      proposal({ id: 3, key: 'usage.enabled', value: 'false', before: 'true', current: 'false' }),
+      proposal({ id: 4, key: 'work.tidy_done_days', value: '5', before: '7', current: '9' }),
     ]);
-    expect(screen.getByTestId('review-moved-playbooks.press_enter').textContent).toContain('it was Off');
-    expect((screen.getByTestId('review-tick-playbooks.press_enter') as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByTestId('review-moved-work.tidy_done_days').textContent).toContain('it was 7 days');
+    expect((screen.getByTestId('review-tick-work.tidy_done_days') as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByTestId('review-moved-usage.enabled').textContent).toContain('Already set');
+    // playbooks.press_enter has not moved; shorten the list to the moved case:
+    expect(screen.queryByTestId('review-moved-playbooks.press_enter')).toBeNull();
+    expect((screen.getByTestId('review-tick-usage.enabled') as HTMLInputElement).checked).toBe(false);
+    await fireEvent.click(screen.getByTestId('review-tick-playbooks.press_enter'));
     await fireEvent.click(screen.getByTestId('review-apply-selected'));
     await waitFor(() => expect(decided).toEqual([{ accept: [1], reject: [] }]));
     await waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Proposed changes: applied 1'));

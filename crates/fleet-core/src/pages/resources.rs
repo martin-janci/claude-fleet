@@ -568,7 +568,8 @@ pub fn resource(id: &str) -> Option<&'static ResourceType> {
     RESOURCES.iter().find(|r| r.id == id)
 }
 
-/// Every desktop command a resource names, for the handler-list check.
+/// Every desktop command a resource or a page action names, for the
+/// handler-list check.
 pub fn commands() -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
     for r in RESOURCES {
@@ -580,6 +581,7 @@ pub fn commands() -> Vec<&'static str> {
             out.extend(["flow_start", "flow_submit", "flow_back", "flow_cancel"]);
         }
     }
+    out.extend(super::actions::PAGE_ACTIONS.iter().map(|a| a.command));
     out.sort_unstable();
     out.dedup();
     out
@@ -740,6 +742,7 @@ mod tests {
                 "test_tracker",
                 "update_org",
                 "update_tracker",
+                "work_retention_sweep",
             ]
         );
     }

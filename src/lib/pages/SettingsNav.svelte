@@ -4,7 +4,16 @@
   // setting's label, key, help and tags. `@modified` lists what is off its
   // default; `@tag:experimental` and the like filter by tag. A hit opens the
   // setting's page and tab and highlights it.
-  import { childrenOf, searchSettings, type Descriptor, type Page } from './pages';
+  //
+  // P5: a command in plain words ("set recent work to 3 days", "turn on
+  // press enter") becomes one confirm row, now → new; Enter or Apply writes
+  // it as the person, and a setting that needs confirming asks first.
+  import ConfirmDialog from '../ConfirmDialog.svelte';
+  import { setFleetSetting, type SettingKey } from '../fleet_settings';
+  import { push } from '../toasts';
+  import { childrenOf, homeOf, searchSettings, type Descriptor, type Page } from './pages';
+  import { valueInWords } from './review';
+  import { interpret } from './settings_nl';
 
   let {
     pages,
@@ -12,6 +21,7 @@
     values,
     selected,
     counts = {},
+    canWrite = false,
     onselect,
   }: {
     pages: Page[];
@@ -21,11 +31,41 @@
     selected: string;
     /** A badge by a page's name: proposals waiting for review. */
     counts?: Record<string, number>;
+    /** This app owns the fleet: a plain-words command may change a setting. */
+    canWrite?: boolean;
     onselect: (view: string, focusKey?: string) => void;
   } = $props();
 
   let query = $state('');
   const hits = $derived(searchSettings(query, pages, descs, values));
+  const nl = $derived(canWrite ? interpret(query, descs.values()) : null);
+  const change = $derived(nl?.kind === 'change' ? nl : null);
+  const unchanged = $derived(change !== null && (values[change.d.key] ?? change.d.value) === change.value);
+
+  let busy = $state(false);
+  let confirming = $state(false);
+  let nlError = $state<string | null>(null);
+
+  async function applyChange(confirmed = false) {
+    if (!change || unchanged || busy) return;
+    if (!confirmed && change.d.danger.level === 'confirm') {
+      confirming = true;
+      return;
+    }
+    const { d, value } = change;
+    busy = true;
+    nlError = null;
+    const r = await setFleetSetting(d.key as SettingKey, value);
+    busy = false;
+    if (!r.ok) {
+      nlError = r.error.message;
+      return;
+    }
+    push({ kind: 'success', message: `${d.label}: ${valueInWords(d, value)}` });
+    query = '';
+    const home = homeOf(pages, d.key);
+    if (home) onselect(home.page, d.key);
+  }
 
   // General first, then the Settings overview and its pages in list order,
   // then any other top-level page (Usage).
@@ -44,6 +84,8 @@
     if (e.key === 'Escape' && query) {
       e.stopPropagation();
       query = '';
+    } else if (e.key === 'Enter' && change) {
+      void applyChange();
     } else if (e.key === 'Enter' && hits[0]) {
       onselect(hits[0].page, hits[0].key);
     }
@@ -59,7 +101,43 @@
     data-testid="settings-search"
     bind:value={query}
     onkeydown={onKey} />
-  {#if query.trim()}
+  {#if nl}
+    <div class="nl" data-testid="settings-nl" aria-live="polite">
+      {#if nl.kind === 'change'}
+        <div class="nl-change" data-testid="settings-nl-change">
+          <span class="nl-label">{nl.d.label}</span>
+          <span class="nl-diff">
+            <span class="before">{valueInWords(nl.d, values[nl.d.key] ?? nl.d.value)}</span> →
+            <strong>{valueInWords(nl.d, nl.value)}</strong>
+          </span>
+        </div>
+        {#if unchanged}
+          <p class="nl-note">Already set.</p>
+        {:else}
+          <button type="button" class="btn btn--primary" disabled={busy} data-testid="settings-nl-apply" onclick={() => void applyChange()}
+            >Apply</button
+          >
+          <span class="nl-note">or press Enter</span>
+        {/if}
+      {:else if nl.kind === 'ambiguous'}
+        <p class="nl-note">Which setting?</p>
+        <ul>
+          {#each nl.options as d (d.key)}
+            {@const home = homeOf(pages, d.key)}
+            <li>
+              <button type="button" data-testid={`settings-nl-option-${d.key}`} onclick={() => home && onselect(home.page, d.key)}
+                >{d.label}</button
+              >
+            </li>
+          {/each}
+        </ul>
+      {:else}
+        <p class="nl-note err" data-testid="settings-nl-error">{nl.message}</p>
+      {/if}
+      {#if nlError}<p class="nl-note err" role="alert">{nlError}</p>{/if}
+    </div>
+  {/if}
+  {#if query.trim() && !nl}
     <ul class="hits" data-testid="settings-search-hits">
       {#each hits as h (h.key)}
         <li>
@@ -72,7 +150,7 @@
         <li class="none">No setting matches.</li>
       {/each}
     </ul>
-  {:else}
+  {:else if !nl}
     <ul class="tree">
       {#each entries as e (e.id)}
         <li>
@@ -91,6 +169,20 @@
     </ul>
   {/if}
 </nav>
+
+{#if confirming && change}
+  <ConfirmDialog
+    title={change.d.label}
+    message={change.d.danger.level === 'confirm' ? change.d.danger.message : ''}
+    confirmLabel="Change it"
+    danger
+    confirmTestId="settings-nl-confirm"
+    onconfirm={() => {
+      confirming = false;
+      void applyChange(true);
+    }}
+    oncancel={() => (confirming = false)} />
+{/if}
 
 <style>
   .settings-nav {
@@ -157,5 +249,36 @@
     background: var(--accent);
     color: var(--bg);
     font-size: 0.7rem;
+  }
+  .nl {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.4rem 0.45rem;
+    border: 1px dashed var(--accent);
+    border-radius: var(--radius-sm);
+    font-size: 0.78rem;
+  }
+  .nl-change {
+    flex-basis: 100%;
+  }
+  .nl-label {
+    font-weight: 600;
+    display: block;
+  }
+  .nl-diff .before {
+    text-decoration: line-through;
+    color: var(--fg-muted);
+  }
+  .nl-note {
+    margin: 0;
+    color: var(--fg-muted);
+  }
+  .nl-note.err {
+    color: var(--usage-crit);
+  }
+  .nl ul {
+    flex-basis: 100%;
   }
 </style>

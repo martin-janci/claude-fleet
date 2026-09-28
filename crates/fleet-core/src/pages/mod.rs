@@ -14,6 +14,7 @@
 //! guide; `docs/page-spec.schema.json` and `docs/page-catalog.json` are
 //! generated for editors and agents (`REGEN_PAGE_DOCS=1`).
 
+pub mod actions;
 pub mod catalog;
 pub mod flows;
 pub mod model;

@@ -74,12 +74,13 @@ page tree. `id` is dotted lowercase and is also the page's deep link.
 
 | Layout | For | Items it holds |
 |---|---|---|
-| `category` | Settings in sections, saved as you change them | `field`, `stat`, `record`, `notice`, `link`, `custom` |
+| `category` | Settings in sections, saved as you change them | `field`, `stat`, `record`, `table`, `action`, `notice`, `link`, `custom` |
 | `cards` | An overview: numbers and links | `stat`, `record`, `notice`, `link` |
-| `data_page` | Stats, charts and tables | `stat`, `record`, `table`, `chart`, `notice`, `link` |
+| `data_page` | Stats, charts and tables | `stat`, `record`, `table`, `chart`, `action`, `notice`, `link` |
 | `master_detail` | A list of a resource's records beside one record's editor | `field` (naming a field of the resource), `notice`, `custom`; `list_items` above the list: `notice`, `custom` |
 | `flow` | A server-driven wizard (see *Flows*); not a page of its own yet, launched by a resource's `create_flow` | — |
-| `object_editor`, `review_apply` | One object on its own page, reviewing proposed changes | Not yet (design P5) |
+| `review_apply` | Reviewing proposed changes (see *Proposals*); names its `review` | `notice`, `link`; sections are optional |
+| `object_editor` | One object on its own page | Not yet |
 
 ### Items
 
@@ -93,8 +94,9 @@ Every item is an object tagged by `type`:
 | `table` | `source`, optional `columns` | A rows source; `columns` picks and orders columns |
 | `chart` | `source`, `chart` (`line` / `bar` / `stacked_bar` / `sparkline`), optional `title` | A series source |
 | `notice` | `tone` (`info` / `warn` / `danger`), `text` | Plain text, 300 characters at most |
+| `action` | `action` | A button that runs a page action (see *Page actions*), then re-reads the page's data items. Hidden on a read-only page |
 | `link` | `page`, optional `label` | Another page's id |
-| `custom` | `component` (`work_retention` / `auto_tidy_preview` / `org_suggestions` / `tracker_extras`) | A hand-written component registered in code: the one escape hatch, capped at four uses across all pages (`MAX_CUSTOM`; design P5 pays it back). Replace one with a data source and an action when the catalog can express it |
+| `custom` | `component` (`auto_tidy_preview` / `org_suggestions` / `tracker_extras`) | A hand-written component registered in code: the one escape hatch, capped at three uses across all pages (`MAX_CUSTOM`). Replace one with a data source and an action when the catalog can express it, as P5 did for work retention |
 
 A `source` is `{ "id": "usage.by_day", "params": { "days": 30 } }`. Parameters
 are literals, checked against the source's declared parameters.
@@ -197,6 +199,47 @@ record's id and only the fields that changed, after asking any `confirm`.
 Discard drops the draft. A list changes item by item through its actions,
 and removing a record is always confirmed. A failed command becomes a toast,
 and the list is re-read either way.
+
+### Page actions
+
+A page action (`crates/fleet-core/src/pages/actions.rs`, `PAGE_ACTIONS`) is
+a button that runs one existing desktop command with no arguments: an
+`id`, a `label`, the `command`, one sentence of `help`, and an optional
+`confirm`. A page places it with `{ "type": "action", "action":
+"work.retention_sweep" }`; after it runs, the page's data items read their
+sources again. Like a resource's actions it names a command, never code
+(`resource_commands_exist` checks it), so the command's hub verdict applies
+and a read-only page shows no button. Work retention on the Work page is
+the first: the `work.retention` table, the `work.retention_last` record
+and *Sweep now*, where a hand-written component was before.
+
+### Proposals (`review_apply`) and history
+
+An agent proposes a settings change with `set_setting { propose: true,
+why }` (control API); nothing is written until a person decides
+(`service/settings_review.rs`, migration 072). A `review_apply` page names
+what it reviews — `"review": "settings"` is the one source — and lists the
+pending proposals grouped by the page each setting lives on, as now →
+proposed with who and why. A row whose value moved since it was proposed,
+or whose setting needs confirming, starts unticked; **Apply selected** and
+**Reject selected** decide the ticked ones, each on its own. Every page
+also shows a field's own proposal inline (✓ Apply, ✗ Not this, Why?), and
+every field has a **History** of its writes (`setting_history`: who,
+before → after, the proposal). A key whose AI policy is `never` — every
+confirmed change, every read-only key — cannot be proposed.
+
+### Search as a command
+
+The Settings search takes a command in plain words: `set recent work to 3
+days`, `change keep lost sessions to 2 days`, `turn on press enter`,
+`disable collect token usage` (`src/lib/pages/settings_nl.ts`). The words
+are matched against the registry's labels and keys and the value is parsed
+by the setting's own kind (on / off, a number in the unit the field shows
+or with its own unit, an option's name or label), so only a declared key
+and a value it can hold come out. It shows one row, now → new; Enter or
+**Apply** writes it as the person, and a setting that needs confirming asks
+first. When the words fit several settings about as well, it lists them
+instead of guessing. No model is involved.
 
 ### Flows
 

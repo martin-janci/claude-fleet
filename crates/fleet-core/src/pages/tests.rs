@@ -238,9 +238,9 @@ fn a_resource_belongs_to_master_detail_only() {
 
 #[test]
 fn custom_items_are_capped() {
-    let item = json!({ "type": "custom", "component": "work_retention" });
-    let p = category(json!([item, item, item, item, item]));
-    assert!(messages(&[p]).contains("over the cap of 4"));
+    let item = json!({ "type": "custom", "component": "auto_tidy_preview" });
+    let p = category(json!([item, item, item, item]));
+    assert!(messages(&[p]).contains("over the cap of 3"));
 }
 
 #[test]
@@ -362,6 +362,7 @@ fn render_catalog() -> String {
         "settings": settings,
         "sources": SOURCES,
         "resources": super::resources::RESOURCES,
+        "actions": super::actions::PAGE_ACTIONS,
     });
     serde_json::to_string_pretty(&v).unwrap() + "\n"
 }
@@ -381,6 +382,7 @@ fn render_frontend_fixture() -> String {
         "pages": super::all(),
         "sources": SOURCES,
         "resources": super::resources::RESOURCES,
+        "actions": super::actions::PAGE_ACTIONS,
         "descriptors": crate::service::settings::describe(&s),
     });
     serde_json::to_string_pretty(&v).unwrap() + "\n"
@@ -463,4 +465,12 @@ fn a_review_page_names_its_review_and_needs_no_sections() {
     }));
     let m = messages(&[field]);
     assert!(m.contains("ReviewApply page cannot hold a `field`"), "{m}");
+}
+
+#[test]
+fn an_action_item_names_a_page_action() {
+    let ok = category(json!([{ "type": "action", "action": "work.retention_sweep" }]));
+    assert_eq!(messages(&[ok]), "");
+    let bad = category(json!([{ "type": "action", "action": "work.nuke" }]));
+    assert!(messages(&[bad]).contains("`work.nuke` is not a page action"));
 }

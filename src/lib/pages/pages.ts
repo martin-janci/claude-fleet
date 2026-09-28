@@ -48,7 +48,7 @@ export interface SourceRef {
   params?: Record<string, unknown>;
 }
 
-export type CustomComponent = 'work_retention' | 'auto_tidy_preview' | 'org_suggestions' | 'tracker_extras';
+export type CustomComponent = 'auto_tidy_preview' | 'org_suggestions' | 'tracker_extras';
 
 export type Item =
   | { type: 'field'; key: string; widget?: Widget; hint?: string; when?: Condition }
@@ -58,6 +58,7 @@ export type Item =
   | { type: 'chart'; source: SourceRef; chart: 'line' | 'bar' | 'stacked_bar' | 'sparkline'; title?: string }
   | { type: 'notice'; tone: 'info' | 'warn' | 'danger'; text: string }
   | { type: 'custom'; component: CustomComponent }
+  | { type: 'action'; action: string }
   | { type: 'link'; page: string; label?: string };
 
 export interface Section {
@@ -94,7 +95,7 @@ export interface Page {
 
 // ── data sources (`pages/sources.rs`) ──
 
-export type ColType = 'text' | 'int' | 'tokens' | 'usd_micros' | 'day';
+export type ColType = 'text' | 'int' | 'tokens' | 'usd_micros' | 'day' | 'time';
 
 export interface Column {
   id: string;
@@ -110,10 +111,21 @@ export type SourceShape =
 
 export type SourceSpec = { id: string; label: string; help: string } & SourceShape;
 
+/** A button on a page (`pages/actions.rs`): one existing command, no
+ *  arguments; the page's data items are re-read after it. */
+export interface PageAction {
+  id: string;
+  label: string;
+  command: string;
+  help: string;
+  confirm?: string;
+}
+
 export interface PagesBundle {
   pages: Page[];
   sources: SourceSpec[];
   resources: ResourceType[];
+  actions: PageAction[];
 }
 
 // ── the settings registry (`service/settings.rs` `Descriptor`) ──
@@ -162,7 +174,7 @@ export interface Descriptor {
 
 // ── stores ──
 
-export const pagesBundle = writable<PagesBundle>({ pages: [], sources: [], resources: [] });
+export const pagesBundle = writable<PagesBundle>({ pages: [], sources: [], resources: [], actions: [] });
 export const descriptors = writable<Map<string, Descriptor>>(new Map());
 
 export async function loadPages(): Promise<Result<PagesBundle>> {
@@ -349,8 +361,16 @@ export function searchSettings(
 
 // ── formatting data ──
 
-export function formatCell(ty: ColType, v: unknown): string {
+export function formatCell(ty: ColType, v: unknown, now = Math.floor(Date.now() / 1000)): string {
+  if (ty === 'time' && (v === null || v === undefined)) return 'never';
   if (v === null || v === undefined) return '—';
+  if (ty === 'time') {
+    const d = Math.max(0, now - Number(v));
+    if (d < 60) return 'just now';
+    if (d < 3600) return `${Math.floor(d / 60)} min ago`;
+    if (d < 86_400) return `${Math.floor(d / 3600)} h ago`;
+    return `${Math.floor(d / 86_400)} d ago`;
+  }
   switch (ty) {
     case 'usd_micros': {
       const usd = Number(v) / 1_000_000;

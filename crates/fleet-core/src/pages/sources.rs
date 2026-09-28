@@ -4,10 +4,11 @@
 //! and a `table` gets rows before anything runs. A page can never run a
 //! query of its own: it names a source here, with literal parameters.
 //!
-//! Access: every source below reads the whole fleet's usage, so it is for
-//! the process that owns the fleet (a standalone desktop, or a master token
-//! on a hub), exactly like `usage_report`. An org-scoped variant is a new
-//! source, not a parameter.
+//! Access: every source below reads the whole fleet (its usage, its work
+//! graph's retention), so it is for the process that owns the fleet (a
+//! standalone desktop, or a master token on a hub), exactly like
+//! `usage_report` and `work_admin`. An org-scoped variant is a new source,
+//! not a parameter.
 
 use crate::ipc_error::{codes, IpcError};
 use crate::service::usage;
@@ -27,6 +28,8 @@ pub enum ColType {
     UsdMicros,
     /// `YYYY-MM-DD`.
     Day,
+    /// Unix seconds, shown as how long ago; `null` is "never".
+    Time,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -169,6 +172,35 @@ pub const SOURCES: &[SourceSpec] = &[
         },
         params: &[HOST_PARAM],
     },
+    SourceSpec {
+        id: "work.retention",
+        label: "Work retention",
+        help: "Per swept table: its window, its rows, and what a sweep would delete now (a dry run).",
+        shape: Shape::Rows {
+            columns: &[
+                col("kept", "Kept", ColType::Text),
+                col("days", "Window (days, 0 = forever)", ColType::Int),
+                col("rows", "Rows", ColType::Int),
+                col("would_delete", "Would delete now", ColType::Int),
+            ],
+        },
+        params: &[],
+    },
+    SourceSpec {
+        id: "work.retention_last",
+        label: "Last retention sweep",
+        help: "When the last sweep ran and what it deleted.",
+        shape: Shape::Record {
+            fields: &[
+                col("at", "Last sweep", ColType::Time),
+                col("journal", "Journal entries", ColType::Int),
+                col("tracker_items", "Done tickets", ColType::Int),
+                col("timeline_work_events", "Timeline events", ColType::Int),
+                col("tracker_writes", "PR links", ColType::Int),
+            ],
+        },
+        params: &[],
+    },
 ];
 
 pub fn source(id: &str) -> Option<&'static SourceSpec> {
@@ -219,6 +251,16 @@ pub fn resolve_params(
         }
     }
     Ok(out)
+}
+
+/// A swept table as a person names it.
+fn retention_label(table: &str) -> &str {
+    match table {
+        "work_journal" => "Work journal",
+        "work_items" => "Done tickets",
+        "session_events" => "Work timeline",
+        other => other,
+    }
 }
 
 fn totals_json(t: &UsageTotals) -> Map<String, Value> {
@@ -312,6 +354,34 @@ pub fn fetch(
                     })
                     .collect(),
             ))
+        }
+        "work.retention" => {
+            let st = crate::service::work::retention::status_locked(s, now)?;
+            Ok(Value::Array(
+                st.tables
+                    .iter()
+                    .map(|t| {
+                        json!({
+                            "kept": retention_label(&t.table),
+                            "days": t.days,
+                            "rows": t.rows,
+                            "would_delete": t.would_delete,
+                        })
+                    })
+                    .collect(),
+            ))
+        }
+        "work.retention_last" => {
+            let st = crate::service::work::retention::status_locked(s, now)?;
+            let at = st.last_sweep.as_ref().map(|l| l.at);
+            let l = st.last_sweep.unwrap_or_default();
+            Ok(json!({
+                "at": at,
+                "journal": l.journal,
+                "tracker_items": l.tracker_items,
+                "timeline_work_events": l.timeline_work_events,
+                "tracker_writes": l.tracker_writes,
+            }))
         }
         other => Err(IpcError::new(
             codes::E_INTERNAL,

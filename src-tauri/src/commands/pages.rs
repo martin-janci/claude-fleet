@@ -19,6 +19,7 @@ pub struct PagesBundle {
     pub pages: &'static [Page],
     pub sources: &'static [sources::SourceSpec],
     pub resources: &'static [resources::ResourceType],
+    pub actions: &'static [fleet_core::pages::actions::PageAction],
 }
 
 /// The page specs this build ships. Compiled into the binary, so the answer
@@ -29,6 +30,7 @@ pub fn list_pages() -> PagesBundle {
         pages: pages::all(),
         sources: sources::SOURCES,
         resources: resources::RESOURCES,
+        actions: fleet_core::pages::actions::PAGE_ACTIONS,
     }
 }
 

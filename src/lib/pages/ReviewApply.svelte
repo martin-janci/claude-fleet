@@ -121,7 +121,9 @@
                   <span aria-hidden="true">→</span>
                   <span class="after">{valueInWords(d, p.value)}</span>
                 </div>
-                {#if moved(p)}
+                {#if p.current === p.value}
+                  <p class="note" data-testid={`review-moved-${p.key}`}>Already set to this since it was proposed: reject it to clear it.</p>
+                {:else if moved(p)}
                   <p class="note warn" data-testid={`review-moved-${p.key}`}>
                     Changed since it was proposed (it was {valueInWords(d, p.before)}).
                   </p>
