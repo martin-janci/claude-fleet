@@ -54,12 +54,17 @@ impl Store {
     pub fn tidy_sessions(&self) -> Result<Vec<TidySession>, IpcError> {
         let rows = self.list_all_sessions()?;
         let mut links: HashMap<i64, TidyLink> = HashMap::new();
+        // The primary link's item, for the merged-PR stamp below — the same
+        // read that already resolves `i.*` for `TidyLink`, so this adds no
+        // second scan of `work_links` / `work_items`.
+        let mut link_items: HashMap<i64, Option<i64>> = HashMap::new();
         {
             let mut stmt = self.conn.prepare(
                 "SELECT p.session_id, l.id, COALESCE(i.key, l.ref_key), i.status_category, \
                         i.status_name, i.resolution, i.status_changed_at, l.archived_at, \
                         l.tidy_snoozed_until, l.tidy_never, \
-                        COALESCE((SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id), CASE WHEN i.tracker_id IS NULL THEN i.org_id END) \
+                        COALESCE((SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id), CASE WHEN i.tracker_id IS NULL THEN i.org_id END), \
+                        l.item_id \
                  FROM work_links l \
                  JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
                  LEFT JOIN work_items i ON i.id = l.item_id \
@@ -81,11 +86,13 @@ impl Store {
                         never: r.get::<_, i64>(9)? != 0,
                         org_id: r.get(10)?,
                     },
+                    r.get::<_, Option<i64>>(11)?,
                 ))
             })?;
             for row in it {
-                let (sid, l) = row?;
+                let (sid, l, item_id) = row?;
                 links.insert(sid, l);
+                link_items.insert(sid, item_id);
             }
         }
         // ANY live confirmed link to an in-progress item protects a session,
@@ -182,8 +189,7 @@ impl Store {
             .flat_map(|t| [t.worker_session_id, t.requester_session_id])
             .flatten()
             .collect();
-        Ok(rows
-            .into_iter()
+        rows.into_iter()
             .map(|row| {
                 let (touch, signals, branch) = extra.remove(&row.id).unwrap_or_default();
                 let pr_merged = signals
@@ -192,8 +198,17 @@ impl Store {
                         serde_json::from_str::<crate::service::work::detect::PrSignals>(s).ok()
                     })
                     .is_some_and(|s| s.is_merged());
+                // A merged PR stamps its linked local item `done`, once (see
+                // `Store::stamp_derived_done`): the signal lives on this
+                // session's `pr_signals` and would be lost once the session
+                // is swept, so it is written here rather than recomputed.
+                if pr_merged {
+                    if let Some(item_id) = link_items.get(&row.id).copied().flatten() {
+                        self.stamp_derived_done(item_id)?;
+                    }
+                }
                 let (snoozed_until, never) = flags.remove(&row.id).unwrap_or_default();
-                TidySession {
+                Ok(TidySession {
                     link: links.remove(&row.id),
                     in_progress: in_progress.contains(&row.id),
                     snoozed_until,
@@ -205,9 +220,9 @@ impl Store {
                     any_link: any_link.contains(&row.id),
                     kept_until: kept.get(&row.id).copied(),
                     row,
-                }
+                })
             })
-            .collect())
+            .collect()
     }
 
     /// Keep a session out of tidy-up until `until` (work graph M11.3): a

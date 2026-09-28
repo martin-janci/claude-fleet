@@ -59,6 +59,38 @@ impl Store {
         )?;
         self.get_work_item(item_id)
     }
+
+    /// Record that a local item's work was delivered, once.
+    ///
+    /// Stamped rather than computed because the merged-PR signal lives on
+    /// `sessions.pr_signals` and dies with its session: a computed `done` would
+    /// silently revert to `todo` once the work's session was swept, which is
+    /// the worst behaviour for the one status a release depends on.
+    ///
+    /// Returns whether it wrote. It never overrides a person (`status_set_by =
+    /// 'person'`), never touches a tracker item, and never writes twice — so a
+    /// tidy pass may call it every tick without emitting an event per tick.
+    pub fn stamp_derived_done(&self, item_id: i64) -> Result<bool, IpcError> {
+        let wrote = self.conn.execute(
+            "UPDATE work_items SET status_category = 'done', status_set_by = 'derived', \
+             status_set_at = ?1, updated_at = ?1 \
+             WHERE id = ?2 AND source = 'local' \
+               AND COALESCE(status_set_by, '') <> 'person' \
+               AND NOT (status_category = 'done' AND status_set_by = 'derived')",
+            rusqlite::params![now_unix(), item_id],
+        )? == 1;
+        if wrote {
+            self.emit_work_item(
+                item_id,
+                super::tracker_items::SessionChange {
+                    primary: true,
+                    suggested: false,
+                    rejected: false,
+                },
+            )?;
+        }
+        Ok(wrote)
+    }
 }
 
 #[cfg(test)]

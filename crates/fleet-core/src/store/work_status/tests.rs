@@ -71,3 +71,73 @@ fn an_unknown_id_is_not_an_error() {
     let s = store();
     assert!(s.set_item_status(9_999, "done").unwrap().is_none());
 }
+
+/// A tracker item with no key still gets named in its refusal — by title,
+/// since `key.unwrap_or_else(|| title)` has no keyed fallback to lean on.
+#[test]
+fn a_keyless_tracker_items_refusal_names_it_by_title() {
+    let s = store();
+    let t = s
+        .add_tracker("jira", "Acme", "https://acme.atlassian.net")
+        .unwrap();
+    let item = s
+        .upsert_tracker_item(
+            t.id,
+            &TrackerItemWrite {
+                external_id: "1".into(),
+                key: None,
+                title: "untitled ticket".into(),
+                status_name: "To Do".into(),
+                status_category: "todo".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .id;
+    let e = s.set_item_status(item, "done").unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    assert!(
+        e.message.contains("untitled ticket"),
+        "the refusal must name the ticket by title: {}",
+        e.message
+    );
+}
+
+#[test]
+fn a_merged_pr_stamps_a_local_item_done() {
+    let s = store();
+    let id = name_local_item(&s, "auth refactor");
+    assert!(s.stamp_derived_done(id).unwrap());
+    let row = s.get_work_item(id).unwrap().unwrap();
+    assert_eq!(row.status_category, "done");
+    assert_eq!(row.status_set_by.as_deref(), Some("derived"));
+}
+
+#[test]
+fn a_persons_status_outranks_the_stamp() {
+    let s = store();
+    let id = name_local_item(&s, "auth refactor");
+    s.set_item_status(id, "in_progress").unwrap();
+    assert!(
+        !s.stamp_derived_done(id).unwrap(),
+        "the stamp must not write"
+    );
+    let row = s.get_work_item(id).unwrap().unwrap();
+    assert_eq!(row.status_category, "in_progress");
+    assert_eq!(row.status_set_by.as_deref(), Some("person"));
+}
+
+#[test]
+fn the_stamp_never_touches_a_tracker_item() {
+    let s = store();
+    let id = seed_tracker_item(&s, "ABC-1");
+    assert!(!s.stamp_derived_done(id).unwrap());
+}
+
+#[test]
+fn stamping_twice_writes_once() {
+    let s = store();
+    let id = name_local_item(&s, "x");
+    assert!(s.stamp_derived_done(id).unwrap());
+    assert!(!s.stamp_derived_done(id).unwrap(), "already done, no event");
+}
