@@ -731,7 +731,8 @@ impl FleetTools {
         write its hand-off. summarize {key, link_id}: \
         a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never \
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
-        kill when dirty). Work view: primary:false links a secondary; \
+        kill when dirty). set_status {item_id, status}: a person's status for \
+        work with no ticket. Work view: primary:false links a secondary; \
         expected_* guard (E_CONFLICT).")]
     pub(super) async fn work_link(
         &self,
@@ -898,6 +899,23 @@ impl FleetTools {
                     None,
                 )),
             };
+        }
+        if args.action == "set_status" {
+            // A person's status for work with no ticket (design
+            // 2026-09-28 §2). The fence is inside `set_status`: an item
+            // outside the scope answers as an unknown id, and a tracker
+            // item is `E_INVALID`, naming the ticket.
+            let item_id = args
+                .item_id
+                .ok_or_else(|| mcp_err("E_INVALID", "set_status needs item_id", None))?;
+            let status = args
+                .status
+                .as_deref()
+                .ok_or_else(|| mcp_err("E_INVALID", "set_status needs status", None))?;
+            return ok_json(
+                &crate::service::work::status::set_status(&self.store, &scope, item_id, status)
+                    .map_err(to_mcp_err)?,
+            );
         }
         if args.action == "tidy_apply" {
             let items = args.items.clone().unwrap_or_default();

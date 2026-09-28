@@ -2308,6 +2308,55 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Status (task 2, native item status): host A's own local item, set by
+    // whoever may see it; another host's answers as unknown — the same
+    // fence rename uses.
+    let unknown_item_status = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "set_status", "item_id": 999_999, "status": "done" }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "set_status",
+        move |_, _| json!({ "action": "set_status", "item_id": local_a, "status": "done" }),
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    same_as_unknown(a, &unknown_item_status, &local_a.to_string(), "999999")
+                }
+                _ => assert!(
+                    text(a).contains("\"status_category\":\"done\""),
+                    "{who:?}: {a:?}"
+                ),
+            }
+        },
+    )
+    .await;
+    // A ticket's status is not a person's to set here: refused for who
+    // sees it, unknown otherwise (`store::tracker_items` owns it).
+    m.row(
+        "work_link",
+        "set_status",
+        |fx, _| json!({ "action": "set_status", "item_id": fx.item_b, "status": "done" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostA | Who::HostNone | Who::BoundA => {
+                    is_code(who, a, "E_NOTFOUND", "another org's ticket")
+                }
+                _ => is_code(who, a, "E_INVALID", "a ticket"),
+            }
+        },
+    )
+    .await;
     m.row(
         "work",
         "local_items",

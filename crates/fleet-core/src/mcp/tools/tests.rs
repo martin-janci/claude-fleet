@@ -3259,9 +3259,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// measured apart never cover the merged surface, so a merge that trips
     /// this re-measures. The why of each raise belongs in its commit
     /// message (`git log -L` on this constant), not here: a log in this
-    /// comment conflicted on every merge. Measured at 63,473 on 2026-09-28
-    /// (`catalog_admin` over `new_session`'s `model` / `effort`).
-    const BUDGET_BYTES: usize = 63_573;
+    /// comment conflicted on every merge. Measured at 63,650 on 2026-09-28
+    /// (`work_link`'s `set_status` action, task 2 of native item status).
+    const BUDGET_BYTES: usize = 63_750;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
