@@ -2447,6 +2447,41 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     expect(names()).toHaveLength(1);
     expect(screen.queryByTestId('past-work-group')).toBeNull();
   });
+  it('the archived count matches a search the way the list does (project owner / repo, a sibling row)', async () => {
+    const live = { ...sessionFor(2, 'dev-a'), work: w('PAY-1', 1, 'in_progress') };
+    const parked = { ...sessionFor(2, 'dev-parked'), work: w('PAY-2', 2, 'done', 100) };
+    const other = { ...sessionFor(1, 'old-x'), work: w('PAY-3', 3, 'done', 100) };
+    mockBackend(fakeProjects, [live, parked, other]);
+    render(Sidebar);
+    await tick();
+    expect(await screen.findByTestId('archived-row')).toHaveTextContent('2 archived hidden');
+    // The repo matches: showing archived would list the whole project, so
+    // its archived row counts though its own name does not match.
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'pos-frontend' } });
+    await waitFor(() => expect(screen.getByTestId('archived-row')).toHaveTextContent('1 archived hidden'));
+    // A sibling row matches: the same.
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'nothing' } });
+    await waitFor(() => expect(screen.queryByTestId('archived-row')).toBeNull());
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'dev-a' } });
+    await waitFor(() => expect(screen.getByTestId('archived-row')).toHaveTextContent('1 archived hidden'));
+    await fireEvent.click(screen.getByTestId('archived-toggle'));
+    await tick();
+    expect(names().map((n) => n.includes('dev-parked') || n.includes('dev-a'))).toEqual([true, true]);
+  });
+
+  it('work mode: the archived count matches a work group the way the list does', async () => {
+    const live = { ...sessionFor(1, 'dev-a'), tags: ['PAY-7'] };
+    const parked = { ...sessionFor(1, 'dev-parked'), tags: ['PAY-7'], work: w('PAY-7', 7, 'done', 100) };
+    mockBackend(fakeProjects, [live, parked]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    expect(await screen.findByTestId('archived-row')).toHaveTextContent('1 archived hidden');
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'nothing' } });
+    await waitFor(() => expect(screen.queryByTestId('archived-row')).toBeNull());
+    // The group matches through its live row: showing archived lists both.
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'dev-a' } });
+    await waitFor(() => expect(screen.getByTestId('archived-row')).toHaveTextContent('1 archived hidden'));
+  });
 });
 
 describe('Sidebar filters: one set of rules for every section', () => {
