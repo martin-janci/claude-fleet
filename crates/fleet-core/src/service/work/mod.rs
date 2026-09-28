@@ -890,7 +890,7 @@ pub fn work_link_as<'a>(
                 .link_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "reconsider needs link_id"))?;
             checked_link(link_id)?;
-            s.reconsider_work_link(session_id, link_id)?;
+            s.reconsider_work_link(session_id, link_id, decider)?;
         }
         _ => {}
     }
