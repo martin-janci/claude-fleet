@@ -115,6 +115,7 @@
         {#if o.isolate_sessions}<span class="badge" data-testid="org-isolated">isolates sessions</span>{/if}
         {#if o.auto_tidy != null}<span class="badge" data-testid="org-auto-tidy-badge">auto-tidy {o.auto_tidy ? 'on' : 'off'}</span>{/if}
         {#if o.jev_allowed}<span class="badge" data-testid="org-jev-badge">sends to Jev</span>{/if}
+        {#if o.bound_sees_unassigned === false}<span class="badge" data-testid="org-bound-own-only" title="Devices bound to this org see only its own work and sessions">bound devices: own only</span>{/if}
         {#if owns}
           <input
             type="color"
@@ -250,6 +251,19 @@
                 )}
             />
             send to Jev
+          </label>
+          <label class="isolate" title="Devices paired to this org (fleet-hub pair --org) also see work and sessions that belong to no org, as a host does. Off: they see only this org's own.">
+            <input
+              type="checkbox"
+              data-testid="org-bound-sees-unassigned"
+              checked={o.bound_sees_unassigned ?? true}
+              onchange={(e) =>
+                void run(
+                  updateOrg(o.id, { bound_sees_unassigned: (e.currentTarget as HTMLInputElement).checked }),
+                  'Update failed',
+                )}
+            />
+            bound devices see unassigned
           </label>
         </div>
         {#if o.isolate_sessions}

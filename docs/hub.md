@@ -771,9 +771,11 @@ What a client may do:
   session-addressed tool, `fleet_health`'s trackers, spend and counts, and
   every `/events` frame. Whether it also sees *unassigned* work and sessions
   (no org) is the org's switch `bound_sees_unassigned` (decision D31): on by
-  default, as a host sees them; `fleet-hub`'s master turns it off with
-  `work_admin { action: "update_org", org_id, bound_sees_unassigned: false }`
-  (or Settings → Work → Organisations), and the org's bound clients then see
+  default, as a host sees them; the master turns it off with `fleet-hub org
+  set <id> --bound-sees-unassigned off` (`work_admin { action: "update_org",
+  org_id, bound_sees_unassigned: false }`; on a standalone desktop, Settings →
+  Work → Organisations → *bound devices see unassigned*), and `org list`
+  marks such an org *bound devices: own org only*. The org's bound clients then see
   only rows assigned to it. Another org's session or task answers exactly as
   one that does not exist, whatever `isolate_sessions` says (a bound client
   asked to be restricted, so the session fence is always on for it), and
@@ -1146,6 +1148,7 @@ fleet-hub org rule add 1 --path /home/me/work/acme     # by where the worktree l
 fleet-hub org assign-host hetzner-a 1                  # the boundary for that host's token
 fleet-hub org assign-tracker 2 1                       # its tickets are Company A's
 fleet-hub org set 1 --isolate-sessions on              # see below
+fleet-hub org set 1 --bound-sees-unassigned off        # its bound phones: its own only (D31)
 fleet-hub org list
 ```
 

@@ -110,7 +110,7 @@ describe('Settings → Organisations', () => {
     expect(upd.args).toEqual({ org_id: 1, auto_tidy: 'on' });
   });
 
-  it('standalone: an org opts in to Jev with its own checkbox, off by default (D31)', async () => {
+  it('standalone: an org opts in to Jev with its own checkbox, off by default (Jev D31)', async () => {
     const inv = route({ update_org: { ...acme, jev_allowed: true } });
     render(OrgSettings);
     const box = (await screen.findByTestId('org-jev')) as HTMLInputElement;
@@ -120,6 +120,25 @@ describe('Settings → Organisations', () => {
     await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'update_org')).toBe(true));
     const upd = inv.mock.calls.find((c) => c[0] === 'update_org')![1] as { args: unknown };
     expect(upd.args).toEqual({ org_id: 1, jev: 'on' });
+  });
+
+  it('standalone: what bound devices see of unassigned work is a per-org toggle, on by default (D31)', async () => {
+    const inv = route({ update_org: { ...acme, bound_sees_unassigned: false } });
+    render(OrgSettings);
+    const box = (await screen.findByTestId('org-bound-sees-unassigned')) as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    expect(screen.queryByTestId('org-bound-own-only')).toBeNull();
+    await fireEvent.click(box);
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'update_org')).toBe(true));
+    const upd = inv.mock.calls.find((c) => c[0] === 'update_org')![1] as { args: unknown };
+    expect(upd.args).toEqual({ org_id: 1, bound_sees_unassigned: false });
+  });
+
+  it('an org whose bound devices see only its own says so (D31)', async () => {
+    route({ list_orgs: [{ ...acme, bound_sees_unassigned: false }] });
+    render(OrgSettings);
+    expect(await screen.findByTestId('org-bound-own-only')).toBeTruthy();
+    expect(((await screen.findByTestId('org-bound-sees-unassigned')) as HTMLInputElement).checked).toBe(false);
   });
 
   it('standalone: adds an org by name, adds an owner/repo rule, removes a rule and the org', async () => {

@@ -837,8 +837,9 @@ and Review) and M14.4 (fleet-mobile's *My work*) came from
 `claude/fleet-dynamic-work-view-kwc3r9`, merged over that backend, with
 `scripts/hub-e2e.sh` hub W section 10 running the contract on a real hub
 (tree, session tasks, the primary's compare-and-set, placement,
-`work:changed`, Acme- and Beta-bound and readonly clients). Open: D31's
-per-org switch has no desktop control yet (`work_admin` sets it), and
+`work:changed`, Acme- and Beta-bound and readonly clients) (#349,
+fleet-mobile#54). D31's per-org switch is in Settings → Work →
+Organisations and `fleet-hub org set --bound-sees-unassigned`. Open:
 M14.5, the acceptance run (Part R), waits on the owner. D31–D36 are
 answered (the table below). M14 is the one milestone after M13's close-out, by the
 owner's choice (D36); D26's "operating" applies again once it is done. The

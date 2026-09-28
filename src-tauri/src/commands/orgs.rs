@@ -45,6 +45,10 @@ pub struct UpdateOrgArgs {
     /// model calls (`orgs.jev_allowed`).
     #[serde(default)]
     pub jev: Option<String>,
+    /// D31 (work graph M14): the org's bound devices also see unassigned
+    /// work and sessions.
+    #[serde(default)]
+    pub bound_sees_unassigned: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -136,6 +140,7 @@ pub async fn update_org(
             isolate_sessions: args.isolate_sessions,
             auto_tidy: args.auto_tidy,
             jev: args.jev,
+            bound_sees_unassigned: args.bound_sees_unassigned,
             ..Default::default()
         },
         &store,
