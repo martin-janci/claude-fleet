@@ -53,7 +53,9 @@ pub enum Reason {
     /// or hand over before the next turn does it for you.
     ContextFull,
     /// The tick demoted a `working` row nothing had moved for
-    /// `reconcile.stale_working_secs`: look at what it was doing.
+    /// `reconcile.stale_working_secs`: look at what it was doing. Ends on
+    /// the next hook, an attach, the row `working` / `blocked` again, or
+    /// after `reconcile.stale_working_ttl_secs`.
     StaleWorking,
     /// Idle with a PR whose checks are failing.
     CiFailing,

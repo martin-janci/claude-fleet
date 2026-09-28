@@ -521,9 +521,12 @@ impl Store {
                idle_since={idle},
                pending_input={new_pending},
                -- A pane that shows a live turn lifts the stale-working
-               -- demotion (F2); anything else keeps the stamp.
+               -- demotion (F2): the stamp and the veto's memory (080) both
+               -- go. Anything else keeps them.
                stale_working_at=CASE WHEN ({new_status}) IS 'working' THEN NULL
                                      ELSE stale_working_at END,
+               stale_demoted_at=CASE WHEN ({new_status}) IS 'working' THEN NULL
+                                     ELSE stale_demoted_at END,
                -- The freshness stamp (Task H / the BE-3 guard's evidence),
                -- folded in here so a pass is ONE physical UPDATE per row
                -- instead of this upsert plus a second stamping UPDATE.

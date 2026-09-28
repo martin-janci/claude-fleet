@@ -63,6 +63,9 @@ pub const RECONCILE_INTERVAL_SECS: &str = "reconcile.interval_secs";
 /// output for this long is demoted to `idle` by the tick (lifecycle F2).
 /// `0` turns the rule off.
 pub const RECONCILE_STALE_WORKING_SECS: &str = "reconcile.stale_working_secs";
+/// How long a `stale_working` stamp asks for a look before the tick lifts
+/// it on its own. An attach or any hook lifts it sooner. `0` = never by age.
+pub const RECONCILE_STALE_WORKING_TTL_SECS: &str = "reconcile.stale_working_ttl_secs";
 /// How long a resumable mass-loss row (`lost_reason` `host_reboot` /
 /// `tmux_server_gone`, with a `claude_session_id`, any kind but `external`)
 /// is kept before Phase 2
@@ -327,6 +330,11 @@ pub const SPECS: &[Spec] = &[
     Spec {
         key: RECONCILE_STALE_WORKING_SECS,
         default: "1800",
+        kind: Kind::Secs,
+    },
+    Spec {
+        key: RECONCILE_STALE_WORKING_TTL_SECS,
+        default: "86400",
         kind: Kind::Secs,
     },
     Spec {
