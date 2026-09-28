@@ -1154,6 +1154,16 @@
           onchange={(e) => onLimitIntChange(SETTING_KEYS.workSyncIntervalSecs, 'Tracker sync', e)} />
         <span class="hook-desc" id="work-sync-interval-desc">seconds between tracker (Jira) sync passes (0 = off; read at launch)</span>
       </div>
+      <div class="mcp-field">
+        <label class="lbl" for="work-describe-cache">describe cache</label>
+        <input class="port" id="work-describe-cache" type="number" min="0" max="86400" step="60"
+          value={settingInt($fleetSettings, SETTING_KEYS.workDescribeCacheSecs)}
+          disabled={limitsBusy}
+          aria-describedby="work-describe-cache-desc"
+          data-testid="work-describe-cache"
+          onchange={(e) => onLimitIntChange(SETTING_KEYS.workDescribeCacheSecs, 'Describe cache', e)} />
+        <span class="hook-desc" id="work-describe-cache-desc">seconds a full ticket description ("Read the full description") is reused before fleet asks the tracker again (0 = off)</span>
+      </div>
       <label class="toggle">
         <input
           type="checkbox"
