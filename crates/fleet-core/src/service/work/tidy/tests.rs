@@ -491,6 +491,10 @@ fn a_merged_prs_stamp_is_offered_as_pr_merged_idle_end_to_end() {
         .unwrap();
     assert_eq!(row.status_category, "done");
     assert_eq!(row.status_set_by.as_deref(), Some("derived"));
+    // Prove `stamp_derived_done` itself wrote `status_changed_at` — nothing
+    // else in this test overwrites it, so reverting that write would show
+    // up here as `None`.
+    assert!(row.status_changed_at.is_some());
 }
 
 /// Once `status_changed_at` is old enough, a person's `done` on a local item
@@ -504,7 +508,11 @@ fn a_persons_done_ages_into_done_idle() {
     let (sid, item_id) = seed_session_and_item(&store, "shipped-by-hand");
     {
         let s = store.lock().unwrap();
-        s.set_item_status(item_id, "done").unwrap();
+        let row = s.set_item_status(item_id, "done").unwrap().unwrap();
+        // Prove the API itself wrote the column, before the clock push below
+        // overwrites it — otherwise this test would still pass even if
+        // `set_item_status` never stamped `status_changed_at` at all.
+        assert!(row.status_changed_at.is_some());
         // Push the real wall-clock stamp `set_item_status` just wrote into
         // this file's synthetic `NOW` frame (see `seed`'s own comment).
         s.conn_ref()
