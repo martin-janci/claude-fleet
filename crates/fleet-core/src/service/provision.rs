@@ -1066,6 +1066,11 @@ mod tests {
     #[tokio::test]
     async fn write_host_file_secret_local_failure_leaves_the_original_untouched() {
         use std::os::unix::fs::PermissionsExt;
+        if crate::service::move_session::carry::tests::skip_as_root(
+            "mode 0500 does not stop uid 0 writing into the directory",
+        ) {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret.json");
         std::fs::write(&path, "original").unwrap();

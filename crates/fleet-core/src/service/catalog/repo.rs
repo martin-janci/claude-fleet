@@ -1025,6 +1025,11 @@ mod tests {
         write(&root, "agents/pm/prompt.md", "prompt\n");
         let hooks_dir = root.join("hooks");
         fs::create_dir_all(&hooks_dir).unwrap();
+        if crate::service::move_session::carry::tests::skip_as_root(
+            "mode 000 does not stop uid 0 reading the directory",
+        ) {
+            return;
+        }
         fs::set_permissions(&hooks_dir, fs::Permissions::from_mode(0o000)).unwrap();
 
         let result = load_dir(&root);

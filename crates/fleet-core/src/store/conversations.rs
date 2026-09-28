@@ -652,15 +652,6 @@ impl Store {
         Ok(self.emit_session(session_id)?)
     }
 
-    /// Flag the session's context size as out of date (compaction, resume).
-    pub fn mark_context_stale(&self, session_id: i64) -> Result<Option<SessionRow>, IpcError> {
-        self.conn.execute(
-            "UPDATE sessions SET context_stale = 1 WHERE id = ?1",
-            [session_id],
-        )?;
-        Ok(self.emit_session(session_id)?)
-    }
-
     /// `start_source` of the session's current open conversation.
     pub fn current_conversation_source(&self, session_id: i64) -> Result<Option<String>, IpcError> {
         Ok(self

@@ -343,10 +343,6 @@ export interface LocalWorkItem {
   live_sessions?: number;
 }
 
-export function listLocalWorkItems(): Promise<Result<LocalWorkItem[]>> {
-  return invokeCmd<LocalWorkItem[]>('list_local_work_items');
-}
-
 /** Name new local work (a title, an optional key) and link the session to
  *  it: manual and confirmed, primary when the session has no primary work.
  *  A key a visible ticket or a local item already carries is refused with

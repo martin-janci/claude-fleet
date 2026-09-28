@@ -345,11 +345,6 @@ impl DirectTransport {
             .await
             .map_err(TransportError::Connect)
     }
-
-    pub fn with_max_body(mut self, max: u64) -> Self {
-        self.max_body = max;
-        self
-    }
 }
 
 /// A URL split into the endpoint to connect to and the request-line target

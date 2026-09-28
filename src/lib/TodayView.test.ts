@@ -189,7 +189,8 @@ describe('TodayView', () => {
   });
   it('Refresh asks the hub again; Close closes the view, and is offered only over a selected session', async () => {
     const onclose = vi.fn();
-    const { unmount } = render(TodayView, { onclose });
+    // A fixed clock: a local midnight between the two loads would move `since`.
+    const { unmount } = render(TodayView, { onclose, now: () => Date.UTC(2026, 8, 28, 12) });
     await flush();
     const asked = () => vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'work_today').length;
     expect(asked()).toBe(1);

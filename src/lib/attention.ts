@@ -83,10 +83,6 @@ export function setContextRedPct(pct: number | undefined): void {
   if (typeof pct === 'number' && Number.isFinite(pct) && pct > 0 && pct <= 100) contextRedPct = pct;
 }
 
-export function contextRedThreshold(): number {
-  return contextRedPct;
-}
-
 export function contextLevel(pct: number | null): ContextLevel | null {
   if (pct === null || !Number.isFinite(pct)) return null;
   if (pct >= contextRedPct) return 'crit';
@@ -118,8 +114,6 @@ export interface AttentionOptions {
   /** Unix seconds "now" (injected so tests are deterministic). */
   now: number;
 }
-
-export const DEFAULT_ATTENTION_IDLE_MINUTES = 30;
 
 /** Triage buckets, most urgent first. `classify()` puts a row in exactly one,
  *  and everything that orders sessions reads this one list — the sidebar's
