@@ -144,7 +144,33 @@ describe('WorkFiltersBar', () => {
     await flush();
     await fireEvent.click(screen.getByTestId('work-view-delete'));
     await flush();
-    expect(calls('delete_work_view')[0]).toEqual({ view_id: 1 });
+    // A compare-and-set on the version the person saw.
+    expect(calls('delete_work_view')[0]).toEqual({ view_id: 1, expected_version: 1 });
     expect(get(activeWorkViewId)).toBeNull();
+  });
+
+  it('a Delete that lost a race keeps the view and shows its current version, with Reload', async () => {
+    handlers.delete_work_view = () => {
+      views = [{ ...views[0], version: 4 }];
+      throw { code: 'E_CONFLICT', message: 'view 1 was changed', details: { view_id: 1, version: 4 } };
+    };
+    activeWorkViewId.set(1);
+    render(WorkFiltersBar, { orgs, trackers });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-view-delete'));
+    await flush();
+    expect(get(activeWorkViewId)).toBe(1);
+    const notice = screen.getByTestId('work-view-notice');
+    expect(notice.textContent).toContain('changed elsewhere');
+    expect(screen.getByTestId('work-conflict-current').textContent).toBe('Now: version 4');
+    const before = calls('work_views').length;
+    await fireEvent.click(screen.getByTestId('work-conflict-reload'));
+    await flush();
+    expect(calls('work_views').length).toBe(before + 1);
+    // The next Delete names the version it now sees.
+    handlers.delete_work_view = () => ({ deleted: true });
+    await fireEvent.click(screen.getByTestId('work-view-delete'));
+    await flush();
+    expect(calls('delete_work_view')[1]).toEqual({ view_id: 1, expected_version: 4 });
   });
 });
