@@ -735,7 +735,7 @@ pub(super) fn persist_audit(
     caller: &Caller,
 ) {
     // `peer_exchange` carries a linked hub's message bodies inside its `send`
-    // array, which `redact_args` (top-level keys only) would render as raw
+    // array, which `redact_args` (no body key in it is a redacted one) would render as raw
     // JSON onto the controller's timeline — once per long-poll. It writes no
     // row; its own `audit` log line carries counts only.
     if tool == crate::mcp::auth::PEER_TOOL {

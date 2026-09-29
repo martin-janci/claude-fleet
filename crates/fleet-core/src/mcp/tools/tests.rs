@@ -704,6 +704,41 @@ fn audit_row_falls_back_to_the_controller_session() {
         .any(|e| e.kind == "mcp_call" && e.detail.as_deref() == Some("whoami by master")));
 }
 
+/// `catalog_admin` nests its action's arguments under `args`, so
+/// `set_secret`'s value is one level down: the audit row on the controller's
+/// timeline names the action and the secret's name, never its value.
+#[test]
+fn catalog_admin_set_secret_audit_row_holds_no_secret() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    assert!(!guard::is_readonly_tool("catalog_admin"));
+    let args = serde_json::json!({
+        "action": "set_secret",
+        "args": { "name": "API_TOKEN", "host_alias": null, "value": "ghp_s3cr3t-unique" }
+    });
+    persist_audit(&store, "catalog_admin", args.as_object(), &Caller::master());
+    let s = store.lock().unwrap();
+    let events = s.list_session_events(id, 10).unwrap();
+    let row = events
+        .iter()
+        .find(|e| e.kind == "mcp_call")
+        .expect("mcp_call event");
+    let detail = row.detail.as_deref().unwrap();
+    assert!(detail.starts_with("catalog_admin by master:"), "{detail}");
+    assert!(detail.contains("action=set_secret"), "{detail}");
+    assert!(detail.contains("API_TOKEN"), "{detail}");
+    assert!(!detail.contains("s3cr3t"), "{detail}");
+    assert!(!detail.contains("value"), "{detail}");
+}
+
 /// Task 2: a read-only tool (`guard::READONLY_TOOLS` — the exact set a
 /// `readonly` token may call) writes NO audit row at all, even with a
 /// controller registered. The `audit()` tracing log line still fires for

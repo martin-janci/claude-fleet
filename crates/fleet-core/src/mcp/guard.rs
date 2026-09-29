@@ -1631,6 +1631,38 @@ pub fn scrub_line(s: &str) -> String {
         .collect()
 }
 
+/// A copy of a nested argument value with the same rules applied at every
+/// depth: a [`SKIP_KEYS`] key is dropped and a [`REDACT_KEYS`] string becomes
+/// `<N chars>`. `catalog_admin` nests its action's arguments under `args`, so
+/// `set_secret`'s `value` sits one level down — a top-level-only check
+/// persisted it in clear text in the timeline.
+fn redact_nested(v: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(k, _)| !SKIP_KEYS.contains(&k.as_str()))
+                .map(|(k, v)| {
+                    let v = if REDACT_KEYS.contains(&k.as_str()) {
+                        match v {
+                            Value::String(s) => {
+                                Value::String(format!("<{} chars>", s.chars().count()))
+                            }
+                            Value::Null => Value::Null,
+                            _ => Value::String("<redacted>".to_string()),
+                        }
+                    } else {
+                        redact_nested(v)
+                    };
+                    (k.clone(), v)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_nested).collect()),
+        other => other.clone(),
+    }
+}
+
 /// One-line, key-sorted `k=v` summary of tool arguments with free-text
 /// values replaced by `<N chars>` and the whole thing capped.
 ///
@@ -1661,7 +1693,7 @@ pub fn redact_args(args: Option<&serde_json::Map<String, serde_json::Value>>) ->
         } else {
             match v {
                 serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
+                other => redact_nested(other).to_string(),
             }
         };
         parts.push(format!("{k}={rendered}"));
@@ -2139,6 +2171,36 @@ mod tests {
         // `work_admin`'s tracker credential: dropped entirely.
         let tracker = serde_json::json!({ "secret": "ATATT-unique-9", "tracker_id": 1 });
         assert_eq!(redact_args(tracker.as_object()), "tracker_id=1");
+    }
+
+    /// `catalog_admin` nests its action's arguments under `args`: the secret
+    /// of `set_secret` (and any nonce or free text) is dropped at any depth,
+    /// inside arrays too, while the identifiers stay.
+    #[test]
+    fn redact_args_drops_secrets_nested_under_args() {
+        let args = serde_json::json!({
+            "action": "set_secret",
+            "args": { "name": "API_TOKEN", "host_alias": null, "value": "s3cr3t-unique" },
+            "confirm_nonce": "n0nce-unique"
+        });
+        let s = redact_args(args.as_object());
+        assert!(!s.contains("s3cr3t"), "{s}");
+        assert!(!s.contains("n0nce"), "{s}");
+        assert!(!s.contains("value"), "{s}");
+        assert!(s.contains("action=set_secret"), "{s}");
+        assert!(s.contains("API_TOKEN"), "{s}");
+
+        let deep = serde_json::json!({
+            "args": {
+                "items": [ { "secret": "tr4cker-unique", "prompt": "free text here" } ],
+                "inner": { "confirm_nonce": "deep-n0nce", "value": "deep-v4lue" }
+            }
+        });
+        let s = redact_args(deep.as_object());
+        for leaked in ["tr4cker", "free text", "deep-n0nce", "deep-v4lue"] {
+            assert!(!s.contains(leaked), "{leaked} leaked: {s}");
+        }
+        assert!(s.contains("<14 chars>"), "{s}");
     }
 
     /// The audit row is written before any tool validates its arguments, so
