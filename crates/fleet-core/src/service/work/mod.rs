@@ -174,9 +174,18 @@ pub struct WorkLinkArgs {
     /// Approved nonce.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
-    /// Name: the work's title.
+    /// name/create/propose: title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// create/propose: parent, item:<id>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// create/propose: notes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// propose: the reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
     /// set_status: todo | in_progress | done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
@@ -379,6 +388,9 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "never",
     "dismiss",
     "tidy_apply",
+    "create",
+    "propose",
+    "accept",
     "name",
     "set_status",
     "summarize",

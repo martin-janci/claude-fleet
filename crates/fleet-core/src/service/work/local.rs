@@ -231,6 +231,120 @@ pub fn rename_local_item(
         .ok_or_else(|| orgs::not_found("work item", id))
 }
 
+/// `item:<id>` → the id.
+fn parent_id(args: &WorkLinkArgs) -> Result<Option<i64>, IpcError> {
+    match args.parent.as_deref() {
+        None => Ok(None),
+        Some(raw) => raw
+            .strip_prefix("item:")
+            .and_then(|n| n.parse::<i64>().ok())
+            .map(Some)
+            .ok_or_else(|| IpcError::new(codes::E_INVALID, "parent is item:<id>")),
+    }
+}
+
+/// The parent a scoped caller may add under: an item it can see. One it
+/// cannot answers exactly as an id that does not exist.
+fn visible_parent(s: &Store, scope: &OrgScope, id: i64) -> Result<(), IpcError> {
+    let Some(item) = s.get_work_item(id)? else {
+        return Err(orgs::not_found("work item", id));
+    };
+    let visible = if item.source == "local" {
+        local_item_visible(s, scope, id)?
+    } else {
+        crate::service::trackers::tickets::item_visible(scope, s, &item)?
+    };
+    if visible {
+        Ok(())
+    } else {
+        Err(orgs::not_found("work item", id))
+    }
+}
+
+/// `work_link { action: create, title, parent?, project_id?, notes? }`
+/// (shared work context, design 2026-09-29). A standalone task needs an
+/// unscoped caller (a new item has no links, and a scoped caller sees a
+/// local item only through its links); a subtask needs a parent the caller
+/// sees.
+pub fn create_task(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+) -> Result<WorkItemRow, IpcError> {
+    let title = args
+        .title
+        .as_deref()
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "create needs title"))?;
+    let parent = parent_id(args)?;
+    let s = lock(store)?;
+    match parent {
+        None if !scope.is_all() => {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "a standalone task needs an unscoped caller (the desktop or the master \
+                 token); add a subtask under a task you work on instead",
+            ))
+        }
+        Some(p) if !scope.is_all() => visible_parent(&s, scope, p)?,
+        _ => {}
+    }
+    s.create_native_item(&crate::store::NativeItem {
+        title,
+        parent_id: parent,
+        project_id: args.project_id,
+        notes: args.notes.as_deref(),
+    })
+}
+
+/// `work_link { action: propose, parent, title, notes?, why? }`: a subtask
+/// for a person to accept or reject. `proposer` is the caller's session
+/// label, never an argument.
+pub fn propose(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+    proposer: &str,
+) -> Result<WorkItemRow, IpcError> {
+    let title = args
+        .title
+        .as_deref()
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "propose needs title"))?;
+    let parent =
+        parent_id(args)?.ok_or_else(|| IpcError::new(codes::E_INVALID, "propose needs parent"))?;
+    let s = lock(store)?;
+    if !scope.is_all() {
+        visible_parent(&s, scope, parent)?;
+    }
+    s.propose_subtask(&crate::store::Proposal {
+        parent_id: parent,
+        title,
+        notes: args.notes.as_deref(),
+        why: args.why.as_deref(),
+        proposed_by: proposer,
+    })
+}
+
+/// `work_link { action: accept | reject, item_id }` (no `session_id`): a
+/// person's decision on a proposal. Refused to per-host tokens and bound
+/// clients: an agent never accepts its own (or any) proposal.
+pub fn decide(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+    accept: bool,
+) -> Result<WorkItemRow, IpcError> {
+    if !scope.is_all() {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            "a person decides proposals, from the desktop or the master token",
+        ));
+    }
+    let id = args
+        .item_id
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "accept / reject needs item_id"))?;
+    lock(store)?.decide_proposal(id, accept)
+}
+
 /// A local item is visible: always to `All`; to a per-host token through
 /// one of its visible links.
 ///
