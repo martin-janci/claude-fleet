@@ -63,6 +63,19 @@ pub fn set_status(
 /// `has_working_session` must come from ONE join over the whole page
 /// (`Store::work_items_with_working_session`) — never a query per row.
 ///
+/// **It normalises, where three callers used to pass the stored string
+/// through verbatim.** `to_task`, `brief_of` and `card` reported
+/// `work_items.status_category` exactly as stored; routed through here, a
+/// value outside the three categories now reports as `todo` instead (see
+/// [`normalize`]). Deliberate, and a behaviour change worth knowing about:
+/// the three categories are the whole vocabulary
+/// (`store::work_status::STATUS_CATEGORIES`), every provider maps onto them
+/// (`jira_common.rs`, `linear.rs`, `github.rs`, and Asana's
+/// `SECTION_CATEGORIES`), and the wire contract says a reader may switch on
+/// three values — so propagating a fourth to a client that cannot render it
+/// is worse than answering the one the item is closest to. An EMPTY string
+/// is the exception and stays distinguishable, as `None`, below.
+///
 /// `None` when `status_category` is itself empty (fix round 3): the
 /// schema never produces this (`NOT NULL DEFAULT 'todo'`, and every writer
 /// — sync, `set_item_status`, `stamp_derived_done` — writes one of the
@@ -90,9 +103,14 @@ pub fn effective_status(
     })
 }
 
-/// `status_category` keeps exactly three values; anything else (there
-/// should be nothing else) reads as `todo` rather than propagating an
-/// unrecognised string.
+/// `status_category` keeps exactly three values
+/// (`store::work_status::STATUS_CATEGORIES`); anything else — which the
+/// schema and every provider mapping say cannot happen — reads as `todo`
+/// rather than propagating a string a reader cannot switch on. A COERCION,
+/// not a pass-through: see [`effective_status`]'s doc for which callers it
+/// changed and why that is the answer wanted here. An empty string never
+/// reaches this function; [`effective_status`] answers `None` for it, so
+/// "nothing said" stays distinguishable from "to do".
 fn normalize(status_category: &str) -> &'static str {
     match status_category {
         "done" => "done",
@@ -148,6 +166,27 @@ mod effective_status_tests {
         assert_eq!(
             effective_status("in_progress", None, "jira", false),
             Some("in_progress")
+        );
+    }
+
+    /// The coercion is deliberate (final review, item 7): three callers used
+    /// to report the stored string verbatim, and now report `todo` for a
+    /// value outside the vocabulary. Pinned so it is a decision, not a
+    /// side effect — and so that restoring a pass-through has to say so
+    /// here first.
+    #[test]
+    fn a_status_outside_the_vocabulary_reads_as_todo() {
+        for stored in ["blocked", "in review", "DONE", "Done"] {
+            assert_eq!(
+                effective_status(stored, None, "jira", false),
+                Some("todo"),
+                "{stored:?} must not reach a reader that can only switch on the three"
+            );
+        }
+        // Including under a person's or the stamp's arm, which share it.
+        assert_eq!(
+            effective_status("blocked", Some("person"), "local", false),
+            Some("todo")
         );
     }
 
