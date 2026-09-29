@@ -47,11 +47,38 @@ pub struct Page {
     /// to apply or reject.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewSource>,
+    /// A `data_page`'s filter bar: each filter sets the parameter of the
+    /// same name on every data item whose source declares it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filters: Vec<Filter>,
     /// Either `sections` or `tabs`, never both.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<Section>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tabs: Vec<Tab>,
+}
+
+/// One control in a `data_page`'s filter bar, bound by name to a source
+/// parameter (`pages::sources`). Its control follows the parameter's type:
+/// a `days` parameter is a select over `choices`, a `host` parameter a
+/// select over the registered hosts with "All hosts" first. A data item
+/// may not also set a filtered parameter literally.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(deny_unknown_fields)]
+pub struct Filter {
+    /// The source parameter this filter sets, e.g. "days" or "host".
+    pub param: String,
+    /// The control's label; the parameter's own name when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// A `days` filter's options, ascending. A `host` filter has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<u64>,
+    /// The option picked when the page opens: one of `choices`; the first
+    /// when absent. A `host` filter starts at "All hosts".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<u64>,
 }
 
 /// What a `review_apply` page reviews. Closed: each is a list of proposed
@@ -149,6 +176,10 @@ pub enum Item {
         source: SourceRef,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         columns: Vec<String>,
+        /// Offer "Copy as text": the source's label with the filters, then
+        /// one line per row, `first: rest, …`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        copy: bool,
     },
     /// A chart of a `series` source.
     Chart {

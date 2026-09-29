@@ -5,7 +5,7 @@
 //! query of its own: it names a source here, with literal parameters.
 //!
 //! Access: every source below reads the whole fleet (its usage, its work
-//! graph's retention), so it is for the process that owns the fleet (a
+//! graph's retention and usage counts), so it is for the process that owns the fleet (a
 //! standalone desktop, or a master token on a hub), exactly like
 //! `usage_report` and `work_admin`. An org-scoped variant is a new source,
 //! not a parameter.
@@ -185,6 +185,26 @@ pub const SOURCES: &[SourceSpec] = &[
             ],
         },
         params: &[],
+    },
+    SourceSpec {
+        id: "work.usage",
+        label: "Work graph usage",
+        help: "How the work graph was used over the window: links, detection, handovers, resumes, the journal, tidy-up and each tracker's sync, as counts (`fleet-hub work usage`).",
+        shape: Shape::Rows {
+            columns: &[
+                col("group", "What", ColType::Text),
+                col("counted", "Counted", ColType::Text),
+            ],
+        },
+        params: &[ParamSpec {
+            name: "days",
+            ty: ParamType::Days {
+                min: 1,
+                max: crate::service::work::usage::MAX_DAYS as u64,
+            },
+            default: Some(crate::service::work::usage::DEFAULT_DAYS as u64),
+            help: "How many days back.",
+        }],
     },
     SourceSpec {
         id: "work.retention_last",
@@ -374,6 +394,24 @@ pub fn fetch(
                             "would_delete": t.would_delete,
                         })
                     })
+                    .collect(),
+            ))
+        }
+        "work.usage" => {
+            let days = p
+                .get("days")
+                .and_then(Value::as_u64)
+                .unwrap_or(u64::from(crate::service::work::usage::DEFAULT_DAYS));
+            let u = crate::service::work::usage::usage(
+                s,
+                days as u32,
+                now,
+                &crate::service::trackers::sync::metrics_for,
+            )?;
+            Ok(Value::Array(
+                u.rows()
+                    .into_iter()
+                    .map(|(group, counted)| json!({ "group": group, "counted": counted }))
                     .collect(),
             ))
         }

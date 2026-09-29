@@ -667,7 +667,6 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::trackers::decide_status_map_proposal`
 - `commands::trackers::work_retention_status`
 - `commands::trackers::work_retention_sweep`
-- `commands::trackers::work_usage`
 - `commands::trackers::list_trackers`
 - `commands::trackers::work_tickets`
 - `commands::trackers::work_lookup`

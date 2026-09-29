@@ -862,7 +862,7 @@
       </div>
     </section>
 
-    <WorkSettings />
+    <WorkSettings onopen={(id) => select(id)} />
 
     {#if !ownsFleet}
       <section class="block" data-testid="mcp-remote-section">
