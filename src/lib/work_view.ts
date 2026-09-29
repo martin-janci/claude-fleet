@@ -161,6 +161,23 @@ export interface WorkTask {
   /** Done, or every session link archived, with nothing running: hidden
    *  from the tree unless `filters.archived` (or `status: done`). */
   archived?: boolean;
+  /** Where the item came from: `manual` (a person wrote it in Fleet),
+   *  `agent` (a delegated job's mirror), `proposed` (an agent's accepted
+   *  proposal) or `detected` (a tracker ticket, a bare key). Absent from an
+   *  older hub. */
+  origin?: string | null;
+  /** The project a native task runs in. */
+  project_id?: number | null;
+  /** That project as `owner/repo` (or `repo` for a local owner). */
+  project_label?: string | null;
+  /** A native subtask's parent (`item:<id>`); nested under it when listed. */
+  parent_task_id?: string | null;
+  /** A job mirror's state (the delegated job's `state`). */
+  job_state?: string | null;
+  /** The title is borrowed from the first session's name (the item has none). */
+  title_derived?: boolean;
+  /** Agent proposals under this task waiting for a person's decision. */
+  open_proposals?: number;
   last_activity_at?: number | null;
   repos?: string[];
   /** 0 = no placement. */
@@ -261,6 +278,70 @@ export interface TaskDetail {
   placement?: Placement | null;
   /** Ids of the rules that match. */
   rules?: number[];
+  /** A native task's notes (plain text, fenced for an agent). */
+  notes?: string | null;
+  /** The delegated job's result, when this task is a job mirror (plain text). */
+  job_result?: string | null;
+  /** Native subtasks: written by a person, accepted proposals, job mirrors. */
+  subtasks?: SubtaskView[];
+  /** Agent proposals waiting for a person's decision. */
+  proposals?: ProposalView[];
+  rejected_proposals?: ProposalView[];
+  /** Jobs delegated under this task. */
+  jobs?: JobView[];
+  /** The steps agents took, per conversation. */
+  steps?: StepGroup[];
+}
+
+/** A native subtask on a task page. */
+export interface SubtaskView {
+  task_id: string;
+  item_id: number;
+  key?: string | null;
+  title: string;
+  origin: string;
+  status?: string | null;
+  project_id?: number | null;
+  live_sessions: number;
+  job_state?: string | null;
+}
+
+/** An agent's proposed subtask. `why` and `notes` are agent text: render as text. */
+export interface ProposalView {
+  item_id: number;
+  key?: string | null;
+  title: string;
+  why?: string | null;
+  notes?: string | null;
+  proposed_by?: string | null;
+  at: number;
+}
+
+/** A delegated job under a task. `result` is agent text: render as text. */
+export interface JobView {
+  item_id: number;
+  key?: string | null;
+  title: string;
+  state: string;
+  result?: string | null;
+  /** The worker session's name, while it exists. */
+  worker?: string | null;
+  at: number;
+}
+
+/** One conversation's steps, labelled by the session that ran it. */
+export interface StepGroup {
+  label: string;
+  claude_session_id: string;
+  steps?: StepLine[];
+}
+
+/** One step an agent took (its own task tools). `text` is agent text. */
+export interface StepLine {
+  text: string;
+  /** `pending` | `in_progress` | `completed`. */
+  state: string;
+  at: number;
 }
 
 /** The task a `session_tasks` link is to. */
@@ -1088,6 +1169,13 @@ sidebarView.subscribe((v) => writePref('sidebar.view', v));
 export function toggleSidebarView(): void {
   sidebarView.update((v) => (v === 'work' ? 'sessions' : 'work'));
 }
+
+/** The Work tab's layout (design 2026-09-29): List (by status: To do, Doing,
+ *  Done) or Grouped (org → group). Defaults to List. */
+export type WorkLayout = 'list' | 'grouped';
+const isWorkLayout = (v: unknown): v is WorkLayout => v === 'list' || v === 'grouped';
+export const workLayout = writable<WorkLayout>(readPref('work.layout', 'list', isWorkLayout));
+workLayout.subscribe((v) => writePref('work.layout', v));
 
 const isFilters = (v: unknown): v is WorkTreeFilters => isObj(v);
 /** The Work view's filters (without `group`, which is per section). */
