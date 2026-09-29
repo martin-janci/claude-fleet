@@ -136,13 +136,12 @@
 
   <div class="md">
     <div class="list">
-      <ul role="listbox" aria-label={resource.plural} data-testid="resource-list">
+      <ul aria-label={resource.plural} data-testid="resource-list">
         {#each records as r (idOf(resource, r))}
           <li>
             <button
               type="button"
-              role="option"
-              aria-selected={selected === idOf(resource, r)}
+              aria-current={selected === idOf(resource, r) ? 'true' : undefined}
               data-testid="resource-row"
               onclick={() => (selected = idOf(resource, r))}>
               {#if resource.color_field}
@@ -246,7 +245,7 @@
   li button:hover {
     background: var(--control-bg-hover);
   }
-  li button[aria-selected='true'] {
+  li button[aria-current='true'] {
     background: var(--accent-soft);
     border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }

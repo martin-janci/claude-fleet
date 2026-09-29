@@ -49,10 +49,12 @@
   import type { IpcError, Result } from './result';
 
   let {
+    /** Told the queue's total after every read, so the tab's count needs no
+     *  read of its own. */
     onchanged,
     /** The refetch debounce, ms; injectable for tests. */
     debounceMs = 500,
-  }: { onchanged?: () => void; debounceMs?: number } = $props();
+  }: { onchanged?: (total: number) => void; debounceMs?: number } = $props();
 
   const blocked = $derived(hubActionBlocked('decide_work_batch', $hubStatus, $hubConnection));
 
@@ -89,12 +91,13 @@
     // Ticks on items that were decided elsewhere go away.
     picked = new Set([...picked].filter((id) => items.some((x) => x.review_id === id)));
     if (focusIdx >= items.length) focusIdx = Math.max(0, items.length - 1);
+    onchanged?.(total);
   }
 
-  async function reload() {
-    await load();
-    onchanged?.();
-  }
+  /** A read now: only where nothing was written (a conflict, a failed undo,
+   *  the notice's Reload). A successful write bumps `workChanged`, and the
+   *  subscription below does the one re-read for it. */
+  const reload = () => load();
 
   const off = onWorkChangedDebounced(() => void load(), () => debounceMs);
   onMount(() => void load());
@@ -148,7 +151,6 @@
       const d = undoOf({ session_id: it.session_id, link_id: it.link_id, decision: undoable }, version);
       if (d?.expected_version != null) undo = { label: `${what} ${taskLabel(it.task)} for ${sessionName(it)}`, decisions: [d] };
     }
-    await reload();
   }
 
   /** Link `it`'s version now, if it is in the state `decision` left it in
@@ -310,7 +312,6 @@
     // What failed stays ticked, with its reason.
     const failedLinks = new Set(decisions.filter((d) => !byLink.get(d.link_id)?.ok).map((d) => d.link_id));
     picked = new Set(list.filter((x) => failedLinks.has(x.link_id)).map((x) => x.review_id));
-    await reload();
   }
 
   async function runUndo() {
@@ -327,8 +328,8 @@
       } else {
         summary = `Undo failed: ${readErrorText(r.error)}`;
         fail(d.link_id, r.error);
+        await reload();
       }
-      await reload();
       return;
     }
     const r = await decideWorkBatch(u.decisions);
@@ -345,7 +346,6 @@
       failed === 0
         ? `Undone: ${u.label} — back to suggestions`
         : `Undone: ${ok} of ${u.decisions.length} — ${failed} changed elsewhere or failed`;
-    await reload();
   }
 
   /** How many decisions of a batch answer succeeded; the failures are kept

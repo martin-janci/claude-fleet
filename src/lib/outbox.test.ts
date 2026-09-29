@@ -379,15 +379,51 @@ describe('outbox: settling into the transcript', () => {
     expect(h.msgs().map((m) => m.seen)).toEqual([0, 0, 0]);
   });
 
-  it('a failed duplicate does not raise the baseline', async () => {
+  it('a failed duplicate still in line raises the baseline: a retry sends it first', async () => {
     const h = harness({ 1: idle() });
     h.box.enqueue(A, { kind: 'prompt', text: 'go', seen: 0 });
     await flush();
     h.sends[0].done({ ok: false, error: { code: 'E_PTY_BUSY', message: 'busy' } });
     await flush();
     expect(h.msgs()[0].state).toBe('failed');
-    h.box.enqueue(A, { kind: 'prompt', text: 'go' });
-    expect(h.msgs().map((m) => m.seen)).toEqual([0, 0]);
+    h.box.enqueue(A, { kind: 'prompt', text: 'go', seen: 0 });
+    expect(h.msgs().map((m) => m.seen)).toEqual([0, 1]);
+    h.box.retry(A.id, h.msgs()[0].id);
+    await flush();
+    h.sends[1].done(ok(undefined));
+    await flush();
+    h.sends[2].done(ok(undefined));
+    await flush();
+    // The transcript carries only the retried copy: the later one stays.
+    h.box.settle(A.id, conv('go'), { quiet: false, turnSeq: 0 });
+    expect(h.msgs()).toHaveLength(1);
+    expect(h.msgs()[0].seen).toBe(1);
+    h.box.settle(A.id, conv('go', 'go'), { quiet: false, turnSeq: 0 });
+    expect(h.msgs()).toEqual([]);
+  });
+
+  it('discarding or editing a failed duplicate lowers the later baseline again', async () => {
+    for (const how of ['discard', 'edit'] as const) {
+      const h = harness({ 1: idle() });
+      h.box.enqueue(A, { kind: 'prompt', text: 'go', seen: 2 });
+      await flush();
+      h.sends[0].done(fail('down'));
+      await flush();
+      h.box.enqueue(A, { kind: 'prompt', text: 'go', seen: 2 });
+      h.box.enqueue(A, { kind: 'prompt', text: 'other', seen: 0 });
+      expect(h.msgs().map((m) => m.seen)).toEqual([2, 3, 0]);
+      const failed = h.msgs()[0].id;
+      if (how === 'discard') h.box.discard(A.id, failed);
+      else h.box.edit(A.id, failed);
+      expect(h.msgs().map((m) => m.seen)).toEqual([2, 0]);
+      await flush();
+      h.sends[1].done(ok(undefined));
+      await flush();
+      h.box.settle(A.id, conv('go', 'go'), { quiet: false, turnSeq: 0 });
+      expect(h.msgs().map((m) => m.text)).toEqual(['go', 'other']);
+      h.box.settle(A.id, conv('go', 'go', 'go'), { quiet: false, turnSeq: 0 });
+      expect(h.msgs().map((m) => m.text)).toEqual(['other']);
+    }
   });
 
   it('never settles a message that has not gone out', async () => {

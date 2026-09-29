@@ -346,8 +346,9 @@
   // `work:changed` / session events: one debounced re-read — at most
   // `maxWaitMs` after the first change it waits for, so a steady stream of
   // changes (a busy fleet) cannot hold the view back forever. While Review
-  // shows, the tree is not on screen: only its count is read (Review reads
-  // its own list), and the tree once when Tasks is back. A `resync` (a gap
+  // shows, the tree is not on screen and nothing is read here (Review reads
+  // its own list and reports the count), and the tree once when Tasks is
+  // back. A `resync` (a gap
   // in the hub's stream) reloads the whole view.
   let staleWhileHidden = false;
   let staleFull = false;
@@ -357,7 +358,8 @@
       if (tab === 'review') {
         staleWhileHidden = true;
         staleFull ||= full;
-        void loadReviewCount();
+        // Review re-reads its own list on the same bump and reports the
+        // count (`onchanged`): no second read here.
         return;
       }
       void load({ full, review: true });
@@ -537,7 +539,7 @@
       </p>
     {/if}
     {#if tab === 'review'}
-      <WorkReview onchanged={() => void loadReviewCount()} />
+      <WorkReview {debounceMs} onchanged={(n) => (reviewTotal = n)} />
     {:else if error}
       <div class="state error" role="alert" data-testid="work-tree-error">
         <p>{readErrorText(error)}</p>

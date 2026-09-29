@@ -194,17 +194,36 @@ export function createOutbox(deps: OutboxDeps) {
     else lastSubmit.set(sid, seq);
   }
 
-  /** Identical plain prompts of `sid` still in line (not failed): the
-   *  transcript will carry each of them before the new one. */
+  /** A plain prompt (no files) whose body normalizes to `want`. */
+  const plainDuplicate = (m: OutboxMessage, want: string) =>
+    m.kind === 'prompt' && m.attachments.length === 0 && normalizePrompt(outboxBody(m)) === want;
+
+  /** Identical plain prompts of `sid` still in line: the transcript will
+   *  carry each of them before the new one. A failed one counts too — it
+   *  holds the line and a retry sends it first; Discard / Edit take it back
+   *  out of the later messages' baseline (`dropFailed`). */
   function queuedDuplicates(sid: number, body: string): number {
     const want = normalizePrompt(body);
-    return list(sid).filter(
-      (m) =>
-        m.kind === 'prompt' &&
-        m.state !== 'failed' &&
-        m.attachments.length === 0 &&
-        normalizePrompt(outboxBody(m)) === want,
-    ).length;
+    return list(sid).filter((m) => plainDuplicate(m, want)).length;
+  }
+
+  /** Remove a failed message that will never be sent: every later identical
+   *  plain prompt counted it in its `seen`, so each one's baseline drops by
+   *  one — else it would wait for a turn that never comes. */
+  function dropFailed(sid: number, m: OutboxMessage) {
+    const msgs = list(sid);
+    const at = msgs.findIndex((x) => x.id === m.id);
+    const want = m.kind === 'prompt' && m.attachments.length === 0 ? normalizePrompt(outboxBody(m)) : null;
+    setList(
+      sid,
+      msgs
+        .filter((x) => x.id !== m.id)
+        .map((x) =>
+          want !== null && msgs.indexOf(x) > at && x.seen > 0 && plainDuplicate(x, want)
+            ? { ...x, seen: x.seen - 1 }
+            : x,
+        ),
+    );
   }
 
   function enqueue(target: OutboxTarget, input: EnqueueInput): string {
@@ -373,7 +392,7 @@ export function createOutbox(deps: OutboxDeps) {
   function discard(sid: number, id: string) {
     const m = find(sid, id);
     if (!m || m.state !== 'failed') return;
-    remove(sid, id);
+    dropFailed(sid, m);
     pump(sid);
   }
 
@@ -382,7 +401,7 @@ export function createOutbox(deps: OutboxDeps) {
   function edit(sid: number, id: string): { text: string; attachments: Attachment[] } | null {
     const m = find(sid, id);
     if (!m || m.state !== 'failed') return null;
-    remove(sid, id);
+    dropFailed(sid, m);
     pump(sid);
     const spent = m.paths !== null || !m.retryable;
     const ids = new Set(spent ? m.attachments.map((a) => a.id) : []);

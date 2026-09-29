@@ -292,6 +292,25 @@ describe('WorkTaskDetail', () => {
     expect(calls('assign_work_org')).toEqual([{ task_id: 'item:77', org_id: 1, impact_token: 'tok-1' }]);
   });
 
+  it('Assign org re-reads the task once, on its bump — not again from the dialog', async () => {
+    handlers.work_org_impact = () => impact('tok-1');
+    handlers.assign_work_org = () => ({ ...localTask.task, org_id: 2, org_source: 'item' });
+    render(WorkTaskDetail, { taskId: 'item:77', debounceMs: 5 });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-assign-org'));
+    await fireEvent.change(screen.getByTestId('work-org-target'), { target: { value: '2' } });
+    await fireEvent.click(screen.getByTestId('work-org-review'));
+    await flush();
+    const tasks = calls('work_task').length;
+    await fireEvent.click(screen.getByTestId('work-org-confirm'));
+    await flush();
+    expect(calls('work_task')).toHaveLength(tasks);
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    expect(calls('work_task')).toHaveLength(tasks + 1);
+    expect(screen.queryByTestId('work-org-dialog')).toBeNull();
+  });
+
   it('Place in group keeps the placement note unless edited, and shows the new placement at once', async () => {
     const placed = { group: 'Infra', note: 'owned by ops', version: 2, updated_at: null, updated_by: 'mj' };
     handlers.work_task = () => ({ ...trackerTask, task: { ...trackerTask.task, placement_version: 2 }, placement: placed });

@@ -108,11 +108,14 @@
   function placed(t: WorkTask, note: string | null) {
     if (detail) {
       const version = t.placement_version ?? 0;
+      // A cleared placement keeps a version (> 0) but places nothing.
+      const placedNow = t.group?.source === 'manual' || !!note;
       detail = {
         ...detail,
         task: { ...t, sessions: t.sessions ?? detail.task.sessions },
-        placement:
-          version > 0 ? { group: t.group?.label ?? '', note, version, updated_at: null, updated_by: null } : null,
+        placement: placedNow
+          ? { group: t.group?.label ?? '', note, version, updated_at: null, updated_by: null }
+          : null,
       };
     }
   }
@@ -472,17 +475,12 @@
   />
 {/if}
 {#if assigning && task}
-  <WorkOrgDialog {task} onclose={() => (assigning = false)} ondone={() => void load(taskId)} />
+  <!-- Assign org… and a rule's save bump `workChanged`: the subscription
+       above re-reads the task (and the rules) once — no read here. -->
+  <WorkOrgDialog {task} onclose={() => (assigning = false)} />
 {/if}
 {#if ruleDraft}
-  <WorkRuleEditor
-    initial={ruleDraft}
-    onclose={() => (ruleDraft = null)}
-    onsaved={() => {
-      void loadRules();
-      void load(taskId);
-    }}
-  />
+  <WorkRuleEditor initial={ruleDraft} onclose={() => (ruleDraft = null)} />
 {/if}
 
 <style>

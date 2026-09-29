@@ -88,6 +88,22 @@ describe('Organisations (master_detail over the org resource)', () => {
     expect(screen.getByTestId('item-trackers').textContent).toContain('Acme Jira');
   });
 
+  it('the list is plain buttons: the open record is aria-current, no listbox roles', async () => {
+    route({ list_orgs: [acme, { ...acme, id: 2, name: 'Company B' }] });
+    show();
+    await waitFor(() => expect(screen.getAllByTestId('resource-row')).toHaveLength(2));
+    const list = screen.getByTestId('resource-list');
+    expect(list.getAttribute('role')).toBeNull();
+    expect(list.getAttribute('aria-label')).toBeTruthy();
+    expect(within(list).queryAllByRole('option')).toHaveLength(0);
+    expect(within(list).getAllByRole('listitem')).toHaveLength(2);
+    const rows = () => screen.getAllByTestId('resource-row');
+    await fireEvent.click(rows()[1]);
+    await waitFor(() => expect(rows()[1].getAttribute('aria-current')).toBe('true'));
+    expect(rows()[0].hasAttribute('aria-current')).toBe(false);
+    expect(rows()[1].hasAttribute('aria-selected')).toBe(false);
+  });
+
   it('a suggestion is one click: the org, then its rule', async () => {
     const inv = route({ add_org: { id: 9, name: 'beta', created_at: 1 }, add_org_rule: { id: 1, org_id: 9, owner: 'beta' } });
     show();

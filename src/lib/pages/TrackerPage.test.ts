@@ -179,7 +179,7 @@ describe('Trackers (master_detail over the tracker resource)', () => {
     await fireEvent.click(screen.getByTestId('flow-submit'));
     await waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Connected https://acme.atlassian.net'));
     await waitFor(() =>
-      expect(screen.getAllByTestId('resource-row')[0].getAttribute('aria-selected')).toBe('true'),
+      expect(screen.getAllByTestId('resource-row')[0].getAttribute('aria-current')).toBe('true'),
     );
     expect(screen.queryByTestId('flow-tracker.connect')).toBeNull();
   });

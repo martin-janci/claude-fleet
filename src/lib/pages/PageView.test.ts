@@ -173,6 +173,29 @@ describe('PageView — fields', () => {
   });
 });
 
+describe('PageView — a search hit', () => {
+  it('opens the tab the setting is on when an earlier tab is hidden by its when', async () => {
+    const work = pageOf('settings.work');
+    const tabs = work.tabs ?? [];
+    expect(tabs.map((t) => t.title)).toEqual(['Detection', 'Tidy-up', 'Retention']);
+    const page: Page = { ...work, tabs: [{ ...tabs[0], when: { key: 'work.recent_days', eq: 'never' } }, ...tabs.slice(1)] };
+    render(PageView, {
+      props: {
+        page,
+        pages: bundle.pages,
+        descs,
+        values: defaults,
+        sources: bundle.sources,
+        focusKey: 'work.tidy_done_days',
+        onnavigate: () => {},
+      },
+    });
+    expect(await screen.findByTestId('setting-row-work.tidy_done_days')).toBeTruthy();
+    expect(screen.queryByTestId('setting-row-work.retention.journal_days')).toBeNull();
+    expect(screen.queryByTestId('page-settings.work-tab-2')).toBeNull();
+  });
+});
+
 describe('PageView — data and links', () => {
   it('shows stats, a chart with its table, and tables from their sources', async () => {
     show('usage');

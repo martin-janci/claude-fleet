@@ -410,7 +410,7 @@ describe('WorkTree', () => {
 
   const reviewCalls = () => vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'work_review').length;
 
-  it('a change while Review shows reads only its count; back on Tasks, the tree once', async () => {
+  it('a change while Review shows reads the review list once (its count with it); back on Tasks, the tree once', async () => {
     render(WorkTree, { debounceMs: 5 });
     await flush();
     await fireEvent.click(screen.getByTestId('work-tab-review'));
@@ -421,7 +421,8 @@ describe('WorkTree', () => {
     await new Promise((r) => setTimeout(r, 30));
     await flush();
     expect(treeCalls()).toHaveLength(trees);
-    expect(reviewCalls()).toBeGreaterThan(reviews);
+    // Review's own re-read; the tab's count comes from it, not a second read.
+    expect(reviewCalls()).toBe(reviews + 1);
     await fireEvent.click(screen.getByTestId('work-tab-tasks'));
     await flush();
     expect(treeCalls()).toHaveLength(trees + 1);

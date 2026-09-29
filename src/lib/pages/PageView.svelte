@@ -4,7 +4,7 @@
   // spec only says what goes where; a field's label, help, bounds and danger
   // come from the registry's descriptor, a data item's formatting from its
   // source's declared shape.
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import FieldRow from './FieldRow.svelte';
   import DataItem from './DataItem.svelte';
   import Disclosure from './Disclosure.svelte';
@@ -95,11 +95,15 @@
 
   let root = $state<HTMLElement>();
 
-  // A search hit: open the tab the setting is on, then scroll to it.
+  // A search hit: open the tab the setting is on, then scroll to it. The
+  // index is into the tabs shown (a tab hidden by its `when` is not one);
+  // a setting on a hidden tab opens none. Read untracked: a value changed
+  // on the page must not pull the view back to the hit (a new page does).
   $effect(() => {
     const key = focusKey;
+    void page;
     if (!key) return;
-    const at = (page.tabs ?? []).findIndex((t) =>
+    const at = untrack(() => tabs).findIndex((t) =>
       t.sections.some((s) => s.items.some((i) => i.type === 'field' && i.key === key)),
     );
     if (at >= 0) tab = at;

@@ -2482,6 +2482,33 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     expect(names()).toHaveLength(1);
     expect(screen.queryByTestId('past-work-group')).toBeNull();
   });
+  it('work mode, nothing live archived: the count is the visible past links, and a search still narrows it', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const a = { ...sessionFor(1, 'dev-a'), tags: ['PAY-7'] };
+    mockBackend(fakeProjects, [a]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    const link = (id: number, key: string, name: string) => ({
+      id, ref_key: key, state: 'confirmed', source: 'manual', created_at: 1, ended_at: nowSec - 60, snap_host: 'local', snap_name: name,
+    });
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, x?: { args?: { key?: string } }) => {
+      if (cmd === 'session_work_links') {
+        return x?.args?.key === undefined ? [link(2, 'ABC-9', 'old'), link(3, 'PAY-7', 'older'), link(4, 'OPS-1', 'gone')] : [];
+      }
+      return base(cmd, x);
+    });
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    expect(await screen.findByTestId('archived-row')).toHaveTextContent('3 archived hidden');
+    // PAY-7 is a live group: its Done row counts when the group matches
+    // through its live session.
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'dev-a' } });
+    await waitFor(() => expect(screen.getByTestId('archived-row')).toHaveTextContent('1 archived hidden'));
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'gone' } });
+    await waitFor(() => expect(screen.getByTestId('archived-row')).toHaveTextContent('1 archived hidden'));
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: '' } });
+    await waitFor(() => expect(screen.getByTestId('archived-row')).toHaveTextContent('3 archived hidden'));
+  });
+
   it('the archived count matches a search the way the list does (project owner / repo, a sibling row)', async () => {
     const live = { ...sessionFor(2, 'dev-a'), work: w('PAY-1', 1, 'in_progress') };
     const parked = { ...sessionFor(2, 'dev-parked'), work: w('PAY-2', 2, 'done', 100) };

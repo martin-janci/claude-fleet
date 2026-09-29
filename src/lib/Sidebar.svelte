@@ -303,7 +303,8 @@
   // (any of which then shows every row in it), else the session itself.
   // Matching each archived row on its own used to disagree with the list.
   // Cheap gate: most of the time nothing is archived, and the count below
-  // (a second grouping pass) is skipped.
+  // (a second grouping pass) is skipped; with only past work to count and
+  // no search, it counts the past links alone.
   const anyArchivedSession = $derived($sessions.some((s) => s.work?.archived_at != null));
   const archivedHidden = $derived.by((): number => {
     if (focus || workFilterView.archived) return 0;
@@ -313,8 +314,16 @@
     const pastCounts = workMode && !needsYouOnly && [...$pastWork.values()].some((l) => l.length > 0);
     if (!anyArchivedSession && !pastCounts) return 0;
     const shown: WorkFilters = { ...workFilterView, archived: true };
-    const shownPred = triagePredicate(workFilterPredicate(shown, workFilterCtx));
     const q = searchQuery.toLowerCase();
+    // Past work only (nothing live is archived) and no search: every group
+    // matches, so the count is the visible past links — no regrouping of
+    // the live sessions on each row event / clock tick.
+    if (!anyArchivedSession && !q) {
+      let past = 0;
+      for (const [key, links] of $pastWork) past += links.filter((l) => pastVisible(key, l, shown)).length;
+      return past;
+    }
+    const shownPred = triagePredicate(workFilterPredicate(shown, workFilterCtx));
     const isArchived = (s: SessionRow) => s.work?.archived_at != null;
     const byWork = workMode
       ? buildSessionsByWork($sessions, viewHost, viewBg, shownPred, (s) => workKeyFor(s, branchById), viewScope)

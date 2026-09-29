@@ -62,6 +62,11 @@ function calls(cmd: string) {
 async function flush() {
   for (let i = 0; i < 10; i++) await tick();
 }
+/** Past the re-read debounce a write's `workChanged` bump starts. */
+async function debounced() {
+  await new Promise((r) => setTimeout(r, 20));
+  await flush();
+}
 
 describe('WorkReview', () => {
   beforeEach(() => {
@@ -111,10 +116,10 @@ describe('WorkReview', () => {
   });
 
   it('a confirm keeps an existing primary; a session with none gets it; Undo reconsiders at the version it left', async () => {
-    render(WorkReview);
+    render(WorkReview, { debounceMs: 5 });
     await flush();
     await fireEvent.click(within(screen.getAllByTestId('work-review-item')[0]).getByTestId('work-review-confirm'));
-    await flush();
+    await debounced();
     expect(calls('confirm_session_work')[0]).toEqual({ session_id: 7, link_id: 42, primary: false, expected_version: 2 });
     sessionLinks[8] = [sl(50, 'active', 2, 'PAY-2')];
     await fireEvent.click(within(screen.getAllByTestId('work-review-item')[0]).getByTestId('work-review-confirm'));
@@ -126,6 +131,21 @@ describe('WorkReview', () => {
     // A compare-and-set: the version the confirm left, read back.
     expect(calls('reconsider_work_link')[0]).toEqual({ session_id: 8, link_id: 50, expected_version: 2 });
     expect(screen.getByTestId('work-review-summary').textContent).toContain('Undone');
+  });
+
+  it('one decision reads the queue once, after the debounce, and reports its total', async () => {
+    const totals: number[] = [];
+    render(WorkReview, { debounceMs: 5, onchanged: (n: number) => totals.push(n) });
+    await flush();
+    expect(totals).toEqual([4]);
+    const before = calls('work_review').length;
+    await fireEvent.click(within(screen.getAllByTestId('work-review-item')[0]).getByTestId('work-review-reject'));
+    await flush();
+    await debounced();
+    await debounced();
+    expect(calls('work_review')).toHaveLength(before + 1);
+    expect(totals).toEqual([4, 3]);
+    expect(screen.getAllByTestId('work-review-item')).toHaveLength(3);
   });
 
   it('Undo names the version the decision answered, without re-reading the session', async () => {
