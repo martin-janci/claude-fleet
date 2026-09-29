@@ -44,7 +44,7 @@ pub struct JournalCounts {
 /// `'a','b'` for a list of compile-time vocabulary words. Only lowercase
 /// ASCII letters, digits and `_` pass, so nothing a caller supplies can reach
 /// the SQL text.
-fn sql_list(words: &[&str]) -> String {
+pub(super) fn sql_list(words: &[&str]) -> String {
     words
         .iter()
         .map(|w| {

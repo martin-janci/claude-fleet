@@ -874,6 +874,11 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/081_pane_working_at.sql"),
         already_applied: Some(sessions_has_pane_working_at),
     },
+    // An index on `work_unlinks.item_id` for its `work_items` cascade.
+    Migration::plain(
+        82,
+        include_str!("../../migrations/082_work_unlinks_item_index.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

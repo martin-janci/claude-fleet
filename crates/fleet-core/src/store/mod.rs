@@ -51,9 +51,7 @@ mod work_tidy;
 mod work_usage;
 mod work_view;
 
-pub use bench_work_link::{
-    BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow, BENCH_PERSON_SOURCES,
-};
+pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
 };

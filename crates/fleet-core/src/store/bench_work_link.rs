@@ -3,13 +3,9 @@
 //! the texts never leave the process except into a local file the operator
 //! asked for (`--export-unlinked`, D39).
 
-use super::{ItemMeta, Store};
+use super::work_usage::sql_list;
+use super::{ItemMeta, Store, PERSON_SOURCES};
 use crate::ipc_error::IpcError;
-
-/// Link sources that mean a PERSON decided: the link was made by hand, or by
-/// starting work on the ticket. `agent`, `agent_inferred` and every
-/// resolver/detection source are not a person's decision (D34).
-pub const BENCH_PERSON_SOURCES: &[&str] = &["manual", "started"];
 
 /// A confirmed link a person decided, with the prompt that opened the
 /// conversation it was decided in.
@@ -74,35 +70,38 @@ pub struct BenchHostLink {
 }
 
 impl Store {
-    /// Confirmed links a person decided (sources [`BENCH_PERSON_SOURCES`])
-    /// at or after `since`, naming an item, whose conversation has a first
-    /// prompt — the newest `limit`, returned oldest first. Joined like
-    /// [`Store::nl_census_pairs`].
+    /// Confirmed links a person decided (sources [`PERSON_SOURCES`]: `agent`,
+    /// `agent_inferred` and every resolver/detection source are not a
+    /// person's decision, D34) at or after `since`, naming an item, whose
+    /// conversation has a first prompt — the newest `limit`, returned oldest
+    /// first. Joined like [`Store::nl_census_pairs`].
     pub fn bench_work_link_cases(
         &self,
         since: i64,
         limit: u32,
     ) -> Result<Vec<BenchLinkRow>, IpcError> {
-        let mut st = self.conn.prepare(concat!(
+        let sql = format!(
             "SELECT l.id, l.item_id, l.source, COALESCE(l.decided_at, l.created_at), \
                     s.id, s.host_alias, c.first_prompt, s.last_prompt, \
                     COALESCE(s.current_branch, \
                              (SELECT wt.branch FROM worktrees wt WHERE wt.id = s.worktree_id), \
                              l.snap_branch), \
-                    COALESCE(t.org_id, ",
-            crate::session_org_sql!("s"),
-            ") FROM work_links l \
+                    COALESCE(t.org_id, {org}) \
+             FROM work_links l \
              JOIN participants p ON p.id = l.participant_id \
              JOIN sessions s ON s.id = p.session_id \
              JOIN conversations c ON c.session_id = s.id \
                                  AND c.claude_session_id = l.claude_session_id \
              JOIN work_items w ON w.id = l.item_id \
              LEFT JOIN trackers t ON t.id = w.tracker_id \
-             WHERE l.state = 'confirmed' AND l.source IN ('manual', 'started') \
+             WHERE l.state = 'confirmed' AND l.source IN ({person}) \
                AND c.first_prompt IS NOT NULL \
                AND COALESCE(l.decided_at, l.created_at) >= ?1 \
-             ORDER BY COALESCE(l.decided_at, l.created_at) DESC, l.id DESC LIMIT ?2"
-        ))?;
+             ORDER BY COALESCE(l.decided_at, l.created_at) DESC, l.id DESC LIMIT ?2",
+            org = crate::session_org_sql!("s"),
+            person = sql_list(PERSON_SOURCES),
+        );
+        let mut st = self.conn.prepare(&sql)?;
         let mut rows = st
             .query_map(rusqlite::params![since, limit], |r| {
                 Ok(BenchLinkRow {

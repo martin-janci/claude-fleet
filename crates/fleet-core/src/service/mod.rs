@@ -16,6 +16,7 @@ pub mod attachments;
 pub mod attention;
 pub mod bg_sessions;
 pub mod catalog;
+pub mod claude_print;
 pub mod clipboard;
 pub mod context;
 pub mod decide;

@@ -530,6 +530,15 @@ pub struct DecisionOutcome {
     /// record; act on it only through [`Self::usable`].
     pub answer: Option<DecisionAnswer>,
     pub fallback: Option<Fallback>,
+    /// The call's round trip, as recorded; `None` when nothing was sent.
+    #[serde(default)]
+    pub latency_ms: Option<i64>,
+    /// The call's input tokens and cost, as recorded (`0` when nothing was
+    /// sent) — also when the record itself failed.
+    #[serde(default)]
+    pub input_tokens: i64,
+    #[serde(default)]
+    pub cost_microusd: i64,
 }
 
 impl DecideRequest {
@@ -645,6 +654,9 @@ pub async fn decide(ctx: &DecideCtx, req: DecideRequest) -> DecisionOutcome {
             mode: None,
             answer: None,
             fallback: Some(Fallback::HttpError),
+            latency_ms: None,
+            input_tokens: 0,
+            cost_microusd: 0,
         };
     }
 
@@ -800,6 +812,9 @@ fn record(
         mode,
         answer,
         fallback,
+        latency_ms: run.latency_ms,
+        input_tokens: run.input_tokens,
+        cost_microusd: run.cost_microusd,
     }
 }
 

@@ -493,7 +493,7 @@ impl Store {
     }
 
     /// What a person's unlinks hold for `participant` (R9u, migration
-    /// 066): `(target, signal, value)`, the target labelled as
+    /// 070): `(target, signal, value)`, the target labelled as
     /// [`Self::detection_links`] labels a link (the item's current key, the
     /// bare key, or `item:<id>`).
     pub fn work_unlink_holds(
@@ -893,6 +893,18 @@ mod tests {
             s.detection_backlog(now, None).unwrap(),
             3,
             "the recent one too"
+        );
+    }
+
+    /// Migration 082: deleting a work item finds its unlinks (the cascade)
+    /// by `idx_work_unlinks_item`, not by scanning the table.
+    #[test]
+    fn the_item_cascade_uses_the_work_unlinks_item_index() {
+        let s = Store::open_in_memory().unwrap();
+        let plan = s.query_plan("SELECT id FROM work_unlinks WHERE item_id = 1");
+        assert!(
+            plan.iter().any(|d| d.contains("idx_work_unlinks_item")),
+            "expected idx_work_unlinks_item in the plan: {plan:?}"
         );
     }
 }

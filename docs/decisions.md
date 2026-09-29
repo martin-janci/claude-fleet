@@ -153,7 +153,9 @@ category they are. Jira, Linear and GitHub carry exact status categories
 from the tracker itself: `status_map` never looks at them.
 
 **When.** After a clean sync pass of an Asana tracker, at most once a day
-per tracker (sooner when its sections change), in a task of its own — never
+per tracker (sooner when its sections change; a run the gate refused —
+no key yet, the breaker open, the budget spent — does not count, so the
+next clean sync after that clears runs it), in a task of its own — never
 on the sync's path, and a failure never fails the sync. A run asks at most
 40 questions; a section decided in the last 14 days on the same input
 (fingerprint), question version, mode and model is not asked again, and a

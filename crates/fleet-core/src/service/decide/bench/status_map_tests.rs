@@ -1174,6 +1174,9 @@ fn a_labels_org_comes_from_the_database() {
     let mut rows = vec![label(" PARKED ", Some(other), None)];
     let e = resolve_label_orgs(&s, &mut rows).unwrap_err();
     assert!(e.contains("row 1") && e.contains("tracker_id"), "{e}");
+    // One sentence: the continuation leaves no run of spaces behind.
+    assert!(e.contains(&format!("are in org(s) {acme};")), "{e}");
+    assert!(!e.contains("  "), "{e:?}");
     // An org the database does not know; a tracker it does not know.
     assert!(resolve_label_orgs(&s, &mut [label("Ideas", Some(9_999), None)]).is_err());
     assert!(resolve_label_orgs(&s, &mut [label("Ideas", None, Some(9_999))]).is_err());

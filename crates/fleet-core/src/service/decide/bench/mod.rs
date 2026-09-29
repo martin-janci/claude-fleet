@@ -255,11 +255,10 @@ impl Calibration {
     pub fn of(obs: &[(f64, bool)]) -> Calibration {
         let n = obs.len() as u64;
         let shown = n >= SUPPRESS_BELOW;
-        let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
         Calibration {
             n: Shown(n),
-            ece: ece(obs, ECE_BINS).filter(|_| shown).map(r3),
-            brier: brier(obs).filter(|_| shown).map(r3),
+            ece: ece(obs, ECE_BINS).filter(|_| shown).map(round3),
+            brier: brier(obs).filter(|_| shown).map(round3),
         }
     }
 
@@ -360,9 +359,63 @@ pub fn f3(x: Option<f64>) -> String {
     x.map(|v| format!("{v:.3}")).unwrap_or_else(|| "-".into())
 }
 
+/// PURE: `x` to two places, `-` for none.
+pub(crate) fn f2(x: Option<f64>) -> String {
+    x.map(|v| format!("{v:.2}")).unwrap_or_else(|| "-".into())
+}
+
+/// PURE: `x` rounded to three places.
+pub(crate) fn round3(x: f64) -> f64 {
+    (x * 1000.0).round() / 1000.0
+}
+
+/// PURE: `k / n` to three places, none when `n` is 0.
+pub(crate) fn pct(k: u64, n: u64) -> Option<f64> {
+    (n > 0).then(|| round3(k as f64 / n as f64))
+}
+
+/// The skip reason of a case past a run's `max_calls`.
+pub(crate) const MAX_CALLS: &str = "max_calls";
+
+/// Before a bench call: the gate for `org_id` (its fallback's name when it
+/// refuses — nothing is sent or recorded), then the `max_calls` budget.
+/// `Ok` means the call may be made; the caller counts it.
+pub(crate) fn gate_or_skip(
+    ctx: &crate::service::decide::DecideCtx,
+    feature: crate::service::decide::Feature,
+    org_id: Option<i64>,
+    calls: usize,
+    max_calls: usize,
+) -> Result<(), &'static str> {
+    let gated = match crate::ipc_error::lock(&ctx.store) {
+        Ok(s) => crate::service::decide::gate_bench_at(&s, feature, org_id, ctx.now()),
+        Err(_) => Err(crate::service::decide::Fallback::FlagOff),
+    };
+    gated.map_err(|f| f.as_str())?;
+    if calls >= max_calls {
+        return Err(MAX_CALLS);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shared_metric_and_format_helpers() {
+        assert_eq!(pct(1, 3), Some(0.333));
+        assert_eq!(pct(2, 3), Some(0.667));
+        assert_eq!(pct(0, 0), None);
+        assert_eq!(pct(0, 4), Some(0.0));
+        assert_eq!(round3(0.12345), 0.123);
+        assert_eq!(round3(-0.0006), -0.001);
+        assert_eq!(f2(None), "-");
+        assert_eq!(f2(Some(0.126)), "0.13");
+        assert_eq!(f2(Some(1.0)), "1.00");
+        assert_eq!(f3(None), "-");
+        assert_eq!(f3(Some(1.0 / 3.0)), "0.333");
+    }
 
     #[test]
     fn ece_of_a_calibrated_model_is_zero_and_of_an_overconfident_one_is_the_gap() {

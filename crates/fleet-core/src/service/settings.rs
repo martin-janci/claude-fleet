@@ -282,9 +282,11 @@ pub const DECIDE_JEV_ENABLED: &str = "decide.jev.enabled";
 pub const DECIDE_JEV_STATUS_MAP: &str = "decide.jev.status_map";
 /// `work_link`'s mode (choosing a work item for an unlinked session).
 pub const DECIDE_JEV_WORK_LINK: &str = "decide.jev.work_link";
-/// What a feature's mode may be. `auto` is not offered: no feature has
-/// passed acceptance (D36).
-pub const DECIDE_MODES: &[&str] = &["off", "shadow", "assist"];
+/// What a feature's mode may be: the store's `decision_runs.mode` words
+/// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
+/// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
+/// has passed acceptance (D36).
+pub const DECIDE_MODES: &[&str] = crate::store::DECISION_MODES;
 
 // ── update.* (application updates, update-channel design §7.3) ──
 /// The release track the hub follows for its fleet.

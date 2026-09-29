@@ -934,6 +934,46 @@ async fn the_sync_hook_runs_a_clean_asana_pass_once_a_day() {
 }
 
 #[tokio::test]
+async fn a_gated_run_does_not_latch_the_tracker_for_a_day() {
+    // First-time setup: the feature on before the key is stored. The key
+    // is not in the sections' digest, so a latched tracker would wait a day.
+    let w = world();
+    w.on("assist");
+    assert!(w.store.lock().unwrap().clear_decision_credential().unwrap());
+    let fake = Fake::answering(vec![says("todo", 0.9); 3]);
+    let trigger = StatusMapTrigger::new(w.ctx(fake.clone()));
+    let pass = TrackerPass {
+        tracker_id: w.tracker,
+        ..Default::default()
+    };
+    trigger
+        .after_pass(std::slice::from_ref(&pass))
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(fake.calls(), 0, "the gate refused: no key");
+    assert!(
+        !trigger.last.lock().unwrap().contains_key(&w.tracker),
+        "a gated run marks nothing"
+    );
+    // The key arrives: the next pass runs it, not a day later.
+    w.store
+        .lock()
+        .unwrap()
+        .set_decision_credential(Some(&Secret::new(KEY)), None)
+        .unwrap();
+    trigger
+        .after_pass(std::slice::from_ref(&pass))
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(fake.calls(), 3);
+    // A run past the gate holds it for the day.
+    assert!(trigger.last.lock().unwrap().contains_key(&w.tracker));
+    assert!(trigger.after_pass(std::slice::from_ref(&pass)).is_none());
+}
+
+#[tokio::test]
 async fn a_tracker_due_while_a_run_is_going_stays_due() {
     let w = world();
     w.on("assist");
