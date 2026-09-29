@@ -21,6 +21,7 @@ pub mod context;
 pub mod decide;
 pub mod delivery;
 pub mod diagnostics;
+pub mod evidence;
 pub mod fresh;
 pub mod gc;
 pub mod health;

@@ -129,6 +129,17 @@ line under it says so — *Shown 600 of 6812 characters — open the ticket* —
 and *open the ticket* opens it in the tracker. A description that fits has
 no such line.
 
+Beside a live session's PR the detail shows the PR's **Result**: *Ready*,
+*Waiting*, *Blocked*, *Unknown*, *Merged* or *Closed*. The session's own
+details list the reasons behind it: failing checks by name, uncommitted or
+unpushed work, a worktree on another commit than the PR, a review or a
+draft, merge conflicts. They also say which commit the reading is about and
+when it was taken. Fleet explains here, it does not decide: *Ready* only
+means nothing it read stands in the way, and a reading older than a
+quarter of an hour is *Unknown*, whatever it said. The session row's CI
+badge dims in that case too. See
+`docs/specs/2026-09-29-result-evidence-design.md`.
+
 **Where things come from.** Every value that fleet did not get from a person
 says so:
 

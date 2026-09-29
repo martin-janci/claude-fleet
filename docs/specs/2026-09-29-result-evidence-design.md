@@ -234,30 +234,57 @@ claude-fleet #381). That reads as "no requirement", not as a reason.
 
 ## 6. Where it shows
 
-- **Session details** (`SessionDetails.svelte`, today the PR link plus the CI
-  chip): an **Evidence** card. Verdict and commit on the first line, reasons
-  below, "checked 3 min ago" and a refresh button that calls §3. Opening the
-  card triggers one refresh if the stored reading is older than the TTL.
-- **Work item detail**: one line per linked session with a PR, worst verdict
-  first. The group-header roll-up (`work_keys.ts`, worst `ci_status`) is
-  unchanged in phase 1.
-- **Session row badge**: unchanged. It gets a dimmed style when the row's
-  `pr_checked_at` is older than 3 × TTL, so an old `passing` stops looking
-  current.
+The desktop assesses the row it already holds. `src/lib/evidence.ts` mirrors
+`service::evidence::assess`, and both run the shared fixture
+`service/testdata/evidence_cases.json`, the pattern `quiet_statuses.json`
+set. So the card works the same against a hub, with no command, no hub
+verdict row and no round trip.
+
+- **Session details** (`SessionDetails.svelte`): a **Result** row under the
+  pull request, drawn by `PrResult.svelte`. The first line has the verdict,
+  the short commit and "checked 3m ago"; the reasons follow, and the failing
+  checks are listed as links. It is called "Result", not "Evidence", because
+  the Work view already uses *evidence* for why a session is linked to a task.
+- **Work item detail** (`WorkTaskDetail.svelte`): a verdict chip beside the PR
+  of each *live* linked session. The group-header roll-up (`work_keys.ts`,
+  worst `ci_status`) is unchanged.
+- **Session row badge**: dimmed when `pr_checked_at` is older than
+  `PR_EVIDENCE_STALE_SECS`, and its tooltip then says when it was last
+  checked.
 - **Dispatch tasks**: the commit line in `list_tasks` / the inbox message (§4).
+
+The refresh button waits for phase 3's fresh-read tool (§3). Until then the
+card shows the background probe's reading and its age.
 
 Attention is unchanged. `CiFailing` still reads `ci_status`, and "ready to
 merge" is not something that needs a person urgently.
 
+### Refinements made in phase 2
+
+- **Merged / Closed** end the question. `PrEvidence` gained `state`, so a
+  merged PR reads "Merged" and not "Ready", and still lists uncommitted or
+  unpushed work left in the worktree.
+- **`mergeStateStatus: UNKNOWN` is no reason.** GitHub computes mergeability
+  lazily and answers `UNKNOWN` to a first read as a matter of course.
+- **`BLOCKED` counts only when nothing else explains it** (`merge_blocked`,
+  Waiting). A required review already says why.
+- **An old reading keeps its reasons** after the leading `stale`, as the last
+  thing known, and is never Ready or a confident Blocked.
+- **Reasons are codes, not sentences** (`Reason` / `reasons: [...]`). The
+  client words them from the numbers and names in the evidence, so the two
+  sides share only the rule.
+
 ## 7. Phases
 
-1. **Probe and store** (§1, §2): fields, git line, check summary, migration,
-   write path. Nothing new in the UI yet, but the data starts accumulating.
-2. **Assess and show** (§3, §5, §6): the pure assessment, the on-demand read,
-   the card, the dimmed badge.
-3. **Tasks and agents** (§4, MCP): `result_commit`, then the evidence on the
-   full `list_sessions` row plus a fresh-read MCP tool, batched with other
-   tool-surface changes.
+1. **Probe and store** (§1, §2), done in #390: fields, git line, check
+   summary, migration, write path.
+2. **Assess and show** (§5, §6): the pure assessment on both sides, the
+   Result card, the Work chip, the dimmed badge.
+3. **Fresh reads, tasks and agents** (§3, §4, MCP): the on-demand read with
+   review commits, a fresh-read MCP tool (which is also the hub path for the
+   card's refresh button), `result_commit`, the evidence on full
+   `list_sessions` rows. The tool changes are batched with other tool-surface
+   edits.
 
 ## Not in scope
 
