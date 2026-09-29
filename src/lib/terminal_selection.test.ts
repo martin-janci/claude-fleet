@@ -3,6 +3,8 @@ import {
   normalizeSelection,
   selectionRects,
   snapToGlyphs,
+  shiftSelection,
+  shiftCell,
   type CellPos,
 } from './terminal_selection';
 
@@ -202,5 +204,64 @@ describe('selections never cut a wide glyph', () => {
     expect(selectionRects({ row: 0, col: 0 }, { row: 0, col: 2 }, 6, 8, 16, 4, wide)).toEqual([
       { left: 4, top: 4, width: 4 * 8, height: 16 },
     ]);
+  });
+});
+
+describe('shiftSelection', () => {
+  const band = (top: number, bottom: number, delta: number) => ({ top, bottom, delta });
+
+  it('moves a selection inside the band with it, keeping anchor and focus roles', () => {
+    const anchor = { row: 6, col: 3 };
+    const focus = { row: 4, col: 1 };
+    expect(shiftSelection(anchor, focus, band(0, 9, -2), 10)).toEqual({
+      anchor: { row: 4, col: 3 },
+      focus: { row: 2, col: 1 },
+    });
+  });
+
+  it('returns the same endpoints when the band does not reach the selection', () => {
+    const anchor = { row: 8, col: 0 };
+    const focus = { row: 9, col: 4 };
+    const out = shiftSelection(anchor, focus, band(0, 5, -3), 10);
+    expect(out!.anchor).toBe(anchor);
+    expect(out!.focus).toBe(focus);
+  });
+
+  it('cuts a start pushed off the top back to the band top, from column 0', () => {
+    expect(shiftSelection({ row: 1, col: 5 }, { row: 4, col: 2 }, band(0, 9, -3), 10)).toEqual({
+      anchor: { row: 0, col: 0 },
+      focus: { row: 1, col: 2 },
+    });
+  });
+
+  it('cuts an end pushed off the bottom back to the band bottom, to the last column', () => {
+    expect(shiftSelection({ row: 5, col: 5 }, { row: 8, col: 2 }, band(0, 9, 3), 10)).toEqual({
+      anchor: { row: 8, col: 5 },
+      focus: { row: 9, col: 9 },
+    });
+  });
+
+  it('drops a selection scrolled entirely off either edge', () => {
+    expect(shiftSelection({ row: 1, col: 0 }, { row: 2, col: 9 }, band(0, 9, -3), 10)).toBeNull();
+    expect(shiftSelection({ row: 7, col: 0 }, { row: 8, col: 9 }, band(0, 9, 5), 10)).toBeNull();
+  });
+
+  it('leaves an endpoint outside the band where it is (a row below the region)', () => {
+    // Selection from row 5 in the region to the status row 10 below it.
+    expect(shiftSelection({ row: 5, col: 2 }, { row: 10, col: 3 }, band(0, 9, -2), 10)).toEqual({
+      anchor: { row: 3, col: 2 },
+      focus: { row: 10, col: 3 },
+    });
+  });
+});
+
+describe('shiftCell', () => {
+  it('moves a cell in the band, pins one pushed out to the edge it left by, leaves others', () => {
+    const b = { top: 2, bottom: 7, delta: -3 };
+    expect(shiftCell({ row: 6, col: 4 }, b, 10)).toEqual({ row: 3, col: 4 });
+    expect(shiftCell({ row: 3, col: 4 }, b, 10)).toEqual({ row: 2, col: 0 });
+    expect(shiftCell({ row: 5, col: 4 }, { ...b, delta: 3 }, 10)).toEqual({ row: 7, col: 9 });
+    const outside = { row: 9, col: 1 };
+    expect(shiftCell(outside, b, 10)).toBe(outside);
   });
 });

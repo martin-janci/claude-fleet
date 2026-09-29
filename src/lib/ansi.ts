@@ -21,6 +21,19 @@
 
 import { wcwidth, firstCharWidth } from './wcwidth';
 
+/** Rows the screen moved in one scroll step: every row in [top, bottom]
+ *  moved by `delta` (negative = up); a row pushed past either edge is gone,
+ *  and blanks filled the vacated rows. `null` marks a wholesale swap of the
+ *  content (alt screen, RIS, resize) after which no old position means
+ *  anything. The view replays these onto its selection so the highlight
+ *  stays on the text it covered while tmux or claude scrolls it. */
+export type RowShift = { top: number; bottom: number; delta: number } | null;
+
+/** Pending shifts beyond this are collapsed into a single `null`: a Screen
+ *  whose owner never drains them must not grow without bound, and a
+ *  selection can't survive that much scrolling anyway. */
+const MAX_ROW_SHIFTS = 1024;
+
 export interface Cell {
   /** One grapheme: a base code point plus whatever tmux joined onto it
    *  (combining marks, variation selectors, the rest of a ZWJ sequence, a
@@ -194,6 +207,8 @@ export class Screen {
    *  parser has no back-channel of its own; the component drains this after
    *  every `write()` and forwards it to the PTY. */
   pendingReplies: string[] = [];
+  /** Row moves since the last `takeRowShifts()`, oldest first. */
+  private rowShifts: RowShift[] = [];
   /** Current SGR state — applied to each printed cell. */
   curFg = COLOR_DEFAULT;
   curBg = COLOR_DEFAULT;
@@ -339,6 +354,9 @@ export class Screen {
     rows = Math.max(1, rows);
     cols = Math.max(1, cols);
     if (rows === this.rows && cols === this.cols) return;
+    // tmux repaints (and reflows) the pane after a SIGWINCH, so no cell keeps
+    // the text it held.
+    this.noteContentSwap();
     this.cells = resizeGrid(this.cells, this.rows, this.cols, rows, cols);
     // Rows that survive a height change keep their flags; a width change
     // moves the wrap column, so no row ends in a wrap any more.
@@ -367,6 +385,39 @@ export class Screen {
     // Reset to the full new screen so stale margins can't mis-scroll.
     this.scrollTop = 0;
     this.scrollBottom = this.rows - 1;
+  }
+
+  /** Drain the row moves recorded since the last call, oldest first. */
+  takeRowShifts(): RowShift[] {
+    if (this.rowShifts.length === 0) return [];
+    const out = this.rowShifts;
+    this.rowShifts = [];
+    return out;
+  }
+
+  /** Record that rows [top, bottom] moved by `delta`. A move in the same
+   *  direction over the same band as the previous one is folded into it —
+   *  a stream of LFs at the bottom margin is one entry, not hundreds. Moves
+   *  in opposite directions don't fold: a row pushed out by the first is
+   *  gone, and the second must not bring it back. */
+  private noteShift(top: number, bottom: number, delta: number): void {
+    if (delta === 0 || top > bottom) return;
+    const last = this.rowShifts[this.rowShifts.length - 1];
+    if (last && last.top === top && last.bottom === bottom && Math.sign(last.delta) === Math.sign(delta)) {
+      last.delta += delta;
+      return;
+    }
+    if (this.rowShifts.length >= MAX_ROW_SHIFTS) {
+      this.rowShifts = [null];
+      return;
+    }
+    this.rowShifts.push({ top, bottom, delta });
+  }
+
+  /** Record that the whole content was replaced; earlier moves no longer
+   *  matter once nothing survives this one. */
+  private noteContentSwap(): void {
+    this.rowShifts = [null];
   }
 
   /** Drain the reply queue (DSR / DA answers) as one string; empty when the
@@ -638,6 +689,7 @@ export class Screen {
       this.cells.splice(this.scrollBottom, 0, this.blankRow());
       this.wrapped.splice(this.scrollTop, 1);
       this.wrapped.splice(this.scrollBottom, 0, false);
+      this.noteShift(this.scrollTop, this.scrollBottom, -1);
       this.coverRow = -1;
       this.unwrap(this.scrollTop - 1);
       this.markRows(this.scrollTop, this.scrollBottom);
@@ -657,6 +709,7 @@ export class Screen {
       this.cells.splice(this.scrollTop, 0, this.blankRow());
       this.wrapped.splice(this.scrollBottom, 1);
       this.wrapped.splice(this.scrollTop, 0, false);
+      this.noteShift(this.scrollTop, this.scrollBottom, 1);
       this.coverRow = -1;
       this.unwrap(this.scrollTop - 1);
       this.unwrap(this.scrollBottom);
@@ -681,6 +734,7 @@ export class Screen {
     this.cells.splice(this.scrollBottom - n + 1, 0, ...blanks);
     this.wrapped.splice(this.scrollTop, n);
     this.wrapped.splice(this.scrollBottom - n + 1, 0, ...new Array<boolean>(n).fill(false));
+    this.noteShift(this.scrollTop, this.scrollBottom, -n);
     this.endCoverage();
     this.coverRow = -1;
     this.unwrap(this.scrollTop - 1);
@@ -697,6 +751,7 @@ export class Screen {
     this.cells.splice(this.scrollTop, 0, ...blanks);
     this.wrapped.splice(this.scrollBottom - n + 1, n);
     this.wrapped.splice(this.scrollTop, 0, ...new Array<boolean>(n).fill(false));
+    this.noteShift(this.scrollTop, this.scrollBottom, n);
     this.endCoverage();
     this.coverRow = -1;
     this.unwrap(this.scrollTop - 1);
@@ -872,6 +927,7 @@ export class Screen {
   }
 
   private fullReset(): void {
+    this.noteContentSwap();
     this.cells = makeGrid(this.rows, this.cols);
     this.wrapped = new Array(this.rows).fill(false);
     this.coverRow = -1;
@@ -1136,6 +1192,7 @@ export class Screen {
    *  pane re-entry sequences don't double-save. */
   private enterAltScreen(): void {
     if (this.savedScreen !== null) return;
+    this.noteContentSwap();
     this.savedScreen = {
       cells: this.cells,
       wrapped: this.wrapped,
@@ -1178,6 +1235,7 @@ export class Screen {
   private leaveAltScreen(): void {
     const saved = this.savedScreen;
     if (saved === null) return;
+    this.noteContentSwap();
     this.cells = saved.cells;
     this.wrapped = saved.wrapped;
     this.coverRow = -1;
@@ -1256,6 +1314,7 @@ export class Screen {
       this.wrapped.splice(this.cursorRow, 0, false);
       this.endCoverage();
     }
+    this.noteShift(this.cursorRow, this.scrollBottom, n);
     this.coverRow = -1;
     // The row above lost its continuation, and so did the row now at the
     // bottom (its old next row fell off the region).
@@ -1279,6 +1338,7 @@ export class Screen {
       this.wrapped.splice(this.scrollBottom, 0, false);
       this.endCoverage();
     }
+    this.noteShift(this.cursorRow, this.scrollBottom, -n);
     this.coverRow = -1;
     this.unwrap(this.cursorRow - 1);
     this.markRows(this.cursorRow, this.scrollBottom);

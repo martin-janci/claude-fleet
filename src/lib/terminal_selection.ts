@@ -148,3 +148,65 @@ export function expandSelection(
     end: { row: end.row, col: wordBoundsAt(endRow, end.col).to },
   };
 }
+
+/** A band of rows that moved together: every row in [top, bottom] moved by
+ *  `delta` (negative = up). Structurally `ansi.RowShift` minus its `null`. */
+export interface RowBand {
+  top: number;
+  bottom: number;
+  delta: number;
+}
+
+/** Move one cell with a band shift. A cell outside the band stays; one the
+ *  shift pushed past an edge is pinned to that edge — the start of the band
+ *  when it left through the top, the end of the band when it left through
+ *  the bottom — so a gesture anchor never points at a row that isn't there. */
+export function shiftCell(p: CellPos, shift: RowBand, cols: number): CellPos {
+  if (p.row < shift.top || p.row > shift.bottom) return p;
+  const row = p.row + shift.delta;
+  if (row < shift.top) return { row: shift.top, col: 0 };
+  if (row > shift.bottom) return { row: shift.bottom, col: cols - 1 };
+  return { row, col: p.col };
+}
+
+/** Carry a selection along with rows the screen scrolled, so the highlight
+ *  stays on the text it covered — the way a terminal with scrollback keeps it
+ *  on its lines — instead of sitting on fixed cells while tmux or claude
+ *  scroll the text away under it. Endpoints inside the band move with it;
+ *  an end pushed out of the band is cut back to the part still on screen;
+ *  a selection with nothing left on screen is gone (`null`). There is no
+ *  scrollback to keep the scrolled-off part in, so a later scroll back
+ *  doesn't restore it. The endpoints keep their roles: the anchor stays the
+ *  anchor (Shift+click extends from it). Returns the same objects when the
+ *  shift didn't touch the selection. */
+export function shiftSelection(
+  anchor: CellPos,
+  focus: CellPos,
+  shift: RowBand,
+  cols: number,
+): { anchor: CellPos; focus: CellPos } | null {
+  const { start, end } = normalizeSelection(anchor, focus);
+  const anchorIsStart = start === anchor;
+  const move = (p: CellPos): number | null =>
+    p.row < shift.top || p.row > shift.bottom ? null : p.row + shift.delta;
+
+  let newStart = start;
+  const sr = move(start);
+  if (sr !== null) {
+    if (sr < shift.top) newStart = { row: shift.top, col: 0 };
+    else if (sr > shift.bottom) newStart = { row: shift.bottom + 1, col: 0 };
+    else newStart = { row: sr, col: start.col };
+  }
+  let newEnd = end;
+  const er = move(end);
+  if (er !== null) {
+    if (er > shift.bottom) newEnd = { row: shift.bottom, col: cols - 1 };
+    else if (er < shift.top) newEnd = { row: shift.top - 1, col: cols - 1 };
+    else newEnd = { row: er, col: end.col };
+  }
+  // Both ends left through the same edge (or the cut crossed them): nothing
+  // of the selection is on screen any more.
+  if (newStart.row > newEnd.row || (newStart.row === newEnd.row && newStart.col > newEnd.col)) return null;
+  if (newStart === start && newEnd === end) return { anchor, focus };
+  return anchorIsStart ? { anchor: newStart, focus: newEnd } : { anchor: newEnd, focus: newStart };
+}

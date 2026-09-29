@@ -2363,3 +2363,94 @@ describe('Screen soft wraps — copied text joins wrapped rows (N2)', () => {
     expect(wide.wrapped).toEqual([false, false, false]);
   });
 });
+
+describe('ansi.Screen — row shifts (what a selection follows)', () => {
+  it('records nothing for output that moves no rows', () => {
+    const s = new Screen(5, 10);
+    s.write('hello\r\nworld\x1b[H\x1b[2K');
+    expect(s.takeRowShifts()).toEqual([]);
+  });
+
+  it('folds a run of LFs at the bottom margin into one upward shift', () => {
+    const s = new Screen(5, 10);
+    s.write('1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7');
+    expect(s.takeRowShifts()).toEqual([{ top: 0, bottom: 4, delta: -2 }]);
+    // Drained: the next take starts empty.
+    expect(s.takeRowShifts()).toEqual([]);
+  });
+
+  it('scopes the shift to the scroll region (tmux keeps its status bar out of it)', () => {
+    const s = new Screen(5, 10);
+    s.write('\x1b[1;4r\x1b[4;1H\n\n');
+    expect(s.takeRowShifts()).toEqual([{ top: 0, bottom: 3, delta: -2 }]);
+  });
+
+  it('records RI, SU and SD over the region', () => {
+    const s = new Screen(5, 10);
+    s.write('\x1b[H\x1bM');
+    expect(s.takeRowShifts()).toEqual([{ top: 0, bottom: 4, delta: 1 }]);
+    s.write('\x1b[2S');
+    expect(s.takeRowShifts()).toEqual([{ top: 0, bottom: 4, delta: -2 }]);
+    s.write('\x1b[3T');
+    expect(s.takeRowShifts()).toEqual([{ top: 0, bottom: 4, delta: 3 }]);
+  });
+
+  it('records IL and DL from the cursor row down to the region bottom', () => {
+    const s = new Screen(6, 10);
+    s.write('\x1b[3;1H\x1b[2L');
+    expect(s.takeRowShifts()).toEqual([{ top: 2, bottom: 5, delta: 2 }]);
+    s.write('\x1b[1M');
+    expect(s.takeRowShifts()).toEqual([{ top: 2, bottom: 5, delta: -1 }]);
+    // Outside the region IL is a no-op, so nothing moved.
+    s.write('\x1b[1;3r\x1b[5;1H\x1b[L');
+    expect(s.takeRowShifts()).toEqual([]);
+  });
+
+  it('keeps opposite moves apart — a row pushed out does not come back', () => {
+    const s = new Screen(5, 10);
+    s.write('\x1b[S\x1b[T');
+    expect(s.takeRowShifts()).toEqual([
+      { top: 0, bottom: 4, delta: -1 },
+      { top: 0, bottom: 4, delta: 1 },
+    ]);
+  });
+
+  it('marks a wholesale content swap with null (alt screen, RIS, resize)', () => {
+    const s = new Screen(5, 10);
+    s.write('\n\n\n\n\n\x1b[?1049h');
+    expect(s.takeRowShifts()).toEqual([null]);
+    s.write('\x1b[?1049l');
+    expect(s.takeRowShifts()).toEqual([null]);
+    s.write('\x1bc');
+    expect(s.takeRowShifts()).toEqual([null]);
+    s.resize(6, 10);
+    expect(s.takeRowShifts()).toEqual([null]);
+    s.resize(6, 10);
+    expect(s.takeRowShifts()).toEqual([]);
+  });
+
+  it('collapses an undrained backlog into null instead of growing without bound', () => {
+    const s = new Screen(5, 10);
+    s.write('\x1b[S\x1b[T'.repeat(600));
+    const shifts = s.takeRowShifts();
+    // The overflow became one null; the moves after it still count.
+    expect(shifts[0]).toBeNull();
+    expect(shifts.length).toBeLessThanOrEqual(1024);
+    expect(shifts.filter((x) => x === null)).toHaveLength(1);
+  });
+
+  it("follows tmux copy-mode scrolling: the selected text is still under the moved selection", () => {
+    // What tmux 3.6a sends an xterm-256color client for one wheel-up in
+    // copy-mode (captured): scroll region, then 5 × (home, IL 1, new top row).
+    const s = new Screen(25, 20);
+    s.write('\x1b[1;24r');
+    for (let i = 1; i <= 24; i++) s.write(`line ${i}` + (i < 24 ? '\r\n' : ''));
+    s.takeRowShifts();
+    const before = s.selectionText({ row: 9, col: 0 }, { row: 10, col: 6 });
+    let wheel = '';
+    for (let i = 0; i < 5; i++) wheel += `\x1b[1;1H\x1b[1Lold ${i}`;
+    s.write(wheel);
+    expect(s.takeRowShifts()).toEqual([{ top: 0, bottom: 23, delta: 5 }]);
+    expect(s.selectionText({ row: 14, col: 0 }, { row: 15, col: 6 })).toBe(before);
+  });
+});
