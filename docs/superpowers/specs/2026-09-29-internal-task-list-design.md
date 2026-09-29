@@ -1,7 +1,7 @@
 # One internal task list — design
 
 **Date:** 2026-09-29
-**Status:** design approved by the owner, nothing implemented.
+**Status:** superseded as a product by `2026-09-29-shared-work-context-design.md` (roadmap part 1); kept as history, mechanisms reused there (§7).
 **Revised:** 2026-09-29, after reading the code — see "Revisions after reading the code" below; they win where they differ from §1–§4.
 **Builds on:** `2026-09-24-work-graph-design.md` (§0), `2026-09-27-work-view-design.md`,
 `2026-09-28-sprints-releases-epics-design.md` (decision E1 "native owns").
