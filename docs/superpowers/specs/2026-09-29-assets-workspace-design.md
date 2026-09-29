@@ -11,6 +11,12 @@ sub-projects (S1–S5), each of which gets its own spec and plan.
 **Inputs:** a UX/UI audit and an agent-flows/Jev analysis, both run
 read-only against `origin/main` @ `d1e29ed1` and the owner's live hub
 (`list_assets`, 2026-09-29).
+**Mockups:** `2026-09-29-assets-workspace-mockups.html` beside this file — eight
+interactive screens (first run, Inbox, Layers and hosts, Library, author and
+test, test results, skill overlap, mobile) drawn with the app's own tokens.
+Open it in a browser. Names and counts are live data; layer names, diffs and
+test results are illustrative. Where the mockups and this spec disagree, the
+spec wins.
 
 ## Problem
 
