@@ -86,11 +86,29 @@ pub fn configure(args: ConfigureArgs, store: &Mutex<Store>) -> Result<CatalogCon
             "repo_path must not be empty",
         ));
     }
+    // Set over the wire (`catalog_admin configure`) and handed to `git
+    // clone` as the hub's own user: a path that reads as an option, or one
+    // that means "wherever the process happens to run", is refused here.
+    if path.starts_with('-') {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "repo_path must not start with '-'",
+        ));
+    }
+    if !std::path::Path::new(&path).is_absolute() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("repo_path must be an absolute path (or start with ~/), got {path}"),
+        ));
+    }
     let remote = args
         .remote_url
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
+    if let Some(url) = remote {
+        repo::check_remote_url(url)?;
+    }
     repo::ensure_repo(std::path::Path::new(&path), remote)?;
     Ok(lock(store)?.set_catalog_config(&path, remote)?)
 }
@@ -549,6 +567,68 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "-q", "-m", "init"]);
         root
+    }
+
+    /// `configure` is reachable over the wire (`catalog_admin`); its
+    /// `remote_url` / `repo_path` go to `git clone` as the hub's user, so an
+    /// option-shaped or helper remote and a relative path are refused before
+    /// git runs or anything is stored.
+    #[test]
+    fn configure_refuses_option_shaped_input() {
+        let base = std::env::temp_dir().join(format!(
+            "fleet-catalog-configure-refuse-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let marker = base.join("pwned");
+        let target = base.join("agent-assets");
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let cases = [
+            (
+                target.to_string_lossy().into_owned(),
+                Some(format!(
+                    "--config=core.sshCommand=touch {}",
+                    marker.display()
+                )),
+            ),
+            (
+                "ssh://x/y".to_string(),
+                Some(format!(
+                    "--config=core.sshCommand=touch {}",
+                    marker.display()
+                )),
+            ),
+            (
+                target.to_string_lossy().into_owned(),
+                Some(format!("--upload-pack=touch {}", marker.display())),
+            ),
+            (
+                target.to_string_lossy().into_owned(),
+                Some(format!("ext::sh -c touch% {}", marker.display())),
+            ),
+            ("relative/assets".to_string(), None),
+            ("--template=/tmp".to_string(), None),
+        ];
+        for (repo_path, remote_url) in cases {
+            let err = configure(
+                ConfigureArgs {
+                    repo_path: repo_path.clone(),
+                    remote_url: remote_url.clone(),
+                },
+                &store,
+            )
+            .unwrap_err();
+            assert_eq!(
+                err.code,
+                codes::E_INVALID,
+                "{repo_path} {remote_url:?}: {}",
+                err.message
+            );
+        }
+        assert!(!marker.exists());
+        assert!(!target.exists());
+        assert!(config(&store).unwrap().is_none());
     }
 
     fn configured_store_with_layers(tag: &str) -> Mutex<Store> {

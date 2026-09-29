@@ -123,6 +123,46 @@ fn clone_parent(path: &Path) -> &Path {
     }
 }
 
+/// The `git clone` argv for `url` into `target`. The `--` ends option
+/// parsing, so a URL or path that starts with `-` (`--upload-pack=<cmd>`,
+/// `--config=core.sshCommand=<cmd>`) is taken as an operand, never as an
+/// option git would act on.
+fn clone_args<'a>(url: &'a str, target: &'a str) -> [&'a str; 5] {
+    ["clone", "-q", "--", url, target]
+}
+
+/// Refuse a catalog remote URL that git could read as something other than
+/// a place to fetch from: one that starts with `-` (an option), or one in
+/// git's `<transport>::<address>` remote-helper form (`ext::<cmd>` runs a
+/// command; no catalog remote needs a helper). `E_INVALID`.
+///
+/// The remote is set over the wire (`catalog_admin configure`, by the master
+/// or a client granted `assets`), and the clone runs as the hub's own user,
+/// who can read the whole state database — so this is checked where the URL
+/// is stored AND again right before the clone, for a row stored before this
+/// check existed.
+pub(crate) fn check_remote_url(url: &str) -> Result<(), IpcError> {
+    if url.starts_with('-') {
+        return Err(IpcError::new(
+            E_INVALID,
+            "remote_url must not start with '-'",
+        ));
+    }
+    if let Some((scheme, _)) = url.split_once("::") {
+        let helper_like = !scheme.is_empty()
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+        if helper_like {
+            return Err(IpcError::new(
+                E_INVALID,
+                format!("remote_url must not use a git remote helper ({scheme}::)"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Clone `remote` into `path` when `path` has no `.git`. With no remote, the
 /// directory must already be a git repo.
 ///
@@ -143,8 +183,9 @@ pub fn ensure_repo(path: &Path, remote: Option<&str>) -> Result<(), IpcError> {
         Some(url) => {
             let parent = clone_parent(path);
             std::fs::create_dir_all(parent).map_err(|e| unreadable(parent, &e))?;
+            check_remote_url(url)?;
             let target = path.to_string_lossy().to_string();
-            git(parent, &["clone", "-q", url, &target])?;
+            git(parent, &clone_args(url, &target))?;
             Ok(())
         }
         None => Err(IpcError::new(
@@ -1051,6 +1092,58 @@ mod tests {
             &std::io::Error::from(std::io::ErrorKind::NotFound),
         );
         assert!(!other.message.contains("runs as"), "{}", other.message);
+    }
+
+    /// `--` ends git's option parsing before the URL and the target, so a
+    /// remote such as `--upload-pack=<cmd>` is an operand, never an option.
+    #[test]
+    fn clone_args_end_options_before_the_url() {
+        let args = clone_args("--upload-pack=touch /tmp/x", "/srv/assets");
+        let dashes = args.iter().position(|a| *a == "--").expect("has --");
+        let url = args
+            .iter()
+            .position(|a| *a == "--upload-pack=touch /tmp/x")
+            .unwrap();
+        assert!(dashes < url, "{args:?}");
+        assert_eq!(args.last(), Some(&"/srv/assets"));
+    }
+
+    #[test]
+    fn check_remote_url_refuses_options_and_remote_helpers() {
+        for bad in [
+            "--config=core.sshCommand=touch /tmp/x",
+            "--upload-pack=touch /tmp/x",
+            "-u",
+            "ext::sh -c touch% /tmp/x",
+            "fd::17",
+            "custom+helper::whatever",
+        ] {
+            let err = check_remote_url(bad).unwrap_err();
+            assert_eq!(err.code, E_INVALID, "{bad}: {}", err.message);
+        }
+        for good in [
+            "git@github.com:org/assets.git",
+            "https://github.com/org/assets.git",
+            "ssh://git@[::1]/org/assets.git",
+            "/srv/git/assets.git",
+            "file:///srv/git/assets.git",
+        ] {
+            assert!(check_remote_url(good).is_ok(), "{good}");
+        }
+    }
+
+    /// The clone itself refuses an option-shaped remote, for a row stored
+    /// before `configure` checked it: nothing runs, nothing is created.
+    #[test]
+    fn ensure_repo_refuses_an_option_shaped_remote() {
+        let base = tmp("ensure-repo-option-remote");
+        let marker = base.join("pwned");
+        let path = base.join("agent-assets");
+        let url = format!("--upload-pack=touch {}", marker.display());
+        let err = ensure_repo(&path, Some(&url)).unwrap_err();
+        assert_eq!(err.code, E_INVALID, "{}", err.message);
+        assert!(!marker.exists());
+        assert!(!path.exists());
     }
 
     #[test]
