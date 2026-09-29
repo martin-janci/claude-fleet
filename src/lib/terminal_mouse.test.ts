@@ -224,3 +224,48 @@ describe('createMouseController focus (F9)', () => {
     windowUp(10, 20);
   });
 });
+
+// The screen scrolling under a drag-select (claude streaming output, tmux
+// copy-mode) must not leave the gesture expanding from a cell whose text has
+// moved away.
+describe('createMouseController shiftRows', () => {
+  const controllers: ReturnType<typeof createMouseController>[] = [];
+  afterEach(() => {
+    for (const c of controllers.splice(0)) c.dispose();
+  });
+
+  it('carries a drag anchor with the rows the screen moved', () => {
+    const { mouse, sel } = setup('');
+    controllers.push(mouse);
+    mouse.onMousedown(down(0, { clientX: 10, clientY: 52 })); // row 3, col 0
+    windowMove(30, 52); // col 3
+    mouse.shiftRows({ top: 0, bottom: 9, delta: -2 });
+    windowMove(30, 52);
+    expect(sel().anchor).toEqual({ row: 1, col: 0 });
+    expect(sel().focus).toEqual({ row: 3, col: 3 });
+    windowUp(30, 52);
+  });
+
+  it('carries a deferred press, so the drag it becomes starts on the moved text', () => {
+    const { mouse, sel } = setup();
+    controllers.push(mouse);
+    mouse.onMousedown(down(0, { clientX: 10, clientY: 52 })); // row 3, col 0
+    mouse.shiftRows({ top: 0, bottom: 9, delta: 2 });
+    windowMove(60, 52); // promotes to a drag; col 7
+    expect(sel().anchor).toEqual({ row: 3, col: 7 });
+    expect(sel().focus).toEqual({ row: 5, col: 0 });
+    windowUp(60, 52);
+  });
+
+  it('ends a drag-select when the content is swapped out wholesale', () => {
+    const { mouse, sel } = setup('');
+    controllers.push(mouse);
+    mouse.onMousedown(down(0, { clientX: 10, clientY: 52 }));
+    windowMove(30, 52);
+    const before = sel();
+    mouse.shiftRows(null);
+    windowMove(80, 100);
+    expect(sel()).toEqual(before);
+    windowUp(80, 100);
+  });
+});

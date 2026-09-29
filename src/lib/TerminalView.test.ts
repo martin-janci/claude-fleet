@@ -1012,6 +1012,65 @@ describe('TerminalView selection like a text input', () => {
     expect(selectionRectsPx()).toHaveLength(0);
   });
 
+  /** Mount on `first`, then return a feeder that serves later chunks of
+   *  output through pty_drain and waits for the drain loop to render them. */
+  async function mountStreaming(first: string): Promise<{ host: HTMLElement; feed: (d: string) => Promise<void> }> {
+    const queue = [first];
+    inv().mockImplementation(async (cmd: string) => {
+      if (cmd === 'pty_drain') {
+        const d = queue.shift();
+        return d === undefined ? { data: '', bytes: 0 } : { data: d, bytes: d.length };
+      }
+      return null;
+    });
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    await vi.advanceTimersByTimeAsync(40);
+    await settle();
+    const feed = async (d: string) => {
+      queue.push(d);
+      // Past the idle backoff, so the loop has polled the chunk for sure.
+      await vi.advanceTimersByTimeAsync(2000);
+      await settle();
+    };
+    return { host: screen.getByTestId('terminal-host'), feed };
+  }
+
+  it('the selection moves with its text when output scrolls the screen', async () => {
+    const { host, feed } = await mountStreaming('ab cd ef\r\nxy zz');
+    host.dispatchEvent(mouse('mousedown', { detail: 2, clientX: xOf(0), clientY: yOf(1) }));
+    window.dispatchEvent(mouse('mouseup', { clientX: xOf(0), clientY: yOf(1) }));
+    await settle();
+    expect(selectionRectsPx()).toEqual([{ left: 4, width: 2 * CW, top: 4 + CH }]);
+    // A newline at the bottom margin scrolls "xy zz" up to row 0; the
+    // highlight has to go with it rather than stay on row 1.
+    await feed('\r\nnew');
+    expect(selectionRectsPx()).toEqual([{ left: 4, width: 2 * CW, top: 4 }]);
+    host.dispatchEvent(new KeyboardEvent('keydown', { key: 'C', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    await settle();
+    expect(clipboardWriteText).toHaveBeenCalledWith('xy');
+  });
+
+  it('the selection goes away once its text has scrolled off the screen', async () => {
+    const { host, feed } = await mountStreaming('ab cd ef\r\nxy zz');
+    host.dispatchEvent(mouse('mousedown', { detail: 2, clientX: xOf(4), clientY: yOf(0) }));
+    window.dispatchEvent(mouse('mouseup', { clientX: xOf(4), clientY: yOf(0) }));
+    await settle();
+    expect(selectionRectsPx()).toHaveLength(1);
+    await feed('\r\nnew');
+    expect(selectionRectsPx()).toHaveLength(0);
+  });
+
+  it('tmux copy-mode scrolling (IL at the top) carries the selection down', async () => {
+    const { host, feed } = await mountStreaming('ab cd ef\r\nxy zz');
+    host.dispatchEvent(mouse('mousedown', { detail: 2, clientX: xOf(4), clientY: yOf(0) }));
+    window.dispatchEvent(mouse('mouseup', { clientX: xOf(4), clientY: yOf(0) }));
+    await settle();
+    await feed('\x1b[1;1H\x1b[1Lolder');
+    expect(selectionRectsPx()).toEqual([{ left: 4 + 3 * CW, width: 2 * CW, top: 4 + CH }]);
+  });
+
   it('a double-click selects locally even when the app has mouse reporting on', async () => {
     const host = await mountWith('\x1b[?1000h\x1b[?1006hab cd ef');
     host.dispatchEvent(mouse('mousedown', { detail: 2, clientX: xOf(4), clientY: yOf(0) }));
