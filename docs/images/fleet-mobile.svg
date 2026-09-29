@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 280 540" width="280" height="540" role="img">
+<style>:root {
+  --bg: #f4f6fb; --surface: #ffffff; --surface-2: #eef1f8; --line: #d9deea;
+  --fg: #151a28; --muted: #58617a;
+  --c-desk: #2563eb; --c-hub: #d97706; --c-host: #0d9488; --c-mob: #db2777; --c-agent: #65a30d; --c-trk: #7c3aed;
+  --desk-soft: color-mix(in srgb, var(--c-desk) 11%, var(--surface));
+  --hub-soft: color-mix(in srgb, var(--c-hub) 12%, var(--surface));
+  --host-soft: color-mix(in srgb, var(--c-host) 11%, var(--surface));
+  --mob-soft: color-mix(in srgb, var(--c-mob) 11%, var(--surface));
+  --agent-soft: color-mix(in srgb, var(--c-agent) 13%, var(--surface));
+  --trk-soft: color-mix(in srgb, var(--c-trk) 11%, var(--surface));
+  --f-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #0c0f16; --surface: #141925; --surface-2: #1b2130; --line: #2a3345;
+  --fg: #e9edf6; --muted: #98a3bb;
+  --c-desk: #6aa8ff; --c-hub: #fbbf24; --c-host: #2dd4bf; --c-mob: #f472b6; --c-agent: #a3e635; --c-trk: #a78bfa;
+  color-scheme: dark } }
+.bg { fill: var(--bg) }
+/* SVG styling — every fill comes from the tokens */
+text { font-family: var(--f-body); fill: var(--fg) }
+.t-title { font: 700 17px var(--f-display) }
+.t-big { font: 800 22px var(--f-display) }
+.t-sm { font-size: 12.5px; fill: var(--muted) }
+.t-mono { font: 500 12px var(--f-mono); fill: var(--muted) }
+.t-eye { font: 600 10.5px var(--f-mono); letter-spacing: .12em; fill: var(--muted) }
+.t-lbl { font: 600 12px var(--f-mono) }
+.fr-desk { fill: var(--desk-soft); stroke: var(--c-desk); stroke-width: 1.6 }
+.fr-hub { fill: var(--hub-soft); stroke: var(--c-hub); stroke-width: 1.8 }
+.fr-host { fill: var(--host-soft); stroke: var(--c-host); stroke-width: 1.4 }
+.fr-mob { fill: var(--mob-soft); stroke: var(--c-mob); stroke-width: 1.6 }
+.fr-agent { fill: var(--agent-soft); stroke: var(--c-agent); stroke-width: 1.4 }
+.fr-trk { fill: var(--trk-soft); stroke: var(--c-trk); stroke-width: 1.4 }
+.box { fill: var(--surface); stroke: var(--line); stroke-width: 1.2 }
+.box2 { fill: var(--surface-2); stroke: var(--line); stroke-width: 1 }
+.pill { fill: var(--surface); stroke: var(--line) }
+.ln-desk { stroke: var(--c-desk); fill: none; stroke-width: 2.2 }
+.ln-hub { stroke: var(--c-hub); fill: none; stroke-width: 2.2 }
+.ln-host { stroke: var(--c-host); fill: none; stroke-width: 2; stroke-dasharray: 6 5 }
+.ln-mob { stroke: var(--c-mob); fill: none; stroke-width: 2.2 }
+.ln-agent { stroke: var(--c-agent); fill: none; stroke-width: 2.4 }
+.ln-trk { stroke: var(--c-trk); fill: none; stroke-width: 2 }
+.ln-dash { stroke-dasharray: 7 6 }
+.life { stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 4 5 }
+.d-work { fill: var(--c-hub) } .d-idle { fill: var(--muted) } .d-block { fill: var(--c-mob) } .d-ok { fill: var(--c-host) }
+.k-desk { fill: var(--c-desk) } .k-hub { fill: var(--c-hub) } .k-host { fill: var(--c-host) } .k-mob { fill: var(--c-mob) } .k-agent { fill: var(--c-agent) } .k-trk { fill: var(--c-trk) }
+.tx-desk { fill: var(--c-desk) } .tx-hub { fill: var(--c-hub) } .tx-host { fill: var(--c-host) } .tx-mob { fill: var(--c-mob) } .tx-agent { fill: var(--c-agent) } .tx-trk { fill: var(--c-trk) }
+
+.flow { animation: dash 1.6s linear infinite }
+@keyframes dash { to { stroke-dashoffset: -22 } }
+@media (prefers-reduced-motion: reduce) { .flow { animation: none } }
+</style>
+<rect class="bg" x="0" y="0" width="280" height="540" rx="16"/>
+        <title id="c-t">Blokovaná session na mobile</title>
+        <desc id="c-d">Obrazovka mobilu: session čaká na povolenie, otázka s tromi tlačidlami, pod ňou rýchle odpovede a pole na prompt.</desc>
+        <rect x="6" y="6" width="268" height="528" rx="38" class="fr-mob"/>
+        <rect x="20" y="22" width="240" height="496" rx="26" class="box"/>
+        <rect x="112" y="30" width="56" height="8" rx="4" class="k-mob" style="opacity:.45"/>
+        <text x="38" y="72" class="t-eye">GPU-BOX</text>
+        <text x="38" y="96" class="t-title">train-eval</text>
+        <rect x="178" y="80" width="66" height="24" rx="12" class="k-mob" style="opacity:.18"/>
+        <circle cx="192" cy="92" r="4.5" class="d-block"/><text x="202" y="97" class="t-lbl tx-mob" style="font-size:11px">blocked</text>
+
+        <rect x="36" y="118" width="208" height="92" rx="10" class="box2"/>
+        <text x="48" y="140" class="t-mono" style="font-size:10.5px">● Bash(python eval.py</text>
+        <text x="48" y="156" class="t-mono" style="font-size:10.5px">    --split test)</text>
+        <text x="48" y="178" class="t-mono" style="font-size:10.5px">  Running on 4 GPUs…</text>
+        <text x="48" y="196" class="t-mono" style="font-size:10.5px">  epoch 3/3 ✓</text>
+
+        <text x="38" y="238" style="font-weight:600;font-size:13.5px">Povoliť tento príkaz?</text>
+        <text x="38" y="256" class="t-sm" style="font-size:11.5px">pending_input z panelu sessionu</text>
+        <rect x="36" y="268" width="208" height="36" rx="10" class="k-mob"/>
+        <text x="140" y="291" text-anchor="middle" style="fill:var(--surface);font-weight:600;font-size:13px">1 · Áno</text>
+        <rect x="36" y="312" width="208" height="36" rx="10" class="pill"/>
+        <text x="140" y="335" text-anchor="middle" style="font-weight:600;font-size:13px">2 · Áno, už sa nepýtaj</text>
+        <rect x="36" y="356" width="208" height="36" rx="10" class="pill"/>
+        <text x="140" y="379" text-anchor="middle" style="font-weight:600;font-size:13px">3 · Nie, povedz čo inak</text>
+
+        <text x="38" y="420" class="t-eye">RÝCHLE ODPOVEDE</text>
+        <rect x="36" y="430" width="74" height="26" rx="13" class="box2"/><text x="73" y="447" text-anchor="middle" class="t-lbl" style="font-size:11px">pokračuj</text>
+        <rect x="116" y="430" width="62" height="26" rx="13" class="box2"/><text x="147" y="447" text-anchor="middle" class="t-lbl" style="font-size:11px">testy</text>
+        <rect x="184" y="430" width="60" height="26" rx="13" class="box2"/><text x="214" y="447" text-anchor="middle" class="t-lbl" style="font-size:11px">/clear</text>
+        <rect x="36" y="466" width="208" height="36" rx="18" class="box2"/>
+        <text x="52" y="489" class="t-sm">Napíš prompt…</text>
+        <circle cx="226" cy="484" r="13" class="k-mob"/>
+        <path d="M221 484 h10 m-4 -4 l4 4 l-4 4" style="stroke:var(--surface);stroke-width:2;fill:none"/>
+      </svg>
