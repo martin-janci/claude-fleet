@@ -57,6 +57,16 @@ fn job_title(prompt: &str) -> String {
         .collect()
 }
 
+/// An agent's proposed subtask.
+#[derive(Debug, Clone, Copy)]
+pub struct Proposal<'a> {
+    pub parent_id: i64,
+    pub title: &'a str,
+    pub notes: Option<&'a str>,
+    pub why: Option<&'a str>,
+    pub proposed_by: &'a str,
+}
+
 /// Everything `insert_native` writes.
 pub(super) struct NativeRow<'a> {
     pub origin: &'a str,
@@ -249,6 +259,102 @@ impl Store {
             .prepare("SELECT w.id, t.state FROM work_items w JOIN tasks t ON t.id = w.task_id")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    }
+
+    /// A subtask an agent proposes; a person accepts or rejects it.
+    pub fn propose_subtask(&self, p: &Proposal<'_>) -> Result<WorkItemRow, IpcError> {
+        let title = validate_local_work_title(p.title)?;
+        self.parent_for_new_child(p.parent_id)?;
+        let norm = |t: &str| {
+            t.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
+        };
+        let (open, rejected_same): (usize, bool) = {
+            let siblings = self.native_children(p.parent_id)?;
+            let open = siblings
+                .iter()
+                .filter(|c| c.proposal_state.as_deref() == Some("proposed"))
+                .count();
+            let same = siblings.iter().any(|c| {
+                c.proposal_state.as_deref() == Some("rejected") && norm(&c.title) == norm(&title)
+            });
+            (open, same)
+        };
+        if rejected_same {
+            return Err(IpcError::new(
+                codes::E_EXISTS,
+                format!("\"{title}\" was already proposed here and rejected"),
+            ));
+        }
+        if open >= PROPOSALS_OPEN_CAP {
+            return Err(IpcError::new(
+                codes::E_LIMIT,
+                format!("{PROPOSALS_OPEN_CAP} proposals already wait for a decision on this task"),
+            ));
+        }
+        let notes = p
+            .notes
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+            .map(cut_brief);
+        let why = p
+            .why
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+            .map(cut_brief);
+        let by: String = p
+            .proposed_by
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(120)
+            .collect();
+        self.insert_native(&NativeRow {
+            origin: "proposed",
+            title: &title,
+            parent_id: Some(p.parent_id),
+            project_id: None,
+            notes: notes.as_deref(),
+            task_id: None,
+            status: "todo",
+            status_set_by: None,
+            proposal_state: Some("proposed"),
+            proposed_by: Some(&by),
+            proposal_why: why.as_deref(),
+        })
+    }
+
+    /// A person decides a proposal, once.
+    pub fn decide_proposal(&self, item_id: i64, accept: bool) -> Result<WorkItemRow, IpcError> {
+        let now = now_unix();
+        let wrote = self.conn.execute(
+            "UPDATE work_items SET proposal_state = ?1, updated_at = ?2 \
+              WHERE id = ?3 AND origin = 'proposed' AND proposal_state = 'proposed'",
+            rusqlite::params![if accept { "accepted" } else { "rejected" }, now, item_id],
+        )? == 1;
+        if !wrote {
+            return match self.get_work_item(item_id)? {
+                None => Err(IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("work item {item_id} not found"),
+                )),
+                Some(_) => Err(IpcError::new(
+                    codes::E_INVALID,
+                    "that item is not a proposal waiting for a decision",
+                )),
+            };
+        }
+        self.emit_work_item(
+            item_id,
+            super::tracker_items::SessionChange {
+                primary: false,
+                suggested: false,
+                rejected: !accept,
+            },
+        )?;
+        self.get_work_item(item_id)?
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work item vanished after update"))
     }
 
     /// Every native child of `parent_id`, proposals included, oldest first.

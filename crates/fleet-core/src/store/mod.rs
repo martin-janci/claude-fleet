@@ -121,7 +121,7 @@ pub use work_journal::{
 pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_MAX_CHARS};
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
 pub use work_status::STATUS_CATEGORIES;
-pub use work_tasks::{job_status, NativeItem, PROPOSALS_OPEN_CAP, TASK_KEY_PREFIX};
+pub use work_tasks::{job_status, NativeItem, Proposal, PROPOSALS_OPEN_CAP, TASK_KEY_PREFIX};
 pub use work_tidy::ReopenedWork;
 pub use work_usage::{DetectionCounts, JournalCounts};
 pub use work_view::{

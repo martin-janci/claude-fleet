@@ -144,3 +144,80 @@ fn the_job_status_map() {
         assert_eq!(job_status(st), "done");
     }
 }
+
+fn proposal(parent: i64, title: &str) -> Proposal<'_> {
+    Proposal {
+        parent_id: parent,
+        title,
+        notes: None,
+        why: Some("because"),
+        proposed_by: "OM-110 · trn",
+    }
+}
+
+#[test]
+fn a_proposal_waits_for_a_person_then_becomes_a_subtask() {
+    let s = Store::open_in_memory().unwrap();
+    let ticket = s.create_local_work_item(Some("OM-110"), "Qomora").unwrap();
+    let p = s
+        .propose_subtask(&proposal(ticket.id, "Decide the P0 owner"))
+        .unwrap();
+    assert_eq!(
+        (p.origin.as_deref(), p.proposal_state.as_deref()),
+        (Some("proposed"), Some("proposed"))
+    );
+    assert_eq!(
+        (p.proposed_by.as_deref(), p.proposal_why.as_deref()),
+        (Some("OM-110 · trn"), Some("because"))
+    );
+    let a = s.decide_proposal(p.id, true).unwrap();
+    assert_eq!(
+        (a.proposal_state.as_deref(), a.status_category.as_str()),
+        (Some("accepted"), "todo")
+    );
+    assert_eq!(
+        s.decide_proposal(p.id, false).unwrap_err().code,
+        codes::E_INVALID,
+        "decided once"
+    );
+}
+
+#[test]
+fn a_rejected_title_is_not_proposed_again_under_the_same_parent() {
+    let s = Store::open_in_memory().unwrap();
+    let t = s.create_local_work_item(Some("OM-110"), "Qomora").unwrap();
+    let p = s
+        .propose_subtask(&proposal(t.id, "Create om-catalog module"))
+        .unwrap();
+    s.decide_proposal(p.id, false).unwrap();
+    let e = s
+        .propose_subtask(&proposal(t.id, "create OM-CATALOG module "))
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS);
+}
+
+#[test]
+fn open_proposals_are_capped_per_parent() {
+    let s = Store::open_in_memory().unwrap();
+    let t = s.create_local_work_item(Some("OM-110"), "Qomora").unwrap();
+    for i in 0..PROPOSALS_OPEN_CAP {
+        s.propose_subtask(&proposal(t.id, &format!("idea {i}")))
+            .unwrap();
+    }
+    assert_eq!(
+        s.propose_subtask(&proposal(t.id, "one too many"))
+            .unwrap_err()
+            .code,
+        codes::E_LIMIT
+    );
+}
+
+#[test]
+fn deciding_something_that_is_not_a_proposal_is_refused() {
+    let s = Store::open_in_memory().unwrap();
+    let t = s.create_native_item(&native("plain")).unwrap();
+    assert_eq!(
+        s.decide_proposal(t.id, true).unwrap_err().code,
+        codes::E_INVALID
+    );
+}
