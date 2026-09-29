@@ -5301,11 +5301,16 @@ mod tests {
         let marker = dir.path().join("ran");
         let pgid_file = dir.path().join("pgid");
         let gc_file = dir.path().join("grandchild");
+        let gc_tmp = dir.path().join("grandchild.tmp");
         let q = |p: &Path| crate::shell::quote(p.to_str().unwrap());
+        // The grandchild's pid is renamed into place: `> {gc}` alone creates
+        // the file before `echo` writes it, and a cancel sent the moment it
+        // appears can kill the group in between, leaving it empty.
         let script = format!(
-            "echo $$ > {pgid}\n( sleep 1; touch {marker} ) &\necho $! > {gc}\nwait\n",
+            "echo $$ > {pgid}\n( sleep 1; touch {marker} ) &\necho $! > {tmp}\nmv {tmp} {gc}\nwait\n",
             pgid = q(&pgid_file),
             marker = q(&marker),
+            tmp = q(&gc_tmp),
             gc = q(&gc_file),
         );
         let token = CancellationToken::new();
