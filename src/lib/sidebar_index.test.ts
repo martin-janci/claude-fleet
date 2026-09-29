@@ -3,6 +3,7 @@ import {
   buildOutsideFleet,
   buildSessionsByProject,
   buildSessionsByWork,
+  sessionFilterRow,
   sessionVisible,
   sortProjectsBySeverity,
   sortWorkGroups,
@@ -106,6 +107,43 @@ describe('buildOutsideFleet', () => {
     const ghost = row({ kind: 'external', status: 'ghost' });
     const lost = row({ kind: 'external', lost_at: 100 });
     expect(buildOutsideFleet([live, rebooted, ghost, lost], 'all').map((s) => s.id)).toEqual([live.id]);
+  });
+});
+
+describe('sessionFilterRow', () => {
+  it('prefers effective_status over status_category (native item status, fix round 3)', () => {
+    const r = row({
+      work: {
+        link_id: 1,
+        item_id: 2,
+        key: 'LOC-1',
+        title: 'Local work',
+        source: 'manual',
+        effective_status: 'in_progress',
+      },
+    });
+    expect(sessionFilterRow(r).statusCategory).toBe('in_progress');
+  });
+
+  it('falls back to status_category for a hub old enough not to send effective_status', () => {
+    const r = row({
+      work: {
+        link_id: 1,
+        item_id: 2,
+        key: 'ABC-1',
+        title: 'Ticket',
+        source: 'manual',
+        status_category: 'todo',
+      },
+    });
+    expect(sessionFilterRow(r).statusCategory).toBe('todo');
+  });
+
+  it('is null without either field', () => {
+    const r = row({
+      work: { link_id: 1, item_id: 2, key: 'ABC-1', title: 'Ticket', source: 'manual' },
+    });
+    expect(sessionFilterRow(r).statusCategory).toBeNull();
   });
 });
 

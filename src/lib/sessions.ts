@@ -200,9 +200,27 @@ export interface SessionWork {
   title: string;
   /** `manual` | `started` | `agent` | `agent_started` … — tolerant: a newer hub may add more. */
   source: string;
+  /** `tracker` | `local` | `ref` (native item status): which kind of task
+   *  this is. Empty for a hub older than this field — do not read that as
+   *  `ref`. */
+  kind?: string;
   /** The tracker item's status (work graph M3); absent for a bare key, a
-   *  local item, or a hub older than M3. `todo` | `in_progress` | `done`. */
+   *  local item, or a hub older than M3. `todo` | `in_progress` | `done`.
+   *
+   *  Deliberately NOT the live status (native item status task 4, fix
+   *  round 2): `isLocal`-style checks elsewhere derive "this is a local
+   *  item, not a ticket" from this being absent, so a local item's real
+   *  status must not appear here — see `effective_status`. */
   status_category?: string | null;
+  /** The item's status with the live precedence applied (design
+   *  2026-09-28 §2): a person's setting or a stamped `done` is final;
+   *  otherwise a confirmed link whose session is presently working lifts a
+   *  LOCAL item to `in_progress`; otherwise the stored value — for a
+   *  tracker item and a local item alike, unlike `status_category` above.
+   *  Prefer this for display (a status chip, a filter, "is it stale");
+   *  `status_category`'s only remaining job is "is this a ticket". Absent
+   *  for a bare key, or a hub older than this field. */
+  effective_status?: string | null;
   /** The tracker's own status name ("In Review"). */
   status_name?: string | null;
   url?: string | null;

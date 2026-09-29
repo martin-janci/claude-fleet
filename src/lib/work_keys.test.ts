@@ -6,6 +6,7 @@ import {
   extractWorkKey,
   keyFromTicketUrl,
   workGroupPrSummary,
+  workGroupTicket,
   workKeyFor,
   worktreeBranchById,
   type RecognizeCtx,
@@ -122,6 +123,51 @@ describe('workKeyFor', () => {
     expect(describeWorkKey(w!)).toBe('Billing migration — linked to this session');
   });
 
+  it("shows a LOCAL item's live status, not a tracker's (fix round 3)", () => {
+    // `effective_status`, not `status_category` (tracker-only on the wire
+    // by design): a local item's WorkKey still gets a status dot, but
+    // `trackerBacked` stays unset since no tracker backs it.
+    const w = workKeyFor(
+      sess({
+        work: {
+          link_id: 3,
+          item_id: 4,
+          key: 'LOC-1',
+          title: 'Local work',
+          source: 'manual',
+          effective_status: 'in_progress',
+        },
+      }),
+      branches,
+    );
+    expect(w?.status).toEqual({
+      category: 'in_progress',
+      name: null,
+      url: null,
+      unavailable: false,
+    });
+    expect(w?.trackerBacked).toBeUndefined();
+  });
+
+  it("a tracker item's status is trackerBacked; a local item's is not", () => {
+    const w = workKeyFor(
+      sess({
+        work: {
+          link_id: 3,
+          item_id: 4,
+          key: 'ABC-1',
+          title: 'Ticket',
+          source: 'manual',
+          status_category: 'in_progress',
+          effective_status: 'in_progress',
+        },
+      }),
+      branches,
+    );
+    expect(w?.status?.category).toBe('in_progress');
+    expect(w?.trackerBacked).toBe(true);
+  });
+
   it('never recognises a key the user rejected for the row', () => {
     // The branch names ABC-123, the user said "Not this": the next source
     // down is used, and with none the row has no key.
@@ -154,6 +200,45 @@ describe('workGroupPrSummary', () => {
 
   it('is empty without PRs', () => {
     expect(workGroupPrSummary([sess({})])).toEqual({ prCount: 0, ci: null });
+  });
+});
+
+describe('workGroupTicket', () => {
+  it("shows a LOCAL item's live status in the group header (fix round 3)", () => {
+    const rows = [
+      sess({
+        work: {
+          link_id: 1,
+          item_id: 2,
+          key: 'LOC-1',
+          title: 'Local work',
+          source: 'manual',
+          effective_status: 'in_progress',
+        },
+      }),
+    ];
+    const t = workGroupTicket('LOC-1', rows);
+    expect(t?.status?.category).toBe('in_progress');
+    expect(t?.trackerBacked).toBeUndefined();
+  });
+
+  it("a tracker item's ticket line is trackerBacked", () => {
+    const rows = [
+      sess({
+        work: {
+          link_id: 1,
+          item_id: 2,
+          key: 'ABC-1',
+          title: 'Ticket',
+          source: 'manual',
+          status_category: 'todo',
+          effective_status: 'todo',
+        },
+      }),
+    ];
+    const t = workGroupTicket('ABC-1', rows);
+    expect(t?.status?.category).toBe('todo');
+    expect(t?.trackerBacked).toBe(true);
   });
 });
 

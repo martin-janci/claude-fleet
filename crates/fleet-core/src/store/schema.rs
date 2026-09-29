@@ -369,6 +369,18 @@ fn client_tokens_has_assets_admin(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 075 (native item status): its last
+/// ADD COLUMN (`work_items.status_set_at`) present means the whole migration
+/// is — the `ALTER TABLE ... ADD COLUMN`s are not idempotent on their own.
+fn work_items_has_status_set_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'status_set_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 067 (work graph M14.1b, D31).
 fn orgs_has_bound_sees_unassigned(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -892,6 +904,14 @@ const MIGRATIONS: &[Migration] = &[
     // Declarative pages P5: `setting_proposals` and `setting_audit`. New
     // tables and indexes, `IF NOT EXISTS`, safe to re-run.
     Migration::plain(83, include_str!("../../migrations/083_setting_review.sql")),
+    // Native item status (design 2026-09-28 §2): `status_set_by` /
+    // `status_set_at`. The `ADD COLUMN`s are not idempotent (unlike the
+    // partial index), so this needs the same guard 072/074's ADD COLUMNs use.
+    Migration {
+        version: 84,
+        sql: include_str!("../../migrations/084_native_item_status.sql"),
+        already_applied: Some(work_items_has_status_set_at),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

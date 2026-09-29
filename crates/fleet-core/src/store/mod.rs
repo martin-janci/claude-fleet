@@ -48,6 +48,7 @@ mod work_detect;
 mod work_journal;
 mod work_local;
 mod work_retention;
+mod work_status;
 mod work_tidy;
 mod work_usage;
 mod work_view;
@@ -120,6 +121,7 @@ pub use work_journal::{
 };
 pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_MAX_CHARS};
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
+pub use work_status::STATUS_CATEGORIES;
 pub use work_tidy::ReopenedWork;
 pub use work_usage::{DetectionCounts, JournalCounts};
 pub use work_view::{

@@ -351,6 +351,17 @@ automatic trust, it is not written back to a tracker, and the usage
 summary counts it apart. When an agent
 decides the same way you already did, your decision is kept.
 
+### Status of work with no ticket
+
+Work fleet tracks itself — named work with no ticket — carries one of three
+states: to do, in progress, done. You never have to set it: fleet marks work
+*in progress* while a session is working on it, and *done* once the pull
+request it produced is merged. Setting it yourself overrides that for good; the
+same work will not flip back because a session started again.
+
+A ticket's status is not yours to set here — it belongs to Jira, GitHub, Asana
+or Linear, and fleet would be overwritten on its next sync. Change it there.
+
 ### Detection
 
 Fleet watches for work in:
@@ -766,7 +777,10 @@ it. `0` keeps a table forever.
 - `work.retention.journal_days` (365): the work journal. Kept regardless of
   age: rows of an open conversation, of a live-linked session, and of work
   that is not done or still has a live link; an undelivered handover and
-  one addressed to a live session.
+  one addressed to a live session. Work fleet tracks itself keeps its
+  journal and handover history whatever its status — marking your own work
+  done never puts its history on a clock — the same line the ticket cache
+  draws by sweeping only tickets.
 - `work.retention.tracker_items_days` (180): cached tickets in done. Kept
   while any link, live or ended, names one, and while it is the parent of a
   kept ticket.
@@ -951,7 +965,11 @@ not recorded: suggestions shown (only made, confirmed, rejected and expired are 
 The phone app (fleet-mobile) reads work from a hub over its paired client
 token:
 
-- work groups (per host), the **My work** chip and the row's work chip;
+- work groups (per host), the **My work** chip and the row's work chip —
+  though not yet local work's live *in progress* / *done* (native item
+  status): the phone's wire model predates that field and reads a bare
+  key's status the old way, so a fleet-mobile release must add it before a
+  phone shows the same answer the desktop does for work with no ticket;
 - with a **full** token: Confirm / *Not this* on a suggestion, set or clear
   a link, start work from a ticket (*Start here*) and resume past work;
 - **Today** with *Copy standup*, and the ticket card with its acceptance
