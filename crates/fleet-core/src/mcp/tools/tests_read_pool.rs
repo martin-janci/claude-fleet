@@ -149,8 +149,15 @@ async fn the_read_tools_answer_the_same_through_the_pool() {
         "fleet_health",
         "list_sessions",
     ] {
-        let a = json(&call(&on_writer, tool).await.unwrap());
-        let b = json(&call(&on_pool, tool).await.unwrap());
+        let mut a = json(&call(&on_writer, tool).await.unwrap());
+        let mut b = json(&call(&on_pool, tool).await.unwrap());
+        // `fleet_health.hub.uptime_secs` is this process's clock, not a read:
+        // two calls a second boundary apart differ in it whatever they read.
+        for v in [&mut a, &mut b] {
+            if let Some(hub) = v.get_mut("hub").and_then(|h| h.as_object_mut()) {
+                hub.remove("uptime_secs");
+            }
+        }
         assert_eq!(a, b, "{tool} answered differently through the pool");
     }
 }
