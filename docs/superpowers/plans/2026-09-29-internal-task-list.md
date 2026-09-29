@@ -1,5 +1,7 @@
 # One internal task list — implementation plan
 
+> **Superseded — do not execute.** Replaced by `2026-09-29-shared-work-context.md` (roadmap part 1). Kept as history.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** The Work tab becomes one list of tasks. It holds tasks a person writes, tasks one session dispatches to another (`dispatch_task`), and detected tickets. The list is split into To do / Doing / Done, each task has a Start button, and the ☑ Tasks popover goes away.
