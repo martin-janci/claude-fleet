@@ -66,6 +66,20 @@ impl Store {
 
     /// Store what the PR probe read for `tmux_name` on `host` (`None`: no
     /// PR). Returns the session id when the value changed.
+    ///
+    /// Merged signals also stamp the session's local work `done`
+    /// ([`Store::stamp_derived_done_for_session`], design 2026-09-28 §2).
+    /// **Here** because this is the moment the merged fact becomes known and
+    /// the only one a later `kill_session` cannot lose: `pr_signals` is
+    /// deleted with its session row, and the background tidy sweep does not
+    /// reach the stamp unless `work.auto_tidy` is on (default off), so a
+    /// stamp that lived only in `Store::tidy_sessions` was a promise kept
+    /// only if a person opened Tidy-up before the session was reaped.
+    ///
+    /// Attempted on every merged probe, not only when the stored value
+    /// CHANGED: the link may be confirmed after the merge was first seen
+    /// (`resolve_session` runs after this returns), and the stamp is
+    /// idempotent — a bounded, event-free no-op `UPDATE` once written.
     pub fn set_pr_signals(
         &self,
         host: &str,
@@ -86,6 +100,12 @@ impl Store {
              WHERE id = ?3 AND (pr_signals IS NOT ?1 OR pr_signals_at IS NULL)",
             rusqlite::params![signals, now_unix(), id],
         )?;
+        let merged = signals
+            .and_then(|s| serde_json::from_str::<crate::service::work::detect::PrSignals>(s).ok())
+            .is_some_and(|s| s.is_merged());
+        if merged {
+            self.stamp_derived_done_for_session(id)?;
+        }
         Ok((n > 0).then_some(id))
     }
 

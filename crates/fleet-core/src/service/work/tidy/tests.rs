@@ -497,6 +497,81 @@ fn a_merged_prs_stamp_is_offered_as_pr_merged_idle_end_to_end() {
     assert!(row.status_changed_at.is_some());
 }
 
+/// Finding 1 of the final whole-branch review, and the one that made half
+/// the feature not work as shipped: the derived `done` must be stamped by
+/// the path that RECORDS the merged PR, not only by the one tidy happens to
+/// look through.
+///
+/// Two halves, in order, and note what this test does NOT do — it never
+/// calls `Store::tidy_sessions()` (nor `work_tidy`, `Snapshot::take`,
+/// `tidy_apply`), so nothing here can be satisfied by the tidy-path stamp:
+///
+/// 1. `work.auto_tidy` is unset — the default, off (D2) — so the REAL
+///    background sweep (`sweep_with`, the GC tick the app runs) reaches
+///    `auto_tidy`, which returns before `Snapshot::take`. The item is still
+///    `todo` afterwards: that is exactly the hole, and it is why the second
+///    half has to exist. Were the stamp moved back behind auto-tidy, the
+///    test would stop at the assertion after `set_pr_signals`.
+/// 2. `Store::set_pr_signals` — what the reconcile pass calls when the PR
+///    probe reads `MERGED` — stamps it, so a `kill_session` that deletes
+///    `pr_signals` with the session row can no longer lose the `done`.
+#[tokio::test]
+async fn a_merged_pr_stamps_done_in_the_background_with_auto_tidy_off() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let (sid, item_id) = seed_session_and_item(&store, "merged-bg");
+    let merged = serde_json::json!({ "head": "feat/x", "state": "MERGED" }).to_string();
+    {
+        let s = store.lock().unwrap();
+        // The merged fact as a session that has already been probed carries
+        // it, so the sweep below sees the same input the stamp reads.
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET pr_signals = ?2 WHERE id = ?1",
+                rusqlite::params![sid, merged],
+            )
+            .unwrap();
+        assert!(
+            !tidy_config(&s).auto_anywhere(),
+            "the default must be auto-tidy off, or this test proves nothing"
+        );
+    }
+    // The real background tick, auto-tidy off: it stamps nothing.
+    let exec = FakeExec::default();
+    assert_eq!(
+        sweep_with(&store, &exec, &GC_OFF, NOW).await,
+        GcReport::default()
+    );
+    let after_sweep = store
+        .lock()
+        .unwrap()
+        .get_work_item(item_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after_sweep.status_category, "todo",
+        "the tidy path is unreachable in the background with auto_tidy off — \
+         which is why the stamp cannot live only there"
+    );
+
+    // The write that records the merged PR: this is what must stamp.
+    store
+        .lock()
+        .unwrap()
+        .set_pr_signals("local", "merged-bg", Some(&merged))
+        .unwrap();
+    let row = store
+        .lock()
+        .unwrap()
+        .get_work_item(item_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.status_category, "done",
+        "a merged PR must stamp its local work done where the fact is written"
+    );
+    assert_eq!(row.status_set_by.as_deref(), Some("derived"));
+}
+
 /// Once `status_changed_at` is old enough, a person's `done` on a local item
 /// is offered as `done_idle` — the reason that, before `set_item_status`
 /// stamped `status_changed_at` (task 3 fix round 3), could never fire for

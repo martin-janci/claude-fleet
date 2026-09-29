@@ -1,6 +1,8 @@
 //! Who decided an item's status (design 2026-09-28 §2). The only writers of
 //! `work_items.status_set_by` live here: a person's explicit setting, and the
-//! derived stamp `work_tidy` makes when it sees a merged PR. Both are also
+//! derived stamp made when a session's PR is seen merged — by
+//! `Store::set_pr_signals`, where that fact is recorded, and by
+//! `Store::tidy_sessions`, which reads the same signal. Both are also
 //! the only local-item writers of `status_changed_at` (a tracker item's is
 //! written by `store::tracker_items` on every sync) — without it, the tidy
 //! planner's `done_long` (`service/gc/tidy.rs`) can never see a local item
@@ -174,13 +176,9 @@ impl Store {
     /// Also stamps `status_changed_at`, for the same reason `set_item_status`
     /// does: it is what the tidy planner's `done_long` reads.
     ///
-    /// Called from `Store::tidy_sessions` — a read-shaped path: the Tauri
-    /// `work_tidy` command and the MCP tool both reach it just by listing
-    /// candidates. That is intentional (moving the stamp to the GC sweep
-    /// alone would mean a person listing candidates does not see delivered
-    /// work as `done` until the next sweep) and safe, because this method is
-    /// idempotent and writes at most once per item regardless of how many
-    /// times a read calls it.
+    /// Reached through [`Self::stamp_derived_done_for_session`] from two
+    /// places, and only those two — see that method for which, and why one
+    /// of them is not enough.
     pub fn stamp_derived_done(&self, item_id: i64) -> Result<bool, IpcError> {
         let wrote = self.conn.execute(
             "UPDATE work_items SET status_category = 'done', status_set_by = 'derived', \
@@ -199,6 +197,52 @@ impl Store {
                     rejected: false,
                 },
             )?;
+        }
+        Ok(wrote)
+    }
+
+    /// [`Self::stamp_derived_done`] for the local work `session_id` is on:
+    /// its live, confirmed, PRIMARY link's item. How many items it wrote
+    /// (0 or 1 today — the schema allows one live primary link per
+    /// participant, and the return stays a count so a second one could not
+    /// go unnoticed).
+    ///
+    /// **The one definition of "which item a merged PR delivered."** Both
+    /// stamp sites call this, so neither can drift from the other:
+    ///
+    /// * [`Self::set_pr_signals`] — where the merged fact is WRITTEN. This
+    ///   is the site that makes the feature work: the background reconcile
+    ///   pass reaches it on every probe, `sessions.pr_signals` is deleted
+    ///   with its session, and nothing else in the background stamps.
+    ///   `service::work::tidy::auto_tidy` returns before `Snapshot::take`
+    ///   unless `work.auto_tidy` is on (default off, D2), so before this
+    ///   site existed a merged PR followed by a `kill_session` lost `done`
+    ///   permanently unless a person happened to open Tidy-up first.
+    /// * `Store::tidy_sessions` — kept because it is free (the pass already
+    ///   reads every session's `pr_signals`) and because a person opening
+    ///   Tidy-up should see delivered work as `done` in that same answer,
+    ///   not one probe later. Idempotent, so a second site is harmless.
+    ///
+    /// The PRIMARY link only, deliberately: a session may hold confirmed
+    /// secondary links (an epic, a ticket it also touched), and "my PR
+    /// merged" says nothing about those — stamping them would mark an epic
+    /// delivered because one child's PR landed.
+    pub fn stamp_derived_done_for_session(&self, session_id: i64) -> Result<usize, IpcError> {
+        let items: Vec<i64> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT l.item_id FROM work_links l \
+                 JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+                 WHERE p.session_id = ?1 AND l.ended_at IS NULL AND l.is_primary = 1 \
+                   AND l.state = 'confirmed' AND l.item_id IS NOT NULL",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![session_id], |r| r.get::<_, i64>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut wrote = 0;
+        for item_id in items {
+            if self.stamp_derived_done(item_id)? {
+                wrote += 1;
+            }
         }
         Ok(wrote)
     }

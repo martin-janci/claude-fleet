@@ -132,9 +132,22 @@ on the **session** (`sessions.pr_signals`, `state: OPEN|CLOSED|MERGED`, read
 today by `PrSignals::is_merged`). When that session is retired and swept, the
 signal is gone — so a purely computed `done` would silently revert to `todo`
 once the work's session disappeared, which is the worst possible behaviour for
-the one status a release depends on. `done` is therefore **written once** by the
-tick that already computes `pr_merged_idle` for tidy-up, with
+the one status a release depends on. `done` is therefore **written once**, with
 `status_set_by = 'derived'`, and it survives the session.
+
+**Where it is written.** At the point the merged fact is recorded —
+`Store::set_pr_signals`, which the reconcile pass calls whenever the PR probe
+reads `MERGED`. Not (only) the tick that computes `pr_merged_idle` for tidy-up:
+that tick is `service::work::tidy::auto_tidy`, which returns before it reads the
+fleet unless `work.auto_tidy` is on — and that is off by default (D2). A stamp
+living only there would be lost for good by the ordinary sequence "merge the PR,
+then kill the session", because the session's `pr_signals` go with its row.
+`Store::tidy_sessions` stamps too, because it is free there and a person opening
+Tidy-up should see delivered work as `done` in that same answer; the write is
+idempotent, so two sites are harmless. Both go through
+`Store::stamp_derived_done_for_session`, so neither can drift from the other: it
+stamps the session's live, confirmed, **primary** link's item — a merged PR says
+nothing about a secondary link (an epic, a ticket the session also touched).
 
 `in_progress` stays computed in the read path, because it is transient by
 nature: it means "a session is working on this right now", and there is nothing
