@@ -469,6 +469,35 @@ export async function renameWorkItem(itemId: number, title: string): Promise<Res
   return r;
 }
 
+/** A task, or a subtask under `parent` (`item:<id>`), written in Fleet. */
+export async function createWorkTask(input: {
+  title: string;
+  parent?: string | null;
+  projectId?: number | null;
+  notes?: string | null;
+}): Promise<Result<WorkItemRow>> {
+  const notes = input.notes?.trim();
+  const r = await invokeCmd<WorkItemRow>('create_work_task', {
+    args: {
+      title: input.title.trim(),
+      ...(input.parent ? { parent: input.parent } : {}),
+      ...(input.projectId != null ? { project_id: input.projectId } : {}),
+      ...(notes ? { notes } : {}),
+    },
+  });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
+/** A person accepts or rejects an agent's proposed subtask. */
+export async function decideWorkProposal(itemId: number, accept: boolean): Promise<Result<WorkItemRow>> {
+  const r = await invokeCmd<WorkItemRow>(accept ? 'accept_work_proposal' : 'reject_work_proposal', {
+    args: { item_id: itemId },
+  });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
 // ── Past work and resume (roadmap M2) ──
 
 /** The key an ended link is past work of: its bare key. (Links to a local
