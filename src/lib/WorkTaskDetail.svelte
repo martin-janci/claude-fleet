@@ -16,7 +16,7 @@
   import { orgs as orgStore } from './orgs';
   import { openExternal } from './open_external';
   import { timeAgo } from './session_status';
-  import { describeEvidence, onWorkChangedDebounced, resumeWork } from './work';
+  import { changedAny, describeEvidence, onWorkChangedDebounced, resumeWork } from './work';
   import { providerInfo, startWork, unavailableLabel } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -30,6 +30,7 @@
     orgSourceText,
     placementNote,
     readErrorText,
+    ruleDraftFor,
     selectedTaskId,
     taskStatus,
     trackerDown,
@@ -100,8 +101,9 @@
   }
 
   // A placement saved: show the task and its placement line as the hub
-  // answered at once (not the old "Placed …" until the next read), then
-  // re-read the whole detail.
+  // answered at once (not the old "Placed …" until the next read). The
+  // write's own bump re-reads the whole detail (debounced): one read, not a
+  // second one here.
   function placed(t: WorkTask, note: string | null) {
     if (detail) {
       const version = t.placement_version ?? 0;
@@ -112,7 +114,6 @@
           version > 0 ? { group: t.group?.label ?? '', note, version, updated_at: null, updated_by: null } : null,
       };
     }
-    void load(taskId);
   }
 
   let loadedFor: string | null = null;
@@ -134,9 +135,11 @@
   }
   void loadRules();
 
-  const off = onWorkChangedDebounced(() => {
-    void load(taskId);
-    void loadRules();
+  // The rules are re-read only when a rule may have moved; the task on
+  // anything but a saved view's change.
+  const off = onWorkChangedDebounced((kinds) => {
+    if ([...kinds].some((k) => k !== 'view')) void load(taskId);
+    if (changedAny(kinds, 'rule', 'resync', 'local')) void loadRules();
   }, () => debounceMs);
   onDestroy(off);
 
@@ -223,23 +226,9 @@
     if (row) selectSessionExplicitly(row);
   }
 
-  function makeRuleDraft(t: WorkTask): WorkRuleDraft {
-    const g = t.group;
-    const prefix = t.key && /^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(t.key) ? t.key.split('-')[0] : null;
-    return {
-      name: '',
-      enabled: true,
-      group: g && g.source !== 'none' ? g.label : '',
-      expected_version: 0,
-      conditions: {
-        tracker_id: t.kind === 'tracker' ? (t.tracker_id ?? null) : null,
-        container: g?.source === 'tracker' ? (g.tracker_value ?? g.label) : null,
-        key_prefix: g?.source !== 'tracker' && prefix ? prefix : null,
-        repo: g?.source === 'repo' ? g.label : null,
-        title_contains: null,
-      },
-    };
-  }
+  // Prefilled for the group it is in now (none: the editor asks).
+  const makeRuleDraft = (t: WorkTask): WorkRuleDraft =>
+    ruleDraftFor(t, t.group && t.group.source !== 'none' ? t.group.label : '');
 </script>
 
 <section class="task-detail" data-testid="work-task-detail" aria-label="Task">

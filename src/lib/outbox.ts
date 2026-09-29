@@ -65,7 +65,9 @@ export interface OutboxMessage {
   at: string;
   /** ms timestamp the current send attempt started. */
   sendingSince: number | null;
-  /** Turns already carrying this text when it was sent (see `transcriptCarries`). */
+  /** Turns already carrying this text when it was sent: the transcript has
+   *  caught up once `carriedCount` is greater than this, so re-sending an
+   *  earlier prompt ("continue") is not mistaken for it. */
   seen: number;
   /** The row's `turn_seq` when it went out. */
   turnSeqAtSend: number | null;

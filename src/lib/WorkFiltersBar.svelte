@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onWorkChangedDebounced } from './work';
+  import { changedAny, onWorkChangedDebounced } from './work';
   // The Work view's filters and saved views (work graph M14). One filters
   // object (`WorkTreeFilters`) for the tree, the saved views and the phone:
   // org, tracker, status, mine, has, review and a search (debounced). Saved
@@ -215,9 +215,15 @@
     await loadViews();
   }
 
-  // Debounced like every other reader: session status ticks bump this too,
-  // and each re-read is a `work_views` call (to the hub when paired).
-  const offChanged = onWorkChangedDebounced(() => void loadViews(), () => 500);
+  // Debounced like every other reader, and only for what moves a saved
+  // view: each re-read is a `work_views` call (to the hub when paired), and
+  // session status ticks and placements bump the tick too.
+  const offChanged = onWorkChangedDebounced(
+    (kinds) => {
+      if (changedAny(kinds, 'view', 'resync', 'local')) void loadViews();
+    },
+    () => 500,
+  );
   onMount(() => void loadViews());
   onDestroy(() => {
     offF();

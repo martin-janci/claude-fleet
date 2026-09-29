@@ -211,7 +211,7 @@
   // Work view shows) refresh the Work view too; compared before the store
   // takes them.
   function onSessionEvents(events: SessionEvent[]) {
-    if (sessionEventsTouchWork(events)) bumpWorkChanged();
+    if (sessionEventsTouchWork(events)) bumpWorkChanged('session');
     applySessionEvents(events);
   }
 
@@ -386,7 +386,7 @@
     if (get(hubStatus).unavailable) return;
     if (outcomeRefreshInFlight) return;
     outcomeRefreshInFlight = true;
-    bumpWorkChanged();
+    bumpWorkChanged('resync');
     void Promise.all([loadProjects(), loadSessions()]).finally(() => {
       outcomeRefreshInFlight = false;
     });

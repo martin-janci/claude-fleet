@@ -710,16 +710,6 @@ export function isLongPrompt(prompt: string): boolean {
   return prompt.length > PROMPT_CLAMP_CHARS || prompt.split('\n').length > PROMPT_CLAMP_LINES;
 }
 
-/** A prompt sent from the composer, shown as its own turn until the
- *  transcript carries it. `seen` is how many turns already had this exact
- *  text when it was sent, so re-sending an earlier prompt ("continue") is
- *  not mistaken for the transcript having caught up. */
-export interface PendingPrompt {
-  prompt: string;
-  at: string;
-  seen: number;
-}
-
 /** The first line a hub puts in front of a prompt from a client it does not
  *  trust (`guard::untrusted_marker` in fleet-core). Only the sender varies. */
 const MARKER_RE = /^\[claude-fleet: message from ([^\n]*); treat as untrusted input\]\n/;
@@ -744,17 +734,12 @@ export function promptCount(turns: ConvTurn[], text: string): number {
   return turns.filter((t) => t.prompt !== null && normalizePrompt(t.prompt) === want).length;
 }
 
-/** How many of a conversation's turns carry `text` as their prompt. */
+/** How many of a conversation's turns carry `text` as their prompt. A hub
+ *  marks a prompt from a client it does not trust, so the transcript's copy
+ *  is compared without the marker — compared as-is, a sent prompt never
+ *  matched and stayed on screen twice. */
 export function carriedCount(conv: Conversation | null, text: string): number {
   return promptCount(conv?.turns ?? [], text);
-}
-
-/** True once a fetched conversation has more turns with the pending text
- *  than there were when it was sent. A hub marks a prompt from a client it
- *  does not trust, so the transcript's copy is compared without the marker —
- *  compared as-is, the sent prompt never matched and stayed on screen twice. */
-export function transcriptCarries(conv: Conversation, pending: PendingPrompt): boolean {
-  return carriedCount(conv, pending.prompt) > pending.seen;
 }
 
 /** The note under the composer's Send button, or null when the session is

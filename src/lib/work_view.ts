@@ -20,10 +20,12 @@ import { derived, get, writable, type Readable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
 import { readPref, writePref } from './prefs';
 import { acceptCommandRow, sessions, type SessionEvent, type SessionRow } from './sessions';
-import { bumpWorkChanged, workChanged, type WorkEvidence } from './work';
+import { bumpWorkChanged, workChanged, type WorkChangeKind, type WorkEvidence } from './work';
 import { onSessionOpened } from './selection';
 import { todayOpen } from './today';
 import { trackerStateBadge } from './trackers';
+import { knownProviderShort } from './tracker_health';
+import { classify, type TriageBucket } from './attention';
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -201,6 +203,27 @@ export interface WorkTreePage {
   archived_hidden?: number;
   next_cursor?: string | null;
   generated_at?: number;
+  /** The sections `WorkTreeQuery.sections` asked for, paged from the same
+   *  read (absent from an older hub: read each by itself). */
+  sections?: WorkTreeSection[];
+  /** The review inbox's total, when asked (absent from an older hub). */
+  review_total?: number;
+}
+
+/** A section to page in the same read: exactly what a read of that
+ *  section by itself (`sectionFilters`) answers first. */
+export interface WorkTreeSectionAsk {
+  org_id: number | null;
+  group_id: string;
+  /** 1–200, default 50. */
+  limit?: number;
+}
+
+export interface WorkTreeSection {
+  org_id: number | null;
+  group_id: string;
+  tasks: WorkTask[];
+  next_cursor?: string | null;
 }
 
 export interface LastOutcome {
@@ -402,6 +425,10 @@ export interface WorkTreeQuery {
   limit?: number;
   /** 0–50, default 8. */
   per_task?: number;
+  /** Open sections to page from the same read (at most 100). */
+  sections?: WorkTreeSectionAsk[];
+  /** Add `review_total` from the same read. */
+  with_review_total?: boolean;
 }
 
 /** `archived` always goes on the wire: the hub hides archived tasks only
@@ -411,7 +438,14 @@ export function workTree(q: WorkTreeQuery = {}): Promise<Result<WorkTreePage>> {
   const n = normalizeFilters(q.filters);
   const filters: WorkTreeFilters = { ...n, archived: n.archived === true };
   return invokeCmd<WorkTreePage>('work_tree', {
-    args: clean({ filters, cursor: q.cursor ?? undefined, limit: q.limit, per_task: q.per_task }),
+    args: clean({
+      filters,
+      cursor: q.cursor ?? undefined,
+      limit: q.limit,
+      per_task: q.per_task,
+      sections: q.sections && q.sections.length > 0 ? q.sections : undefined,
+      with_review_total: q.with_review_total || undefined,
+    }),
   });
 }
 
@@ -640,13 +674,6 @@ export function conflictNotice(
   return { conflict: true, text: conflictSentence(what), current: conflictCurrent(c, linkName) };
 }
 
-/** A notice that may be a conflict, as plain text (tests, titles). */
-export function noticeText(n: string | ConflictNotice | null | undefined): string {
-  if (!n) return '';
-  if (typeof n === 'string') return n;
-  return n.current ? `${n.text} ${n.current}` : n.text;
-}
-
 /** "Needs a newer hub": the hub (or this build's backend) has no Work view. */
 export const NEWER_HUB = 'Needs a newer hub: update fleet-hub to use the Work view.';
 
@@ -711,35 +738,6 @@ export function sameFilters(a: WorkTreeFilters, b: WorkTreeFilters): boolean {
   return filtersKey(a) === filtersKey(b);
 }
 
-/** Filters as a URL-safe query string (`org=3&status=open&q=login`). */
-export function filtersToQuery(f: WorkTreeFilters): string {
-  const n = normalizeFilters(f);
-  const p = new URLSearchParams();
-  for (const k of FILTER_ORDER) {
-    const v = n[k];
-    if (v === undefined) continue;
-    p.set(k === 'query' ? 'q' : k, v === true ? '1' : String(v));
-  }
-  return p.toString();
-}
-
-/** The inverse of `filtersToQuery`; anything malformed is dropped. */
-export function filtersFromQuery(s: string): WorkTreeFilters {
-  const p = new URLSearchParams(s.startsWith('?') ? s.slice(1) : s);
-  const num = (v: string | null) => (v !== null && /^\d+$/.test(v) ? Number(v) : v);
-  return normalizeFilters({
-    org: num(p.get('org')),
-    tracker: num(p.get('tracker')),
-    status: p.get('status') ?? undefined,
-    mine: p.get('mine') === '1',
-    has: p.get('has') ?? undefined,
-    review: p.get('review') === '1',
-    query: p.get('q') ?? undefined,
-    group: p.get('group') ?? undefined,
-    archived: p.get('archived') === '1',
-  });
-}
-
 /** How many filters are on (the chip's count); `group` is navigation, and
  *  showing archived tasks widens the view rather than narrowing it. */
 export function activeFilterCount(f: WorkTreeFilters): number {
@@ -753,6 +751,16 @@ export function activeFilterCount(f: WorkTreeFilters): number {
 /** A section's key: its org and its group (a group id can recur per org). */
 export function sectionKey(orgId: number | null | undefined, groupId: string): string {
   return `${orgId ?? 'none'}|${groupId}`;
+}
+
+/** The inverse of `sectionKey` (the org part never has a `|`); null for a
+ *  key that is not a section's (an org's, `org:<id>`). */
+export function parseSectionKey(k: string): { orgId: number | null; groupId: string } | null {
+  const i = k.indexOf('|');
+  if (i <= 0) return null;
+  const org = k.slice(0, i);
+  if (org !== 'none' && !/^\d+$/.test(org)) return null;
+  return { orgId: org === 'none' ? null : Number(org), groupId: k.slice(i + 1) };
 }
 
 export function orgSectionKey(orgId: number | null | undefined): string {
@@ -900,16 +908,6 @@ export function isOccurrenceOf(l: Pick<WorkTaskLink, 'session_id' | 'state'>, se
   return sessionId != null && l.session_id === sessionId && l.state !== 'ended' && l.state !== 'rejected';
 }
 
-/** Every task id (loaded) that shows `sessionId`. */
-export function tasksShowingSession(sections: readonly OrgSection[], sessionId: number | null | undefined): Set<string> {
-  const out = new Set<string>();
-  if (sessionId == null) return out;
-  for (const o of sections)
-    for (const g of o.groups)
-      for (const t of g.tasks) if ((t.sessions ?? []).some((l) => isOccurrenceOf(l, sessionId))) out.add(t.task_id);
-  return out;
-}
-
 /** A task's short status: the tracker's own name, else its category. */
 export function taskStatus(t: Pick<WorkTask, 'status_name' | 'status_category'>): string {
   if (t.status_name) return t.status_name;
@@ -948,16 +946,10 @@ export function orgSourceText(t: Pick<WorkTask, 'org_source' | 'tracker_name' | 
   }
 }
 
-const PROVIDER_NAMES: Record<string, string> = {
-  jira: 'Jira',
-  jira_dc: 'Jira',
-  github: 'GitHub',
-  asana: 'Asana',
-  linear: 'Linear',
-};
-
+/** "Jira", "GitHub", … for a provider id; "the tracker" for none or one
+ *  this build does not know. */
 export function providerName(p: string | null | undefined): string {
-  return (p && PROVIDER_NAMES[p]) || 'the tracker';
+  return (p && knownProviderShort(p)) || 'the tracker';
 }
 
 /** Where a task's group comes from, as a sentence. */
@@ -990,6 +982,43 @@ export function placementNote(g: GroupRef, t: Pick<WorkTask, 'provider'>): strin
   if (g.source === 'rule') return 'Placing it by hand overrides the rule for this task only.';
   if (g.source === 'manual') return 'Clearing the placement falls back to where fleet would put it.';
   return 'Placing it is local to fleet navigation; it is never a boundary.';
+}
+
+/** A key's prefix as the hub reads it (`view.rs` `key_prefix`): the part
+ *  before the first `-`, non-empty, followed by digits only, in ASCII
+ *  upper case (`abc-12` → `ABC`, `ops2.x-12` → `OPS2.X`, `ABC-12a` → null). */
+export function keyPrefix(key: string | null | undefined): string | null {
+  if (!key) return null;
+  const i = key.indexOf('-');
+  if (i <= 0) return null;
+  const tail = key.slice(i + 1);
+  if (!/^[0-9]+$/.test(tail)) return null;
+  return key.slice(0, i).replace(/[a-z]+/g, (c) => c.toUpperCase());
+}
+
+/** "Make a rule…" prefilled from where a task's group comes from: its
+ *  tracker and project, its key prefix (the key group's own label, else the
+ *  hub's reading of the key) or its repository. */
+export function ruleDraftFor(
+  t: Pick<WorkTask, 'kind' | 'tracker_id' | 'key' | 'group'>,
+  group: string,
+  name = '',
+): WorkRuleDraft {
+  const g = t.group;
+  const prefix = g?.source === 'key' ? g.label || null : keyPrefix(t.key);
+  return {
+    name,
+    enabled: true,
+    group,
+    expected_version: 0,
+    conditions: {
+      tracker_id: t.kind === 'tracker' ? (t.tracker_id ?? null) : null,
+      container: g?.source === 'tracker' ? (g.tracker_value ?? g.label) : null,
+      key_prefix: g?.source !== 'tracker' ? prefix : null,
+      repo: g?.source === 'repo' ? g.label : null,
+      title_contains: null,
+    },
+  };
 }
 
 /** A tracker state that is not `ok`: "tracker down". */
@@ -1161,7 +1190,7 @@ export function cycleWorkOrg(): void {
 /** Bumped by every work write (`work.ts`), by `work:changed` and by session
  *  events that touch work; the Work view re-reads what it shows (debounced)
  *  when it moves. Lives in `work.ts` so its link wrappers bump it too. */
-export { workChanged, bumpWorkChanged };
+export { workChanged, bumpWorkChanged, type WorkChangeKind };
 
 /** The session ids the loaded tree shows, so their status changes refresh
  *  it even when they have no primary work. */
@@ -1202,22 +1231,26 @@ export function parseWorkChanged(payload: unknown): WorkChanged | null {
   }
 }
 
-/** Whether a batch of changes calls for reloading the whole view rather
- *  than re-reading the visible page: a gap in the stream. */
-export function needsFullReload(changes: readonly WorkChanged[]): boolean {
-  return changes.some((c) => c.what === 'resync');
+/** The attention a row's "needs you" is drawn from: the triage bucket
+ *  (`attention.ts`, the hub's `needs_attention_with` reasons), with the
+ *  buckets the hub never counts folded away — `working` / `idle` (they
+ *  flip on every turn and the tree draws nothing from them) and
+ *  `done_unread` (a read / unread flip is not the tree's). With
+ *  `idleSecs: 0`, `idle_long` never fires, so it is deterministic. */
+function attentionSig(r: SessionRow): TriageBucket | null {
+  const b = classify(r, { idleSecs: 0, now: 0 });
+  return b === 'working' || b === 'idle' || b === 'done_unread' ? null : b;
 }
 
 /** What of a row the Work view shows: its primary and suggested work, its
  *  org, `work_rev` (moves when ANY of its live links changes, a secondary
- *  one too), whether it is alive, and whether it needs you. Not the raw
+ *  one too), whether it is alive, and why it needs you. Not the raw
  *  `claude_status`: working ↔ idle flips on every turn and the tree draws
  *  nothing from it but "needs you". */
 function workSig(r: SessionRow | undefined): string {
   if (!r) return '';
   const w = r.work;
   const s = r.work_suggested;
-  const needsYou = r.claude_status === 'blocked' || r.claude_status === 'failed' || r.stuck_kind != null;
   return JSON.stringify([
     w?.link_id ?? null,
     w?.state ?? null,
@@ -1229,7 +1262,7 @@ function workSig(r: SessionRow | undefined): string {
     r.org_id ?? null,
     r.work_rev ?? 0,
     r.status,
-    needsYou ? 1 : 0,
+    attentionSig(r),
   ]);
 }
 
@@ -1257,15 +1290,18 @@ export function sessionEventsTouchWork(
   return false;
 }
 
-/** Route the batched `work:*` frames: a `changed` frame bumps the tick. */
+/** Route the batched `work:*` frames: an `item` frame (a tracker item the
+ *  sync changed: its title, status or group) bumps the tick as a
+ *  `placement` — the tasks move, never a saved view or a rule. */
 export function noteWorkEvents(events: readonly { type: string }[]): void {
-  if (events.some((e) => e.type === 'item')) bumpWorkChanged();
+  if (events.some((e) => e.type === 'item')) bumpWorkChanged('placement');
 }
 
 /** `work:changed` frames (placements, rules, views, a task's org, or the
- *  desktop's own `resync` after a stream gap): the Work view re-reads what
- *  it shows. Every kind is a re-read today; `needsFullReload` tells the
- *  cases a caller might one day treat differently apart. */
+ *  desktop's own `resync` after a stream gap): one bump carrying every
+ *  kind, so each reader re-reads only what it shows — the saved views on
+ *  `view`, the rules on `rule`, the tree on anything (and on `resync`, the
+ *  whole view, dropping the sections it kept). */
 export function noteWorkChanged(changes: readonly WorkChanged[]): void {
-  if (changes.length > 0) bumpWorkChanged();
+  if (changes.length > 0) bumpWorkChanged(...new Set(changes.map((c) => c.what)));
 }

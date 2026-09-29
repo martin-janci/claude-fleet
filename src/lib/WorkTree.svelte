@@ -55,6 +55,7 @@
     workViewKey,
     activeWorkViewId,
     normalizeFilters,
+    parseSectionKey,
     type GroupSection,
     type OrgSection,
     type SectionState,
@@ -62,6 +63,8 @@
     type WorkTaskLink,
     type WorkTreeGroup,
     type WorkTreePage,
+    type WorkTreeSection,
+    type WorkTreeSectionAsk,
   } from './work_view';
   import type { IpcError } from './result';
 
@@ -129,16 +132,57 @@
   /** The most tasks one `work_tree` read returns. */
   const PAGE_MAX = 200;
 
+  // The sections a load asks for in the same read (the open ones, as many
+  // tasks as each showed), so one refresh is one `work_tree` on a hub that
+  // pages them; an older hub answers without `sections` and each open
+  // section is read by itself, as before.
+  function sectionAsks(sameView: boolean, had: ReadonlyMap<string, number>): WorkTreeSectionAsk[] {
+    const openNow = get(workExpanded)[get(workViewKey)] ?? {};
+    const keys = new Set<string>();
+    for (const [k, open] of Object.entries(openNow)) if (open) keys.add(k);
+    // A section the last page filled is open unless closed — but one that
+    // page covered whole is not asked for again (the new first page covers
+    // it too, or `load` reads it by itself when it grew past it).
+    if (sameView)
+      for (const [k, st] of states) {
+        if (openNow[k] === false) continue;
+        if (!st.own) {
+          const g = page?.groups.find((x) => sectionKey(x.org_id, x.group.id) === k);
+          if (g && st.tasks.length >= g.count) continue;
+        }
+        keys.add(k);
+      }
+    const asks: WorkTreeSectionAsk[] = [];
+    for (const k of keys) {
+      const at = parseSectionKey(k);
+      if (!at) continue;
+      const want = sameView ? Math.max(pageSize, had.get(k) ?? 0) : pageSize;
+      // More than one read's worth pages by itself (`readSection`).
+      if (want > PAGE_MAX) continue;
+      asks.push({ org_id: at.orgId, group_id: at.groupId, limit: want });
+      if (asks.length >= SECTIONS_MAX) break;
+    }
+    return asks;
+  }
+
+  /** The most sections one read pages (the hub's `TREE_MAX_SECTIONS`). */
+  const SECTIONS_MAX = 100;
+
   let loadSeq = 0;
-  async function load() {
+  /** Read the view. `full`: nothing kept is current (a stream gap), so no
+   *  section keeps what it showed. `review`: bring the Review tab's count
+   *  along (in the same read where the hub can). */
+  async function load(opts: { full?: boolean; review?: boolean } = {}) {
     const mine = ++loadSeq;
     const filters = get(workViewFilters);
     const fk = filtersKey(filters);
     // What each section had, so a refresh re-reads as much as was shown.
     const had = new Map<string, number>();
     for (const [k, s] of states) if (s.own) had.set(k, s.tasks.length);
+    const sameBefore = !opts.full && pageFiltersKey === fk && fk === lastFiltersKey;
+    const asks = sectionAsks(sameBefore, had);
     loading = true;
-    const r = await workTree({ filters, limit: pageSize });
+    const r = await workTree({ filters, limit: pageSize, sections: asks, with_review_total: opts.review });
     if (mine !== loadSeq) return;
     loading = false;
     if (!r.ok) {
@@ -148,6 +192,7 @@
         error = r.error;
         refreshError = null;
       }
+      if (opts.review) void loadReviewCount();
       return;
     }
     error = null;
@@ -155,10 +200,19 @@
     // A refresh of the view shown (same filters) keeps each open section it
     // re-reads below until that read answers, so a failed or slow re-read
     // never blanks what was loaded.
-    const sameView = pageFiltersKey === fk && fk === lastFiltersKey;
+    const sameView = !opts.full && pageFiltersKey === fk && fk === lastFiltersKey;
     pageFiltersKey = fk;
     const p = pageOf(r.value);
     page = p;
+    if (opts.review) {
+      if (typeof r.value?.review_total === 'number') reviewTotal = r.value.review_total;
+      else void loadReviewCount();
+    }
+    // The sections this read paged (a hub that pages them answers every one
+    // asked for).
+    const paged = new Map<string, WorkTreeSection>();
+    if (asks.length > 0 && Array.isArray(r.value?.sections))
+      for (const sec of r.value.sections) paged.set(sectionKey(sec.org_id, sec.group_id), sec);
     const fresh = distributeTasks(p);
     const openNow = get(workExpanded)[get(workViewKey)] ?? {};
     const keep = new Map<string, SectionState>();
@@ -170,7 +224,8 @@
     // section is still open — so a section never stays "Loading…".
     cancelSections();
     workTreeMeta.set({ orgs: p.orgs, trackers: p.trackers, groups: p.groups });
-    // Open sections the first page did not cover load by themselves.
+    // Open sections the first page did not cover: from this read when it
+    // paged them, else each by itself.
     for (const g of p.groups) {
       const k = sectionKey(g.org_id, g.group.id);
       const open = openNow[k] ?? fresh.has(k);
@@ -181,11 +236,25 @@
         if (states.get(k)?.own) states = new Map(states).set(k, fresh.get(k)!);
         continue;
       }
+      const sec = paged.get(k);
+      if (sec && Array.isArray(sec.tasks)) {
+        applySection(k, sec.tasks, sec.next_cursor ?? null, false);
+        continue;
+      }
       const want = sameView ? Math.max(pageSize, had.get(k) ?? 0) : pageSize;
       void loadSection(g, false, want);
     }
     loadedOnce = true;
     flushReveal();
+  }
+
+  /** A section's read answered: from its start it replaces what the
+   *  section had loaded by itself (a task that left it goes), and the first
+   *  page's share is merged; `more` appends. */
+  function applySection(k: string, got: WorkTask[], cursor: string | null, more: boolean) {
+    const cur = states.get(k);
+    const tasks = more || (cur && !cur.own) ? mergeTasks(cur?.tasks ?? [], got) : got;
+    states = new Map(states).set(k, { tasks, cursor, own: true });
   }
 
   // Each section's request generation: an answer whose generation is no
@@ -256,11 +325,7 @@
     errs.delete(k);
     sectionErrors = errs;
     const p = pageOf(r.value);
-    const cur = states.get(k);
-    // A re-read from the start replaces what the section had loaded by
-    // itself (a task that left it goes); the first page's share is merged.
-    const tasks = more || (cur && !cur.own) ? mergeTasks(cur?.tasks ?? [], p.tasks) : p.tasks;
-    states = new Map(states).set(k, { tasks, cursor: p.next_cursor ?? null, own: true });
+    applySection(k, p.tasks, p.next_cursor ?? null, more);
   }
 
   async function loadReviewCount() {
@@ -280,19 +345,38 @@
 
   // `work:changed` / session events: one debounced re-read — at most
   // `maxWaitMs` after the first change it waits for, so a steady stream of
-  // changes (a busy fleet) cannot hold the view back forever.
+  // changes (a busy fleet) cannot hold the view back forever. While Review
+  // shows, the tree is not on screen: only its count is read (Review reads
+  // its own list), and the tree once when Tasks is back. A `resync` (a gap
+  // in the hub's stream) reloads the whole view.
+  let staleWhileHidden = false;
+  let staleFull = false;
   const offChanged = onWorkChangedDebounced(
-    () => {
-      void load();
-      void loadReviewCount();
+    (kinds) => {
+      const full = kinds.has('resync');
+      if (tab === 'review') {
+        staleWhileHidden = true;
+        staleFull ||= full;
+        void loadReviewCount();
+        return;
+      }
+      void load({ full, review: true });
     },
     () => debounceMs,
     () => maxWaitMs,
   );
 
+  function showTasks() {
+    tab = 'tasks';
+    if (!staleWhileHidden) return;
+    const full = staleFull;
+    staleWhileHidden = false;
+    staleFull = false;
+    void load({ full });
+  }
+
   onMount(() => {
-    void load();
-    void loadReviewCount();
+    void load({ review: true });
   });
   onDestroy(() => {
     offFilters();
@@ -394,7 +478,7 @@
     const req = get(revealTaskRequest);
     if (!req || !loadedOnce) return;
     revealTaskRequest.set(null);
-    tab = 'tasks';
+    showTasks();
     void reveal(req.taskId);
   }
   const offReveal = revealTaskRequest.subscribe((req) => {
@@ -418,7 +502,7 @@
           aria-selected={tab === 'tasks'}
           class:is-active={tab === 'tasks'}
           data-testid="work-tab-tasks"
-          onclick={() => (tab = 'tasks')}>Tasks</button
+          onclick={showTasks}>Tasks</button
         >
         <button
           class="btn btn--chip btn--toggle"

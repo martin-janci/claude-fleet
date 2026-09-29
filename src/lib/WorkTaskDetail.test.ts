@@ -16,7 +16,7 @@ import { sessions } from './sessions';
 import { selectedSession, clearSelection } from './selection';
 import { session } from './hosts_fixture';
 import { link, task } from './work_view_fixture';
-import { selectedTaskId, workTreeMeta, type OrgImpact, type TaskDetail } from './work_view';
+import { noteWorkChanged, selectedTaskId, workTreeMeta, type OrgImpact, type TaskDetail } from './work_view';
 
 const trackerTask: TaskDetail = {
   task: task({
@@ -269,7 +269,7 @@ describe('WorkTaskDetail', () => {
       group: { id: 'label:Payments', label: 'Payments', source: 'manual' },
       placement_version: 3,
     });
-    render(WorkTaskDetail, { taskId: 'item:12' });
+    render(WorkTaskDetail, { taskId: 'item:12', debounceMs: 5 });
     await flush();
     expect(screen.getByTestId('work-task-placement').textContent).toContain('owned by ops');
     await fireEvent.click(screen.getByTestId('work-task-place'));
@@ -285,7 +285,35 @@ describe('WorkTaskDetail', () => {
     await fireEvent.click(screen.getByTestId('work-place-submit'));
     await flush();
     expect(calls('place_work')[0]).toEqual({ task_id: 'item:12', group: 'Payments', note: 'owned by ops', expected_version: 2 });
-    expect(calls('work_task').length).toBeGreaterThanOrEqual(2);
+    // The write's own bump re-reads the detail once (debounced), not twice.
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    expect(calls('work_task')).toHaveLength(2);
+  });
+
+  it('a placement change re-reads the task, not the rules; a rule change both', async () => {
+    handlers.work_task = () => trackerTask;
+    handlers.work_rules = () => [];
+    render(WorkTaskDetail, { taskId: 'item:12', debounceMs: 5 });
+    await flush();
+    const tasks = calls('work_task').length;
+    const rules = calls('work_rules').length;
+    noteWorkChanged([{ what: 'placement', task_id: 'item:12' }]);
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    expect(calls('work_task')).toHaveLength(tasks + 1);
+    expect(calls('work_rules')).toHaveLength(rules);
+    noteWorkChanged([{ what: 'rule', rule_id: 3 }]);
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    expect(calls('work_task')).toHaveLength(tasks + 2);
+    expect(calls('work_rules')).toHaveLength(rules + 1);
+    // A saved view's change is neither's.
+    noteWorkChanged([{ what: 'view', view_id: 1 }]);
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    expect(calls('work_task')).toHaveLength(tasks + 2);
+    expect(calls('work_rules')).toHaveLength(rules + 1);
   });
 
   it('a tracker-controlled org is refused with the admin path', async () => {
