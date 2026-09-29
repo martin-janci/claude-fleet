@@ -934,7 +934,11 @@ not recorded: suggestions shown (only made, confirmed, rejected and expired are 
 The phone app (fleet-mobile) reads work from a hub over its paired client
 token:
 
-- work groups (per host), the **My work** chip and the row's work chip;
+- work groups (per host), the **My work** chip and the row's work chip —
+  though not yet local work's live *in progress* / *done* (native item
+  status): the phone's wire model predates that field and reads a bare
+  key's status the old way, so a fleet-mobile release must add it before a
+  phone shows the same answer the desktop does for work with no ticket;
 - with a **full** token: Confirm / *Not this* on a suggestion, set or clear
   a link, start work from a ticket (*Start here*) and resume past work;
 - **Today** with *Copy standup*, and the ticket card with its acceptance

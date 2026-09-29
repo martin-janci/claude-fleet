@@ -289,18 +289,35 @@ pub struct WorkSummary {
     pub source: String,
     /// `tracker` | `local` | `ref` (native item status, task 4): which kind
     /// of task this is, the same vocabulary as `WorkTask.kind`. Empty for a
-    /// hub older than this column — a client must not read that as `ref`;
-    /// see `status_category` below for what changed here.
+    /// hub older than this column.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub kind: String,
-    // --- the item's status (work graph M3; native item status task 4 lifts
-    // the old restriction to tracker items only — a local item's real
-    // status shows too, so `kind`, not "is `status_category` absent?", is
-    // now how a client tells a local item from a tracker item). Absent for
-    // a bare key (no item at all), or a hub older than M3.
+    // --- the tracker item's status (work graph M3), absent for a bare key,
+    // a local item, or a hub older than M3.
+    //
+    // Deliberately NOT the effective/live status (native item status task
+    // 4, fix round 2): fleet-mobile's `WorkSummary.isLocal` derives "this is
+    // a local item, not a ticket" from `itemId != null && statusCategory ==
+    // null && url == null` — the ONLY signal it has, since it predates
+    // `kind` and has no other way to tell. Making a local item's status
+    // non-null here would silently disable "Rename work" on every paired
+    // phone, shipped builds included, which cannot be patched by anything
+    // this repo ships. See `effective_status` below for the live value.
     /// todo | in_progress | done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_category: Option<String>,
+    /// The item's status with the live precedence applied (design
+    /// 2026-09-28 §2, fix round 2): a person's setting or a stamped `done`
+    /// is final; otherwise a confirmed link whose session is presently
+    /// working lifts a LOCAL item to `in_progress`; otherwise the stored
+    /// value — for BOTH a tracker item and a local item alike, unlike
+    /// `status_category` above. This is the field a reader wanting "the
+    /// real answer" should use: the sidebar chip, the status filter, the
+    /// Today view's staleness check and the handover summary all read this,
+    /// not `status_category`. `None` for a bare key (no item at all), or a
+    /// hub older than this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_status: Option<String>,
     /// The tracker's own status name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_name: Option<String>,
@@ -1677,27 +1694,36 @@ impl Store {
 
     /// session id → its primary work, for every live session that has one.
     ///
-    /// `status_category` and `kind` are unconditional (native item status
-    /// task 4, fix round 1): this had the same tracker-only `CASE` that
-    /// hid a local item's status on the session row, before that was
-    /// fixed. Zero non-test callers today, so nothing downstream depended
-    /// on the old hiding — but a latent copy of a just-fixed bug is exactly
-    /// what waits for its first caller.
+    /// `kind` is unconditional (native item status task 4, fix round 1):
+    /// this had the same tracker-only `status_category` `CASE` that hid a
+    /// local item's status on the session row, before that was fixed. Zero
+    /// non-test callers today, so nothing downstream depended on the old
+    /// hiding — but a latent copy of a just-fixed bug is exactly what waits
+    /// for its first caller.
+    ///
+    /// `status_category` itself is back to tracker-only (fix round 2): a
+    /// shipped fleet-mobile build derives "this is a local item" from
+    /// `status_category == null` on the identically-shaped `WorkSummary`
+    /// `rows.rs` stamps on the session row, and this method feeds the same
+    /// type. `effective_status` carries the live-lifted value instead — see
+    /// its doc on `WorkSummary`.
     pub fn primary_work_by_session(&self) -> Result<HashMap<i64, WorkSummary>, IpcError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT p.session_id, l.id, l.item_id, COALESCE(i.key, l.ref_key), \
                     COALESCE(i.title, ''), l.source, \
                     CASE WHEN i.id IS NULL THEN 'ref' \
                          WHEN i.tracker_id IS NOT NULL THEN 'tracker' \
                          ELSE 'local' END, \
-                    i.status_category, \
+                    CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
+                    {effective}, \
                     i.status_name, i.url, i.unavailable_at IS NOT NULL \
              FROM work_links l \
              JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
              LEFT JOIN work_items i ON i.id = l.item_id \
              WHERE l.ended_at IS NULL AND l.is_primary = 1 AND l.state = 'confirmed' \
                AND p.session_id IS NOT NULL",
-        )?;
+            effective = crate::effective_status_sql!(),
+        ))?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -1709,9 +1735,10 @@ impl Store {
                     source: r.get(5)?,
                     kind: r.get(6)?,
                     status_category: r.get(7)?,
-                    status_name: r.get(8)?,
-                    url: r.get(9)?,
-                    unavailable: r.get::<_, Option<bool>>(10)?.unwrap_or(false),
+                    effective_status: r.get(8)?,
+                    status_name: r.get(9)?,
+                    url: r.get(10)?,
+                    unavailable: r.get::<_, Option<bool>>(11)?.unwrap_or(false),
                     state: "confirmed".into(),
                     ..Default::default()
                 },
@@ -2077,10 +2104,12 @@ mod tests {
                 title: "Login".into(),
                 source: "manual".into(),
                 kind: "local".into(),
-                // A local item's own status now shows too (native item
-                // status task 4): `create_local_work_item` leaves it
-                // `todo`, `status_set_by` NULL.
-                status_category: Some("todo".into()),
+                // `status_category` stays tracker-only (fix round 2, wire
+                // compat with a shipped phone build's `isLocal`); the live
+                // value shows through `effective_status` instead —
+                // `create_local_work_item` leaves it `todo`,
+                // `status_set_by` NULL, no working session.
+                effective_status: Some("todo".into()),
                 state: "confirmed".into(),
                 strength: Some("explicit".into()),
                 ..Default::default()

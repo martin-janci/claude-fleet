@@ -342,7 +342,9 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                            CASE WHEN i.id IS NULL THEN 'ref' \
                                 WHEN i.tracker_id IS NOT NULL THEN 'tracker' \
                                 ELSE 'local' END, \
-                         'status_category', i.status_category, \
+                         'status_category', \
+                           CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
+                         'effective_status', ", crate::effective_status_sql!(), ", \
                          'status_name', i.status_name, 'url', i.url, \
                          'unavailable', json(CASE WHEN i.unavailable_at IS NOT NULL \
                                                   THEN 'true' ELSE 'false' END), \
@@ -371,7 +373,9 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                            CASE WHEN i.id IS NULL THEN 'ref' \
                                 WHEN i.tracker_id IS NOT NULL THEN 'tracker' \
                                 ELSE 'local' END, \
-                         'status_category', i.status_category, \
+                         'status_category', \
+                           CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
+                         'effective_status', ", crate::effective_status_sql!(), ", \
                          'status_name', i.status_name, 'url', i.url, \
                          'suggestions', (SELECT COUNT(*) FROM work_links s2 \
                                           WHERE s2.participant_id = p.id \
@@ -1283,5 +1287,158 @@ mod tests {
         let row: ProjectRow =
             serde_json::from_str(current_hub).expect("a current hub's project row parses");
         assert!(row.system, "the flag survives the wire when it is sent");
+    }
+
+    /// `WorkSummary.effective_status` (native item status task 4, fix round
+    /// 2): `crate::effective_status_sql!`'s SQL must agree with
+    /// `service::work::status::effective_status`'s Rust precedence, checked
+    /// end to end through `Store::get_session` — the real production path,
+    /// not a standalone query. SQLite cannot call into Rust, so the logic
+    /// is duplicated; these tests are what keeps the two from drifting.
+    /// `status_category` stays tracker-only throughout (wire compat, see
+    /// its doc on `WorkSummary`).
+    mod effective_status_on_the_session_row {
+        use super::*;
+
+        fn seed(s: &Store, name: &str) -> i64 {
+            s.upsert_host("h").unwrap();
+            s.upsert_session(name, "h", None, None, 1, 1, "running", None)
+                .unwrap()
+        }
+
+        fn mark_working(s: &Store, sid: i64, claude_session_id: &str) {
+            s.set_claude_session_id(sid, claude_session_id).unwrap();
+            s.set_claude_status_by_session_id(claude_session_id, "working")
+                .unwrap();
+        }
+
+        fn tracker_item(s: &Store, key: &str, status_category: &str) -> i64 {
+            let t = s
+                .add_tracker("jira", "Jira", "https://x.atlassian.net")
+                .unwrap();
+            s.upsert_tracker_item(
+                t.id,
+                &TrackerItemWrite {
+                    external_id: key.into(),
+                    key: Some(key.into()),
+                    title: "Ticket".into(),
+                    status_name: "status".into(),
+                    status_category: status_category.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id
+        }
+
+        #[test]
+        fn a_local_items_status_shows_through_effective_status_not_status_category() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            s.create_local_work_item(Some("LOC-1"), "Local work")
+                .unwrap();
+            s.link_session_work(sid, WorkTarget::Key("LOC-1"), "manual")
+                .unwrap();
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(
+                w.status_category, None,
+                "wire compat: status_category stays tracker-only"
+            );
+            assert_eq!(w.effective_status.as_deref(), Some("todo"));
+            assert_eq!(w.kind, "local");
+        }
+
+        #[test]
+        fn a_tracker_items_status_shows_in_both_fields() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            let item = tracker_item(&s, "TK-1", "in_progress");
+            s.link_session_work(sid, WorkTarget::Item(item), "manual")
+                .unwrap();
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(w.status_category.as_deref(), Some("in_progress"));
+            assert_eq!(w.effective_status.as_deref(), Some("in_progress"));
+            assert_eq!(w.kind, "tracker");
+        }
+
+        #[test]
+        fn a_working_session_lifts_effective_status_to_in_progress() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            s.create_local_work_item(Some("LOC-2"), "Local work")
+                .unwrap();
+            s.link_session_work(sid, WorkTarget::Key("LOC-2"), "manual")
+                .unwrap();
+            mark_working(&s, sid, "c-loc-2");
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(w.effective_status.as_deref(), Some("in_progress"));
+        }
+
+        /// The lift belongs to the ITEM, not "this row's own session": a
+        /// DIFFERENT session's confirmed link to the same item, working,
+        /// lifts it too — matching the Work view's `Graph`-based check,
+        /// which also looks at every confirmed link, not only the primary.
+        #[test]
+        fn a_working_session_elsewhere_on_the_same_item_also_lifts_it() {
+            let s = Store::open_in_memory().unwrap();
+            let a = seed(&s, "a");
+            let b = seed(&s, "b");
+            let item = s.create_local_work_item(Some("LOC-3"), "Shared").unwrap();
+            s.link_session_work(a, WorkTarget::Item(item.id), "manual")
+                .unwrap();
+            s.link_session_work(b, WorkTarget::Item(item.id), "manual")
+                .unwrap();
+            mark_working(&s, b, "c-loc-3-b");
+            let w = s.get_session("a", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(
+                w.effective_status.as_deref(),
+                Some("in_progress"),
+                "a's own session is idle, but b's confirmed link to the same item is working"
+            );
+        }
+
+        #[test]
+        fn a_persons_status_is_final_even_while_a_session_works_it() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            let item = s
+                .create_local_work_item(Some("LOC-4"), "Local work")
+                .unwrap();
+            s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+                .unwrap();
+            s.set_item_status(item.id, "todo").unwrap();
+            mark_working(&s, sid, "c-loc-4");
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(w.effective_status.as_deref(), Some("todo"));
+        }
+
+        #[test]
+        fn a_working_session_never_lifts_a_tracker_item() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            let item = tracker_item(&s, "TK-2", "todo");
+            s.link_session_work(sid, WorkTarget::Item(item), "manual")
+                .unwrap();
+            mark_working(&s, sid, "c-tk-2");
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(
+                w.effective_status.as_deref(),
+                Some("todo"),
+                "a tracker item's column is its tracker's"
+            );
+        }
+
+        #[test]
+        fn a_bare_key_has_no_item_and_no_effective_status() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            s.link_session_work(sid, WorkTarget::Key("BARE-1"), "manual")
+                .unwrap();
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(w.item_id, None);
+            assert_eq!(w.status_category, None);
+            assert_eq!(w.effective_status, None);
+            assert_eq!(w.kind, "ref");
+        }
     }
 }

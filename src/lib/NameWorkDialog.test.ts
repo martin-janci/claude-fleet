@@ -21,7 +21,17 @@ const named = (id: number, itemId = 40): SessionRow =>
   live({
     id,
     row_version: 2,
-    work: { link_id: 100 + id, item_id: itemId, key: 'OPS', title: 'Ops cleanup', source: 'manual' },
+    // `kind: 'local'` is the current wire (native item status, fix round
+    // 2): a current hub sends this, `status_category` stays null for a
+    // local item either way (wire compat with a shipped phone build).
+    work: {
+      link_id: 100 + id,
+      item_id: itemId,
+      key: 'OPS',
+      title: 'Ops cleanup',
+      source: 'manual',
+      kind: 'local',
+    },
   });
 
 beforeEach(() => {
@@ -241,11 +251,34 @@ describe('the row work menu', () => {
         key: 'ABC-1',
         title: 'Login',
         source: 'manual',
+        kind: 'tracker',
         status_category: 'todo',
         url: 'https://x.atlassian.net/browse/ABC-1',
       },
     });
     render(SessionRowItem, { props: props(ticket) });
+    await openMenu();
+    expect(screen.getByTestId('work-name')).toBeTruthy();
+    expect(screen.queryByTestId('work-rename')).toBeNull();
+  });
+
+  it('kind, not the absence of status_category, decides Rename… (fix round 2)', async () => {
+    vi.mocked(invoke).mockResolvedValue([]);
+    // A tracker item that has not synced a status yet: `kind` says
+    // tracker, but `status_category` and `url` are both absent — exactly
+    // what the OLD "is status_category/url missing?" heuristic would have
+    // read as a local item. `kind` must win.
+    const notYetSynced = live({
+      work: {
+        link_id: 2,
+        item_id: 6,
+        key: 'ABC-2',
+        title: 'Not synced yet',
+        source: 'manual',
+        kind: 'tracker',
+      },
+    });
+    render(SessionRowItem, { props: props(notYetSynced) });
     await openMenu();
     expect(screen.getByTestId('work-name')).toBeTruthy();
     expect(screen.queryByTestId('work-rename')).toBeNull();

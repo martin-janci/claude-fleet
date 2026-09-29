@@ -59,6 +59,7 @@ fn summary(org: Option<i64>) -> WorkSummary {
         source: "manual".into(),
         kind: String::new(),
         status_category: None,
+        effective_status: None,
         status_name: None,
         url: None,
         unavailable: false,

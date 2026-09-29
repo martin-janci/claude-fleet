@@ -15,7 +15,6 @@ use crate::events::{EventBus as _, RowChange, WorkChanged};
 use crate::ipc_error::{codes, IpcError};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
 /// One work item as the Work view reads it: the row, its meta (assignee,
 /// description), the tracker's containers (project / team keys, Asana
@@ -202,28 +201,37 @@ impl Store {
         self.view_links_where("1 = 1", rusqlite::params![])
     }
 
-    /// Every item id with a live confirmed link whose session is presently
-    /// working (native item status, design 2026-09-28 §2 rule 3): what
-    /// `service::work::status::effective_status` lifts to `in_progress`
-    /// (for a local item; the function itself gates on `source`). One query
-    /// for the whole page — the shape `Store::tidy_sessions`'s
-    /// `in_progress` set already uses, joined through `sessions` instead of
-    /// filtered by the item's own stored category.
+    /// `(item_id, session_id)` for every live confirmed link whose session
+    /// is presently working (native item status, design 2026-09-28 §2 rule
+    /// 3): what `service::work::status::effective_status` lifts to
+    /// `in_progress` (for a local item; the function itself gates on
+    /// `source`). One query for the whole page — the shape
+    /// `Store::tidy_sessions`'s `in_progress` set already uses, joined
+    /// through `sessions` instead of filtered by the item's own stored
+    /// category.
     ///
-    /// `l.item_id IS NOT NULL`: a `work_links` row may name a bare
-    /// `ref_key` with no item yet (migration 046's CHECK allows either), so
-    /// `SELECT DISTINCT l.item_id` would otherwise yield a NULL into the
-    /// set.
-    pub fn work_items_with_working_session(&self) -> Result<BTreeSet<i64>, IpcError> {
+    /// Returns the session too, not just the item id, so the caller can
+    /// fence the lift by `OrgScope` (`Graph::load` does: a scope that
+    /// cannot see the session must not see its "working" derived either —
+    /// fix round 2, a caller-side check this store method does not make).
+    ///
+    /// `l.item_id IS NOT NULL` is load-bearing, not an optimisation: a
+    /// `work_links` row may name a bare `ref_key` with no item yet
+    /// (migration 046's CHECK allows either), and `l.item_id` is `NULL` for
+    /// one. Without this clause, `r.get::<_, i64>(0)` on that NULL would
+    /// **error** — not silently admit a bogus id — failing the whole query
+    /// and, with it, every `tree` / `task` / `session_tasks` / `review`
+    /// call that loads a `Graph`.
+    pub fn work_items_with_working_session(&self) -> Result<Vec<(i64, i64)>, IpcError> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT l.item_id FROM work_links l \
+            "SELECT DISTINCT l.item_id, p.session_id FROM work_links l \
              JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
              JOIN sessions s     ON s.id = p.session_id \
              WHERE l.ended_at IS NULL AND l.state = 'confirmed' \
                AND s.claude_status = 'working' AND l.item_id IS NOT NULL",
         )?;
-        let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
-        Ok(rows.collect::<rusqlite::Result<BTreeSet<_>>>()?)
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// The links of one session's participant (live, suggested, rejected

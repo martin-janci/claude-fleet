@@ -130,7 +130,16 @@ pub struct EndedWork {
 
 /// Why a session is stale, if it is.
 fn stale_reason(row: &SessionRow, now: i64) -> Option<&'static str> {
-    if row.work.as_ref().and_then(|w| w.status_category.as_deref()) == Some("done") {
+    // `effective_status`, not `status_category` (fix round 2): the latter
+    // is tracker-only on the wire (wire compat with a shipped phone build),
+    // so reading it here would silently never flag a LOCAL item's own
+    // person-set or PR-derived `done` as stale.
+    if row
+        .work
+        .as_ref()
+        .and_then(|w| w.effective_status.as_deref())
+        == Some("done")
+    {
         Some("done")
     } else if row.last_activity_at < now - STALE_AFTER_SECS {
         Some("idle")
@@ -448,7 +457,9 @@ mod tests {
         let mut recent_idle = row(4, Some("OLD-1"));
         recent_idle.claude_status = Some("idle".into());
         let mut done = row(5, Some("DONE-1"));
-        done.work.as_mut().unwrap().status_category = Some("done".into());
+        // `effective_status`, not `status_category` (fix round 2):
+        // `stale_reason` reads the live-lifted field now.
+        done.work.as_mut().unwrap().effective_status = Some("done".into());
         let t = digest(
             &[blocked, working, idle, recent_idle, done],
             &[],

@@ -430,12 +430,34 @@ pub(crate) struct Graph {
     pub(crate) context_red_pct: f64,
     /// Item ids with a live confirmed link whose session is presently
     /// working (native item status §2 rule 3) — one join for the whole
-    /// page, looked up per task instead of queried per row.
+    /// page, looked up per task instead of queried per row. Fenced by the
+    /// caller's `OrgScope` (fix round 2): an item whose only working
+    /// session belongs to a session this scope cannot see is left out, so
+    /// "someone is working on this" never leaks through a task the caller
+    /// can otherwise see.
     pub(crate) working_session_items: BTreeSet<i64>,
 }
 
 impl Graph {
-    pub(crate) fn load(s: &Store) -> Result<Graph, IpcError> {
+    pub(crate) fn load(s: &Store, scope: &OrgScope) -> Result<Graph, IpcError> {
+        let sessions: HashMap<i64, SessionRow> = s
+            .list_all_sessions()?
+            .into_iter()
+            .map(|r| (r.id, r))
+            .collect();
+        // Fence the live signal by scope: a pair whose session this scope
+        // cannot see (`OrgScope::sees_row`, the same check `link_visible`
+        // uses) does not lift its item, even though the raw query found it.
+        let working_session_items: BTreeSet<i64> = s
+            .work_items_with_working_session()?
+            .into_iter()
+            .filter(|(_, session_id)| {
+                sessions
+                    .get(session_id)
+                    .is_some_and(|row| scope.sees_row(row))
+            })
+            .map(|(item_id, _)| item_id)
+            .collect();
         Ok(Graph {
             now: crate::service::catalog::now_secs(),
             items: s
@@ -444,11 +466,7 @@ impl Graph {
                 .map(|i| (i.item.id, i))
                 .collect(),
             links: s.work_view_links()?,
-            sessions: s
-                .list_all_sessions()?
-                .into_iter()
-                .map(|r| (r.id, r))
-                .collect(),
+            sessions,
             trackers: s.list_trackers()?.into_iter().map(|t| (t.id, t)).collect(),
             orgs: s.list_orgs()?,
             projects: s.list_projects()?.into_iter().map(|p| (p.id, p)).collect(),
@@ -459,7 +477,7 @@ impl Graph {
                 .collect(),
             rules: s.work_rules()?,
             context_red_pct: crate::service::health::context_red_pct(s),
-            working_session_items: s.work_items_with_working_session()?,
+            working_session_items,
         })
     }
 
@@ -1069,19 +1087,7 @@ fn to_task(
         }
     }
     counts.active = active_sessions.len() as u32;
-    // The live precedence (§2): a person's setting or a stamped `done` is
-    // final; otherwise a working session lifts a local item to
-    // `in_progress`; otherwise the stored value. `working_session_items` is
-    // the whole page's one join, looked up here rather than queried again.
-    let status_category = item.map(|i| {
-        effective_status(
-            &i.item.status_category,
-            i.item.status_set_by.as_deref(),
-            &i.item.source,
-            g.working_session_items.contains(&i.item.id),
-        )
-        .to_string()
-    });
+    let status_category = item.and_then(|i| item_status(g, i));
     let archived = counts.active == 0
         && (status_category.as_deref() == Some("done") || all_links_archived(&b.visible));
     if let Some(i) = item {
@@ -1507,7 +1513,7 @@ pub fn tree(store: &Mutex<Store>, scope: &OrgScope, args: &TreeArgs) -> Result<T
     check_filters(&args.filters)?;
     let g = {
         let s = lock(store)?;
-        Graph::load(&s)?
+        Graph::load(&s, scope)?
     };
     tree_of(&g, scope, args)
 }
@@ -1575,7 +1581,7 @@ pub(crate) fn find_task(
 /// `work { action: task, task_id }`.
 pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<TaskDetail, IpcError> {
     let s = lock(store)?;
-    let g = Graph::load(&s)?;
+    let g = Graph::load(&s, scope)?;
     let (task, aliases) = find_task(&g, scope, task_id, true)?;
     let item = task.item_id.and_then(|i| g.items.get(&i));
     // The tracker that might serve the whole description, and the key to name
@@ -1697,21 +1703,35 @@ fn brief_of(g: &Graph, task_id: &str, item: Option<&ViewItem>, ref_key: Option<&
         // two views of the same item must not disagree about its status.
         // `working_session_items` is the same page-wide one-join set —
         // this adds no second query.
-        status_category: item.map(|i| {
-            effective_status(
-                &i.item.status_category,
-                i.item.status_set_by.as_deref(),
-                &i.item.source,
-                g.working_session_items.contains(&i.item.id),
-            )
-            .to_string()
-        }),
+        status_category: item.and_then(|i| item_status(g, i)),
         status_name: item.and_then(|i| i.item.status_name.clone()),
         url: item.and_then(|i| i.item.url.clone()),
         unavailable: item.is_some_and(|i| i.item.unavailable_at.is_some()),
         org_id: item.and_then(|i| g.item_org(i)),
         tracker_name: tracker.map(|t| t.name.clone()),
     }
+}
+
+/// The item's status a reader should see (§2), shared by `to_task` and
+/// `brief_of` so the tree and a session's own task list can never disagree.
+/// `None` when the stored value itself is empty (fix round 2, restoring a
+/// guard the switch to `effective_status` dropped): `effective_status`
+/// normalises anything it does not recognise to `todo`, which is right for
+/// a live reader deciding what to lift, but wrong for reporting a raw
+/// empty column as if someone had actually said `todo`.
+fn item_status(g: &Graph, i: &ViewItem) -> Option<String> {
+    if i.item.status_category.is_empty() {
+        return None;
+    }
+    Some(
+        effective_status(
+            &i.item.status_category,
+            i.item.status_set_by.as_deref(),
+            &i.item.source,
+            g.working_session_items.contains(&i.item.id),
+        )
+        .to_string(),
+    )
 }
 
 /// `work { action: session_tasks, session_id }`: every link of the
@@ -1723,7 +1743,7 @@ pub fn session_tasks(
     session_id: i64,
 ) -> Result<SessionTasks, IpcError> {
     let s = lock(store)?;
-    let g = Graph::load(&s)?;
+    let g = Graph::load(&s, scope)?;
     let row = g
         .sessions
         .get(&session_id)
@@ -2007,7 +2027,7 @@ pub fn review(
 ) -> Result<ReviewPage, IpcError> {
     let g = {
         let s = lock(store)?;
-        Graph::load(&s)?
+        Graph::load(&s, scope)?
     };
     review_of(&g, scope, cursor, limit)
 }

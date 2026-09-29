@@ -575,7 +575,7 @@ fn the_graph_and_the_store_agree_on_item_orgs() {
         it.id
     };
     let s = w.st.lock().unwrap();
-    let g = Graph::load(&s).unwrap();
+    let g = Graph::load(&s, &OrgScope::All).unwrap();
     for id in [w.t1, w.t2, w.t3, local] {
         assert_eq!(
             g.item_org(&g.items[&id]),
@@ -1358,5 +1358,77 @@ fn the_tree_and_a_sessions_own_tasks_agree_on_a_working_items_status() {
     assert_eq!(
         links.links[0].task.status_category, tree_status,
         "the tree and the session's own task list must agree"
+    );
+}
+
+/// Fix round 2 (C2): a working session on a bare `ref_key` link (no item
+/// at all, `l.item_id IS NULL`) must not break `Store::
+/// work_items_with_working_session`'s one-join query. The clause `AND
+/// l.item_id IS NOT NULL` is load-bearing for a stronger reason than "a
+/// NULL would slip into the set": `r.get::<_, i64>` on that NULL column
+/// would **error**, and every reader that loads a `Graph` — `tree`,
+/// `task`, `session_tasks`, `review` — would fail outright, not just admit
+/// a bogus id.
+#[test]
+fn a_working_session_on_a_bare_ref_key_link_does_not_break_the_view() {
+    let w = world();
+    work_link(
+        &WorkLinkArgs {
+            key: Some("BARE-9".into()),
+            ..wl(&w, "link", w.s1)
+        },
+        &w.st,
+        &OrgScope::All,
+    )
+    .unwrap();
+    mark_working(&w, w.s1, "c-bare-9");
+
+    // None of these may error.
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert!(!p.tasks.is_empty());
+    assert!(task(&w.st, &OrgScope::All, "ref:BARE-9").is_ok());
+    assert!(session_tasks(&w.st, &OrgScope::All, w.s1).is_ok());
+    assert!(review(&w.st, &OrgScope::All, None, None).is_ok());
+}
+
+/// Fix round 2 (C3): the live signal must not leak "someone is working on
+/// this" through a session the caller cannot see. A local item owned by
+/// org A, ALSO worked by an org B session, lifts to `in_progress` for
+/// `OrgScope::All` (which sees every session) but stays at its stored
+/// value for org A's own bound scope, which cannot see org B's session.
+#[test]
+fn the_live_lift_is_fenced_by_org_scope() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        s.upsert_host("h2").unwrap();
+        s.set_host_org("h2", Some(w.org_b)).unwrap();
+        let s2b = s
+            .upsert_session("two-b", "h2", None, None, 1, 1, "running", None)
+            .unwrap();
+        let (it, _) = s
+            .name_session_work(w.s1, Some("LOC-90"), "Cross-org watch")
+            .unwrap();
+        s.seed_local_item_org(it.id, Some(w.org_a));
+        s.link_session_work(s2b, WorkTarget::Item(it.id), "manual")
+            .unwrap();
+        s.set_claude_session_id(s2b, "c-loc-90-b").unwrap();
+        s.set_claude_status_by_session_id("c-loc-90-b", "working")
+            .unwrap();
+    }
+
+    let all = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(
+        task_of(&all, "LOC-90").status_category.as_deref(),
+        Some("in_progress"),
+        "All sees org B's session working on it"
+    );
+
+    let a = bound(w.org_a);
+    let pa = page(&w, &a, WorkTreeFilters::default());
+    assert_eq!(
+        task_of(&pa, "LOC-90").status_category.as_deref(),
+        Some("todo"),
+        "org A must not see org B's session lift this to in_progress"
     );
 }

@@ -657,16 +657,35 @@ pub fn gather_stored(
         });
     }
 
+    // The live precedence (§2, fix round 2): `live` is already fenced by
+    // `reader` above, so this check is never a leak of a session the reader
+    // cannot see. `HandoverInput.status` used to be refused outright for a
+    // local item (`i.source != "local"`) — that hid exactly the status this
+    // whole feature exists to show; `effective_status` now answers for a
+    // local item too, not only a tracker's.
+    let has_working_session = live
+        .iter()
+        .any(|(l, row)| l.state == "confirmed" && row.claude_status.as_deref() == Some("working"));
     let mut input = HandoverInput {
         key: key.clone(),
         title: item
             .as_ref()
             .map(|i| i.title.clone())
             .filter(|t| !t.is_empty()),
-        status: item
-            .as_ref()
-            .filter(|i| i.source != "local")
-            .map(|i| i.status_category.clone()),
+        status: item.as_ref().and_then(|i| {
+            if i.status_category.is_empty() {
+                return None;
+            }
+            Some(
+                crate::service::work::status::effective_status(
+                    &i.status_category,
+                    i.status_set_by.as_deref(),
+                    &i.source,
+                    has_working_session,
+                )
+                .to_string(),
+            )
+        }),
         url: item.as_ref().and_then(|i| i.url.clone()),
         sessions: live.len() + ended.len(),
         live_sessions: live.len(),
@@ -1114,11 +1133,37 @@ Verify the git state before acting; this summary may be stale. Full context: the
         assert_eq!(i.last_progress.as_deref(), Some("halfway"));
         assert_eq!(i.summary.as_ref().map(|s| s.0.as_str()), Some("the gist"));
         assert!(g.target.is_none(), "no project on record");
+        // Fix round 2: a local item's status shows now (used to be refused
+        // outright for `source == "local"`, hiding exactly the answer this
+        // feature exists to give).
+        assert_eq!(i.status.as_deref(), Some("todo"));
         let brief = build_handover(i);
         assert!(
             brief.contains("Prior work: 2 sessions / 2 conversations (1 still live)"),
             "{brief}"
         );
+    }
+
+    /// Fix round 2: the live precedence applies here too — a confirmed,
+    /// presently-working session lifts a local item's handover status to
+    /// `in_progress`, fenced by `reader` the same way `live` already is
+    /// (never a leak of a session the reader cannot see).
+    #[test]
+    fn a_working_session_lifts_the_handover_status() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let sid = s
+            .upsert_session("live", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.create_local_work_item(Some("XYZ-1"), "Ship it").unwrap();
+        s.link_session_work(sid, crate::store::WorkTarget::Key("xyz-1"), "manual")
+            .unwrap();
+        s.set_claude_session_id(sid, "c-xyz-1").unwrap();
+        s.set_claude_status_by_session_id("c-xyz-1", "working")
+            .unwrap();
+
+        let g = gather_stored(&s, "xyz-1", None, &crate::service::orgs::OrgScope::All).unwrap();
+        assert_eq!(g.input.status.as_deref(), Some("in_progress"));
     }
 
     #[test]

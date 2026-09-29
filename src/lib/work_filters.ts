@@ -7,8 +7,9 @@
 // Where the fields come from, all client-side (no backend change):
 // - tracker: the work key's owning tracker (`trackerForKey`); a key two
 //   trackers claim, or no key, has none.
-// - status category: `SessionRow.work.status_category`; a past link has none,
-//   so a status filter hides past work.
+// - status category: `SessionRow.work.effective_status` (native item status,
+//   falling back to `status_category` for an older hub); a past link has
+//   none, so a status filter hides past work.
 // - assignee "mine": the hub's own `mine` view (`work { tickets, view: mine }`
 //   over its cache, up to 200 items): assigned to you and not done.
 // - has-session: live sessions have one, past links do not. Only in work

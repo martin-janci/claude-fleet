@@ -330,12 +330,37 @@ pub fn card(store: &Mutex<Store>, key: &str, scope: &OrgScope) -> Result<TicketC
     );
     // An agent's card is fenced; a person's (a bound phone too) is not.
     let for_agent = matches!(scope, OrgScope::Host { .. });
+    // The live precedence (§2, fix round 2), not the raw stored value: the
+    // card is a single-item lookup, so it does not carry the "not a
+    // ticket" wire trap `WorkSummary.status_category` does (`card`'s field
+    // was always the raw value for a local item too, never hidden) — no
+    // revert needed here, only the upgrade to the live answer. Unfenced by
+    // `scope`: unlike the Work view's page-wide set, this is one item, one
+    // lookup, and the caller's own visibility to the item was already
+    // checked above.
+    let has_working_session = s
+        .work_items_with_working_session()?
+        .into_iter()
+        .any(|(id, _)| id == item.id);
+    let status_category = if item.status_category.is_empty() {
+        None
+    } else {
+        Some(
+            super::status::effective_status(
+                &item.status_category,
+                item.status_set_by.as_deref(),
+                &item.source,
+                has_working_session,
+            )
+            .to_string(),
+        )
+    };
     Ok(TicketCard {
         key,
         title: item.title,
         url: item.url,
         status_name: item.status_name,
-        status_category: Some(item.status_category).filter(|c| !c.is_empty()),
+        status_category,
         org_id,
         cached: true,
         acceptance: if for_agent { Vec::new() } else { acceptance },

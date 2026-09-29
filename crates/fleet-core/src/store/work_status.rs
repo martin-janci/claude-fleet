@@ -13,6 +13,50 @@ use crate::ipc_error::{codes, IpcError};
 /// among them: it is a property of a session, which the row already shows.
 pub const STATUS_CATEGORIES: [&str; 3] = ["todo", "in_progress", "done"];
 
+/// The live-lifted status of a `work_items` row aliased `i` in scope, as one
+/// SQL expression — the same precedence
+/// `service::work::status::effective_status` computes in Rust (design
+/// 2026-09-28 §2, fix round 2 of native item status task 4): a person's
+/// setting or a stamped `done` (`status_set_by`) is final; otherwise a
+/// confirmed link whose session is presently working lifts a LOCAL item
+/// (`source = 'local'`) to `in_progress`; otherwise the stored value,
+/// normalised to one of the three categories. `NULL` when `i` is no item at
+/// all (a bare key).
+///
+/// SQLite cannot call into Rust, so this duplicates `effective_status`'s
+/// logic rather than calling it — `store::rows::tests` and
+/// `store::work::tests` check this expression against `effective_status`
+/// directly (the same scenarios, same expected answers) so the two do not
+/// quietly drift apart.
+///
+/// A macro, not a `const`, so `SESSION_COLUMNS` and `primary_work_by_session`
+/// can `concat!` it (the same reason `session_org_sql!` is a macro). No
+/// parameters: every call site aliases the item `i`, and each use sits in
+/// its own correlated subquery, so the inner alias names (`es_l`/`es_p`/
+/// `es_s`) never collide across uses.
+#[macro_export]
+macro_rules! effective_status_sql {
+    () => {
+        "CASE WHEN i.id IS NULL THEN NULL \
+              WHEN i.status_set_by IN ('person', 'derived') THEN \
+                CASE i.status_category WHEN 'done' THEN 'done' \
+                                        WHEN 'in_progress' THEN 'in_progress' \
+                                        ELSE 'todo' END \
+              WHEN i.source = 'local' AND EXISTS ( \
+                     SELECT 1 FROM work_links es_l \
+                       JOIN participants es_p ON es_p.id = es_l.participant_id \
+                                              AND es_p.retired_at IS NULL \
+                       JOIN sessions es_s     ON es_s.id = es_p.session_id \
+                      WHERE es_l.item_id = i.id AND es_l.ended_at IS NULL \
+                        AND es_l.state = 'confirmed' AND es_s.claude_status = 'working') \
+                THEN 'in_progress' \
+              ELSE CASE i.status_category WHEN 'done' THEN 'done' \
+                                           WHEN 'in_progress' THEN 'in_progress' \
+                                           ELSE 'todo' END \
+         END"
+    };
+}
+
 impl Store {
     /// A person sets a local item's status. `Ok(None)` when the id is unknown,
     /// so a caller outside the item's scope gets the answer an unknown id gets.

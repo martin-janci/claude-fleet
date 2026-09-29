@@ -481,8 +481,15 @@ Index by area (names only; see the reference for details):
   starts only there (`E_FORBIDDEN` says why); it never receives `work:*`
   frames on `/events`. Events: `work:item`, `work:tracker`,
   `work:tracker_removed` — emitted only when something a reader sees
-  changed; a session's `work` carries its item's `status_category`,
-  `status_name`, `url` and `unavailable`. `work:changed` (work graph M14)
+  changed; a session's `work` carries its item's `kind` (`tracker` | `local`
+  | `ref`), `status_category`, `status_name`, `url` and `unavailable`.
+  `status_category` is the tracker's own status — `null` for a local item or
+  a bare key, by design, since a paired phone tells a local item apart from
+  a ticket by that absence (native item status task 4). `effective_status`
+  is the live answer instead: the stored value with a person's override, a
+  merged-PR's stamped `done`, or a currently-working session's live
+  `in_progress` applied — present for a local item too, and the field a
+  status display should read. `work:changed` (work graph M14)
   carries ids only — `{ what: placement | rule | view | org, task_id?,
   rule_id?, view_id? }` — after a Work view structure write; a client
   re-reads what it shows. Like every `work:*` frame it never reaches a
