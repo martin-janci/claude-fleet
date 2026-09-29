@@ -14,6 +14,10 @@
 //! Work graph M11.1 adds local work ("Name this work…"):
 //! `list_local_work_items` → `work { local_items }`, and `name_session_work`
 //! / `rename_work_item` → `work_link { name }`.
+//!
+//! Shared work context (design 2026-09-29): `create_work_task` →
+//! `work_link { create }`, and `accept_work_proposal` /
+//! `reject_work_proposal` → `work_link { accept | reject }`.
 
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
@@ -212,6 +216,52 @@ pub async fn rename_work_item(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<WorkItemRow, IpcError> {
     routed::rename_work_item(&backend, args, &store).await
+}
+
+/// A task or subtask a person writes (shared work context, design
+/// 2026-09-29): `parent` is `item:<id>`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateWorkTaskArgs {
+    pub title: String,
+    #[serde(default)]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<i64>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+/// A person's decision on an agent's proposal.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkProposalArgs {
+    pub item_id: i64,
+}
+
+#[tauri::command]
+pub async fn create_work_task(
+    args: CreateWorkTaskArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorkItemRow, IpcError> {
+    routed::create_work_task(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn accept_work_proposal(
+    args: WorkProposalArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorkItemRow, IpcError> {
+    routed::decide_work_proposal(&backend, args, true, &store).await
+}
+
+#[tauri::command]
+pub async fn reject_work_proposal(
+    args: WorkProposalArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorkItemRow, IpcError> {
+    routed::decide_work_proposal(&backend, args, false, &store).await
 }
 
 /// The tidy-up candidates (work graph M7).
@@ -640,6 +690,52 @@ pub(crate) mod routed {
                 &args,
                 store,
                 &fleet_core::service::orgs::OrgScope::All,
+            ),
+        }
+    }
+
+    pub async fn create_work_task(
+        backend: &FleetBackend,
+        args: CreateWorkTaskArgs,
+        store: &Mutex<Store>,
+    ) -> Result<WorkItemRow, IpcError> {
+        let args = WorkLinkArgs {
+            action: "create".into(),
+            title: Some(args.title),
+            parent: args.parent,
+            project_id: args.project_id,
+            notes: args.notes,
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("create_work_task", &args).await,
+            None => {
+                work::local::create_task(&args, store, &fleet_core::service::orgs::OrgScope::All)
+            }
+        }
+    }
+
+    /// `work_link { accept | reject, item_id }` with no `session_id`: a
+    /// proposal decision, never a link's.
+    pub async fn decide_work_proposal(
+        backend: &FleetBackend,
+        args: WorkProposalArgs,
+        accept: bool,
+        store: &Mutex<Store>,
+    ) -> Result<WorkItemRow, IpcError> {
+        let args = WorkLinkArgs {
+            action: if accept { "accept" } else { "reject" }.into(),
+            item_id: Some(args.item_id),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) if accept => hub.route("accept_work_proposal", &args).await,
+            Some(hub) => hub.route("reject_work_proposal", &args).await,
+            None => work::local::decide(
+                &args,
+                store,
+                &fleet_core::service::orgs::OrgScope::All,
+                accept,
             ),
         }
     }

@@ -174,9 +174,18 @@ pub struct WorkLinkArgs {
     /// Approved nonce.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
-    /// Name: the work's title.
+    /// name/create/propose: title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// create/propose: parent, item:<id>.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// create/propose: notes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// propose: the reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
     /// set_status: todo | in_progress | done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
@@ -379,6 +388,9 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "never",
     "dismiss",
     "tidy_apply",
+    "create",
+    "propose",
+    "accept",
     "name",
     "set_status",
     "summarize",
@@ -429,6 +441,9 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("list_local_work_items", "work", "local_items"),
     ("name_session_work", "work_link", "name"),
     ("rename_work_item", "work_link", "name"),
+    ("create_work_task", "work_link", "create"),
+    ("accept_work_proposal", "work_link", "accept"),
+    ("reject_work_proposal", "work_link", "reject"),
     ("summarize_past_work", "work_link", "summarize"),
     // Work graph M14.1d: the Work view's desktop commands.
     ("work_tree", "work", "tree"),

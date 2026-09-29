@@ -2389,6 +2389,103 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // ── Shared work context (design 2026-09-29) ────────────────────────
+    // A standalone task needs an unscoped caller: a new item has no links,
+    // and a scoped caller sees a local item only through its links.
+    m.row(
+        "work_link",
+        "create",
+        |_, _| json!({ "action": "create", "title": "matrix task" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::Master | Who::ClientFull => {
+                    assert!(text(a).contains("\"origin\":\"manual\""), "{who:?}: {a:?}")
+                }
+                _ => is_code(
+                    who,
+                    a,
+                    "E_FORBIDDEN",
+                    "a standalone task needs an unscoped caller",
+                ),
+            }
+        },
+    )
+    .await;
+    // A subtask under host A's local item: whoever sees the item may add
+    // one; another host's (or org's) caller reads it as an unknown id.
+    let unknown_parent = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "create", "parent": "item:999999", "title": "t" }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "create",
+        move |_, _| json!({ "action": "create", "parent": format!("item:{local_a}"), "title": "matrix step" }),
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    same_as_unknown(a, &unknown_parent, &local_a.to_string(), "999999")
+                }
+                _ => assert!(
+                    text(a).contains(&format!("\"parent_id\":{local_a}")),
+                    "{who:?}: {a:?}"
+                ),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "propose",
+        move |_, _| {
+            json!({ "action": "propose", "parent": format!("item:{local_a}"),
+                    "title": "matrix idea", "why": "x" })
+        },
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    is_code(who, a, "E_NOTFOUND", "another org's parent")
+                }
+                _ => assert!(
+                    text(a).contains("\"proposal_state\":\"proposed\""),
+                    "{who:?}: {a:?}"
+                ),
+            }
+        },
+    )
+    .await;
+    // A person decides: never a per-host token or a bound client.
+    for action in ["accept", "reject"] {
+        m.row(
+            "work_link",
+            action,
+            move |_, _| json!({ "action": action, "item_id": 999_999 }),
+            |_, who, a| {
+                if readonly_refused(who, a) {
+                    return;
+                }
+                match who {
+                    Who::Master | Who::ClientFull => {
+                        is_code(who, a, "E_NOTFOUND", "unknown proposal")
+                    }
+                    _ => is_code(who, a, "E_FORBIDDEN", "a person decides"),
+                }
+            },
+        )
+        .await;
+    }
     // ── idle_unlinked and keep (work graph M11.3) ──────────────────────
     // Two work sessions with their own worktrees and no work linked, idle
     // and unprompted forever: A's on h-a, B's on h-b.
