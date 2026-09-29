@@ -60,6 +60,47 @@ mkfake codex
 expect_rc "which: unknown harness exits 2" 2 which nope
 expect_rc "which: no argument exits 2" 2 which
 
+# --- launch: harness resolution and config ------------------------------------
+cfg '# a comment' '  default =  claude  ' '[alias]' 'default = codex'
+expect "config: top-level key, trimmed; section keys do not leak" "BIN=claude"
+cfg 'default = codex'
+expect "positional harness beats config default" "BIN=claude" claude
+export AG_HARNESS=claude
+expect "AG_HARNESS beats config default" "BIN=claude"
+export AG_HARNESS=nope
+expect_rc "AG_HARNESS naming an unknown harness exits 2" 2
+unset AG_HARNESS
+cfg 'order = codex claude'
+rm "$FAKE/codex"
+expect "no default: first installed harness in config order" "BIN=claude"
+cfg 'default = claude'
+rm "$FAKE/claude"
+expect_rc "default harness not installed exits 4" 4
+if grep -q 'claude.ai/install.sh' "$ROOT/err"; then pass "not installed: prints the install command"; else fail "not installed: no install hint in [$(cat "$ROOT/err")]"; fi
+rm -f "$AG_CONFIG"
+expect_rc "nothing installed, no config exits 4" 4
+mkfake claude; mkfake codex
+
+# --- launch: claude argv -----------------------------------------------------------
+cfg 'default = claude'
+expect "claude: bare" "BIN=claude" claude
+expect "claude: --yolo" "BIN=claude ARG=--dangerously-skip-permissions" claude --yolo
+cfg 'default = claude' 'yolo = true'
+expect "claude: yolo = true in config" "BIN=claude ARG=--dangerously-skip-permissions" claude
+expect "claude: --no-yolo beats config" "BIN=claude" claude --no-yolo
+cfg 'default = claude'
+expect "claude: canonical flag order" \
+  "BIN=claude ARG=--dangerously-skip-permissions ARG=--model ARG=opus ARG=--effort ARG=high ARG=--name ARG=N ARG=--resume ARG=X" \
+  claude --resume X --name N --yolo -m opus --effort high
+expect "claude: --continue" "BIN=claude ARG=--continue" claude -c
+expect "claude: --new-id maps to --session-id" "BIN=claude ARG=--session-id ARG=ID1" claude --new-id ID1
+expect "claude: -p keeps the prompt as one argument, last" "BIN=claude ARG=--model ARG=m ARG=-p ARG=hi there" claude -p "hi there" -m m
+expect "claude: unknown args pass through" "BIN=claude ARG=--verbose ARG=--session-id ARG=S" claude --verbose --session-id S
+expect "claude: everything after -- passes through" "BIN=claude ARG=-c ARG=x" claude -- -c x
+expect_rc "a flag missing its value exits 2" 2 claude --resume
+expect_rc "--continue with --resume exits 2" 2 claude -c -r X
+expect_rc "--new-id with --resume exits 2" 2 claude --new-id A -r X
+
 # --- summary ----------------------------------------------------------------
 echo "ag-test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
