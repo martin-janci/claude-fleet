@@ -2,6 +2,7 @@
 
 **Date:** 2026-09-29
 **Status:** design approved by the owner, nothing implemented.
+**Revised:** 2026-09-29, after reading the code — see "Revisions after reading the code" below; they win where they differ from §1–§4.
 **Builds on:** `2026-09-24-work-graph-design.md` (§0), `2026-09-27-work-view-design.md`,
 `2026-09-28-sprints-releases-epics-design.md` (decision E1 "native owns").
 
@@ -171,3 +172,16 @@ When a `detected` item has an empty title (no tracker, or a bare `#N`), the view
 - The Work view reload cost: 2+K full graph loads per refresh, and the store lock held through the build (`reviews/2026-09-28-two-day-review.md` :220, :224). This should be the next PR; the status grouping will not make it worse.
 - fleet-mobile UI changes.
 - Any change to tracker sync, detection rules or org isolation.
+
+## Revisions after reading the code (2026-09-29)
+
+The implementation plan (`docs/superpowers/plans/2026-09-29-internal-task-list.md`) is written against these changes:
+
+1. **Native tasks get a key, `TASK-<id>`.** The start path (`service::trackers::tickets::resolve_start`) refuses an item with no key ("that work item has no key to start from"), and its duplicate guard, session name and branch name are all derived from the key. Giving manual and agent items a key lets Start reuse the existing path unchanged, and lets a branch named `task-12-…` link itself.
+2. **Backfill:** a local item → `manual`, anything else → `detected`. Every local item that exists today was named through "Name this work…".
+3. **No server-side `group_by: status`.** The tree is org/group/section-paged (sections, cursors, `TreeGroup`). The desktop's new `TaskList.svelte` reads one `work_tree` page (`archived: true`, limit 200) and groups it by status in the client. The old `WorkTree.svelte` stays, reachable as ⋯ → Grouped view, so nothing it does is lost. The backend view only gains fields. This is also one graph load per refresh, fewer than the tree's own reads.
+4. **No `CONTRACT_REVISION` bump.** The wire changes only add fields. `create` is a new action on an existing tool, and an older hub answers it with `E_INVALID "unknown work_link action"`, which is a clear refusal. None of the changed types are in `hub_contract.golden.json`.
+5. **`create` is for unscoped callers only** (the desktop, the master token, an unbound client). A new task has no links, and a scoped caller sees a local item only through its links, so it could not read back what it created.
+6. **Starting a manual task:** `start_work` fills an unset `project_id` from the item and an unset brief from `title + notes` (`with_manual_defaults`). An agent's `work_link { start, item_id }` therefore behaves like the desktop's Start.
+7. **The dispatch mirror runs in `dispatch_task` after `inherit_worker_work`.** It links the worker to the agent item as a **secondary** link, so the worker's inherited primary (work graph M2.2) is unchanged. State changes are mirrored from `start_task` / `fail_task` / `cancel_task` / `complete_task`.
+8. **`'task'` joins `'person'` / `'derived'` as a final `status_set_by`**, in both `effective_status` and `effective_status_sql!`. The tidy planner reads only `'derived'`, so it is unaffected.
