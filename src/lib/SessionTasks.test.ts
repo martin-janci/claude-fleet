@@ -86,13 +86,30 @@ describe('SessionTasks', () => {
     expect(within(rows[1]).getByTestId('session-task-make-primary')).toBeTruthy();
   });
 
-  it('Make primary is a compare-and-set on the current primary', async () => {
+  it('Make primary is a compare-and-set on the current primary, then ONE re-read', async () => {
     handlers.set_primary_work = () => row;
-    render(SessionTasks, { session: row });
+    render(SessionTasks, { session: row, debounceMs: 5 });
     await flush();
     await fireEvent.click(within(screen.getAllByTestId('session-task')[1]).getByTestId('session-task-make-primary'));
     await flush();
     expect(calls('set_primary_work')[0]).toEqual({ session_id: 7, link_id: 43, expected_primary: 42 });
+    // The write's own bump brings the re-read; the action adds none of its own.
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    expect(calls('work_session_tasks').length).toBe(2);
+  });
+
+  it('does not re-read on a saved view change', async () => {
+    render(SessionTasks, { session: row, debounceMs: 5 });
+    await flush();
+    expect(calls('work_session_tasks').length).toBe(1);
+    bumpWorkChanged('view');
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    expect(calls('work_session_tasks').length).toBe(1);
+    bumpWorkChanged('placement');
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
     expect(calls('work_session_tasks').length).toBe(2);
   });
 

@@ -6,7 +6,7 @@
 // module so Sidebar.test.ts can spy on them and assert the call count
 // deterministically instead of measuring jsdom wall-clock.
 import type { SessionRow } from './sessions';
-import type { WorkKey } from './work_keys';
+import { effectiveCategory, type WorkKey } from './work_keys';
 
 /** Optional per-row predicate layered on top of the host / bg filters
  *  (the "N stuck" and "needs attention" pills). `null` = no extra filter. */
@@ -96,10 +96,7 @@ export function sessionFilterRow(s: SessionRow, scopeOf?: (s: SessionRow) => str
     host: s.host_alias,
     scope: scopeOf ? scopeOf(s) : 'all',
     kind: s.kind,
-    // `effective_status` (native item status, fix round 2) so a local
-    // item's live status filters/sorts like a tracker item's; fall back to
-    // `status_category` for a hub older than the field.
-    statusCategory: s.work?.effective_status ?? s.work?.status_category ?? null,
+    statusCategory: effectiveCategory(s.work),
     statusName: s.work?.status_name ?? null,
     live: true,
     archived: false,

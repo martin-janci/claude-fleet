@@ -328,6 +328,39 @@ export function worktreeBranchById(projects: readonly ProjectTreeRow[]): Map<num
   return out;
 }
 
+type LinkedWork = NonNullable<SessionRow['work']>;
+
+/** The status category a linked work item shows: `effective_status` (the
+ *  native item status, fix round 3) so a local item's own live status shows
+ *  and filters like a tracker item's, falling back to `status_category` for
+ *  a hub old enough not to send the newer field. */
+export function effectiveCategory(
+  w: Pick<LinkedWork, 'effective_status' | 'status_category'> | null | undefined,
+): string | null {
+  return w?.effective_status ?? w?.status_category ?? null;
+}
+
+/** A linked work item's chip status (the dot, its name and link), and
+ *  whether a real tracker backs it. The dot's category is
+ *  {@link effectiveCategory}; `trackerBacked` stays keyed on
+ *  `status_category` alone (tracker-only on the wire, by design): it is the
+ *  "a real tracker backs this" gate. No category and not unavailable: no
+ *  status at all. */
+export function chipStatusOf(w: LinkedWork): { status?: WorkKey['status']; trackerBacked: boolean } {
+  const trackerBacked = !!(w.status_category || w.unavailable);
+  const category = effectiveCategory(w);
+  if (!category && !w.unavailable) return { trackerBacked };
+  return {
+    status: {
+      category: category ?? 'unknown',
+      name: w.status_name ?? null,
+      url: w.url ?? null,
+      unavailable: !!w.unavailable,
+    },
+    trackerBacked,
+  };
+}
+
 /** The session's work key, or null when nothing it carries names one.
  *  An explicit link wins (a person or the in-session agent decided it); then
  *  tags (set on purpose), then the worktree's branch, then the worktree
@@ -341,23 +374,7 @@ export function workKeyFor(
   const linked = s.work?.key || s.work?.title;
   if (s.work && linked) {
     const w = s.work;
-    // `trackerBacked` stays keyed on `status_category` alone (tracker-only
-    // on the wire, by design): it is the "a real tracker backs this" gate.
-    // The dot's `category` prefers `effective_status` (native item status,
-    // fix round 3), so a local item's own live status shows too — falling
-    // back to `status_category` for a hub old enough not to send the
-    // newer field.
-    const trackerBacked = !!(w.status_category || w.unavailable);
-    const category = w.effective_status ?? w.status_category;
-    const status =
-      category || w.unavailable
-        ? {
-            category: category ?? 'unknown',
-            name: w.status_name ?? null,
-            url: w.url ?? null,
-            unavailable: !!w.unavailable,
-          }
-        : undefined;
+    const { status, trackerBacked } = chipStatusOf(w);
     const out: WorkKey = { key: linked, source: 'link', from: w.title };
     if (status) out.status = status;
     if (trackerBacked) out.trackerBacked = true;
@@ -462,25 +479,11 @@ export function workGroupTicket(
   for (const s of rows) {
     const w = s.work;
     if (!w || w.key !== key) continue;
-    // `category` prefers `effective_status` (native item status, fix
-    // round 3), so a local item's live status shows in the group header
-    // too, not only a tracker's; `trackerBacked` stays on `status_category`
-    // alone, the tracker-only wire field, for anything that needs to know
-    // whether a real tracker backs this key.
-    const category = w.effective_status ?? w.status_category;
-    if (!w.title && !category && !w.unavailable) continue;
-    const trackerBacked = !!(w.status_category || w.unavailable);
+    const { status, trackerBacked } = chipStatusOf(w);
+    if (!w.title && !status) continue;
     return {
       title: w.title,
-      status:
-        category || w.unavailable
-          ? {
-              category: category ?? 'unknown',
-              name: w.status_name ?? null,
-              url: w.url ?? null,
-              unavailable: !!w.unavailable,
-            }
-          : undefined,
+      status,
       ...(trackerBacked ? { trackerBacked: true } : {}),
     };
   }

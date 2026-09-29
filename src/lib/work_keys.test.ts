@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import fixture from '../../crates/fleet-core/src/service/work/testdata/recognize_cases.json';
 import {
+  chipStatusOf,
   describeWorkKey,
+  effectiveCategory,
   extractTicketRefs,
   extractWorkKey,
   keyFromTicketUrl,
@@ -279,5 +281,35 @@ describe('extractTicketRefs (shared fixture)', () => {
 
   it.each(cases.map((c) => [c.name, c] as const))('%s', (_name, c) => {
     expect(extractTicketRefs(c.text, c.ctx)).toEqual(c.expect);
+  });
+});
+
+describe('chipStatusOf / effectiveCategory', () => {
+  const work = (over: Partial<NonNullable<SessionRow['work']>>) =>
+    ({ link_id: 1, item_id: 1, key: 'ABC-1', title: 't', source: 'manual', ...over }) as NonNullable<SessionRow['work']>;
+
+  it('prefers effective_status, falling back to status_category', () => {
+    expect(effectiveCategory(work({ effective_status: 'done', status_category: 'in_progress' }))).toBe('done');
+    expect(effectiveCategory(work({ status_category: 'in_progress' }))).toBe('in_progress');
+    expect(effectiveCategory(work({}))).toBeNull();
+    expect(effectiveCategory(null)).toBeNull();
+  });
+
+  it('a local item shows its own status but is not tracker-backed', () => {
+    expect(chipStatusOf(work({ effective_status: 'in_progress', status_name: 'Doing' }))).toEqual({
+      status: { category: 'in_progress', name: 'Doing', url: null, unavailable: false },
+      trackerBacked: false,
+    });
+  });
+
+  it('an unavailable tracker item is tracker-backed with an unknown category', () => {
+    expect(chipStatusOf(work({ unavailable: true }))).toEqual({
+      status: { category: 'unknown', name: null, url: null, unavailable: true },
+      trackerBacked: true,
+    });
+  });
+
+  it('no category and available: no status', () => {
+    expect(chipStatusOf(work({}))).toEqual({ trackerBacked: false });
   });
 });

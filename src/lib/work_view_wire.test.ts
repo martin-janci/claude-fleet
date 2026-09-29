@@ -5,6 +5,7 @@
 // helpers read the real shapes. Regenerate them when the hub's shapes change.
 import { describe, expect, it } from 'vitest';
 import tree from './__fixtures__/work_view_wire/tree.json';
+import treeSections from './__fixtures__/work_view_wire/tree_sections.json';
 import task from './__fixtures__/work_view_wire/task.json';
 import sessionTasks from './__fixtures__/work_view_wire/session_tasks.json';
 import review from './__fixtures__/work_view_wire/review.json';
@@ -13,11 +14,13 @@ import {
   buildSections,
   distributeTasks,
   occurrenceKind,
+  sectionKey,
   type OrgImpact,
   type ReviewPage,
   type SessionTasks,
   type TaskDetail,
   type WorkTreePage,
+  type WorkTreeSection,
 } from './work_view';
 
 describe('work view: the hub’s real wire shapes', () => {
@@ -43,6 +46,29 @@ describe('work view: the hub’s real wire shapes', () => {
     expect(tk2.group.tracker_value).toBe('TP');
     const tk3 = page.tasks.find((t) => t.key === 'TK-3')!;
     expect(occurrenceKind(tk3.sessions![0])).toBe('suggested');
+  });
+
+  it('a tree read pages its open sections and the review total as WorkTree reads them', () => {
+    const p = treeSections as unknown as WorkTreePage;
+    // WorkTree keys the paged sections by org and group, then matches them
+    // to the page's group headers.
+    const paged = new Map<string, WorkTreeSection>();
+    expect(Array.isArray(p.sections)).toBe(true);
+    for (const sec of p.sections!) paged.set(sectionKey(sec.org_id, sec.group_id), sec);
+    const tp = p.groups.find((g) => g.group.label === 'TP')!;
+    const sec = paged.get(sectionKey(tp.org_id, tp.group.id))!;
+    expect(sec).toBeDefined();
+    expect(Array.isArray(sec.tasks)).toBe(true);
+    expect(sec.tasks.map((t) => t.key)).toEqual(['TK-1']);
+    expect(sec.tasks[0].group.id).toBe(tp.group.id);
+    // Asked for one of the section's two tasks: a cursor to page on.
+    expect(tp.count).toBe(2);
+    expect(typeof (sec.next_cursor ?? null)).toBe('string');
+    expect(typeof p.review_total).toBe('number');
+    expect(p.review_total).toBe((review as unknown as ReviewPage).total);
+    // Asked for neither, the plain read has neither.
+    expect(page.sections).toBeUndefined();
+    expect(page.review_total).toBeUndefined();
   });
 
   it('a task detail carries its placement', () => {

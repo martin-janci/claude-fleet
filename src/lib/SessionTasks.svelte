@@ -19,8 +19,8 @@
     linkSessionWork,
     rejectWorkLink,
     unlinkSessionWork,
+    onWorkChangedDebounced,
     type WorkRef,
-    workChanged,
   } from './work';
   import { workTickets, type TicketRow } from './trackers';
   import { timeAgo } from './session_status';
@@ -103,15 +103,15 @@
     scheduleLoad();
   });
 
-  // The tick itself, not its debounced run: the timer above is the debounce.
-  let firstTick = true;
-  const off = workChanged.subscribe(() => {
-    if (firstTick) {
-      firstTick = false;
-      return;
-    }
-    scheduleLoad();
-  });
+  // Every bump, undelayed (`ms` 0): the timer above is the debounce, so a
+  // bump and the `work_rev` move it brings are one read. A saved view's
+  // change (`view` alone) moves nothing this list shows.
+  const off = onWorkChangedDebounced(
+    (kinds) => {
+      if ([...kinds].some((k) => k !== 'view')) scheduleLoad();
+    },
+    () => 0,
+  );
   onDestroy(() => {
     off();
     clearTimeout(loadTimer);
@@ -138,8 +138,9 @@
       await load(session.id);
       return;
     }
+    // No read here: every write this calls bumps `workChanged`, and that
+    // bump's re-read (above) is the one read of the new state.
     if (ok) notice = ok;
-    await load(session.id);
   }
 
   const makePrimary = (l: SessionTaskLink) =>
@@ -202,7 +203,7 @@
     query = '';
     results = [];
     notice = `Added ${label}`;
-    await load(session.id);
+    // `linkSessionWork` bumped `workChanged`: its re-read shows the new link.
   }
 </script>
 

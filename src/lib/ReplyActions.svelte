@@ -9,7 +9,15 @@
   import CopyButton from './CopyButton.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import { rewindConversation } from './sessions';
-  import { insertIntoComposer, promptCount, splitMarker, type ConvTurn } from './conversation';
+  import {
+    CONV_MAX_TURNS,
+    carriedCount,
+    insertIntoComposer,
+    promptCount,
+    sessionConversation,
+    splitMarker,
+    type ConvTurn,
+  } from './conversation';
   import { outbox } from './outbox';
   import { replyActionsFor, quoteText, waitForReplQuiet } from './reply_actions';
   import { pushError } from './toasts';
@@ -113,13 +121,28 @@
     // Through the outbox, the session's one sender: a bubble with receipts,
     // and a failed send offers Retry / Edit / Discard there. `send_prompt`
     // has no session-id form, so the target carries host + tmux name.
-    // `seen`: the rewound conversation holds only the turns BEFORE this one,
-    // so only those count — the stale pre-rewind transcript still carries
-    // this prompt, and counting it would settle the bubble at once.
+    const seen = await retrySeen(r.value.claude_session_id ?? undefined, prompt);
     outbox.enqueue(
       { id: sessionId, host_alias: hostAlias, tmux_name: tmuxName },
-      { kind: 'prompt', text: prompt, prefix: null, seen: promptCount(turns.slice(0, index), prompt) },
+      { kind: 'prompt', text: prompt, prefix: null, seen },
     );
+  }
+
+  // `seen` for the re-sent prompt: how many turns of the REWOUND conversation
+  // already carry it. That conversation holds only the turns BEFORE this one,
+  // so the stale pre-rewind transcript's copy must not count. With the whole
+  // conversation on screen those turns are `turns.slice(0, index)`. A
+  // truncated window hides older ones, and the rewound conversation's first
+  // read can bring them into view — a hidden earlier "continue" would then
+  // settle the bubble before Claude got the prompt. So the count comes from
+  // the rewound conversation itself, read at the widest window any panel read
+  // can return (a panel's window is a suffix of it), which is the composer's
+  // rule (`carriedCount`). If that read fails, only the quiet-turn fallback
+  // may settle the bubble.
+  async function retrySeen(cid: string | undefined, body: string): Promise<number> {
+    if (!truncated) return promptCount(turns.slice(0, index), body);
+    const r = await sessionConversation(sessionId, CONV_MAX_TURNS, cid);
+    return r.ok ? carriedCount(r.value, body) : Number.MAX_SAFE_INTEGER;
   }
 </script>
 

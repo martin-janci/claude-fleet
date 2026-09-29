@@ -18,6 +18,13 @@ vi.mock('./reply_actions', async () => {
   return { ...actual, waitForReplQuiet: vi.fn() };
 });
 
+// Retry reads the rewound conversation when the window on screen is
+// truncated; everything else in the module stays real (`composerDrafts`).
+vi.mock('./conversation', async () => {
+  const actual = await vi.importActual<typeof import('./conversation')>('./conversation');
+  return { ...actual, sessionConversation: vi.fn() };
+});
+
 vi.mock('./toasts', async () => {
   const actual = await vi.importActual<typeof import('./toasts')>('./toasts');
   return { ...actual, pushError: vi.fn() };
@@ -27,7 +34,7 @@ import ReplyActions from './ReplyActions.svelte';
 import { rewindConversation, sendPrompt } from './sessions';
 import { waitForReplQuiet } from './reply_actions';
 import { pushError } from './toasts';
-import { composerDrafts } from './conversation';
+import { composerDrafts, sessionConversation, type Conversation } from './conversation';
 import { outbox } from './outbox';
 import { get } from 'svelte/store';
 
@@ -35,6 +42,7 @@ const mockedRewind = rewindConversation as unknown as ReturnType<typeof vi.fn>;
 const mockedSend = sendPrompt as unknown as ReturnType<typeof vi.fn>;
 const mockedWait = waitForReplQuiet as unknown as ReturnType<typeof vi.fn>;
 const mockedPushError = pushError as unknown as ReturnType<typeof vi.fn>;
+const mockedConv = sessionConversation as unknown as ReturnType<typeof vi.fn>;
 
 async function settle() {
   await tick();
@@ -64,6 +72,7 @@ beforeEach(() => {
   mockedSend.mockReset();
   mockedWait.mockReset();
   mockedPushError.mockReset();
+  mockedConv.mockReset();
   mockedWait.mockResolvedValue(true);
   mockedSend.mockResolvedValue({ ok: true, value: undefined });
   composerDrafts.clear();
@@ -109,6 +118,53 @@ describe('ReplyActions', () => {
     await fireEvent.click(screen.getByTestId('confirm-ok'));
     await settle();
     expect(bubbles()[0].seen).toBe(1);
+  });
+
+  it("retry's seen counts a hidden earlier copy when the window is truncated", async () => {
+    // 30 turns, the panel shows the last 10 (20..29, truncated). The retried
+    // "continue" is window index 5 (turn 25); turn 17, also "continue", is
+    // hidden above the window. The rewound conversation's first read brings
+    // it into view, so counting only the window (0) would settle at once.
+    const turn = (prompt: string, uuid: string) => ({ prompt, at: null, ended_at: null, items: [], prompt_uuid: uuid });
+    const windowTurns = Array.from({ length: 10 }, (_, i) =>
+      turn(i === 5 ? 'continue' : `p${20 + i}`, `u${20 + i}`),
+    );
+    // The rewound conversation holds turns 0..24; its read carries turn 17.
+    const rewound = {
+      turns: Array.from({ length: 25 }, (_, i) => turn(i === 17 ? 'continue' : `p${i}`, `u${i}`)),
+      truncated: false,
+    } as unknown as Conversation;
+    mockedRewind.mockResolvedValue({ ok: true, value: { id: 7, claude_session_id: 'new-cid' } });
+    mockedConv.mockResolvedValue({ ok: true, value: rewound });
+    render(ReplyActions, { props: { ...base, turns: windowTurns, truncated: true, index: 5 } });
+    await fireEvent.click(screen.getByTestId('reply-retry'));
+    await settle();
+    await fireEvent.click(screen.getByTestId('confirm-ok'));
+    await settle();
+    await settle();
+    expect(mockedConv).toHaveBeenCalledWith(7, 100, 'new-cid');
+    expect(bubbles()).toHaveLength(1);
+    expect(bubbles()[0].seen).toBe(1);
+    // The refetched window carries only the earlier copy: the bubble stays.
+    outbox.settle(7, rewound, { quiet: false, turnSeq: 0 });
+    expect(bubbles()).toHaveLength(1);
+    // Once the retried turn lands, it settles.
+    const landed = { ...rewound, turns: [...rewound.turns, turn('continue', 'u25')] } as Conversation;
+    outbox.settle(7, landed, { quiet: false, turnSeq: 0 });
+    expect(bubbles()).toHaveLength(0);
+  });
+
+  it("retry's seen leaves a truncated window to the quiet-turn fallback when the read fails", async () => {
+    mockedRewind.mockResolvedValue({ ok: true, value: { id: 7, claude_session_id: 'new-cid' } });
+    mockedConv.mockResolvedValue({ ok: false, error: { code: 'E_IO', message: 'nope' } });
+    render(ReplyActions, { props: { ...base, truncated: true, index: 1 } });
+    await fireEvent.click(screen.getByTestId('reply-retry'));
+    await settle();
+    await fireEvent.click(screen.getByTestId('confirm-ok'));
+    await settle();
+    await settle();
+    expect(bubbles()).toHaveLength(1);
+    expect(bubbles()[0].seen).toBe(Number.MAX_SAFE_INTEGER);
   });
 
   it('retry re-sends the prompt without the hub marker', async () => {
