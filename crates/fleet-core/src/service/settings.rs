@@ -1630,16 +1630,6 @@ pub fn set_by(
         None
     };
     s.set_setting(key, &stored)?;
-    if key == HEALTH_CONTEXT_RED_PCT {
-        // The hub's `/events` stamps `needs_attention` without a store; keep
-        // its threshold equal to the one `list_sessions` now reads.
-        s.context_red_pct_changed(crate::service::health::context_red_pct(s));
-    }
-    if key.starts_with("update.") {
-        // A new track or check interval wakes the hub's channel refresh.
-        crate::service::update::settings_changed(key);
-    }
-
     if let Some(before) = before {
         if before.as_deref() != Some(stored.as_str()) {
             s.insert_setting_audit(
@@ -1653,6 +1643,15 @@ pub fn set_by(
         }
     }
     s.emit_settings_changed(key);
+    if key == HEALTH_CONTEXT_RED_PCT {
+        // The hub's `/events` stamps `needs_attention` without a store; keep
+        // its threshold equal to the one `list_sessions` now reads.
+        s.context_red_pct_changed(crate::service::health::context_red_pct(s));
+    }
+    if key.starts_with("update.") {
+        // A new track or check interval wakes the hub's channel refresh.
+        crate::service::update::settings_changed(key);
+    }
     Ok(())
 }
 

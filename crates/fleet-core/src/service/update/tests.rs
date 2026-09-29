@@ -851,46 +851,31 @@ async fn the_update_picture_emits_ids_only_when_it_moves() {
         .unwrap();
     assert!(bus.take().is_empty(), "an unchanged channel is silent");
 
-    // A real paired token, not a made-up id: `pin` refuses a target that is
-    // not there (`require_target_exists`), so the client this test pins must
-    // exist. Inserting it emits nothing, so the event list below is still
-    // only what the update picture said.
-    let cid = lock(&store)
+    // A pin names a live client (the pin hardening), so pair one first.
+    let id = lock(&store)
         .unwrap()
-        .insert_client_token("phone", "sha-a", "full")
+        .insert_client_token("desk", "sha-desk", "full")
         .unwrap()
         .id;
-    let c = client(cid, TokenMode::Full, None);
+    bus.take();
+    let observed = format!("update:changed:observed:client:{id}");
+    let c = client(id, TokenMode::Full, None);
     check(&store, &c, &desktop_req("0.3.3"), &keys(&key), NOW).unwrap();
-    assert_eq!(
-        bus.take(),
-        vec![format!("update:changed:observed:client:{cid}")]
-    );
+    assert_eq!(bus.take(), vec![observed.clone()]);
     check(&store, &c, &desktop_req("0.3.3"), &keys(&key), NOW + 60).unwrap();
     assert!(bus.take().is_empty(), "a routine re-check is silent");
     check(&store, &c, &desktop_req("0.3.4"), &keys(&key), NOW + 120).unwrap();
-    assert_eq!(
-        bus.take(),
-        vec![format!("update:changed:observed:client:{cid}")]
-    );
+    assert_eq!(bus.take(), vec![observed]);
 
-    pin(
-        &store,
-        "desktop",
-        &format!("client:{cid}"),
-        "0.3.3",
-        false,
-        None,
-        NOW,
-    )
-    .unwrap();
+    let target = format!("client:{id}");
+    pin(&store, "desktop", &target, "0.3.3", false, None, NOW).unwrap();
     pin(&store, "hub", "", "0.3.3", false, None, NOW).unwrap();
     assert!(unpin(&store, "hub", "").unwrap());
     assert!(!unpin(&store, "hub", "").unwrap());
     assert_eq!(
         bus.take(),
         vec![
-            format!("update:changed:pin:client:{cid}"),
+            format!("update:changed:pin:{target}"),
             "update:changed:pin:".to_string(),
             "update:changed:pin:".to_string(),
         ]

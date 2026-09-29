@@ -560,8 +560,9 @@ Trusted keys are `fleet_update::keys::RELEASE_KEYS`: the owner's release
 key (made on the owner's machine only, `scripts/release-key.sh`) is trusted
 since a3033c2 / #384 (v0.4.1); the secret half is only the
 `RELEASE_SIGNING_KEY` repository secret and the owner's backup. Nothing is
-offered until 0.4.1 publishes the first channel. An `e2e` build also reads
-`FLEET_UPDATE_E2E_KEYS`, reserved for S4b's hub-e2e section U; nothing uses
-it yet. `update.track` offers `stable` / `beta` only until S2b publishes
-`nightly`. S2b (nightly), the rest of S4b and S6–S9 are not built; the
+offered until 0.4.1 publishes the first channel. `FLEET_UPDATE_E2E_KEYS`
+(read by `e2e` builds only) is reserved for S4b's hub-e2e section U;
+nothing uses it yet. `update.track` offers `stable` / `beta` only until S2b
+publishes `nightly` (a stored `nightly` resolves to `stable`). S2b
+(nightly), the rest of S4b and S6–S9 are not built; the
 other §13 questions wait on the owner.

@@ -59,7 +59,6 @@ use super::{
     bootstrap_acc_diff, f2, f3, gate_or_skip, pct, percentile, round3, Calibration, Criterion,
     Paired, Split, Verdict,
 };
-use crate::ipc_error::lock;
 use crate::service::decide::haiku::{reason::OTHER_ORG, Haiku};
 use crate::service::decide::status_map::{self as sm, MIN_CONFIDENCE, NO_RULE, UNSURE};
 use crate::service::decide::{

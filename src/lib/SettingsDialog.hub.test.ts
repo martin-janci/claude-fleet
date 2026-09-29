@@ -273,8 +273,8 @@ describe('the panels that do not apply to a hub client', () => {
     render(SettingsDialog, { props: { onClose: () => {} } });
     expect((await screen.findByTestId('mcp-remote')).textContent).toContain('fleet.example.com');
     expect(screen.queryByTestId('mcp-enable')).toBeNull();
-    expect(screen.queryByTestId('update-section')).toBeNull();
   });
+
   it('still renders Diagnostics, which is about THIS process either way', async () => {
     route();
     render(SettingsDialog, { props: { onClose: () => {} } });

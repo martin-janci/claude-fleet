@@ -841,7 +841,13 @@ pub fn health_for(
         peer_links_total: s.peer_links_total().unwrap_or_default(),
         updates: None,
         hosts: host_rows,
-        decide: crate::service::decide::health(s, now),
+        // The decision envelope is the hub's own business: a scoped view
+        // gets none of it (`fleet_health` also drops it for those callers).
+        decide: if matches!(view, HealthView::Fleet) {
+            crate::service::decide::health(s, now)
+        } else {
+            None
+        },
     };
     h.set_tunnels(tunnels);
     if matches!(view, HealthView::Blank) {

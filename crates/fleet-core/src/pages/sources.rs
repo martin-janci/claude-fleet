@@ -261,7 +261,10 @@ fn retention_label(table: &str) -> &str {
         "work_items" => "Done tickets",
         "session_events" => "Work timeline",
         "work_item_descriptions" => "Full descriptions",
-        "tracker_writes" => "PR link outbox",
+        // The write-back outbox: a write still waiting to be sent is never
+        // swept, so its "would delete" counts settled (sent or given-up)
+        // rows only.
+        "tracker_writes" => "PR link outbox (sent or given up)",
         other => other,
     }
 }
@@ -397,6 +400,15 @@ pub fn fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every table the retention sweep keeps has a name a person reads,
+    /// never the raw SQL table.
+    #[test]
+    fn every_swept_table_has_a_label() {
+        for t in crate::store::RetentionTable::ALL {
+            assert_ne!(retention_label(t.table()), t.table(), "{}", t.table());
+        }
+    }
 
     /// Every value `fetch` returns has exactly the columns its shape
     /// declares, so a renderer can trust the declaration.

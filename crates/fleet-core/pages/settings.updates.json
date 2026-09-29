@@ -16,6 +16,11 @@
         {
           "type": "field",
           "key": "update.check_interval_secs"
+        },
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "Nothing installs itself yet: fleet-updater, the desktop and the phone arrive in later slices (S6–S8), so on a standalone desktop these rows have no effect. There is no nightly track until it is published (S2b)."
         }
       ]
     },

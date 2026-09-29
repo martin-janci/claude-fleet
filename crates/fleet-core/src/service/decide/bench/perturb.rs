@@ -105,13 +105,13 @@ pub fn seed_of(parts: &[&str]) -> u64 {
 }
 
 /// PURE: `s` without its diacritics, in its own case (`Hotové` →
-/// `Hotove`, `Straße` → `Strasse`): the letters [`super::bm25::fold_char`]
+/// `Hotove`, `Straße` → `Strasse`): the letters [`crate::service::nl::fold_char`]
 /// folds; everything else unchanged.
 pub fn fold_diacritics(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         let mut f = String::new();
-        super::bm25::fold_char(c, &mut f);
+        crate::service::nl::fold_char(c, &mut f);
         if f.chars().eq(c.to_lowercase()) {
             out.push(c);
         } else if c.is_uppercase() {

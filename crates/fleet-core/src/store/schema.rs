@@ -880,8 +880,9 @@ const MIGRATIONS: &[Migration] = &[
     // Stale-working acknowledgement: `sessions.stale_demoted_at`, the
     // reconcile veto's memory apart from the attention stamp (one ADD
     // COLUMN, its own guard; the backfill is `backfill_stale_demoted`,
-    // after the collision repair). Not a `SessionRow` field, so 065's
-    // row_version trigger does not watch it.
+    // after the collision repair). Read into `SessionRow` but never
+    // serialized nor compared, so 065's row_version trigger (and 082's
+    // rebuild of it) does not watch it.
     Migration {
         version: 80,
         sql: include_str!("../../migrations/080_stale_demoted.sql"),

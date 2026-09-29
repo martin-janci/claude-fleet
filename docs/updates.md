@@ -13,10 +13,11 @@ and the phones. Design and rationale:
 > channels live on the `update-channels` branch (`docs/RELEASING.md` →
 > *Update manifest and channels*). The release key exists and every build
 > from 0.4.1 trusts it; until 0.4.1 is released there is no channel to
-> read, so nothing is offered yet, and a hub that cannot verify a channel
-> still offers nothing. `fleet-hub update check` asks the channel directly
-> (slice S3). `fleet-updater`, the desktop and the phone install nothing
-> yet (slices S6–S8), and there is no `nightly` channel yet (S2b).
+> read, so nothing is offered yet. `fleet-hub update check` asks the
+> channel directly (slice S3). `fleet-updater`, the desktop and the phone
+> install nothing yet (slices S6–S8): on a standalone desktop the Settings
+> → Updates rows have no effect. A hub that cannot verify a channel still
+> offers nothing, and there is no `nightly` channel yet (S2b).
 
 ## Who decides what
 
