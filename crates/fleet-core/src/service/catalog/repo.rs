@@ -142,7 +142,16 @@ pub fn ensure_repo(path: &Path, remote: Option<&str>) -> Result<(), IpcError> {
     match remote {
         Some(url) => {
             let parent = clone_parent(path);
-            std::fs::create_dir_all(parent).map_err(|e| unreadable(parent, &e))?;
+            // Named as the checkout, with the directory that failed: on
+            // Windows a path under a file probes as absent (not "not a
+            // directory"), so this is where such a checkout fails there.
+            std::fs::create_dir_all(parent).map_err(|e| {
+                let e = std::io::Error::new(
+                    e.kind(),
+                    format!("cannot create {}: {e}", parent.display()),
+                );
+                unreadable(path, &e)
+            })?;
             let target = path.to_string_lossy().to_string();
             git(parent, &["clone", "-q", url, &target])?;
             Ok(())
@@ -1024,6 +1033,28 @@ mod tests {
         assert_eq!(err.code, "E_IO");
         assert!(
             err.message.contains(&*path.to_string_lossy()),
+            "{}",
+            err.message
+        );
+    }
+
+    /// A checkout that probes as absent but whose directory cannot be made
+    /// names the checkout and the directory that failed. A dangling symlink
+    /// in the way does this on Unix, as a path under a file does on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_repo_names_a_checkout_it_cannot_create() {
+        let base = tmp("ensure-repo-uncreatable");
+        let dangling = base.join("dangling");
+        std::os::unix::fs::symlink(base.join("nowhere"), &dangling).unwrap();
+        let path = dangling.join("agent-assets");
+        let err = ensure_repo(&path, Some("/nonexistent/remote.git")).unwrap_err();
+        assert_eq!(err.code, "E_IO");
+        assert!(
+            err.message.contains(&*path.to_string_lossy())
+                && err
+                    .message
+                    .contains(&format!("cannot create {}", dangling.display())),
             "{}",
             err.message
         );
