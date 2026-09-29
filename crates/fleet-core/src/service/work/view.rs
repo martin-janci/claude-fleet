@@ -236,6 +236,103 @@ pub struct WorkTask {
     /// while another host or org still works on it.
     #[serde(default)]
     pub archived: bool,
+    /// Where the item came from: `manual` (a person wrote it in Fleet),
+    /// `agent` (a delegated job's mirror), `proposed` (an agent's accepted
+    /// proposal) or `detected` (a tracker ticket, a bare key).
+    #[serde(default)]
+    pub origin: String,
+    /// The project a native task runs in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
+    /// That project as `owner/repo` (or `repo` for a local owner).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_label: Option<String>,
+    /// A native subtask's parent (`item:<id>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    /// A job mirror's state (the delegated job's `state`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_state: Option<String>,
+    /// The item has no title: `title` is borrowed from its first session's
+    /// name.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub title_derived: bool,
+    /// Agent proposals under this task waiting for a person's decision.
+    #[serde(default)]
+    pub open_proposals: u32,
+}
+
+/// A native subtask on a task page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubtaskView {
+    pub task_id: String,
+    pub item_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub title: String,
+    /// manual | proposed (accepted) | agent
+    pub origin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
+    /// Live confirmed links to it (on sessions the caller sees).
+    pub live_sessions: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_state: Option<String>,
+}
+
+/// An agent's proposed subtask. `why` and `notes` are agent text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProposalView {
+    pub item_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_by: Option<String>,
+    pub at: i64,
+}
+
+/// A delegated job under a task. `result` is agent text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JobView {
+    /// The job's mirror item.
+    pub item_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub title: String,
+    /// The job's `state`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    /// The worker session's name, while it exists (and the caller sees it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<String>,
+    pub at: i64,
+}
+
+/// One conversation's steps, labelled by the session that ran it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StepGroup {
+    pub label: String,
+    pub claude_session_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<StepLine>,
+}
+
+/// One step an agent took (its own task tools). `text` is agent text; a
+/// `completed` is the agent's word, never a status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StepLine {
+    pub text: String,
+    /// pending | in_progress | completed | cancelled
+    pub state: String,
+    pub at: i64,
 }
 
 /// A section header of a page: one org's group and how many tasks match.
@@ -369,6 +466,27 @@ pub struct TaskDetail {
     /// it unless a person did).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<i64>,
+    /// A native task's notes (fenced for an agent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// The delegated job's result, when this task is a job mirror.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_result: Option<String>,
+    /// Native subtasks: a person's, accepted proposals, job mirrors.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subtasks: Vec<SubtaskView>,
+    /// Agent proposals waiting for a person's decision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<ProposalView>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected_proposals: Vec<ProposalView>,
+    /// Jobs delegated under this task.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub jobs: Vec<JobView>,
+    /// The steps agents took on this task and its subtasks, per
+    /// conversation, newest conversation first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<StepGroup>,
 }
 
 /// The task one of a session's links points at, briefly.
@@ -480,6 +598,10 @@ pub(crate) struct Graph {
     /// "someone is working on this" never leaks through a task the caller
     /// can otherwise see.
     pub(crate) working_session_items: BTreeSet<i64>,
+    /// A job mirror's item id → its job's `state`.
+    pub(crate) job_states: HashMap<i64, String>,
+    /// A task's item id → its proposals waiting for a decision.
+    pub(crate) open_proposals: HashMap<i64, u32>,
 }
 
 impl Graph {
@@ -502,13 +624,22 @@ impl Graph {
             })
             .map(|(item_id, _)| item_id)
             .collect();
+        let items: HashMap<i64, ViewItem> = s
+            .work_view_items()?
+            .into_iter()
+            .map(|i| (i.item.id, i))
+            .collect();
+        let mut open_proposals: HashMap<i64, u32> = HashMap::new();
+        for i in items.values() {
+            if let (Some("proposed"), Some(parent)) =
+                (i.item.proposal_state.as_deref(), i.item.parent_id)
+            {
+                *open_proposals.entry(parent).or_default() += 1;
+            }
+        }
         Ok(Graph {
             now: crate::service::catalog::now_secs(),
-            items: s
-                .work_view_items()?
-                .into_iter()
-                .map(|i| (i.item.id, i))
-                .collect(),
+            items,
             links: s.work_view_links()?,
             sessions,
             trackers: s.list_trackers()?.into_iter().map(|t| (t.id, t)).collect(),
@@ -522,6 +653,8 @@ impl Graph {
             rules: s.work_rules()?,
             context_red_pct: crate::service::health::context_red_pct(s),
             working_session_items,
+            job_states: s.job_states_by_item()?,
+            open_proposals,
         })
     }
 
@@ -663,6 +796,14 @@ struct Built<'g> {
 fn build_tasks<'g>(g: &'g Graph, scope: &OrgScope) -> Vec<Built<'g>> {
     let mut by_task: BTreeMap<String, Built<'g>> = BTreeMap::new();
     for item in g.items.values() {
+        // A proposal waiting for a decision (or rejected) is not a task:
+        // only its parent's page lists it. An accepted one is a subtask.
+        if matches!(
+            item.item.proposal_state.as_deref(),
+            Some("proposed" | "rejected")
+        ) {
+            continue;
+        }
         let id = format!("item:{}", item.item.id);
         by_task.insert(
             id.clone(),
@@ -1267,7 +1408,27 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
             }
         }
     };
+    // The group reads the item's own title, never a borrowed one.
     let group = group_of(g, &b.task_id, item, key.as_deref(), &title, &repos);
+    let origin = origin_of(item.map(|i| &i.item));
+    let project_id = item.and_then(|i| i.item.project_id);
+    let project_label = project_id.and_then(|p| project_label(g, p));
+    let parent_task_id = item
+        .filter(|i| is_native(&i.item))
+        .and_then(|i| i.item.parent_id)
+        .map(|p| format!("item:{p}"));
+    let job_state = item.and_then(|i| g.job_states.get(&i.item.id).cloned());
+    let open_proposals = item
+        .and_then(|i| g.open_proposals.get(&i.item.id).copied())
+        .unwrap_or(0);
+    let (title, title_derived) = match listed
+        .iter()
+        .find(|(_, st, _)| *st != "rejected")
+        .or(listed.first())
+    {
+        Some((l, _, _)) if title.trim().is_empty() => (link_name(g.row_of(l), l), true),
+        _ => (title, false),
+    };
     let task = WorkTask {
         task_id: b.task_id.clone(),
         item_id: item.map(|i| i.item.id),
@@ -1300,11 +1461,43 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         sessions_more: listed.len() as u32,
         sessions: Vec::new(),
         archived,
+        origin,
+        project_id,
+        project_label,
+        parent_task_id,
+        job_state,
+        title_derived,
+        open_proposals,
     };
     TaskSummary {
         task,
         links: listed,
     }
+}
+
+/// An item's origin; a row an older hub wrote (and a bare key) reads as
+/// `detected`.
+fn origin_of(item: Option<&crate::store::WorkItemRow>) -> String {
+    item.and_then(|i| i.origin.clone())
+        .unwrap_or_else(|| "detected".into())
+}
+
+/// A native item: a person's, an agent's proposal, or a job mirror.
+fn is_native(item: &crate::store::WorkItemRow) -> bool {
+    matches!(
+        item.origin.as_deref(),
+        Some("manual" | "proposed" | "agent")
+    )
+}
+
+/// A project as `owner/repo`, or `repo` for a local (or empty) owner.
+fn project_label(g: &Graph, project_id: i64) -> Option<String> {
+    let p = g.projects.get(&project_id)?;
+    Some(if p.owner.is_empty() || p.owner == "local" {
+        p.repo.clone()
+    } else {
+        format!("{}/{}", p.owner, p.repo)
+    })
 }
 
 fn to_task(
@@ -1865,8 +2058,10 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
         .and_then(|j| serde_json::from_str(j).ok())
         .unwrap_or_default();
     // The one item's description (the graph reads no description), and
-    // that journal: a second, short lock.
-    let (meta, journal) = {
+    // that journal; its native children, their jobs, live sessions and
+    // the steps of every conversation of the task and its subtasks: a
+    // second, short lock.
+    let (meta, journal, work) = {
         let s = lock(store)?;
         let meta = item
             .map(|i| s.work_item_meta(i.item.id))
@@ -1876,7 +2071,8 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
             Some(_) => s.journal_for_conversations(&conversations)?,
             None => Vec::new(),
         };
-        (meta, journal)
+        let work = native_work(&s, &g, scope, item, task.key.as_deref())?;
+        (meta, journal, work)
     };
     // The tracker that might serve the whole description, and the key to name
     // it by — flattened as every other `fence_ticket` call site flattens it
@@ -1965,6 +2161,44 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
         }
         p
     });
+    // Agent and third-party text an agent reads is fenced, exactly as the
+    // description is; a person reads it as is.
+    let fence = |x: String, what: &str| match scope {
+        OrgScope::Host { .. } => {
+            crate::mcp::guard::fence_untrusted(&x, what, DESCRIPTION_MAX_CHARS)
+        }
+        _ => x,
+    };
+    let notes = item
+        .and_then(|i| i.item.notes.clone())
+        .filter(|n| !n.trim().is_empty())
+        .map(|n| fence(n, "a task's notes"));
+    let job_result = work.own_result.map(|r| fence(r, "a job's result"));
+    let proposal = |mut p: ProposalView| {
+        p.why = p.why.map(|w| fence(w, "an agent's proposal"));
+        p.notes = p.notes.map(|n| fence(n, "an agent's proposal"));
+        p
+    };
+    let proposals = work.proposals.into_iter().map(proposal).collect();
+    let rejected_proposals = work.rejected_proposals.into_iter().map(proposal).collect();
+    let jobs = work
+        .jobs
+        .into_iter()
+        .map(|mut j| {
+            j.result = j.result.map(|r| fence(r, "a job's result"));
+            j
+        })
+        .collect();
+    let steps = work
+        .steps
+        .into_iter()
+        .map(|mut grp| {
+            for st in &mut grp.steps {
+                st.text = fence(std::mem::take(&mut st.text), "an agent's step");
+            }
+            grp
+        })
+        .collect();
     Ok(TaskDetail {
         task,
         aliases,
@@ -1974,7 +2208,228 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
         last_outcome,
         placement,
         rules,
+        notes,
+        job_result,
+        subtasks: work.subtasks,
+        proposals,
+        rejected_proposals,
+        jobs,
+        steps,
     })
+}
+
+/// A task page's native work, read under the caller's lock: unfenced.
+#[derive(Default)]
+struct NativeWork {
+    own_result: Option<String>,
+    subtasks: Vec<SubtaskView>,
+    proposals: Vec<ProposalView>,
+    rejected_proposals: Vec<ProposalView>,
+    jobs: Vec<JobView>,
+    steps: Vec<StepGroup>,
+}
+
+/// The children of `item` (a person's subtasks, accepted and open and
+/// rejected proposals, job mirrors), the jobs, and the steps of every
+/// conversation of the task and its subtasks. A child whose own org the
+/// caller cannot see is left out; a scoped caller reads only the steps of
+/// conversations it sees a link through, and a worker it sees.
+fn native_work(
+    s: &Store,
+    g: &Graph,
+    scope: &OrgScope,
+    item: Option<&ViewItem>,
+    key: Option<&str>,
+) -> Result<NativeWork, IpcError> {
+    let mut out = NativeWork::default();
+    let job_of = |task_id: Option<i64>| -> Result<Option<crate::store::TaskRow>, IpcError> {
+        task_id
+            .map(|t| s.get_task(t))
+            .transpose()
+            .map(Option::flatten)
+    };
+    if let Some(i) = item {
+        out.own_result = job_of(i.item.task_id)?.and_then(|t| t.result);
+    }
+    let children: Vec<crate::store::WorkItemRow> = match item {
+        Some(i) => s
+            .native_children(i.item.id)?
+            .into_iter()
+            .filter(|c| {
+                let own = g.items.get(&c.id).and_then(|v| g.item_org(v));
+                own.is_none() || scope.sees_org(own)
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let sees_session = |sid: i64| g.sessions.get(&sid).is_some_and(|r| scope.sees_row(r));
+    let mut item_ids: BTreeSet<i64> = item.map(|i| i.item.id).into_iter().collect();
+    let mut keys: Vec<String> = key.map(str::to_string).into_iter().collect();
+    for c in children {
+        let proposal = |c: &crate::store::WorkItemRow| ProposalView {
+            item_id: c.id,
+            key: c.key.clone(),
+            title: c.title.clone(),
+            why: c.proposal_why.clone(),
+            notes: c.notes.clone(),
+            proposed_by: c.proposed_by.clone(),
+            at: c.created_at,
+        };
+        match c.proposal_state.as_deref() {
+            Some("proposed") => {
+                out.proposals.push(proposal(&c));
+                continue;
+            }
+            Some("rejected") => {
+                out.rejected_proposals.push(proposal(&c));
+                continue;
+            }
+            _ => {}
+        }
+        let live_sessions = s
+            .local_item_links(Some(c.id))?
+            .iter()
+            .filter(|l| l.session_id.is_some_and(sees_session))
+            .count() as u32;
+        let status = g
+            .items
+            .get(&c.id)
+            .and_then(|v| item_status(g, v))
+            .or_else(|| Some(c.status_category.clone()));
+        if c.origin.as_deref() == Some("agent") {
+            if let Some(job) = job_of(c.task_id)? {
+                out.jobs.push(JobView {
+                    item_id: c.id,
+                    key: c.key.clone(),
+                    title: c.title.clone(),
+                    state: job.state.clone(),
+                    worker: job
+                        .worker_session_id
+                        .and_then(|w| g.sessions.get(&w))
+                        .filter(|r| scope.sees_row(r))
+                        .map(|r| {
+                            r.friendly_name
+                                .clone()
+                                .unwrap_or_else(|| r.tmux_name.clone())
+                        }),
+                    at: job.finished_at.or(job.started_at).unwrap_or(job.created_at),
+                    result: job.result,
+                });
+            }
+        }
+        item_ids.insert(c.id);
+        if let Some(k) = &c.key {
+            if !keys.contains(k) {
+                keys.push(k.clone());
+            }
+        }
+        out.subtasks.push(SubtaskView {
+            task_id: format!("item:{}", c.id),
+            item_id: c.id,
+            key: c.key.clone(),
+            origin: origin_of(Some(&c)),
+            status,
+            project_id: c.project_id,
+            live_sessions,
+            job_state: g.job_states.get(&c.id).cloned(),
+            title: c.title,
+        });
+    }
+    // Every conversation of the task and its subtasks, deduplicated.
+    let mut convs: Vec<String> = Vec::new();
+    for k in &keys {
+        let ids = match s.work_conversation_ids(k) {
+            Ok(ids) => ids,
+            // A key the journal cannot name has no conversations.
+            Err(e) if e.code == codes::E_INVALID => continue,
+            Err(e) => return Err(e),
+        };
+        for id in ids {
+            if !convs.contains(&id) {
+                convs.push(id);
+            }
+        }
+    }
+    let labels = conversation_labels(g, scope, &item_ids, &keys);
+    let mut groups: Vec<(i64, StepGroup)> = Vec::new();
+    for st in s.current_steps(&convs)? {
+        let label = labels.get(&st.claude_session_id);
+        if !scope.is_all() && !label.is_some_and(|(_, visible)| *visible) {
+            continue;
+        }
+        let line = StepLine {
+            text: st.text,
+            state: st.state,
+            at: st.at,
+        };
+        match groups
+            .iter_mut()
+            .find(|(_, grp)| grp.claude_session_id == st.claude_session_id)
+        {
+            Some((newest, grp)) => {
+                *newest = (*newest).max(line.at);
+                grp.steps.push(line);
+            }
+            None => groups.push((
+                line.at,
+                StepGroup {
+                    label: label.map_or_else(|| "earlier conversation".into(), |(l, _)| l.clone()),
+                    claude_session_id: st.claude_session_id,
+                    steps: vec![line],
+                },
+            )),
+        }
+    }
+    // Newest conversation first (a stable sort keeps first-seen order on a
+    // tie).
+    groups.sort_by(|a, b| b.0.cmp(&a.0));
+    out.steps = groups.into_iter().map(|(_, grp)| grp).collect();
+    Ok(out)
+}
+
+/// Each conversation of these items' (or keys') confirmed links → the name
+/// of the session that ran it, and whether the caller sees that link: an
+/// ended link's snapshot conversations, a live link's session's current
+/// one.
+fn conversation_labels(
+    g: &Graph,
+    scope: &OrgScope,
+    item_ids: &BTreeSet<i64>,
+    keys: &[String],
+) -> HashMap<String, (String, bool)> {
+    let mut out: HashMap<String, (String, bool)> = HashMap::new();
+    for l in &g.links {
+        let ours = l.link.item_id.is_some_and(|i| item_ids.contains(&i))
+            || (l.link.item_id.is_none()
+                && l.link.ref_key.as_ref().is_some_and(|k| keys.contains(k)));
+        if !ours || !matches!(g.state_of(l), Some("active" | "ended")) {
+            continue;
+        }
+        let convs: Vec<String> = if l.link.ended_at.is_some() {
+            l.link
+                .snap_claude_ids
+                .as_deref()
+                .and_then(|j| serde_json::from_str(j).ok())
+                .unwrap_or_default()
+        } else {
+            g.row_of(l)
+                .and_then(|r| r.claude_session_id.clone())
+                .into_iter()
+                .collect()
+        };
+        let visible = g.link_visible(scope, l);
+        let name = link_name(g.session_of(l), l);
+        for c in convs {
+            match out.get(&c) {
+                Some((_, true)) => {}
+                Some((_, false)) if !visible => {}
+                _ => {
+                    out.insert(c, (name.clone(), visible));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn brief_of(g: &Graph, task_id: &str, item: Option<&ViewItem>, ref_key: Option<&str>) -> TaskBrief {
