@@ -441,6 +441,9 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("list_local_work_items", "work", "local_items"),
     ("name_session_work", "work_link", "name"),
     ("rename_work_item", "work_link", "name"),
+    ("create_work_task", "work_link", "create"),
+    ("accept_work_proposal", "work_link", "accept"),
+    ("reject_work_proposal", "work_link", "reject"),
     ("summarize_past_work", "work_link", "summarize"),
     // Work graph M14.1d: the Work view's desktop commands.
     ("work_tree", "work", "tree"),

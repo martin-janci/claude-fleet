@@ -58,6 +58,7 @@
     "work_retention_sweep"
   ],
   "routed": [
+    "accept_work_proposal",
     "ack_work_link",
     "add_project",
     "archive_session_work",
@@ -95,6 +96,7 @@
     "catalog_update_asset",
     "catalog_write_layer",
     "confirm_session_work",
+    "create_work_task",
     "decide_setting_proposals",
     "decide_work_batch",
     "delete_work_rule",
@@ -134,6 +136,7 @@
     "recreate_session",
     "refresh_projects",
     "reject_session_work",
+    "reject_work_proposal",
     "related_sessions",
     "rename_session",
     "rename_work_item",
