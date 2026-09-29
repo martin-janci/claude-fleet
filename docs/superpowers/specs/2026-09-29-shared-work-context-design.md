@@ -1,7 +1,7 @@
 # Shared work context (roadmap part 1) — design
 
 **Date:** 2026-09-29
-**Status:** design approved by the owner in brainstorming; nothing implemented.
+**Status:** implemented on branch `docs/internal-task-list-spec` (plan `2026-09-29-shared-work-context.md`).
 **Roadmap:** part 1 of `2026-09-29-ai-task-system-brainstorming.md` ("Spoločný kontext práce"). Parts 2–5 get their own specs.
 **Supersedes as a product:** `2026-09-29-internal-task-list-design.md` and its plan. They stay on this branch as history, and several of their mechanisms are reused here (§7).
 **Builds on:** the work graph (`2026-09-24-work-graph-design.md` §0), native item status (migration 084), the work journal (migration 047), `dispatch_task` (migration 020).
