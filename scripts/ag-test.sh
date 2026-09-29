@@ -101,6 +101,22 @@ expect_rc "a flag missing its value exits 2" 2 claude --resume
 expect_rc "--continue with --resume exits 2" 2 claude -c -r X
 expect_rc "--new-id with --resume exits 2" 2 claude --new-id A -r X
 
+# --- launch: codex argv ------------------------------------------------------------
+cfg 'default = codex'
+expect "codex: bare" "BIN=codex"
+expect "codex: --yolo" "BIN=codex ARG=--dangerously-bypass-approvals-and-sandbox" --yolo
+expect "codex: --continue is resume --last" "BIN=codex ARG=resume ARG=--last" -c
+expect "codex: --resume ID" "BIN=codex ARG=resume ARG=S1" -r S1
+expect "codex: -p is exec, prompt last" "BIN=codex ARG=exec ARG=hi there" -p "hi there"
+expect "codex: -p with --resume is exec resume" "BIN=codex ARG=exec ARG=resume ARG=S1 ARG=hi" -p hi -r S1
+expect "codex: -p with --continue is exec resume --last" "BIN=codex ARG=exec ARG=resume ARG=--last ARG=hi" -p hi -c
+expect "codex: model and effort" 'BIN=codex ARG=-m ARG=gpt-5.5 ARG=-c ARG=model_reasoning_effort="high"' -m gpt-5.5 --effort high
+expect "codex: canonical order" \
+  "BIN=codex ARG=resume ARG=S1 ARG=--dangerously-bypass-approvals-and-sandbox ARG=-m ARG=M ARG=--search" \
+  --search -r S1 --yolo -m M
+expect "codex: --name is ignored" "BIN=codex" --name N
+expect_rc "codex: --new-id is unsupported (exit 3)" 3 --new-id ID1
+
 # --- summary ----------------------------------------------------------------
 echo "ag-test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
