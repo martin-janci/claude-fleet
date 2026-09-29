@@ -158,7 +158,7 @@ replacing the CLI paragraph at `AssetsPanel.svelte:308-315`.
 | Scope | Example | May be installed on | Source |
 |---|---|---|---|
 | **private** | `airbnb-invoices`, `paycheck`, the author suite | hosts with no org | personal catalog |
-| **org** | `ppt-*`, `openmarket-*`, `papayapos-*` | hosts whose `org_id` is that org | that org's catalog |
+| **org** | `ppt-*`, `openmarket-*`, `papayapos-*` | hosts that **accept** that org's catalog | that org's catalog |
 | **shared** | `superpowers`, `worktree`, `code-review` | wherever a layer puts it | any catalog |
 | **managed** | `anthropic-skills:*` (claude.ai account), marketplace plugin skills, a repo's own `.claude/skills` | not synced; shown read-only | outside fleet |
 
@@ -169,15 +169,24 @@ checkout under `<data-dir>/catalogs/<name>` with its own remote and deploy
 key. A repository in a GitHub org with SSO needs an org admin to allow the
 deploy key; onboarding says so.
 
+**Which catalogs a host accepts.** A host bound to an org (`hosts.org_id`)
+accepts that org's catalog and the *shared* assets of the personal catalog,
+nothing else. A host with no org accepts the personal catalog and any org
+catalog the owner **admits** for it — the owner's Mac and mefistos run
+`ppt-*` without belonging to papayapos, so they admit its catalog
+explicitly. Admission is stored per host (`host_catalogs(host, catalog)`),
+shown on the host row, and changed only by a person.
+
 **Rules.**
 
 - **Scope is a hard boundary above layers.** Sync never plans an org asset
-  onto a host of another org, nor a private asset onto an org host. This is
+  onto a host that does not accept that org's catalog, nor a private asset
+  onto an org-bound host. This is
   enforced in planning, the same place `hosts.org_id` bounds tokens, and a
   layer that would violate it fails validation rather than being silently
   filtered.
-- Layers belong to a catalog. A host composes layers only from catalogs valid
-  for it (personal + its own org's).
+- Layers belong to a catalog. A host composes layers only from the catalogs
+  it accepts.
 - An asset found on an org host that is not shared is proposed into that
   org's catalog, never into the personal one.
 - **Name collision across catalogs** (Claude Code skill names are global) is
@@ -419,7 +428,8 @@ S4 (ground truth).
 ## Testing this work
 
 - Store tests: identity collapse, the rule classifier, the scope boundary
-  (an org asset is never planned onto another org's host; a layer that would
+  (an org asset is never planned onto a host that does not accept its
+  catalog; a private asset never onto an org-bound host; a layer that would
   do so fails validation), rejection holds by content hash.
 - A fixture from the live `list_assets` (520 rows) asserting 164 identities,
   8 signatures and the expected bootstrap card.
