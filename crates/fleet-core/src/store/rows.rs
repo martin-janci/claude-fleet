@@ -294,6 +294,19 @@ pub struct SessionRow {
     /// caller (`OrgScope::redact_row`): another org's link would move it.
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub work_rev: i64,
+    /// What the PR probe last read as evidence about the session's PR
+    /// (migration 082, result evidence): the commit the checks describe,
+    /// the worktree's own HEAD, review and merge state. `None` without a
+    /// PR, before the first probe, or from a host whose `gh` answers only
+    /// the basic fields. Absent from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_evidence: Option<crate::service::outcome::PrEvidence>,
+    /// When the probe last observed the PR (migration 082): exact when the
+    /// evidence changed, else at most `outcome::PR_CHECKED_REFRESH_SECS`
+    /// old while probes succeed. A reading older than
+    /// `outcome::PR_EVIDENCE_STALE_SECS` describes the past.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_checked_at: Option<i64>,
 }
 
 fn is_zero_i64(n: &i64) -> bool {
@@ -352,8 +365,13 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
      (SELECT json_object('link_id', l.id, 'item_id', l.item_id, \
                          'key', COALESCE(i.key, l.ref_key), 'title', COALESCE(i.title, ''), \
                          'source', l.source, \
+                         'kind', \
+                           CASE WHEN i.id IS NULL THEN 'ref' \
+                                WHEN i.tracker_id IS NOT NULL THEN 'tracker' \
+                                ELSE 'local' END, \
                          'status_category', \
                            CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
+                         'effective_status', ", crate::effective_status_sql!(), ", \
                          'status_name', i.status_name, 'url', i.url, \
                          'unavailable', json(CASE WHEN i.unavailable_at IS NOT NULL \
                                                   THEN 'true' ELSE 'false' END), \
@@ -378,8 +396,13 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                          'rule', l.rule, \
                          'preselected', json(CASE WHEN l.preselected = 1 \
                                                   THEN 'true' ELSE 'false' END), \
+                         'kind', \
+                           CASE WHEN i.id IS NULL THEN 'ref' \
+                                WHEN i.tracker_id IS NOT NULL THEN 'tracker' \
+                                ELSE 'local' END, \
                          'status_category', \
                            CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
+                         'effective_status', ", crate::effective_status_sql!(), ", \
                          'status_name', i.status_name, 'url', i.url, \
                          'suggestions', (SELECT COUNT(*) FROM work_links s2 \
                                           WHERE s2.participant_id = p.id \
@@ -409,8 +432,19 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
     " AS org_id, prompt_submit_seq, stale_working_at, stale_demoted_at, \
      (SELECT COALESCE(SUM(l.version * 1000003 + l.id), 0) FROM work_links l \
         JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
-       WHERE p.session_id = sessions.id AND l.ended_at IS NULL) AS work_rev"
+       WHERE p.session_id = sessions.id AND l.ended_at IS NULL) AS work_rev, \
+     pr_evidence, pr_checked_at"
 );
+
+/// Decode `sessions.pr_evidence`. Malformed text (never written by us)
+/// reads as no evidence rather than failing every session read.
+pub(super) fn decode_pr_evidence(
+    raw: Option<String>,
+) -> Option<crate::service::outcome::PrEvidence> {
+    raw.as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|s| serde_json::from_str(s).ok())
+}
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
 /// (never written by us, but a hand-edited DB is possible) reads as no tags
@@ -504,6 +538,8 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         stale_working_at: row.get(59)?,
         stale_demoted_at: row.get(60)?,
         work_rev: row.get(61)?,
+        pr_evidence: decode_pr_evidence(row.get(62)?),
+        pr_checked_at: row.get(63)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
@@ -1239,6 +1275,10 @@ pub struct ReconcileSession<'a> {
     /// sweep respects: a row whose pane is visibly working is never demoted,
     /// whatever the agents cadence let the status say this pass.
     pub pane_working: bool,
+    /// The PR's evidence this pass read (result evidence), governed by
+    /// `pr_observed` like `ci_status`: authoritative when the probe ran (a
+    /// `None` clears it), preserved when it did not.
+    pub pr_evidence: Option<crate::service::outcome::PrEvidence>,
 }
 
 /// All inputs for applying one host's probe result atomically. Consumed by
@@ -1475,5 +1515,299 @@ mod tests {
             back.eq_ignoring_row_version(&row),
             "a demoted-only difference is not a visible one"
         );
+    }
+
+    /// `WorkSummary.effective_status` (native item status task 4, fix round
+    /// 2): `crate::effective_status_sql!`'s SQL must agree with
+    /// `service::work::status::effective_status`'s Rust precedence, checked
+    /// end to end through `Store::get_session` — the real production path,
+    /// not a standalone query. SQLite cannot call into Rust, so the logic
+    /// is duplicated; these tests are what keeps the two from drifting.
+    /// `status_category` stays tracker-only throughout (wire compat, see
+    /// its doc on `WorkSummary`).
+    mod effective_status_on_the_session_row {
+        use super::*;
+
+        fn seed(s: &Store, name: &str) -> i64 {
+            s.upsert_host("h").unwrap();
+            s.upsert_session(name, "h", None, None, 1, 1, "running", None)
+                .unwrap()
+        }
+
+        fn mark_working(s: &Store, sid: i64, claude_session_id: &str) {
+            s.set_claude_session_id(sid, claude_session_id).unwrap();
+            s.set_claude_status_by_session_id(claude_session_id, "working")
+                .unwrap();
+        }
+
+        fn tracker_item(s: &Store, key: &str, status_category: &str) -> i64 {
+            let t = s
+                .add_tracker("jira", "Jira", "https://x.atlassian.net")
+                .unwrap();
+            s.upsert_tracker_item(
+                t.id,
+                &TrackerItemWrite {
+                    external_id: key.into(),
+                    key: Some(key.into()),
+                    title: "Ticket".into(),
+                    status_name: "status".into(),
+                    status_category: status_category.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id
+        }
+
+        #[test]
+        fn a_local_items_status_shows_through_effective_status_not_status_category() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            s.create_local_work_item(Some("LOC-1"), "Local work")
+                .unwrap();
+            s.link_session_work(sid, WorkTarget::Key("LOC-1"), "manual")
+                .unwrap();
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(
+                w.status_category, None,
+                "wire compat: status_category stays tracker-only"
+            );
+            assert_eq!(w.effective_status.as_deref(), Some("todo"));
+            assert_eq!(w.kind, "local");
+        }
+
+        #[test]
+        fn a_tracker_items_status_shows_in_both_fields() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            let item = tracker_item(&s, "TK-1", "in_progress");
+            s.link_session_work(sid, WorkTarget::Item(item), "manual")
+                .unwrap();
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(w.status_category.as_deref(), Some("in_progress"));
+            assert_eq!(w.effective_status.as_deref(), Some("in_progress"));
+            assert_eq!(w.kind, "tracker");
+        }
+
+        #[test]
+        fn a_working_session_lifts_effective_status_to_in_progress() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            s.create_local_work_item(Some("LOC-2"), "Local work")
+                .unwrap();
+            s.link_session_work(sid, WorkTarget::Key("LOC-2"), "manual")
+                .unwrap();
+            mark_working(&s, sid, "c-loc-2");
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(w.effective_status.as_deref(), Some("in_progress"));
+        }
+
+        /// The lift belongs to the ITEM, not "this row's own session": a
+        /// DIFFERENT session's confirmed link to the same item, working,
+        /// lifts it too — matching the Work view's `Graph`-based check,
+        /// which also looks at every confirmed link, not only the primary.
+        #[test]
+        fn a_working_session_elsewhere_on_the_same_item_also_lifts_it() {
+            let s = Store::open_in_memory().unwrap();
+            let a = seed(&s, "a");
+            let b = seed(&s, "b");
+            let item = s.create_local_work_item(Some("LOC-3"), "Shared").unwrap();
+            s.link_session_work(a, WorkTarget::Item(item.id), "manual")
+                .unwrap();
+            s.link_session_work(b, WorkTarget::Item(item.id), "manual")
+                .unwrap();
+            mark_working(&s, b, "c-loc-3-b");
+            let w = s.get_session("a", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(
+                w.effective_status.as_deref(),
+                Some("in_progress"),
+                "a's own session is idle, but b's confirmed link to the same item is working"
+            );
+        }
+
+        #[test]
+        fn a_persons_status_is_final_even_while_a_session_works_it() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            let item = s
+                .create_local_work_item(Some("LOC-4"), "Local work")
+                .unwrap();
+            s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+                .unwrap();
+            s.set_item_status(item.id, "todo").unwrap();
+            mark_working(&s, sid, "c-loc-4");
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(w.effective_status.as_deref(), Some("todo"));
+        }
+
+        /// The exact arm the SQL's `IN ('person', 'derived')` protects and
+        /// nothing else in this crate exercises through the store's real
+        /// write path (`set_item_status` only ever writes `'person'`):
+        /// narrowing the SQL to `= 'person'` would read a PR-stamped `done`
+        /// back as `in_progress` here, with every other test in this file
+        /// still green.
+        #[test]
+        fn a_derived_done_stamp_is_final_even_while_a_session_works_it() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            let item = s
+                .create_local_work_item(Some("LOC-5"), "Local work")
+                .unwrap();
+            s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+                .unwrap();
+            assert!(s.stamp_derived_done(item.id).unwrap(), "stamps once");
+            mark_working(&s, sid, "c-loc-5");
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(
+                w.effective_status.as_deref(),
+                Some("done"),
+                "a PR-stamped done must not read back as in_progress"
+            );
+        }
+
+        #[test]
+        fn a_working_session_never_lifts_a_tracker_item() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            let item = tracker_item(&s, "TK-2", "todo");
+            s.link_session_work(sid, WorkTarget::Item(item), "manual")
+                .unwrap();
+            mark_working(&s, sid, "c-tk-2");
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(
+                w.effective_status.as_deref(),
+                Some("todo"),
+                "a tracker item's column is its tracker's"
+            );
+        }
+
+        #[test]
+        fn a_bare_key_has_no_item_and_no_effective_status() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            s.link_session_work(sid, WorkTarget::Key("BARE-1"), "manual")
+                .unwrap();
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(w.item_id, None);
+            assert_eq!(w.status_category, None);
+            assert_eq!(w.effective_status, None);
+            assert_eq!(w.kind, "ref");
+        }
+
+        /// Cross-check (fix round 3): the SQL macro and the Rust function
+        /// must agree — not two independently hand-written literal
+        /// expectations that could each be wrong the same way. Each arm
+        /// reads the item's REAL fields back from the store
+        /// (`Store::get_work_item`) and calls
+        /// `service::work::status::effective_status` with them directly,
+        /// then compares against what the SQL computed for the very same
+        /// item through the real `Store::get_session` path — so a drift
+        /// between the two implementations shows up as a mismatch, not as
+        /// two tests that each independently typed the "right" answer.
+        #[test]
+        fn the_sql_macro_and_the_rust_function_agree_arm_by_arm() {
+            use crate::service::work::status::effective_status;
+
+            fn agree(
+                s: &Store,
+                session_name: &str,
+                item_id: i64,
+                has_working_session: bool,
+                label: &str,
+            ) {
+                let raw = s.get_work_item(item_id).unwrap().unwrap();
+                let want = effective_status(
+                    &raw.status_category,
+                    raw.status_set_by.as_deref(),
+                    &raw.source,
+                    has_working_session,
+                );
+                let got = s
+                    .get_session(session_name, "h")
+                    .unwrap()
+                    .unwrap()
+                    .work
+                    .unwrap()
+                    .effective_status;
+                assert_eq!(got.as_deref(), want, "{label}");
+            }
+
+            // person
+            {
+                let s = Store::open_in_memory().unwrap();
+                let sid = seed(&s, "person");
+                let item = s.create_local_work_item(Some("X-1"), "t").unwrap();
+                s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+                    .unwrap();
+                s.set_item_status(item.id, "done").unwrap();
+                agree(&s, "person", item.id, false, "person's setting");
+            }
+            // derived, with a working session (the arm `IN ('person',
+            // 'derived')` protects and nothing but this cross-check and
+            // `a_derived_done_stamp_is_final_even_while_a_session_works_it`
+            // exercises).
+            {
+                let s = Store::open_in_memory().unwrap();
+                let sid = seed(&s, "derived");
+                let item = s.create_local_work_item(Some("X-2"), "t").unwrap();
+                s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+                    .unwrap();
+                s.stamp_derived_done(item.id).unwrap();
+                mark_working(&s, sid, "c-x-2");
+                agree(
+                    &s,
+                    "derived",
+                    item.id,
+                    true,
+                    "derived stamp, working session",
+                );
+            }
+            // live-lift on a local item
+            {
+                let s = Store::open_in_memory().unwrap();
+                let sid = seed(&s, "lift-local");
+                let item = s.create_local_work_item(Some("X-3"), "t").unwrap();
+                s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+                    .unwrap();
+                mark_working(&s, sid, "c-x-3");
+                agree(&s, "lift-local", item.id, true, "live lift on a local item");
+            }
+            // live-lift attempted on a tracker item (must not lift)
+            {
+                let s = Store::open_in_memory().unwrap();
+                let sid = seed(&s, "lift-tracker");
+                let item = tracker_item(&s, "TK-9", "todo");
+                s.link_session_work(sid, WorkTarget::Item(item), "manual")
+                    .unwrap();
+                mark_working(&s, sid, "c-x-4");
+                agree(
+                    &s,
+                    "lift-tracker",
+                    item,
+                    true,
+                    "live lift attempted on a tracker item",
+                );
+            }
+            // empty stored status: the schema (`NOT NULL DEFAULT 'todo'`)
+            // and every writer this crate has prevent it in practice — a
+            // narrow, deliberate raw `UPDATE` here (not the banned pattern
+            // of faking a person's/tracker's status through one) is the
+            // only way to drive this arm, simulating a hand-edited or
+            // pre-migration row.
+            {
+                let s = Store::open_in_memory().unwrap();
+                let sid = seed(&s, "empty");
+                let item = s.create_local_work_item(Some("X-5"), "t").unwrap();
+                s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+                    .unwrap();
+                s.conn_ref()
+                    .execute(
+                        "UPDATE work_items SET status_category = '' WHERE id = ?1",
+                        rusqlite::params![item.id],
+                    )
+                    .unwrap();
+                agree(&s, "empty", item.id, false, "empty stored status");
+            }
+        }
     }
 }

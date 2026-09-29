@@ -16,8 +16,10 @@ mod provision;
 mod ready;
 mod reports;
 mod serve;
+mod settings;
 mod tls;
 mod tracker;
+mod update;
 mod work;
 
 use clap::{Parser, Subcommand};
@@ -161,6 +163,24 @@ enum Cmd {
     Decide {
         #[command(subcommand)]
         cmd: decide::DecideCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Review settings proposals an agent made over the control API, and
+    /// read a setting's history (declarative pages P5). Reads and writes
+    /// the database directly, as the person at this console.
+    Settings {
+        #[command(subcommand)]
+        cmd: settings::SettingsCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// This hub's own updates. `check` reads the published release channel
+    /// and says what this build should run, verified against the release
+    /// key; it needs no running hub and installs nothing. See docs/updates.md.
+    Update {
+        #[command(subcommand)]
+        cmd: update::UpdateCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -423,6 +443,8 @@ async fn main() -> ExitCode {
         Cmd::Catalog { cmd, opts } => catalog::run(cmd, &opts, &env),
         Cmd::Census { cmd, opts } => census::run(cmd, &opts, &env),
         Cmd::Decide { cmd, opts } => decide::run(cmd, &opts, &env).await,
+        Cmd::Settings { cmd, opts } => settings::run(cmd, &opts, &env),
+        Cmd::Update { cmd, opts } => update::run(cmd, &opts, &env).await,
         Cmd::Reports {
             limit,
             since,
@@ -907,5 +929,16 @@ mod tests {
         assert_eq!((to, prefix.as_str(), json), (None, "pre-0.3.4", true));
         assert!(Cli::try_parse_from(["fleet-hub", "bogus"]).is_err());
         Cli::try_parse_from(["fleet-hub", "compat"]).unwrap();
+        let Cmd::Update { cmd, .. } =
+            Cli::try_parse_from(["fleet-hub", "update", "check", "--track", "beta", "--json"])
+                .unwrap()
+                .cmd
+        else {
+            panic!("update check");
+        };
+        assert!(matches!(
+            cmd,
+            update::UpdateCmd::Check { track: Some(ref t), json: true } if t == "beta"
+        ));
     }
 }

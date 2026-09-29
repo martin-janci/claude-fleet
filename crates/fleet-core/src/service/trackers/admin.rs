@@ -698,7 +698,7 @@ fn json<T: Serialize>(v: &T) -> Result<serde_json::Value, IpcError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::net::https::{FakeTransport, Method, Response};
     use serde_json::json;
@@ -939,7 +939,7 @@ mod tests {
 
     /// One successful Jira Cloud probe: identity, tenant, projects, fields,
     /// sprint check, favourite filters.
-    fn probe_ok(f: &FakeTransport) {
+    pub(crate) fn probe_ok(f: &FakeTransport) {
         f.once(
             Method::Get,
             "/myself",

@@ -17,6 +17,7 @@ pub mod resume;
 pub mod retention;
 #[cfg(test)]
 mod scale_tests;
+pub mod status;
 pub mod structure;
 pub mod summary;
 pub mod tidy;
@@ -175,6 +176,9 @@ pub struct WorkLinkArgs {
     /// Name: the work's title.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// set_status: todo | in_progress | done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
     /// item:<id> or ref:<KEY>.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
@@ -375,6 +379,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "dismiss",
     "tidy_apply",
     "name",
+    "set_status",
     "summarize",
     "set_primary",
     "reconsider",

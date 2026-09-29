@@ -1,0 +1,21 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings.review",
+  "title": "Proposed changes",
+  "parent": "settings",
+  "layout": "review_apply",
+  "review": "settings",
+  "intro": "Settings an agent proposed. Nothing changes until you apply it.",
+  "sections": [
+    {
+      "title": "How proposals work",
+      "items": [
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "An agent proposes with set_setting { propose: true } and says why. A change that needs confirming is never proposed, and one you reject stays rejected until the agent proposes again. Every applied change is in the setting's History."
+        }
+      ]
+    }
+  ]
+}

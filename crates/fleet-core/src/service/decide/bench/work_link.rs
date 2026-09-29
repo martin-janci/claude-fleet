@@ -1676,6 +1676,10 @@ pub struct BenchReport {
     pub thresholds: Thresholds,
     pub approximated: Vec<&'static str>,
     pub datasets: Vec<DatasetReport>,
+    /// `--perturb`: each perturbation's variants against their originals
+    /// (dataset C; a diagnostic).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub robustness: Vec<super::work_link_robust::WlRobustness>,
     pub notes: Vec<String>,
 }
 
@@ -2214,6 +2218,7 @@ pub fn report(loaded: &Loaded, opts: &BenchOptions, outcomes: &Outcomes) -> Benc
         thresholds: th,
         approximated: APPROXIMATIONS.to_vec(),
         datasets,
+        robustness: Vec::new(),
         notes,
     }
 }
@@ -2558,6 +2563,12 @@ fn language_cells(
 
 impl BenchReport {
     /// The report as lines for a terminal.
+    /// The report with `--perturb`'s comparisons.
+    pub fn with_robustness(mut self, r: Vec<super::work_link_robust::WlRobustness>) -> Self {
+        self.robustness = r;
+        self
+    }
+
     pub fn lines(&self) -> Vec<String> {
         let s = &self.sizes;
         let mut v = vec![
@@ -2796,6 +2807,11 @@ impl BenchReport {
                     v.push(format!("  {}", c.line()));
                 }
             }
+        }
+        let robust = super::work_link_robust::robustness_lines(&self.robustness);
+        if !robust.is_empty() {
+            v.push(String::new());
+            v.extend(robust);
         }
         if !self.notes.is_empty() {
             v.push(String::new());

@@ -22,6 +22,43 @@ export type StuckKind = (typeof STUCK_KINDS)[number];
 /** Reduced PR check status populated by reconcile (migration 019). */
 export type CiStatus = 'passing' | 'failing' | 'pending';
 
+/** One failing check of a PR, by the name GitHub shows (result evidence). */
+export interface FailingCheck {
+  name: string;
+  url?: string;
+}
+
+/** The PR's check rollup, counted. Mirrors Rust `outcome::CheckSummary`. */
+export interface CheckSummary {
+  total: number;
+  pending: number;
+  skipped: number;
+  failing?: FailingCheck[];
+  failing_total: number;
+}
+
+/**
+ * What the PR probe last read as evidence about a session's PR (migration
+ * 082). Mirrors Rust `outcome::PrEvidence`; every optional field absent
+ * means "not observed", never "fine".
+ */
+export interface PrEvidence {
+  /** The commit GitHub's checks describe (`headRefOid`). */
+  head_oid?: string;
+  /** The worktree's HEAD when the probe ran. */
+  local_head?: string;
+  /** Commits not on the upstream; absent without an upstream. */
+  ahead?: number;
+  /** Tracked files differ from HEAD; absent when git could not tell. */
+  dirty?: boolean;
+  draft: boolean;
+  review_decision?: string;
+  merge_state?: string;
+  /** OPEN | CLOSED | MERGED; absent from readings stored before it was added. */
+  state?: string;
+  checks: CheckSummary;
+}
+
 export interface SessionRow {
   id: number;
   tmux_name: string;
@@ -74,6 +111,10 @@ export interface SessionRow {
   /** Last Stop hook (turn completed). */
   last_turn_at: number | null;
   ci_status: CiStatus | null;
+  /** The PR's evidence (migration 082); absent without a PR or from an older hub. */
+  pr_evidence?: PrEvidence | null;
+  /** When the probe last observed the PR (unix secs); absent without a PR. */
+  pr_checked_at?: number | null;
   // Orchestration fields (migration 020).
   /** Completed turns, bumped by every Stop hook. */
   turn_seq: number;
@@ -159,9 +200,27 @@ export interface SessionWork {
   title: string;
   /** `manual` | `started` | `agent` | `agent_started` … — tolerant: a newer hub may add more. */
   source: string;
+  /** `tracker` | `local` | `ref` (native item status): which kind of task
+   *  this is. Empty for a hub older than this field — do not read that as
+   *  `ref`. */
+  kind?: string;
   /** The tracker item's status (work graph M3); absent for a bare key, a
-   *  local item, or a hub older than M3. `todo` | `in_progress` | `done`. */
+   *  local item, or a hub older than M3. `todo` | `in_progress` | `done`.
+   *
+   *  Deliberately NOT the live status (native item status task 4, fix
+   *  round 2): `isLocal`-style checks elsewhere derive "this is a local
+   *  item, not a ticket" from this being absent, so a local item's real
+   *  status must not appear here — see `effective_status`. */
   status_category?: string | null;
+  /** The item's status with the live precedence applied (design
+   *  2026-09-28 §2): a person's setting or a stamped `done` is final;
+   *  otherwise a confirmed link whose session is presently working lifts a
+   *  LOCAL item to `in_progress`; otherwise the stored value — for a
+   *  tracker item and a local item alike, unlike `status_category` above.
+   *  Prefer this for display (a status chip, a filter, "is it stale");
+   *  `status_category`'s only remaining job is "is this a ticket". Absent
+   *  for a bare key, or a hub older than this field. */
+  effective_status?: string | null;
   /** The tracker's own status name ("In Review"). */
   status_name?: string | null;
   url?: string | null;

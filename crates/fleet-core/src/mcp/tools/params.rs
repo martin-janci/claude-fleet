@@ -922,11 +922,42 @@ pub struct SetClientTrustParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct GetSettingsParams {
+    /// true: every key's metadata (label, help, bounds, danger) and value.
+    pub describe: Option<bool>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SetSettingParams {
     /// e.g. "work.recent_days".
     pub key: String,
     /// An object or array is stored as its JSON.
     pub value: serde_json::Value,
+    /// Only propose it: a person applies or rejects it in Settings.
+    #[serde(default)]
+    pub propose: bool,
+    /// With propose: why, shown to the person (≤500 chars).
+    #[serde(default)]
+    pub why: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SettingHistoryParams {
+    /// A registered setting, e.g. "work.recent_days".
+    pub key: String,
+    /// Newest first, 1-100; 20 when unset.
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct DecideSettingProposalsParams {
+    /// Proposal ids to apply.
+    #[serde(default)]
+    pub accept: Vec<i64>,
+    /// Proposal ids to reject.
+    #[serde(default)]
+    pub reject: Vec<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -975,6 +1006,13 @@ pub struct CatalogAdminParams {
     /// apply_sync: nonce of an approved E_CONFIRM_REQUIRED.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema, Default)]
+pub struct UpdateStatusParams {
+    /// client:<id>, agent:<alias> or hub:self: its whole decision.
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

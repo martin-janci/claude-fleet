@@ -800,6 +800,7 @@ fn write_reachable_host(
             intel_observed: pane.is_some(),
             ci_status: pr.and_then(|p| p.ci_status.clone()),
             pr_observed: pr.is_some(),
+            pr_evidence: pr.and_then(|p| p.evidence.clone()),
             tmux_pane_id: sess.pane_id.clone(),
             pending_input: pane.and_then(|p| p.pending_input.clone()),
             // The spinner on screen is life, whether or not this pass asked
@@ -969,6 +970,20 @@ fn write_reachable_host(
                 if let Err(e) = crate::service::work::detect::resolve_session(s, sid) {
                     tracing::debug!(error = %e.message, "[work] PR resolve failed");
                     s.ensure_in_tx()?;
+                }
+                // The merged-PR stamp, once more now that the links have
+                // settled (native item status, design 2026-09-28 §2):
+                // `set_pr_signals` already tried, but the resolve above may
+                // have only just confirmed the link the stamp needs. Both
+                // calls are on a signal that CHANGED this pass — a stale
+                // merged signal must never stamp work the session was
+                // pointed at later — and both are idempotent, so the second
+                // writes only what the first could not see yet.
+                if info.signals.as_ref().is_some_and(|sg| sg.is_merged()) {
+                    if let Err(e) = s.stamp_derived_done_for_session(sid) {
+                        tracing::debug!(error = %e.message, "[work] merged PR did not stamp");
+                        s.ensure_in_tx()?;
+                    }
                 }
                 // Write-back (M13.4e): after the links settled, queue the
                 // PR's remote link where an admin allows it. Idempotent.

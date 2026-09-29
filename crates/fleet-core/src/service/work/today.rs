@@ -130,7 +130,16 @@ pub struct EndedWork {
 
 /// Why a session is stale, if it is.
 fn stale_reason(row: &SessionRow, now: i64) -> Option<&'static str> {
-    if row.work.as_ref().and_then(|w| w.status_category.as_deref()) == Some("done") {
+    // `effective_status`, not `status_category` (fix round 2): the latter
+    // is tracker-only on the wire (wire compat with a shipped phone build),
+    // so reading it here would silently never flag a LOCAL item's own
+    // person-set or PR-derived `done` as stale.
+    if row
+        .work
+        .as_ref()
+        .and_then(|w| w.effective_status.as_deref())
+        == Some("done")
+    {
         Some("done")
     } else if row.last_activity_at < now - STALE_AFTER_SECS {
         Some("idle")
@@ -185,7 +194,11 @@ pub fn digest(
                                 key: Some(key),
                                 title: w.title.clone(),
                                 item_id: w.item_id,
-                                status_category: w.status_category.clone(),
+                                // `effective_status`, not `status_category`
+                                // (fix round 3): the latter is tracker-only
+                                // on the wire, so the group header would
+                                // never show a local item's own status.
+                                status_category: w.effective_status.clone(),
                                 status_name: w.status_name.clone(),
                                 url: w.url.clone(),
                                 org_id: w.org_id,
@@ -448,7 +461,9 @@ mod tests {
         let mut recent_idle = row(4, Some("OLD-1"));
         recent_idle.claude_status = Some("idle".into());
         let mut done = row(5, Some("DONE-1"));
-        done.work.as_mut().unwrap().status_category = Some("done".into());
+        // `effective_status`, not `status_category` (fix round 2):
+        // `stale_reason` reads the live-lifted field now.
+        done.work.as_mut().unwrap().effective_status = Some("done".into());
         let t = digest(
             &[blocked, working, idle, recent_idle, done],
             &[],
@@ -504,6 +519,8 @@ mod tests {
                 title: format!("{key} title"),
                 url: Some(format!("https://x.atlassian.net/browse/{key}")),
                 status_category: cat.into(),
+                status_set_by: None,
+                status_set_at: None,
                 created_at: 1,
                 updated_at: 1,
                 tracker_id: Some(1),

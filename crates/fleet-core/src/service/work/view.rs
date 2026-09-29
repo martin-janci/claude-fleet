@@ -26,6 +26,7 @@
 //! decisions); ended suggestions and rejections are dropped altogether.
 
 use super::resolve::Evidence;
+use super::status::effective_status;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::attention;
 use crate::service::orgs::OrgScope;
@@ -471,10 +472,36 @@ pub(crate) struct Graph {
     pub(crate) rules: Vec<WorkRule>,
     /// `health.context_red_pct`: `needs_you` agrees with `list_sessions`.
     pub(crate) context_red_pct: f64,
+    /// Item ids with a live confirmed link whose session is presently
+    /// working (native item status §2 rule 3) — one join for the whole
+    /// page, looked up per task instead of queried per row. Fenced by the
+    /// caller's `OrgScope` (fix round 2): an item whose only working
+    /// session belongs to a session this scope cannot see is left out, so
+    /// "someone is working on this" never leaks through a task the caller
+    /// can otherwise see.
+    pub(crate) working_session_items: BTreeSet<i64>,
 }
 
 impl Graph {
-    pub(crate) fn load(s: &Store) -> Result<Graph, IpcError> {
+    pub(crate) fn load(s: &Store, scope: &OrgScope) -> Result<Graph, IpcError> {
+        let sessions: HashMap<i64, SessionRow> = s
+            .list_all_sessions()?
+            .into_iter()
+            .map(|r| (r.id, r))
+            .collect();
+        // Fence the live signal by scope: a pair whose session this scope
+        // cannot see (`OrgScope::sees_row`, the same check `link_visible`
+        // uses) does not lift its item, even though the raw query found it.
+        let working_session_items: BTreeSet<i64> = s
+            .work_items_with_working_session()?
+            .into_iter()
+            .filter(|(_, session_id)| {
+                sessions
+                    .get(session_id)
+                    .is_some_and(|row| scope.sees_row(row))
+            })
+            .map(|(item_id, _)| item_id)
+            .collect();
         Ok(Graph {
             now: crate::service::catalog::now_secs(),
             items: s
@@ -483,11 +510,7 @@ impl Graph {
                 .map(|i| (i.item.id, i))
                 .collect(),
             links: s.work_view_links()?,
-            sessions: s
-                .list_all_sessions()?
-                .into_iter()
-                .map(|r| (r.id, r))
-                .collect(),
+            sessions,
             trackers: s.list_trackers()?.into_iter().map(|t| (t.id, t)).collect(),
             orgs: s.list_orgs()?,
             projects: s.list_projects()?.into_iter().map(|p| (p.id, p)).collect(),
@@ -498,6 +521,7 @@ impl Graph {
                 .collect(),
             rules: s.work_rules()?,
             context_red_pct: crate::service::health::context_red_pct(s),
+            working_session_items,
         })
     }
 
@@ -1204,9 +1228,14 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         ended: ended_sessions.len() as u32,
         suggested: suggested_sessions.len() as u32,
     };
-    let status_category = item
-        .map(|i| i.item.status_category.clone())
-        .filter(|c| !c.is_empty());
+    // `status_category` here is `item_status`'s live-lifted value (fix
+    // round 3 checked this deliberately, not assumed safe): a `done` that
+    // the live rule lifts to `in_progress` (a session resumes an
+    // untracked/legacy `done`) never flips `archived` to true either way,
+    // because the same confirmed link that justifies the lift is itself
+    // `active` in `b.all` below — see
+    // `a_legacy_done_item_a_session_resumes_is_lifted_and_stays_unarchived`.
+    let status_category = item.and_then(|i| item_status(g, i));
     // Over every link: `counts.active` is the caller's, and a session on a
     // host or in an org it cannot see still keeps the task in work.
     let archived = !b.all.iter().any(|(_, st)| *st == "active")
@@ -1750,7 +1779,7 @@ fn section_pages(
 pub fn tree(store: &Mutex<Store>, scope: &OrgScope, args: &TreeArgs) -> Result<TreePage, IpcError> {
     let g = {
         let s = lock(store)?;
-        Graph::load(&s)?
+        Graph::load(&s, scope)?
     };
     tree_of(&g, scope, args)
 }
@@ -1819,7 +1848,7 @@ pub(crate) fn find_task(
 pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<TaskDetail, IpcError> {
     let g = {
         let s = lock(store)?;
-        Graph::load(&s)?
+        Graph::load(&s, scope)?
     };
     let (task, aliases) = find_task(&g, scope, task_id, true)?;
     let item = task.item_id.and_then(|i| g.items.get(&i));
@@ -1959,15 +1988,32 @@ fn brief_of(g: &Graph, task_id: &str, item: Option<&ViewItem>, ref_key: Option<&
             .or_else(|| ref_key.map(str::to_string)),
         title: item.map(|i| i.item.title.clone()).unwrap_or_default(),
         kind: task_kind(item).into(),
-        status_category: item
-            .map(|i| i.item.status_category.clone())
-            .filter(|c| !c.is_empty()),
+        // The same live precedence `to_task` projects (§2, fix round 1):
+        // two views of the same item must not disagree about its status.
+        // `working_session_items` is the same page-wide one-join set —
+        // this adds no second query.
+        status_category: item.and_then(|i| item_status(g, i)),
         status_name: item.and_then(|i| i.item.status_name.clone()),
         url: item.and_then(|i| i.item.url.clone()),
         unavailable: item.is_some_and(|i| i.item.unavailable_at.is_some()),
         org_id: item.and_then(|i| g.item_org(i)),
         tracker_name: tracker.map(|t| t.name.clone()),
     }
+}
+
+/// The item's status a reader should see (§2), shared by `to_task` and
+/// `brief_of` so the tree and a session's own task list can never disagree.
+/// `effective_status` itself answers `None` for an empty stored value (fix
+/// round 3 moved that guard inside the function, so there is one place to
+/// get it right instead of once per caller).
+fn item_status(g: &Graph, i: &ViewItem) -> Option<String> {
+    effective_status(
+        &i.item.status_category,
+        i.item.status_set_by.as_deref(),
+        &i.item.source,
+        g.working_session_items.contains(&i.item.id),
+    )
+    .map(str::to_string)
 }
 
 /// `work { action: session_tasks, session_id }`: every link of the
@@ -1980,7 +2026,7 @@ pub fn session_tasks(
 ) -> Result<SessionTasks, IpcError> {
     let g = {
         let s = lock(store)?;
-        Graph::load(&s)?
+        Graph::load(&s, scope)?
     };
     let row = g
         .sessions
@@ -2265,7 +2311,7 @@ pub fn review(
 ) -> Result<ReviewPage, IpcError> {
     let g = {
         let s = lock(store)?;
-        Graph::load(&s)?
+        Graph::load(&s, scope)?
     };
     review_of(&g, scope, cursor, limit)
 }

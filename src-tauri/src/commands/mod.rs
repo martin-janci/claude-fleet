@@ -13,6 +13,7 @@ pub mod mutate;
 pub mod onboarding;
 pub mod operator;
 pub mod orgs;
+pub mod pages;
 pub mod projects;
 pub mod quick_replies;
 pub mod resolve_move;

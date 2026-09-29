@@ -20,14 +20,14 @@ pub use fetch::HttpsFetch;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use fleet_update::channel::{attach_evidence, RawDoc};
+use fleet_update::channel::{attach_evidence, CheckOutcome, RawDoc};
 use fleet_update::decide::{decide, DecideInput, HubSpeaks, Pin, Policy};
 use fleet_update::verify::verify_channel;
-use fleet_update::wire::{CheckRequest, Decision, Report, Speaks, Status, UPDATE_PROTO};
+use fleet_update::wire::{CheckRequest, Decision, Installed, Report, Speaks, Status, UPDATE_PROTO};
 use fleet_update::{
     fetch_channel, fetch_manifests, verify_listed_manifest, wanted_versions, Component, Fetch,
-    Manifests, Mode, Platform, Source, Track, TrustedKeys, UpdateError, VerifiedChannel, Version,
-    Window,
+    GitUpdateChannel, Manifests, MemorySequenceStore, Mode, Platform, SequenceStore, Source, Track,
+    TrustedKeys, UpdateChannel, UpdateError, UpdatePhase, VerifiedChannel, Version, Window,
 };
 use serde::Serialize;
 
@@ -362,6 +362,78 @@ pub fn check(
     )
 }
 
+/// Record what a paired client's `X-Fleet-Client` header says it runs
+/// (design §6.3), so the dashboard knows its version without it calling
+/// `/update`. Only a client token, only a client component; the phase, the
+/// last check and the last error are the target's own reports and stay.
+/// `authorize` calls it at most once a minute per client.
+pub fn record_client_header(
+    s: &Store,
+    caller: &Caller,
+    h: &fleet_update::client_header::ClientHeader,
+    now: i64,
+) -> Result<(), IpcError> {
+    if caller.client.is_none() || caller.mode == TokenMode::Updater {
+        return Ok(());
+    }
+    let id = identity(caller)?;
+    if !id.allowed.contains(&h.component) {
+        return Ok(());
+    }
+    let prev = s.update_observed(&id.target)?;
+    // The header carries os and arch only: keep a reported variant while
+    // they match.
+    let platform = h.platform.as_ref().map(|p| {
+        let variant = prev
+            .as_ref()
+            .and_then(|o| o.platform.as_deref())
+            .and_then(|j| serde_json::from_str::<Platform>(j).ok())
+            .filter(|old| old.os == p.os && old.arch == p.arch)
+            .map(|old| old.variant)
+            .unwrap_or_default();
+        Platform::new(&p.os, &p.arch, &variant)
+    });
+    let mut speaks: Speaks = prev
+        .as_ref()
+        .and_then(|o| o.speaks.as_deref())
+        .and_then(|j| serde_json::from_str(j).ok())
+        .unwrap_or_default();
+    if h.contract_accepts.is_some() {
+        speaks.contract_accepts = h.contract_accepts;
+    }
+    let same_build = prev
+        .as_ref()
+        .is_some_and(|o| o.version == h.version.to_string());
+    s.upsert_update_observed(&UpdateObservedRow {
+        target: id.target,
+        component: h.component.as_str().into(),
+        platform: platform
+            .as_ref()
+            .and_then(json)
+            .or_else(|| prev.as_ref().and_then(|o| o.platform.clone())),
+        version: h.version.to_string(),
+        commit_sha: h.build.clone().or_else(|| {
+            prev.as_ref()
+                .filter(|_| same_build)
+                .and_then(|o| o.commit_sha.clone())
+        }),
+        build_id: prev
+            .as_ref()
+            .filter(|_| same_build)
+            .and_then(|o| o.build_id.clone()),
+        digest: None,
+        speaks: json(&speaks),
+        phase: prev
+            .as_ref()
+            .map(|o| o.phase.clone())
+            .unwrap_or_else(|| "idle".into()),
+        attempt: prev.as_ref().and_then(|o| o.attempt.clone()),
+        last_error: prev.as_ref().and_then(|o| o.last_error.clone()),
+        reported_at: now,
+        last_checked_at: None,
+    })
+}
+
 /// `POST /update/report`: one state-machine transition and the observed
 /// state that comes with it. Idempotent on `(target, attempt, phase)` for a
 /// report that carries an attempt: a replayed report adds nothing and returns
@@ -491,26 +563,17 @@ pub struct UpdateStatus {
     pub pins: Vec<UpdateDesiredRow>,
 }
 
-/// The fleet's update picture (`update_status`). A caller behind an org
-/// boundary (a per-host token, an org-bound client) sees its own row only and
-/// no pins; the master and an unbound client see every target.
-pub fn status(
-    store: &Mutex<Store>,
-    caller: &Caller,
-    keys: &TrustedKeys,
+/// Every observed target (or only `own`), with what the hub would tell it
+/// now.
+fn target_rows(
+    s: &Store,
+    cached: Option<&Cached>,
+    own: Option<&str>,
     now: i64,
-) -> Result<UpdateStatus, IpcError> {
-    let own = if caller.is_scoped() {
-        Some(identity(caller)?.target)
-    } else {
-        None
-    };
-    let s = lock(store)?;
-    let track = track(&s);
-    let cached = load_cached(&s, track, keys, now);
+) -> Result<Vec<TargetStatus>, IpcError> {
     let mut targets = Vec::new();
     for o in s.update_observed_all()? {
-        if own.as_ref().is_some_and(|t| *t != o.target) {
+        if own.is_some_and(|t| t != o.target) {
             continue;
         }
         let Ok(component) = o.component.parse::<Component>() else {
@@ -530,14 +593,7 @@ pub fn status(
             continue;
         };
         let d = decide_for(
-            &s,
-            cached.as_ref(),
-            component,
-            &o.target,
-            &platform,
-            &installed,
-            &speaks,
-            now,
+            s, cached, component, &o.target, &platform, &installed, &speaks, now,
         )?;
         targets.push(TargetStatus {
             target: o.target,
@@ -553,6 +609,27 @@ pub fn status(
             reason: d.reason.text,
         });
     }
+    Ok(targets)
+}
+
+/// The fleet's update picture (`update_status`). A caller behind an org
+/// boundary (a per-host token, an org-bound client) sees its own row only and
+/// no pins; the master and an unbound client see every target.
+pub fn status(
+    store: &Mutex<Store>,
+    caller: &Caller,
+    keys: &TrustedKeys,
+    now: i64,
+) -> Result<UpdateStatus, IpcError> {
+    let own = if caller.is_scoped() {
+        Some(identity(caller)?.target)
+    } else {
+        None
+    };
+    let s = lock(store)?;
+    let track = track(&s);
+    let cached = load_cached(&s, track, keys, now);
+    let targets = target_rows(&s, cached.as_ref(), own.as_deref(), now)?;
     let mut components: BTreeMap<String, ComponentSummary> = BTreeMap::new();
     for t in &targets {
         let e = components
@@ -598,6 +675,170 @@ pub fn status(
         } else {
             s.update_desired_all()?
         },
+    })
+}
+
+/// What the hub would tell one `target` now, and why (`update_status {
+/// target }`, the dashboard's "why"): the full decision for its last
+/// reported build, without the relayed documents. A scoped caller may ask
+/// about itself only.
+pub fn check_for(
+    store: &Mutex<Store>,
+    caller: &Caller,
+    target: &str,
+    keys: &TrustedKeys,
+    now: i64,
+) -> Result<Decision, IpcError> {
+    if caller.is_scoped() && identity(caller)?.target != target {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            "a scoped token may ask about its own target only",
+        ));
+    }
+    let s = lock(store)?;
+    let o = s.update_observed(target)?.ok_or_else(|| {
+        IpcError::new(
+            codes::E_INVALID,
+            format!("{target:?} has not reported to this hub (see update_status)"),
+        )
+    })?;
+    let component =
+        serde_json::from_value::<Component>(serde_json::Value::String(o.component.clone()))
+            .map_err(|_| {
+                IpcError::new(
+                    codes::E_INVALID,
+                    format!("unknown component {:?}", o.component),
+                )
+            })?;
+    let platform: Platform = o
+        .platform
+        .as_deref()
+        .and_then(|p| serde_json::from_str(p).ok())
+        .unwrap_or_else(|| Platform::new("", "", ""));
+    let speaks: Speaks = o
+        .speaks
+        .as_deref()
+        .and_then(|p| serde_json::from_str(p).ok())
+        .unwrap_or_default();
+    let installed = Version::parse(&o.version).map_err(|e| {
+        IpcError::new(
+            codes::E_INVALID,
+            format!("reported version {:?}: {e}", o.version),
+        )
+    })?;
+    let cached = load_cached(&s, track(&s), keys, now);
+    let mut d = decide_for(
+        &s,
+        cached.as_ref(),
+        component,
+        target,
+        &platform,
+        &installed,
+        &speaks,
+        now,
+    )?;
+    if let Some(t) = d.target.as_mut() {
+        t.evidence = None;
+    }
+    Ok(d)
+}
+
+// ── fleet_health ──
+
+/// `fleet_health.updates[].reason`: a target the hub would answer
+/// `update_required` (blocked until it updates).
+pub const ATTENTION_UPDATE_REQUIRED: &str = "update_required";
+/// An install that failed (phase `failed`).
+pub const ATTENTION_UPDATE_FAILED: &str = "update_failed";
+/// An install that was rolled back to the previous build (phase `recovered`).
+pub const ATTENTION_UPDATE_ROLLED_BACK: &str = "update_rolled_back";
+/// A rollback that did not come back either: terminal until an operator
+/// clears it (phase `rollback_failed`).
+pub const ATTENTION_ROLLBACK_FAILED: &str = "rollback_failed";
+/// The verified channel is past its signed `expires_at`: nothing new is
+/// offered until the publisher re-signs or the hub can fetch it again.
+pub const ATTENTION_CHANNEL_STALE: &str = "channel_stale";
+
+/// One thing about the fleet's updates a person should look at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct UpdateAttention {
+    /// One of the `ATTENTION_*` codes.
+    pub reason: String,
+    /// `client:3`, `agent:<host>`, `hub:self`; `channel:<track>` for
+    /// `channel_stale`.
+    pub target: String,
+    #[serde(default)]
+    pub component: String,
+    /// The target's reported version (empty for the channel).
+    #[serde(default)]
+    pub version: String,
+    /// The hub's reason text or the target's last error.
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+/// `fleet_health.updates` (update design §9): the channel's state and what
+/// needs a person. `rollout_paused` joins it with rollouts (S9).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct UpdatesHealth {
+    /// `fresh`, `stale`, or `none` (no channel verifies yet).
+    #[serde(default)]
+    pub channel: String,
+    #[serde(default)]
+    pub attention: Vec<UpdateAttention>,
+}
+
+/// The update roll-up for `fleet_health`. A scoped caller (a per-host token,
+/// an org-bound client) sees its own target only, as in `update_status`.
+pub fn health(
+    s: &Store,
+    caller: &Caller,
+    keys: &TrustedKeys,
+    now: i64,
+) -> Result<UpdatesHealth, IpcError> {
+    let own = if caller.is_scoped() {
+        Some(identity(caller)?.target)
+    } else {
+        None
+    };
+    let track = track(s);
+    let cached = load_cached(s, track, keys, now);
+    let mut attention = Vec::new();
+    let channel = match &cached {
+        None => "none",
+        Some(c) if c.channel.fresh => "fresh",
+        Some(_) => {
+            attention.push(UpdateAttention {
+                reason: ATTENTION_CHANNEL_STALE.into(),
+                target: format!("channel:{}", track.as_str()),
+                component: String::new(),
+                version: String::new(),
+                detail: None,
+            });
+            "stale"
+        }
+    };
+    for t in target_rows(s, cached.as_ref(), own.as_deref(), now)? {
+        let (reason, detail) = match t.phase.as_str() {
+            "rollback_failed" => (ATTENTION_ROLLBACK_FAILED, t.last_error.clone()),
+            "failed" => (ATTENTION_UPDATE_FAILED, t.last_error.clone()),
+            "recovered" => (ATTENTION_UPDATE_ROLLED_BACK, t.last_error.clone()),
+            _ if t.status == Status::UpdateRequired => {
+                (ATTENTION_UPDATE_REQUIRED, Some(t.reason.clone()))
+            }
+            _ => continue,
+        };
+        attention.push(UpdateAttention {
+            reason: reason.into(),
+            target: t.target,
+            component: t.component,
+            version: t.version,
+            detail,
+        });
+    }
+    Ok(UpdatesHealth {
+        channel: channel.into(),
+        attention,
     })
 }
 
@@ -695,6 +936,98 @@ pub fn unpin(store: &Mutex<Store>, component: &str, target: &str) -> Result<bool
     let c = parse_component(component)?;
     validate_target(c, target)?;
     lock(store)?.clear_update_desired(c.as_str(), target)
+}
+
+// ── Git mode: a standalone check ──
+
+/// A standalone check (Git mode, design §7 F1): no hub above, so the
+/// published channel is read directly and decided under a local policy.
+/// What `fleet-hub update check` runs for the hub itself, and what a
+/// standalone desktop will run for its own build (S7).
+#[derive(Debug, Clone)]
+pub struct GitCheck {
+    /// Where `<track>.json` lives ([`channel_base_url`]).
+    pub base_url: String,
+    pub track: Track,
+    pub policy: Policy,
+    /// The highest channel sequence already trusted (the replay guard).
+    pub seen: u64,
+}
+
+impl GitCheck {
+    /// The settings, pin and last-seen sequence of `store` when there is
+    /// one, the defaults otherwise; `track` overrides `update.track`.
+    pub fn from_store(
+        store: Option<&Store>,
+        component: Component,
+        target: &str,
+        track_override: Option<Track>,
+    ) -> Result<GitCheck, IpcError> {
+        let track = track_override.unwrap_or_else(|| store.map_or(Track::Stable, track));
+        let (policy, seen) = match store {
+            Some(s) => (
+                policy(s, component, target)?,
+                s.update_doc("channel", track.as_str())?
+                    .and_then(|d| d.sequence)
+                    .map_or(0, |q| q.max(0) as u64),
+            ),
+            None => (Policy::default(), 0),
+        };
+        Ok(GitCheck {
+            base_url: channel_base_url(),
+            track,
+            policy,
+            seen,
+        })
+    }
+}
+
+/// The check request for this running hub build.
+pub fn hub_self_request(installed: Installed) -> CheckRequest {
+    CheckRequest {
+        update_proto: UPDATE_PROTO,
+        component: Component::Hub,
+        platform: hub_platform(),
+        installed,
+        speaks: Speaks::default(),
+        phase: UpdatePhase::Idle,
+        attempt: None,
+    }
+}
+
+/// Decide `req` from the published channel ([`GitUpdateChannel`]), and
+/// prove a target it names against the signed documents. A channel that
+/// is not published yet is `E_HUB_UNAVAILABLE`, saying so; one no trusted
+/// key signed, or an older one than `check.seen`, is `E_UPDATE_UNVERIFIED`.
+pub async fn git_check<F: Fetch + 'static>(
+    fetch: F,
+    check: GitCheck,
+    keys: TrustedKeys,
+    req: &CheckRequest,
+    now: i64,
+) -> Result<CheckOutcome, IpcError> {
+    let url = fleet_update::channel::channel_url(&check.base_url, check.track);
+    let seen = MemorySequenceStore::default();
+    seen.record(check.track, check.seen);
+    let channel = GitUpdateChannel::new(
+        fetch,
+        check.base_url,
+        check.track,
+        check.policy,
+        keys,
+        Box::new(seen),
+    )
+    .with_clock(move || now);
+    channel.check(req).await.map_err(|e| match e {
+        UpdateError::Http { status: 404, .. } => IpcError::new(
+            codes::E_HUB_UNAVAILABLE,
+            format!(
+                "no {} channel is published yet (nothing at {url})",
+                check.track.as_str()
+            ),
+        ),
+        other => update_err(other),
+    })
 }
 
 // ── refresh ──
@@ -807,7 +1140,10 @@ pub async fn refresh(
         })?;
     }
     let keep: Vec<String> = wanted.iter().map(|v| v.to_string()).collect();
-    s.prune_update_manifests(&keep)?;
+    let pruned = s.prune_update_manifests(&keep)?;
+    if channel.doc.sequence != seen || !fetched.raw.is_empty() || pruned > 0 {
+        s.emit_update_changed("channel", None);
+    }
     let manifests = s.update_docs("manifest")?.len();
     let outcome = RefreshOutcome {
         track,
@@ -834,12 +1170,15 @@ pub struct HubSelf {
     pub build_id: String,
 }
 
-fn hub_variant() -> &'static str {
-    if std::path::Path::new("/.dockerenv").exists() {
+/// This hub's platform: in a container it is updated as an image, else as
+/// the release tarball.
+pub fn hub_platform() -> Platform {
+    let variant = if std::path::Path::new("/.dockerenv").exists() {
         "oci"
     } else {
         "tarball"
-    }
+    };
+    Platform::new(std::env::consts::OS, std::env::consts::ARCH, variant)
 }
 
 /// Record `hub:self` at start. The same version keeps the phase, attempt
@@ -847,18 +1186,13 @@ fn hub_variant() -> &'static str {
 /// binary is running, and the old attempt's outcome no longer describes it
 /// (the updater's own queued reports, if any, follow and set them again).
 pub(crate) fn record_hub_self(store: &Store, me: &HubSelf, now: i64) -> Result<(), IpcError> {
-    let variant = hub_variant();
     let prev = store
         .update_observed("hub:self")?
         .filter(|p| p.version == me.version);
     store.upsert_update_observed(&UpdateObservedRow {
         target: "hub:self".into(),
         component: "hub".into(),
-        platform: json(&Platform::new(
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            variant,
-        )),
+        platform: json(&hub_platform()),
         version: me.version.clone(),
         commit_sha: Some(me.commit.clone()),
         build_id: Some(me.build_id.clone()),
