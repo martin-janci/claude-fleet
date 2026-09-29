@@ -594,6 +594,8 @@ mod tests {
             last_stop_at: None,
             stale_working_at: None,
             work_rev: 0,
+            pr_evidence: None,
+            pr_checked_at: None,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),

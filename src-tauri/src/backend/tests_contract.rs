@@ -80,6 +80,8 @@ pub(crate) fn sample_session() -> SessionRow {
         last_stop_at: Some(1_725_000_900),
         stale_working_at: Some(1_790_500_000),
         work_rev: 17,
+        pr_evidence: None,
+        pr_checked_at: None,
         parent_session_id: Some(5),
         tags: vec!["tag-a".into(), "tag-b".into()],
         row_version: 12,
