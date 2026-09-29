@@ -2382,7 +2382,7 @@ fn native_work(
     }
     // Newest conversation first (a stable sort keeps first-seen order on a
     // tie).
-    groups.sort_by(|a, b| b.0.cmp(&a.0));
+    groups.sort_by_key(|g| std::cmp::Reverse(g.0));
     out.steps = groups.into_iter().map(|(_, grp)| grp).collect();
     Ok(out)
 }
