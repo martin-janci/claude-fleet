@@ -25,18 +25,27 @@ drv_install_hint() {
 }
 
 # drv_argv — fill ARGV from the AG_* globals:
-#   codex [exec] [resume --last | resume ID] [flags…] [passthrough…] [PROMPT]
+#   codex [exec] [resume --last | resume [ID]] [flags…] [passthrough…] [PROMPT]
 # Codex cannot start a session under a caller-chosen id: --new-id → exit 3.
-# --name has no Codex equivalent and is dropped.
+# --name has no Codex equivalent and is dropped. AG_RESUME_PICKER=1 (bare
+# -r/--resume) maps to a bare `resume` — Codex's own resume picker; combined
+# with -p that is `exec resume` with no id, which Codex cannot run
+# non-interactively, so that combination is a usage error (exit 2).
 drv_argv() {
   if [ -n "$AG_NEW_ID" ]; then
     echo "ag: codex cannot start a session under a chosen id (--new-id)" >&2
     return 3
   fi
+  if [ "$AG_HAS_PRINT" = 1 ] && [ "$AG_RESUME_PICKER" = 1 ]; then
+    echo "ag: codex needs a session id to resume non-interactively — pass -r ID, or drop -p to use the picker" >&2
+    return 2
+  fi
   ARGV=("$(drv_bin)")
   if [ "$AG_HAS_PRINT" = 1 ]; then ARGV+=(exec); fi
   if [ "$AG_CONTINUE" = 1 ]; then
     ARGV+=(resume --last)
+  elif [ "$AG_RESUME_PICKER" = 1 ]; then
+    ARGV+=(resume)
   elif [ -n "$AG_RESUME" ]; then
     ARGV+=(resume "$AG_RESUME")
   fi
