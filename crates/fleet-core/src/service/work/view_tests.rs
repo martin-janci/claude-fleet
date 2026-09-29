@@ -1432,3 +1432,49 @@ fn the_live_lift_is_fenced_by_org_scope() {
         "org A must not see org B's session lift this to in_progress"
     );
 }
+
+/// Fix round 3 (item 5): `to_task`'s `archived` now reads `item_status`
+/// (the live-lifted value), not the raw stored `status_category` directly
+/// — checked here rather than assumed safe. A "legacy" done item
+/// (`status_category = 'done'`, `status_set_by` NULL — written before that
+/// column existed, or by hand) that a session resumes work on is lifted to
+/// `in_progress` by the same live rule that protects a tracked done/derived
+/// stamp from a fresh working session; either way `archived` stays false,
+/// because the very link that lifts the status also makes
+/// `counts.active >= 1` for the same task. This pins that interaction.
+#[test]
+fn a_legacy_done_item_a_session_resumes_is_lifted_and_stays_unarchived() {
+    let w = world();
+    let item =
+        w.st.lock()
+            .unwrap()
+            .create_local_work_item(Some("LOC-91"), "Legacy done")
+            .unwrap();
+    // A narrow, deliberate raw UPDATE (not the banned pattern of faking a
+    // person's/tracker's status through one): simulates a `done` stamped
+    // before `status_set_by` existed, which `stamp_derived_done`/
+    // `set_item_status` — the store's only real writers — always pair with
+    // one, so there is no other way to reach this state through the store.
+    w.st.lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE work_items SET status_category = 'done' WHERE id = ?1",
+            rusqlite::params![item.id],
+        )
+        .unwrap();
+    link(&w, w.s1, item.id, true);
+    mark_working(&w, w.s1, "c-loc-91");
+
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let t = task_of(&p, "LOC-91");
+    assert_eq!(
+        t.status_category.as_deref(),
+        Some("in_progress"),
+        "nobody tracked this done, so the live lift applies"
+    );
+    assert!(
+        !t.archived,
+        "a session working it now is not archived, lifted status or not"
+    );
+}

@@ -277,11 +277,18 @@
 
   // ── "Name this work…" (work graph M11.1): work with a title and no
   // ticket. A local item's title can be renamed from here too (the backend
-  // refuses a ticket anyway). `kind` is the reliable signal (native item
-  // status task 4): a local item now carries a real `status_category` too,
-  // so "is it absent?" no longer means "not a ticket". A hub older than
-  // `kind` sends none — fall back to the old heuristic for it, since such a
-  // hub still hides a local item's status the old way.
+  // refuses a ticket anyway). `status_category` stays tracker-only on the
+  // wire on purpose (native item status task 4, fix round 2 reverted an
+  // attempt to relax it): a paired phone derives "this is a local item,
+  // not a ticket" from `status_category == null`, so making it non-null
+  // for local work would silently break Rename on every phone. `kind`
+  // (`tracker` | `local` | `ref`) is the newer, explicit signal — prefer
+  // it; fall back to the `status_category == null && !url` heuristic only
+  // when a hub is old enough not to send `kind` at all, since that hub
+  // still follows the same tracker-only rule the fallback assumes. A
+  // local item's LIVE status (including the working-session lift) is
+  // `effective_status`, a different field entirely — irrelevant to this
+  // local-vs-ticket check.
   let nameDialog = $state<
     | { mode: 'name'; sessions: { id: number; label: string }[] }
     | { mode: 'rename'; itemId: number; title: string; key?: string | null }

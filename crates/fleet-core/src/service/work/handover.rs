@@ -673,18 +673,13 @@ pub fn gather_stored(
             .map(|i| i.title.clone())
             .filter(|t| !t.is_empty()),
         status: item.as_ref().and_then(|i| {
-            if i.status_category.is_empty() {
-                return None;
-            }
-            Some(
-                crate::service::work::status::effective_status(
-                    &i.status_category,
-                    i.status_set_by.as_deref(),
-                    &i.source,
-                    has_working_session,
-                )
-                .to_string(),
+            crate::service::work::status::effective_status(
+                &i.status_category,
+                i.status_set_by.as_deref(),
+                &i.source,
+                has_working_session,
             )
+            .map(str::to_string)
         }),
         url: item.as_ref().and_then(|i| i.url.clone()),
         sessions: live.len() + ended.len(),

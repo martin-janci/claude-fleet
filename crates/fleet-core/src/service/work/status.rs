@@ -62,17 +62,32 @@ pub fn set_status(
 ///
 /// `has_working_session` must come from ONE join over the whole page
 /// (`Store::work_items_with_working_session`) — never a query per row.
+///
+/// `None` when `status_category` is itself empty (fix round 3): the
+/// schema never produces this (`NOT NULL DEFAULT 'todo'`, and every writer
+/// — sync, `set_item_status`, `stamp_derived_done` — writes one of the
+/// three real values), but a raw empty column must not be reported as
+/// `todo`, which would assert something nobody said. This used to be a
+/// guard every caller repeated outside the function (`view.rs`'s
+/// `item_status`, `card.rs`, `handover.rs`) — moved inside so there is one
+/// place to get it right instead of three to keep in sync, and so
+/// `crate::effective_status_sql!`'s `WHEN i.status_category = '' THEN
+/// NULL` branch has one Rust behaviour to match, not three call sites'
+/// worth of copies.
 pub fn effective_status(
     status_category: &str,
     status_set_by: Option<&str>,
     source: &str,
     has_working_session: bool,
-) -> &'static str {
-    match status_set_by {
+) -> Option<&'static str> {
+    if status_category.is_empty() {
+        return None;
+    }
+    Some(match status_set_by {
         Some("person") | Some("derived") => normalize(status_category),
         _ if has_working_session && source == "local" => "in_progress",
         _ => normalize(status_category),
-    }
+    })
 }
 
 /// `status_category` keeps exactly three values; anything else (there
@@ -94,11 +109,11 @@ mod effective_status_tests {
     fn a_person_outranks_everything() {
         assert_eq!(
             effective_status("todo", Some("person"), "local", true),
-            "todo"
+            Some("todo")
         );
         assert_eq!(
             effective_status("done", Some("person"), "local", true),
-            "done"
+            Some("done")
         );
     }
 
@@ -106,29 +121,45 @@ mod effective_status_tests {
     fn a_stamped_done_is_not_undone_by_new_work() {
         assert_eq!(
             effective_status("done", Some("derived"), "local", true),
-            "done"
+            Some("done"),
+            "narrowing status_set_by's IN ('person','derived') to only 'person' \
+             would read this back as in_progress instead"
         );
     }
 
     #[test]
     fn a_working_session_makes_a_local_item_in_progress() {
-        assert_eq!(effective_status("todo", None, "local", true), "in_progress");
+        assert_eq!(
+            effective_status("todo", None, "local", true),
+            Some("in_progress")
+        );
     }
 
     #[test]
     fn a_working_session_never_lifts_a_tracker_item() {
         // The sync's value, untouched by the live signal (§2, "who may be
         // overridden": a tracker item's column is its tracker's).
-        assert_eq!(effective_status("todo", None, "jira", true), "todo");
+        assert_eq!(effective_status("todo", None, "jira", true), Some("todo"));
     }
 
     #[test]
     fn otherwise_it_is_whatever_is_stored() {
-        assert_eq!(effective_status("todo", None, "local", false), "todo");
+        assert_eq!(effective_status("todo", None, "local", false), Some("todo"));
         assert_eq!(
             effective_status("in_progress", None, "jira", false),
-            "in_progress"
+            Some("in_progress")
         );
+    }
+
+    #[test]
+    fn an_empty_stored_status_reports_nothing() {
+        // The schema never produces this, but the function must not
+        // manufacture a `todo` nobody said — checked before anything else,
+        // even a person's setting (which the schema also never leaves
+        // paired with an empty category).
+        assert_eq!(effective_status("", None, "local", false), None);
+        assert_eq!(effective_status("", None, "local", true), None);
+        assert_eq!(effective_status("", Some("person"), "local", true), None);
     }
 }
 

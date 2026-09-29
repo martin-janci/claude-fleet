@@ -222,6 +222,12 @@ impl Store {
     /// **error** — not silently admit a bogus id — failing the whole query
     /// and, with it, every `tree` / `task` / `session_tasks` / `review`
     /// call that loads a `Graph`.
+    ///
+    /// This `WHERE` and `crate::effective_status_sql!`'s `EXISTS`
+    /// (`store/work_status.rs`) must read as the same condition — both
+    /// answer "is a confirmed, unended `work_links` row's session
+    /// `claude_status = 'working'`" — so a caller sees the same lift
+    /// whichever path served it. Check both before changing either.
     pub fn work_items_with_working_session(&self) -> Result<Vec<(i64, i64)>, IpcError> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT l.item_id, p.session_id FROM work_links l \

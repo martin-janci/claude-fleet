@@ -194,7 +194,11 @@ pub fn digest(
                                 key: Some(key),
                                 title: w.title.clone(),
                                 item_id: w.item_id,
-                                status_category: w.status_category.clone(),
+                                // `effective_status`, not `status_category`
+                                // (fix round 3): the latter is tracker-only
+                                // on the wire, so the group header would
+                                // never show a local item's own status.
+                                status_category: w.effective_status.clone(),
                                 status_name: w.status_name.clone(),
                                 url: w.url.clone(),
                                 org_id: w.org_id,

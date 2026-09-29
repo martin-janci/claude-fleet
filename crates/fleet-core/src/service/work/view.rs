@@ -1087,6 +1087,13 @@ fn to_task(
         }
     }
     counts.active = active_sessions.len() as u32;
+    // `status_category` here is `item_status`'s live-lifted value (fix
+    // round 3 checked this deliberately, not assumed safe): a `done` that
+    // the live rule lifts to `in_progress` (a session resumes an
+    // untracked/legacy `done`) never flips `archived` to true either way,
+    // because the same confirmed link that justifies the lift also makes
+    // `counts.active >= 1` for this same task — see
+    // `a_legacy_done_item_a_session_resumes_is_lifted_and_stays_unarchived`.
     let status_category = item.and_then(|i| item_status(g, i));
     let archived = counts.active == 0
         && (status_category.as_deref() == Some("done") || all_links_archived(&b.visible));
@@ -1714,24 +1721,17 @@ fn brief_of(g: &Graph, task_id: &str, item: Option<&ViewItem>, ref_key: Option<&
 
 /// The item's status a reader should see (§2), shared by `to_task` and
 /// `brief_of` so the tree and a session's own task list can never disagree.
-/// `None` when the stored value itself is empty (fix round 2, restoring a
-/// guard the switch to `effective_status` dropped): `effective_status`
-/// normalises anything it does not recognise to `todo`, which is right for
-/// a live reader deciding what to lift, but wrong for reporting a raw
-/// empty column as if someone had actually said `todo`.
+/// `effective_status` itself answers `None` for an empty stored value (fix
+/// round 3 moved that guard inside the function, so there is one place to
+/// get it right instead of once per caller).
 fn item_status(g: &Graph, i: &ViewItem) -> Option<String> {
-    if i.item.status_category.is_empty() {
-        return None;
-    }
-    Some(
-        effective_status(
-            &i.item.status_category,
-            i.item.status_set_by.as_deref(),
-            &i.item.source,
-            g.working_session_items.contains(&i.item.id),
-        )
-        .to_string(),
+    effective_status(
+        &i.item.status_category,
+        i.item.status_set_by.as_deref(),
+        &i.item.source,
+        g.working_session_items.contains(&i.item.id),
     )
+    .map(str::to_string)
 }
 
 /// `work { action: session_tasks, session_id }`: every link of the

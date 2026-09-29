@@ -41,18 +41,22 @@
 
   const tracker = $derived(trackerForKey(workKey.key, $trackers));
   const interval = $derived(settingInt($fleetSettings, SETTING_KEYS.workSyncIntervalSecs));
+  // `trackerBacked`, not `status` (native item status, fix round 3): a
+  // local item now has a `status` too (its own live status), so "has a
+  // status" no longer means "a tracker owns it" — `trackerBacked` is the
+  // field that still does.
   const stale = $derived(
-    !!workKey.status && !!tracker && trackerStale(tracker, now(), interval),
+    !!workKey.trackerBacked && !!tracker && trackerStale(tracker, now(), interval),
   );
   const ticketShaped = $derived(/^[A-Z][A-Z0-9_]{1,9}-\d{1,7}$/.test(workKey.key));
-  const unbound = $derived(!suggested && !workKey.status && ticketShaped && !tracker);
+  const unbound = $derived(!suggested && !workKey.trackerBacked && ticketShaped && !tracker);
   // Work graph M6: which tracker, once there is more than one kind.
   const prov = $derived(
     tracker && showProviderBadges($trackers) ? providerInfo(tracker.provider) : null,
   );
   const title = $derived.by(() => {
     let t = describeWorkKey(workKey);
-    if (workKey.status) t += ` · ${syncedAgo(tracker, now())}`;
+    if (workKey.trackerBacked) t += ` · ${syncedAgo(tracker, now())}`;
     if (stale) t += ' (stale: the tracker has not synced lately)';
     if (prov) t = `${prov.label} · ${t}`;
     if (unbound) t += ` · connect its tracker in Settings → Work to see ${workKey.key}'s status`;

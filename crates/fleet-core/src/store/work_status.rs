@@ -16,28 +16,76 @@ pub const STATUS_CATEGORIES: [&str; 3] = ["todo", "in_progress", "done"];
 /// The live-lifted status of a `work_items` row aliased `i` in scope, as one
 /// SQL expression — the same precedence
 /// `service::work::status::effective_status` computes in Rust (design
-/// 2026-09-28 §2, fix round 2 of native item status task 4): a person's
-/// setting or a stamped `done` (`status_set_by`) is final; otherwise a
-/// confirmed link whose session is presently working lifts a LOCAL item
-/// (`source = 'local'`) to `in_progress`; otherwise the stored value,
-/// normalised to one of the three categories. `NULL` when `i` is no item at
-/// all (a bare key).
+/// 2026-09-28 §2): `NULL` when `i` is no item at all (a bare key) or its
+/// stored `status_category` is itself empty (the schema never produces
+/// this, but the expression must not manufacture a `todo` nobody said —
+/// matching `effective_status`'s own `None` for the same input); a
+/// person's setting or a stamped `done` (`status_set_by`) is final;
+/// otherwise a confirmed link whose session is presently working lifts a
+/// LOCAL item (`source = 'local'`) to `in_progress`; otherwise the stored
+/// value, normalised to one of the three categories.
+///
+/// The `EXISTS` here and `Store::work_items_with_working_session`'s `WHERE`
+/// must express the same condition — both read "a confirmed, unended
+/// `work_links` row whose session is `claude_status = 'working'`" — because
+/// a caller can see the same item's lift through either path (`Graph::load`
+/// via the latter, a session row via this macro) and they must agree.
+/// Changing one without the other is exactly the drift this macro exists
+/// to avoid; `store::rows::tests::the_sql_macro_and_the_rust_function_agree_arm_by_arm`
+/// and `service::work::view_tests`'s equivalent scenarios are what would
+/// catch it landing wrong, but there is no automatic check that the two
+/// SQL texts themselves stay in lockstep — read both before editing either.
 ///
 /// SQLite cannot call into Rust, so this duplicates `effective_status`'s
-/// logic rather than calling it — `store::rows::tests` and
-/// `store::work::tests` check this expression against `effective_status`
-/// directly (the same scenarios, same expected answers) so the two do not
-/// quietly drift apart.
+/// logic rather than calling it — `store::rows::tests::
+/// effective_status_on_the_session_row` checks the real
+/// `Store::get_session` path against every scenario (including
+/// `status_set_by = 'derived'`, which nothing else in this crate writes
+/// outside `stamp_derived_done`), and
+/// `the_sql_macro_and_the_rust_function_agree_arm_by_arm` additionally
+/// cross-checks this expression's SQL answer against calling
+/// `effective_status` on the very same row's real fields — not two
+/// independently hand-written literal expectations that could each be
+/// wrong the same way.
 ///
 /// A macro, not a `const`, so `SESSION_COLUMNS` and `primary_work_by_session`
 /// can `concat!` it (the same reason `session_org_sql!` is a macro). No
 /// parameters: every call site aliases the item `i`, and each use sits in
 /// its own correlated subquery, so the inner alias names (`es_l`/`es_p`/
 /// `es_s`) never collide across uses.
+///
+/// **Not fenced by `OrgScope`** (fix round 3, an open item, not silently
+/// dropped): the `EXISTS` counts a confirmed working session on `i`
+/// regardless of which org it belongs to, so a caller whose scope cannot
+/// see that session can still see the lift here — unlike `Graph::load`'s
+/// `working_session_items`, which is. Both call sites of this macro
+/// (`SESSION_COLUMNS`'s `work`/`work_suggested`, and
+/// `Store::primary_work_by_session`) build a `SessionRow` with no
+/// `OrgScope` in hand — `list_all_sessions`/`get_session` are used by many
+/// callers, scoped afterward by `OrgScope::redact_row`, which only ever
+/// looks at the row's own link/session org, never at another session
+/// working the same item. Fencing this properly would need either (a)
+/// threading `OrgScope` through every caller of those two methods (well
+/// beyond this task), or (b) a third correlated subquery per session row
+/// to check the working session's visibility — which the maintainer
+/// explicitly asked not to add to this path (`list_sessions` is the
+/// hottest read in the app) without discussion first. Left open; a
+/// batch-style fix mirroring `Graph::load`'s (fetch
+/// `Store::work_items_with_working_session`'s pairs ONCE per list, then
+/// filter in `redact_row` using the already-fetched `SessionRow`s) is the
+/// likely shape of a real fix, at the cost of complicating `redact_row`'s
+/// per-row signature into a per-list one.
+///
+/// `card.rs` does NOT use this macro: it is a single-item lookup, so it
+/// calls `Store::work_items_with_working_session` and
+/// `service::work::status::effective_status` directly and fences the
+/// result itself with `OrgScope::sees_row` — cheap for one item, unlike
+/// the per-row cost the same fence would add here.
 #[macro_export]
 macro_rules! effective_status_sql {
     () => {
         "CASE WHEN i.id IS NULL THEN NULL \
+              WHEN i.status_category = '' THEN NULL \
               WHEN i.status_set_by IN ('person', 'derived') THEN \
                 CASE i.status_category WHEN 'done' THEN 'done' \
                                         WHEN 'in_progress' THEN 'in_progress' \
