@@ -3,10 +3,13 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/martin-janci/claude-fleet/main/tools/ag/install.sh | bash
 #   tools/ag/install.sh --from tools/ag          # from a checkout (fleet provision, tests)
+#   tools/ag/install.sh --alias 'cl=claude --yolo'  # add an alias (repeatable)
 #
 # Copies the ag tree to $AG_HOME (~/.local/share/ag), links $AG_BIN_DIR/ag
 # (~/.local/bin/ag), writes a starter config when there is none, then runs
 # `ag shims` and `ag doctor`. Re-running upgrades in place and keeps the config.
+# --alias NAME=VALUE adds the alias to [alias] unless the config already has
+# that name (a user's existing value is kept); repeatable.
 #
 # The whole body lives in main(), called only at the very last line: a
 # `curl | bash` download truncated mid-script then defines an incomplete
@@ -15,12 +18,31 @@ set -euo pipefail
 
 main() {
   local FROM="" DEFAULT=""
+  local ALIASES=()
   while [ $# -gt 0 ]; do
     case $1 in
       --from) FROM=${2:?--from needs a directory}; shift 2 ;;
       --default) DEFAULT=${2:?--default needs a harness}; shift 2 ;;
-      -h | --help) echo "usage: install.sh [--from DIR] [--default HARNESS]"; return 0 ;;
+      --alias) ALIASES+=("${2:?--alias needs NAME=VALUE}"); shift 2 ;;
+      -h | --help) echo "usage: install.sh [--from DIR] [--default HARNESS] [--alias NAME=VALUE]..."; return 0 ;;
       *) echo "install.sh: unknown argument: $1" >&2; return 2 ;;
+    esac
+  done
+
+  # Validate every --alias before touching anything (same rules as `ag shims`).
+  local a name val
+  for a in ${ALIASES[@]+"${ALIASES[@]}"}; do
+    case $a in
+      *=*) ;;
+      *) echo "install.sh: --alias needs NAME=VALUE (got: $a)" >&2; return 2 ;;
+    esac
+    name=${a%%=*}
+    val=${a#*=}
+    case $name in
+      '' | *[!A-Za-z0-9._-]*) echo "install.sh: invalid alias name: $name" >&2; return 2 ;;
+    esac
+    case $val in
+      '' | *[!A-Za-z0-9\ ._=/:@%+-]*) echo "install.sh: alias $name: value must be plain words" >&2; return 2 ;;
     esac
   done
 
@@ -108,6 +130,32 @@ yolo = false
 EOF
     echo "install.sh: wrote $CONFIG"
   fi
+
+  # --alias: add each alias unless the config already defines that name.
+  for a in ${ALIASES[@]+"${ALIASES[@]}"}; do
+    name=${a%%=*}
+    val=${a#*=}
+    if awk -v n="$name" '
+        /^[[:space:]]*[#;]/ { next }
+        /^[[:space:]]*\[/ { s = $0; gsub(/^[[:space:]]*\[|\][[:space:]]*$/, "", s); sec = s; next }
+        sec == "alias" {
+          i = index($0, "="); if (i == 0) next
+          k = substr($0, 1, i - 1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", k)
+          if (k == n) found = 1
+        }
+        END { exit found ? 0 : 1 }' "$CONFIG"; then
+      echo "install.sh: alias $name is already set in $CONFIG — kept"
+    elif grep -q '^[[:space:]]*\[alias\][[:space:]]*$' "$CONFIG"; then
+      awk -v line="$name = $val" '
+        { print }
+        /^[[:space:]]*\[alias\][[:space:]]*$/ && !done { print line; done = 1 }' "$CONFIG" >"$CONFIG.tmp" &&
+        mv "$CONFIG.tmp" "$CONFIG"
+      echo "install.sh: added alias $name = $val"
+    else
+      printf '\n[alias]\n%s = %s\n' "$name" "$val" >>"$CONFIG"
+      echo "install.sh: added alias $name = $val"
+    fi
+  done
 
   # `ag shims` failing (e.g. a foreign file blocking one alias) is not fatal
   # to the install: the core install (tree + symlink + config) already
