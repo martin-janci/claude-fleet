@@ -778,8 +778,13 @@ fn placement_and_rules_through_the_writes() {
         "me",
     )
     .unwrap();
-    // A cleared placement answers as none, its group the rule's.
-    assert_eq!(cleared.placement_version, 0);
+    // A cleared placement answers as none, its group the rule's; its
+    // version keeps counting (the tombstone's), never back to 0.
+    assert_eq!(cleared.placement_version, 2);
+    assert!(task(&w.st, &OrgScope::All, "item:2")
+        .unwrap()
+        .placement
+        .is_none());
     assert_eq!(cleared.group.source, "rule");
     assert_eq!(task_of(&tree_all(&w), "TK-2").group.source, "rule");
     let err = structure::rule_save(
@@ -1040,6 +1045,89 @@ fn a_bare_key_of_another_org_keeps_its_placement() {
         "org B's bare task still carries it"
     );
     assert!(s.work_placement(&format!("item:{id}")).unwrap().is_none());
+}
+
+/// A clear keeps a tombstone whose version still counts: the version only
+/// ever goes up, so a device holding the version from before a clear and a
+/// re-placement conflicts instead of overwriting (no ABA), and `0` after a
+/// clear conflicts too — the next write names the task's
+/// `placement_version`.
+#[test]
+fn a_cleared_placement_keeps_counting_its_version() {
+    let w = world();
+    let t = format!("item:{}", w.t1);
+    let place = |group: Option<&str>, expected: i64, by: &str| {
+        structure::place(&w.st, &OrgScope::All, &t, group, None, Some(expected), by)
+    };
+    assert_eq!(place(Some("X"), 0, "a").unwrap().placement_version, 1);
+    let cleared = place(None, 1, "b").unwrap();
+    assert_eq!(cleared.placement_version, 2);
+    assert_ne!(cleared.group.source, "manual", "a tombstone places nothing");
+    assert!(task(&w.st, &OrgScope::All, &t).unwrap().placement.is_none());
+    assert_eq!(
+        task(&w.st, &OrgScope::All, &t)
+            .unwrap()
+            .task
+            .placement_version,
+        2,
+        "the reader sees the tombstone's version"
+    );
+    assert!(
+        w.st.lock()
+            .unwrap()
+            .work_placement(&t)
+            .unwrap()
+            .unwrap()
+            .is_cleared(),
+        "the row is kept"
+    );
+    // "I expect none" after a clear is stale.
+    assert_eq!(
+        place(Some("Y"), 0, "c").unwrap_err().code,
+        codes::E_CONFLICT
+    );
+    let y = place(Some("Y"), 2, "c").unwrap();
+    assert_eq!((y.placement_version, y.group.label.as_str()), (3, "Y"));
+    // Device A still holds v1 (group X): it conflicts, and Y stays.
+    let err = place(Some("X again"), 1, "a").unwrap_err();
+    assert_eq!(err.code, codes::E_CONFLICT);
+    assert_eq!(err.details.as_ref().unwrap()["group"], "Y");
+    let d = task(&w.st, &OrgScope::All, &t).unwrap();
+    assert_eq!(d.placement.as_ref().unwrap().group.as_deref(), Some("Y"));
+    assert_eq!(d.task.placement_version, 3);
+}
+
+/// A bare key's placement moves over the item's cleared placement (a
+/// tombstone is not the item's own), at a version above both.
+#[test]
+fn a_bare_keys_placement_moves_over_a_cleared_item_placement() {
+    let w = world();
+    bare(&w, w.s1, "TK-9");
+    structure::place(
+        &w.st,
+        &OrgScope::All,
+        "ref:TK-9",
+        Some("Payments"),
+        None,
+        Some(0),
+        "me",
+    )
+    .unwrap();
+    let id = {
+        let s = w.st.lock().unwrap();
+        let id = item(&s, w.tracker, "9", "TK-9", "Arrived later", "TP");
+        let task = format!("item:{id}");
+        s.set_work_placement(&task, Some("Billing"), None, 0, "x")
+            .unwrap();
+        s.set_work_placement(&task, None, None, 1, "x").unwrap();
+        s.bind_tracker_refs(w.tracker).unwrap();
+        id
+    };
+    let s = w.st.lock().unwrap();
+    assert!(s.work_placement("ref:TK-9").unwrap().is_none());
+    let moved = s.work_placement(&format!("item:{id}")).unwrap().unwrap();
+    assert_eq!(moved.group.as_deref(), Some("Payments"));
+    assert_eq!(moved.version, 3, "above the tombstone's 2");
 }
 
 /// `sweep_orphan_placements` drops a placement whose task is gone (an item

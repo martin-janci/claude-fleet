@@ -116,6 +116,18 @@ describe('WorkPlaceDialog', () => {
     expect(onmakerule).not.toHaveBeenCalled();
   });
 
+  it('a cleared placement (version kept, group not manual) offers no Clear and sends its version', async () => {
+    mount(task({ placement_version: 2 }));
+    expect(screen.queryByTestId('work-place-clear')).toBeNull();
+    await placeIn('Payments');
+    expect(calls('place_work')[0]).toMatchObject({ expected_version: 2 });
+  });
+
+  it('a manual placement offers Clear', () => {
+    mount(task({ placement_version: 1, group: { id: 'label:Infra', label: 'Infra', source: 'manual' } }));
+    expect(screen.getByTestId('work-place-clear')).toBeTruthy();
+  });
+
   it('a task never placed is sent expecting version 0', async () => {
     mount(keyTask);
     await placeIn('Payments');

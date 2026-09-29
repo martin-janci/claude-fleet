@@ -198,7 +198,7 @@ pub fn place(
 ) -> Result<WorkTask, IpcError> {
     no_host(scope, "place")?;
     let expected = expected_version.ok_or_else(|| {
-        invalid("place needs expected_version (0 when the task has no placement)")
+        invalid("place needs expected_version (the task's placement_version; 0 when it was never placed)")
     })?;
     let group = clean_text(group.unwrap_or_default(), "group", LABEL_MAX_CHARS, true)?;
     let note = clean_text(note.unwrap_or_default(), "note", NOTE_MAX_CHARS, true)?;

@@ -184,6 +184,12 @@ every new action has a row, and the leak check runs over every answer.
   Setting the link that is already primary is a no-op success (idempotent).
 - Placements, rules and views carry `version`; `expected_version` `0` means
   "I expect none", so a create never overwrites a concurrent create.
+  Clearing a placement keeps its row as a tombstone (group and note
+  empty) whose version goes on counting (2026-09-29): a version never
+  goes back to 1, so a device still holding the version from before a
+  clear and a re-placement gets `E_CONFLICT` instead of overwriting
+  (ABA). After a clear the next placement names the task's
+  `placement_version` (the tombstone's), not `0`.
 - Start and resume of the same key share the in-flight registry, so two
   devices starting / resuming one ticket at once produce one session and one
   `E_EXISTS` (with the session id when visible).
@@ -251,7 +257,7 @@ changes shape. `CONTRACT_REVISION` stays 4.
   "needs_you": false, "review": false,
   "last_activity_at": 1790000200,
   "repos": ["acme/api"],
-  "placement_version": 0,                 // 0 = no placement
+  "placement_version": 0,                 // 0 = never placed; a cleared placement keeps its version
   "sessions": [ WorkTaskLink … ],         // active (primary first), suggested, ended newest first
   "sessions_more": 0,
   "archived": false                       // no active session, and done or every link (one past) archived

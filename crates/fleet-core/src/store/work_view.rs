@@ -58,6 +58,15 @@ pub struct Placement {
     pub updated_by: Option<String>,
 }
 
+impl Placement {
+    /// A cleared placement: the row is kept (group and note NULL) so its
+    /// version keeps counting for the compare-and-set, but it places
+    /// nothing and reads as no placement.
+    pub fn is_cleared(&self) -> bool {
+        self.group.is_none() && self.note.is_none()
+    }
+}
+
 /// What a placement rule matches: every condition it sets must hold.
 #[derive(
     Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema,
@@ -343,6 +352,9 @@ impl Store {
 
     // --- placements ---------------------------------------------------------
 
+    /// Every placement row, cleared ones (tombstones) included — a reader
+    /// that shows a placement skips [`Placement::is_cleared`] rows; the
+    /// version of every row is what a task's `placement_version` answers.
     pub fn work_placements(&self) -> Result<Vec<Placement>, IpcError> {
         let mut stmt = self.conn.prepare(
             "SELECT task_id, group_label, note, version, updated_at, updated_by \
@@ -369,6 +381,9 @@ impl Store {
         Ok(n)
     }
 
+    /// The placement row of `task_id`, a cleared one (a tombstone, see
+    /// [`Placement::is_cleared`]) included: its version is what the next
+    /// compare-and-set names.
     pub fn work_placement(&self, task_id: &str) -> Result<Option<Placement>, IpcError> {
         Ok(self
             .conn
@@ -381,11 +396,16 @@ impl Store {
             .optional()?)
     }
 
-    /// Place `task_id` in `group` with `note` — both `None` removes the
-    /// placement — if its placement is still at `expected` (`0`: there is
-    /// none). A compare-and-set (work graph M14.1c): a concurrent placement
-    /// from another device answers `E_CONFLICT` instead of being
-    /// overwritten. Returns the placement, if one remains.
+    /// Place `task_id` in `group` with `note` — both `None` clears the
+    /// placement — if its placement is still at `expected` (`0`: there has
+    /// never been one). A compare-and-set (work graph M14.1c): a concurrent
+    /// placement from another device answers `E_CONFLICT` instead of being
+    /// overwritten. A clear keeps the row as a tombstone
+    /// ([`Placement::is_cleared`]) whose version still counts, so the
+    /// version only ever goes up: the next placement names the tombstone's
+    /// version (a task's `placement_version`), and `0` after a clear
+    /// conflicts. Returns the row, a tombstone included (`None` only when
+    /// the task was never placed).
     pub fn set_work_placement(
         &self,
         task_id: &str,
@@ -408,9 +428,15 @@ impl Store {
             ));
         }
         if group.is_none() && note.is_none() {
+            // Cleared, not deleted: the row stays as a tombstone (group and
+            // note NULL) whose version keeps counting, so a device still
+            // holding the version before the clear conflicts instead of
+            // matching a placement re-created at 1 (ABA).
             self.conn.execute(
-                "DELETE FROM work_placements WHERE task_id = ?1",
-                rusqlite::params![task_id],
+                "UPDATE work_placements SET group_label = NULL, note = NULL, \
+                   version = version + 1, updated_at = ?2, updated_by = ?3 \
+                 WHERE task_id = ?1",
+                rusqlite::params![task_id, now_unix(), by],
             )?;
         } else {
             self.conn.execute(

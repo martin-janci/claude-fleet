@@ -163,7 +163,10 @@ export interface WorkTask {
   archived?: boolean;
   last_activity_at?: number | null;
   repos?: string[];
-  /** 0 = no placement. */
+  /** The version the next placement names: 0 = never placed. A cleared
+   *  placement keeps counting (the hub keeps its version so a stale device
+   *  conflicts), so a non-zero version alone does not mean "placed" —
+   *  `group.source === 'manual'` does. */
   placement_version?: number;
   /** Active (primary first), suggested, ended newest first. */
   sessions?: WorkTaskLink[];
@@ -534,7 +537,8 @@ export function decideWorkBatch(decisions: readonly BatchDecision[]): Promise<Re
 }
 
 /** Place a task in a group (`''` clears the placement). `expectedVersion`
- *  is the task's `placement_version` (0: "I expect none"). */
+ *  is the task's `placement_version` (0: "never placed"; after a clear it is
+ *  the cleared placement's version, never 0 again). */
 export function placeWork(
   taskId: string,
   group: string,

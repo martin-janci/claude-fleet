@@ -933,7 +933,10 @@ impl Store {
     /// where it is while a bare link to the same raw key remains (one of
     /// another org stays bare, M5, and still makes the `ref:` task), and
     /// when the item has its own placement (the item's wins; the `ref:`
-    /// row is then an orphan for [`Store::sweep_orphan_placements`]).
+    /// row is then an orphan for [`Store::sweep_orphan_placements`]). A
+    /// cleared item placement (a tombstone) is not its own: the bare key's
+    /// moves over it at a version above both, so the compare-and-set never
+    /// sees a version go back.
     /// Runs inside the caller's transaction; returns the task ids now
     /// placed, for `work:changed`.
     fn rekey_bound_placements(&self, bound: &[(String, i64)]) -> Result<Vec<String>, IpcError> {
@@ -948,11 +951,36 @@ impl Store {
                 continue;
             }
             let item_task = format!("item:{item}");
+            let ref_task = format!("ref:{raw_key}");
+            // The item's own row is only a cleared placement (a tombstone):
+            // the bare key's placement takes its place, the version going
+            // on from the higher of the two, and the `ref:` row is dropped.
+            let n = self.conn.execute(
+                "UPDATE work_placements SET \
+                   group_label = (SELECT r.group_label FROM work_placements r WHERE r.task_id = ?2), \
+                   note = (SELECT r.note FROM work_placements r WHERE r.task_id = ?2), \
+                   updated_by = (SELECT r.updated_by FROM work_placements r WHERE r.task_id = ?2), \
+                   version = MAX(version, (SELECT r.version FROM work_placements r WHERE r.task_id = ?2)) + 1, \
+                   updated_at = ?3 \
+                 WHERE task_id = ?1 AND group_label IS NULL AND note IS NULL \
+                   AND EXISTS (SELECT 1 FROM work_placements r WHERE r.task_id = ?2)",
+                rusqlite::params![item_task, ref_task, now_unix()],
+            )?;
+            if n > 0 {
+                self.conn.execute(
+                    "DELETE FROM work_placements WHERE task_id = ?1",
+                    rusqlite::params![ref_task],
+                )?;
+                if !moved.contains(&item_task) {
+                    moved.push(item_task);
+                }
+                continue;
+            }
             let n = self.conn.execute(
                 "UPDATE work_placements SET task_id = ?1, version = version + 1, updated_at = ?3 \
                  WHERE task_id = ?2 \
                    AND NOT EXISTS (SELECT 1 FROM work_placements WHERE task_id = ?1)",
-                rusqlite::params![item_task, format!("ref:{raw_key}"), now_unix()],
+                rusqlite::params![item_task, ref_task, now_unix()],
             )?;
             if n > 0 && !moved.contains(&item_task) {
                 moved.push(item_task);

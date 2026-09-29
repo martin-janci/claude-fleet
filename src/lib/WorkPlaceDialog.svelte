@@ -59,7 +59,9 @@
       a.localeCompare(b),
     ),
   );
-  const isManual = $derived(task.group?.source === 'manual' || (task.placement_version ?? 0) > 0);
+  // Placed by a person: a manual group, or a note alone. Not a non-zero
+  // `placement_version` — a cleared placement keeps its version.
+  const isManual = $derived(task.group?.source === 'manual' || !!currentNote);
 
   async function place(group: string) {
     if (busy || blocked !== null) return;
