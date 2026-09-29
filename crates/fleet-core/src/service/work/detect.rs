@@ -445,6 +445,7 @@ pub fn loop_guard(
         None if prompt.trim().is_empty() => return None,
         None => return Some("harness"),
     };
+    let p: &str = &p;
     if p.contains("[claude-fleet") {
         return Some("fleet_marked");
     }
@@ -790,7 +791,8 @@ pub fn on_prompt(
     prompt: &str,
     first_prompt: bool,
 ) -> Result<bool, IpcError> {
-    let prompt = crate::service::prompt_origin::human_part(prompt).unwrap_or(prompt);
+    let person = crate::service::prompt_origin::human_part(prompt);
+    let prompt: &str = person.as_deref().unwrap_or(prompt);
     let Some(st) = s.detection_state(session_id)? else {
         return Ok(false);
     };

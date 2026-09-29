@@ -64,7 +64,7 @@ the host's detail in the **Hosts** view (⌘I):
   `E_FORBIDDEN`.
 
 The fleet-admin tools — `provision_hosts`, `add_host`, `remove_host`,
-`hide_host` — are **master-token only** in either mode: a token lifted from
+`merge_host`, `hide_host`, `forget_project` — are **master-token only** in either mode: a token lifted from
 one host must not be able to rotate, re-provision or remove the others.
 
 **Rotate** next to a host mints a fresh token and re-provisions that host with
@@ -256,10 +256,12 @@ Index by area (names only; see the reference for details):
   health and the detection backlog, from cached sync state; a per-host token
   sees its own org's trackers), `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
-  `add_host`, `remove_host`, `probe_host`, `hide_host`, `provision_hosts`,
+  `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
+  `probe_host`, `hide_host`, `provision_hosts`,
   `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
   connected; see *`/agent`* above).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
+  `forget_project` (drop a row a local-less hub cannot rescan away),
   `add_project` (clone, adopt or create a repository on a host — `git` and
   `gh` run there; a per-host token acts on its own host only, and
   `create_remote` — publishing on GitHub — needs a person's approval from
@@ -276,7 +278,9 @@ Index by area (names only; see the reference for details):
   presets the desktop and the phone both draw above their text box, in list
   order, each with `auto_send`: a tap sends at once rather than filling the
   box — call it with no arguments to read, with `set` to replace the list; a
-  `set` entry without `auto_send` keeps the stored chip's flag).
+  `set` entry without `auto_send` keeps the stored chip's flag; `expected`,
+  the list last read, turns a lost race into `E_CONFLICT`; `set` is refused
+  to a per-host token and the operator).
 - **Steering & observing** — `send_prompt`, `broadcast_prompt`,
   `capture_session`, `session_transcript` (the conversation of any session,
   including pane-less `bg:<uuid>` rows — track background runs with it),
@@ -422,7 +426,7 @@ Index by area (names only; see the reference for details):
   `inferred`) that a person confirms or rejects; a rejected pair stays
   rejected. `source: "agent"` remains a confirmed declaration.
   Trackers (roadmap M3): `work_admin` (master token only — fleet admin, so
-  on a paired desktop the Settings → Work section says "configure on the
+  on a paired desktop the Settings → Trackers page says "configure on the
   hub") manages them: `list`, `add { site_url, provider?, transport?,
   settings? }` (the site, or any ticket / issue URL on it; the provider —
   `jira`, `github`, `asana`, `linear`, `jira_dc` — is inferred from the URL
@@ -644,16 +648,63 @@ Index by area (names only; see the reference for details):
   token; a read, but master token only, since it names other fleets — the
   `fleet-hub peer add|list|remove` commands drive the same links straight on
   `state.db`).
+- **Updates** — `update_status` (the fleet's application updates: the
+  verified release channel, each target's reported version and phase with
+  what the hub would tell it now, per-component counts and the operator's
+  pins; a read any client may make, but a per-host or org-bound token sees
+  its own row only) and `update_admin` (master token only: `pin` a version
+  for a component or one target, where a pin below installed is a rollback;
+  `unpin`; `refresh` to re-read the signed channel now). The update wire
+  itself, `POST /update/check` and `/update/report`, is not a tool: see
+  `docs/updates.md`.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
   read, but master token only, since the values name hosts and their
   projects roots) and `set_setting` (change one: validated against the
   key's shape, `E_INVALID` for an unknown or derived key or a bad value;
   returns the whole object). They reach the same keys as the desktop's
-  Settings dialog and no others: `mcp.*`, `hub.*` and `controller.*` are
-  set by their own flags and commands. The ticks and sweeps read their
-  settings every pass, so a change takes effect on the next one. On a hub
-  this is how `reports.*` and `work.*`, which have no flag, are set.
+  Settings dialog and no others. `hub.*` and `mcp.*` are registered
+  read-only: `get_settings` shows them, and `set_setting` refuses them,
+  naming the flag or command that changes each one. `controller.*` and the
+  tokens are not registered at all. `get_settings { describe: true }`
+  returns every key's metadata instead of a plain map, in display order:
+  label, help, kind with bounds and options, unit, what `0` means, default,
+  value, `modified`, tags, danger, restart, AI policy, `owned_by` and option
+  labels. This is the list `docs/settings-reference.md` is generated from.
+  A write emits `settings:changed { key }`. Like `work:*`, it never reaches
+  a per-host token or an org-bound client. Every write of a registered key
+  is audited (who: `person`, `agent` for this API, or `system`; before →
+  after; the proposal it applied), and the desktop shows it as each
+  field's **History** (declarative pages P5).
+  `set_setting { propose: true, why? }` writes nothing: it validates the
+  value like a write and leaves a **proposal** a person applies or rejects
+  (Settings → Proposed changes on a standalone desktop, `fleet-hub
+  settings proposals | apply | reject` on a hub). Use it when a person
+  should decide — the work graph's rule R11 applied to settings. A key
+  whose AI policy is `never` (every change that needs confirming, and
+  every read-only key) cannot be proposed: `E_FORBIDDEN`. A value the key
+  already has is `E_INVALID`; a newer proposal for a key replaces its
+  pending one, and at most 50 wait (`E_RATE_LIMITED`). `why` is at most
+  500 characters and shown to the person as written.
+  **Who** (declarative pages P6): the master token, and a person's own
+  paired device — a client bound to no org, such as the desktop paired with
+  a hub or a phone — reach `get_settings` and `set_setting`; a per-host token
+  and an org-bound client never do (the settings are the whole fleet's). A
+  device of either mode reads; a `full` device proposes; only a device the
+  operator **trusts** (`fleet-hub client trust <name>`) writes directly and
+  decides proposals, and its writes are audited as `person` with `client
+  <name>`. The UX agent's operator client is an agent: it proposes only.
+  Four more tools are served to a paired device and not to the master (who
+  has `fleet-hub settings` on the hub machine, and whose tool list is
+  budgeted): `setting_proposals` (pending, each with the key's value now,
+  and `can_write` for this device), `setting_history` (`key`, `limit`),
+  `decide_setting_proposals` (`accept`, `reject`; trusted only) and
+  `list_pages` (the page specs, data source shapes, resources and page
+  actions a device renders).
+
+  The ticks and sweeps read their settings every pass, so a change takes
+  effect on the next one. On a hub, this is how `reports.*` and `work.*`,
+  which have no flag, are set.
 
 A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 `run_prompt` to steer it and get the reply back (or `send_prompt` →
@@ -661,6 +712,30 @@ A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 for the raw screen).
 
 ### Status vocabulary
+
+The values below live in enums (`service/pane_intel.rs`,
+`service/attention.rs`); the tool descriptions and the generated reference
+derive from them.
+
+- **`claude_status`**: `working | blocked | completed | failed | stopped |
+  idle`. `idle`, `completed`, `stopped` and `failed` mean the turn is over
+  (what `wait_for_session { until: "idle" }` and `run_prompt` wait for);
+  `blocked` is a dialog inside a turn. A row the tick demoted from `working`
+  after `reconcile.stale_working_secs` with no sign of life carries
+  `stale_working_at` and reads `idle`, but that is only a guess (one long tool
+  call looks the same): `run_prompt`, `move_session` and `wait_for_session`
+  ask its pane first and count it as mid-turn unless the pane shows the idle
+  prompt.
+- **`stuck_kind`**: `auth_menu | reconnect | trust_prompt | oom |
+  press_enter`.
+- **`needs_attention.reason`** (on session rows and `/events` frames), most
+  urgent first: `waiting` (blocked on a dialog), `stuck` (`stuck_kind` says
+  which), `stop_failed` (the last turn ended in an API error; re-prompt),
+  `failed` (a pane-less agent reported failure), `context_full` (context at or
+  past `health.context_red_pct`), `stale_working` (the demotion above),
+  `ci_failing` (idle with failing PR checks) and `lifecycle` (a failed or
+  pending safe kill, a ghost, a lost row). `since` is when the session
+  entered that state.
 
 ### Errors and limits
 
@@ -1049,6 +1124,8 @@ timeline instead of a reply. See `docs/hub.md` → *Link two hubs*.
 
 **After provisioning, each host must restart Claude** to load the MCP server (skill files and CLAUDE.md are picked up live, but the MCP server entry requires a restart).
 
+`provision_hosts` takes `host` (one alias; every active host when omitted) and `content_only` (steps 1, 2 and 5 only — skills, the CLAUDE.md block and hooks, with the host's existing token; no token minted, no `~/.claude.json` rewrite, no tunnel, no restart needed; a host without a token answers `E_NO_TOKEN`). Each provisioning records a fingerprint of the content it shipped, and `list_hosts` reports `provisioned_at` and `provision_stale` (provisioned with content other than this build's). Each managed skill dir carries a `.fleet-managed` marker; a skills dir inside a git work tree is refused (`E_INVALID`) unless `provision.force_git_tree` is on.
+
 **After upgrading claude-fleet to a build with per-host tokens, re-provision every host** (Settings → Control API → **Provision hosts**; no rotate needed). Until a host is re-provisioned it keeps authenticating with the master token and its old command hook keeps posting `?token=` — the master token is still accepted in that query form on `/hook` (only there, and only the master token) for the transition — but it has no host identity, cannot be set `readonly`, and its hook still carries the token in argv. **The `?token=` form is removed in 0.4.**
 
 ### Host-alias mismatch (`set_friendly_name` / `register_self` return `E_NOTFOUND`)
@@ -1066,6 +1143,32 @@ Each call returns a status for every non-hidden host:
 | `failed` | One of the steps returned an error (see `detail`). |
 
 Per-host failures do not abort provisioning of other hosts.
+
+### Host health
+
+Every reconcile pass reads one health sample from each reachable host in the
+same batched probe script (`df -Pk` of `$HOME` and `${TMPDIR:-/tmp}`, the
+1-minute load, `MemAvailable` on Linux, the uptime) and, every 6 h, `tmux -V`
+and `claude --version`. `list_hosts` carries the sample on each row
+(`disk_home_free_kb`, `disk_home_total_kb`, `disk_tmp_free_kb`, `load_1m`,
+`mem_avail_kb`, `uptime_secs`, `health_at`), the versions stamp
+(`claude_version_at`), the last accepted hook from the host's own token
+(`last_hook_at`) and, for an agent host, the `agent_version` its last hello
+reported. `fleet_health.hosts[]` judges them per host:
+
+| Field | Meaning |
+|---|---|
+| `disk_home_pct` | Used percent of `$HOME`'s filesystem, when sampled. |
+| `disk_low` | `disk_home_pct >= health.disk_low_pct` (default 90). |
+| `claude_behind` | More than `health.claude_max_behind` (default 30) patch releases behind the fleet's newest version among stamps younger than 24 h. |
+| `agent_behind` | An agent host whose agent is not the hub's version (the live registry outranks the stored hello). |
+| `hooks_silent` | Reachable, with a live non-external session, and no hook from its token within `health.hooks_silent_secs` (default 1 h). |
+
+The desktop's "older than the fleet" mark trusts a `claude_version_at`
+younger than `health.version_max_age_secs` (default 24 h). `move_session`
+refuses (`E_INVALID`, `reason: target_disk_low`) a target whose last sample
+cannot take the source worktree plus 1 GiB of headroom; an unsampled target
+proceeds.
 
 ### Notes
 

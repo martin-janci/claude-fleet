@@ -52,6 +52,33 @@ pub enum Access {
     /// (send / kill / new_session across hosts stay allowed by design), not
     /// fleet admin.
     Client,
+    /// Reachable by the master and by a PERSON's own paired device: a paired
+    /// client bound to no org (the desktop paired with `fleet-hub pair`, a
+    /// phone). Never a per-host token — its Claude is fenced to its host's
+    /// org, and these tools are fleet-wide — nor a client bound to an org
+    /// (M14). The fleet's settings (declarative pages P6): what the hub's
+    /// GC, playbooks and limits do to the sessions that device shows. A
+    /// write needs more than this row; see `set_setting`.
+    Person,
+    /// [`Access::Person`], but not served to the master: the operator has
+    /// `fleet-hub settings` on the hub machine, and every byte of the
+    /// master's tool surface is budgeted
+    /// (`the_served_definition_budget_stays_bounded`). The desktop's own
+    /// commands, under their own names (`setting_proposals`, …).
+    PersonDevice,
+}
+
+/// Whether `caller` may call `tool` by its row's [`Access`] — the one
+/// predicate the call gate (`enforce_admin`) and the served list
+/// (`visible_to`) share. A tool with no row is the master's alone (fail
+/// closed).
+pub fn access_allows(caller: &crate::mcp::Caller, tool: &str) -> bool {
+    match policy(tool).map(|p| p.access) {
+        Some(Access::Client) => true,
+        Some(Access::Person) => caller.is_master() || caller.is_person_device(),
+        Some(Access::PersonDevice) => caller.is_person_device(),
+        Some(Access::Master) | None => caller.is_master(),
+    }
 }
 
 /// Wall-clock class a tool call is bounded to. The caps themselves
@@ -152,6 +179,21 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Quick,
     },
     ToolPolicy {
+        name: "update_status",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "update_admin",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        // `refresh` fetches the channel and its manifests.
+        deadline: Deadline::Lifecycle,
+    },
+    ToolPolicy {
         name: "add_host",
         access: Access::Master,
         readonly: false,
@@ -172,6 +214,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         access: Access::Master,
         readonly: false,
         confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Host identity & health, task 5: folds one alias into another and
+    // deletes it — fleet admin, and destructive enough to confirm.
+    ToolPolicy {
+        name: "merge_host",
+        access: Access::Master,
+        readonly: false,
+        confirm: true,
         deadline: Deadline::Quick,
     },
     ToolPolicy {
@@ -224,20 +275,57 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Quick,
     },
     // Operator settings: the values name hosts and their projects roots, and
-    // a write retunes the GC sweeper and auto-tidy for the whole fleet, so
-    // both are fleet admin. The read is `readonly: true` for the reason
-    // `list_clients` is: WHO may call it is a separate question.
+    // a write retunes the GC sweeper and auto-tidy for the whole fleet. Since
+    // declarative pages P6 a person's own paired device reads them too (they
+    // decide what the hub does to the sessions it shows), and writes them
+    // when the operator trusts it (`fleet-hub client trust`); a per-host
+    // token and an org-bound client never reach them.
     ToolPolicy {
         name: "get_settings",
-        access: Access::Master,
+        access: Access::Person,
         readonly: true,
         confirm: false,
         deadline: Deadline::Quick,
     },
     ToolPolicy {
         name: "set_setting",
-        access: Access::Master,
+        access: Access::Person,
         readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Declarative pages P6: a paired desktop's settings review, under the
+    // desktop commands' own names. Not served to the master (it has
+    // `fleet-hub settings`); the decision is a write, so a readonly device
+    // may list and read history but not decide, and deciding also needs a
+    // trusted client (checked in the tool, like `set_setting`'s write).
+    ToolPolicy {
+        name: "setting_proposals",
+        access: Access::PersonDevice,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "setting_history",
+        access: Access::PersonDevice,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "decide_setting_proposals",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // The page specs, for a phone that renders them (P6). Compiled into the
+    // hub like the desktop: the same answer for everyone who may see pages.
+    ToolPolicy {
+        name: "list_pages",
+        access: Access::PersonDevice,
+        readonly: true,
         confirm: false,
         deadline: Deadline::Quick,
     },
@@ -604,6 +692,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         readonly: true,
         confirm: false,
         deadline: Deadline::Lifecycle,
+    },
+    // Host identity & health, task 7: drops a project row nothing can
+    // rescan away — fleet admin.
+    ToolPolicy {
+        name: "forget_project",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
     },
     // Clones or creates a repository on a host: a write, and a long one — a
     // clone's wall clock is 600 s (`service::add_project::CLONE_WALL_CLOCK`),
@@ -1458,7 +1555,13 @@ pub fn fence_ticket(
         return format!("[{}]", ask("the description did not fit"));
     }
     let fenced = fence_untrusted(text, from, max);
-    let shown = defuse(text).chars().take(max).count() as i64;
+    // Both sides of the comparison on the tracker's own text: `full_chars`
+    // counts the RAW description, so `shown` does too — counted on the
+    // defused copy, a `defuse` that ever changed a length would make the
+    // notice claim (or hide) a cut the cap did not make. It keeps lengths
+    // today (`defuse_keeps_every_length` pins that), so this is also exactly
+    // how much of the fenced copy is shown.
+    let shown = text.chars().take(max).count() as i64;
     let full = full_chars.unwrap_or_else(|| text.chars().count() as i64);
     if full <= shown {
         return fenced;
@@ -1636,10 +1739,11 @@ mod tests {
             "apply_sync",
             "work_admin",
             "work_link",
+            "merge_host",
         ] {
             assert!(needs_confirmation(t), "{t} must be confirm-gated");
         }
-        assert_eq!(CONFIRM_TOOLS.len(), 11);
+        assert_eq!(CONFIRM_TOOLS.len(), 12);
         assert!(!needs_confirmation("send_prompt"));
         assert!(!needs_confirmation("dispatch_task"));
     }
@@ -1882,6 +1986,7 @@ mod tests {
             "provision_hosts",
             "add_host",
             "remove_host",
+            "merge_host",
             "hide_host",
             "apply_sync",
             "set_secret",
@@ -2124,6 +2229,52 @@ mod tests {
         assert_eq!(
             out.lines().last().unwrap(),
             "[shown 10 of 99 chars of the description — open the ticket for the rest]"
+        );
+    }
+
+    /// `fence_ticket` counts what it shows on the raw text and the fenced
+    /// copy is the defused one: the two agree only while `defuse` keeps
+    /// every length.
+    #[test]
+    fn defuse_keeps_every_length() {
+        for s in [
+            "[claude-fleet",
+            "a[claude-fleet:b]c",
+            "x",
+            "",
+            "[claude-fleet[claude-fleet",
+        ] {
+            assert_eq!(defuse(s).chars().count(), s.chars().count(), "{s:?}");
+        }
+    }
+
+    /// A body full of marker openers that fits its budget exactly, with the
+    /// tracker's raw length as `full_chars`: nothing was cut, so no notice.
+    #[test]
+    fn a_whole_description_full_of_markers_gets_no_notice() {
+        let body = "[claude-fleet".repeat(10);
+        let n = body.chars().count();
+        let out = fence_ticket(
+            &body,
+            "a tracker ticket",
+            n,
+            Some(n as i64),
+            DescribeOffer::Key("ABC-1"),
+        );
+        assert!(!out.contains("shown"), "{out}");
+        let out = fence_ticket(
+            &body,
+            "a tracker ticket",
+            n - 1,
+            Some(n as i64),
+            DescribeOffer::Key("ABC-1"),
+        );
+        assert!(
+            out.lines()
+                .last()
+                .unwrap()
+                .starts_with(&format!("[shown {} of {n} chars", n - 1)),
+            "{out}"
         );
     }
 

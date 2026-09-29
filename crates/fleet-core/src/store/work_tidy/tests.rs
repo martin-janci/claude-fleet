@@ -65,6 +65,50 @@ fn archive_is_ui_only_and_the_next_prompt_or_attach_unarchives() {
     assert_eq!(archived(&s, sid), None);
 }
 
+/// 2026-09-28: a `stale_working` row stayed in "needs you" until its next
+/// hook; archiving it did not help. An attach is a person looking — the
+/// reason has done its job.
+#[test]
+fn an_attach_acknowledges_a_stale_working_stamp() {
+    let (s, bus) = crate::store::test_support::store_with_recorder();
+    let sid = seed(&s, "dev");
+    s.conn
+        .execute(
+            "UPDATE sessions SET claude_status = 'idle', stale_working_at = 500, \
+                 stale_demoted_at = 500 WHERE id = ?1",
+            [sid],
+        )
+        .unwrap();
+    let before = s.get_session_by_id(sid).unwrap().unwrap();
+    assert_eq!(
+        crate::service::attention::needs_attention(&before).map(|a| a.reason),
+        Some(crate::service::attention::Reason::StaleWorking)
+    );
+    bus.take();
+
+    assert!(s.touch_session(sid).unwrap());
+    let after = s.get_session_by_id(sid).unwrap().unwrap();
+    assert_eq!(after.stale_working_at, None);
+    assert_eq!(crate::service::attention::needs_attention(&after), None);
+    assert!(
+        after.row_version > before.row_version,
+        "the cleared stamp is a visible change (065's trigger bumps it)"
+    );
+    assert!(
+        s.stale_demoted(&after.host_alias, &after.tmux_name)
+            .unwrap(),
+        "an attach ends the reason, not the demotion's veto"
+    );
+    assert!(
+        bus.take().contains(&format!("session:updated:{sid}")),
+        "the cleared stamp must reach the clients"
+    );
+
+    // Nothing stamped, nothing archived: a touch announces nothing.
+    assert!(s.touch_session(sid).unwrap());
+    assert!(bus.take().is_empty());
+}
+
 #[test]
 fn snooze_and_never_are_per_link_and_idempotent() {
     let s = Store::open_in_memory().unwrap();

@@ -164,6 +164,17 @@ pub(super) fn enforce_mode(caller: &Caller, tool: &str) -> Result<(), McpError> 
             None,
         ));
     }
+    // `fleet-updater`'s token reaches `/update/*` only, never a tool.
+    if caller.mode == TokenMode::Updater {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            format!(
+                "{tool} is not available to an updater token ({})",
+                caller.label()
+            ),
+            None,
+        ));
+    }
     if peer_tool && caller.mode != TokenMode::Peer {
         return Err(mcp_err(
             "E_FORBIDDEN",
@@ -480,9 +491,26 @@ pub(super) fn broadcast_summary(
 /// `failed` turn (a StopFailure) has ended too, and re-prompting is what its
 /// attention reason asks for — the same set `wait_for_session { until:
 /// "idle" }` accepts, so following this error's advice cannot loop.
-pub(super) fn run_prompt_ready(row: &crate::store::SessionRow) -> Result<(), McpError> {
-    match row.claude_status.as_deref() {
+/// `live` is the pane's reading, taken only for a stale-demoted row
+/// (`demoted`, its `stale_demoted_at`; `store::trusted_status`): its stored
+/// `idle` alone is not enough.
+pub(super) fn run_prompt_ready(
+    row: &crate::store::SessionRow,
+    demoted: bool,
+    live: Option<&str>,
+) -> Result<(), McpError> {
+    match crate::store::trusted_status(row, demoted, live) {
         s if crate::store::turn_over(s) => Ok(()),
+        None if crate::store::needs_pane_confirmation(row, demoted) => Err(mcp_err(
+            "E_INVALID_STATE",
+            format!(
+                "session {} was demoted from working after a quiet spell and its pane could \
+                 not confirm the turn is over (a long tool call looks the same) — \
+                 wait_for_session {{ until: \"idle\" }} first",
+                row.id
+            ),
+            None,
+        )),
         other => Err(mcp_err(
             "E_INVALID_STATE",
             format!(
@@ -721,7 +749,7 @@ pub(super) fn persist_audit(
     // to the controller when the peer-supplied args name no real session. A
     // hub link may only ever reach `peer_exchange` (handled above), so any
     // other tool it names is refused and must leave no trace.
-    if caller.mode == TokenMode::Peer {
+    if caller.mode.is_single_purpose() {
         return;
     }
     // Task 2: a read-only tool (`guard::READONLY_TOOLS` — the exact set a
@@ -848,10 +876,22 @@ pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError>
             None,
         ));
     }
-    if caller.is_master() || guard::is_client_tool(tool) {
+    if guard::access_allows(caller, tool) {
         return Ok(());
     }
-    let message = if guard::is_admin_tool(tool) {
+    let access = guard::policy(tool).map(|p| p.access);
+    let message = if access == Some(guard::Access::Person) {
+        format!(
+            "{tool} is for the fleet's operator or a person's own paired device, \
+             not a host's token or a device bound to an org ({} refused)",
+            caller.label()
+        )
+    } else if access == Some(guard::Access::PersonDevice) {
+        format!(
+            "{tool} is for a paired device; on the hub machine use fleet-hub settings ({} refused)",
+            caller.label()
+        )
+    } else if guard::is_admin_tool(tool) {
         format!(
             "{tool} is a fleet-admin tool: master token only ({} refused)",
             caller.label()

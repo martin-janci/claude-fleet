@@ -190,6 +190,42 @@ impl Store {
             .collect()
     }
 
+    /// Two-phase reap for a host nothing probes (hidden, or `local` on a
+    /// hub without a local host): every live row is ghosted this call and
+    /// every already-ghost row is deleted, both kinds, no TTL exemption —
+    /// nothing on such a host can be resumed from here. A ghosted row also
+    /// loses `claude_status` / `stuck_kind` / `current_activity`: a dead
+    /// row saying `working` kept being counted (data-sync F2). Returns the
+    /// number of rows hard-deleted.
+    pub fn reap_host_ghosts(&self, host_alias: &str, now: i64) -> Result<usize, rusqlite::Error> {
+        let (changes, deleted) = self.in_savepoint("reap_host_ghosts", |tx| {
+            let mut out: Vec<RowChange> = Vec::new();
+            let before: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM sessions WHERE host_alias = ?1",
+                [host_alias],
+                |r| r.get(0),
+            )?;
+            tx.execute(
+                "UPDATE sessions SET claude_status = NULL, stuck_kind = NULL, current_activity = NULL \
+                 WHERE host_alias = ?1 AND status != 'ghost'",
+                [host_alias],
+            )?;
+            for kind in [KIND_TMUX, KIND_PANE_LESS] {
+                Self::ghost_and_clean(tx, host_alias, &[], now, kind, None, None, None, &mut out)?;
+            }
+            let after: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM sessions WHERE host_alias = ?1",
+                [host_alias],
+                |r| r.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((out, (before - after).max(0) as usize))
+        })?;
+        for c in &changes {
+            self.bus.emit_change(c);
+        }
+        Ok(deleted)
+    }
+
     fn update_host_probe_in_tx(
         tx: &rusqlite::Connection,
         alias: &str,
@@ -218,17 +254,29 @@ impl Store {
             // which is why this emitted ~265 B per host per pass to every
             // connected client to say nothing had changed. When the stamp is
             // the only thing that moved, say just that.
+            // The health sample (task 2) moves every pass too, so it rides
+            // the ping rather than forcing a full row.
             let only_the_stamp_moved = prior.is_some_and(|before| {
                 HostRow {
                     last_pinged_at: row.last_pinged_at,
+                    claude_version_at: row.claude_version_at,
+                    disk_home_free_kb: row.disk_home_free_kb,
+                    disk_home_total_kb: row.disk_home_total_kb,
+                    disk_tmp_free_kb: row.disk_tmp_free_kb,
+                    load_1m: row.load_1m,
+                    mem_avail_kb: row.mem_avail_kb,
+                    uptime_secs: row.uptime_secs,
+                    health_at: row.health_at,
                     ..before
                 } == row
             });
             out.push(if only_the_stamp_moved {
                 RowChange::HostPinged {
+                    health: Some(crate::store::HostHealth::of(&row)),
                     alias: row.alias,
                     last_pinged_at: row.last_pinged_at.unwrap_or(last_pinged_at),
                     reachable: row.reachable,
+                    claude_version_at: row.claude_version_at,
                 }
             } else {
                 RowChange::HostProbed(row)
@@ -263,6 +311,8 @@ impl Store {
         pending_input: Option<&str>,
         killed_at: Option<i64>,
         reconciled_at: Option<i64>,
+        pane_working: bool,
+        pr_evidence: Option<&str>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // Read the prior row (not just its id) before the write: it tells us
@@ -403,7 +453,7 @@ impl Store {
                                    claude_session_id, claude_status, effort_level, pr_url, current_activity,
                                    context_pct, stuck_kind, ci_status, idle_since, stuck_since,
                                    tmux_pane_id, context_source, context_at, pending_input,
-                                   last_reconciled_at)
+                                   last_reconciled_at, pane_working_at, pr_evidence, pr_checked_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, NULL, {guarded_id}, ?10, ?11, ?12, ?13,
                      ?14, ?15, ?17,
                      CASE WHEN ?10 IN ('idle','completed','stopped') THEN ?19 ELSE NULL END,
@@ -412,7 +462,10 @@ impl Store {
                      CASE WHEN ?14 IS NULL THEN NULL ELSE 'pane' END,
                      CASE WHEN ?14 IS NULL THEN NULL ELSE ?19 END,
                      ?22,
-                     ?23)
+                     ?23,
+                     CASE WHEN ?25 THEN ?19 ELSE NULL END,
+                     CASE WHEN ?18 THEN ?26 ELSE NULL END,
+                     CASE WHEN ?18 AND ?12 IS NOT NULL THEN ?19 ELSE NULL END)
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
                project_id=excluded.project_id,
                last_activity_at=excluded.last_activity_at,
@@ -437,6 +490,21 @@ impl Store {
                pr_url=CASE WHEN ?18 THEN excluded.pr_url ELSE COALESCE(excluded.pr_url, pr_url) END,
                ci_status=CASE WHEN ?18 THEN excluded.ci_status
                               ELSE COALESCE(excluded.ci_status, ci_status) END,
+               -- Result evidence (082) follows the same rule as ci_status:
+               -- authoritative when the probe ran (?18), else kept. Every SET
+               -- expression reads the OLD row, so `pr_evidence` and `pr_url`
+               -- below are the stored values. `pr_checked_at` is stamped at
+               -- once for a new or changed reading and otherwise only when
+               -- the stored stamp is ?27 old: a PR that sits green must not
+               -- make every probe emit. No PR, no stamp.
+               pr_evidence=CASE WHEN ?18 THEN ?26 ELSE pr_evidence END,
+               pr_checked_at=CASE WHEN NOT ?18 THEN pr_checked_at
+                                  WHEN ?12 IS NULL THEN NULL
+                                  WHEN pr_checked_at IS NULL
+                                       OR ?26 IS NOT pr_evidence
+                                       OR ?12 IS NOT pr_url
+                                       OR ?19 - pr_checked_at >= ?27 THEN ?19
+                                  ELSE pr_checked_at END,
                current_activity=COALESCE(excluded.current_activity, current_activity),
                -- The pane footer is a fallback (spec §1.5): it applies only
                -- when no fresh hook/transcript value exists, and a missing
@@ -473,16 +541,24 @@ impl Store {
                idle_since={idle},
                pending_input={new_pending},
                -- A pane that shows a live turn lifts the stale-working
-               -- demotion (F2); anything else keeps the stamp.
+               -- demotion (F2): the stamp and the veto's memory (080) both
+               -- go. Anything else keeps them.
                stale_working_at=CASE WHEN ({new_status}) IS 'working' THEN NULL
                                      ELSE stale_working_at END,
+               stale_demoted_at=CASE WHEN ({new_status}) IS 'working' THEN NULL
+                                     ELSE stale_demoted_at END,
                -- The freshness stamp (Task H / the BE-3 guard's evidence),
                -- folded in here so a pass is ONE physical UPDATE per row
                -- instead of this upsert plus a second stamping UPDATE.
                -- `last_reconciled_at` is not a `SessionRow` field, so it
                -- never makes a no-op pass emit, and migration 063's trigger
                -- does not watch it, so it never bumps `row_version` either.
-               last_reconciled_at=COALESCE(?23, last_reconciled_at)
+               last_reconciled_at=COALESCE(?23, last_reconciled_at),
+               -- The pane showed a live turn this pass (?25): the stale-working
+               -- sweep's evidence of life (migration 081). Bookkeeping like
+               -- `last_reconciled_at`: not a `SessionRow` field, not watched
+               -- by the row_version trigger, so stamping it never emits.
+               pane_working_at=CASE WHEN ?25 THEN ?19 ELSE pane_working_at END
              WHERE {not_stale}",
             new_stuck = NEW_STUCK,
             new_pending = NEW_PENDING,
@@ -520,7 +596,10 @@ impl Store {
                 tmux_pane_id,
                 pending_input,
                 reconciled_at,
-                crate::service::playbooks::OOM_RECREATE_MIN_SPACING_SECS
+                crate::service::playbooks::OOM_RECREATE_MIN_SPACING_SECS,
+                pane_working,
+                pr_evidence,
+                crate::service::outcome::PR_CHECKED_REFRESH_SECS
             ],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
@@ -776,6 +855,10 @@ impl Store {
                     std::collections::HashMap::new();
                 for sess in spec.sessions {
                     let pending_input_json = encode_pending_input(sess.pending_input.as_ref());
+                    let pr_evidence_json = sess
+                        .pr_evidence
+                        .as_ref()
+                        .and_then(|e| serde_json::to_string(e).ok());
                     Self::upsert_session_in_tx(
                         tx,
                         sess.tmux_name,
@@ -801,6 +884,8 @@ impl Store {
                         pending_input_json.as_deref(),
                         kills.get(sess.tmux_name).copied(),
                         spec.reconciled_at,
+                        sess.pane_working,
+                        pr_evidence_json.as_deref(),
                         &mut out,
                     )?;
                     if let Some(pid) = sess.project_id {
@@ -903,6 +988,38 @@ mod tests {
     use super::*;
     use crate::store::test_support::*;
 
+    /// data-sync F2/F5, hub-ops F6: a host nothing probes (hidden, or `local`
+    /// on a hub without one) kept its rows forever, some still `working`.
+    #[test]
+    fn reap_host_ghosts_ghosts_live_rows_then_deletes_ghosts_without_a_probe() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let live = s
+            .upsert_session("dev-a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let bg = s
+            .upsert_session("bg:abc", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET kind='external', claude_status='working', stuck_kind='oom' WHERE id=?1",
+                [bg],
+            )
+            .unwrap();
+        // Pass 1: everything live on the host is ghosted, with its status cleared.
+        assert_eq!(s.reap_host_ghosts("local", 100).unwrap(), 0);
+        for id in [live, bg] {
+            let row = s.get_session_by_id(id).unwrap().unwrap();
+            assert_eq!(row.status, "ghost");
+            assert_eq!(row.claude_status, None, "a ghost has no live status");
+            assert_eq!(row.stuck_kind, None);
+        }
+        // Pass 2: already-ghost rows are hard-deleted, TTL or not.
+        assert_eq!(s.reap_host_ghosts("local", 200).unwrap(), 2);
+        assert!(s.get_session_by_id(live).unwrap().is_none());
+        assert!(s.get_session_by_id(bg).unwrap().is_none());
+    }
+
     /// A minimal, DB-free `SessionRow` for `lifecycle_kind` classification
     /// tests — only `lost_at` varies between cases, every other field is a
     /// harmless default.
@@ -948,6 +1065,8 @@ mod tests {
             last_stop_at: None,
             stale_working_at: None,
             work_rev: 0,
+            pr_evidence: None,
+            pr_checked_at: None,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
@@ -973,6 +1092,18 @@ mod tests {
             provisioned: false,
             transport: "ssh".to_string(),
             org_id: None,
+            claude_version_at: None,
+            disk_home_free_kb: None,
+            disk_home_total_kb: None,
+            disk_tmp_free_kb: None,
+            load_1m: None,
+            mem_avail_kb: None,
+            uptime_secs: None,
+            health_at: None,
+            last_hook_at: None,
+            agent_version: None,
+            provisioned_at: None,
+            provision_stale: false,
         }
     }
 
@@ -1175,6 +1306,8 @@ mod tests {
                         None,
                         None,
                         None,
+                        None,
+                        false,
                         None,
                         &mut out,
                     )?;
@@ -1524,6 +1657,122 @@ mod tests {
             pending_of(&store),
             None,
             "must clear pending_input when the pane was observed and shows no dialog"
+        );
+    }
+
+    /// Result evidence (migration 082) follows `ci_status`'s rule, and
+    /// `pr_checked_at` is stamped for a new or changed reading but not for
+    /// every probe of a steady one, so a PR that sits green does not make
+    /// each probe emit.
+    #[test]
+    fn reconcile_writes_pr_evidence_like_ci_status_and_stamps_it_sparingly() {
+        use crate::service::outcome::{PrEvidence, PR_CHECKED_REFRESH_SECS};
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let pr = Some("https://github.com/o/r/pull/1".to_string());
+        let ev = |head: &str| PrEvidence {
+            head_oid: Some(head.into()),
+            local_head: Some(head.into()),
+            ahead: Some(0),
+            dirty: Some(false),
+            ..Default::default()
+        };
+        let pass = |store: &mut Store,
+                    pr_url: Option<String>,
+                    evidence: Option<PrEvidence>,
+                    observed: bool| {
+            let sessions = vec![ReconcileSession {
+                tmux_name: "s1",
+                created_at: 1,
+                last_activity_at: 1,
+                pr_url,
+                ci_status: observed.then(|| "passing".to_string()),
+                pr_observed: observed,
+                pr_evidence: evidence,
+                ..Default::default()
+            }];
+            store
+                .apply_host_reconcile(HostReconcile {
+                    sessions: &sessions,
+                    keep: &["s1".to_string()],
+                    ..empty_probe("alpha", 1)
+                })
+                .unwrap();
+            store.get_session("s1", "alpha").unwrap().unwrap()
+        };
+        // The session's own events: every pass also emits `host:probed`.
+        let session_events = || {
+            bus.take()
+                .into_iter()
+                .filter(|e| e.starts_with("session:"))
+                .count()
+        };
+        let backdate = |store: &Store, secs: i64| {
+            store
+                .conn
+                .execute(
+                    "UPDATE sessions SET pr_checked_at = pr_checked_at - ?1",
+                    [secs],
+                )
+                .unwrap();
+        };
+
+        // First sight: stored and stamped.
+        let row = pass(&mut store, pr.clone(), Some(ev("aaaaaaa")), true);
+        assert_eq!(row.pr_evidence, Some(ev("aaaaaaa")));
+        let first = row.pr_checked_at.expect("stamped on first sight");
+        bus.take();
+
+        // A pass that did not probe keeps both.
+        let row = pass(&mut store, None, None, false);
+        assert_eq!(row.pr_evidence, Some(ev("aaaaaaa")));
+        assert_eq!(row.pr_checked_at, Some(first));
+        assert_eq!(session_events(), 0, "nothing changed, nothing emitted");
+
+        // The same reading inside the refresh window: no stamp, no event.
+        backdate(&store, 5);
+        let row = pass(&mut store, pr.clone(), Some(ev("aaaaaaa")), true);
+        assert_eq!(
+            row.pr_checked_at,
+            Some(first - 5),
+            "steady reading, stamp kept"
+        );
+        assert_eq!(session_events(), 0, "a steady PR does not emit per probe");
+
+        // The same reading once the stamp is a refresh old: re-stamped.
+        backdate(&store, PR_CHECKED_REFRESH_SECS);
+        let row = pass(&mut store, pr.clone(), Some(ev("aaaaaaa")), true);
+        assert!(row.pr_checked_at.unwrap() >= first, "refreshed");
+        assert_eq!(session_events(), 1, "one event per refresh");
+
+        // A changed reading is stamped at once.
+        backdate(&store, 5);
+        let row = pass(&mut store, pr.clone(), Some(ev("bbbbbbb")), true);
+        assert_eq!(row.pr_evidence, Some(ev("bbbbbbb")));
+        assert!(row.pr_checked_at.unwrap() >= first, "changed ⇒ stamped");
+
+        // An old `gh` (PR seen, no evidence fields) clears the evidence
+        // rather than leaving an old reading that looks current.
+        let row = pass(&mut store, pr.clone(), None, true);
+        assert_eq!(row.pr_evidence, None);
+        assert!(row.pr_checked_at.is_some());
+
+        // A definite "no PR" clears both.
+        let row = pass(&mut store, None, None, true);
+        assert_eq!((row.pr_evidence, row.pr_checked_at), (None, None));
+
+        // A malformed stored value reads as none instead of failing reads.
+        store
+            .conn
+            .execute("UPDATE sessions SET pr_evidence = '{not json'", [])
+            .unwrap();
+        assert_eq!(
+            store
+                .get_session("s1", "alpha")
+                .unwrap()
+                .unwrap()
+                .pr_evidence,
+            None
         );
     }
 
@@ -2729,6 +2978,8 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
+                    false,
                     None,
                     &mut out,
                 )?;

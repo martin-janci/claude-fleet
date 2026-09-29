@@ -283,6 +283,19 @@ pub struct SessionRow {
     /// caller (`OrgScope::redact_row`): another org's link would move it.
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub work_rev: i64,
+    /// What the PR probe last read as evidence about the session's PR
+    /// (migration 082, result evidence): the commit the checks describe,
+    /// the worktree's own HEAD, review and merge state. `None` without a
+    /// PR, before the first probe, or from a host whose `gh` answers only
+    /// the basic fields. Absent from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_evidence: Option<crate::service::outcome::PrEvidence>,
+    /// When the probe last observed the PR (migration 082): exact when the
+    /// evidence changed, else at most `outcome::PR_CHECKED_REFRESH_SECS`
+    /// old while probes succeed. A reading older than
+    /// `outcome::PR_EVIDENCE_STALE_SECS` describes the past.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_checked_at: Option<i64>,
 }
 
 fn is_zero_i64(n: &i64) -> bool {
@@ -314,10 +327,10 @@ impl SessionRow {
 }
 
 /// What losing a session clears, in every path that loses one (a host's
-/// sessions lost, a kill, a reconcile ghosting): the pane-derived state and
-/// the stale-working stamp, none of which a dead row can act on.
+/// sessions lost, a kill, a reconcile ghosting): the pane-derived state,
+/// the stale-working stamp and its veto, none of which a dead row can act on.
 pub(super) const LOSS_CLEARS: &str = "claude_status=NULL, stuck_kind=NULL, stuck_since=NULL, \
-     current_activity=NULL, pending_input=NULL, stale_working_at=NULL";
+     current_activity=NULL, pending_input=NULL, stale_working_at=NULL, stale_demoted_at=NULL";
 
 /// The `sessions` column list every `SessionRow` read shares, in the order
 /// `map_session_row` consumes it. One definition so a new column is added in
@@ -405,8 +418,19 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
     " AS org_id, prompt_submit_seq, stale_working_at, \
      (SELECT COALESCE(SUM(l.version * 1000003 + l.id), 0) FROM work_links l \
         JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
-       WHERE p.session_id = sessions.id AND l.ended_at IS NULL) AS work_rev"
+       WHERE p.session_id = sessions.id AND l.ended_at IS NULL) AS work_rev, \
+     pr_evidence, pr_checked_at"
 );
+
+/// Decode `sessions.pr_evidence`. Malformed text (never written by us)
+/// reads as no evidence rather than failing every session read.
+pub(super) fn decode_pr_evidence(
+    raw: Option<String>,
+) -> Option<crate::service::outcome::PrEvidence> {
+    raw.as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|s| serde_json::from_str(s).ok())
+}
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
 /// (never written by us, but a hand-edited DB is possible) reads as no tags
@@ -499,6 +523,8 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         prompt_submit_seq: row.get(58)?,
         stale_working_at: row.get(59)?,
         work_rev: row.get(60)?,
+        pr_evidence: decode_pr_evidence(row.get(61)?),
+        pr_checked_at: row.get(62)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
@@ -702,11 +728,60 @@ pub struct UsageDelta {
 pub const IDLE_STATUSES: [&str; 3] = ["idle", "completed", "stopped"];
 
 /// A `claude_status` whose turn is over: an idle status, or `failed` (a turn
-/// that ended in an error). What `wait_for_session { until: idle }`,
-/// `run_prompt` and a move's source check all wait for — one set, so a new
-/// terminal status cannot reach one and not the others.
+/// that ended in an error) — [`ClaudeStatus::is_quiet`], the one definition
+/// (the frontend's `isQuietStatus` is held to it by the shared fixture
+/// `service/testdata/quiet_statuses.json`). An unknown value is not quiet.
+/// What `wait_for_session { until: idle }`, `run_prompt` and a move's source
+/// check all wait for — one set, so a new terminal status cannot reach one
+/// and not the others. Those callers read it through [`trusted_status`].
+///
+/// [`ClaudeStatus::is_quiet`]: crate::service::pane_intel::ClaudeStatus::is_quiet
 pub fn turn_over(status: Option<&str>) -> bool {
-    status.is_some_and(|s| IDLE_STATUSES.contains(&s) || s == "failed")
+    status
+        .and_then(|s| s.parse::<crate::service::pane_intel::ClaudeStatus>().ok())
+        .is_some_and(crate::service::pane_intel::ClaudeStatus::is_quiet)
+}
+
+/// The status a turn-over check may believe for `row`. A row the tick
+/// demoted for staleness reads `idle` only because nothing moved for
+/// `reconcile.stale_working_secs` — and one tool call running longer than
+/// that fires no hook and grows no transcript. Its `idle` is a guess, so for
+/// such a row this is `live`, the pane's own reading taken just now
+/// (`session_activity`), and `None` — unknown, never over — when nobody
+/// asked the pane or it could not tell. Any other row's stored status
+/// stands.
+///
+/// `demoted` is the demotion's own memory, `sessions.stale_demoted_at`
+/// (migration 080, read with `Store::stale_demoted_by_id`; not a
+/// `SessionRow` field): an attach or `reconcile.stale_working_ttl_secs`
+/// clears the `stale_working_at` attention stamp, but the stored `idle` is
+/// still a guess until a hook or the pane lifts the demotion. The stamp
+/// counts too, so a caller whose flag read failed errs towards asking.
+pub fn trusted_status<'a>(
+    row: &'a SessionRow,
+    demoted: bool,
+    live: Option<&'a str>,
+) -> Option<&'a str> {
+    let stored = row.claude_status.as_deref();
+    if needs_pane_confirmation(row, demoted) {
+        live
+    } else {
+        stored
+    }
+}
+
+/// [`turn_over`] of the row's [`trusted_status`] with no pane reading: a
+/// stale-demoted row is never over on its stored `idle` alone.
+pub fn turn_over_row(row: &SessionRow, demoted: bool) -> bool {
+    turn_over(trusted_status(row, demoted, None))
+}
+
+/// Whether `row` is stale-demoted (`demoted`, or its attention stamp still
+/// set) with a stored status that only a live pane reading can confirm (see
+/// [`trusted_status`]): the one case a turn-over check should spend a
+/// `session_activity` probe on.
+pub fn needs_pane_confirmation(row: &SessionRow, demoted: bool) -> bool {
+    (demoted || row.stale_working_at.is_some()) && turn_over(row.claude_status.as_deref())
 }
 
 /// SQL fragment: the new `idle_since` given the OLD row's `idle_since` and the
@@ -746,6 +821,82 @@ pub struct HostRow {
     /// per-host token. `None` = no org (the token sees only unassigned work).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// When `claude_version` / `tmux_version` were last read from the host
+    /// (migration 072). `None`: never — the values are whatever `add_host`
+    /// or an older store left. Per-field default: an older hub omits it.
+    #[serde(default)]
+    pub claude_version_at: Option<i64>,
+    /// Health sample from the last reachable probe (migration 073). All
+    /// per-field default: an older hub omits them.
+    #[serde(default)]
+    pub disk_home_free_kb: Option<i64>,
+    #[serde(default)]
+    pub disk_home_total_kb: Option<i64>,
+    #[serde(default)]
+    pub disk_tmp_free_kb: Option<i64>,
+    #[serde(default)]
+    pub load_1m: Option<f64>,
+    #[serde(default)]
+    pub mem_avail_kb: Option<i64>,
+    #[serde(default)]
+    pub uptime_secs: Option<i64>,
+    /// When the sample above was taken. `None`: never.
+    #[serde(default)]
+    pub health_at: Option<i64>,
+    /// Last hook accepted from this host's own token.
+    #[serde(default)]
+    pub last_hook_at: Option<i64>,
+    /// The fleet-agent version its last hello reported (agent hosts).
+    #[serde(default)]
+    pub agent_version: Option<String>,
+    /// When `provision_hosts` last completed on this host (migration 074).
+    #[serde(default)]
+    pub provisioned_at: Option<i64>,
+    /// `provisioned` but with content older than this build ships (or
+    /// unknown). Computed from the stored fingerprint, never stored.
+    #[serde(default)]
+    pub provision_stale: bool,
+}
+
+/// The volatile half of a host row, as `host:pinged` carries it (host
+/// identity & health, task 2): a value that moves every pass must not turn
+/// every ping into a full-row `host:probed`. Mirrors the migration-073
+/// columns.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HostHealth {
+    pub disk_home_free_kb: Option<i64>,
+    pub disk_home_total_kb: Option<i64>,
+    pub disk_tmp_free_kb: Option<i64>,
+    pub load_1m: Option<f64>,
+    pub mem_avail_kb: Option<i64>,
+    pub uptime_secs: Option<i64>,
+    pub health_at: Option<i64>,
+}
+
+impl HostHealth {
+    pub fn of(row: &HostRow) -> Self {
+        HostHealth {
+            disk_home_free_kb: row.disk_home_free_kb,
+            disk_home_total_kb: row.disk_home_total_kb,
+            disk_tmp_free_kb: row.disk_tmp_free_kb,
+            load_1m: row.load_1m,
+            mem_avail_kb: row.mem_avail_kb,
+            uptime_secs: row.uptime_secs,
+            health_at: row.health_at,
+        }
+    }
+}
+
+/// What [`crate::store::Store::merge_host_alias`] did (host identity &
+/// health, task 5).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MergeReport {
+    pub from: String,
+    pub into: String,
+    pub worktrees_moved: usize,
+    pub sessions_moved: usize,
+    pub sessions_dropped: usize,
+    pub usage_days_merged: usize,
 }
 
 /// The only values `hosts.transport` may hold (migration 034). The single
@@ -756,10 +907,16 @@ pub const HOST_TRANSPORTS: [&str; 2] = ["ssh", "agent"];
 /// Columns every `HostRow` query selects, in [`map_host_row`] order.
 pub(super) const HOST_COLUMNS: &str =
     "alias, ssh_alias, reachable, claude_version, tmux_version, hidden, \
-     last_pinged_at, account_uuid, provisioned, transport, org_id";
+     last_pinged_at, account_uuid, provisioned, transport, org_id, claude_version_at, \
+     disk_home_free_kb, disk_home_total_kb, disk_tmp_free_kb, load_1m, mem_avail_kb, \
+     uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
+    let provisioned = row.get::<_, i64>(8)? != 0;
+    // Task 6: a provisioned host whose stored content fingerprint is not
+    // this build's (or unknown, an older provisioning) reads as stale.
+    let fingerprint: Option<String> = row.get(22)?;
     Ok(HostRow {
         alias: row.get(0)?,
         ssh_alias: row.get(1)?,
@@ -769,9 +926,22 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         hidden: row.get::<_, i64>(5)? != 0,
         last_pinged_at: row.get(6)?,
         account_uuid: row.get(7)?,
-        provisioned: row.get::<_, i64>(8)? != 0,
+        provisioned,
         transport: row.get(9)?,
         org_id: row.get(10)?,
+        claude_version_at: row.get(11)?,
+        disk_home_free_kb: row.get(12)?,
+        disk_home_total_kb: row.get(13)?,
+        disk_tmp_free_kb: row.get(14)?,
+        load_1m: row.get(15)?,
+        mem_avail_kb: row.get(16)?,
+        uptime_secs: row.get(17)?,
+        health_at: row.get(18)?,
+        last_hook_at: row.get(19)?,
+        agent_version: row.get(20)?,
+        provisioned_at: row.get(21)?,
+        provision_stale: provisioned
+            && fingerprint.as_deref() != Some(crate::service::provision::fingerprint()),
     })
 }
 
@@ -1087,6 +1257,16 @@ pub struct ReconcileSession<'a> {
     /// `None` CLEARS a stale dialog) when the pane was captured this pass,
     /// preserved when it was not.
     pub pending_input: Option<PendingInput>,
+    /// The pane captured this pass shows a live turn (`derived_status ==
+    /// Working`, the spinner's "esc to interrupt"). Stamps
+    /// `sessions.pane_working_at` (migration 081), which the stale-working
+    /// sweep respects: a row whose pane is visibly working is never demoted,
+    /// whatever the agents cadence let the status say this pass.
+    pub pane_working: bool,
+    /// The PR's evidence this pass read (result evidence), governed by
+    /// `pr_observed` like `ci_status`: authoritative when the probe ran (a
+    /// `None` clears it), preserved when it did not.
+    pub pr_evidence: Option<crate::service::outcome::PrEvidence>,
 }
 
 /// All inputs for applying one host's probe result atomically. Consumed by

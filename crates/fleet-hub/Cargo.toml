@@ -1,6 +1,6 @@
 [package]
 name = "fleet-hub"
-version = "0.3.3"
+version = "0.4.1"
 description = "Headless claude-fleet hub: runs the fleet without the desktop app"
 authors = ["martin-janci"]
 edition = "2021"
@@ -26,6 +26,9 @@ fleet-core = { path = "../fleet-core", features = ["nl-detect"] }
 # bind check applies is the same one the agent and the desktop use
 # (`fleet_proto::net`). Already in the tree — `fleet-core` depends on it.
 fleet-proto = { path = "../fleet-proto" }
+# The update engine's types, for `fleet-hub compat`'s shape (and its test
+# against `publish::HubCompat`). In the tree already through fleet-core.
+fleet-update = { path = "../fleet-update" }
 # No `env` feature: every FLEET_HUB_* value is resolved by hand in
 # `config::resolve` (flag > env > stored setting > default), which clap's own
 # env support cannot express. The env names appear in `--help` as literal text.
@@ -34,6 +37,9 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 directories = "5"
 serde_json = "1"
+# The readiness file `serve` writes and `healthcheck --ready` reads
+# (`ready.rs`): already in the tree as `fleet-core`'s dependency.
+serde = { version = "1", features = ["derive"] }
 # The pairing QR, rendered as Unicode half-blocks straight into the terminal.
 # Default features OFF on purpose: they pull `image` and `svg` renderers this
 # CLI never uses (and a large transitive tree with them).

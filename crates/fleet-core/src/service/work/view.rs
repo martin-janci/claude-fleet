@@ -94,8 +94,8 @@ pub struct WorkTreeFilters {
     /// One group id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
-    /// Include archived tasks (done, or every session link archived, with
-    /// no active session). Absent/false hides them.
+    /// false hides archived tasks (done or every link archived, none
+    /// active) into archived_hidden; absent shows them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
 }
@@ -232,8 +232,10 @@ pub struct WorkTask {
     pub sessions: Vec<TaskLink>,
     pub sessions_more: u32,
     /// No active session, and the task is done or every one of its links
-    /// (at least one of them ended) is archived: the tree hides it unless
-    /// `filters.archived` (or `status: done`) asks for it.
+    /// (at least one of them ended) is archived: the tree hides it when
+    /// asked to (`filters.archived: false`). Judged over every link, not
+    /// only the caller's: a fenced caller must not see a task as archived
+    /// while another host or org still works on it.
     #[serde(default)]
     pub archived: bool,
 }
@@ -317,6 +319,16 @@ pub struct TaskDetail {
     /// The tracker's description (third-party text), capped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The description's full length as the hub knows it, in characters:
+    /// the tracker's own count when the sync recorded one, else the cached
+    /// excerpt's. Present whenever `description` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description_chars: Option<usize>,
+    /// `description` shows less than `description_chars` (the 600-char cap
+    /// here, or the cache's own excerpt): a person's screen says so and
+    /// points at the ticket. Absent (false) from an older hub.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub description_truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_outcome: Option<LastOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -609,6 +621,9 @@ struct Built<'g> {
     visible: Vec<(&'g ViewLink, &'static str)>,
     /// Every link of any state, visible or not.
     any_links: usize,
+    /// Every link with a wire state, visible or not: `archived` is the
+    /// task's, whoever reads it (never listed, only judged).
+    all: Vec<(&'g ViewLink, &'static str)>,
     /// A per-host token's fence: work of it on its own host.
     on_own_host: bool,
 }
@@ -625,6 +640,7 @@ fn build_tasks<'g>(g: &'g Graph, scope: &OrgScope) -> Vec<Built<'g>> {
                 ref_key: None,
                 visible: Vec::new(),
                 any_links: 0,
+                all: Vec::new(),
                 on_own_host: false,
             },
         );
@@ -653,6 +669,7 @@ fn build_tasks<'g>(g: &'g Graph, scope: &OrgScope) -> Vec<Built<'g>> {
                     ref_key: l.link.ref_key.clone(),
                     visible: Vec::new(),
                     any_links: 0,
+                    all: Vec::new(),
                     on_own_host: false,
                 },
             );
@@ -664,6 +681,7 @@ fn build_tasks<'g>(g: &'g Graph, scope: &OrgScope) -> Vec<Built<'g>> {
         let Some(state) = state else {
             continue;
         };
+        b.all.push((l, state));
         if !g.link_visible(scope, l) {
             continue;
         }
@@ -1091,12 +1109,14 @@ fn to_task(
     // round 3 checked this deliberately, not assumed safe): a `done` that
     // the live rule lifts to `in_progress` (a session resumes an
     // untracked/legacy `done`) never flips `archived` to true either way,
-    // because the same confirmed link that justifies the lift also makes
-    // `counts.active >= 1` for this same task — see
+    // because the same confirmed link that justifies the lift is itself
+    // `active` in `b.all` below — see
     // `a_legacy_done_item_a_session_resumes_is_lifted_and_stays_unarchived`.
     let status_category = item.and_then(|i| item_status(g, i));
-    let archived = counts.active == 0
-        && (status_category.as_deref() == Some("done") || all_links_archived(&b.visible));
+    // Over every link: `counts.active` is the caller's, and a session on a
+    // host or in an org it cannot see still keeps the task in work.
+    let archived = !b.all.iter().any(|(_, st)| *st == "active")
+        && (status_category.as_deref() == Some("done") || all_links_archived(&b.all));
     if let Some(i) = item {
         let ext = i.item.updated_ext.unwrap_or(i.item.updated_at);
         last = Some(last.map_or(ext, |x| x.max(ext)));
@@ -1173,9 +1193,9 @@ fn to_task(
 
 /// At least one ended link, and every link but a rejected one archived
 /// (the UI-only archive of work graph M7).
-fn all_links_archived(visible: &[(&ViewLink, &str)]) -> bool {
+fn all_links_archived(links: &[(&ViewLink, &str)]) -> bool {
     let mut ended = false;
-    for (l, st) in visible {
+    for (l, st) in links {
         match *st {
             "rejected" => continue,
             "ended" => ended = true,
@@ -1288,12 +1308,17 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
     !hidden_as_archived(t, f)
 }
 
-/// An archived task stays out of a tree listing unless the filters ask for
-/// archived tasks, or for done ones (an explicit Done filter shows them).
-/// Only the tree hides: a direct read (`task`, `session_tasks`, `review`)
-/// answers archived tasks as any other.
+/// An archived task stays out of a tree listing only when the caller asks
+/// (`archived: false`): a client from before the archive (a fleet-mobile
+/// that never sends it and has no "N hidden" row) keeps seeing every task.
+/// An explicit Done filter, or "past only" (past work is archived work),
+/// shows them anyway. Only the tree hides: a direct read (`task`,
+/// `session_tasks`, `review`) answers archived tasks as any other.
 fn hidden_as_archived(t: &WorkTask, f: &WorkTreeFilters) -> bool {
-    t.archived && f.archived != Some(true) && f.status.as_deref() != Some("done")
+    t.archived
+        && f.archived == Some(false)
+        && f.status.as_deref() != Some("done")
+        && f.has.as_deref() != Some("past_only")
 }
 
 /// A task's place in the order: named orgs by name then unassigned, groups
@@ -1601,31 +1626,45 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
     let flat_key = item
         .and_then(|i| i.item.key.as_deref())
         .map(|k| k.split_whitespace().collect::<Vec<_>>().join(" "));
-    let description = item
+    let excerpt = item
         .and_then(|i| i.meta.description.clone())
-        .filter(|d| !d.trim().is_empty())
-        .map(|d| match scope {
-            // An agent reads it: the same audience and marker as `lookup`,
-            // the start brief and the card, so the same helper — the notice
-            // when what is shown is less than the tracker holds, and the
-            // offer of `describe` when its provider serves one. This path's
-            // own cap is the Work view's (600), narrower than the 2000-char
-            // excerpt a row carries, so the notice fires here for a
-            // description the other paths show whole — which is exactly
-            // right: it names what THIS answer shows. Before this, the task
-            // detail cut at 600 in silence, through the bare
-            // `fence_untrusted` the rest of the branch replaced.
-            OrgScope::Host { .. } => crate::mcp::guard::fence_ticket(
-                &d,
-                "a tracker ticket",
-                DESCRIPTION_MAX_CHARS,
-                item.and_then(|i| i.meta.description_chars),
-                crate::service::trackers::tickets::describe_offer(tracker, flat_key.as_deref()),
-            ),
-            // A person reads it on a phone or the desktop (bound or not): as
-            // is, exactly as before.
-            _ => d.chars().take(DESCRIPTION_MAX_CHARS).collect(),
-        });
+        .filter(|d| !d.trim().is_empty());
+    // The full length and whether the answer shows less of it, for every
+    // caller: a person's screen has no fence notice to read it from. The
+    // larger of the tracker's count and the excerpt's own, so a count that
+    // trimmed differently from the excerpt never hides a cut.
+    let description_chars = excerpt.as_deref().map(|d| {
+        let cached = d.chars().count();
+        item.and_then(|i| i.meta.description_chars)
+            .and_then(|n| usize::try_from(n).ok())
+            .map_or(cached, |n| n.max(cached))
+    });
+    let shown = excerpt
+        .as_deref()
+        .map_or(0, |d| d.chars().count().min(DESCRIPTION_MAX_CHARS));
+    let description_truncated = description_chars.is_some_and(|n| n > shown);
+    let description = excerpt.map(|d| match scope {
+        // An agent reads it: the same audience and marker as `lookup`,
+        // the start brief and the card, so the same helper — the notice
+        // when what is shown is less than the tracker holds, and the
+        // offer of `describe` when its provider serves one. This path's
+        // own cap is the Work view's (600), narrower than the 2000-char
+        // excerpt a row carries, so the notice fires here for a
+        // description the other paths show whole — which is exactly
+        // right: it names what THIS answer shows. Before this, the task
+        // detail cut at 600 in silence, through the bare
+        // `fence_untrusted` the rest of the branch replaced.
+        OrgScope::Host { .. } => crate::mcp::guard::fence_ticket(
+            &d,
+            "a tracker ticket",
+            DESCRIPTION_MAX_CHARS,
+            item.and_then(|i| i.meta.description_chars),
+            crate::service::trackers::tickets::describe_offer(tracker, flat_key.as_deref()),
+        ),
+        // A person reads it on a phone or the desktop (bound or not): as
+        // is, exactly as before.
+        _ => d.chars().take(DESCRIPTION_MAX_CHARS).collect(),
+    });
     // The newest past session the caller sees, and its conversation's
     // newest summary, note or outcome.
     let last_outcome = task
@@ -1684,6 +1723,8 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
         task,
         aliases,
         description,
+        description_chars,
+        description_truncated,
         last_outcome,
         placement,
         rules,

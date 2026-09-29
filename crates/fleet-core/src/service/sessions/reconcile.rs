@@ -191,10 +191,28 @@ pub(crate) const PR_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// up on later passes as the per-session cache expires.
 pub(super) const PR_PROBE_BATCH: usize = 12;
 
+/// How old a host's `claude_version_at` may be before the next pass asks
+/// the host for its versions again (`---FLEET:versions`, one `claude
+/// --version` node start per host per window). The desktop's `claude_old`
+/// badge trusts a stamp younger than `health.version_max_age_secs` (24 h),
+/// so a 6 h refresh keeps it honest with room to spare.
+pub const VERSIONS_REFRESH_SECS: i64 = 6 * 3600;
+
+/// Whether this pass should ask the host for its versions.
+pub(super) fn versions_due(claude_version_at: Option<i64>, now: i64) -> bool {
+    claude_version_at.is_none_or(|at| now - at >= VERSIONS_REFRESH_SECS)
+}
+
 /// One host's probe result, carried from the off-lock probe task to the
 /// under-lock writer.
 pub(super) struct HostProbe {
     pub(super) host: HostRow,
+    /// The versions section, when this pass asked and the host answered
+    /// (task 1). `None`: not due, or unanswerable — the stored versions
+    /// are kept and the stamp does not move.
+    pub(super) versions: Option<crate::tmux::HostVersions>,
+    /// This pass's health sample (task 2), when the host answered it.
+    pub(super) health: Option<crate::tmux::HostHealthSample>,
     pub(super) result: Result<Vec<crate::tmux::TmuxSession>, IpcError>,
     /// `None`: not asked this pass (cadence) or unanswerable — the bg
     /// pruner is skipped.
@@ -736,9 +754,27 @@ fn write_reachable_host(
             s.ensure_in_tx()?;
         }
         let prior_row = prior_read.as_ref().ok().cloned().flatten();
-        let stale = prior_row
-            .as_ref()
-            .is_some_and(|p| p.stale_working_at.is_some());
+        // The veto is armed by the attention stamp OR by the demotion's own
+        // memory (`stale_demoted_at`, not a `SessionRow` field): an attach
+        // or `reconcile.stale_working_ttl_secs` ends the reason, not the
+        // demotion. A failed read leaves the veto to the stamp alone.
+        let stale = match &prior_row {
+            None => false,
+            Some(p) if p.stale_working_at.is_some() => true,
+            Some(_) => match s.stale_demoted(&host.alias, &sess.name) {
+                Ok(demoted) => demoted,
+                Err(e) => {
+                    tracing::warn!(
+                        host = %host.alias,
+                        session = %sess.name,
+                        error = %e,
+                        "[reconcile] stale-demoted read failed"
+                    );
+                    s.ensure_in_tx()?;
+                    false
+                }
+            },
+        };
         // Prefer the authoritative `claude agents` status; fall back to
         // the pane heuristic per `status_candidate` — full weight when
         // this pass actually asked, `Blocked`-only otherwise (a
@@ -783,8 +819,14 @@ fn write_reachable_host(
             intel_observed: pane.is_some(),
             ci_status: pr.and_then(|p| p.ci_status.clone()),
             pr_observed: pr.is_some(),
+            pr_evidence: pr.and_then(|p| p.evidence.clone()),
             tmux_pane_id: sess.pane_id.clone(),
             pending_input: pane.and_then(|p| p.pending_input.clone()),
+            // The spinner on screen is life, whether or not this pass asked
+            // `claude agents`: the stale-working sweep that runs right after
+            // this pass must not demote a row its pane shows working (F2's
+            // demote-lift-demote flap during one long tool call).
+            pane_working: pane_status == Some(crate::service::pane_intel::ClaudeStatus::Working),
         });
     }
     let now = now_unix();
@@ -888,12 +930,30 @@ fn write_reachable_host(
         .get_setting(crate::service::settings::SESSIONS_LOST_TTL_SECS)
         .ok()
         .flatten();
+    // Task 1: a version the host answered THIS pass replaces the stored
+    // one; a missing answer (not due, or the binary said nothing) keeps
+    // it. Only an answered `claude --version` moves the stamp — the stamp
+    // means "read from the host", never "asked".
+    let probed = probe.versions.as_ref();
+    let claude_version = probed
+        .and_then(|v| v.claude_version.as_deref())
+        .or(host.claude_version.as_deref());
+    let tmux_version = probed
+        .and_then(|v| v.tmux_version.as_deref())
+        .or(host.tmux_version.as_deref());
+    if probed.is_some_and(|v| v.claude_version.is_some()) {
+        s.set_host_versions_at(&host.alias, now)?;
+    }
+    // Task 2: the health sample, every pass the host answered it.
+    if let Some(h) = &probe.health {
+        s.set_host_health(&host.alias, h, now)?;
+    }
     s.ensure_in_tx()?;
     s.apply_host_reconcile_in_tx(HostReconcile {
         alias: &host.alias,
         reachable: true,
-        claude_version: host.claude_version.as_deref(),
-        tmux_version: host.tmux_version.as_deref(),
+        claude_version,
+        tmux_version,
         last_pinged_at: now,
         probe_started_at: probe.started_at,
         sessions: &sessions,
@@ -1453,10 +1513,23 @@ pub(super) async fn probe_with_timeout(
         // still names the sessions it just lost. Only trustworthy when we
         // actually reached the host this pass, so it is discarded below
         // when the list fails.
-        let snap = tmux.probe_snapshot(PANE_TAIL_LINES).await;
+        // The versions section rides the same script, but only on a pass
+        // that is due for it (task 1): `claude --version` is a node start.
+        let want_versions = versions_due(host.claude_version_at, started_at);
+        let snap = tmux.probe_snapshot(PANE_TAIL_LINES, want_versions).await;
         let tmux_result = snap.sessions;
         let identity = if tmux_result.is_ok() {
             snap.identity
+        } else {
+            None
+        };
+        let versions = if tmux_result.is_ok() {
+            snap.versions
+        } else {
+            None
+        };
+        let health = if tmux_result.is_ok() {
+            snap.health
         } else {
             None
         };
@@ -1505,20 +1578,26 @@ pub(super) async fn probe_with_timeout(
             intel,
             account,
             identity,
+            versions,
+            health,
         )
     };
     let mut probe = match tokio::time::timeout(timeout, probe).await {
-        Ok((result, agent_rows, agent_mtimes, intel, account, identity)) => HostProbe {
-            host,
-            result,
-            agent_rows,
-            agent_mtimes,
-            intel,
-            pr_info: PrInfoMap::new(),
-            account,
-            identity,
-            started_at,
-        },
+        Ok((result, agent_rows, agent_mtimes, intel, account, identity, versions, health)) => {
+            HostProbe {
+                host,
+                versions,
+                health,
+                result,
+                agent_rows,
+                agent_mtimes,
+                intel,
+                pr_info: PrInfoMap::new(),
+                account,
+                identity,
+                started_at,
+            }
+        }
         Err(_elapsed) => {
             tracing::warn!(
                 host = %host.alias,
@@ -1527,6 +1606,8 @@ pub(super) async fn probe_with_timeout(
             );
             return HostProbe {
                 host,
+                versions: None,
+                health: None,
                 result: Err(IpcError::new(codes::E_TIMEOUT, "host probe timed out")),
                 agent_rows: None,
                 agent_mtimes: None,
@@ -1602,9 +1683,11 @@ pub(crate) async fn reconcile_sessions_with(
         if deps.local_host {
             s.upsert_host("local")?;
         }
-        s.list_hosts()?
+        // One hidden/local rule for every host loop (hub-ops F6): hidden
+        // rows never enter the snapshot now; `reap_hidden_hosts` (step 4)
+        // handles what they still hold.
+        crate::service::hosts::active_hosts(s.list_hosts()?, deps.local_host)
             .into_iter()
-            .filter(|h| deps.local_host || h.alias != "local")
             .map(|h| {
                 let paths = HostPaths::for_host(&s, &h.alias);
                 (h, paths)
@@ -1613,8 +1696,9 @@ pub(crate) async fn reconcile_sessions_with(
     };
 
     // 2. Fan out probes (off-lock) via JoinSet for parallel execution.
-    //    Hidden hosts are skipped here — their last-known sessions are still
-    //    surfaced by the final `list_all_sessions` read, without probing.
+    //    Hidden hosts never reach here (see the snapshot above) — their
+    //    last-known sessions are still surfaced by the final
+    //    `list_all_sessions` read, without probing.
     //    Each task receives owned data so it satisfies 'static + Send.
     //
     //    Each probe is bounded by `deps.probe_timeout` (see `probe_one_host`):
@@ -1631,7 +1715,8 @@ pub(crate) async fn reconcile_sessions_with(
         s.list_projects()?
     };
     let mut set = tokio::task::JoinSet::new();
-    for (host, paths) in hosts.into_iter().filter(|(h, _)| !h.hidden) {
+    // Hidden rows never enter the snapshot (`active_hosts`, step 1).
+    for (host, paths) in hosts {
         let deps = Arc::clone(deps);
         set.spawn(async move { probe_one_host(host, paths, &deps).await });
     }
@@ -1678,7 +1763,39 @@ pub(crate) async fn reconcile_sessions_with(
         // comes back for the lock.
         tokio::task::yield_now().await;
     }
+
+    // 4. Hosts nothing probes — hidden rows, and `local` on a hub without a
+    //    local host — still hold session rows (a copied desktop store, a
+    //    host hidden after its rename). Reap them here, one savepoint per
+    //    host, so "hidden" stops meaning "immortal" (data-sync F2/F5).
+    reap_hidden_hosts(store, deps, now_unix());
     Ok(())
+}
+
+/// Step 4 of [`reconcile_sessions_with`]. Best-effort per host: a failure
+/// is logged and the next pass tries again.
+pub(super) fn reap_hidden_hosts(store: &Mutex<Store>, deps: &ReconcileDeps, now: i64) {
+    let Ok(s) = lock(store) else { return };
+    let Ok(rows) = s.list_hosts() else { return };
+    for h in rows {
+        let unprobed = h.hidden || (!deps.local_host && h.alias == "local");
+        if !unprobed {
+            continue;
+        }
+        match s.reap_host_ghosts(&h.alias, now) {
+            Ok(n) if n > 0 => tracing::info!(
+                host = %h.alias,
+                reaped = n,
+                "[reconcile] reaped rows of an unprobed host"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                host = %h.alias,
+                error = %e,
+                "[reconcile] reap of an unprobed host failed"
+            ),
+        }
+    }
 }
 
 /// Claim the gate and run one full pass. Returns `Ok(false)` without probing
@@ -2004,8 +2121,10 @@ pub(super) fn status_candidate(
     }
 }
 
-/// A row the tick demoted for staleness (`stale_working_at` set) is not
-/// handed back to `working` by the cached `claude agents` status alone.
+/// A row the tick demoted for staleness (`stale_working_at` or, once an
+/// attach or the TTL has ended the attention reason, `stale_demoted_at`
+/// set) is not handed back to `working` by the cached `claude agents`
+/// status alone.
 /// Only the pane's own spinner (`Working`) lifts the demotion; a `Blocked`
 /// pane still surfaces; anything else yields `None` so the upsert keeps
 /// the stored `idle`.
@@ -2050,6 +2169,27 @@ pub fn age_out_stale_working(store: &Mutex<Store>) -> usize {
         }
         Err(e) => {
             tracing::warn!(error = %e, "[reconcile] stale-working sweep failed");
+            0
+        }
+    }
+}
+
+/// The tick's companion to [`age_out_stale_working`]: reads
+/// `reconcile.stale_working_ttl_secs` and lifts every stamp that no longer
+/// asks anything (`Store::expire_stale_working`). Best-effort; returns how
+/// many rows were lifted.
+pub fn expire_stale_working(store: &Mutex<Store>) -> usize {
+    let Ok(s) = store.lock() else {
+        return 0;
+    };
+    let ttl = crate::service::settings::get_secs(
+        &s,
+        crate::service::settings::RECONCILE_STALE_WORKING_TTL_SECS,
+    ) as i64;
+    match s.expire_stale_working(now_unix(), ttl) {
+        Ok(rows) => rows.len(),
+        Err(e) => {
+            tracing::warn!(error = %e, "[reconcile] stale-working expiry failed");
             0
         }
     }

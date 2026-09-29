@@ -98,6 +98,209 @@ fn a_stale_working_demotion_is_not_undone_by_the_cached_agents_status() {
     );
 }
 
+/// F2's flap: one tool call running longer than
+/// `reconcile.stale_working_secs` fires no hook, grows no transcript and
+/// moves no tmux `session_activity`. The tick ran reconcile then the
+/// stale sweep; every pass that asked `claude agents` saw the pane's
+/// spinner, lifted the demotion, and the sweep right after demoted the row
+/// again — a `status_change` pair per tick, until the 500-entry timeline
+/// cap evicted history (the OOM attempt count among it). A pane that shows
+/// a live turn now stamps `pane_working_at`, which the sweep respects.
+#[test]
+fn a_long_tool_call_is_not_demoted_and_lifted_again_every_tick() {
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let projects = s.list_projects().unwrap();
+    let agent = crate::claude_agents::ClaudeAgentRow {
+        status: Some("working".into()),
+        ..agent_for_session("dev-a", "cid-a")
+    };
+    let spinner = crate::service::pane_intel::analyze(
+        "⏺ Bash(sleep 3600)\n  ⎿ Running…\n✶ Cooking… (2400s · esc to interrupt)\n",
+    );
+    assert_eq!(
+        spinner.derived_status,
+        Some(crate::service::pane_intel::ClaudeStatus::Working)
+    );
+    // One tick: a reconcile pass (the pane captured or not, `claude
+    // agents` asked or cadence-skipped), then the sweep. Returns how many
+    // rows the sweep demoted.
+    let tick = |s: &mut Store, pane: bool, agents: bool| -> usize {
+        let mut probe = vps_probe(
+            s,
+            vec![tmux_session("dev-a")],
+            None,
+            vec![agent.clone()],
+            PrInfoMap::new(),
+        );
+        if !agents {
+            probe.agent_rows = None;
+        }
+        if pane {
+            probe.intel.insert("dev-a".into(), spinner.clone());
+        }
+        reconcile_write_one_host(s, &probe, &projects).unwrap();
+        s.age_out_stale_working(now_unix(), 1_800).unwrap().len()
+    };
+    let status = |s: &Store| s.get_session("dev-a", "vps").unwrap().unwrap();
+    let status_changes = |s: &Store| {
+        let id = status(s).id;
+        s.list_session_events(id, 500)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "status_change")
+            .count()
+    };
+
+    // The pane shows the spinner from the first pass: never demoted.
+    assert_eq!(
+        tick(&mut s, true, true),
+        0,
+        "a visibly working pane is not stale"
+    );
+    assert_eq!(status(&s).claude_status.as_deref(), Some("working"));
+
+    // A spell of failed captures lets the sweep demote it once...
+    s.conn_for_test()
+        .execute("UPDATE sessions SET pane_working_at = 1", [])
+        .unwrap();
+    assert_eq!(tick(&mut s, false, true), 1);
+    assert_eq!(status(&s).claude_status.as_deref(), Some("idle"));
+    let after_demotion = status_changes(&s);
+
+    // ...then the spinner is back. Ticks alternate agents-asked and
+    // cadence-skipped passes, as production does: the first asked pass
+    // lifts the demotion, and nothing demotes it again.
+    for (n, agents) in [false, true, false, true, true, false, true]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(tick(&mut s, true, agents), 0, "tick {n}: no re-demotion");
+    }
+    let row = status(&s);
+    assert_eq!(row.claude_status.as_deref(), Some("working"));
+    assert_eq!(row.stale_working_at, None);
+    assert_eq!(
+        status_changes(&s) - after_demotion,
+        1,
+        "one transition back to working, no flap"
+    );
+}
+
+/// A pass of `vps` that sees `dev-a` the way a stale-demoted row looks: the
+/// cached `claude agents` status says `working` (live subagents), the pane
+/// shows `pane_status`.
+fn stale_probe(s: &Store, pane_status: crate::service::pane_intel::ClaudeStatus) -> HostProbe {
+    let mut probe = vps_probe(
+        s,
+        vec![tmux_session("dev-a")],
+        None,
+        vec![agent("uuid-a", Some("dev-a"), Some("/tmp"))],
+        PrInfoMap::new(),
+    );
+    probe.intel.insert(
+        "dev-a".into(),
+        crate::service::pane_intel::PaneIntel {
+            activity: None,
+            stuck: None,
+            context_pct: None,
+            derived_status: Some(pane_status),
+            waiting_for: None,
+            pending_input: None,
+        },
+    );
+    probe
+}
+
+/// `dev-a` on `vps`, `working` by the agents' status, then demoted by the
+/// tick's stale-working rule (both the attention stamp and the veto armed).
+fn demoted_dev_a(s: &mut Store, projects: &[ProjectRow]) -> SessionRow {
+    use crate::service::pane_intel::ClaudeStatus;
+    s.upsert_host("vps").unwrap();
+    let probe = stale_probe(s, ClaudeStatus::Idle);
+    reconcile_write_one_host(s, &probe, projects).unwrap();
+    let row = s.get_session("dev-a", "vps").unwrap().unwrap();
+    assert_eq!(
+        row.claude_status.as_deref(),
+        Some("working"),
+        "precondition"
+    );
+    let demoted = s.age_out_stale_working(now_unix(), 60).unwrap();
+    assert_eq!(demoted.len(), 1, "precondition: the tick demotes dev-a");
+    assert_eq!(demoted[0].claude_status.as_deref(), Some("idle"));
+    assert!(demoted[0].stale_working_at.is_some());
+    demoted.into_iter().next().unwrap()
+}
+
+/// Final review of the stale_working acknowledgement: an attach ends the
+/// attention reason, but not the demotion. The next pass must not let the
+/// cached agents status flip the idle pane back to `working`, and the tick
+/// must not re-demote (and re-stamp) it half an hour later.
+#[test]
+fn an_attach_ends_the_stale_working_reason_but_keeps_the_demotion() {
+    use crate::service::pane_intel::ClaudeStatus;
+    let mut s = Store::open_in_memory().unwrap();
+    let projects = s.list_projects().unwrap();
+    let row = demoted_dev_a(&mut s, &projects);
+    assert!(s.touch_session(row.id).unwrap());
+    let get = |s: &Store| s.get_session("dev-a", "vps").unwrap().unwrap();
+    assert_eq!(get(&s).stale_working_at, None, "the attach acknowledged it");
+
+    let probe = stale_probe(&s, ClaudeStatus::Idle);
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    assert_eq!(
+        get(&s).claude_status.as_deref(),
+        Some("idle"),
+        "the cached agents status must not undo the demotion after an attach"
+    );
+    assert_eq!(get(&s).stale_working_at, None, "the reason stays ended");
+    assert!(
+        s.age_out_stale_working(now_unix() + 3_600, 60)
+            .unwrap()
+            .is_empty(),
+        "an acknowledged demotion is not re-stamped"
+    );
+    assert_eq!(get(&s).stale_working_at, None);
+
+    // The pane's own spinner is real: it lifts the demotion, and a row that
+    // then goes quiet again can be demoted again.
+    let probe = stale_probe(&s, ClaudeStatus::Working);
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    assert_eq!(get(&s).claude_status.as_deref(), Some("working"));
+    let again = s.age_out_stale_working(now_unix() + 3_600, 60).unwrap();
+    assert_eq!(again.len(), 1, "a lifted demotion re-arms the rule");
+}
+
+/// The same for the TTL: `reconcile.stale_working_ttl_secs` expires the
+/// attention stamp, and the demotion still stands.
+#[test]
+fn an_expired_stale_working_stamp_keeps_the_demotion() {
+    use crate::service::pane_intel::ClaudeStatus;
+    let mut s = Store::open_in_memory().unwrap();
+    let projects = s.list_projects().unwrap();
+    demoted_dev_a(&mut s, &projects);
+    let ttl = 3_600;
+    let expired = s.expire_stale_working(now_unix() + ttl + 1, ttl).unwrap();
+    assert_eq!(expired.len(), 1, "the TTL lifts the stamp");
+    let get = |s: &Store| s.get_session("dev-a", "vps").unwrap().unwrap();
+    assert_eq!(get(&s).stale_working_at, None);
+
+    let probe = stale_probe(&s, ClaudeStatus::Idle);
+    reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
+    assert_eq!(
+        get(&s).claude_status.as_deref(),
+        Some("idle"),
+        "the cached agents status must not undo the demotion after the TTL"
+    );
+    assert!(
+        s.age_out_stale_working(now_unix() + 2 * ttl, 60)
+            .unwrap()
+            .is_empty(),
+        "an expired demotion is not re-stamped"
+    );
+    assert_eq!(get(&s).stale_working_at, None);
+}
+
 fn job_agent(session_id: &str, job_id: Option<&str>) -> crate::claude_agents::ClaudeAgentRow {
     crate::claude_agents::ClaudeAgentRow {
         session_id: Some(session_id.into()),
@@ -253,6 +456,8 @@ fn row(
         last_stop_at: None,
         stale_working_at: None,
         work_rev: 0,
+        pr_evidence: None,
+        pr_checked_at: None,
         parent_session_id: None,
         tags: Vec::new(),
         usage: Default::default(),
@@ -2314,6 +2519,236 @@ async fn reconcile_relinks_a_remote_host_after_an_account_switch() {
     );
 }
 
+/// A `TmuxExec` whose remote host `h` answers `host_versions` and
+/// `host_health`.
+struct VersionsTmux {
+    inner: ScriptedTmux,
+    versions: Option<crate::tmux::HostVersions>,
+    health: Option<crate::tmux::HostHealthSample>,
+}
+
+#[async_trait::async_trait]
+impl TmuxExec for VersionsTmux {
+    async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+        self.inner.list_sessions().await
+    }
+    async fn new_session(&self, _n: &str, _c: &std::path::Path, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn kill_session(&self, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn rename_session(&self, _o: &str, _n: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn restart_session(&self, _n: &str, _p: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn capture_pane(&self, _n: &str) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn capture_pane_scrollback(&self, _n: &str, _l: u32) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        Some(vec![])
+    }
+    async fn host_versions(&self) -> Option<crate::tmux::HostVersions> {
+        self.versions.clone()
+    }
+    async fn host_health(&self) -> Option<crate::tmux::HostHealthSample> {
+        self.health.clone()
+    }
+}
+
+/// Deps whose remote host `h` answers `versions` when asked; every other
+/// alias answers nothing.
+fn versions_deps(versions: Option<crate::tmux::HostVersions>) -> Arc<ReconcileDeps> {
+    versions_health_deps(versions, None)
+}
+
+/// [`versions_deps`] whose host `h` also answers `health` every pass.
+fn versions_health_deps(
+    versions: Option<crate::tmux::HostVersions>,
+    health: Option<crate::tmux::HostHealthSample>,
+) -> Arc<ReconcileDeps> {
+    ReconcileDeps::fake(
+        move |alias| {
+            let is_h = alias == "h";
+            Box::new(VersionsTmux {
+                inner: ScriptedTmux {
+                    sessions: Vec::new(),
+                    delay: std::time::Duration::from_millis(0),
+                    hang: false,
+                    probes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                },
+                versions: if is_h { versions.clone() } else { None },
+                health: if is_h { health.clone() } else { None },
+            })
+        },
+        std::time::Duration::from_secs(5),
+    )
+}
+
+/// data-sync F2/F5, hub-ops F6: a hidden host's rows were immortal because
+/// the reaper only ran inside a probed host's write.
+#[tokio::test]
+async fn reconcile_reaps_the_rows_of_a_hidden_host_without_probing_it() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let (on_old, on_h) = {
+        let s = store.lock().unwrap();
+        s.upsert_host("h").unwrap();
+        s.upsert_host("old").unwrap();
+        s.set_host_hidden("old", true).unwrap();
+        (
+            s.upsert_session("dev-old", "old", None, None, 1, 1, "running", None)
+                .unwrap(),
+            s.upsert_session("dev-h", "h", None, None, 1, 1, "running", None)
+                .unwrap(),
+        )
+    };
+    let deps = || {
+        ReconcileDeps::fake_without_local(
+            |alias| {
+                Box::new(IdentityTmux {
+                    sessions: if alias == "h" {
+                        vec![tmux_session("dev-h")]
+                    } else {
+                        Vec::new()
+                    },
+                    ..Default::default()
+                })
+            },
+            std::time::Duration::from_secs(5),
+        )
+    };
+    // Pass 1 ghosts, pass 2 deletes; `h` is probed and its row lives on.
+    reconcile_sessions_with(&store, &deps()).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.get_session_by_id(on_old).unwrap().unwrap().status,
+            "ghost"
+        );
+    }
+    reconcile_sessions_with(&store, &deps()).await.unwrap();
+    let s = store.lock().unwrap();
+    assert!(s.get_session_by_id(on_old).unwrap().is_none());
+    assert_eq!(
+        s.get_session_by_id(on_h).unwrap().unwrap().status,
+        "running"
+    );
+}
+
+#[tokio::test]
+async fn reconcile_writes_the_health_sample_every_pass_and_pings_it() {
+    // hosts F4 / ux F-14: two hosts sat at 98 % disk with no signal.
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("h").unwrap();
+    let sample = crate::tmux::HostHealthSample {
+        disk_home_free_kb: Some(14_000_000),
+        disk_home_total_kb: Some(480_000_000),
+        disk_tmp_free_kb: Some(9_300_000),
+        load_1m: Some(5.9),
+        mem_avail_kb: Some(2_000_000),
+        uptime_secs: Some(57 * 86400),
+    };
+    reconcile_sessions_with(&store, &versions_health_deps(None, Some(sample.clone())))
+        .await
+        .unwrap();
+    let row = host_row_of(&store, "h");
+    assert_eq!(row.disk_home_free_kb, Some(14_000_000));
+    assert_eq!(row.disk_home_total_kb, Some(480_000_000));
+    assert_eq!(row.load_1m, Some(5.9));
+    assert_eq!(row.uptime_secs, Some(57 * 86400));
+    assert!(row.health_at.is_some());
+
+    // A second identical pass changes only the stamps and the sample,
+    // which is a ping (carrying the sample), not a full-row probe event.
+    let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+    let dyn_bus: std::sync::Arc<dyn crate::events::EventBus> = bus.clone();
+    let store2 = Mutex::new(Store::open_with_bus_in_memory(dyn_bus).unwrap());
+    store2.lock().unwrap().upsert_host("h").unwrap();
+    reconcile_sessions_with(&store2, &versions_health_deps(None, Some(sample.clone())))
+        .await
+        .unwrap();
+    bus.take();
+    reconcile_sessions_with(&store2, &versions_health_deps(None, Some(sample)))
+        .await
+        .unwrap();
+    let seen = bus.take();
+    assert!(seen.iter().any(|e| e == "host:pinged:h"), "{seen:?}");
+    assert!(!seen.iter().any(|e| e == "host:probed:h"), "{seen:?}");
+}
+
+fn host_row_of(store: &Mutex<Store>, alias: &str) -> HostRow {
+    store
+        .lock()
+        .unwrap()
+        .get_host_row(alias)
+        .unwrap()
+        .expect("host row exists")
+}
+
+#[tokio::test]
+async fn reconcile_writes_the_probed_versions_and_stamps_them_only_when_due() {
+    // data-sync F1: the pass used to pass the STORED version back through
+    // `update_host_probe`, so `list_hosts` showed provisioning-day numbers
+    // under a minutes-old `last_pinged_at`.
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    {
+        let s = store.lock().unwrap();
+        s.upsert_host("h").unwrap();
+        s.update_host_probe("h", true, Some("2.1.235"), Some("3.5a"), 1)
+            .unwrap();
+    }
+    let fresh = crate::tmux::HostVersions {
+        claude_version: Some("2.1.282".into()),
+        tmux_version: Some("3.6a".into()),
+    };
+    // Never stamped ⇒ due: the pass asks, writes, stamps.
+    reconcile_sessions_with(&store, &versions_deps(Some(fresh.clone())))
+        .await
+        .unwrap();
+    let row = host_row_of(&store, "h");
+    assert_eq!(row.claude_version.as_deref(), Some("2.1.282"));
+    assert_eq!(row.tmux_version.as_deref(), Some("3.6a"));
+    let stamped = row.claude_version_at.expect("stamped");
+    assert!(stamped >= now_unix() - 5);
+
+    // Stamped a moment ago ⇒ not due: the executor is not asked, the row
+    // keeps what it has, the stamp does not move.
+    reconcile_sessions_with(
+        &store,
+        &versions_deps(Some(crate::tmux::HostVersions {
+            claude_version: Some("9.9.9".into()),
+            tmux_version: None,
+        })),
+    )
+    .await
+    .unwrap();
+    let row = host_row_of(&store, "h");
+    assert_eq!(row.claude_version.as_deref(), Some("2.1.282"));
+    assert_eq!(row.claude_version_at, Some(stamped));
+
+    // Due again but the binary answered nothing: keep the stored value,
+    // do NOT stamp (a stamp means "read from the host").
+    let old_stamp = now_unix() - VERSIONS_REFRESH_SECS - 1;
+    {
+        let s = store.lock().unwrap();
+        s.set_host_versions_at("h", old_stamp).unwrap();
+    }
+    reconcile_sessions_with(
+        &store,
+        &versions_deps(Some(crate::tmux::HostVersions::default())),
+    )
+    .await
+    .unwrap();
+    let row = host_row_of(&store, "h");
+    assert_eq!(row.claude_version.as_deref(), Some("2.1.282"));
+    assert_eq!(row.claude_version_at, Some(old_stamp));
+}
+
 #[tokio::test]
 async fn reconcile_keeps_the_remote_link_when_the_account_read_yields_nothing() {
     // A failed read (ssh hiccup, mid-rewrite ~/.claude.json) or a logout
@@ -2668,6 +3103,8 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         account: None,
         pr_info: PrInfoMap::new(),
         identity: None,
+        versions: None,
+        health: None,
         started_at: now_unix(),
     };
     // 2. `new_session` creates the tmux session and runs its own
@@ -2715,6 +3152,8 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         account: None,
         pr_info: PrInfoMap::new(),
         identity: None,
+        versions: None,
+        health: None,
         started_at: now_unix() + 5,
     };
     let mut s = store.lock().unwrap();
@@ -3291,6 +3730,8 @@ fn reconcile_linking(
         account: None,
         pr_info: PrInfoMap::new(),
         identity: None,
+        versions: None,
+        health: None,
         started_at: now_unix(),
     };
     // Two ticks: the second must keep the link, not null it.
@@ -3499,26 +3940,31 @@ fn worktree_key_non_repo_path_is_none() {
 fn recreate_pane_command_matches_kind_and_id() {
     let id = "550e8400-e29b-41d4-a716-446655440000";
     assert_eq!(
-        recreate_pane_command("shell", Some(id), "dev-x"),
+        recreate_pane_command("shell", Some(id), "dev-x", &Default::default()),
         crate::tmux::shell_pane_command(None)
     );
     assert_eq!(
-        recreate_pane_command("work", Some(id), "dev-x"),
+        recreate_pane_command("work", Some(id), "dev-x", &Default::default()),
         crate::tmux::pane_command_for(Some(id), "dev-x")
     );
     assert_eq!(
-        recreate_pane_command("work", None, "dev-x"),
+        recreate_pane_command("work", None, "dev-x", &Default::default()),
         crate::tmux::pane_command_for(None, "dev-x")
     );
     // A corrupt/non-UUID stored id must NOT inject — it degrades to the
     // --continue form (same as no id).
     assert_eq!(
-        recreate_pane_command("work", Some("not-a-uuid; rm -rf /"), "dev-x"),
+        recreate_pane_command(
+            "work",
+            Some("not-a-uuid; rm -rf /"),
+            "dev-x",
+            &Default::default()
+        ),
         crate::tmux::pane_command_for(None, "dev-x")
     );
     // "review" is a non-shell kind → same resume behavior as "work".
     assert_eq!(
-        recreate_pane_command("review", Some(id), "dev-x"),
+        recreate_pane_command("review", Some(id), "dev-x", &Default::default()),
         crate::tmux::pane_command_for(Some(id), "dev-x")
     );
 }
@@ -5404,6 +5850,8 @@ async fn a_verdict_never_marks_a_row_a_newer_probe_already_saw_live() {
             boot_id: Some("a".into()),
             tmux_server_pid: None,
         }),
+        versions: None,
+        health: None,
         started_at: 1000,
     };
     let mut s = store.lock().unwrap();
@@ -5878,6 +6326,8 @@ fn pair_pass(
         account: None,
         pr_info: PrInfoMap::new(),
         identity: None,
+        versions: None,
+        health: None,
         started_at: now_unix(),
     };
     let projects = s.list_projects().unwrap();
@@ -6047,6 +6497,8 @@ fn vps_probe(
         account: None,
         pr_info,
         identity,
+        versions: None,
+        health: None,
         started_at: now_unix(),
     }
 }
@@ -6229,6 +6681,10 @@ fn a_host_write_failing_late_rolls_back_pr_signals_events_and_bg_rows() {
                 head: Some("feat/x".into()),
                 ..Default::default()
             }),
+            evidence: Some(crate::service::outcome::PrEvidence {
+                head_oid: Some("abc1234".into()),
+                ..Default::default()
+            }),
         },
     );
     let agents = vec![
@@ -6284,6 +6740,13 @@ fn a_host_write_failing_late_rolls_back_pr_signals_events_and_bg_rows() {
         })
         .unwrap();
     assert!(signals.is_some(), "without the fault the PR signals land");
+    let landed = s.get_session("dev-a", "vps").unwrap().unwrap();
+    assert_eq!(
+        landed.pr_evidence.and_then(|e| e.head_oid).as_deref(),
+        Some("abc1234"),
+        "without the fault the PR evidence lands"
+    );
+    assert!(landed.pr_checked_at.is_some());
     assert!(s.get_session("bg:bg-1", "vps").unwrap().is_some());
     assert!(s.list_session_events(id, 100).unwrap().len() > events_before);
 }
@@ -6438,6 +6901,7 @@ fn a_host_write_lost_at_the_trusted_projects_read_writes_no_pr_signals() {
                     head: Some("feat/x".into()),
                     ..Default::default()
                 }),
+                evidence: None,
             },
         );
     }
@@ -6628,4 +7092,92 @@ async fn a_stuck_transition_is_logged_with_host_session_and_kind() {
         text.contains("host=local") && text.contains("session=dev-stuck"),
         "{text}"
     );
+}
+
+#[test]
+fn launch_switch_reads_one_valid_argument_only() {
+    use super::prompt::{launch_switch, LaunchSwitch};
+    assert_eq!(
+        launch_switch("/model opus"),
+        Some(LaunchSwitch::Model(Some("opus")))
+    );
+    assert_eq!(
+        launch_switch("  /model sonnet[1m]\n"),
+        Some(LaunchSwitch::Model(Some("sonnet[1m]")))
+    );
+    assert_eq!(
+        launch_switch("/model default"),
+        Some(LaunchSwitch::Model(None))
+    );
+    assert_eq!(
+        launch_switch("/effort xhigh"),
+        Some(LaunchSwitch::Effort(Some("xhigh")))
+    );
+    assert_eq!(
+        launch_switch("/effort auto"),
+        Some(LaunchSwitch::Effort(None))
+    );
+    for other in [
+        "/model",
+        "/effort",
+        "/effort huge",
+        "/model --dangerously-skip-permissions",
+        "/model opus please",
+        "/model opus\nand then",
+        "use /model opus",
+        "/compact",
+    ] {
+        assert_eq!(launch_switch(other), None, "{other:?}");
+    }
+}
+
+/// A `/model` / `/effort` sent through fleet becomes the session's own, and
+/// recreate / restart launch with what is stored.
+#[test]
+fn a_sent_switch_is_stored_and_relaunched() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev-launch", "local", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    record_prompt_outcome(&store, "local", "dev-launch", "/model opus[1m]", false);
+    record_prompt_outcome(&store, "local", "dev-launch", "/effort high", false);
+    {
+        let s = store.lock().unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.effort_level.as_deref(), Some("high"));
+        let launch = stored_launch(&s, id);
+        assert_eq!(launch.model.as_deref(), Some("opus[1m]"));
+        let sid = "550e8400-e29b-41d4-a716-446655440000";
+        let pane = recreate_pane_command("work", Some(sid), "dev-launch", &launch);
+        assert_eq!(
+            pane.matches("--model 'opus[1m]' --effort 'high'").count(),
+            3,
+            "{pane}"
+        );
+    }
+    // Back to the host's defaults.
+    record_prompt_outcome(&store, "local", "dev-launch", "/model default", false);
+    record_prompt_outcome(&store, "local", "dev-launch", "/effort auto", false);
+    let s = store.lock().unwrap();
+    assert_eq!(stored_launch(&s, id), crate::tmux::ClaudeLaunch::default());
+    assert_eq!(s.get_session_by_id(id).unwrap().unwrap().effort_level, None);
+}
+
+/// A tampered stored value never reaches the pane command.
+#[test]
+fn stored_launch_drops_values_that_no_longer_validate() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("dev-bad", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.set_session_launch_model(id, Some("opus'; rm -rf ~; '"))
+        .unwrap();
+    s.set_session_effort(id, Some("huge")).unwrap();
+    assert_eq!(stored_launch(&s, id), crate::tmux::ClaudeLaunch::default());
+    s.set_session_launch_model(id, Some("sonnet")).unwrap();
+    assert_eq!(stored_launch(&s, id).model.as_deref(), Some("sonnet"));
 }

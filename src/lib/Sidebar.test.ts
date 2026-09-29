@@ -1085,6 +1085,27 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(badges[0].closest('[data-testid="sess-details"]')).not.toBeNull();
   });
 
+  it('a host almost out of disk gets a red mark on its filter chip and the meter in its tooltip', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_projects') return fakeProjects;
+      if (cmd === 'list_sessions') return [];
+      if (cmd === 'list_hosts') return [
+        { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, disk_home_free_kb: 3_600_000, disk_home_total_kb: 150_000_000 },
+        { alias: 'oci', ssh_alias: 'oci', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, disk_home_free_kb: 72_000_000, disk_home_total_kb: 96_000_000 },
+      ];
+      return null;
+    });
+    await Promise.all([loadProjects(), loadSessions(), loadHosts(), loadAccounts()]);
+    render(Sidebar);
+    for (let i = 0; i < 8; i++) await tick();
+    await openFilters();
+    expect(screen.getByTestId('filter-host-mefistos-alert')).toBeTruthy();
+    expect(screen.queryByTestId('filter-host-oci-alert')).toBeNull();
+    const pills = document.querySelectorAll('.hosts button');
+    const mef = Array.from(pills).find((p) => p.textContent?.includes('mefistos'));
+    expect(mef!.getAttribute('title')).toContain('disk 98%');
+  });
+
   it('host pill tooltip includes account info when present', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
       if (cmd === 'list_projects') return fakeProjects;
@@ -2446,6 +2467,41 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     await tick();
     expect(names()).toHaveLength(1);
     expect(screen.queryByTestId('past-work-group')).toBeNull();
+  });
+  it('the archived count matches a search the way the list does (project owner / repo, a sibling row)', async () => {
+    const live = { ...sessionFor(2, 'dev-a'), work: w('PAY-1', 1, 'in_progress') };
+    const parked = { ...sessionFor(2, 'dev-parked'), work: w('PAY-2', 2, 'done', 100) };
+    const other = { ...sessionFor(1, 'old-x'), work: w('PAY-3', 3, 'done', 100) };
+    mockBackend(fakeProjects, [live, parked, other]);
+    render(Sidebar);
+    await tick();
+    expect(await screen.findByTestId('archived-row')).toHaveTextContent('2 archived hidden');
+    // The repo matches: showing archived would list the whole project, so
+    // its archived row counts though its own name does not match.
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'pos-frontend' } });
+    await waitFor(() => expect(screen.getByTestId('archived-row')).toHaveTextContent('1 archived hidden'));
+    // A sibling row matches: the same.
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'nothing' } });
+    await waitFor(() => expect(screen.queryByTestId('archived-row')).toBeNull());
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'dev-a' } });
+    await waitFor(() => expect(screen.getByTestId('archived-row')).toHaveTextContent('1 archived hidden'));
+    await fireEvent.click(screen.getByTestId('archived-toggle'));
+    await tick();
+    expect(names().map((n) => n.includes('dev-parked') || n.includes('dev-a'))).toEqual([true, true]);
+  });
+
+  it('work mode: the archived count matches a work group the way the list does', async () => {
+    const live = { ...sessionFor(1, 'dev-a'), tags: ['PAY-7'] };
+    const parked = { ...sessionFor(1, 'dev-parked'), tags: ['PAY-7'], work: w('PAY-7', 7, 'done', 100) };
+    mockBackend(fakeProjects, [live, parked]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    expect(await screen.findByTestId('archived-row')).toHaveTextContent('1 archived hidden');
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'nothing' } });
+    await waitFor(() => expect(screen.queryByTestId('archived-row')).toBeNull());
+    // The group matches through its live row: showing archived lists both.
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'dev-a' } });
+    await waitFor(() => expect(screen.getByTestId('archived-row')).toHaveTextContent('1 archived hidden'));
   });
 });
 

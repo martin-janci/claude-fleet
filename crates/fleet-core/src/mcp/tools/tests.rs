@@ -330,6 +330,8 @@ fn fleet_admin_tools_are_master_only() {
         "provision_hosts",
         "add_host",
         "remove_host",
+        "merge_host",
+        "forget_project",
         "hide_host",
         "apply_sync",
         "set_secret",
@@ -448,6 +450,62 @@ fn keys_test_tools() -> (FleetTools, Arc<Mutex<Store>>, i64) {
 /// Validation happens before any tmux/ssh delivery is attempted, so this
 /// needs no real backend: an unknown key name, and text alongside `keys`,
 /// are both refused up front.
+/// Host identity & health, task 7: `forget_project` over the tool surface.
+#[tokio::test]
+async fn forget_project_refuses_a_live_project_then_drops_it() {
+    let (t, store, _sid) = keys_test_tools();
+    let (pid, sid) = {
+        let s = store.lock().unwrap();
+        let pid = s.upsert_project("o", "gone", "/p/o/gone").unwrap();
+        let sid = s
+            .upsert_session("dev-gone", "local", Some(pid), None, 1, 1, "running", None)
+            .unwrap();
+        (pid, sid)
+    };
+    let err = t
+        .forget_project(Parameters(ForgetProjectParams { project_id: pid }))
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("E_INVALID_STATE"), "{}", err.message);
+    store
+        .lock()
+        .unwrap()
+        .conn_for_test()
+        .execute("UPDATE sessions SET status='ghost' WHERE id=?1", [sid])
+        .unwrap();
+    t.forget_project(Parameters(ForgetProjectParams { project_id: pid }))
+        .await
+        .unwrap();
+    assert!(store.lock().unwrap().get_project(pid).unwrap().is_none());
+}
+
+/// Host identity & health, task 5: the master folds a renamed alias in one
+/// call and the old row is gone.
+#[tokio::test]
+async fn merge_host_folds_the_old_alias_into_the_new_one() {
+    let (t, store, _sid) = keys_test_tools();
+    {
+        let s = store.lock().unwrap();
+        s.insert_host("old", Some("old")).unwrap();
+        s.upsert_session("dev-old", "old", None, None, 1, 1, "ghost", None)
+            .unwrap();
+    }
+    let res = t
+        .merge_host(
+            Extension(Caller::master()),
+            Parameters(crate::service::hosts::MergeHostArgs {
+                from: "old".into(),
+                into: "local".into(),
+                confirm_nonce: None,
+            }),
+        )
+        .await;
+    assert!(res.is_ok(), "{res:?}");
+    let s = store.lock().unwrap();
+    assert!(s.get_host_row("old").unwrap().is_none());
+    assert!(s.get_session("dev-old", "local").unwrap().is_some());
+}
+
 #[tokio::test]
 async fn keys_refuse_an_unknown_key_and_text_alongside_it() {
     let (tools, _store, sid) = keys_test_tools();
@@ -1148,6 +1206,35 @@ fn docs_track_background_runs_with_session_transcript() {
     );
 }
 
+/// Every `needs_attention.reason` a row can carry is named in the guide's
+/// status vocabulary, next to the `claude_status` values.
+#[test]
+fn the_control_api_guide_names_every_attention_reason_and_status() {
+    use crate::service::attention::Reason;
+    for r in [
+        Reason::Waiting,
+        Reason::Stuck,
+        Reason::StopFailed,
+        Reason::Failed,
+        Reason::ContextFull,
+        Reason::StaleWorking,
+        Reason::CiFailing,
+        Reason::Lifecycle,
+    ] {
+        assert!(
+            CONTROL_API_GUIDE.contains(&format!("`{}`", r.as_str())),
+            "docs/control-api.md does not name the attention reason {}",
+            r.as_str()
+        );
+    }
+    for k in ClaudeStatus::ALL {
+        assert!(CONTROL_API_GUIDE.contains(k.as_str()), "{k}");
+    }
+    for k in StuckKind::ALL {
+        assert!(CONTROL_API_GUIDE.contains(k.as_str()), "{k}");
+    }
+}
+
 // ---- handler-level gates (review of #50) ----
 
 fn test_tools(store: Store) -> FleetTools {
@@ -1813,17 +1900,44 @@ async fn run_prompt_refuses_a_session_that_is_not_between_turns() {
     let s = t.store.lock().unwrap();
     s.record_stop_hook("uuid-w").unwrap();
     let row = s.get_session_by_id(id).unwrap().unwrap();
-    assert!(run_prompt_ready(&row).is_ok());
+    assert!(run_prompt_ready(&row, false, None).is_ok());
     // A turn that ended in an API error has ended: re-prompt it.
     let failed = crate::store::SessionRow {
         claude_status: Some("failed".into()),
-        ..row
+        ..row.clone()
     };
-    assert!(run_prompt_ready(&failed).is_ok());
+    assert!(run_prompt_ready(&failed, false, None).is_ok());
     assert!(crate::service::tasks::session_satisfies(
         &failed,
+        false,
         crate::service::tasks::WaitCond::Idle
     ));
+    // F2 x S5: a row the tick demoted for staleness reads `idle` because
+    // nothing moved — exactly what one long tool call looks like. Its stored
+    // status alone must not let run_prompt through (the reply it would hand
+    // back is the PREVIOUS turn's); only a pane that shows it quiet does.
+    // Keyed on the demotion (`stale_demoted_at`, the `demoted` flag): an
+    // attach or the TTL clears the attention stamp but not the guess.
+    let stamped = crate::store::SessionRow {
+        stale_working_at: Some(5),
+        ..row.clone()
+    };
+    // Stamp and memory, memory alone (acknowledged), stamp alone (a failed
+    // flag read errs towards asking).
+    for (r, demoted) in [(&stamped, true), (&row, true), (&stamped, false)] {
+        let e = run_prompt_ready(r, demoted, None).unwrap_err();
+        assert!(e.message.starts_with("E_INVALID_STATE"), "{}", e.message);
+        assert!(e.message.contains("could not confirm"), "{}", e.message);
+        let e = run_prompt_ready(r, demoted, Some("working")).unwrap_err();
+        assert!(e.message.contains("working"), "{}", e.message);
+        assert!(run_prompt_ready(r, demoted, Some("blocked")).is_err());
+        assert!(run_prompt_ready(r, demoted, Some("idle")).is_ok());
+        assert!(!crate::service::tasks::session_satisfies(
+            r,
+            demoted,
+            crate::service::tasks::WaitCond::Idle
+        ));
+    }
 }
 
 #[tokio::test]
@@ -2033,7 +2147,8 @@ fn capture_default_cap_matches_docs() {
 /// 84 with `work_admin`; hub federation adds `peer_exchange` and
 /// `list_peer_links`: 86; `get_settings` / `set_setting`: 88; `quick_replies`:
 /// 89; `rewind_conversation`: 90; `add_project` / `list_github_repos`: 92;
-/// `catalog_admin`: 93.)
+/// `catalog_admin`, and host identity & health's `merge_host` and
+/// `forget_project`: 95; `update_status` / `update_admin`: 97.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -2045,6 +2160,7 @@ fn router_sum_serves_every_tool() {
         include_str!("repo.rs"),
         include_str!("assets.rs"),
         include_str!("peer.rs"),
+        include_str!("updates.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -2054,7 +2170,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 93);
+    assert_eq!(served, 101);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -2196,9 +2312,13 @@ fn readonly_tools_are_client_tools_or_the_documented_list_clients_exception() {
             guard::CLIENT_TOOLS.contains(name)
                 || *name == "list_clients"
                 || *name == "list_peer_links"
-                || *name == "get_settings",
+                || matches!(
+                    guard::policy(name).map(|p| p.access),
+                    Some(guard::Access::Person | guard::Access::PersonDevice)
+                ),
             "{name} is in READONLY_TOOLS but is neither in CLIENT_TOOLS nor the \
-             documented list_clients/list_peer_links/get_settings special case"
+             documented list_clients/list_peer_links special case or a person's \
+             device tool (the fleet's settings, declarative pages P6)"
         );
     }
 }
@@ -2903,6 +3023,25 @@ fn a_peer_token_reaches_only_peer_exchange_and_nothing_else_reaches_it() {
     }
 }
 
+/// `fleet-updater`'s token reaches `/update/*` only (update-channel design
+/// §6.1): no tool is served to it and every tool refuses it, `peer_exchange`
+/// included.
+#[test]
+fn an_updater_token_reaches_no_tool() {
+    let upd = client_caller("updater", TokenMode::Updater);
+    for t in FleetTools::tool_router_for_doc().list_all() {
+        let name = t.name.to_string();
+        assert!(
+            enforce_mode(&upd, &name).is_err(),
+            "an updater token must be refused {name}"
+        );
+        assert!(
+            !present::visible_to(&upd, &name),
+            "{name} served to an updater token"
+        );
+    }
+}
+
 #[test]
 fn a_readonly_token_is_served_no_mutating_tools_and_a_client_no_admin_tools() {
     let all = FleetTools::tool_router_for_doc().list_all();
@@ -2913,10 +3052,15 @@ fn a_readonly_token_is_served_no_mutating_tools_and_a_client_no_admin_tools() {
             .collect()
     };
     let master = served(&Caller::master());
+    let device_only = guard::TOOL_POLICIES
+        .iter()
+        .filter(|p| p.access == guard::Access::PersonDevice)
+        .count();
     assert_eq!(
         master.len(),
-        all.len() - 1,
-        "the master token sees everything but peer_exchange"
+        all.len() - 1 - device_only,
+        "the master token sees everything but peer_exchange and a person's \
+         device's own settings review (it has fleet-hub settings)"
     );
     assert!(!master.iter().any(|n| n == crate::mcp::auth::PEER_TOOL));
 
@@ -3259,9 +3403,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// measured apart never cover the merged surface, so a merge that trips
     /// this re-measures. The why of each raise belongs in its commit
     /// message (`git log -L` on this constant), not here: a log in this
-    /// comment conflicted on every merge. Measured at 63,650 on 2026-09-28
-    /// (`work_link`'s `set_status` action, task 2 of native item status).
-    const BUDGET_BYTES: usize = 63_750;
+    /// comment conflicted on every merge. Measured at 66,750 on 2026-09-29
+    /// (main's declarative pages merged with `work_link`'s `set_status`).
+    const BUDGET_BYTES: usize = 66_850;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -7689,22 +7833,23 @@ async fn the_new_operator_gates_change_nothing_for_anyone_else() {
 // ---- operator settings ----
 
 /// The settings name hosts and their projects roots, and a write retunes the
-/// GC sweeper and auto-tidy for the whole fleet: only the master token may
-/// read or change them, whatever a client's or per-host token's mode.
+/// GC sweeper and auto-tidy for the whole fleet: the master token, or a
+/// person's own paired device (bound to no org), reaches them; a host's token
+/// never does, whatever its mode.
 #[test]
-fn the_settings_tools_are_master_only() {
+fn the_settings_tools_reach_the_master_and_a_persons_device_only() {
+    // Declarative pages P6: the master and a paired device bound to no org;
+    // a host's token (either mode) and a hub link never. A readonly device
+    // reads but does not write (`settings_reach_a_persons_device_…`).
     for t in ["get_settings", "set_setting"] {
         assert!(enforce_admin(&Caller::master(), t).is_ok(), "{t}");
         for (label, c) in every_caller_kind() {
-            if c.is_master() {
-                continue;
-            }
-            assert!(
-                enforce_mode(&c, t)
-                    .and_then(|()| enforce_admin(&c, t))
-                    .is_err(),
-                "{t}: {label}"
-            );
+            let reached = enforce_mode(&c, t)
+                .and_then(|()| enforce_admin(&c, t))
+                .is_ok();
+            let expected = c.is_master()
+                || (c.is_person_device() && (t == "get_settings" || c.mode == TokenMode::Full));
+            assert_eq!(reached, expected, "{t}: {label}");
         }
     }
     assert!(guard::is_readonly_tool("get_settings"));
@@ -7712,15 +7857,65 @@ fn the_settings_tools_are_master_only() {
 }
 
 #[tokio::test]
+async fn get_settings_describe_returns_the_registry_with_values() {
+    let (tools, _guards, _store) = client_tools();
+    tools
+        .set_setting(
+            Extension(Caller::master()),
+            Parameters(SetSettingParams {
+                key: "work.recent_days".into(),
+                value: serde_json::json!(30),
+                propose: false,
+                why: None,
+            }),
+        )
+        .await
+        .expect("set");
+    let v = result_json(
+        &tools
+            .get_settings(Parameters(GetSettingsParams {
+                describe: Some(true),
+            }))
+            .await
+            .expect("describe"),
+    );
+    let all = v.as_array().expect("an array, in display order");
+    assert_eq!(all.len(), crate::service::settings::SPECS.len());
+    let recent = all
+        .iter()
+        .find(|d| d["key"] == "work.recent_days")
+        .expect("work.recent_days");
+    assert_eq!(recent["value"], "30");
+    assert_eq!(recent["modified"], true);
+    assert_eq!(recent["label"], "Recent work");
+    assert_eq!(
+        recent["kind"],
+        serde_json::json!({"type": "int", "min": 1, "max": 365})
+    );
+    // The derived previews are not settings.
+    assert!(all.iter().all(|d| d["key"] != "projects.resolved_base"));
+}
+
+#[tokio::test]
 async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
     let (tools, _guards, store) = client_tools();
     let set = |key: &str, value: serde_json::Value| {
-        tools.set_setting(Parameters(SetSettingParams {
-            key: key.into(),
-            value,
-        }))
+        tools.set_setting(
+            Extension(Caller::master()),
+            Parameters(SetSettingParams {
+                key: key.into(),
+                value,
+                propose: false,
+                why: None,
+            }),
+        )
     };
-    let v = result_json(&tools.get_settings().await.expect("get_settings"));
+    let v = result_json(
+        &tools
+            .get_settings(Parameters(GetSettingsParams { describe: None }))
+            .await
+            .expect("get_settings"),
+    );
     assert_eq!(
         v["work.retention.journal_days"], "365",
         "the default when unset: {v}"
@@ -7762,7 +7957,12 @@ async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
             Some("[3,7]")
         );
     }
-    let v = result_json(&tools.get_settings().await.expect("get_settings"));
+    let v = result_json(
+        &tools
+            .get_settings(Parameters(GetSettingsParams { describe: None }))
+            .await
+            .expect("get_settings"),
+    );
     assert_eq!(v["work.retention.journal_days"], "30");
 
     // Refused: a bad value, an unknown key, a derived key, keys other
@@ -7797,6 +7997,69 @@ async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
     );
     assert_eq!(s.get_setting("mcp.confirm_destructive").unwrap(), None);
     assert_eq!(s.get_setting("hub.allow_plaintext").unwrap(), None);
+}
+
+/// Declarative pages P5: `set_setting { propose: true }` writes nothing; it
+/// leaves a proposal a person applies in Settings. A direct write is audited
+/// as the agent.
+#[tokio::test]
+async fn set_setting_propose_leaves_a_proposal_and_writes_are_audited() {
+    let (tools, _guards, store) = client_tools();
+    let v = result_json(
+        &tools
+            .set_setting(
+                Extension(Caller::master()),
+                Parameters(SetSettingParams {
+                    key: "work.recent_days".into(),
+                    value: serde_json::json!(3),
+                    propose: true,
+                    why: Some("a shorter Recent list".into()),
+                }),
+            )
+            .await
+            .expect("propose"),
+    );
+    assert_eq!(v["state"], "pending");
+    assert_eq!(v["value"], "3");
+    assert_eq!(v["why"], "a shorter Recent list");
+    {
+        let s = store.lock().unwrap();
+        assert_eq!(s.get_setting("work.recent_days").unwrap(), None);
+    }
+    // A confirmed change cannot even be proposed.
+    let err = tools
+        .set_setting(
+            Extension(Caller::master()),
+            Parameters(SetSettingParams {
+                key: "work.auto_tidy".into(),
+                value: serde_json::json!(true),
+                propose: true,
+                why: None,
+            }),
+        )
+        .await
+        .expect_err("confirmed");
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+
+    tools
+        .set_setting(
+            Extension(Caller::master()),
+            Parameters(SetSettingParams {
+                key: "work.recent_days".into(),
+                value: serde_json::json!(5),
+                propose: false,
+                why: None,
+            }),
+        )
+        .await
+        .expect("write");
+    let s = store.lock().unwrap();
+    let h = crate::service::settings_review::history(&s, "work.recent_days", None).unwrap();
+    assert_eq!(h.len(), 1);
+    assert_eq!(
+        (h[0].actor.as_str(), h[0].actor_detail.as_deref()),
+        ("agent", Some("control API"))
+    );
 }
 
 // ---- add_project / list_github_repos (a hub client adds a project) --------
@@ -7878,6 +8141,177 @@ fn add_project_serves_the_source_variants_and_no_call_id() {
             "source kind {kind} missing: {text}"
         );
     }
+}
+
+// ---- declarative pages P6: the fleet's settings on a person's device ----
+
+fn trusted(mut c: Caller) -> Caller {
+    if let Some(cl) = c.client.as_mut() {
+        cl.trusted = true;
+    }
+    c
+}
+
+fn org_bound(mut c: Caller) -> Caller {
+    if let Some(cl) = c.client.as_mut() {
+        cl.org_id = Some(1);
+    }
+    c
+}
+
+/// Who reaches the settings tools: the master and a person's own paired
+/// device (any mode for the reads); never a host's token or an org-bound
+/// device. The review tools are not served to the master, who has
+/// `fleet-hub settings`.
+#[test]
+fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
+    let master = Caller::master();
+    let laptop = client_caller("laptop", TokenMode::Full);
+    let phone_ro = client_caller("phone", TokenMode::Readonly);
+    let host = host_caller("hosta", TokenMode::Full);
+    let bound = org_bound(client_caller("acme-phone", TokenMode::Full));
+    let can = |c: &Caller, t: &str| {
+        enforce_mode(c, t)
+            .and_then(|()| enforce_admin(c, t))
+            .is_ok()
+            && present::visible_to(c, t)
+    };
+    for t in [
+        "get_settings",
+        "setting_proposals",
+        "setting_history",
+        "list_pages",
+    ] {
+        assert!(can(&laptop, t), "{t}: a paired device reads");
+        assert!(can(&phone_ro, t), "{t}: a readonly device reads");
+        assert!(!can(&host, t), "{t}: never a host's token");
+        assert!(!can(&bound, t), "{t}: never an org-bound device");
+    }
+    for t in ["set_setting", "decide_setting_proposals"] {
+        assert!(can(&laptop, t), "{t}: reached, then trust decides");
+        assert!(!can(&phone_ro, t), "{t}: a write");
+        assert!(!can(&host, t) && !can(&bound, t), "{t}");
+    }
+    assert!(can(&master, "get_settings") && can(&master, "set_setting"));
+    for t in [
+        "setting_proposals",
+        "setting_history",
+        "decide_setting_proposals",
+        "list_pages",
+    ] {
+        assert!(!can(&master, t), "{t}: not served to the master");
+    }
+}
+
+/// An untrusted device proposes; a trusted one writes and decides, and the
+/// audit names it as a person on that device. The operator's client is an
+/// agent: it proposes only.
+#[tokio::test]
+async fn a_device_writes_settings_only_when_trusted_and_is_audited_as_the_person() {
+    let (tools, _guards, store) = client_tools();
+    let set = |c: Caller, value: i64, propose: bool| {
+        tools.set_setting(
+            Extension(c),
+            Parameters(SetSettingParams {
+                key: "work.recent_days".into(),
+                value: serde_json::json!(value),
+                propose,
+                why: None,
+            }),
+        )
+    };
+    let laptop = client_caller("laptop", TokenMode::Full);
+    let err = set(laptop.clone(), 5, false).await.expect_err("untrusted");
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    assert!(
+        err.message.contains("fleet-hub client trust laptop"),
+        "{}",
+        err.message
+    );
+    let p = result_json(
+        &set(laptop.clone(), 5, true)
+            .await
+            .expect("an untrusted device proposes"),
+    );
+    assert_eq!(
+        (p["source"].as_str(), p["source_detail"].as_str()),
+        (Some("person"), Some("client laptop"))
+    );
+
+    let v = result_json(
+        &tools
+            .setting_proposals(Extension(laptop.clone()))
+            .await
+            .expect("pending"),
+    );
+    assert_eq!(v["can_write"], false);
+    assert_eq!(v["proposals"].as_array().unwrap().len(), 1);
+    let id = v["proposals"][0]["id"].as_i64().unwrap();
+    let decide = |c: Caller| {
+        tools.decide_setting_proposals(
+            Extension(c),
+            Parameters(DecideSettingProposalsParams {
+                accept: vec![id],
+                reject: vec![],
+            }),
+        )
+    };
+    assert!(
+        decide(laptop.clone()).await.is_err(),
+        "untrusted cannot decide"
+    );
+
+    let me = trusted(laptop);
+    let v = result_json(
+        &tools
+            .setting_proposals(Extension(me.clone()))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(v["can_write"], true);
+    let d = result_json(&decide(me.clone()).await.expect("trusted decides"));
+    assert_eq!(d["applied"], serde_json::json!([id]));
+    set(me, 6, false).await.expect("trusted writes");
+
+    let mut operator = trusted(client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    ));
+    operator.mode = TokenMode::Full;
+    let err = set(operator.clone(), 7, false)
+        .await
+        .expect_err("an agent proposes");
+    assert!(err.message.contains("propose"), "{}", err.message);
+    set(operator, 7, true).await.expect("the operator proposes");
+
+    let h = result_json(
+        &tools
+            .setting_history(Parameters(SettingHistoryParams {
+                key: "work.recent_days".into(),
+                limit: None,
+            }))
+            .await
+            .unwrap(),
+    );
+    let h = h.as_array().unwrap();
+    assert_eq!(h.len(), 2);
+    assert_eq!(
+        (h[0]["after"].as_str(), h[0]["actor_detail"].as_str()),
+        (Some("6"), Some("client laptop"))
+    );
+    assert_eq!(h[1]["proposal_id"].as_i64(), Some(id));
+    let s = store.lock().unwrap();
+    let pending = crate::service::settings_review::pending(&s).unwrap();
+    assert_eq!(
+        pending[0].row.source_detail.as_deref(),
+        Some(
+            crate::mcp::auth::Caller::label(&client_caller(
+                crate::service::operator::OPERATOR_CLIENT_NAME,
+                TokenMode::Full
+            ))
+            .as_str()
+        )
+    );
 }
 
 // ---- add_project / list_github_repos: fences, confirmation, audit ---------
@@ -8265,6 +8699,18 @@ async fn without_an_approver_only_a_paired_client_creates_a_remote() {
 }
 
 #[tokio::test]
+async fn list_pages_serves_the_compiled_page_bundle() {
+    let (tools, _guards, _store) = client_tools();
+    let v = result_json(&tools.list_pages().await.unwrap());
+    assert_eq!(
+        v["pages"].as_array().unwrap().len(),
+        crate::pages::all().len()
+    );
+    assert!(v["actions"].as_array().is_some());
+    assert!(v["resources"].as_array().is_some());
+}
+
+#[tokio::test]
 async fn an_operator_fork_needs_a_person_too() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h1").unwrap();
@@ -8337,4 +8783,132 @@ fn add_projects_audit_line_never_carries_a_raw_clone_url() {
         url: "https://github.com/acme/widget.git".into(),
     });
     assert_eq!(line, "kind=clone repo=acme/widget");
+}
+
+fn quick_replies_tools() -> (FleetTools, Arc<Mutex<Store>>) {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let tools = FleetTools::new(
+        Arc::clone(&store),
+        Arc::new(SshClient::new()),
+        CancellationRegistry::new(),
+        Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
+        McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+    );
+    (tools, store)
+}
+
+fn one_chip(text: &str) -> Vec<crate::service::quick_replies::QuickReply> {
+    vec![crate::service::quick_replies::QuickReply {
+        label: "Planted".into(),
+        text: text.into(),
+        auto_send: Some(true),
+    }]
+}
+
+/// An agent token must not rewrite the person's chip row: an auto-send chip
+/// is a prompt one tap away. A per-host token and the operator may read it.
+#[tokio::test]
+async fn quick_replies_set_is_refused_to_agent_tokens_and_reads_stay_open() {
+    let (tools, store) = quick_replies_tools();
+    for caller in [
+        host_caller("mefistos", TokenMode::Full),
+        client_caller(
+            crate::service::operator::OPERATOR_CLIENT_NAME,
+            TokenMode::Full,
+        ),
+    ] {
+        let label = caller.label();
+        let err = tools
+            .quick_replies(
+                Extension(caller.clone()),
+                Parameters(QuickRepliesParams {
+                    set: Some(one_chip("rm -rf the tree")),
+                    expected: None,
+                }),
+            )
+            .await
+            .expect_err(&label);
+        assert!(
+            err.message.starts_with("E_FORBIDDEN"),
+            "{label}: {}",
+            err.message
+        );
+        let read = tools
+            .quick_replies(
+                Extension(caller),
+                Parameters(QuickRepliesParams {
+                    set: None,
+                    expected: None,
+                }),
+            )
+            .await
+            .expect("a read");
+        assert!(result_json(&read).is_array(), "{label}");
+    }
+    assert_eq!(
+        crate::service::quick_replies::list(&store).unwrap(),
+        crate::service::quick_replies::defaults(),
+        "nothing was stored"
+    );
+}
+
+#[tokio::test]
+async fn quick_replies_set_is_open_to_the_master_and_a_paired_phone_with_cas() {
+    let (tools, store) = quick_replies_tools();
+    for (caller, text) in [
+        (Caller::master(), "from the desktop"),
+        (client_caller("phone", TokenMode::Full), "from the phone"),
+    ] {
+        tools
+            .quick_replies(
+                Extension(caller),
+                Parameters(QuickRepliesParams {
+                    set: Some(one_chip(text)),
+                    expected: None,
+                }),
+            )
+            .await
+            .expect(text);
+        assert_eq!(
+            crate::service::quick_replies::list(&store).unwrap(),
+            one_chip(text)
+        );
+    }
+    // `expected` naming a list that is no longer stored is a conflict.
+    let err = tools
+        .quick_replies(
+            Extension(Caller::master()),
+            Parameters(QuickRepliesParams {
+                set: Some(one_chip("late edit")),
+                expected: Some(one_chip("from the desktop")),
+            }),
+        )
+        .await
+        .expect_err("stale");
+    assert!(err.message.starts_with("E_CONFLICT"), "{}", err.message);
+}
+
+/// An MCP caller's `call_id` is never bound: the field is the desktop
+/// dialog's Cancel handle (schema-skipped, but serde still reads it), and
+/// binding it would replace a desktop call's token of the same id and then
+/// release that slot, so the dialog's Cancel would find nothing to cancel.
+#[cfg(unix)]
+#[tokio::test]
+async fn add_project_never_binds_an_mcp_callers_call_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, _, _) = two_host_store();
+    let t = tools_over_fake_ssh(s, dir.path());
+    // A desktop Add-project dialog's call in flight under id 7.
+    let desktop = tokio_util::sync::CancellationToken::new();
+    t.reg.bind(7, desktop.clone());
+    let mut params = add_params("hostb", clone_src());
+    params.args.call_id = Some(7);
+    t.add_project(Extension(Caller::master()), Parameters(params))
+        .await
+        .expect("the clone succeeds on the fake host");
+    t.reg.cancel(7);
+    assert!(
+        desktop.is_cancelled(),
+        "the desktop's slot survives the MCP call and its Cancel still works"
+    );
 }

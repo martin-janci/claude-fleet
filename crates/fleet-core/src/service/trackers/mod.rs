@@ -13,6 +13,7 @@ pub mod asana;
 #[cfg(test)]
 pub mod conformance;
 pub mod github;
+pub mod infer;
 pub mod jira;
 pub mod jira_common;
 pub mod jira_dc;
@@ -152,6 +153,27 @@ pub const DESCRIPTION_MAX_CHARS: usize = 2000;
 /// [`DESCRIPTION_MAX_CHARS`]: this text never enters a sync frame, a session
 /// row or the phone projection, so it costs no replay-ring pressure.
 pub const DESCRIBE_MAX_CHARS: usize = 32_000;
+
+/// `describe`'s answer: the whole description, capped at
+/// [`DESCRIBE_MAX_CHARS`], with its length AT THE TRACKER. `chars` is at
+/// least `text`'s own length; above it exactly when fleet's cap cut the
+/// text, which is what lets a reader say "shown N of M" rather than serve a
+/// cut body as the whole requirement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FullDescription {
+    pub text: String,
+    pub chars: i64,
+}
+
+impl FullDescription {
+    /// A plain-text body cut at [`DESCRIBE_MAX_CHARS`], its true length kept.
+    pub fn capped(text: &str) -> FullDescription {
+        FullDescription {
+            text: text.chars().take(DESCRIBE_MAX_CHARS).collect(),
+            chars: text.chars().count() as i64,
+        }
+    }
+}
 
 /// The description as plain text, capped at [`DESCRIPTION_MAX_CHARS`], with
 /// its length AT THE TRACKER — what a later reader needs to say that text
@@ -376,10 +398,10 @@ pub trait TrackerProvider: Send + Sync {
         ))
     }
     /// One item's full description, uncapped by [`DESCRIPTION_MAX_CHARS`]
-    /// and capped by [`DESCRIBE_MAX_CHARS`]. `None` means this provider does
-    /// not serve one; the default says so for every adapter that has not
-    /// implemented it.
-    async fn describe(&self, _r: &ItemRef) -> Result<Option<String>, TrackerError> {
+    /// and capped by [`DESCRIBE_MAX_CHARS`], with its true length (see
+    /// [`FullDescription`]). `None` means this provider does not serve one;
+    /// the default says so for every adapter that has not implemented it.
+    async fn describe(&self, _r: &ItemRef) -> Result<Option<FullDescription>, TrackerError> {
         Ok(None)
     }
 }

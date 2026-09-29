@@ -132,7 +132,9 @@ impl ClaudeStatus {
     /// Whether the session is between turns: nothing is generating and
     /// nothing inside a turn is waiting on the user. `Blocked` is NOT quiet —
     /// a permission prompt or a question is part of the turn it interrupts.
-    /// The same set as the frontend's `isQuietStatus` (`conversation.ts`).
+    /// The same set as the frontend's `isQuietStatus` (`conversation.ts`), held
+    /// there by the shared fixture `testdata/quiet_statuses.json`; `store::turn_over`
+    /// is defined through it.
     pub fn is_quiet(self) -> bool {
         match self {
             ClaudeStatus::Idle
@@ -1579,6 +1581,49 @@ Enter to select
         }
         assert!("confirmation".parse::<StuckKind>().is_err());
         assert!("none".parse::<StuckKind>().is_err());
+    }
+
+    /// The shared fixture `src/lib/conversation.test.ts` reads too: one
+    /// answer to "is this turn over?" for `is_quiet`, `store::turn_over` and
+    /// the frontend's `isQuietStatus`, every vocabulary value covered and an
+    /// unknown value (and none) not quiet.
+    #[test]
+    fn quiet_statuses_match_the_shared_fixture() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            status: Option<String>,
+            quiet: bool,
+        }
+        let cases: Vec<Case> =
+            serde_json::from_str(include_str!("testdata/quiet_statuses.json")).unwrap();
+        for c in &cases {
+            assert_eq!(
+                crate::store::turn_over(c.status.as_deref()),
+                c.quiet,
+                "turn_over({:?})",
+                c.status
+            );
+            if let Some(k) = c
+                .status
+                .as_deref()
+                .and_then(|s| s.parse::<ClaudeStatus>().ok())
+            {
+                assert_eq!(k.is_quiet(), c.quiet, "{k}.is_quiet()");
+            }
+        }
+        for k in ClaudeStatus::ALL {
+            assert!(
+                cases
+                    .iter()
+                    .any(|c| c.status.as_deref() == Some(k.as_str())),
+                "the fixture lacks {k}"
+            );
+        }
+        assert!(cases.iter().any(|c| c.status.is_none()));
+        assert!(cases.iter().any(|c| c
+            .status
+            .as_deref()
+            .is_some_and(|s| s.parse::<ClaudeStatus>().is_err())));
     }
 
     #[test]

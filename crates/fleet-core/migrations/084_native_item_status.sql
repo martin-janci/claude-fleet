@@ -16,4 +16,4 @@ ALTER TABLE work_items ADD COLUMN status_set_at INTEGER;
 CREATE INDEX IF NOT EXISTS idx_work_items_status_set
   ON work_items(status_set_by) WHERE status_set_by IS NOT NULL;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (75);
+INSERT OR IGNORE INTO schema_version (version) VALUES (84);

@@ -12,7 +12,7 @@
 //! * **Cache with a TTL** (`work.describe_cache_secs`, clamped to the
 //!   retention window — see `ttl_ceiling_secs`): a warm entry is
 //!   served without asking the tracker. The cache lives in its own table
-//!   (migration 068), so the excerpt stays authoritative for every other
+//!   (migration 073), so the excerpt stays authoritative for every other
 //!   path — a read path has exactly one source for "the" description. The
 //!   TTL window is inclusive: an entry fetched exactly `ttl_secs` ago is
 //!   still served (`Store::cached_description`'s own doc says so too).
@@ -27,10 +27,14 @@
 //!   [`trackers::DESCRIBE_MAX_CHARS`]) — this function returns the value, so
 //!   this function discharges the fencing duty, the same rule `lookup`
 //!   (`tickets::lookup`) and `card` (`card::card`) follow for their own
-//!   answers. `describe`'s body is already fleet's full/capped answer, so
-//!   no truncation notice is ever appended (`full_chars` is passed as the
-//!   body's own length, and `DescribeOffer::None`). A person (master, a
-//!   phone, bound or not) gets it plain, as `lookup` leaves its excerpt.
+//!   answers. The notice fires only on fleet's OWN cap: `full_chars` is the
+//!   tracker's true length (the provider's [`trackers::FullDescription`]
+//!   `chars`, kept in the cache's `chars` column), so a description past
+//!   [`trackers::DESCRIBE_MAX_CHARS`] says "shown N of M … open the ticket"
+//!   (`DescribeOffer::None`: asking `describe` again would not get more).
+//!   A person (master, a phone, bound or not) gets it plain, as `lookup`
+//!   leaves its excerpt, with [`Described::chars`] above the body's length
+//!   to say it was cut.
 //! * **The notice still applies.** A warm cache does not stop `lookup` or a
 //!   start brief saying they cut: that notice is about THEIR budget (the
 //!   2000-char excerpt vs. the tracker's true length), not about what fleet
@@ -47,9 +51,7 @@
 //!   `DESCRIPTION_MAX_CHARS` would be reopened by the back door.
 //! * **Parked, on purpose.** No single-flight for two concurrent misses on
 //!   the same key (each would fetch and write once, harmlessly redundantly —
-//!   not a correctness bug, just a wasted tracker call under a rare race);
-//!   `work_item_descriptions.chars` is written but has no reader yet (kept
-//!   for the day something wants a length without paying for the body).
+//!   not a correctness bug, just a wasted tracker call under a rare race).
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
@@ -72,15 +74,15 @@ pub struct Described {
     /// The whole description, third-party text. For a per-host token
     /// (`OrgScope::Host`) already fenced exactly as `lookup` fences its
     /// excerpt — markers defused, wrapped in the untrusted-input marker,
-    /// capped at [`trackers::DESCRIBE_MAX_CHARS`] — with no trailing
-    /// truncation notice (this answer already is fleet's full/capped text).
+    /// capped at [`trackers::DESCRIBE_MAX_CHARS`] — with a trailing "shown
+    /// N of M … open the ticket" notice only when that cap cut it.
     /// For a person (master, a phone, bound or not) this is the plain body,
     /// exactly as `lookup` leaves its excerpt.
     pub body: String,
-    /// The DESCRIPTION's own length — `body` without the marker lines a
-    /// per-host token's copy is wrapped in. Equal to the tracker's true
-    /// length on a fresh fetch (before fleet's own cap); on a cache hit, the
-    /// length of what was stored (already capped when it was fetched).
+    /// The description's length AT THE TRACKER, before fleet's own
+    /// [`trackers::DESCRIBE_MAX_CHARS`] cap — on a fresh fetch and on a
+    /// cache hit alike (the cache keeps the length the fetch reported).
+    /// Above the text in `body` exactly when that cap cut it.
     pub chars: i64,
     /// Served from the cache rather than asking the tracker.
     #[serde(default)]
@@ -145,16 +147,30 @@ pub async fn describe(
     let (item_id, out_key, item_key, external_id, tracker, ttl_secs) = {
         let s = lock(store)?;
         orgs::require_key(&s, scope, &key)?;
-        let Some(item) = s.work_item_by_key(&key)? else {
-            return Err(orgs::not_visible_to(scope, &key));
-        };
-        let org_id = s.item_org(item.id)?;
-        if let Some(allowed) = tickets::allowed(scope, &s)? {
-            if !allowed.contains(&item.id) && (item.tracker_id.is_some() || !scope.sees_org(org_id))
-            {
-                return Err(orgs::not_visible_to(scope, &key));
+        // The first item carrying `key` that this caller may see. Two
+        // trackers can hold the same key (two Jira sites, one per org): the
+        // store's single "the item for this key" would pick the oldest and
+        // refuse a host of the other org over a ticket that is not theirs,
+        // when their own is right there.
+        let allowed = tickets::allowed(scope, &s)?;
+        let mut item = None;
+        for candidate in s.work_items_by_key(&key)? {
+            let visible = match &allowed {
+                None => true,
+                Some(allowed) => {
+                    allowed.contains(&candidate.id)
+                        || (candidate.tracker_id.is_none()
+                            && scope.sees_org(s.item_org(candidate.id)?))
+                }
+            };
+            if visible {
+                item = Some(candidate);
+                break;
             }
         }
+        let Some(item) = item else {
+            return Err(orgs::not_visible_to(scope, &key));
+        };
         let tracker = s
             .list_trackers()?
             .into_iter()
@@ -201,11 +217,15 @@ pub async fn describe(
     // `.await` inside this block either: it would hold the guard across an
     // await, which this module's own discipline (see the module doc) forbids.
     // Both are safe once this block has returned or fallen through.
-    if let Some(body) = lock(store)?.cached_description(item_id, ttl_secs, now)? {
-        let chars = body.chars().count() as i64;
+    if let Some((body, chars)) =
+        lock(store)?.cached_description_with_chars(item_id, ttl_secs, now)?
+    {
+        // A row written before the length was the tracker's own holds the
+        // body's length; never report less than what is served.
+        let chars = chars.max(body.chars().count() as i64);
         return Ok(Described {
             key: out_key,
-            body: fence_for_scope(scope, &body),
+            body: fence_for_scope(scope, &body, chars),
             chars,
             from_cache: true,
         });
@@ -219,14 +239,14 @@ pub async fn describe(
     };
     // The provider serves descriptions (checked above), so `None` here means
     // this ticket has no description text — not an unsupported operation.
-    let Some(body) = provider.describe(&item_ref).await.map_err(|e| e.to_ipc())? else {
+    let Some(full) = provider.describe(&item_ref).await.map_err(|e| e.to_ipc())? else {
         return Err(no_description(&out_key));
     };
-    let chars = body.chars().count() as i64;
-    lock(store)?.put_description(item_id, &body, chars)?;
+    let chars = full.chars.max(full.text.chars().count() as i64);
+    lock(store)?.put_description(item_id, &full.text, chars)?;
     Ok(Described {
         key: out_key,
-        body: fence_for_scope(scope, &body),
+        body: fence_for_scope(scope, &full.text, chars),
         chars,
         from_cache: false,
     })
@@ -236,18 +256,17 @@ pub async fn describe(
 /// (`fence_ticket`, third-party text, capped at
 /// [`trackers::DESCRIBE_MAX_CHARS`]); a person (master, a phone, bound or
 /// not) reads it plain, as `lookup` leaves its excerpt for the same scopes.
-/// `describe`'s body is already fleet's full/capped answer — passing its own
-/// length as `full_chars` with [`crate::mcp::guard::DescribeOffer::None`]
-/// means `fence_ticket` never appends a "shown X of Y" notice here; that
-/// notice belongs to `lookup` and the start brief, whose own (smaller)
-/// budget it describes.
-fn fence_for_scope(scope: &OrgScope, body: &str) -> String {
+/// `full_chars` is the tracker's true length, so a description fleet's own
+/// cap cut carries "shown N of M chars … open the ticket"
+/// ([`crate::mcp::guard::DescribeOffer::None`]: `describe` is already the
+/// most fleet serves); an uncut one gets no notice.
+fn fence_for_scope(scope: &OrgScope, body: &str, full_chars: i64) -> String {
     match scope {
         OrgScope::Host { .. } => crate::mcp::guard::fence_ticket(
             body,
             "the tracker ticket's full description",
             trackers::DESCRIBE_MAX_CHARS,
-            Some(body.chars().count() as i64),
+            Some(full_chars),
             crate::mcp::guard::DescribeOffer::None,
         ),
         OrgScope::All | OrgScope::Org { .. } => body.to_string(),

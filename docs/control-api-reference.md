@@ -53,6 +53,12 @@ The Assets tab's catalog operations as one tool. Master or a client granted `ass
 
 Parameters: `action`, `args`, `confirm_nonce`
 
+### `decide_setting_proposals`
+
+Apply or reject settings proposals by id, each on its own; a trusted device only.
+
+Parameters: `accept`, `reject`
+
 ### `delete_worktree`
 
 Delete a git worktree on its host (no --force) and drop fleet's row. Refuses if an alive session points at it, unless force. Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, E_CONFIRM_REQUIRED (desktop confirmation on).
@@ -87,7 +93,13 @@ Ensure the UX agent's operator session exists; returns its row.
 
 ### `fleet_health`
 
-Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers. hub: uptime and last reconcile pass; tunnels_mode none|reverse; peer_links_total.
+Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers. hub: uptime and last reconcile pass; tunnels_mode none|reverse; peer_links_total. hosts[]: per host disk_home_pct/disk_low, claude_behind, agent_behind, hooks_silent. decide (master only): Jev's last hour, degraded if its breaker is open or >20% failed.
+
+### `forget_project`
+
+Drop a project row and its worktrees (ghost sessions go with it); E_INVALID_STATE while a live session references it. Master only.
+
+Parameters: `project_id`
 
 ### `get_clipboard`
 
@@ -97,7 +109,9 @@ Parameters: `host_alias`
 
 ### `get_settings`
 
-Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, work graph), each key's effective value. Read-only but master token only (it names hosts and their paths).
+Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, work graph), each key's effective value. Master token or a paired device bound to no org.
+
+Parameters: `describe`
 
 ### `hide_host`
 
@@ -157,6 +171,10 @@ Registered hosts: reachability, claude/tmux versions, linked account.
 
 The catalog's layer definitions (layers/*.yaml) and each host's role + active contexts. Read-only. Requires catalog_configure + catalog_load in the app.
 
+### `list_pages`
+
+The settings page specs, data source shapes, resources and page actions a device renders.
+
 ### `list_peer_links`
 
 List this hub's links to other fleets' hubs: fleet, role, state, pending count, last exchange and error. Never a token. Read-only, master token only.
@@ -184,6 +202,12 @@ Parameters: `limit`, `requester_session_id`, `state`
 Git worktrees fleet knows about, with their alive-session occupants (0 = free to delete via delete_worktree). Returns {total, worktrees}: total counts every match. Narrow with project_id / host_alias: a fleet-wide call answers hundreds of rows.
 
 Parameters: `host_alias`, `limit`, `project_id`, `summary`
+
+### `merge_host`
+
+Fold host `from` into `into` in one transaction: worktrees, fingerprints, dismissals, layers and daily usage move (usage sums), sessions move unless `into` already has the same claude_session_id or tmux_name (those are dropped), then `from` is deleted. For a renamed host (`local` -> `mac`). Master only; may return E_CONFIRM_REQUIRED.
+
+Parameters: `confirm_nonce`, `from`, `into`
 
 ### `move_session`
 
@@ -215,7 +239,7 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 ### `pair_client`
 
-Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.
+Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange), updater is fleet-updater's (/update only); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.
 
 Parameters: `mode`, `name`, `org_id`, `trusted`, `ttl_s`
 
@@ -249,15 +273,15 @@ Propose a layer split from the last scan, grouping assets by the exact set of ho
 
 ### `provision_hosts`
 
-Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it.
+Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it. host: one alias; content_only: skills, CLAUDE.md and hooks only, no token.
 
-Parameters: `rotate`
+Parameters: `content_only`, `host`, `rotate`
 
 ### `quick_replies`
 
-Read or replace the fleet's quick replies: the chip row the desktop and phone composers draw above the prompt box, as [{label, text, auto_send}] in order. No arguments reads; `set` replaces the whole list (max 24, [] restores the defaults). Errors: E_INVALID.
+Read or replace the fleet's quick replies: the chip row the desktop and phone composers draw above the prompt box, as [{label, text, auto_send}] in order. No arguments reads; `set` replaces the whole list (max 24, [] restores the defaults; not a host token or the operator). Errors: E_INVALID, E_CONFLICT, E_FORBIDDEN.
 
-Parameters: `set`
+Parameters: `expected`, `set`
 
 ### `recreate_session`
 
@@ -481,15 +505,35 @@ Parameters: `host_alias`, `session_id`, `tags`, `tmux_name`
 
 ### `set_setting`
 
-Change one get_settings key, validated; E_INVALID otherwise. mcp.*, hub.* and controller.* are refused. Master token only. Returns the settings.
+Change one get_settings key, validated; E_INVALID otherwise. mcp.*, hub.* and controller.* are refused. Master, or a trusted device. Returns the settings, or with propose the proposal.
 
-Parameters: `key`, `value`
+Parameters: `key`, `propose`, `value`, `why`
+
+### `setting_history`
+
+One setting's writes, newest first: who, before and after, the proposal applied.
+
+Parameters: `key`, `limit`
+
+### `setting_proposals`
+
+Settings proposals waiting for review, each with the key's value now, and can_write: whether this device may decide.
 
 ### `spawn_review`
 
 Spawn a review session: a new Claude session in the source session's worktree, seeded with a review prompt. Returns its row.
 
 Parameters: `confirm_nonce`, `prompt`, `source_session_id`
+
+### `update_admin`
+
+Update admin, master only: pin a version for a component or target (below installed = rollback), unpin, or refresh the signed channel. E_INVALID, E_UPDATE_UNVERIFIED.
+
+Parameters: `action`, `component`, `mandatory`, `reason`, `target`, `version`
+
+### `update_status`
+
+Fleet updates: the verified release channel, each target's version, phase and what the hub would tell it now, per-component counts, pins. A per-host or org-bound token sees itself only.
 
 ### `usage_report`
 
@@ -523,7 +567,7 @@ Parameters: `tmux_name`
 
 ### `work`
 
-Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; describe {key} (the tracker's whole description, cached); tidy; reopened. Work view: tree {filters, cursor}; task {task_id}; session_tasks; review; rules; rule_preview {rule}; views; org_impact.
+Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; describe {key} (the tracker's whole description, cached); tidy; reopened. Work view: tree {filters, cursor} (archived: false hides archived tasks); task {task_id}; session_tasks; review; rules; rule_preview {rule}; views; org_impact.
 
 Parameters: `action`, `cursor`, `filters`, `host_alias`, `host_aliases`, `key`, `limit`, `link_id`, `org_id`, `per_task`, `project_id`, `query`, `rule`, `session_id`, `since`, `task_id`, `tracker_id`, `url`, `view`, `with_brief`
 
@@ -651,8 +695,18 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::purge_project`
 - `commands::quick_replies::quick_replies`
 - `commands::quick_replies::set_quick_replies`
-- `commands::sessions::get_fleet_settings`
-- `commands::sessions::set_fleet_setting`
+- `commands::pages::get_fleet_settings`
+- `commands::pages::describe_fleet_settings`
+- `commands::pages::list_pages`
+- `commands::pages::fetch_page_source`
+- `commands::pages::flow_start`
+- `commands::pages::flow_submit`
+- `commands::pages::flow_back`
+- `commands::pages::flow_cancel`
+- `commands::pages::setting_proposals`
+- `commands::pages::decide_setting_proposals`
+- `commands::pages::setting_history`
+- `commands::pages::set_fleet_setting`
 - `commands::tasks::list_tasks`
 - `commands::tasks::cancel_task`
 - `commands::files::repo_changes`
@@ -685,6 +739,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::probe_host`
 - `commands::hosts::probe_ssh_alias`
 - `commands::hosts::remove_host`
+- `commands::hosts::merge_host`
 - `commands::hosts::hide_host`
 - `commands::hosts::set_account_nickname`
 - `commands::account_usage::list_account_usage`

@@ -1034,7 +1034,7 @@ fn the_benchmark_needs_no_live_mode_but_every_other_check() {
 }
 
 #[tokio::test]
-async fn a_benchmarks_spend_and_failures_never_stop_the_live_calls() {
+async fn a_benchmarks_failures_never_stop_the_live_calls_but_its_spend_does() {
     let w = world();
     w.all_on();
     w.set(settings::DECIDE_JEV_DAILY_TOKEN_BUDGET, "1000");
@@ -1064,7 +1064,12 @@ async fn a_benchmarks_spend_and_failures_never_stop_the_live_calls() {
         Some(Fallback::BreakerOpen)
     );
     w.set(settings::DECIDE_JEV_DAILY_TOKEN_BUDGET, "1000");
-    // The live path: its breaker is closed and its budget unspent.
+    // One budget: the benchmark's spend is the day's spend, so the live
+    // path is refused too — the setting is never spent twice a day.
+    let live = decide(&ctx, request(Feature::WorkLink, Some(w.org))).await;
+    assert_eq!(live.fallback, Some(Fallback::Budget));
+    // With room left, the live path goes: its breaker is closed.
+    w.set(settings::DECIDE_JEV_DAILY_TOKEN_BUDGET, "1300");
     let live = decide(&ctx, request(Feature::WorkLink, Some(w.org))).await;
     assert_eq!(live.fallback, None);
     assert_eq!(fake.calls(), 4);
@@ -1080,6 +1085,156 @@ async fn a_benchmarks_spend_and_failures_never_stop_the_live_calls() {
     assert_eq!(st.today.bench_input_tokens, 1_200);
     assert!(!st.breaker.open);
     let live_rows: i64 = st.stats.iter().filter(|r| !r.bench).map(|r| r.runs).sum();
-    assert_eq!(live_rows, 1);
+    assert_eq!(live_rows, 2, "the budget refusal and the call");
     assert!(st.lines().iter().any(|l| l.contains("bench")));
+    assert!(
+        st.lines().iter().any(|l| l.contains("1210 of 1300")),
+        "the day's spend is both: {:?}",
+        st.lines()
+    );
+}
+
+// --- health (test map §7) -------------------------------------------------------------
+
+fn live_run(fallback: Option<&str>, at: i64) -> crate::store::NewDecisionRun {
+    crate::store::NewDecisionRun {
+        at,
+        feature: "status_map".into(),
+        subject_kind: "tracker_section".into(),
+        subject_id: "1:abc".into(),
+        mode: "shadow".into(),
+        provider: "jev".into(),
+        question_version: "status_map.v1".into(),
+        fallback: fallback.map(str::to_string),
+        called: fallback.is_none_or(|f| {
+            matches!(
+                f,
+                "timeout" | "http_error" | "rate_limited" | "invalid_answer" | "low_confidence"
+            )
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn health_is_absent_while_nothing_is_on_and_ok_on_a_quiet_hour() {
+    let w = world();
+    assert_eq!(health(&w.store.lock().unwrap(), NOON), None);
+    w.all_on();
+    let h = health(&w.store.lock().unwrap(), NOON).unwrap();
+    assert!(h.enabled && !h.degraded);
+    assert_eq!(h.modes.keys().collect::<Vec<_>>(), vec!["work_link"]);
+    assert_eq!((h.attempts, h.failures, h.failure_rate), (0, 0, None));
+    assert!(h.line().ends_with("→ ok"), "{}", h.line());
+    // A window onto a hub reports nothing: the hub does.
+    w.store
+        .lock()
+        .unwrap()
+        .set_setting(HUB_REMOTE_URL_KEY, "https://hub.example")
+        .unwrap();
+    assert_eq!(health(&w.store.lock().unwrap(), NOON), None);
+}
+
+#[test]
+fn failing_calls_in_the_last_hour_make_it_degraded() {
+    let w = world();
+    w.all_on();
+    {
+        let s = w.store.lock().unwrap();
+        // Refusals by configuration are no attempts; an old failure is out
+        // of the window; a benchmark's failures never count.
+        for _ in 0..20 {
+            s.insert_decision_run(&live_run(Some("org_off"), NOON - 60))
+                .unwrap();
+        }
+        for _ in 0..10 {
+            s.insert_decision_run(&live_run(Some("timeout"), NOON - 2 * 3600))
+                .unwrap();
+            s.insert_decision_run(&crate::store::NewDecisionRun {
+                subject_kind: DECISION_BENCH_SUBJECT.into(),
+                ..live_run(Some("http_error"), NOON - 60)
+            })
+            .unwrap();
+        }
+        for _ in 0..8 {
+            s.insert_decision_run(&live_run(None, NOON - 120)).unwrap();
+        }
+        s.insert_decision_run(&live_run(Some("low_confidence"), NOON - 120))
+            .unwrap();
+        s.insert_decision_run(&live_run(Some("timeout"), NOON - 60))
+            .unwrap();
+    }
+    // 1 failure of 10 attempts: 10%, ok.
+    let h = health(&w.store.lock().unwrap(), NOON).unwrap();
+    assert_eq!((h.attempts, h.failures), (10, 1));
+    assert_eq!(h.failure_rate, Some(0.1));
+    assert!(!h.degraded);
+    {
+        let s = w.store.lock().unwrap();
+        s.insert_decision_run(&live_run(Some("rate_limited"), NOON - 30))
+            .unwrap();
+        s.insert_decision_run(&live_run(Some("http_error"), NOON - 20))
+            .unwrap();
+    }
+    // 3 of 12: 25% > 20%.
+    let h = health(&w.store.lock().unwrap(), NOON).unwrap();
+    assert_eq!((h.attempts, h.failures), (12, 3));
+    assert!(h.degraded);
+    assert_eq!(h.reason.as_deref(), Some("failure_rate"));
+    assert!(h.line().contains("DEGRADED (failure_rate)"), "{}", h.line());
+    // The kill switch off: nothing is on, whatever the record says.
+    w.set(settings::DECIDE_JEV_ENABLED, "false");
+    let h = health(&w.store.lock().unwrap(), NOON).unwrap();
+    assert!(
+        !h.degraded,
+        "a mode left on with the switch off is not degraded"
+    );
+}
+
+#[test]
+fn an_open_breaker_is_degraded_with_few_attempts_and_a_spent_budget_is_not() {
+    let mut modes = BTreeMap::new();
+    modes.insert("status_map".to_string(), "assist".to_string());
+    let h = health_of(true, modes.clone(), &[], true, false);
+    assert_eq!(
+        (h.degraded, h.reason.as_deref()),
+        (true, Some("breaker_open"))
+    );
+    let row = |fallback: Option<&str>, runs: i64| DecisionStatRow {
+        feature: "status_map".into(),
+        provider: "jev".into(),
+        fallback: fallback.map(str::to_string),
+        runs,
+        ..Default::default()
+    };
+    // Under five attempts a failure rate says nothing.
+    let h = health_of(
+        true,
+        modes.clone(),
+        &[row(Some("timeout"), 4)],
+        false,
+        false,
+    );
+    assert_eq!(h.failure_rate, Some(1.0));
+    assert!(!h.degraded);
+    // A spent budget is planned: reported, not degraded, and no attempt.
+    let h = health_of(
+        true,
+        modes,
+        &[row(Some("budget"), 50), row(None, 5)],
+        false,
+        true,
+    );
+    assert!(h.budget_spent && !h.degraded);
+    assert_eq!(h.attempts, 5);
+    assert!(h.line().contains("today's budget spent"), "{}", h.line());
+}
+
+#[test]
+fn status_shows_the_health_line() {
+    let w = world();
+    w.all_on();
+    let st = status(&w.store.lock().unwrap(), NOON, 7).unwrap();
+    assert!(st.health.is_some());
+    assert!(st.lines().join("\n").contains("health (last 60 min, live)"));
 }

@@ -287,9 +287,13 @@ impl FleetPrompts {
     /// Code typed it ([`Self::is_fleet`]), else the prompt without the
     /// harness blocks at its head (rows stored before the hook took them
     /// off).
-    pub fn person_text<'a>(&self, prompt: &'a str, last_prompt: Option<&str>) -> Option<&'a str> {
+    pub fn person_text<'a>(
+        &self,
+        prompt: &'a str,
+        last_prompt: Option<&str>,
+    ) -> Option<std::borrow::Cow<'a, str>> {
         let p = crate::service::prompt_origin::human_part(prompt)?;
-        (!self.is_fleet(p, last_prompt)).then_some(p)
+        (!self.is_fleet(&p, last_prompt)).then_some(p)
     }
 }
 
@@ -357,7 +361,7 @@ pub fn census(
             s.fleet_typed.bump();
             continue;
         };
-        count(s, super::read_with(detector, text));
+        count(s, super::read_with(detector, &text));
     }
 
     let items = store.nl_census_items(since, max)?;
@@ -400,7 +404,7 @@ pub fn census(
             acc.pairs.fleet_typed.bump();
             continue;
         };
-        let a = super::read_with(detector, prompt).bucket;
+        let a = super::read_with(detector, &prompt).bucket;
         let b = super::read_with(detector, &pr.title).bucket;
         if is_language(a) && is_language(b) {
             if a == b {
@@ -574,7 +578,7 @@ pub fn sample_prompts(
         .filter_map(|p| {
             fleet
                 .person_text(&p.text, p.last_prompt.as_deref())
-                .map(str::to_string)
+                .map(std::borrow::Cow::into_owned)
         })
         .filter(|t| seen.insert(t.clone()))
         .collect();
@@ -897,12 +901,13 @@ mod tests {
             f.person_text(
                 "<system-reminder>Plan mode.</system-reminder>\nfix PAY-7 on mobile",
                 None
-            ),
+            )
+            .as_deref(),
             Some("fix PAY-7 on mobile"),
             "a row stored with a harness head is read without it"
         );
         assert_eq!(
-            f.person_text("  Pozri sa na ten build ", None),
+            f.person_text("  Pozri sa na ten build ", None).as_deref(),
             Some("Pozri sa na ten build")
         );
 

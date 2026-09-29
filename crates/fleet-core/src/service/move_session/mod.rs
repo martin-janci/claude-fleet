@@ -292,6 +292,27 @@ pub trait MoveHooks: Send + Sync {
         host: &str,
         tmux_name: &str,
     ) -> Result<(), IpcError>;
+    /// The source pane's live `claude_status` (a `session_activity`
+    /// capture), or `None` when it cannot tell. Asked only for a
+    /// stale-demoted source, whose stored `idle` is a guess
+    /// (`store::trusted_status`). The default cannot tell.
+    async fn pane_status(&self, _store: &Mutex<Store>, _session_id: i64) -> Option<String> {
+        None
+    }
+}
+
+/// [`MoveHooks::pane_status`] as a [`crate::service::tasks::PaneProbe`], for
+/// the `when: idle` waiter's `wait_for_session_probed`.
+pub(crate) struct HooksPaneProbe<'a> {
+    pub hooks: &'a dyn MoveHooks,
+    pub store: &'a Mutex<Store>,
+}
+
+#[async_trait::async_trait]
+impl crate::service::tasks::PaneProbe for HooksPaneProbe<'_> {
+    async fn pane_status(&self, session_id: i64) -> Option<String> {
+        self.hooks.pane_status(self.store, session_id).await
+    }
 }
 
 /// Production hooks over the real ssh client.
@@ -368,6 +389,13 @@ impl MoveHooks for RealHooks<'_> {
         .await
         .map(|_| ())
     }
+
+    async fn pane_status(&self, store: &Mutex<Store>, session_id: i64) -> Option<String> {
+        crate::service::sessions::session_activity(store, self.ssh, session_id)
+            .await
+            .ok()
+            .and_then(|p| p.claude_status)
+    }
 }
 
 /// Poll interval for [`wait::run_wait`]'s retry loop — the same cadence
@@ -383,8 +411,10 @@ fn source_is_idle(store: &Mutex<Store>, session_id: i64) -> Result<bool, IpcErro
     let row = s.get_session_by_id(session_id)?.ok_or_else(|| {
         IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
     })?;
+    let demoted = s.stale_demoted_by_id(session_id)?;
     Ok(crate::service::tasks::session_satisfies(
         &row,
+        demoted,
         crate::service::tasks::WaitCond::Idle,
     ))
 }
@@ -608,6 +638,48 @@ pub fn carry_verdict(state: &SourceState, branch: &str) -> Result<(), IpcError> 
                 state.current_branch
             ),
         ));
+    }
+    Ok(())
+}
+
+/// One GiB of headroom on top of the worktree the carry recreates.
+const TARGET_DISK_HEADROOM_KB: i64 = 1_048_576;
+
+/// `du -sk` of the source worktree; empty output (an unmatched fake, a
+/// missing `du`) is "unknown" and skips the check.
+fn worktree_size_script(worktree: &str) -> String {
+    format!(
+        "# cf-move:size\ndu -sk -- {} 2>/dev/null | cut -f1",
+        quote(worktree)
+    )
+}
+
+/// Pure: refuse a target whose `$HOME` filesystem cannot take the worktree
+/// plus [`TARGET_DISK_HEADROOM_KB`] (hosts F4). `None` on either side =
+/// unknown = proceed, as everywhere else in the move.
+pub fn target_disk_verdict(
+    target: &str,
+    target_free_kb: Option<i64>,
+    source_kb: Option<i64>,
+) -> Result<(), IpcError> {
+    let (Some(free), Some(size)) = (target_free_kb, source_kb) else {
+        return Ok(());
+    };
+    let needed = size + TARGET_DISK_HEADROOM_KB;
+    if free < needed {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{target} has {free} kB free in $HOME, the worktree needs {size} kB plus 1 GiB \
+                 headroom ({needed} kB); free disk on {target} first"
+            ),
+        )
+        .with_details(serde_json::json!({
+            "reason": "target_disk_low",
+            "target": target,
+            "free_kb": free,
+            "needed_kb": needed,
+        })));
     }
     Ok(())
 }
@@ -873,6 +945,8 @@ pub fn parse_locate(stdout: &str) -> Result<Located, IpcError> {
 /// Refuse a source whose Claude may be mid-turn: the copy would miss the
 /// rest of the turn and the two sessions would fork. Only a known idle
 /// status (the `wait_for_session` idle set, plus `failed`) is accepted.
+/// `status` is the row's `store::trusted_status`: for a stale-demoted source
+/// that is the pane's live reading, `None` (unknown) when it had none.
 pub fn require_source_idle(status: Option<&str>) -> Result<(), IpcError> {
     match status {
         s if crate::store::turn_over(s) => Ok(()),
@@ -1648,6 +1722,9 @@ async fn carry_memory(
 pub(super) struct Snapshot {
     pub(super) row: SessionRow,
     pub(super) claude_id: String,
+    /// The source's `claude --model` / `--effort`, relaunched on the target
+    /// and stored on its row.
+    pub(super) launch: crate::tmux::ClaudeLaunch,
     pub(super) branch: String,
     pub(super) project_id: i64,
     pub(super) worktree_id: i64,
@@ -1814,6 +1891,7 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
     .saturating_mul(1024 * 1024);
     let target_taken = target_rows.into_iter().map(|r| r.tmux_name).collect();
     Ok(Snapshot {
+        launch: crate::service::sessions::stored_launch(s, row.id),
         claude_id,
         branch,
         project_id,
@@ -2290,13 +2368,24 @@ async fn gather(
     //    the source is busy, never to refuse on it. A real move (`dry_run:
     //    false`) always enforces it, whatever `when` says: only the public
     //    `move_session` entry point ever turns `idle` into an actual wait.
+    //    A source the tick demoted for staleness reads `idle` only because
+    //    nothing moved — one long tool call looks the same — so its pane is
+    //    asked, and the move goes ahead only when the pane shows it quiet.
     hooks.refresh_host(store, &src).await?;
-    let status = {
+    let (fresh, demoted) = {
         let s = lock(store)?;
-        s.get_session_by_id(snap.row.id)?
-            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?
-            .claude_status
+        let fresh = s
+            .get_session_by_id(snap.row.id)?
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
+        let demoted = s.stale_demoted_by_id(fresh.id)?;
+        (fresh, demoted)
     };
+    let live = if crate::store::needs_pane_confirmation(&fresh, demoted) {
+        hooks.pane_status(store, fresh.id).await
+    } else {
+        None
+    };
+    let status = crate::store::trusted_status(&fresh, demoted, live.as_deref()).map(str::to_string);
     let idle_deferred = args.dry_run && args.when == When::Idle;
     let busy = if idle_deferred {
         require_source_idle(status.as_deref()).is_err()
@@ -2334,6 +2423,31 @@ async fn gather(
         return Err(IpcError::new(codes::E_GIT, msg));
     }
     let state = parse_inspection(&String::from_utf8_lossy(&out.stdout))?;
+    // hosts F4: the target's last health sample vs. the source worktree's
+    // size. Unknown on either side proceeds; a known shortfall is a check
+    // failure, before the transcript is read or anything is written.
+    let target_free_kb = {
+        let s = lock(store)?;
+        s.get_host_row(&target)?.and_then(|h| h.disk_home_free_kb)
+    };
+    let source_kb = if target_free_kb.is_some() {
+        let out = sh(
+            ssh,
+            &src,
+            &worktree_size_script(&state.worktree),
+            GIT_TIMEOUT,
+        )
+        .await?;
+        // The first word: `cut -f1` leaves a bare number, a `du` without
+        // it (or a fake) leaves `<kb>\t<path>`; either way the size.
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.parse::<i64>().ok())
+    } else {
+        None
+    };
+    target_disk_verdict(&target, target_free_kb, source_kb)?;
     if args.strict && args.dry_run && state.origin_tip_not_local {
         // The move would fetch origin's tip here and then refuse only if the
         // source has commits it lacks. Without the fetch that half cannot be
@@ -2694,7 +2808,12 @@ async fn move_session_inner(
 
     let tmux_name = pick_target_name(&snap.row.tmux_name, &snap.target_taken)?;
     crate::validate::tmux_name(&tmux_name)?;
-    let pane_cmd = crate::service::sessions::recreate_pane_command("work", Some(&id), &tmux_name);
+    let pane_cmd = crate::service::sessions::recreate_pane_command(
+        "work",
+        Some(&id),
+        &tmux_name,
+        &snap.launch,
+    );
     let cwd = hooks
         .ensure_target_workspace(
             store,
@@ -3116,6 +3235,14 @@ async fn move_session_inner(
                 "[move_session] storing claude_session_id failed"
             );
         }
+        // So a later recreate / restart on the target keeps them too.
+        if let Err(e) = crate::service::sessions::store_launch(&s, row.id, &snap.launch) {
+            tracing::warn!(
+                session_id = row.id,
+                error = %e,
+                "[move_session] storing the launch options failed"
+            );
+        }
         // Usage (G1): the target's transcript is a whole-line prefix copy of
         // the source's, so its usage cursor starts where the source's stands
         // and the copied history is not counted twice.
@@ -3452,6 +3579,9 @@ mod tests {
         moved_at_kill: Mutex<Option<bool>>,
         started: Mutex<Vec<(String, String)>>,
         log: Mutex<Vec<String>>,
+        /// What `pane_status` answers (the live pane of a stale-demoted
+        /// source); `None` = cannot tell. Each ask is logged `pane <id>`.
+        pane: Option<&'static str>,
     }
 
     impl FakeHooks {
@@ -3471,6 +3601,7 @@ mod tests {
                 moved_at_kill: Mutex::new(None),
                 started: Mutex::new(Vec::new()),
                 log: Mutex::new(Vec::new()),
+                pane: None,
             }
         }
         fn log(&self) -> Vec<String> {
@@ -3531,6 +3662,10 @@ mod tests {
                 .unwrap()
                 .push((host.to_string(), name.to_string()));
             Ok(())
+        }
+        async fn pane_status(&self, _: &Mutex<Store>, session_id: i64) -> Option<String> {
+            self.log.lock().unwrap().push(format!("pane {session_id}"));
+            self.pane.map(str::to_string)
         }
         async fn refresh_host(&self, store: &Mutex<Store>, host: &str) -> Result<(), IpcError> {
             if self.refresh_target_fails && host != "alpha" {
@@ -3897,6 +4032,49 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, codes::E_MOVE_DIRTY);
         assert_eq!(progress_of(&f, &bus), ["check:started", "check:failed"]);
+    }
+
+    /// hosts F4: every writer on the target fails with ENOSPC before anyone
+    /// is told why. The check runs before the transcript is read.
+    #[tokio::test]
+    async fn a_target_low_on_disk_is_refused_in_the_check() {
+        let (f, bus) = recorded_fixture();
+        {
+            let s = f.store.lock().unwrap();
+            s.set_host_health(
+                "beta",
+                &crate::tmux::HostHealthSample {
+                    disk_home_free_kb: Some(1_500_000),
+                    disk_home_total_kb: Some(150_000_000),
+                    ..Default::default()
+                },
+                1,
+            )
+            .unwrap();
+        }
+        f.fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:size"),
+            Reply::ok("2097152\t/local/o/r/.claude/worktrees/feat\n"),
+        );
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID, "{}", err.message);
+        assert_eq!(err.details.as_ref().unwrap()["reason"], "target_disk_low");
+        assert_eq!(
+            err.details.as_ref().unwrap()["needed_kb"],
+            2_097_152 + 1_048_576
+        );
+        assert_eq!(progress_of(&f, &bus), ["check:started", "check:failed"]);
+    }
+
+    /// An unsampled target (no health row yet) or an unmeasurable source
+    /// never refuses: unknown means proceed, as everywhere else in the move.
+    #[tokio::test]
+    async fn an_unsampled_target_does_not_block_the_move() {
+        let f = fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        assert!(run(&f, &hooks, false).await.is_ok());
     }
 
     #[tokio::test]
@@ -6414,6 +6592,69 @@ mod tests {
             !hooks.log().iter().any(|l| l.starts_with("kill")),
             "nothing is killed when the source moved on"
         );
+    }
+
+    /// F2 x the move's source check: a source the tick demoted for
+    /// staleness reads `idle` only because nothing moved for
+    /// `reconcile.stale_working_secs` — one long tool call looks the same.
+    /// Its stored `idle` must not let a move copy a turn in flight: the pane
+    /// is asked, and only a quiet pane lets the move proceed — keyed on the
+    /// demotion (`stale_demoted_at`), which outlives the attention stamp.
+    #[tokio::test]
+    async fn a_stale_demoted_source_is_moved_only_when_its_pane_is_quiet() {
+        for (pane, moves) in [
+            (None, false),
+            (Some("working"), false),
+            (Some("idle"), true),
+        ] {
+            let f = fixture();
+            let id = {
+                let s = f.store.lock().unwrap();
+                s.set_claude_status_by_session_id(SID, "idle").unwrap();
+                let id = s.get_session_by_claude_id(SID).unwrap().unwrap().id;
+                // Demoted, and the attention stamp since acknowledged (an
+                // attach or the TTL): the demotion's memory alone must still
+                // make the move ask the pane.
+                s.conn_ref()
+                    .execute(
+                        "UPDATE sessions SET stale_demoted_at = 5, stale_working_at = NULL \
+                         WHERE id = ?1",
+                        [id],
+                    )
+                    .unwrap();
+                id
+            };
+            let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+            hooks.pane = pane;
+            let out = run(&f, &hooks, false).await;
+            assert!(
+                hooks.log().contains(&format!("pane {id}")),
+                "{pane:?}: the pane was asked"
+            );
+            if moves {
+                out.expect("a quiet pane confirms the demotion");
+            } else {
+                let err = out.unwrap_err();
+                assert_eq!(
+                    err.code,
+                    codes::E_INVALID_STATE,
+                    "{pane:?}: {}",
+                    err.message
+                );
+                assert!(err.message.contains("is not idle"), "{}", err.message);
+                assert!(f.fake.calls().is_empty(), "{pane:?}: no ssh at all");
+            }
+        }
+        // A row that was never demoted is not probed: its status stands.
+        let f = fixture();
+        f.store
+            .lock()
+            .unwrap()
+            .set_claude_status_by_session_id(SID, "idle")
+            .unwrap();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        run(&f, &hooks, false).await.expect("move");
+        assert!(!hooks.log().iter().any(|l| l.starts_with("pane ")));
     }
 
     #[tokio::test]

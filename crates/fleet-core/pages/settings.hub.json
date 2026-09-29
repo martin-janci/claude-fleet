@@ -1,0 +1,44 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings.hub",
+  "title": "Hub daemon",
+  "parent": "settings",
+  "layout": "category",
+  "intro": "How a fleet-hub daemon serves this fleet. Read-only here: the daemon writes these when it starts.",
+  "sections": [
+    {
+      "title": "Serving",
+      "items": [
+        {
+          "type": "field",
+          "key": "hub.bind"
+        },
+        {
+          "type": "field",
+          "key": "hub.public_url"
+        },
+        {
+          "type": "field",
+          "key": "hub.tls"
+        },
+        {
+          "type": "field",
+          "key": "hub.allow_plaintext"
+        },
+        {
+          "type": "field",
+          "key": "hub.allowed_hosts"
+        }
+      ]
+    },
+    {
+      "title": "Hosts",
+      "items": [
+        {
+          "type": "field",
+          "key": "hub.local_host"
+        }
+      ]
+    }
+  ]
+}

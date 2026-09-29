@@ -1,0 +1,43 @@
+[package]
+name = "fleet-update"
+version = "0.1.0"
+# Like fleet-core: not versioned in step with the app (scripts/release.sh
+# excludes it) and never published; scripts/check-version-consistency.sh
+# holds it to this exception.
+publish = false
+description = "The update engine shared by every claude-fleet component: manifests, signatures, decide(), the update state machine and UpdateChannel"
+authors = ["martin-janci"]
+edition = "2021"
+license = "MIT"
+
+# Design: docs/superpowers/specs/2026-09-28-update-channel-design.md.
+#
+# Deliberately small and Tauri-free, with NO fleet-core dependency: the hub
+# (fleet-core), the desktop (src-tauri), fleet-updater and later fleet-agent
+# all depend on it, the way fleet-agent depends only on fleet-proto. No I/O
+# happens here except through the `Fetch` / `HubTransport` seams.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+semver = { version = "1", features = ["serde"] }
+sha2 = "0.10"
+async-trait = "0.1"
+# Zero-dependency minisign verifier; the same crate tauri-plugin-updater uses.
+minisign-verify = "0.3"
+# The test signer (`testkit`), for other crates' tests only.
+ring = { version = "0.17", optional = true }
+blake2 = { version = "0.10", optional = true }
+base64 = { version = "0.22", optional = true }
+
+[features]
+# A minisign-format test signer and a manifest builder, for tests in crates
+# that depend on this one (fleet-core's `service::update`). Never in a
+# production build: only ever enabled from a `[dev-dependencies]` entry.
+testkit = ["dep:ring", "dep:blake2", "dep:base64"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+# Test-only signer: minisign's prehashed mode is Ed25519 over BLAKE2b-512.
+ring = "0.17"
+blake2 = "0.10"
+base64 = "0.22"

@@ -1,0 +1,290 @@
+// Resources on generated pages (declarative pages P4): the types
+// `crates/fleet-core/src/pages/resources.rs` serialises, and the pure
+// helpers a `master_detail` page uses — read a field, encode an edit, build
+// an action's arguments, say a sub-item, list the badges. Actions run the
+// existing desktop commands they name, so every hub verdict applies as is.
+import { invokeCmd, type Result } from '../result';
+import { loadOrgs, ruleChip, type OrgRuleRow } from '../orgs';
+import { loadTrackers } from '../trackers';
+
+export type Bind =
+  | { from: 'record'; name: string }
+  | { from: 'item' }
+  | { from: 'item_field'; name: string }
+  | { from: 'param'; name: string }
+  | { from: 'null' };
+
+export type OptionSource = 'hosts' | 'trackers';
+
+export type ParamSpec = { name: string; label: string; required: boolean } & (
+  | { type: 'text'; max: number; placeholder: string }
+  | { type: 'color' }
+  | { type: 'secret' }
+  | { type: 'options'; source: OptionSource }
+);
+
+export interface ActionSpec {
+  id: string;
+  label: string;
+  command: string;
+  envelope: 'args';
+  bind: [string, Bind][];
+  params: ParamSpec[];
+  confirm?: string;
+  /** Only for records whose `variant_by` field is one of these. */
+  variants?: string[];
+  /** The command answers `{ ok, error? }`. */
+  report: boolean;
+}
+
+export type ItemLabel = { type: 'plain' } | { type: 'field'; field: string } | { type: 'org_rule' };
+
+export type Badge =
+  | { when: 'true'; text: string }
+  | { when: 'false'; text: string }
+  | { when: 'set'; text: string }
+  | { when: 'label' };
+
+export type FieldKind =
+  | { type: 'text'; max: number }
+  | { type: 'color' }
+  | { type: 'bool'; on_off: boolean; default: boolean }
+  | { type: 'inherit' }
+  | { type: 'choice'; options: [string, string][] }
+  | { type: 'time' }
+  | { type: 'items'; item_label: ItemLabel; remove?: ActionSpec; add: ActionSpec[] };
+
+export type FieldSpec = {
+  id: string;
+  label: string;
+  help: string;
+  edit?: string;
+  badge?: Badge;
+  confirm?: string;
+  /** The value lives at this path inside the record's `edit` object. */
+  merge_path?: string[];
+} & FieldKind;
+
+export interface ResourceType {
+  id: string;
+  label: string;
+  plural: string;
+  help: string;
+  list: string;
+  id_field: string;
+  title_field: string;
+  color_field?: string;
+  empty: string;
+  fields: FieldSpec[];
+  create?: ActionSpec;
+  update?: ActionSpec;
+  delete?: ActionSpec;
+  actions?: ActionSpec[];
+  create_flow?: string;
+  variant_by?: string;
+}
+
+export type ResourceRecord = Record<string, unknown>;
+
+/** The value a scalar field edits: a string for text and colour, a boolean
+ *  for on/off, `'on' | 'off' | 'inherit'` for an inherit field. */
+export type FieldValue = string | boolean;
+
+/** A field's raw value: its own key, or its path inside the `edit` object. */
+export function rawOf(f: FieldSpec, record: ResourceRecord): unknown {
+  if (!f.merge_path?.length || !f.edit) return record[f.id];
+  let v: unknown = record[f.edit];
+  for (const k of f.merge_path) v = v && typeof v === 'object' ? (v as Record<string, unknown>)[k] : undefined;
+  return v;
+}
+
+export function fieldValue(f: FieldSpec, record: ResourceRecord): FieldValue {
+  const raw = rawOf(f, record);
+  switch (f.type) {
+    case 'bool':
+      return typeof raw === 'boolean' ? raw : f.default;
+    case 'inherit':
+      return raw === null || raw === undefined ? 'inherit' : raw ? 'on' : 'off';
+    default:
+      return raw === null || raw === undefined ? '' : String(raw);
+  }
+}
+
+/** What the update command takes for a field's new value. */
+export function encodeField(f: FieldSpec, v: FieldValue): unknown {
+  if (f.type === 'bool') return f.on_off ? (v ? 'on' : 'off') : v === true;
+  return v;
+}
+
+/**
+ * Apply's arguments for the changed fields: each under its `edit` name, or
+ * — for a merged field — the record's whole `edit` object with every
+ * changed path set, the rest kept as it is.
+ */
+export function updateArgs(
+  record: ResourceRecord,
+  changed: { f: FieldSpec; v: FieldValue }[],
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const { f, v } of changed) {
+    if (!f.edit) continue;
+    if (!f.merge_path?.length) {
+      out[f.edit] = encodeField(f, v);
+      continue;
+    }
+    const base = (out[f.edit] ?? JSON.parse(JSON.stringify(record[f.edit] ?? {}))) as Record<string, unknown>;
+    let at = base;
+    f.merge_path.forEach((k, i) => {
+      if (i === f.merge_path!.length - 1) at[k] = encodeField(f, v);
+      else {
+        if (!at[k] || typeof at[k] !== 'object') at[k] = {};
+        at = at[k] as Record<string, unknown>;
+      }
+    });
+    out[f.edit] = base;
+  }
+  return out;
+}
+
+/** A choice's label for its value. */
+export function choiceLabel(f: FieldSpec, v: string): string {
+  return f.type === 'choice' ? (f.options.find(([o]) => o === v)?.[1] ?? v) : v;
+}
+
+/** Unix seconds as how long ago, from `now`. */
+export function ago(secs: unknown, now: number): string {
+  if (typeof secs !== 'number') return 'never';
+  const d = Math.max(0, now - secs);
+  if (d < 60) return 'just now';
+  if (d < 3600) return `${Math.floor(d / 60)} min ago`;
+  if (d < 86_400) return `${Math.floor(d / 3600)} h ago`;
+  return `${Math.floor(d / 86_400)} d ago`;
+}
+
+/** The action applies to this record: no variants, or its variant is one. */
+export function applies(r: ResourceType, a: ActionSpec, record: ResourceRecord): boolean {
+  if (!a.variants?.length || !r.variant_by) return true;
+  return a.variants.includes(String(record[r.variant_by] ?? ''));
+}
+
+/** Record fields as the strings a `when` compares. */
+export function recordValues(r: ResourceType, record: ResourceRecord): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const f of r.fields) {
+    if (f.type === 'items') continue;
+    out[f.id] = String(fieldValue(f, record));
+  }
+  return out;
+}
+
+export function itemsOf(f: FieldSpec, record: ResourceRecord): unknown[] {
+  const v = record[f.id];
+  return Array.isArray(v) ? v : [];
+}
+
+export function itemLabel(label: ItemLabel, item: unknown): string {
+  if (label.type === 'plain') return String(item);
+  if (label.type === 'org_rule') return ruleChip(item as OrgRuleRow);
+  const v = (item as Record<string, unknown> | null)?.[label.field];
+  return v === undefined || v === null ? '' : String(v);
+}
+
+/** A stable key for a sub-item: its `id`, else the item itself. */
+export function itemKey(item: unknown): string {
+  if (item && typeof item === 'object' && 'id' in item) return String((item as { id: unknown }).id);
+  return String(item);
+}
+
+/** The value an option-source select picks for an item already in the
+ *  list, so the select can leave it out. */
+export function itemValue(item: unknown): string {
+  return itemKey(item);
+}
+
+export function badgesOf(r: ResourceType, record: ResourceRecord): string[] {
+  const out: string[] = [];
+  for (const f of r.fields) {
+    if (!f.badge) continue;
+    const v = fieldValue(f, record);
+    if (f.badge.when === 'true' && v === true) out.push(f.badge.text);
+    else if (f.badge.when === 'false' && v === false) out.push(f.badge.text);
+    else if (f.badge.when === 'set' && v !== 'inherit') out.push(`${f.badge.text} ${v}`);
+    else if (f.badge.when === 'label' && v !== '') out.push(choiceLabel(f, String(v)));
+  }
+  return out;
+}
+
+export function titleOf(r: ResourceType, record: ResourceRecord): string {
+  return String(record[r.title_field] ?? '');
+}
+
+export function idOf(r: ResourceType, record: ResourceRecord): string {
+  return String(record[r.id_field] ?? '');
+}
+
+/**
+ * The arguments `action` sends, from the record it runs on, the sub-item
+ * (for a list's remove) and the form's values. An empty optional param is
+ * sent as null; an options param holding a number-like id is sent as a
+ * number, as the commands take it.
+ */
+export function buildArgs(
+  action: ActionSpec,
+  record: ResourceRecord | null,
+  item: unknown,
+  params: Record<string, string>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [arg, bind] of action.bind) {
+    switch (bind.from) {
+      case 'record':
+        out[arg] = record?.[bind.name] ?? null;
+        break;
+      case 'item':
+        out[arg] = item;
+        break;
+      case 'item_field':
+        out[arg] = (item as Record<string, unknown> | null)?.[bind.name] ?? null;
+        break;
+      case 'param': {
+        const spec = action.params.find((p) => p.name === bind.name);
+        const v = (params[bind.name] ?? '').trim();
+        if (v === '') out[arg] = null;
+        else if (spec?.type === 'options' && /^\d+$/.test(v)) out[arg] = Number(v);
+        else out[arg] = v;
+        break;
+      }
+      case 'null':
+        out[arg] = null;
+        break;
+    }
+  }
+  return out;
+}
+
+/** The form can be sent: every required param has a value. */
+export function formReady(action: ActionSpec, params: Record<string, string>): boolean {
+  return action.params.every((p) => !p.required || (params[p.name] ?? '').trim() !== '');
+}
+
+export function runAction(action: ActionSpec, args: Record<string, unknown>): Promise<Result<unknown>> {
+  return invokeCmd<unknown>(action.command, { args });
+}
+
+export function listRecords(r: ResourceType): Promise<Result<ResourceRecord[]>> {
+  return invokeCmd<ResourceRecord[]>(r.list);
+}
+
+/**
+ * The stores other views keep of a resource, re-read after a change here
+ * so the sidebar's scopes and colours follow. Frontend glue, a closed map
+ * like the custom components.
+ */
+export const RESOURCE_RELOADERS: Record<string, (() => Promise<unknown>)[]> = {
+  org: [loadOrgs, loadTrackers],
+  tracker: [loadTrackers, loadOrgs],
+};
+
+export async function afterChange(r: ResourceType): Promise<void> {
+  await Promise.all((RESOURCE_RELOADERS[r.id] ?? []).map((f) => f()));
+}

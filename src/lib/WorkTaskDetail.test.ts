@@ -10,6 +10,7 @@ import { get } from 'svelte/store';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('./open_external', () => ({ openExternal: vi.fn(async () => true) }));
 import { invoke } from '@tauri-apps/api/core';
+import { openExternal } from './open_external';
 import WorkTaskDetail from './WorkTaskDetail.svelte';
 import { sessions } from './sessions';
 import { selectedSession, clearSelection } from './selection';
@@ -138,6 +139,23 @@ describe('WorkTaskDetail', () => {
     expect(screen.getByTestId('work-task-outcome').textContent).toContain('Fixed the token refresh.');
     // A tracker's task has no org to assign: its tracker's is its org.
     expect(screen.queryByTestId('work-task-assign-org')).toBeNull();
+  });
+
+  it('a whole description carries no cut notice', async () => {
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    expect(screen.queryByTestId('work-task-description-cut')).toBeNull();
+  });
+
+  it('the notice names shown and full lengths; its link opens the ticket', async () => {
+    const excerpt = 'é'.repeat(600);
+    handlers.work_task = () => ({ ...trackerTask, description: excerpt, description_chars: 6812, description_truncated: true });
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    const notice = screen.getByTestId('work-task-description-cut');
+    expect(notice.textContent?.replace(/\s+/g, ' ').trim()).toBe('Shown 600 of 6812 characters — open the ticket');
+    await fireEvent.click(within(notice).getByTestId('work-task-description-open'));
+    expect(vi.mocked(openExternal)).toHaveBeenCalledWith(trackerTask.task.url);
   });
 
   it('an inferred org says it is not a boundary', async () => {

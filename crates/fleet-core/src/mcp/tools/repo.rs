@@ -80,6 +80,17 @@ impl FleetTools {
         )
     }
 
+    #[tool(description = "Drop a project row and its worktrees (ghost \
+        sessions go with it); E_INVALID_STATE while a live session \
+        references it. Master only.")]
+    pub(super) async fn forget_project(
+        &self,
+        Parameters(p): Parameters<ForgetProjectParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("forget_project", &format!("project_id={}", p.project_id));
+        ok_json(&projects::forget_project(&self.store, p.project_id).map_err(to_mcp_err)?)
+    }
+
     #[tool(description = "Add a project on a host: clone a GitHub URL, adopt a \
         folder (the hub's local host only) or create a new repository \
         (create_remote is refused once with a confirm token to send back). \
@@ -89,7 +100,7 @@ impl FleetTools {
         &self,
         Extension(caller): Extension<Caller>,
         Parameters(AddProjectParams {
-            args,
+            mut args,
             confirm_nonce,
         }): Parameters<AddProjectParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -140,8 +151,15 @@ impl FleetTools {
                 person,
             )?;
         }
-        // `call_id` is never set here (it is `#[schemars(skip)]`): the
-        // registry mints an anonymous token and `CancelGuard` releases it.
+        // `call_id` is the desktop dialog's Cancel handle, never an MCP
+        // caller's: `#[schemars(skip)]` only hides it from the schema, and
+        // `#[serde(default)]` still reads one a caller sends. Bound, it would
+        // replace a desktop call's token of the same id in the shared
+        // registry, and its `CancelGuard` would then remove that slot. So it
+        // is dropped here: the registry mints an anonymous token (ids from
+        // `ANONYMOUS_ID_BASE`, never a frontend's) and `CancelGuard` releases
+        // it.
+        args.call_id = None;
         let row = add_project::add_project(args, &self.store, &*self.ssh, &self.reg)
             .await
             .map_err(to_mcp_err)?;

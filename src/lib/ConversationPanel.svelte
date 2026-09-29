@@ -1098,6 +1098,18 @@
   const outboxBusy = $derived(outgoing.some((m) => m.state === 'waiting' || m.state === 'sending' || m.state === 'sent'));
   const busyBlocked = $derived(blockWhileBusy && (busyNote !== null || outboxBusy));
   const canSend = $derived(draft.trim().length > 0 && viewing === null && !busyBlocked);
+  // A one-gesture chip send is held while the session is waiting on an
+  // answer: a permission or choice prompt (`blocked`) or any stuck screen.
+  // What a chip types there lands in the prompt's menu, not in the REPL, and
+  // its Enter can pick an option nobody chose. The typed composer is not held
+  // (typing ahead is that surface's deliberate workflow); a chip is one click
+  // with no chance to look first, so it only fills the box and says why.
+  const chipHold = $derived(liveStatus === 'blocked' || !!liveStuck);
+  let chipHeld = $state(false);
+  $effect(() => {
+    if (!chipHold) chipHeld = false;
+  });
+
   // Model / effort pickers: each sends `/model <v>` or `/effort <v>` through
   // the same outbox as a typed slash command. The model shows from the row
   // (the transcript's); effort is in no transcript, so the picker remembers
@@ -1115,7 +1127,11 @@
     void sendText(line);
   }
   const statusNote = $derived(
-    viewing !== null ? 'Viewing an earlier conversation — go back to current to send.' : busyNote,
+    viewing !== null
+      ? 'Viewing an earlier conversation — go back to current to send.'
+      : chipHeld && chipHold
+        ? 'The session is waiting on an answer, so the chip filled the box instead of sending. Answer it in the terminal, then press Send.'
+        : busyNote,
   );
   // The context meter lives in the header; at warn/crit the Compact chip is
   // suggested, since that is the one-click remedy.
@@ -1180,10 +1196,15 @@
     // the note under the box says why it did not go, and one press of Send
     // finishes the job once the turn ends. A disabled chip would take the
     // fill away too, and a silent no-op would say nothing at all.
-    if (sendNow && !busyBlocked) {
+    //
+    // The same degrade applies while the session waits on an answer (see
+    // `chipHold`), on every composer: an auto-send chip must not type into a
+    // permission prompt.
+    if (sendNow && !busyBlocked && !chipHold) {
       void sendText(p.text.trim() || p.text);
       return;
     }
+    chipHeld = sendNow && chipHold;
     draft = p.text;
     slashDismissedFor = draft;
     histIndex = null;
@@ -1237,6 +1258,7 @@
       return;
     }
     if (busyBlocked) return;
+    chipHeld = false;
     // A pasted tile has an empty `path` (see attachments.ts): nothing ever
     // authorised it for the Rust allow-list, so it is never uploaded. It
     // stays in the tray with its own honest error rather than being spent
@@ -2197,6 +2219,7 @@
                 : p.text}\n\n${p.auto_send
                 ? 'Click sends now; Shift+click fills the box.'
                 : 'Click fills the box; Shift+click sends now.'}`}
+              aria-label={p.auto_send ? `${p.label}, sends immediately` : undefined}
               disabled={viewing !== null}
               onclick={(e) => usePreset(p, presetSendsNow(p, e.shiftKey))}
               >{p.label}{#if p.auto_send}<span class="chip-send" aria-hidden="true">&nbsp;↵</span>{/if}</button

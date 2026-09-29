@@ -181,11 +181,13 @@ fn what_claude_code_submits_itself_is_not_evidence() {
         "fleet's own prompt behind a harness head is still fleet's"
     );
     assert!(!on_prompt(&f.s, sid, notification, true).unwrap());
+    // A slash command's echo with nothing typed after the name is not the
+    // person's either.
     assert!(!on_prompt(
         &f.s,
         sid,
         "<command-message>review</command-message>\n<command-name>/review</command-name>\n\
-         <command-args>ABC-8</command-args>",
+         <command-args></command-args>",
         true
     )
     .unwrap());
@@ -204,6 +206,25 @@ fn what_claude_code_submits_itself_is_not_evidence() {
     let ev = &ls[0].evidence[0];
     assert_eq!(ev["text"], "ABC-7");
     assert!(!ev["snippet"].as_str().unwrap().contains("reminder"));
+}
+
+/// `/fix ABC-8` reaches the hook as the command's tags; the arguments are
+/// what the person typed, so the key in them is evidence like any prompt's.
+#[test]
+fn a_slash_commands_arguments_are_evidence() {
+    let f = fx();
+    let sid = session(&f, "dev", "c1");
+    on_prompt(
+        &f.s,
+        sid,
+        "<command-message>fix</command-message>\n<command-name>/fix</command-name>\n\
+         <command-args>ABC-8</command-args>",
+        true,
+    )
+    .unwrap();
+    let ls = f.s.session_work_links(sid).unwrap();
+    assert_eq!(ls.len(), 1, "{ls:?}");
+    assert_eq!(ls[0].evidence[0]["text"], "ABC-8");
 }
 
 #[test]

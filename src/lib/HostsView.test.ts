@@ -55,6 +55,8 @@ beforeEach(() => {
         return fleetTokens();
       case 'discover_hosts':
         return [];
+      case 'health_check':
+        return { version: '0.3.1', db_ready: true, schema_version: 67 };
       case 'refresh_account_usage':
         return get(accountUsage)[args.account_uuid as string];
       case 'probe_host':

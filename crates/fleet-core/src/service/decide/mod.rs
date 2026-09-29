@@ -308,11 +308,13 @@ enum Caller {
     /// live mode on (for `status_map` that would start the daily live
     /// runs) — and the call counts as `shadow`: it never proposes. The
     /// owner, the flag, the org's consent, the key, the breaker and the
-    /// budget still apply, counted over every run.
+    /// budget still apply, the breaker counted over every run.
     Bench,
 }
 
 impl Caller {
+    /// The runs the BREAKER counts: a live feature's breaker never opens on
+    /// a benchmark's failures. The budget is not scoped: see [`clear`].
     fn scope(self) -> RunScope {
         match self {
             Caller::Live => RunScope::Live,
@@ -376,7 +378,11 @@ fn clear(
         Ok(b) if !b.open => {}
         _ => return Err(Fallback::BreakerOpen),
     }
-    match s.decision_usage_since(provider, day_start(now), caller.scope()) {
+    // ONE budget: `daily_token_budget` caps the day's spend, live and
+    // benchmark together, for every caller. Scoping it like the breaker let
+    // a benchmark and the live features each spend the whole budget, twice
+    // the setting a day.
+    match s.decision_usage_since(provider, day_start(now), RunScope::All) {
         Ok((used, _)) if used < cfg.daily_token_budget => {}
         _ => return Err(Fallback::Budget),
     }
@@ -483,8 +489,8 @@ pub struct DecideRequest {
     pub feature: Feature,
     /// What is decided about: `session`, `tracker`, `section`, … (a word).
     /// [`DECISION_BENCH_SUBJECT`] marks the offline benchmark's call: gated
-    /// as [`gate_bench_at`], never counted by the live breaker, budget or
-    /// stats.
+    /// as [`gate_bench_at`], never counted by the live breaker or stats (the
+    /// daily budget counts every run).
     pub subject_kind: String,
     /// Its id (a word).
     pub subject_id: String,
@@ -833,17 +839,201 @@ pub fn sweep_runs(store: &Mutex<Store>, now: i64) -> usize {
     done
 }
 
+// --- health (test map §7) -------------------------------------------------------------
+
+/// The window `fleet_health.decide` judges the live calls over.
+pub const HEALTH_WINDOW_SECS: i64 = 3_600;
+/// Fewer attempts in the window are not enough to call the envelope
+/// degraded by its failure rate (the breaker still can).
+pub const HEALTH_MIN_ATTEMPTS: u32 = 5;
+/// Above this share of failed attempts in the window the envelope is
+/// degraded (test map §7: "fallback rate > 20% for an hour").
+pub const HEALTH_FAILURE_RATE: f64 = 0.20;
+/// Fallbacks that are a configuration's refusal, not an attempt: nothing
+/// was meant to be sent.
+pub const HEALTH_NOT_ATTEMPTS: &[&str] = &[
+    "not_owner",
+    "flag_off",
+    "mode_off",
+    "org_off",
+    "no_key",
+    "budget",
+];
+/// Fallbacks that are the service failing (or the breaker refusing because
+/// it did): what the failure rate counts.
+pub const HEALTH_FAILURES: &[&str] = &["timeout", "http_error", "rate_limited", "breaker_open"];
+
+/// `fleet_health.decide`: whether the live decision calls are working —
+/// the test map's "degraded" (§7). Counts only, over the live adapters'
+/// runs of the last [`HEALTH_WINDOW_SECS`]; a benchmark's runs never count.
+/// Every field defaults (an older hub omits the whole block).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DecideHealth {
+    /// `decide.jev.enabled`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Every feature whose mode is not `off`: feature → `shadow | assist`.
+    #[serde(default)]
+    pub modes: BTreeMap<String, String>,
+    #[serde(default)]
+    pub window_secs: i64,
+    /// Live runs in the window that meant to ask (a configuration's refusal
+    /// — [`HEALTH_NOT_ATTEMPTS`] — is not one).
+    #[serde(default)]
+    pub attempts: u32,
+    /// Of them, the service failing ([`HEALTH_FAILURES`]).
+    #[serde(default)]
+    pub failures: u32,
+    #[serde(default)]
+    pub failure_rate: Option<f64>,
+    #[serde(default)]
+    pub breaker_open: bool,
+    /// Today's input-token budget is spent: every call falls back until the
+    /// UTC day ends (planned, so not `degraded`).
+    #[serde(default)]
+    pub budget_spent: bool,
+    /// The envelope is on and its calls are failing: the breaker is open,
+    /// or more than [`HEALTH_FAILURE_RATE`] of at least
+    /// [`HEALTH_MIN_ATTEMPTS`] attempts failed. Answers fall back to what
+    /// fleet does today by themselves; this is for a person to look.
+    #[serde(default)]
+    pub degraded: bool,
+    /// `breaker_open` or `failure_rate` when degraded.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// PURE: the judgement over the live `stats` of the window (rows of
+/// [`Store::decision_stats`]; benchmark rows are skipped).
+pub fn health_of(
+    enabled: bool,
+    modes: BTreeMap<String, String>,
+    stats: &[DecisionStatRow],
+    breaker_open: bool,
+    budget_spent: bool,
+) -> DecideHealth {
+    let (mut attempts, mut failures) = (0u32, 0u32);
+    for r in stats.iter().filter(|r| !r.bench) {
+        let f = r.fallback.as_deref();
+        if f.is_some_and(|f| HEALTH_NOT_ATTEMPTS.contains(&f)) {
+            continue;
+        }
+        let n = u32::try_from(r.runs).unwrap_or(u32::MAX);
+        attempts = attempts.saturating_add(n);
+        if f.is_some_and(|f| HEALTH_FAILURES.contains(&f)) {
+            failures = failures.saturating_add(n);
+        }
+    }
+    let rate = (attempts > 0)
+        .then(|| (f64::from(failures) / f64::from(attempts) * 1000.0).round() / 1000.0);
+    let on = enabled && !modes.is_empty();
+    let reason = if !on {
+        None
+    } else if breaker_open {
+        Some("breaker_open")
+    } else if attempts >= HEALTH_MIN_ATTEMPTS && rate.is_some_and(|r| r > HEALTH_FAILURE_RATE) {
+        Some("failure_rate")
+    } else {
+        None
+    };
+    DecideHealth {
+        enabled,
+        modes,
+        window_secs: HEALTH_WINDOW_SECS,
+        attempts,
+        failures,
+        failure_rate: rate,
+        breaker_open,
+        budget_spent,
+        degraded: reason.is_some(),
+        reason: reason.map(str::to_string),
+    }
+}
+
+/// `fleet_health.decide` from the store at `now`: `None` in a process that
+/// does not own the fleet (a window onto a hub never calls out), or when
+/// the envelope is off and no feature is on (nothing to report). Read
+/// errors report nothing rather than a healthy envelope.
+pub fn health(s: &Store, now: i64) -> Option<DecideHealth> {
+    if !owns_the_fleet(s) {
+        return None;
+    }
+    let enabled = settings::get_bool(s, settings::DECIDE_JEV_ENABLED);
+    let modes: BTreeMap<String, String> = Feature::ALL
+        .into_iter()
+        .map(|f| (f, FeatureMode::of(s, f)))
+        .filter(|(_, m)| *m != FeatureMode::Off)
+        .map(|(f, m)| (f.as_str().to_string(), m.as_str().to_string()))
+        .collect();
+    if !enabled && modes.is_empty() {
+        return None;
+    }
+    let cfg = CallSettings::read(s);
+    let stats = s.decision_stats(now - HEALTH_WINDOW_SECS).ok()?;
+    let breaker = breaker_state(
+        s,
+        PROVIDER_JEV,
+        cfg.breaker_failures,
+        cfg.breaker_open_secs,
+        now,
+        RunScope::Live,
+    )
+    .ok()?;
+    let (used, _) = s
+        .decision_usage_since(PROVIDER_JEV, day_start(now), RunScope::Live)
+        .ok()?;
+    let budget_spent = cfg.daily_token_budget > 0 && used >= cfg.daily_token_budget;
+    Some(health_of(
+        enabled,
+        modes,
+        &stats,
+        breaker.open,
+        budget_spent,
+    ))
+}
+
+impl DecideHealth {
+    /// The CLI's line.
+    pub fn line(&self) -> String {
+        format!(
+            "health (last {} min, live): {} attempt(s), {} failed{}{}{} → {}",
+            self.window_secs / 60,
+            self.attempts,
+            self.failures,
+            self.failure_rate
+                .map(|r| format!(" ({:.0}%)", r * 100.0))
+                .unwrap_or_default(),
+            if self.breaker_open {
+                ", breaker open"
+            } else {
+                ""
+            },
+            if self.budget_spent {
+                ", today's budget spent"
+            } else {
+                ""
+            },
+            match self.reason.as_deref() {
+                Some(r) => format!("DEGRADED ({r}); answers fall back to today's rules"),
+                None if self.enabled && !self.modes.is_empty() => "ok".to_string(),
+                None => "no live feature on".to_string(),
+            }
+        )
+    }
+}
+
 /// Today's spend.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodayUsage {
     /// The UTC day's start.
     pub since: i64,
-    /// The live adapters' spend: what the budget counts.
+    /// The live adapters' spend; the budget counts it together with the
+    /// benchmark's below.
     pub input_tokens: i64,
     pub cost_microusd: i64,
     pub budget: i64,
-    /// The offline benchmark's spend today, apart (a benchmark call is
-    /// gated on the live and its own spend together).
+    /// The offline benchmark's spend today, apart (every call, live or
+    /// benchmark, is gated on the live and the benchmark spend together).
     #[serde(default)]
     pub bench_input_tokens: i64,
     #[serde(default)]
@@ -858,7 +1048,7 @@ pub struct OrgConsent {
 }
 
 /// Everything `fleet-hub decide status` shows — never the key.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DecideStatus {
     pub enabled: bool,
     pub owns_the_fleet: bool,
@@ -875,6 +1065,9 @@ pub struct DecideStatus {
     /// The window of `stats`, in days.
     pub window_days: i64,
     pub stats: Vec<DecisionStatRow>,
+    /// What `fleet_health.decide` says (`None` when nothing is on).
+    #[serde(default)]
+    pub health: Option<DecideHealth>,
 }
 
 /// Read-only: the flag, modes, consent, key (configured or not), the live
@@ -931,6 +1124,7 @@ pub fn status(s: &Store, now: i64, days: i64) -> Result<DecideStatus, IpcError> 
         runs_kept: s.decision_run_count()?,
         window_days: days,
         stats: s.decision_stats(now - days.max(0) * 86_400)?,
+        health: health(s, now),
     })
 }
 
@@ -1000,12 +1194,12 @@ impl DecideStatus {
             ),
             format!(
                 "today (UTC): {} of {} input tokens, {}{}",
-                self.today.input_tokens,
+                self.today.input_tokens + self.today.bench_input_tokens,
                 self.today.budget,
-                fmt_usd(self.today.cost_microusd),
+                fmt_usd(self.today.cost_microusd + self.today.bench_cost_microusd),
                 if self.today.bench_input_tokens > 0 || self.today.bench_cost_microusd > 0 {
                     format!(
-                        "   benchmark: {} input tokens, {}",
+                        "   of which benchmark: {} input tokens, {}",
                         self.today.bench_input_tokens,
                         fmt_usd(self.today.bench_cost_microusd)
                     )
@@ -1023,6 +1217,9 @@ impl DecideStatus {
                 }
             ),
         ];
+        if let Some(h) = &self.health {
+            out.push(h.line());
+        }
         if self.stats.is_empty() {
             out.push(format!("no runs in the last {} days", self.window_days));
         } else {

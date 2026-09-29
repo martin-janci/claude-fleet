@@ -13,6 +13,7 @@
 //
 // Pure helpers plus one store; `TrackerAttention.svelte` polls and renders.
 import { setContextRedPct } from './attention';
+import { decideHealth } from './decide_health';
 import { writable } from 'svelte/store';
 import { healthCheck } from './ipc';
 
@@ -68,6 +69,7 @@ export async function refreshTrackersHealth(): Promise<void> {
   const r = await healthCheck();
   if (r.ok) {
     trackersHealth.set(r.value.trackers ?? null);
+    decideHealth.set(r.value.decide ?? null);
     setContextRedPct(r.value.context_red_pct);
   }
 }
@@ -130,8 +132,9 @@ export function plainUntrusted(e: string | null | undefined): string {
   return e;
 }
 
-/** The Settings section an Attention item links to. */
-export const RECONNECT_SECTION = 'work';
+/** The Settings page an Attention item links to (the generated Trackers
+ *  page, declarative pages P4b). */
+export const RECONNECT_SECTION = 'settings.trackers';
 
 export interface TrackerAttentionItem {
   /** `tracker-<id>`: one item per tracker, whatever the roll-up repeats. */

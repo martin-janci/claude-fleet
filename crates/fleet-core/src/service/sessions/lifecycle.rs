@@ -311,11 +311,12 @@ pub(crate) const WORKTREE_BASE_SNIPPET: &str = "if [ -d .worktrees ]; then base=
      else base=.worktrees\n\
      fi\n";
 
-/// The name rule for a NEW worktree (and so its branch): a valid git ref,
-/// never `main` / `master`. `new_session { new_worktree }` and a fork into
-/// a new worktree both apply it.
+/// The name rule for a NEW worktree (and so its branch): a name git accepts
+/// for a branch ([`crate::validate::branch_name`]), never `main` /
+/// `master`. `new_session { new_worktree }` and a fork into a new worktree
+/// both apply it.
 pub(crate) fn validate_new_worktree_name(name: &str) -> Result<(), IpcError> {
-    crate::validate::git_ref(name)?;
+    crate::validate::branch_name(name)?;
     if name == "main" || name == "master" {
         return Err(IpcError::new(
             codes::E_INVALID,
@@ -481,8 +482,8 @@ pub(crate) fn claude_id_and_pane_cmd(args: &NewSessionArgs) -> (Option<String>, 
             crate::tmux::shell_pane_command(args.start_command.as_deref()),
         );
     }
-    // `model` / `effort` ride on the first launch only: a later recreate or
-    // restart runs `recreate_pane_command`, i.e. the host's defaults.
+    // `model` / `effort` are also stored on the row (`store_launch`), so a
+    // later recreate / restart / repair / move launches with them again.
     let launch = crate::tmux::ClaudeLaunch {
         model: args.model.clone(),
         effort: args.effort.clone(),
@@ -829,6 +830,17 @@ pub(super) async fn new_session_inner(
     let worktree_id =
         link_new_session_worktree(&s, row.id, &args, &path.to_string_lossy(), fixed.is_some())?;
     let derived_friendly = derive_friendly_name(&s, &args, worktree_id.or(row.worktree_id))?;
+    // Soft-fail: the pane already runs with them; a failed write only means
+    // a later recreate / restart uses the host's defaults.
+    if !is_shell {
+        let launch = crate::tmux::ClaudeLaunch {
+            model: args.model.clone(),
+            effort: args.effort.clone(),
+        };
+        if let Err(e) = store_launch(&s, row.id, &launch) {
+            tracing::warn!(session = %args.name, error = %e, "[new_session] storing the launch options failed");
+        }
+    }
     finalize_new_session(
         &s,
         row.id,
@@ -1338,7 +1350,7 @@ pub async fn restart_session(
     // restarted shell session comes back as a shell, not a Claude pane. Read
     // the controller under the same lock and refuse to restart ourselves
     // unless forced.
-    let (kind, claude_id, session_id) = {
+    let (kind, claude_id, session_id, launch) = {
         let s = lock(store)?;
         guard_not_controller(
             s.get_controller()?.as_ref(),
@@ -1347,11 +1359,14 @@ pub async fn restart_session(
             args.force,
         )?;
         match s.get_session(&args.name, &args.host_alias)? {
-            Some(r) => (r.kind, r.claude_session_id, Some(r.id)),
-            None => ("work".to_string(), None, None),
+            Some(r) => {
+                let launch = stored_launch(&s, r.id);
+                (r.kind, r.claude_session_id, Some(r.id), launch)
+            }
+            None => ("work".to_string(), None, None, Default::default()),
         }
     };
-    let pane_cmd: String = recreate_pane_command(&kind, claude_id.as_deref(), &args.name);
+    let pane_cmd: String = recreate_pane_command(&kind, claude_id.as_deref(), &args.name, &launch);
     let tmux = exec_for(&args.host_alias, ssh);
     // Automatic self-repair (create-only) before the pane is respawned, then
     // respawn INTO the verified directory (a pane whose cwd was deleted keeps
@@ -1421,16 +1436,41 @@ pub(super) async fn wait_for_repl_ready(tmux: &dyn TmuxExec, name: &str) {
 /// shell; otherwise resume the session's own Claude id (or `--continue` for a
 /// legacy session with no stored id). A stored id is validated before use so a
 /// tampered DB value can't inject shell — an invalid id degrades to `None`.
+/// `launch` is the session's stored model / effort ([`stored_launch`]).
 pub(crate) fn recreate_pane_command(
     kind: &str,
     claude_session_id: Option<&str>,
     tmux_name: &str,
+    launch: &crate::tmux::ClaudeLaunch,
 ) -> String {
     if kind == "shell" {
         return crate::tmux::shell_pane_command(None);
     }
     let id = claude_session_id.filter(|id| crate::validate::claude_session_id(id).is_ok());
-    crate::tmux::pane_command_for(id, tmux_name)
+    crate::tmux::pane_command_with(id, tmux_name, launch)
+}
+
+/// Store `launch` as the session's own (both halves, `None` included).
+pub(crate) fn store_launch(
+    s: &Store,
+    session_id: i64,
+    launch: &crate::tmux::ClaudeLaunch,
+) -> Result<(), rusqlite::Error> {
+    s.set_session_launch_model(session_id, launch.model.as_deref())?;
+    s.set_session_effort(session_id, launch.effort.as_deref())
+}
+
+/// The model / effort a session was started or last switched to, checked
+/// again ([`crate::tmux::ClaudeLaunch::checked`]). A failed read is the
+/// host's default: a rebuilt pane must not fail over a cosmetic column.
+pub(crate) fn stored_launch(s: &Store, session_id: i64) -> crate::tmux::ClaudeLaunch {
+    match s.session_launch(session_id) {
+        Ok((model, effort)) => crate::tmux::ClaudeLaunch::checked(model, effort),
+        Err(e) => {
+            tracing::warn!(session_id, error = %e, "reading the session's launch options failed");
+            crate::tmux::ClaudeLaunch::default()
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -1489,6 +1529,7 @@ pub async fn recreate_session(
             &sess.kind,
             sess.claude_session_id.as_deref(),
             &sess.tmux_name,
+            &stored_launch(&s, sess.id),
         );
         (sess, cwd_src, pane_cmd)
     };

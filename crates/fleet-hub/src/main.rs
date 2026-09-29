@@ -6,14 +6,19 @@ mod census;
 mod config;
 mod decide;
 mod demo;
+mod host;
 mod org;
 mod out;
 mod pair;
 mod peer;
+mod provision;
+mod ready;
 mod reports;
 mod serve;
+mod settings;
 mod tls;
 mod tracker;
+mod update;
 mod work;
 
 use clap::{Parser, Subcommand};
@@ -83,7 +88,7 @@ enum Cmd {
         /// Name for the client, as it will appear in `client list` (1-64 characters).
         #[arg(long)]
         name: String,
-        /// What the client may do: full (drive sessions), readonly (observe), or peer (another hub; see fleet-hub peer add). [default: full]
+        /// What the client may do: full (drive sessions), readonly (observe), peer (another hub; see fleet-hub peer add), or updater (fleet-updater; /update only). [default: full]
         #[arg(long)]
         mode: Option<String>,
         /// Seconds the pairing code stays valid (30-3600). [default: 600]
@@ -160,6 +165,24 @@ enum Cmd {
         #[command(flatten)]
         opts: HubOptions,
     },
+    /// Review settings proposals an agent made over the control API, and
+    /// read a setting's history (declarative pages P5). Reads and writes
+    /// the database directly, as the person at this console.
+    Settings {
+        #[command(subcommand)]
+        cmd: settings::SettingsCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// This hub's own updates. `check` reads the published release channel
+    /// and says what this build should run, verified against the release
+    /// key; it needs no running hub and installs nothing. See docs/updates.md.
+    Update {
+        #[command(subcommand)]
+        cmd: update::UpdateCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
     /// Name organisations, their placement rules, and which org each host
     /// and tracker belongs to (work graph M5). Needs a running hub.
     ///
@@ -168,6 +191,13 @@ enum Cmd {
     Org {
         #[command(subcommand)]
         cmd: org::OrgCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Host administration (merge a renamed alias). Needs a running hub.
+    Host {
+        #[command(subcommand)]
+        cmd: host::HostCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -195,6 +225,18 @@ enum Cmd {
         #[command(flatten)]
         opts: HubOptions,
     },
+    /// Provision every active host (or one) from this hub: skills, the
+    /// managed CLAUDE.md block, hooks and the MCP entry. Needs a running hub.
+    Provision {
+        /// One host; every active host when omitted.
+        #[arg(long)]
+        host: Option<String>,
+        /// Skills, CLAUDE.md block and hooks only (no token, no ~/.claude.json).
+        #[arg(long)]
+        content_only: bool,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
     /// Show the error reports the hub has collected from its participants, newest first. Needs a running hub.
     Reports {
         /// Rows to show (1-1000). [default: 100]
@@ -214,6 +256,10 @@ enum Cmd {
     },
     /// Print this hub's SSH public key (generated on first use; derived when only the private key exists).
     SshKey,
+    /// Print this build's protocol windows and store schema as JSON — the
+    /// release manifest's `compatibility` (update design U3). For CI.
+    #[command(hide = true)]
+    Compat,
     /// Exit 0 when a hub answers HTTP on 127.0.0.1 (for Docker HEALTHCHECK). Does not open the database.
     Healthcheck {
         /// Port to probe [env: FLEET_HUB_PORT] [default: 4180]
@@ -222,6 +268,30 @@ enum Cmd {
         /// Whether the hub terminates TLS, so the probe speaks it too: off or cert [env: FLEET_HUB_TLS] [default: off]
         #[arg(long)]
         tls: Option<String>,
+        /// Also require readiness (store migrated, listener bound, first reconcile done) from the
+        /// running serve's readiness file, and check its build identity. For fleet-updater.
+        #[arg(long)]
+        ready: bool,
+        /// With --ready: print the verdict and the build identity as JSON (always, even when not ready).
+        #[arg(long, requires = "ready")]
+        json: bool,
+        /// Where serve keeps its readiness file [env: FLEET_HUB_DATA_DIR]
+        #[arg(long)]
+        data_dir: Option<std::path::PathBuf>,
+    },
+    /// Take a consistent online copy of state.db (read-only; never migrates). Safe while the hub serves.
+    Backup {
+        /// Write the copy here (refuses to overwrite) [default: <data dir>/backups/<prefix>-<UTC stamp>.db]
+        #[arg(long)]
+        to: Option<std::path::PathBuf>,
+        /// File name prefix for the default path, [A-Za-z0-9._-]+ (fleet-updater uses pre-<version>).
+        #[arg(long, default_value = "manual")]
+        prefix: String,
+        /// Print {path, schema, bytes} as JSON.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        opts: HubOptions,
     },
 }
 
@@ -284,6 +354,24 @@ enum PeerCmd {
     Remove { target: String },
 }
 
+/// The build's windows, in the shape `fleet_update::publish::HubCompat`
+/// reads. A test holds it to the constants.
+fn compat_json() -> serde_json::Value {
+    let peer = fleet_core::service::peer::wire::PROTO;
+    serde_json::json!({
+        "contract": { "hub_serves": fleet_core::wire_contract::CONTRACT_REVISION },
+        "agent_proto": {
+            "hub_accepts": [fleet_proto::MIN_SUPPORTED_PROTO, fleet_proto::PROTO_VERSION],
+            "agent_speaks": fleet_proto::PROTO_VERSION
+        },
+        // The listener refuses any other revision (`peer/listen.rs`).
+        "peer_proto": { "speaks": peer, "accepts": [peer, peer] },
+        // Any older database is migrated forward; a newer one is refused.
+        "store": { "schema_to": fleet_core::store::known_schema_version(), "opens_down_to": 1 },
+        "update_proto": fleet_update::wire::UPDATE_PROTO
+    })
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     // Mandatory and first: fleet-core keeps no default app version, so
@@ -344,10 +432,18 @@ async fn main() -> ExitCode {
         },
         Cmd::Tracker { cmd, opts } => tracker::run(cmd, &opts, &env).await,
         Cmd::Org { cmd, opts } => org::run(cmd, &opts, &env).await,
+        Cmd::Host { cmd, opts } => host::run(cmd, &opts, &env).await,
+        Cmd::Provision {
+            host,
+            content_only,
+            opts,
+        } => provision::run(host, content_only, &opts, &env).await,
         Cmd::Work { cmd, opts } => work::run(cmd, &opts, &env).await,
         Cmd::Catalog { cmd, opts } => catalog::run(cmd, &opts, &env),
         Cmd::Census { cmd, opts } => census::run(cmd, &opts, &env),
         Cmd::Decide { cmd, opts } => decide::run(cmd, &opts, &env).await,
+        Cmd::Settings { cmd, opts } => settings::run(cmd, &opts, &env),
+        Cmd::Update { cmd, opts } => update::run(cmd, &opts, &env).await,
         Cmd::Reports {
             limit,
             since,
@@ -362,7 +458,29 @@ async fn main() -> ExitCode {
             opts,
         } => demo_seed(&opts, &env, hosts, clear, force),
         Cmd::SshKey => serve::ssh_key(),
-        Cmd::Healthcheck { port, tls } => serve::healthcheck(port, tls, &env).await,
+        Cmd::Compat => {
+            out::line(&compat_json().to_string());
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Healthcheck {
+            port,
+            tls,
+            ready,
+            json,
+            data_dir,
+        } => {
+            if ready {
+                serve::healthcheck_ready(port, tls, data_dir, json, &env).await
+            } else {
+                serve::healthcheck(port, tls, &env).await
+            }
+        }
+        Cmd::Backup {
+            to,
+            prefix,
+            json,
+            opts,
+        } => serve::backup(&opts, &env, to, &prefix, json),
     };
     match result {
         Ok(code) => code,
@@ -428,6 +546,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compat_is_what_the_release_manifest_reads() {
+        let c: fleet_update::publish::HubCompat = serde_json::from_value(compat_json()).unwrap();
+        assert_eq!(
+            c.contract.hub_serves,
+            fleet_core::wire_contract::CONTRACT_REVISION
+        );
+        assert_eq!(c.agent_proto.agent_speaks, fleet_proto::PROTO_VERSION);
+        assert_eq!(
+            c.agent_proto.hub_accepts.min,
+            fleet_proto::MIN_SUPPORTED_PROTO
+        );
+        assert_eq!(c.store.schema_to, fleet_core::store::known_schema_version());
+        assert_eq!(c.update_proto, fleet_update::wire::UPDATE_PROTO);
+    }
+
+    #[test]
     fn cli_parses_every_subcommand() {
         Cli::try_parse_from(["fleet-hub", "init", "--public-url", "https://x.example.com"])
             .unwrap();
@@ -463,6 +597,33 @@ mod tests {
         Cli::try_parse_from(["fleet-hub", "token", "show"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "token", "regenerate"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "agent-token", "laptop"]).unwrap();
+        // Host identity & health, task 5: the alias merge.
+        let Cmd::Host { cmd, .. } =
+            Cli::try_parse_from(["fleet-hub", "host", "merge", "local", "mac"])
+                .unwrap()
+                .cmd
+        else {
+            panic!("host merge parses")
+        };
+        assert!(
+            matches!(cmd, host::HostCmd::Merge { ref from, ref into } if from == "local" && into == "mac")
+        );
+        // Task 6: the content-only re-provision of one host.
+        let Cmd::Provision {
+            host, content_only, ..
+        } = Cli::try_parse_from([
+            "fleet-hub",
+            "provision",
+            "--host",
+            "mefistos",
+            "--content-only",
+        ])
+        .unwrap()
+        .cmd
+        else {
+            panic!("provision parses")
+        };
+        assert_eq!((host.as_deref(), content_only), (Some("mefistos"), true));
         Cli::try_parse_from([
             "fleet-hub",
             "agent-token",
@@ -717,7 +878,7 @@ mod tests {
         Cli::try_parse_from(["fleet-hub", "reports"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "ssh-key"]).unwrap();
         Cli::try_parse_from(["fleet-hub", "healthcheck"]).unwrap();
-        let Cmd::Healthcheck { port, tls } = Cli::try_parse_from([
+        let Cmd::Healthcheck { port, tls, .. } = Cli::try_parse_from([
             "fleet-hub",
             "healthcheck",
             "--port",
@@ -732,6 +893,51 @@ mod tests {
         };
         assert_eq!(port, Some(4190));
         assert_eq!(tls.as_deref(), Some("cert"));
+        let Cmd::Healthcheck {
+            ready,
+            json,
+            data_dir,
+            ..
+        } = Cli::try_parse_from([
+            "fleet-hub",
+            "healthcheck",
+            "--ready",
+            "--json",
+            "--data-dir",
+            "/var/lib/fleet-hub",
+        ])
+        .unwrap()
+        .cmd
+        else {
+            panic!("healthcheck --ready did not parse");
+        };
+        assert!(ready && json);
+        assert_eq!(data_dir, Some("/var/lib/fleet-hub".into()));
+        assert!(
+            Cli::try_parse_from(["fleet-hub", "healthcheck", "--json"]).is_err(),
+            "--json needs --ready"
+        );
+        let Cmd::Backup {
+            to, prefix, json, ..
+        } = Cli::try_parse_from(["fleet-hub", "backup", "--prefix", "pre-0.3.4", "--json"])
+            .unwrap()
+            .cmd
+        else {
+            panic!("backup did not parse");
+        };
+        assert_eq!((to, prefix.as_str(), json), (None, "pre-0.3.4", true));
         assert!(Cli::try_parse_from(["fleet-hub", "bogus"]).is_err());
+        Cli::try_parse_from(["fleet-hub", "compat"]).unwrap();
+        let Cmd::Update { cmd, .. } =
+            Cli::try_parse_from(["fleet-hub", "update", "check", "--track", "beta", "--json"])
+                .unwrap()
+                .cmd
+        else {
+            panic!("update check");
+        };
+        assert!(matches!(
+            cmd,
+            update::UpdateCmd::Check { track: Some(ref t), json: true } if t == "beta"
+        ));
     }
 }

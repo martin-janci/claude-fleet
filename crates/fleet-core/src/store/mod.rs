@@ -8,6 +8,7 @@ use crate::events::{EventBus, RowChange};
 use rusqlite::{Connection, OptionalExtension, Result, TransactionBehavior};
 use std::sync::Arc;
 
+pub mod backup;
 mod bench_work_link;
 mod catalog;
 mod clients;
@@ -29,6 +30,7 @@ mod rows;
 pub(crate) mod scale_fixture;
 mod schema;
 mod sessions;
+mod setting_review;
 mod tasks;
 #[cfg(test)]
 mod test_support;
@@ -38,6 +40,7 @@ mod timeline;
 mod tracker_items;
 mod tracker_writes;
 mod trackers;
+mod update;
 mod usage;
 mod work;
 mod work_describe;
@@ -60,8 +63,8 @@ pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use decisions::{
     is_decision_word, DecisionKeyStatus, DecisionRunFilter, DecisionRunRow, DecisionStatRow,
     NewDecisionRun, RunScope, DECISION_BENCH_SUBJECT, DECISION_CALL_FAILURES, DECISION_FALLBACKS,
-    DECISION_FOLLOWUPS, DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_PERSON_FOLLOWUPS,
-    DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
+    DECISION_FOLLOWUPS, DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_NO_BASELINE,
+    DECISION_PERSON_FOLLOWUPS, DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
 };
 pub use layers::HostLayerRow;
 pub use nl_census::{
@@ -82,9 +85,14 @@ pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};
 pub use rows::*;
+pub use schema::known_schema_version;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
+pub use setting_review::{
+    NewSettingProposal, SettingAuditRow, SettingProposalRow, DECIDED_PROPOSAL_KEEP_SECS,
+    SETTING_AUDIT_KEEP,
+};
 pub(crate) use tracker_items::ItemUpsertOutcome;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
 pub use tracker_writes::{
@@ -96,6 +104,9 @@ pub use trackers::{
     validate_tracker_settings, validate_tracker_transport, Secret, TrackerConfig,
     TrackerCredential, TrackerRow, TrackerSettings, TrackerViewRow, WriteBack, TRACKER_AUTH_KINDS,
     TRACKER_PROVIDERS, TRACKER_STATES,
+};
+pub use update::{
+    UpdateDesiredRow, UpdateDocRow, UpdateEventRow, UpdateObservedRow, UPDATE_EVENT_RETENTION_SECS,
 };
 pub use work::{
     canonical_key, github_ref, normalize_work_ref, primary_conflict, split_github_repo, Decider,
@@ -531,6 +542,14 @@ impl Store {
             rusqlite::params![key, value],
         )?;
         Ok(())
+    }
+
+    /// Emit `settings:changed` for `key` (declarative pages P3). Called by
+    /// `service::settings::set` after a validated write, not by
+    /// [`Self::set_setting`]: most rows in this table are internal state
+    /// nobody renders.
+    pub fn emit_settings_changed(&self, key: &str) {
+        self.bus.emit(&RowChange::SettingsChanged(key.to_string()));
     }
 
     /// Forget a key, so the next `get_setting` answers `None` and its reader

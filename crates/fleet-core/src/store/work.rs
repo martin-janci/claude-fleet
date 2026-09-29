@@ -519,6 +519,13 @@ pub(super) fn map_link(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkLinkRow> {
     })
 }
 
+/// [`Store::work_item_by_key`]'s preference among items sharing a key: a
+/// removed tracker's rows last, then tracker items before local ones, then
+/// the oldest.
+const ITEMS_BY_KEY_ORDER: &str = "ORDER BY (tracker_id IS NOT NULL \
+                                    AND tracker_id NOT IN (SELECT id FROM trackers)) ASC, \
+                                  (source = 'local') ASC, id ASC";
+
 pub(super) const ITEM_COLUMNS: &str =
     "id, source, key, title, url, status_category, created_at, updated_at, \
      tracker_id, external_id, aliases, kind, hierarchy_level, status_name, resolution, parent_id, \
@@ -1614,16 +1621,30 @@ impl Store {
         self.conn
             .query_row(
                 &format!(
-                    "SELECT {ITEM_COLUMNS} FROM work_items WHERE key = ?1 \
-                     ORDER BY (tracker_id IS NOT NULL \
-                               AND tracker_id NOT IN (SELECT id FROM trackers)) ASC, \
-                              (source = 'local') ASC, id ASC LIMIT 1"
+                    "SELECT {ITEM_COLUMNS} FROM work_items WHERE key = ?1 {ITEMS_BY_KEY_ORDER} \
+                     LIMIT 1"
                 ),
                 rusqlite::params![key],
                 map_item,
             )
             .optional()
             .map_err(IpcError::from)
+    }
+
+    /// Every work item that carries `key`, in [`Store::work_item_by_key`]'s
+    /// order (its first row is that function's answer). Two trackers can
+    /// hold the same key — two Jira sites, one per org, both with `PAY` — so
+    /// a scoped reader that must answer with the item IT may see walks this
+    /// list rather than taking the first row and refusing the caller over
+    /// another org's ticket.
+    pub fn work_items_by_key(&self, key: &str) -> Result<Vec<WorkItemRow>, IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ITEM_COLUMNS} FROM work_items WHERE key = ?1 {ITEMS_BY_KEY_ORDER}"
+        ))?;
+        let rows = stmt
+            .query_map(rusqlite::params![key], map_item)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Live confirmed links to `key` with the session each is on, newest

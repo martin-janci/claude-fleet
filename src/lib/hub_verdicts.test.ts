@@ -69,6 +69,7 @@ describe('ROUTED_ACTIONS against the generated routed/routed_unless commands', (
 //                  (HostDetail.svelte's per-host token controls)
 const REASONS_KEYS_THAT_ARE_NOT_COMMANDS: ReadonlySet<string> = new Set([
   'repo_write',
+  'fleet_settings',
   'host_tokens',
 ]);
 
@@ -108,10 +109,33 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   // `catalog_config` check. Its commands route to the hub's `catalog_admin`
   // now; the two that still refuse — `catalog_import_host` and
   // `catalog_spawn_author_session` — have REASONS entries of their own.)
+  // No frontend UI calls these at all.
+  noUiControl: [
+    // Host identity & health, task 5: the alias merge is an operator's
+    // `fleet-hub host merge` / master-token tool; no Svelte control calls it.
+    'merge_host',
+  ],
   // Gated by SettingsDialog.svelte's own `get_fleet_settings` gate: `{#if
   // !ownsFleet}` swaps the whole Projects section for the remote note, and
-  // the Limits section (with WorkRetention.svelte, work graph M12.3) too.
-  gatedBySettingsDialog: ['set_fleet_setting', 'work_retention_status', 'work_retention_sweep'],
+  // the generated pages too. Work retention (work graph M12.3) is a page's
+  // data source and its Sweep now a page action since declarative pages P5:
+  // a read-only page shows neither.
+  // `describe_fleet_settings` (declarative pages P1) and
+  // `fetch_page_source` (P3) feed the generated pages, which show the same
+  // hub reason instead (`pages-remote`) when the app does not own the fleet.
+  // Declarative pages P4b: a resource's create flow. ResourcePage renders a
+  // paired desktop's resource read-only, with no Add, so no flow starts.
+  gatedByReadonlyResourcePage: ['flow_start', 'flow_submit', 'flow_back', 'flow_cancel'],
+  gatedBySettingsDialog: [
+    // (The settings themselves, their proposals and history route to the
+    // hub since declarative pages P6.) A page's data sources read this
+    // app's store: a paired desktop's pages show no data item.
+    'fetch_page_source',
+    // No view calls it since P5 (the page reads `work.retention` instead);
+    // it stays a command for work_admin's status on a standalone desktop.
+    'work_retention_status',
+    'work_retention_sweep',
+  ],
   // (`pty_open` and `upload_to_session` used to be listed here, gated by
   // TerminalView's `ownsTheFleet` check. They are `same_in_both` now: both
   // are this machine's own `ssh`, addressed by the alias passed in, reading

@@ -972,8 +972,8 @@
         class="hub-badge"
         class:err={($trackersHealth?.failing ?? 0) > 0}
         data-testid="footer-trackers"
-        title="Tracker sync health. Settings → Work to reconnect."
-        onclick={() => openSettingsAt('work')}>{trackersLine}</button
+        title="Tracker sync health. Settings → Trackers to reconnect."
+        onclick={() => openSettingsAt('settings.trackers')}>{trackersLine}</button
       >
     {/if}
   {:else if $hubStatus.unavailable}

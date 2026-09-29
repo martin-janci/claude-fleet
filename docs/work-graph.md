@@ -113,13 +113,21 @@ filters (hosts, recency, org scope) do not apply here and step aside.
 Archived tasks (done, or every session archived, with nothing running)
 are hidden by default; the end of the tree says how many, with *Show
 archived*, and the panel has an *Archived tasks* switch. *Status: Done*
-shows done tasks regardless. ⌘⇧O cycles the Work view's organisation.
+shows done tasks regardless, and *Sessions: Past only* shows past work
+(which is archived work), as the Sessions list's *Past only* does. A task
+is archived only when it is archived for everyone: a session on another
+host or in another org that you cannot see still keeps it in the tree.
+⌘⇧O cycles the Work view's organisation.
 
 **A task's detail** (select it) shows the tracker's data, where its org and
 its group come from, the repositories it ran in, every session with its
 state and *why* it is linked (the branch, the ticket URL in a prompt, a
 person), the last known outcome of its newest past session, and **Open**,
-**Continue** (resume the last conversation) and **Start new**.
+**Continue** (resume the last conversation) and **Start new**. The ticket's
+description shows its first 600 characters; when the ticket holds more, a
+line under it says so — *Shown 600 of 6812 characters — open the ticket* —
+and *open the ticket* opens it in the tracker. A description that fits has
+no such line.
 
 **Where things come from.** Every value that fleet did not get from a person
 says so:
@@ -150,7 +158,7 @@ says so:
   hosts and org-bound devices that would stop or start seeing it, and how
   many journal entries and summaries go with it. It is applied only while
   that preview still holds. A ticket's org is its tracker's; move the
-  tracker instead (Settings → Work, or `fleet-hub org assign-tracker`).
+  tracker instead (Settings → Organisations, or `fleet-hub org assign-tracker`).
 
 **A session's tasks.** A session's details list all its tasks — primary,
 secondary, suggested and past — each with *why*. **Make primary** moves the
@@ -190,18 +198,23 @@ including tasks with no session at all — as reads of the `work` tool
   `"ref"`), `status`, `mine`, `has` (`active` / `past_only` / `none` /
   `suggested`), `review`, `query`, `group`, `archived`. A task is
   *archived* when it has no active session and is done, or every one of
-  its links (at least one of them past) is archived; the tree hides
-  archived tasks unless `archived: true` (or `status: "done"`) asks for
-  them, and `archived_hidden` says how many passed every other filter but
-  were hidden that way (over the whole result, not the page). Each task
-  carries `archived`; `task` / `session_tasks` / `review` answer archived
+  its links (at least one of them past) is archived, judged over every
+  link of the task, not only the ones the caller sees. The tree hides
+  archived tasks only when asked, with `archived: false` (the desktop
+  always sends it); absent shows them, so a client from before the archive
+  keeps seeing every task. `status: "done"` and `has: "past_only"` show
+  them anyway. `archived_hidden` says how many passed every other filter
+  but were hidden that way (over the whole result, not the page). Each
+  task carries `archived`; `task` / `session_tasks` / `review` answer archived
   tasks as any other. Pages are a keyset: pass
   `next_cursor` back with the same filters (other filters refuse it). No
   task is repeated across pages while the fleet changes; a task that moved
   meanwhile may be skipped until the next full read.
 - `work { action: task, task_id }` (`item:<id>` or `ref:<KEY>`): one task
-  with every session and why it is linked, its tracker description, the
-  last known outcome, its placement and the rules that match it.
+  with every session and why it is linked, its tracker description (at
+  most 600 characters, with `description_chars`, the full length fleet
+  knows, and `description_truncated` when it shows less), the last known
+  outcome, its placement and the rules that match it.
 - `work { action: session_tasks, session_id }`: every link of one session
   (active, suggested, rejected, ended), each with its task.
 - `work { action: review, cursor?, limit? }`: suggestions and conflicts
@@ -472,8 +485,8 @@ reference (`--ref env:NAME` / `--ref file:/run/secrets/jira`) resolved at
 each sync. It is never a command-line argument, never in an answer, event,
 log line or error report; a tracker row shows only a `…abcd` hint.
 
-> **[Screenshot placeholder]** Settings → Work with one connected tracker
-> and the Connect a tracker form open.
+> **[Screenshot placeholder]** Settings → Trackers with one connected tracker
+> and the Add tracker steps open.
 
 ### Per provider
 
@@ -483,7 +496,7 @@ log line or error report; a tracker row shows only a `…abcd` hint.
 | **Jira Data Center** | the site, with provider `jira_dc` (`--provider jira_dc`) | personal access token | one exact host, https only; the name is resolved and a loopback / link-local address is refused unless `allow_private_network`; an internal CA goes in `extra_ca` (PEM) |
 | **GitHub** | `https://github.com/<owner>` or any issue URL, plus a host where `gh` is logged in (`--via-cli <host>`) | **none in fleet**: `gh` on that host uses its own `gh auth login` | `assignee:@me` issues in the owner's repos (`--repo owner/repo` narrows); fleet refuses to store a GitHub token |
 | **GitHub Enterprise Server** | an issue URL, provider GitHub, plus the **hostname** (`--hostname ghe.corp.example[:port]`) and `--via-cli <host>` | none: `gh auth login --hostname …` on that host | keys are `host/owner/repo#n`, so the same repo name on github.com is different work |
-| **Asana** | `https://app.asana.com[/<workspace>]` or any task URL | personal access token | tasks have no human keys: detection is by URL. Which sections mean *in progress* is guessed on the first test and shown with a **Confirm** button; your confirmed map wins. A section the guess cannot place counts as *to do*; with the experimental `status_map` decision feature on (off by default, [decisions.md](decisions.md#status_map--asana-section-proposals-j3)) the hub proposes a category for it, which you apply with `fleet-hub tracker section-map` or decide one at a time with `fleet-hub decide proposals apply\|reject <run>`; on a standalone desktop in `assist`, Settings → Work lists them as *Proposed by Jev (assist)* with the confidence and why, and **Apply**, **Apply as…** or **Not this** |
+| **Asana** | `https://app.asana.com[/<workspace>]` or any task URL | personal access token | tasks have no human keys: detection is by URL. Which sections mean *in progress* is guessed on the first test and shown with a **Confirm** button; your confirmed map wins. A section the guess cannot place counts as *to do*; with the experimental `status_map` decision feature on (off by default, [decisions.md](decisions.md#status_map--asana-section-proposals-j3)) the hub proposes a category for it, which you apply with `fleet-hub tracker section-map` or decide one at a time with `fleet-hub decide proposals apply\|reject <run>`; on a standalone desktop in `assist`, Settings → Trackers lists them as *Proposed by Jev (assist)* with the confidence and why, and **Apply**, **Apply as…** or **Not this** |
 | **Linear** | `https://linear.app/<workspace>` or any issue URL | personal API key | team keys are the prefixes; *My issues*, *Current cycle*, *Recent* |
 
 A tracker only one machine can reach (a VPN) is read with `curl` on that
@@ -493,8 +506,8 @@ The full details are in [hub.md → Trackers](hub.md#trackers).
 
 ### Write-back: the PR link (Jira, off by default)
 
-For a Jira tracker (Cloud or Data Center), Settings → Work has **Add a
-session's pull request to its ticket as a link**. With it on, when the PR
+For a Jira tracker (Cloud or Data Center), Settings → Trackers has **Link pull requests**
+(add a session's pull request to its ticket as a link). With it on, when the PR
 probe sees a pull request on a session, fleet adds that PR to the linked
 ticket once, as a Jira remote link titled `PR: owner/repo#n`. Nothing else
 is ever written: no transition, no worklog, no comment (D29), and nothing a
@@ -559,7 +572,9 @@ there really is more.
 Only Jira (Cloud and Data Center) and GitHub serve a full description on
 demand; for Asana and Linear the line says *open the ticket* instead, and the
 ticket's URL is in every answer that carries its description. Nothing is
-written to the tracker either way — this is a read.
+written to the tracker either way — this is a read. `describe` itself stops
+at 32,000 characters; a longer description ends with the same kind of line,
+saying *open the ticket* for the rest.
 
 What Claude fetches is held briefly (`work.describe_cache_secs`, 300 s by
 default) so a second question about the same ticket costs no second request,
@@ -769,7 +784,9 @@ it. `0` keeps a table forever.
   window is also the ceiling on how long an entry is *served*: a longer
   `work.describe_cache_secs` is clamped to it. Disconnecting a tracker
   deletes its items' cached descriptions at once, and so does a sync that
-  changes a description.
+  changes a description — its first 2,000 characters, its length, or the
+  ticket's "updated" time at the tracker, so an edit past the excerpt is not
+  served stale.
 - `work.retention.timeline_work_events_days` (180): handover, nudge, tidy and withdrawn-suggestion
   timeline events. The newest of each kind per session stays.
 - The write-back outbox (see *Write-back*) follows the journal's window:
@@ -819,7 +836,7 @@ only its own: the other org's task, its title, evidence, conversation and
 summary never reach a device bound to the first org, and a device bound to
 the other org sees the task without the first org's session.
 
-Orgs are managed in Settings → Work → Organisations on a standalone
+Orgs are managed in Settings → Organisations on a standalone
 desktop (read-only on a paired desktop), or with `fleet-hub org …` on a
 hub. **Assign every host of a company before
 connecting a second company's tracker.** The details and commands are in
@@ -859,14 +876,14 @@ On the desktop:
 
 - The footer shows a one-line summary when there is something to say, for
   example `trackers: 1 failing · 3 suggestions undecided > 7 d`. Clicking it
-  opens Settings → Work.
+  opens Settings → Trackers.
 - Each **failing** tracker raises one item in the attention strip,
-  **⚠ Reconnect Jira (acme) →**, which opens Settings scrolled to Work.
+  **⚠ Reconnect Jira (acme) →**, which opens Settings → Trackers.
   Hover it for the error, the failure count and the org. A degraded tracker
   raises none.
 - A tracker failing because it keeps **skipping items** raises
   **⚠ Sync skipping items — Jira (acme) →** instead: reconnecting would not
-  help. It also opens Settings → Work, where the tracker's last pass reads
+  help. It also opens Settings → Trackers, where the tracker's last pass reads
   `… · 2 skipped (3 passes in a row)` with the reason. See
   [troubleshooting.md → Sync skips items](troubleshooting.md#sync-skips-items).
 - The roll-up is read at startup and every 60 seconds. On a paired desktop
@@ -874,7 +891,7 @@ On the desktop:
 
 After you set a new credential and **Test** it, the item goes away once the
 tracker is `ok` and a sync pass has succeeded, at the next read after that. The same numbers, with each pass's details, are in `fleet-hub tracker
-status` and Settings → Work. See
+status` and Settings → Trackers. See
 [troubleshooting.md → Tracker sync fails](troubleshooting.md#tracker-sync-fails).
 
 > **[Screenshot placeholder]** The attention strip with a Reconnect item,
@@ -983,30 +1000,33 @@ asks you to confirm, like any kill.
 
 Every `work.*` setting, with its default. On a standalone desktop they are
 in Settings → Limits (with its *Retention* and *Lifecycle* groups); on a hub, set them with `set_setting` (master token), read
-them with `get_settings`. A test (`work_settings_are_in_the_user_guide`)
-fails when a `work.*` setting in `service/settings.rs` is missing from this
-table.
+them with `get_settings`. This table is generated from
+`service/settings.rs` (`settings_docs_are_current`); every setting is also
+in [the settings reference](settings-reference.md).
 
+<!-- BEGIN GENERATED: settings work. -->
+<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current -->
 | Setting | Default | Range | What it does |
 |---|---|---|---|
-| `work.recent_days` | `14` | 1–365 days | how long ended work with no live session keeps a sidebar group |
-| `work.sync_interval_secs` | `300` | seconds, `0` = off | seconds between tracker sync passes; read at start; under a minute is raised to one |
-| `work.describe_cache_secs` | `300` | seconds, `0` = off | how long a full ticket description fetched by `work { action: describe }` is reused before fleet asks the tracker again. Never longer than the window that cache is swept at: the value is clamped to `work.retention.tracker_items_days` (or the fixed 30-day floor when that is `0`), so fleet never serves a description the sweep would already have deleted |
-| `work.trusted_branch_projects` | `[]` | project ids | projects where a sole branch key links automatically; set from the popover, cleared with **Trust none** |
-| `work.evidence_snippets` | `true` | on / off | keep a redacted ±40-character prompt snippet around a detected key as evidence |
-| `work.session_start_context` | `false` | on / off | SessionStart hands Claude the linked ticket's context (synchronous hook; takes effect on re-provision) |
-| `work.classify_nudge` | `false` | on / off | one note per conversation asking Claude to name its work after three unlinked turns |
-| `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | the model a dead session's on-demand *Summarise* runs on, on the session's own host and account |
-| `work.tidy_done_days` | `2` | 1–365 days | how long a linked ticket must be done before tidy-up suggests its session |
-| `work.tidy_idle_hours` | `4` | 1–720 hours | how long a session must be idle before any tidy reason suggests it |
-| `work.tidy_idle_unlinked_days` | `7` | 1–90 days | idle and unprompted days before a session with no work is suggested (`idle_unlinked`) |
-| `work.auto_tidy` | `false` | on / off | the GC sweep acts on the allowed tidy reasons by itself (safe kill or archive only) |
-| `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | any of `done_idle`, `pr_merged_idle`, `not_planned` | the reasons auto-tidy may act on |
-| `work.retention.journal_days` | `365` | 0–3650 days, `0` = forever | work journal retention |
-| `work.retention.tracker_items_days` | `180` | 0–3650 days, `0` = forever | retention of done tickets no link names |
-| `work.retention.timeline_work_events_days` | `180` | 0–3650 days, `0` = forever | retention of handover, nudge, tidy and withdrawn-suggestion timeline events |
+| `work.retention.journal_days` | `365` | 0–3650 days, `0` = forever | Days a work journal row is kept once its conversation ended and its work is done or unlinked. |
+| `work.retention.tracker_items_days` | `180` | 0–3650 days, `0` = forever | Days a done ticket that no session links to is kept in the cache. |
+| `work.retention.timeline_work_events_days` | `180` | 0–3650 days, `0` = forever | Days handover, nudge, tidy and withdrawn-suggestion timeline events are kept; the newest of each kind per session always stays. |
+| `work.recent_days` | `14` | 1–365 days | How long ended work with no live session keeps a sidebar group. |
+| `work.sync_interval_secs` | `300` | seconds, `0` = off | Seconds between tracker sync passes. Under a minute is raised to one. Applies after a restart. |
+| `work.describe_cache_secs` | `300` | seconds, shown in minutes, `0` = off | How long a fetched ticket description is reused before the tracker is asked again; never longer than the done-tickets retention window. |
+| `work.trusted_branch_projects` | `[]` | JSON array of ids | Projects where a sole ticket key in the branch name links automatically; elsewhere it is a suggestion. Set from the work popover. |
+| `work.evidence_snippets` | `true` | on / off | Keep a short, redacted prompt snippet around a detected ticket key as evidence. Off keeps only the matched text. |
+| `work.session_start_context` | `false` | on / off | Give Claude the linked ticket at session start. Makes the start hook synchronous, which can add up to 2 s when the hub is down. Experimental. Applies when the hooks are next installed. |
+| `work.classify_nudge` | `false` | on / off | After three prompts with no ticket, ask Claude once which of your few open tickets it is on. Its answer is only ever a suggestion. Experimental. |
+| `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | The model Summarise runs on for a past session, on that session's own host and account. |
+| `work.tidy_done_days` | `2` | 1–365 days | Days a linked ticket must be done before Tidy up suggests its session. |
+| `work.tidy_idle_hours` | `4` | 1–720 hours | Hours a session must be idle before any tidy reason suggests it. |
+| `work.tidy_idle_unlinked_days` | `7` | 1–90 days | Days a session with no work linked must sit idle and unprompted before Tidy up suggests it. Only ever suggested, never auto-tidied. |
+| `work.auto_tidy` | `false` | on / off | Let the GC sweep act on the allowed tidy reasons by itself, by safe kill or archive only. Off, Tidy up only suggests. An organisation can override it. Asks to confirm. |
+| `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | any of `done_idle`, `pr_merged_idle`, `not_planned` | The tidy reasons auto-tidy may act on. |
+<!-- END GENERATED: settings work. -->
 
-Per-org settings, set on the org (Settings → Work → Organisations, or
+Per-org settings, set on the org (Settings → Organisations, or
 `work_admin { action: "update_org", org_id, … }` on a hub), not here:
 
 | Org setting | Default | Range | What it does |

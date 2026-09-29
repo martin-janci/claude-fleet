@@ -38,6 +38,17 @@ pub fn apply_hook(
     payload: &HookPayload,
     ctx: &HookContext,
 ) -> Result<(), IpcError> {
+    // hosts F9: the only proof a host's hooks still authenticate used to be
+    // indirect. A per-host token names its host; the master token maps to
+    // `local` (`caller_host`), which a hub without a local host has hidden —
+    // so only a bound caller stamps.
+    if let Some(host) = ctx.caller.host_alias.as_deref() {
+        if let Ok(s) = store.lock() {
+            if let Err(e) = s.set_host_last_hook_at(host, crate::store::now_unix()) {
+                tracing::debug!(host, error = %e, "[hook] last_hook_at not stamped");
+            }
+        }
+    }
     match payload.hook_event_name.as_deref() {
         Some("Stop") => apply_stop_hook(store, ssh, payload, ctx),
         Some("UserPromptSubmit") => apply_prompt_submit_hook(store, payload, ctx),
@@ -518,6 +529,16 @@ fn prompt_nudge_locked(
     payload: &HookPayload,
     ctx: &HookContext,
 ) -> Option<(i64, String, String)> {
+    // A turn Claude Code submitted itself (a `<task-notification>`, a
+    // reminder) is nobody's prompt: the nudge is once per conversation, and
+    // spent on a turn no person sees it is gone for the one they do.
+    if payload
+        .prompt
+        .as_deref()
+        .is_some_and(crate::service::prompt_origin::is_harness)
+    {
+        return None;
+    }
     let (row, _) = resolve_hook_row(s, payload, ctx, false).ok()??;
     let current = row.claude_session_id.clone()?;
     if payload.session_id.as_deref() != Some(current.as_str()) {
@@ -1138,11 +1159,11 @@ fn apply_prompt_submit_hook(
             let first = s
                 .get_conversation(row.id, session_id)?
                 .is_none_or(|c| c.first_prompt.is_none());
-            s.conversation_set_first_prompt(row.id, session_id, p)?;
+            s.conversation_set_first_prompt(row.id, session_id, &p)?;
             // Work detection (M4.2): references in the full prompt become
             // suggestions with evidence; the prompt itself is never stored.
             // Best-effort: a detection failure never fails the hook.
-            if let Err(e) = crate::service::work::detect::on_prompt(s, row.id, p, first) {
+            if let Err(e) = crate::service::work::detect::on_prompt(s, row.id, &p, first) {
                 tracing::debug!(error = %e.message, "[work] prompt detection failed");
                 s.ensure_in_tx()?;
             }
@@ -3259,6 +3280,42 @@ mod tests {
         assert!(last_hook_at(&store, id2).is_some());
     }
 
+    /// hosts F9: every accepted hook from a per-host token stamps the
+    /// host's `last_hook_at`; the master token, which maps to `local`,
+    /// stamps nothing.
+    #[test]
+    fn a_bound_caller_stamps_its_host_last_hook_at_and_the_master_does_not() {
+        let store = make_store();
+        store.lock().unwrap().upsert_host("h").unwrap();
+        let _id = pane_session(&store, "s", "%3");
+        let bound = host_caller("h");
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("Stop", NEW),
+            &ctx(&bound, None),
+        )
+        .unwrap();
+        let row = store.lock().unwrap().get_host_row("h").unwrap().unwrap();
+        assert!(row.last_hook_at.is_some(), "a bound caller stamps its host");
+
+        let master = Caller::master();
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("Stop", NEW),
+            &ctx(&master, None),
+        )
+        .unwrap();
+        let local = store
+            .lock()
+            .unwrap()
+            .get_host_row("local")
+            .unwrap()
+            .unwrap();
+        assert_eq!(local.last_hook_at, None, "the master token names no host");
+    }
+
     #[test]
     fn non_rebinding_events_never_use_the_awaiting_mark() {
         let store = make_store();
@@ -3973,6 +4030,39 @@ mod tests {
 
         let second = prompt_submit_context(&store, &payload, &ctx).expect("the nudge alone");
         assert!(second.starts_with("[claude-fleet: work]"), "{second}");
+    }
+
+    /// A turn Claude Code submitted itself (a background task finishing)
+    /// never gets the nudge and does not use it up: the person's next prompt
+    /// does.
+    #[test]
+    fn a_harness_turn_never_gets_the_nudge() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (_, b, _) = nudge_ready(&store);
+        let ctx = HookContext {
+            caller: &Caller::master(),
+            pane_id: None,
+            sync_start: false,
+        };
+        let turn = |prompt: &str| HookPayload {
+            session_id: Some("conv-b".into()),
+            hook_event_name: Some("UserPromptSubmit".into()),
+            prompt: Some(prompt.into()),
+            ..Default::default()
+        };
+        let harness = turn(
+            "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n\
+             </task-notification>",
+        );
+        assert_eq!(prompt_submit_context(&store, &harness, &ctx), None);
+        assert!(!store
+            .lock()
+            .unwrap()
+            .conversation_nudged(b, "conv-b")
+            .unwrap());
+        let person = turn("fix the refund retries");
+        let text = prompt_submit_context(&store, &person, &ctx).expect("the nudge");
+        assert!(text.starts_with("[claude-fleet: work]"), "{text}");
     }
 
     /// A nested `claude -p` sharing the pane (another conversation id) never

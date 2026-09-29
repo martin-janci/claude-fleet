@@ -113,12 +113,39 @@ const PREF_KEY = 'sidebar.work-filters.v2';
  *  choice: carry the rest over and start hidden. */
 const PREF_KEY_V1 = 'sidebar.work-filters';
 
-/** The stored filters: v2, else v1's with the new archived default. */
+/** Saved filters, field by field: a field that is missing (a pref from
+ *  before it existed) or no longer valid takes its default, and the rest
+ *  are kept — a whole-object check dropped a person's tracker and status
+ *  choices for want of one new field. `null` when there is nothing saved. */
+export function migrateWorkFilters(v: unknown): WorkFilters | null {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
+  const f = v as Record<string, unknown>;
+  const d = DEFAULT_WORK_FILTERS;
+  return {
+    tracker:
+      f.tracker === 'all' || (typeof f.tracker === 'number' && Number.isInteger(f.tracker))
+        ? (f.tracker as WorkFilters['tracker'])
+        : d.tracker,
+    status:
+      STATUS_FILTERS.includes(f.status as StatusCategoryFilter) || isStatusNameFilter(f.status)
+        ? (f.status as StatusFilter)
+        : d.status,
+    assignee: f.assignee === 'all' || f.assignee === 'mine' ? f.assignee : d.assignee,
+    hasSession: HAS_SESSION_FILTERS.includes(f.hasSession as HasSessionFilter)
+      ? (f.hasSession as HasSessionFilter)
+      : d.hasSession,
+    archived: typeof f.archived === 'boolean' ? f.archived : d.archived,
+  };
+}
+
+/** The stored filters: v2, else v1's with the new archived default, each
+ *  read field by field (`migrateWorkFilters`). */
 export function readWorkFilters(): WorkFilters {
-  const v2 = readPref<WorkFilters | null>(PREF_KEY, null, (v): v is WorkFilters | null => v === null || isWorkFilters(v));
+  const raw = (key: string) => readPref<unknown>(key, null, (_v): _v is unknown => true);
+  const v2 = migrateWorkFilters(raw(PREF_KEY));
   if (v2) return v2;
-  const v1 = readPref(PREF_KEY_V1, DEFAULT_WORK_FILTERS, isWorkFilters);
-  return { ...v1, archived: false };
+  const v1 = migrateWorkFilters(raw(PREF_KEY_V1));
+  return { ...(v1 ?? DEFAULT_WORK_FILTERS), archived: false };
 }
 
 /** Persisted across restarts, like `hostFilter` and `scopeFilter`. */

@@ -29,7 +29,7 @@
 //! sent meant the first session to call a tool consumed the only notice its
 //! siblings would ever get.
 
-use super::super::auth::{Caller, TokenMode};
+use super::super::auth::Caller;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
@@ -51,7 +51,7 @@ const MAX_CALLERS: usize = 4096;
 /// `HubClient.jsonRpcReply` takes the first frame carrying `result` or
 /// `error`, pinned by its `JsonRpcFramingTest`.
 pub(super) fn wants_notification(caller: &Caller) -> bool {
-    caller.mode != TokenMode::Peer
+    !caller.mode.is_single_purpose()
 }
 
 /// A fingerprint of a visible tool list: order-independent over the names.
@@ -113,6 +113,7 @@ impl ToolListTracker {
 mod tests {
     use super::*;
     use crate::mcp::auth::ClientRef;
+    use crate::mcp::auth::TokenMode;
 
     #[test]
     fn a_caller_never_seen_is_told_until_it_relists() {
@@ -202,5 +203,6 @@ mod tests {
         assert!(wants_notification(&client(TokenMode::Full)));
         assert!(wants_notification(&client(TokenMode::Readonly)));
         assert!(!wants_notification(&client(TokenMode::Peer)));
+        assert!(!wants_notification(&client(TokenMode::Updater)));
     }
 }

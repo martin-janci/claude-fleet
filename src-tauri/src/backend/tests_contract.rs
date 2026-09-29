@@ -80,6 +80,8 @@ pub(crate) fn sample_session() -> SessionRow {
         last_stop_at: Some(1_725_000_900),
         stale_working_at: Some(1_790_500_000),
         work_rev: 17,
+        pr_evidence: None,
+        pr_checked_at: None,
         parent_session_id: Some(5),
         tags: vec!["tag-a".into(), "tag-b".into()],
         row_version: 12,
@@ -143,6 +145,18 @@ pub(crate) fn sample_host() -> HostRow {
         // `transport` is not an `Option`, so either value pins the same key.
         transport: "ssh".into(),
         org_id: Some(2),
+        claude_version_at: Some(1_725_000_000),
+        disk_home_free_kb: Some(3_600_000),
+        disk_home_total_kb: Some(150_000_000),
+        disk_tmp_free_kb: Some(5_900_000),
+        load_1m: Some(1.5),
+        mem_avail_kb: Some(2_000_000),
+        uptime_secs: Some(86_400),
+        health_at: Some(1_725_000_000),
+        last_hook_at: Some(1_725_000_000),
+        agent_version: Some("0.3.1".into()),
+        provisioned_at: Some(1_725_000_000),
+        provision_stale: true,
     }
 }
 
@@ -293,9 +307,41 @@ fn sample_health() -> Health {
         tunnels_flapping: 1,
         peer_links_down: 1,
         trackers: sample_trackers_health(),
+        // Every judgement true, so a renamed flag is a golden diff.
+        hosts: vec![fleet_core::service::health::HostHealthRow {
+            alias: "trn".into(),
+            reachable: true,
+            transport: "agent".into(),
+            claude_version: Some("2.0.0".into()),
+            claude_version_at: Some(1_725_000_000),
+            agent_version: Some("0.2.26".into()),
+            disk_home_pct: Some(98),
+            disk_low: true,
+            claude_behind: true,
+            agent_behind: true,
+            hooks_silent: true,
+        }],
         hub: Some(sample_hub_health()),
         tunnels_mode: Some("none".into()),
         peer_links_total: 2,
+        decide: Some(sample_decide_health()),
+    }
+}
+
+/// `Health.decide` (the Jev envelope's last hour, test map §7): every flag
+/// true and every option set, so a renamed field is a golden diff.
+fn sample_decide_health() -> fleet_core::service::decide::DecideHealth {
+    fleet_core::service::decide::DecideHealth {
+        enabled: true,
+        modes: BTreeMap::from([("status_map".to_string(), "assist".to_string())]),
+        window_secs: 3_600,
+        attempts: 12,
+        failures: 4,
+        failure_rate: Some(0.333),
+        breaker_open: true,
+        budget_spent: true,
+        degraded: true,
+        reason: Some("breaker_open".into()),
     }
 }
 
@@ -554,6 +600,7 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         }),
     );
     put("Health", wire_keys(&sample_health()));
+    put("Health.decide", wire_keys(&sample_decide_health()));
     let trackers = sample_trackers_health();
     put("Health.trackers", wire_keys(&trackers));
     put("Health.trackers.trackers", wire_keys(&trackers.trackers[0]));

@@ -154,10 +154,23 @@ pub struct KillSessionParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ForgetProjectParams {
+    /// The project's id.
+    pub project_id: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ProvisionHostsParams {
     /// Mint fresh per-host tokens (invalidates each host's current one).
     #[serde(default)]
     pub rotate: bool,
+    /// One host alias; every active host when omitted.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Skills, CLAUDE.md block and hooks only: no token, no ~/.claude.json
+    /// rewrite, no tunnel.
+    #[serde(default)]
+    pub content_only: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -555,6 +568,9 @@ pub struct QuickRepliesParams {
     /// built-in defaults). Omit to read the current list instead.
     #[serde(default)]
     pub set: Option<Vec<crate::service::quick_replies::QuickReply>>,
+    /// With `set`: the list last read; E_CONFLICT if it changed since.
+    #[serde(default)]
+    pub expected: Option<Vec<crate::service::quick_replies::QuickReply>>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -883,7 +899,7 @@ pub struct PairClientParams {
     /// Shown in `list_clients` and in the untrusted-input marker on what it
     /// sends. Rules: see the tool.
     pub name: String,
-    /// `full` (default), `readonly` or `peer`; see the tool.
+    /// `full` (default), `readonly`, `peer` or `updater`; see the tool.
     #[serde(default)]
     pub mode: Option<String>,
     /// Code lifetime: default 600, max 3600; it also dies on first use.
@@ -906,11 +922,42 @@ pub struct SetClientTrustParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct GetSettingsParams {
+    /// true: every key's metadata (label, help, bounds, danger) and value.
+    pub describe: Option<bool>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SetSettingParams {
     /// e.g. "work.recent_days".
     pub key: String,
     /// An object or array is stored as its JSON.
     pub value: serde_json::Value,
+    /// Only propose it: a person applies or rejects it in Settings.
+    #[serde(default)]
+    pub propose: bool,
+    /// With propose: why, shown to the person (≤500 chars).
+    #[serde(default)]
+    pub why: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SettingHistoryParams {
+    /// A registered setting, e.g. "work.recent_days".
+    pub key: String,
+    /// Newest first, 1-100; 20 when unset.
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct DecideSettingProposalsParams {
+    /// Proposal ids to apply.
+    #[serde(default)]
+    pub accept: Vec<i64>,
+    /// Proposal ids to reject.
+    #[serde(default)]
+    pub reject: Vec<i64>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -959,4 +1006,25 @@ pub struct CatalogAdminParams {
     /// apply_sync: nonce of an approved E_CONFIRM_REQUIRED.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateAdminParams {
+    /// pin | unpin | refresh.
+    pub action: String,
+    /// hub | agent | desktop | android | ios.
+    #[serde(default)]
+    pub component: Option<String>,
+    /// One target (hub:self, agent:<alias>, client:<id>); absent = every target.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// pin: the release to serve.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// pin: required, not merely offered.
+    #[serde(default)]
+    pub mandatory: Option<bool>,
+    /// pin: why, for the dashboard.
+    #[serde(default)]
+    pub reason: Option<String>,
 }

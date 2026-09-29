@@ -241,7 +241,9 @@
       "context_red",
       "context_red_pct",
       "db_ready",
+      "decide",
       "ghosts",
+      "hosts",
       "hosts_reachable",
       "hosts_total",
       "hub",
@@ -257,6 +259,18 @@
       "usage_by_day",
       "usage_by_host",
       "version"
+    ],
+    "Health.decide": [
+      "attempts",
+      "breaker_open",
+      "budget_spent",
+      "degraded",
+      "enabled",
+      "failure_rate",
+      "failures",
+      "modes",
+      "reason",
+      "window_secs"
     ],
     "Health.hub": [
       "reconcile",
@@ -297,16 +311,28 @@
     ],
     "HostRow": [
       "account_uuid",
+      "agent_version",
       "alias",
       "claude_version",
+      "claude_version_at",
+      "disk_home_free_kb",
+      "disk_home_total_kb",
+      "disk_tmp_free_kb",
+      "health_at",
       "hidden",
+      "last_hook_at",
       "last_pinged_at",
+      "load_1m",
+      "mem_avail_kb",
       "org_id",
+      "provision_stale",
       "provisioned",
+      "provisioned_at",
       "reachable",
       "ssh_alias",
       "tmux_version",
-      "transport"
+      "transport",
+      "uptime_secs"
     ],
     "HostWorktrees": [
       "cloned",

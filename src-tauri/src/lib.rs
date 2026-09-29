@@ -35,7 +35,7 @@ pub fn run() {
     declare_app_version();
     // File logging first, so the instance reaper and env recovery below are
     // captured too. A failure is non-fatal: the app runs without a log file.
-    let data_dir = appdata_dir();
+    let (data_dir, data_dir_note) = appdata_dir();
     let log_dir = match fleet_core::logging::init(&data_dir) {
         Ok(dir) => Some(dir),
         Err(e) => {
@@ -46,6 +46,9 @@ pub fn run() {
             None
         }
     };
+    if let Some(note) = data_dir_note {
+        tracing::warn!("[startup] {note}");
+    }
 
     // Win the singleton race before opening the DB or binding the MCP port:
     // kill any other running instance of this app (any build).
@@ -452,8 +455,18 @@ pub fn run() {
             commands::sessions::purge_project,
             commands::quick_replies::quick_replies,
             commands::quick_replies::set_quick_replies,
-            commands::sessions::get_fleet_settings,
-            commands::sessions::set_fleet_setting,
+            commands::pages::get_fleet_settings,
+            commands::pages::describe_fleet_settings,
+            commands::pages::list_pages,
+            commands::pages::fetch_page_source,
+            commands::pages::flow_start,
+            commands::pages::flow_submit,
+            commands::pages::flow_back,
+            commands::pages::flow_cancel,
+            commands::pages::setting_proposals,
+            commands::pages::decide_setting_proposals,
+            commands::pages::setting_history,
+            commands::pages::set_fleet_setting,
             commands::tasks::list_tasks,
             commands::tasks::cancel_task,
             commands::files::repo_changes,
@@ -486,6 +499,7 @@ pub fn run() {
             commands::hosts::probe_host,
             commands::hosts::probe_ssh_alias,
             commands::hosts::remove_host,
+            commands::hosts::merge_host,
             commands::hosts::hide_host,
             commands::hosts::set_account_nickname,
             commands::account_usage::list_account_usage,

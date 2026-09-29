@@ -15,7 +15,10 @@ impl FleetTools {
         detection_backlog: suggestions undecided for detection_backlog_days). \
         A per-host token sees its own host's usage and its org's trackers. \
         hub: uptime and last reconcile pass; tunnels_mode none|reverse; \
-        peer_links_total.")]
+        peer_links_total. \
+        hosts[]: per host disk_home_pct/disk_low, claude_behind, \
+        agent_behind, hooks_silent. decide (master only): Jev's last \
+        hour, degraded if its breaker is open or >20% failed.")]
     pub(super) async fn fleet_health(
         &self,
         Extension(caller): Extension<Caller>,
@@ -30,6 +33,16 @@ impl FleetTools {
             h.db_ready = false;
         }
         h.set_tunnels(self.tunnels.health());
+        // Host identity & health, task 2: the agents connected right now
+        // outrank the stored hello for `agent_version` / `agent_behind`.
+        if let Some(reg) = self.ssh.agent_registry() {
+            let live: Vec<(String, String)> = reg
+                .snapshot()
+                .into_iter()
+                .map(|a| (a.alias, a.agent_version))
+                .collect();
+            health::overlay_agents(&mut h.hosts, &live, crate::app_version::get());
+        }
         if let Some(host) = caller.host_alias.as_deref() {
             match self.reader().lock() {
                 Ok(s) => {
@@ -66,6 +79,11 @@ impl FleetTools {
                     r.last_error = Some("reconcile failed (details on the hub)".into());
                 }
             }
+        }
+        // The decision envelope is the hub's own business: a per-host token
+        // or an org-bound client gets none of it.
+        if caller.host_alias.is_some() || caller.is_scoped() {
+            h.decide = None;
         }
         // An agent reads it: a tracker's error is the tracker's text.
         h.trackers.fence_errors();
@@ -154,10 +172,12 @@ impl FleetTools {
     #[tool(description = "Read or replace the fleet's quick replies: the \
         chip row the desktop and phone composers draw above the prompt box, \
         as [{label, text, auto_send}] in order. No arguments reads; `set` \
-        replaces the whole list (max 24, [] restores the defaults). \
-        Errors: E_INVALID.")]
+        replaces the whole list (max 24, [] restores the defaults; not a \
+        host token or the operator). \
+        Errors: E_INVALID, E_CONFLICT, E_FORBIDDEN.")]
     pub(super) async fn quick_replies(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<QuickRepliesParams>,
     ) -> Result<CallToolResult, McpError> {
         // Chip TEXT is a prompt the operator wrote; the count is the whole
@@ -169,8 +189,21 @@ impl FleetTools {
                 None => "read".to_string(),
             },
         );
+        // The chips are a PERSON's buttons, on every screen of the fleet, and
+        // an auto-send chip is a prompt one tap away. A per-host token is a
+        // host's own Claude and the operator is the UX agent: letting either
+        // rewrite the list would let an agent plant a prompt the person then
+        // sends without reading. Reads stay open to both.
+        if p.set.is_some() && (caller.host_alias.is_some() || caller.is_operator()) {
+            return Err(to_mcp_err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "quick replies are the person's: an agent token may read them, not replace them",
+            )));
+        }
         let entries = match p.set {
-            Some(entries) => quick_replies::replace(&self.store, entries).map_err(to_mcp_err)?,
+            Some(entries) => {
+                quick_replies::replace(&self.store, entries, p.expected).map_err(to_mcp_err)?
+            }
             None => quick_replies::list(&self.store).map_err(to_mcp_err)?,
         };
         ok_json_compact(&entries)
@@ -215,6 +248,30 @@ impl FleetTools {
         ok_json(&hosts::remove_host(args, &self.store).map_err(to_mcp_err)?)
     }
 
+    #[tool(description = "Fold host `from` into `into` in one transaction: \
+        worktrees, fingerprints, dismissals, layers and daily usage move \
+        (usage sums), sessions move unless `into` already has the same \
+        claude_session_id or tmux_name (those are dropped), then `from` is \
+        deleted. For a renamed host (`local` -> `mac`). Master only; may \
+        return E_CONFIRM_REQUIRED.")]
+    pub(super) async fn merge_host(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<hosts::MergeHostArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "merge_host",
+            &format!("from={} into={}", args.from, args.into),
+        );
+        self.confirm_gate(
+            "merge_host",
+            args.confirm_nonce.as_deref(),
+            &format!("from={} into={}", args.from, args.into),
+            &caller,
+        )?;
+        ok_json(&hosts::merge_host(args, &self.store).map_err(to_mcp_err)?)
+    }
+
     #[tool(description = "Hide or show a host (hidden: skipped by \
         reconcile). Returns the host row.")]
     pub(super) async fn hide_host(
@@ -234,12 +291,19 @@ impl FleetTools {
         / EnterWorktree http hooks and this fleet's MCP server entry \
         (per-host bearer token) into every reachable host's ~/.claude.json \
         (a reverse SSH tunnel when the hub is loopback-only). Returns \
-        per-host status; each host must restart Claude to load it.")]
+        per-host status; each host must restart Claude to load it. host: \
+        one alias; content_only: skills, CLAUDE.md and hooks only, no token.")]
     pub(super) async fn provision_hosts(
         &self,
         Parameters(p): Parameters<ProvisionHostsParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit("provision_hosts", &format!("rotate={}", p.rotate));
+        audit(
+            "provision_hosts",
+            &format!(
+                "rotate={} host={:?} content_only={}",
+                p.rotate, p.host, p.content_only
+            ),
+        );
         let base = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?
@@ -249,7 +313,11 @@ impl FleetTools {
             &self.ssh,
             &self.tunnels,
             &base,
-            p.rotate,
+            crate::service::provision::ProvisionScope {
+                rotate: p.rotate,
+                only_host: p.host,
+                content_only: p.content_only,
+            },
         )
         .await
         .map_err(to_mcp_err)?;
@@ -264,7 +332,8 @@ impl FleetTools {
         sees it; the device posts it to /pair once for a token of its own. \
         name: 1-64 chars, no control characters, not a live client's. mode \
         full drives sessions fleet-wide, readonly observes, peer is another \
-        hub's link (see peer_exchange); fleet-admin tools stay out of a \
+        hub's link (see peer_exchange), updater is fleet-updater's (/update \
+        only); fleet-admin tools stay out of a \
         client's reach. Codes are in memory only: a hub restart voids them. \
         org_id binds it to one org (its work and sessions only). Master token \
         only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.")]
@@ -292,6 +361,14 @@ impl FleetTools {
             return Err(mcp_err(
                 codes::E_VALIDATE,
                 "a peer hub link is never bound to an org; drop org_id",
+                None,
+            ));
+        }
+        // `fleet-updater` sends no prompts and belongs to no org.
+        if mode == "updater" && (p.trusted || p.org_id.is_some()) {
+            return Err(mcp_err(
+                codes::E_VALIDATE,
+                "an updater token is never trusted or bound to an org; drop trusted / org_id",
                 None,
             ));
         }
@@ -421,21 +498,29 @@ impl FleetTools {
 
     #[tool(description = "Operator settings (ticks, GC, playbooks, projects \
         roots, move, usage, reports, work graph), each key's effective value. \
-        Read-only but master token only (it names hosts and their paths).")]
-    pub(super) async fn get_settings(&self) -> Result<CallToolResult, McpError> {
+        Master token or a paired device bound to no org.")]
+    pub(super) async fn get_settings(
+        &self,
+        Parameters(p): Parameters<GetSettingsParams>,
+    ) -> Result<CallToolResult, McpError> {
         audit("get_settings", "");
-        let all = {
-            let s = lock(&self.store).map_err(to_mcp_err)?;
-            crate::service::settings::read_all(&s)
-        };
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        if p.describe == Some(true) {
+            let described = crate::service::settings::describe(&s);
+            drop(s);
+            return ok_json_compact(&described);
+        }
+        let all = crate::service::settings::read_all(&s);
+        drop(s);
         ok_json_compact(&all)
     }
 
     #[tool(description = "Change one get_settings key, validated; E_INVALID \
-        otherwise. mcp.*, hub.* and controller.* are refused. Master token \
-        only. Returns the settings.")]
+        otherwise. mcp.*, hub.* and controller.* are refused. Master, or a \
+        trusted device. Returns the settings, or with propose the proposal.")]
     pub(super) async fn set_setting(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<SetSettingParams>,
     ) -> Result<CallToolResult, McpError> {
         // The key only: a value is not a secret here, but the audit trail
@@ -450,16 +535,159 @@ impl FleetTools {
             )),
             other => other.to_string(),
         };
+        let who = settings_actor(&caller);
+        let actor = who.actor();
+        if p.propose {
+            let row = {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                crate::service::settings_review::propose(
+                    &s,
+                    &p.key,
+                    &value,
+                    p.why.as_deref(),
+                    actor,
+                )
+                .map_err(to_mcp_err)?
+            };
+            tracing::info!(key = %p.key.escape_debug(), id = row.id, "[mcp] proposed a setting");
+            return ok_json_compact(&row);
+        }
+        settings_writer(&caller, &who)?;
         let all = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            crate::service::settings::set(&s, &p.key, &value).map_err(to_mcp_err)?;
+            crate::service::settings::set_by(&s, &p.key, &value, actor, None)
+                .map_err(to_mcp_err)?;
             crate::service::settings::read_all(&s)
         };
         tracing::info!(key = %p.key.escape_debug(), "[mcp] changed a setting");
         ok_json_compact(&all)
     }
 
+    // ---- settings review on a paired device (declarative pages P6) ----
+
+    #[tool(description = "Settings proposals waiting for review, each with \
+        the key's value now, and can_write: whether this device may decide.")]
+    pub(super) async fn setting_proposals(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("setting_proposals", "");
+        let who = settings_actor(&caller);
+        let proposals = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            crate::service::settings_review::pending(&s).map_err(to_mcp_err)?
+        };
+        ok_json_compact(&crate::service::settings_review::Pending {
+            can_write: settings_writer(&caller, &who).is_ok(),
+            proposals,
+        })
+    }
+
+    #[tool(description = "One setting's writes, newest first: who, before \
+        and after, the proposal applied.")]
+    pub(super) async fn setting_history(
+        &self,
+        Parameters(p): Parameters<SettingHistoryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("setting_history", &format!("key={}", p.key.escape_debug()));
+        let rows = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            crate::service::settings_review::history(&s, &p.key, p.limit).map_err(to_mcp_err)?
+        };
+        ok_json_compact(&rows)
+    }
+
+    #[tool(description = "Apply or reject settings proposals by id, each on \
+        its own; a trusted device only.")]
+    pub(super) async fn decide_setting_proposals(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<DecideSettingProposalsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "decide_setting_proposals",
+            &format!("accept={:?} reject={:?}", p.accept, p.reject),
+        );
+        let who = settings_actor(&caller);
+        settings_writer(&caller, &who)?;
+        let out = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            crate::service::settings_review::decide_as(&s, &p.accept, &p.reject, who.actor())
+                .map_err(to_mcp_err)?
+        };
+        ok_json_compact(&out)
+    }
+
+    #[tool(description = "The settings page specs, data source shapes, \
+        resources and page actions a device renders.")]
+    pub(super) async fn list_pages(&self) -> Result<CallToolResult, McpError> {
+        audit("list_pages", "");
+        ok_json_compact(&crate::pages::bundle())
+    }
+
     // ---- workspace repair ----
+}
+
+/// Who a settings write or proposal is, as the audit trail records it: the
+/// master is an agent over the control API; a paired device is the person
+/// holding it — unless it is the UX agent's operator client, an agent.
+pub(super) enum SettingsWho {
+    ControlApi,
+    /// An agent on a paired client (the operator) or a host's own token:
+    /// it proposes, never writes. `Access::Person` keeps a host's token away
+    /// from these tools; this is the second line.
+    Agent(String),
+    Device(String),
+}
+
+impl SettingsWho {
+    pub(super) fn actor(&self) -> crate::service::settings::Actor<'_> {
+        use crate::service::settings::Actor;
+        match self {
+            SettingsWho::ControlApi => Actor::Agent("control API"),
+            SettingsWho::Agent(name) => Actor::Agent(name),
+            SettingsWho::Device(name) => Actor::PersonVia(name),
+        }
+    }
+}
+
+pub(super) fn settings_actor(caller: &Caller) -> SettingsWho {
+    if caller.is_master() {
+        return SettingsWho::ControlApi;
+    }
+    match (&caller.host_alias, &caller.client) {
+        (None, Some(c)) if !caller.is_operator() => {
+            SettingsWho::Device(format!("client {}", c.name))
+        }
+        _ => SettingsWho::Agent(caller.label()),
+    }
+}
+
+/// A write of the fleet's settings (a direct `set_setting`, or deciding a
+/// proposal) is the master's, or a trusted device's (declarative pages P6):
+/// trust is the operator vouching that the device is a person's own
+/// (`fleet-hub client trust`). An agent's client proposes instead.
+pub(super) fn settings_writer(caller: &Caller, who: &SettingsWho) -> Result<(), McpError> {
+    match who {
+        SettingsWho::ControlApi => Ok(()),
+        SettingsWho::Agent(_) => Err(mcp_err(
+            "E_FORBIDDEN",
+            "an agent proposes a settings change (set_setting with propose: true); a person applies it",
+            None,
+        )),
+        SettingsWho::Device(_) if caller.is_trusted_client() && caller.mode == TokenMode::Full => {
+            Ok(())
+        }
+        SettingsWho::Device(_) => Err(mcp_err(
+            "E_FORBIDDEN",
+            format!(
+                "this device may read the fleet's settings and propose a change; to change them, \
+                 the hub's operator trusts it: fleet-hub client trust {}",
+                caller.client.as_ref().map_or("<name>", |c| c.name.as_str())
+            ),
+            None,
+        )),
+    }
 }
 
 /// How long a pairing code stays valid: the caller's `ttl_s` clamped to

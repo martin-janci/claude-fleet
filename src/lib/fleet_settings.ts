@@ -9,6 +9,7 @@ import { invokeCmd, type Result } from './result';
 export const SETTING_KEYS = {
   reconcileIntervalSecs: 'reconcile.interval_secs',
   reconcileStaleWorkingSecs: 'reconcile.stale_working_secs',
+  reconcileStaleWorkingTtlSecs: 'reconcile.stale_working_ttl_secs',
   sessionsLostTtlSecs: 'sessions.lost_ttl_secs',
   restoreBatchSize: 'restore.batch_size',
   restoreStaggerMs: 'restore.stagger_ms',
@@ -38,6 +39,11 @@ export const SETTING_KEYS = {
   reportsMaxRows: 'reports.max_rows',
   reportsMaxAgeSecs: 'reports.max_age_secs',
   healthContextRedPct: 'health.context_red_pct',
+  healthVersionMaxAgeSecs: 'health.version_max_age_secs',
+  healthDiskLowPct: 'health.disk_low_pct',
+  healthClaudeMaxBehind: 'health.claude_max_behind',
+  healthHooksSilentSecs: 'health.hooks_silent_secs',
+  provisionForceGitTree: 'provision.force_git_tree',
   workRetentionJournalDays: 'work.retention.journal_days',
   workRetentionTrackerItemsDays: 'work.retention.tracker_items_days',
   workRetentionTimelineWorkEventsDays: 'work.retention.timeline_work_events_days',
@@ -64,11 +70,24 @@ export const SETTING_KEYS = {
   decideJevDailyTokenBudget: 'decide.jev.daily_token_budget',
   decideJevModel: 'decide.jev.model',
   decideRetentionDays: 'decide.retention_days',
+  updateTrack: 'update.track',
+  updateHubMode: 'update.hub.mode',
+  updateAgentMode: 'update.agent.mode',
+  updateDesktopMode: 'update.desktop.mode',
+  updateMobileMode: 'update.mobile.mode',
+  updateCheckIntervalSecs: 'update.check_interval_secs',
 } as const;
 
 /** Mirror of `settings::DECIDE_MODES`: what a decision feature's mode may be
  *  (`auto` is not offered, decision D36). */
 export const DECIDE_MODES = ['off', 'shadow', 'assist'] as const;
+
+/** Mirror of `settings::UPDATE_TRACKS`: the release track the hub follows. */
+export const UPDATE_TRACKS = ['stable', 'beta', 'nightly'] as const;
+/** Mirror of `settings::UPDATE_MODES`. */
+export const UPDATE_MODES = ['manual', 'notify', 'automatic'] as const;
+/** Mirror of `settings::UPDATE_MOBILE_MODES`: a phone never installs silently. */
+export const UPDATE_MOBILE_MODES = ['manual', 'notify'] as const;
 
 /** Mirror of `settings::DECIDE_JEV_MODELS`. */
 export const DECIDE_JEV_MODELS = ['jev-1.13.0', 'jev-latest'] as const;
@@ -141,6 +160,7 @@ export type SettingKey = (typeof SETTING_KEYS)[keyof typeof SETTING_KEYS];
 export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'reconcile.interval_secs': '20',
   'reconcile.stale_working_secs': '1800',
+  'reconcile.stale_working_ttl_secs': '86400',
   'sessions.lost_ttl_secs': '1209600',
   'restore.batch_size': '4',
   'restore.stagger_ms': '3000',
@@ -170,6 +190,11 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'reports.max_rows': '5000',
   'reports.max_age_secs': '604800',
   'health.context_red_pct': '85',
+  'health.version_max_age_secs': '86400',
+  'health.disk_low_pct': '90',
+  'health.claude_max_behind': '30',
+  'health.hooks_silent_secs': '3600',
+  'provision.force_git_tree': 'false',
   'work.retention.journal_days': '365',
   'work.retention.tracker_items_days': '180',
   'work.retention.timeline_work_events_days': '180',
@@ -196,6 +221,12 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'decide.jev.daily_token_budget': '2000000',
   'decide.jev.model': 'jev-1.13.0',
   'decide.retention_days': '90',
+  'update.track': 'stable',
+  'update.hub.mode': 'notify',
+  'update.agent.mode': 'notify',
+  'update.desktop.mode': 'notify',
+  'update.mobile.mode': 'notify',
+  'update.check_interval_secs': '21600',
 };
 
 export type FleetSettings = Record<string, string>;

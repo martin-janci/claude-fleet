@@ -15,14 +15,23 @@
 //! - [`status_map`]: card J3, an Asana section's status category
 //!   (`fleet-hub decide bench status-map`).
 //!
+//! - [`perturb`]: perturbed variants (dataset C) and the paired comparison
+//!   datasets B and C are judged by; [`status_map_robust`] applies them to
+//!   J3, with its floor sweep, and [`work_link_robust`] to J1.
+//!
 //! Shared here: the bootstrap on differences, percentiles, calibration (ECE
 //! and Brier, test map §4) and the acceptance verdicts both benches print.
 
 pub mod bm25;
+pub mod perturb;
 pub mod status_map;
+pub mod status_map_robust;
+#[cfg(test)]
+mod status_map_robust_tests;
 #[cfg(test)]
 mod status_map_tests;
 pub mod work_link;
+pub mod work_link_robust;
 #[cfg(test)]
 mod work_link_tests;
 

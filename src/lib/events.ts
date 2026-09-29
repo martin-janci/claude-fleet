@@ -1,7 +1,7 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { SessionRow, SessionEvent } from './sessions';
 import type { SessionEvent as TimelineEvent } from './timeline';
-import type { HostRow, HostEvent } from './hosts';
+import type { HostRow, HostEvent, HostHealth } from './hosts';
 import type { AccountRow } from './accounts';
 import type { ProjectRow, WorktreeRow, ProjectEvent } from './projects';
 import type { TaskRow, TaskEvent } from './tasks';
@@ -75,6 +75,9 @@ export type RowEventHandlers = {
    *  M14.1d: ids only), in order. A `resync` among them means reload the
    *  whole Work view (`needsFullReload`); anything else, re-read what shows. */
   onWorkChanged?: (changes: WorkChanged[]) => void;
+  /** One call per flush with the key of every `settings:changed`
+   *  (declarative pages P3: the key only), in order, duplicates kept. */
+  onSettingsChanged?: (keys: string[]) => void;
 };
 
 type Queued =
@@ -83,7 +86,16 @@ type Queued =
   | { name: 'session:event'; payload: TimelineEvent }
   | { name: 'session:conversations'; payload: { session_id: number } }
   | { name: 'host:added' | 'host:probed'; payload: HostRow }
-  | { name: 'host:pinged'; payload: { alias: string; last_pinged_at: number; reachable: boolean } }
+  | {
+      name: 'host:pinged';
+      payload: {
+        alias: string;
+        last_pinged_at: number;
+        reachable: boolean;
+        claude_version_at?: number | null;
+        health?: HostHealth | null;
+      };
+    }
   | { name: 'host:removed'; payload: { alias: string } }
   | { name: 'account:upserted'; payload: AccountRow }
   | { name: 'project:updated'; payload: ProjectRow }
@@ -99,7 +111,8 @@ type Queued =
   | { name: 'work:item'; payload: WorkItemRow }
   | { name: 'work:tracker'; payload: TrackerRow }
   | { name: 'work:tracker_removed'; payload: { id: number } }
-  | { name: 'work:changed'; payload: unknown };
+  | { name: 'work:changed'; payload: unknown }
+  | { name: 'settings:changed'; payload: { key: string } };
 
 /**
  * Subscribe to every row-change event from the backend. Returns a single
@@ -138,6 +151,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     const conversationsChangedIds: number[] = [];
     const workEvents: WorkEvent[] = [];
     const workChanges: WorkChanged[] = [];
+    const settingsKeys: string[] = [];
     for (const ev of batch) {
       switch (ev.name) {
         case 'session:created':
@@ -227,6 +241,9 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
           if (c) workChanges.push(c);
           break;
         }
+        case 'settings:changed':
+          if (typeof ev.payload?.key === 'string') settingsKeys.push(ev.payload.key);
+          break;
       }
     }
     if (sessionEvents.length > 0) handlers.onSessionEvents?.(sessionEvents);
@@ -239,6 +256,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     if (conversationsChangedIds.length > 0) handlers.onConversationsChanged?.(conversationsChangedIds);
     if (workEvents.length > 0) handlers.onWorkEvents?.(workEvents);
     if (workChanges.length > 0) handlers.onWorkChanged?.(workChanges);
+    if (settingsKeys.length > 0) handlers.onSettingsChanged?.(settingsKeys);
   };
 
   const enqueue = (ev: Queued) => {
@@ -277,6 +295,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     moveProgress: !!handlers.onMoveProgress,
     work: !!handlers.onWorkEvents,
     workChanged: !!handlers.onWorkChanged,
+    settingsChanged: !!handlers.onSettingsChanged,
   };
 
   const sub = <N extends Queued['name']>(
@@ -315,6 +334,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('work:tracker', wanted.work),
     sub('work:tracker_removed', wanted.work),
     sub('work:changed', wanted.workChanged),
+    sub('settings:changed', wanted.settingsChanged),
   ]);
   return () => {
     disposed = true;

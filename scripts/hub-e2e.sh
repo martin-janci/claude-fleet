@@ -317,16 +317,22 @@ pv_c=$(tool "$PA" "$PUB" "$CTOK" provision_hosts '{}')
 check "a client is refused provision_hosts even in full mode" 'echo "$pv_c" | grep -q E_FORBIDDEN' "${pv_c:0:400}"
 pr_c=$(tool "$PA" "$PUB" "$CTOK" pair_client '{"name":"a second phone"}')
 check "a client cannot pair another client" 'echo "$pr_c" | grep -q E_FORBIDDEN' "${pr_c:0:400}"
-# Operator settings: the master sets the ones with no flag; a client, even
-# full, may neither change nor read them.
+# Operator settings: the master sets the ones with no flag. A paired device
+# (declarative pages P6) reads them and proposes, but writes only once the
+# operator trusts it; this client is not trusted.
 ss_m=$(tool "$PA" "$PUB" "$TOKA" set_setting '{"key":"work.retention.journal_days","value":30}')
 gs_m=$(tool "$PA" "$PUB" "$TOKA" get_settings '{}')
 check "set_setting changes a setting the hub has no flag for, and get_settings reads it back" 'echo "$ss_m" | grep -q "\"isError\":false" && echo "$gs_m" | grep -qE "work\.retention\.journal_days[^0-9a-z]+30[^0-9]"' "${ss_m:0:300} / ${gs_m:0:300}"
 ss_x=$(tool "$PA" "$PUB" "$TOKA" set_setting '{"key":"mcp.confirm_destructive","value":false}')
 check "set_setting refuses a key another subsystem owns" 'echo "$ss_x" | grep -q E_INVALID' "${ss_x:0:400}"
-ss_c=$(tool "$PA" "$PUB" "$CTOK" set_setting '{"key":"gc.enabled","value":true}')
+ss_c=$(tool "$PA" "$PUB" "$CTOK" set_setting '{"key":"work.recent_days","value":5}')
 gs_c=$(tool "$PA" "$PUB" "$CTOK" get_settings '{}')
-check "a client is refused set_setting and get_settings" 'echo "$ss_c" | grep -q E_FORBIDDEN && echo "$gs_c" | grep -q E_FORBIDDEN' "${ss_c:0:300} / ${gs_c:0:300}"
+check "an untrusted device reads the settings but is refused a write, told to be trusted" 'echo "$ss_c" | grep -q E_FORBIDDEN && echo "$ss_c" | grep -q "client trust" && echo "$gs_c" | grep -q "\"isError\":false" && echo "$gs_c" | grep -q "work.recent_days"' "${ss_c:0:300} / ${gs_c:0:300}"
+sp_c=$(tool "$PA" "$PUB" "$CTOK" set_setting '{"key":"work.recent_days","value":5,"propose":true,"why":"e2e"}')
+pp_c=$(tool "$PA" "$PUB" "$CTOK" setting_proposals '{}')
+check "the device proposes instead, and sees its proposal with can_write false" 'echo "$sp_c" | grep -q "\"isError\":false" && echo "$pp_c" | grep -q "can_write.*false" && echo "$pp_c" | grep -q "work.recent_days"' "${sp_c:0:300} / ${pp_c:0:300}"
+pp_m=$(tool "$PA" "$PUB" "$TOKA" setting_proposals '{}')
+check "the review tools are the device's: the master uses fleet-hub settings" 'echo "$pp_m" | grep -q E_FORBIDDEN' "${pp_m:0:300}"
 
 # --- GET /events -------------------------------------------------------------
 # One request, captured once: a second one inside AUTH_FAIL_INTERVAL would be

@@ -68,7 +68,7 @@ describe('tracker attention items (pure)', () => {
     const items = trackerAttentionItems(rollup());
     expect(items.map((i) => i.key)).toEqual(['tracker-2', 'tracker-4']);
     expect(items.map((i) => i.label)).toEqual(['Reconnect Jira (acme)', 'Reconnect ops (Linear)']);
-    expect(items.every((i) => i.section === 'work')).toBe(true);
+    expect(items.every((i) => i.section === 'settings.trackers')).toBe(true);
   });
 
   it('carries the unfenced error, the failures in a row and the org in its detail', () => {
@@ -123,7 +123,7 @@ describe('tracker attention items (pure)', () => {
     expect(items.map((i) => i.key)).toEqual(['tracker-7', 'tracker-9']);
     expect(items[0].label).toBe('Sync skipping items — Jira (acme)');
     expect(items[0].label).not.toContain('Reconnect');
-    expect(items[0].section).toBe('work');
+    expect(items[0].section).toBe('settings.trackers');
     expect(items[0].detail).toContain('2 items skipped');
     expect(items[0].detail).toContain('3 passes in a row');
     expect(items[0].detail).toContain('UNIQUE constraint failed');
@@ -185,7 +185,7 @@ describe('TrackerAttention', () => {
     expect(items[0].getAttribute('title')).toContain('token has expired');
     await fireEvent.click(items[0]);
     expect(get(settingsOpen)).toBe(true);
-    expect(get(settingsSection)).toBe('work');
+    expect(get(settingsSection)).toBe('settings.trackers');
   });
 
   it('renders a skipping tracker with its own wording and opens Settings → Work', async () => {
@@ -200,7 +200,7 @@ describe('TrackerAttention', () => {
     const [item] = screen.getAllByTestId('tracker-attention-item');
     expect(item.textContent?.trim()).toBe('⚠ Sync skipping items — Jira (acme) →');
     await fireEvent.click(item);
-    expect(get(settingsSection)).toBe('work');
+    expect(get(settingsSection)).toBe('settings.trackers');
   });
 
   it('renders nothing while every tracker is ok or degraded', async () => {

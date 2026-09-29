@@ -110,8 +110,15 @@ tmp="$dest.part.$$"
 # Whole lines only: a Claude still appending (a fork mid-turn) leaves an
 # unterminated last line, which copied would be broken JSON.
 n=$(wc -l < "$f") || exit 1
-LC_ALL=C awk -v anchor="$anchor" -v oldid={id_q} -v newid="$newid" \
-    -v oldcwd="$oldcwd" -v newcwd="$newcwd" -v n="$n" '
+# The values reach awk through the ENVIRONMENT, never `-v`: `-v` processes
+# backslash escapes, so a JSON-escaped cwd (`\"`, `\\`) would come out
+# unescaped and the rewritten line would be broken JSON.
+CF_ANCHOR="$anchor" CF_OLDID={id_q} CF_NEWID="$newid" \
+CF_OLDCWD="$oldcwd" CF_NEWCWD="$newcwd" LC_ALL=C awk -v n="$n" '
+BEGIN {{
+  anchor = ENVIRON["CF_ANCHOR"]; oldid = ENVIRON["CF_OLDID"]; newid = ENVIRON["CF_NEWID"]
+  oldcwd = ENVIRON["CF_OLDCWD"]; newcwd = ENVIRON["CF_NEWCWD"]
+}}
 NR > n + 0 {{ exit }}
 function rep(s, from, to,    out, p) {{
   if (from == "") return s
@@ -148,10 +155,25 @@ function top_uuid_is(s, want,    n, i, c, depth, instr, esc, j) {{
   }}
   return 0
 }}
+# The body of the first `"cwd":"…"` on the line, still JSON-escaped, read up
+# to the first UNESCAPED quote (a `[^"]*` match would stop at a `\"`). The
+# compact key can only be structural: inside a string its quotes are escaped.
+function cwd_of(s,    p, i, n, c, esc) {{
+  p = index(s, "\"cwd\":\"")
+  if (p == 0) return ""
+  n = length(s); esc = 0
+  for (i = p + 7; i <= n; i++) {{
+    c = substr(s, i, 1)
+    if (esc) esc = 0
+    else if (c == "\\") esc = 1
+    else if (c == "\"") return substr(s, p + 7, i - p - 7)
+  }}
+  return ""
+}}
 anchor != "" && index($0, anchor) > 0 && top_uuid_is($0, anchor) {{ found = 1; exit }}
 {{
   line = rep($0, "\"sessionId\":\"" oldid "\"", "\"sessionId\":\"" newid "\"")
-  if (newcwd != "" && oldcwd == "" && match(line, /"cwd":"[^"]*"/)) oldcwd = substr(line, RSTART + 7, RLENGTH - 8)
+  if (newcwd != "" && oldcwd == "") oldcwd = cwd_of(line)
   if (newcwd != "" && oldcwd != "") {{
     line = rep(line, "\"cwd\":\"" oldcwd "\"", "\"cwd\":\"" newcwd "\"")
     line = rep(line, "\"cwd\":\"" oldcwd "/", "\"cwd\":\"" newcwd "/")
@@ -204,6 +226,13 @@ async fn run_shell(
 /// pair, so the cleanup after a failure can never remove someone's own.
 pub const WT_EXISTS: &str = "__CF_WT_EXISTS__";
 
+/// Sentinel [`fork_worktree_script`] prints (exit 7) when the host's git
+/// refuses the name as a branch (`git check-ref-format --branch`) — checked
+/// before anything is created, so the caller gets `E_INVALID`, not raw git
+/// stderr. [`crate::validate::branch_name`] refuses the same names up front;
+/// this is the host's git having the last word.
+pub const BAD_BRANCH: &str = "__CF_BAD_BRANCH__";
+
 /// The bash script that creates a fork's NEW worktree, before anything else
 /// happens (see `RewindArgs::new_worktree`).
 ///
@@ -214,8 +243,9 @@ pub const WT_EXISTS: &str = "__CF_WT_EXISTS__";
 /// first entry of `git worktree list`, the main checkout, so the new tree is
 /// never nested inside the source's). The directory convention is
 /// `new_session`'s own ([`crate::service::sessions::WORKTREE_BASE_SNIPPET`]).
-/// Unlike `worktree_add_script` it never adopts an existing directory or
-/// branch: either one exits 6 with [`WT_EXISTS`]. The only stdout is the
+/// A name the host's git refuses as a branch exits 7 with [`BAD_BRANCH`]
+/// before anything else runs. Unlike `worktree_add_script` it never adopts
+/// an existing directory or branch: either one exits 6 with [`WT_EXISTS`]. The only stdout is the
 /// new tree's physical path (`pwd -P`) — the cwd Claude Code will see.
 pub fn fork_worktree_script(src_tmux: Option<&str>, src_dir: Option<&str>, name: &str) -> String {
     let tmux_q = quote(src_tmux.unwrap_or(""));
@@ -223,6 +253,10 @@ pub fn fork_worktree_script(src_tmux: Option<&str>, src_dir: Option<&str>, name:
     format!(
         r#"set -e
 name={name_q}
+if ! git check-ref-format --branch "$name" >/dev/null 2>&1 || [ "$name" = @ ]; then
+  printf '{BAD_BRANCH} %s\n' "$name" >&2
+  exit 7
+fi
 src=''
 if [ -n {tmux_q} ]; then
   src=$(tmux display-message -p -t {target_q} '#{{pane_current_path}}' 2>/dev/null) || src=''
@@ -259,7 +293,7 @@ wt={path_q}
 name={name_q}
 phys=$(cd -- "$wt" 2>/dev/null && pwd -P || printf '%s' "$wt")
 if tmux list-panes -a -F '#{{pane_current_path}}' 2>/dev/null \
-  | awk -v a="$wt" -v b="$phys" '$0==a || $0==b || index($0, a "/")==1 || index($0, b "/")==1 {{ f=1 }} END {{ exit !f }}'; then
+  | CF_A="$wt" CF_B="$phys" awk 'BEGIN {{ a = ENVIRON["CF_A"]; b = ENVIRON["CF_B"] }} $0==a || $0==b || index($0, a "/")==1 || index($0, b "/")==1 {{ f=1 }} END {{ exit !f }}'; then
   printf '{TREE_IN_USE} %s\n' "$wt" >&2
   exit 3
 fi
@@ -420,6 +454,12 @@ impl ReplyOps for LiveOps<'_> {
         .await?;
         let stderr = String::from_utf8_lossy(&out.stderr);
         if !out.status.success() {
+            if stderr.contains(BAD_BRANCH) {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!("{name:?} is not a valid branch name"),
+                ));
+            }
             if stderr.contains(WT_EXISTS) {
                 return Err(IpcError::new(
                     codes::E_CONFLICT,
@@ -2421,6 +2461,66 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    /// A cwd with a quote and a backslash, old AND new, through the REAL
+    /// awk: the new value reaches awk verbatim (the environment, not `-v`,
+    /// which would unescape `\"` and `\\`), and the old value guessed from
+    /// the line is read past its escaped quote. Every copied line must stay
+    /// JSON and name exactly the new tree.
+    #[cfg(unix)]
+    #[test]
+    fn a_cwd_with_a_quote_and_a_backslash_stays_valid_json() {
+        let d = tmp();
+        let old_cwd = r#"/src/a"b\c"#;
+        let new_cwd = r#"/r/.worktrees/x"y\z"#;
+        let line = |uuid: &str, cwd: &str| {
+            serde_json::json!({"type": "user", "uuid": uuid, "sessionId": OLD, "cwd": cwd})
+                .to_string()
+        };
+        let body = format!(
+            "{}\n{}\n{}\n",
+            line(A1, old_cwd),
+            line("bbbb", &format!("{old_cwd}/sub")),
+            line("cccc", old_cwd)
+        );
+        let src = d.join(format!("{OLD}.jsonl"));
+        std::fs::write(&src, body).unwrap();
+        let dest = d.join("dest");
+        let out = run(&rewind_script(
+            None,
+            Some(src.to_str().unwrap()),
+            None,
+            OLD,
+            NEW,
+            None,
+            Some(dest.to_str().unwrap()),
+            Some(("", &json_string_body(new_cwd))),
+        ));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let written = std::fs::read_to_string(dest.join(format!("{NEW}.jsonl"))).unwrap();
+        let cwds: Vec<String> = written
+            .lines()
+            .map(|l| {
+                let v: serde_json::Value =
+                    serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}"));
+                assert_eq!(v["sessionId"], NEW);
+                v["cwd"].as_str().unwrap().to_string()
+            })
+            .collect();
+        assert_eq!(
+            cwds,
+            [
+                new_cwd.to_string(),
+                format!("{new_cwd}/sub"),
+                new_cwd.to_string()
+            ]
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
     #[test]
     fn a_path_is_json_escaped_for_the_transcript() {
         assert_eq!(json_string_body("/a/b"), "/a/b");
@@ -2537,6 +2637,43 @@ mod tests {
         std::fs::remove_dir_all(&d).ok();
     }
 
+    /// A name git refuses as a branch is refused before anything is
+    /// created, with the sentinel the caller maps to `E_INVALID` — not raw
+    /// git stderr, and never `WT_EXISTS` (`.` is the repo root's own name).
+    #[cfg(unix)]
+    #[test]
+    fn the_fork_worktree_script_refuses_a_name_git_would() {
+        let d = tmp();
+        let repo = d.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "set -e; cd {}; git init -q -b main; git -c user.email=a@b -c user.name=a \
+                 -c commit.gpgsign=false commit -q --allow-empty -m one",
+                quote(repo.to_str().unwrap())
+            ))
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        for bad in ["x.lock", "a:b", "@", "a/", "a.", "."] {
+            let out = run(&fork_worktree_script(
+                None,
+                Some(repo.to_str().unwrap()),
+                bad,
+            ));
+            assert_eq!(out.status.code(), Some(7), "{bad:?}");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(stderr.contains(BAD_BRANCH), "{bad:?}: {stderr}");
+            assert!(
+                !repo.join(".worktrees").exists(),
+                "{bad:?}: nothing created"
+            );
+            assert!(crate::validate::branch_name(bad).is_err(), "{bad:?}");
+        }
+        std::fs::remove_dir_all(&d).ok();
+    }
+
     /// The removal script refuses a tree a live tmux pane is working in
     /// (below its root too) and leaves tree and branch; with no pane there
     /// it removes both. Skipped where tmux is not installed.
@@ -2568,43 +2705,45 @@ mod tests {
                 .unwrap()
         };
         let r = quote(repo.to_str().unwrap());
-        let wt = repo.join("wt-live");
-        let w = quote(wt.to_str().unwrap());
-        let setup = sh(&format!(
+        let init = sh(&format!(
             "set -e; cd {r}; git init -q; git -c user.email=a@b -c user.name=a \
-             commit -q --allow-empty -m init; git worktree add -q {w} -b fork-live; \
-             mkdir -p {w}/sub; tmux new-session -d -s live -c {w}/sub 'sleep 60'"
+             commit -q --allow-empty -m init"
         ));
-        assert!(
-            setup.status.success(),
-            "{}",
-            String::from_utf8_lossy(&setup.stderr)
-        );
+        assert!(init.status.success());
+        // A backslash in the path too: awk's `-v` would read `\l` as an
+        // escape and the live pane would go unseen.
+        for (dir, branch) in [("wt-live", "fork-live"), (r"wt-li\ve", "fork-live2")] {
+            let wt = repo.join(dir);
+            let w = quote(wt.to_str().unwrap());
+            let setup = sh(&format!(
+                "set -e; cd {r}; git worktree add -q {w} -b {branch}; \
+                 mkdir -p {w}/sub; tmux new-session -d -s live -c {w}/sub 'sleep 60'"
+            ));
+            assert!(
+                setup.status.success(),
+                "{}",
+                String::from_utf8_lossy(&setup.stderr)
+            );
 
-        let rm = sh(&remove_fork_worktree_script(
-            wt.to_str().unwrap(),
-            "fork-live",
-        ));
-        assert_eq!(
-            rm.status.code(),
-            Some(3),
-            "{}",
-            String::from_utf8_lossy(&rm.stderr)
-        );
-        assert!(String::from_utf8_lossy(&rm.stderr).contains(TREE_IN_USE));
-        assert!(wt.exists(), "the tree stays");
+            let rm = sh(&remove_fork_worktree_script(wt.to_str().unwrap(), branch));
+            assert_eq!(
+                rm.status.code(),
+                Some(3),
+                "{dir}: {}",
+                String::from_utf8_lossy(&rm.stderr)
+            );
+            assert!(String::from_utf8_lossy(&rm.stderr).contains(TREE_IN_USE));
+            assert!(wt.exists(), "{dir}: the tree stays");
 
-        sh("tmux kill-server");
-        let rm = sh(&remove_fork_worktree_script(
-            wt.to_str().unwrap(),
-            "fork-live",
-        ));
-        assert!(
-            rm.status.success(),
-            "{}",
-            String::from_utf8_lossy(&rm.stderr)
-        );
-        assert!(!wt.exists(), "no pane: the tree goes");
+            sh("tmux kill-server");
+            let rm = sh(&remove_fork_worktree_script(wt.to_str().unwrap(), branch));
+            assert!(
+                rm.status.success(),
+                "{}",
+                String::from_utf8_lossy(&rm.stderr)
+            );
+            assert!(!wt.exists(), "{dir}: no pane: the tree goes");
+        }
         std::fs::remove_dir_all(&d).ok();
     }
 }

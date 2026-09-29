@@ -15,11 +15,15 @@
   import { openSettingsAt } from './app_views';
   import { hubStatus } from './hub';
   import { refreshTrackersHealth, trackerAttentionItems, trackersHealth } from './tracker_health';
+  import { decideAttentionItem, decideHealth } from './decide_health';
 
   /** Tracker health moves on the sync's scale (minutes). */
   const REFRESH_MS = 60_000;
 
   const items = $derived(trackerAttentionItems($trackersHealth));
+  // The Jev envelope's calls failing (test map §7) rides the same strip and
+  // the same read: one item, to Settings → Decisions (Jev).
+  const jev = $derived(decideAttentionItem($decideHealth));
 
   onMount(() => {
     const t = setInterval(() => {
@@ -30,8 +34,18 @@
   });
 </script>
 
-{#if items.length > 0}
+{#if items.length > 0 || jev}
   <div class="trackers" data-testid="tracker-attention">
+    {#if jev}
+      <button
+        class="pill hot"
+        data-testid="decide-attention-item"
+        title={jev.detail}
+        onclick={() => openSettingsAt(jev.section)}
+      >
+        ⚠ {jev.label} →
+      </button>
+    {/if}
     {#each items as it (it.key)}
       <button
         class="pill hot"
