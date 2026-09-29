@@ -23,6 +23,7 @@ import {
   showTaskInWorkView,
   taskDetailOpen,
   workExpanded,
+  workLayout,
   workViewFilters,
   type WorkTreeFilters,
   type WorkTreePage,
@@ -103,6 +104,8 @@ describe('WorkTree', () => {
     selectedTaskId.set(null);
     taskDetailOpen.set(false);
     revealTaskRequest.set(null);
+    // These cases test the org → group tree (Grouped); List is `TaskList`.
+    workLayout.set('grouped');
     sessions.set([session('mefistos', 'api', { id: 7 }), session('mefistos', 'web', { id: 9 })]);
     treeImpl = (a) => {
       if (a.filters?.group === 'label:Payments') {
@@ -606,5 +609,41 @@ describe('WorkTree', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('defaults to List and shows the grouped tree on Grouped', async () => {
+    workLayout.set('list');
+    render(WorkTree);
+    await flush();
+    expect(screen.getByTestId('task-list')).toBeTruthy();
+    // One read (the list's, archived on); the header still has its filters.
+    expect(treeCalls()).toHaveLength(1);
+    expect(treeCalls()[0].filters?.archived).toBe(true);
+    expect(screen.getByTestId('work-tab-review').textContent).toContain('4');
+    expect(screen.getByTestId('work-layout-list').getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(screen.getByTestId('work-layout-grouped'));
+    await flush();
+    expect(screen.queryByTestId('task-list')).toBeNull();
+    expect(screen.getAllByTestId('work-org').length).toBeGreaterThan(0);
+    expect(get(workLayout)).toBe('grouped');
+  });
+
+  it('"Show in Work view" from List switches to Grouped and reveals the task', async () => {
+    workLayout.set('list');
+    vi.mocked(invoke).mockImplementation(async (cmd: string, raw?: unknown) => {
+      const a = (raw as Args | undefined)?.args ?? {};
+      if (cmd === 'work_task') return { task: task({ task_id: 'item:31', group: PAY, org_id: 1 }), rules: [] };
+      if (cmd === 'work_tree') return treeImpl(a);
+      if (cmd === 'work_review') return { items: [], total: 0, next_cursor: null };
+      return [];
+    });
+    render(WorkTree);
+    await flush();
+    showTaskInWorkView('item:31');
+    await flush();
+    await flush();
+    expect(get(workLayout)).toBe('grouped');
+    expect(screen.getByText('Receipts')).toBeTruthy();
+    expect(get(revealTaskRequest)).toBeNull();
   });
 });
