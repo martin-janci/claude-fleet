@@ -16,6 +16,7 @@ import {
   groupItems,
   toolName,
   toolGroupLabel,
+  toolGroupParts,
   isLongPrompt,
   transcriptCarries,
   splitMarker,
@@ -52,7 +53,6 @@ import {
   toolDurationMs,
   doingNow,
   hasPendingCall,
-  editDiffLines,
   transcriptBackground,
   fleetBackground,
   type Conversation,
@@ -305,6 +305,8 @@ describe('toolName / toolGroupLabel', () => {
     expect(toolGroupLabel([l('Read(a)'), l('Read(b)'), l('Bash(x)')])).toBe('3 tool calls · Read, Bash');
     expect(toolGroupLabel([l('A()'), l('B()'), l('C()'), l('D()'), l('A()')])).toBe('5 tool calls · A, B, C +1');
     expect(toolGroupLabel([l('Bash(x)', true), l('Bash(y)'), l('Read(z)', true)])).toBe('3 tool calls · Bash, Read · 2 failed');
+    expect(toolGroupParts([l('Bash(x)', true), l('Read(z)')])).toEqual({ main: '2 tool calls · Bash, Read', failed: '1 failed' });
+    expect(toolGroupParts([l('Bash(x)')]).failed).toBeNull();
   });
 
   it('prefers the structured name over parsing the summary when present', () => {
@@ -684,12 +686,6 @@ describe('tool helpers', () => {
     expect(doingNow(cut, true, 0)).toBeNull();
     const sub = { ...c, turns: [{ ...c.turns[0], items: [{ kind: 'subagent', id: 's', name: 'Task', agent_type: 'Explore', description: 'Map it', result: null, error: false, at: null, ended_at: null, done: false }] }] } as Conversation;
     expect(doingNow(sub, true, 0)).toEqual({ label: 'Explore · Map it', sinceMs: null });
-  });
-  it('edit diff keeps shared context and marks changes', () => {
-    expect(editDiffLines('a\nb\nc', 'a\nB\nc')).toEqual([
-      { kind: 'ctx', text: 'a' }, { kind: 'del', text: 'b' }, { kind: 'add', text: 'B' }, { kind: 'ctx', text: 'c' },
-    ]);
-    expect(editDiffLines('', 'new')).toEqual([{ kind: 'add', text: 'new' }]);
   });
 });
 

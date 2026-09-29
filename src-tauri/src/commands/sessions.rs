@@ -451,27 +451,7 @@ pub async fn session_tool_detail(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<fleet_core::service::transcript::ToolDetail, IpcError> {
-    // The session id is the hub's and the transcript lives on the hub's
-    // hosts; with no hub tool to ask, a local read would look up the wrong
-    // row over this machine's SSH keys.
-    backend.refuse_local_only("session_tool_detail")?;
-    let row = {
-        let s = lock(&store)?;
-        s.get_session_by_id(args.session_id)?.ok_or_else(|| {
-            IpcError::new(
-                codes::E_NOTFOUND,
-                format!("session {} not found", args.session_id),
-            )
-        })?
-    };
-    fleet_core::service::transcript::fetch_tool_detail(
-        &store,
-        &ssh,
-        &row,
-        args.claude_session_id.as_deref(),
-        &args.tool_use_id,
-    )
-    .await
+    routed::session_tool_detail(&backend, args, &store, &ssh).await
 }
 
 // ── Activity probe (live indicator) ─────────────────────────────────────────
@@ -791,6 +771,43 @@ pub(crate) mod routed {
             turns,
             max_chars,
             transcript::CONV_EVENTS_LIMIT_UI,
+        )
+        .await
+    }
+
+    /// The session id is the hub's and the transcript lives on the hub's
+    /// hosts, so a hub client asks the hub's tool; `claude_session_id` goes
+    /// over only when set.
+    pub async fn session_tool_detail(
+        backend: &FleetBackend,
+        args: SessionToolDetailArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<fleet_core::service::transcript::ToolDetail, IpcError> {
+        if let Some(hub) = backend.hub() {
+            return hub
+                .session_tool_detail(
+                    args.session_id,
+                    &args.tool_use_id,
+                    args.claude_session_id.as_deref(),
+                )
+                .await;
+        }
+        let row = {
+            let s = lock(store)?;
+            s.get_session_by_id(args.session_id)?.ok_or_else(|| {
+                IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("session {} not found", args.session_id),
+                )
+            })?
+        };
+        fleet_core::service::transcript::fetch_tool_detail(
+            store,
+            ssh,
+            &row,
+            args.claude_session_id.as_deref(),
+            &args.tool_use_id,
         )
         .await
     }

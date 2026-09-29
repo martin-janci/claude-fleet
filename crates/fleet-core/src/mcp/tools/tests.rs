@@ -87,6 +87,7 @@ fn readonly_token_is_refused_mutating_tools_and_allowed_reads() {
         "wait_for_session",
         "session_transcript",
         "session_conversation",
+        "session_tool_detail",
         "wait_for_task",
         "list_tasks",
         "work",
@@ -2148,7 +2149,7 @@ fn capture_default_cap_matches_docs() {
 /// `list_peer_links`: 86; `get_settings` / `set_setting`: 88; `quick_replies`:
 /// 89; `rewind_conversation`: 90; `add_project` / `list_github_repos`: 92;
 /// `catalog_admin`, and host identity & health's `merge_host` and
-/// `forget_project`: 95; `update_status` / `update_admin`: 97.)
+/// `forget_project`: 95; `update_status` / `update_admin`: 97; `session_tool_detail`: 98.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -2170,7 +2171,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 97);
+    assert_eq!(served, 98);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3394,10 +3395,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// measured apart never cover the merged surface, so a merge that trips
     /// this re-measures. The why of each raise belongs in its commit
     /// message (`git log -L` on this constant), not here: a log in this
-    /// comment conflicted on every merge. Measured at 66,115 on 2026-09-28
-    /// (the second gap review's `quick_replies` `expected` and the `work`
-    /// tree's `archived` over update S4a and plan B's host identity).
-    const BUDGET_BYTES: usize = 66_215;
+    /// comment conflicted on every merge. Measured at 66,782 on 2026-09-29
+    /// (`session_tool_detail`, the phone's expanded tool rows).
+    const BUDGET_BYTES: usize = 66_882;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

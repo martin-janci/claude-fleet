@@ -296,12 +296,18 @@ export function toolName(summary: string): string {
 /** `"7 tool calls · Bash, Read, Edit +2"` for a folded group, with
  *  `" · 1 failed"` appended when any call errored. */
 export function toolGroupLabel(tools: ToolLine[]): string {
+  const { main, failed } = toolGroupParts(tools);
+  return failed ? `${main} · ${failed}` : main;
+}
+
+/** {@link toolGroupLabel} in its two parts, so the header can colour only
+ *  the failure count rather than the whole line. */
+export function toolGroupParts(tools: ToolLine[]): { main: string; failed: string | null } {
   const names = [...new Set(tools.map((t) => t.name || toolName(t.summary)))];
   const shown = names.slice(0, 3).join(', ');
   const more = names.length > 3 ? ` +${names.length - 3}` : '';
   const failed = tools.filter((t) => t.error).length;
-  const suffix = failed > 0 ? ` · ${failed} failed` : '';
-  return `${tools.length} tool calls · ${shown}${more}${suffix}`;
+  return { main: `${tools.length} tool calls · ${shown}${more}`, failed: failed > 0 ? `${failed} failed` : null };
 }
 
 // ─── Background work: notifications (spec §"Frontend — the thread") ─────────
@@ -675,31 +681,6 @@ export function doingNow(conv: Conversation | null, working: boolean, nowMs: num
 export function hasPendingCall(conv: Conversation | null): boolean {
   if (!conv || conv.turns.length === 0) return false;
   return conv.turns[conv.turns.length - 1].items.some((it) => (it.kind === 'tool' || it.kind === 'subagent') && !it.done);
-}
-
-export interface DiffLine {
-  kind: 'del' | 'add' | 'ctx';
-  text: string;
-}
-
-/** Context lines kept on each side of an edit's changed block. */
-const DIFF_CONTEXT = 2;
-
-/** A line diff of an edit: the shared leading / trailing lines as context
- *  (at most two each side), the changed middle as deletions then additions. */
-export function editDiffLines(old: string, next: string): DiffLine[] {
-  const a = old === '' ? [] : old.split('\n');
-  const b = next === '' ? [] : next.split('\n');
-  let pre = 0;
-  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
-  let suf = 0;
-  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
-  const out: DiffLine[] = [];
-  for (const text of a.slice(Math.max(0, pre - DIFF_CONTEXT), pre)) out.push({ kind: 'ctx', text });
-  for (const text of a.slice(pre, a.length - suf)) out.push({ kind: 'del', text });
-  for (const text of b.slice(pre, b.length - suf)) out.push({ kind: 'add', text });
-  for (const text of a.slice(a.length - suf, a.length - suf + DIFF_CONTEXT)) out.push({ kind: 'ctx', text });
-  return out;
 }
 
 /** Prompts longer than this are clamped behind "Show more". */

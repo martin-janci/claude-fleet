@@ -541,6 +541,14 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Lifecycle,
     },
+    // One tool call's input and result, grepped from the same transcript.
+    ToolPolicy {
+        name: "session_tool_detail",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
     ToolPolicy {
         name: "run_prompt",
         access: Access::Client,
@@ -1690,6 +1698,7 @@ mod tests {
             "wait_for_session",
             "session_transcript",
             "session_conversation",
+            "session_tool_detail",
             "wait_for_task",
             "list_tasks",
         ] {

@@ -368,8 +368,9 @@ Index by area (names only; see the reference for details):
   next `apply_sync` writes to its filesystem, the same reasoning as
   `apply_sync` and `set_secret`).
 - **Orchestration** — `wait_for_session`, `session_transcript`,
-  `session_conversation`, `run_prompt`, `dispatch_task`, `wait_for_task`,
-  `list_tasks`, `cancel_task`, `set_session_tags`.
+  `session_conversation`, `session_tool_detail`, `run_prompt`,
+  `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
+  `set_session_tags`.
 - **Work** — `work` (read: `{session_id}` → that session's live work links,
   primary first; `{key}` → ended links to the key, each with the snapshot of
   the session that did it), `work_link` (`{session_id, action}`: `link` a key
@@ -987,7 +988,12 @@ ended_at, items: [{ kind: "text", text } | { kind: "tool", summary, error }] }],
 truncated }` — the same shape the desktop's Conversation tab renders, for a
 client that wants the exchange's structure rather than one flat blob.
 `turns` defaults to 10 and is capped at 100; the character budget scales with
-it. Same errors as `session_transcript`. `run_prompt { session_id, prompt, timeout_s?, max_chars?,
+it. Same errors as `session_transcript`. `session_tool_detail { session_id,
+tool_use_id, claude_session_id? }` returns what a tool item leaves out —
+one call's input and result, `{ id, name, input, edit, command, result,
+is_error }` (`edit` is `{ file_path, old, new }` for Edit / MultiEdit /
+Write), each text capped at 8 000 chars; the phone and a hub-paired desktop
+read it when a tool row is expanded. Readonly, like `session_conversation`. `run_prompt { session_id, prompt, timeout_s?, max_chars?,
 raw? }` composes the three: deliver, wait for `turn_seq` to grow, return
 `{ turn_seq, status, transcript }`. It refuses (`E_INVALID_STATE`) a session that is not between turns (`claude_status` idle, completed or stopped): mid-turn, the previous turn's `Stop` would satisfy the wait and return the old reply.
 

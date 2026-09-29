@@ -859,6 +859,22 @@ impl HubBackend {
         self.route("session_conversation", &args).await
     }
 
+    /// `commands::sessions::session_tool_detail` — one tool call's input and
+    /// result, grepped from the transcript on the hub's host.
+    /// `claude_session_id` is sent only when set, like `session_conversation`.
+    pub async fn session_tool_detail(
+        &self,
+        session_id: i64,
+        tool_use_id: &str,
+        claude_session_id: Option<&str>,
+    ) -> Result<fleet_core::service::transcript::ToolDetail, IpcError> {
+        let mut args = json!({ "session_id": session_id, "tool_use_id": tool_use_id });
+        if let Some(id) = claude_session_id {
+            args["claude_session_id"] = json!(id);
+        }
+        self.route("session_tool_detail", &args).await
+    }
+
     /// `commands::sessions::session_activity` — one pane probe for the
     /// Conversation tab's live indicator, read over the hub's own ssh.
     pub async fn session_activity(
