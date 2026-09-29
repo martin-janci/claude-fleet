@@ -243,6 +243,97 @@ fn custom_items_are_capped() {
     assert!(messages(&[p]).contains("over the cap of 3"));
 }
 
+// ── L8: embed pages and account usage ──
+
+fn embed(id: &str, slot: &str, view: &str) -> Page {
+    page(json!({
+        "spec": "fleet.page/1", "id": id, "title": "E", "layout": "embed", "slot": slot,
+        "sections": [{ "title": "S", "items": [
+            { "type": "account_usage", "source": { "id": "accounts.usage" }, "view": view }
+        ] }]
+    }))
+}
+
+#[test]
+fn an_embed_page_fills_one_slot_with_the_views_it_takes() {
+    assert_eq!(messages(&[embed("e.a", "host_detail", "block")]), "");
+    let got = messages(&[embed("e.a", "new_session_chip", "block")]);
+    assert!(
+        got.contains("slot takes [Chip], not the Block view"),
+        "{got}"
+    );
+    let got = messages(&[
+        embed("e.a", "status_footer", "footer"),
+        embed("e.b", "status_footer", "footer"),
+    ]);
+    assert!(
+        got.contains("e.a already fills the StatusFooter slot"),
+        "{got}"
+    );
+
+    let no_slot = page(json!({
+        "spec": "fleet.page/1", "id": "e", "title": "E", "layout": "embed",
+        "sections": [{ "title": "S", "items": [
+            { "type": "account_usage", "source": { "id": "accounts.usage" }, "view": "block" }
+        ] }]
+    }));
+    assert!(messages(&[no_slot]).contains("an embed page names its slot"));
+    let slotted_category = page(json!({
+        "spec": "fleet.page/1", "id": "t", "title": "T", "layout": "category", "slot": "host_detail",
+        "sections": [{ "title": "S", "items": [{ "type": "notice", "tone": "info", "text": "x" }] }]
+    }));
+    assert!(messages(&[slotted_category]).contains("only an embed page names a slot"));
+    let mut parented = embed("e.a", "host_detail", "block");
+    parented.parent = Some("settings".into());
+    let linker = category(json!([{ "type": "link", "page": "e.a" }]));
+    let got = messages(&[
+        parented,
+        linker,
+        compiled_pages()
+            .into_iter()
+            .find(|p| p.id == "settings")
+            .unwrap(),
+    ]);
+    assert!(got.contains("not the page tree: no parent"), "{got}");
+    assert!(
+        got.contains("is an embed page: nothing links to it"),
+        "{got}"
+    );
+}
+
+#[test]
+fn account_usage_takes_only_an_account_usage_source_and_a_page_shows_blocks() {
+    let p = page(json!({
+        "spec": "fleet.page/1", "id": "t", "title": "T", "layout": "data_page",
+        "sections": [{ "title": "S", "items": [
+            { "type": "account_usage", "source": { "id": "accounts.usage" }, "view": "block" },
+            { "type": "account_usage", "source": { "id": "accounts.usage" }, "view": "chip" },
+            { "type": "account_usage", "source": { "id": "usage.total" }, "view": "block" },
+            { "type": "table", "source": { "id": "accounts.usage" } }
+        ] }]
+    }));
+    let got = messages(&[p]);
+    assert!(got.contains("the Chip view belongs in a slot"), "{got}");
+    assert!(
+        got.contains("account_usage shows account usage, not record"),
+        "{got}"
+    );
+    assert!(
+        got.contains("a table shows rows, not account_usage"),
+        "{got}"
+    );
+    assert!(!got.contains("item 1"), "the block is fine: {got}");
+}
+
+#[test]
+fn embeds_stay_out_of_list_pages() {
+    assert!(super::bundle().pages.iter().all(|p| p.slot.is_none()));
+    assert_eq!(
+        super::embeds().count() + super::navigable().len(),
+        super::all().len()
+    );
+}
+
 fn data_page(filters: Value, items: Value) -> Page {
     page(json!({
         "spec": "fleet.page/1", "id": "t", "title": "T", "layout": "data_page",
@@ -440,6 +531,22 @@ fn render_catalog() -> String {
         "sources": SOURCES,
         "resources": super::resources::RESOURCES,
         "actions": super::actions::PAGE_ACTIONS,
+        "slots": catalog::SLOTS
+            .iter()
+            .map(|s| json!({ "id": s, "views": catalog::slot_views(*s) }))
+            .collect::<Vec<_>>(),
+        "page_usage_views": catalog::PAGE_USAGE_VIEWS,
+    });
+    serde_json::to_string_pretty(&v).unwrap() + "\n"
+}
+
+/// The desktop's embed pages (declarative pages L8): what its own screens
+/// place in their slots. Production code reads it, so a slot draws on the
+/// first frame without waiting on `list_pages`, which never carries them.
+fn render_embeds() -> String {
+    let v = json!({
+        "_generated": "from crates/fleet-core/pages (layout embed); regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
+        "pages": super::embeds().collect::<Vec<_>>(),
     });
     serde_json::to_string_pretty(&v).unwrap() + "\n"
 }
@@ -456,7 +563,7 @@ fn render_frontend_fixture() -> String {
     let s = crate::store::Store::open_in_memory().unwrap();
     let v = json!({
         "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
-        "pages": super::all(),
+        "pages": super::navigable(),
         "sources": SOURCES,
         "resources": super::resources::RESOURCES,
         "actions": super::actions::PAGE_ACTIONS,
@@ -476,6 +583,7 @@ fn page_docs_are_current() {
             "src/lib/pages/registry.generated.json",
             render_frontend_fixture(),
         ),
+        ("src/lib/pages/embeds.generated.json", render_embeds()),
     ] {
         let path = repo_path(rel);
         if regen {
@@ -509,7 +617,8 @@ fn the_catalog_names_what_the_validator_accepts() {
             "master_detail",
             "cards",
             "review_apply",
-            "data_page"
+            "data_page",
+            "embed"
         ]
     );
     assert_eq!(

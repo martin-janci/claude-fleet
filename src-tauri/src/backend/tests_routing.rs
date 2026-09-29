@@ -4322,6 +4322,22 @@ fn resource_commands_exist() {
             "a resource names `{cmd}`, which has no hub verdict"
         );
     }
+    // A live data source is loaded by a desktop command too.
+    for live in fleet_core::pages::sources::SOURCES
+        .iter()
+        .filter_map(|s| s.live)
+    {
+        assert!(
+            registered.iter().any(|c| c == live.command),
+            "a live source names `{}`, which lib.rs does not register",
+            live.command
+        );
+        assert!(
+            super::verdicts::verdict(live.command).is_some(),
+            "a live source names `{}`, which has no hub verdict",
+            live.command
+        );
+    }
 }
 
 /// A payload built from a real value, for the catalog answers too big to

@@ -2832,6 +2832,11 @@
         {
           "items": [
             {
+              "label": "Claude accounts",
+              "page": "usage.accounts",
+              "type": "link"
+            },
+            {
               "label": "Work graph usage",
               "page": "usage.work",
               "type": "link"
@@ -2882,6 +2887,28 @@
       ],
       "spec": "fleet.page/1",
       "title": "Work graph usage"
+    },
+    {
+      "id": "usage.accounts",
+      "intro": "Each Claude account's plan headroom: the 5-hour and weekly windows and per-model limits, checked from a host logged in to it.",
+      "layout": "data_page",
+      "parent": "usage",
+      "sections": [
+        {
+          "items": [
+            {
+              "source": {
+                "id": "accounts.usage"
+              },
+              "type": "account_usage",
+              "view": "block"
+            }
+          ],
+          "title": "Accounts"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Claude accounts"
     }
   ],
   "resources": [
@@ -3597,6 +3624,17 @@
     }
   ],
   "sources": [
+    {
+      "help": "Each Claude account's plan headroom: the 5-hour and weekly windows, per-model limits, when it was checked and from which host, and when a refresh is allowed.",
+      "id": "accounts.usage",
+      "label": "Claude account usage",
+      "live": {
+        "command": "list_account_usage",
+        "event": "account_usage"
+      },
+      "params": [],
+      "shape": "account_usage"
+    },
     {
       "fields": [
         {
