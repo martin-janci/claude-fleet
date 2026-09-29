@@ -143,6 +143,28 @@ expect_rc "shims: an alias value with shell metacharacters is refused (exit 5)" 
 if [ ! -e "$BIN/evil" ]; then pass "shims: no shim for an unsafe value"; else fail "shims: wrote $BIN/evil"; fi
 rm -f "$BIN/mytool"
 
+# --- doctor / install ----------------------------------------------------------------
+doc() { PATH="$BIN:$FAKE:/usr/bin:/bin" "$AG" doctor >"$ROOT/doctor" 2>&1; }
+cfg 'default = claude' '[alias]' 'cl = claude --yolo'
+PATH="$FAKE:/usr/bin:/bin" "$AG" shims >/dev/null 2>&1
+doc; rc=$?
+if [ $rc = 0 ]; then pass "doctor: healthy machine exits 0"; else fail "doctor: exit $rc: $(cat "$ROOT/doctor")"; fi
+if grep -q '^ok    claude:' "$ROOT/doctor"; then pass "doctor: reports claude"; else fail "doctor: no claude line"; fi
+rm "$BIN/cl"
+doc; rc=$?
+if [ $rc = 1 ] && grep -q 'fix: ag shims' "$ROOT/doctor"; then pass "doctor: missing shim fails with the fix"; else fail "doctor: missing shim: exit $rc: $(cat "$ROOT/doctor")"; fi
+PATH="$FAKE:/usr/bin:/bin" "$AG" shims >/dev/null 2>&1
+# Capture first: with pipefail, `doctor | grep -q` would carry doctor's exit 1.
+PATH="$FAKE:/usr/bin:/bin" "$AG" doctor >"$ROOT/doctor" 2>&1
+if grep -q "is not on PATH" "$ROOT/doctor"; then pass "doctor: flags a bin dir missing from PATH"; else fail "doctor: PATH check: $(cat "$ROOT/doctor")"; fi
+cfg 'default = claude'
+rm "$FAKE/claude"
+doc; rc=$?
+if [ $rc = 1 ] && grep -q 'fix: ag install claude' "$ROOT/doctor"; then pass "doctor: default not installed fails with the fix"; else fail "doctor: default missing: exit $rc: $(cat "$ROOT/doctor")"; fi
+mkfake claude
+expect "install prints the official command" "npm install -g @openai/codex   # or: brew install --cask codex" install codex
+expect_rc "install: unknown harness exits 2" 2 install nope
+
 # --- summary ----------------------------------------------------------------
 echo "ag-test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
