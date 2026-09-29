@@ -8,6 +8,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.4.3] - 2026-09-30
+
+### Added
+- **pages:** embed pages (L8); account usage drawn through the catalog everywhere — declarative pages P4d
+- **work:** the view carries origin, project, parent, proposals, jobs and agent steps
+- **work:** desktop create_work_task and proposal decisions, routed
+- **work:** work_link create / propose / accept / reject
+- **work:** dispatched jobs appear as agent subtasks and follow the job
+- **work:** starting a native item uses its project and the parent ticket's brief
+- **ui:** task page — notes, subtasks, proposals, jobs and agent steps
+- **ui:** Work tab List layout — To do / Doing / Done under the existing header and filters
+- **ui:** remove the global Tasks popover; jobs are in the Work list
+- **work:** agent proposals — capped, decided once, a rejected title stays rejected
+- **work:** native tasks and subtasks (TASK-<id>), job mirrors, depth one
+- **work:** capture Claude Code task steps from PostToolUse, transcript backstop for stale hosts
+- **ag:** one-command installer
+- **ag:** doctor with exact fixes, install hints
+- **ag:** alias shims that work in tmux, ssh and fleet panes
+- **ag:** Codex driver — exec, resume, yolo, model/effort mapping
+- **work:** list data — wire fields, create/decide wrappers, status grouping, layout pref
+- **ag:** normalised flags and Claude Code launch
+- **ag:** launcher skeleton — config reader, harness registry, list/which
+- **work:** agent steps — Claude Code adapter and the journal's step kind
+- **work:** a job's status ('task') is final over the live lift
+- **work:** migration 086 — origin, project, notes, job and proposal columns
+- **conversation:** responsive header bar with one control height and a slim context gauge
+- **pages:** data-page filter bar; Work graph usage as a generated page — declarative pages P4c
+
+### Changed
+- cargo fmt
+- **ag:** run the launcher tests on macOS bash 3.2 + Linux; docs
+- **pages:** read the host filter's options with Array.from for svelte-check
+
+### Fixed
+- **work:** sort step groups with sort_by_key (clippy::unnecessary_sort_by on rust 1.98)
+- **work:** batch-B join — start briefs never carry a parent the caller cannot see; regenerate the control API reference; raise the tool-definition budget to 68,056 (measured 67,956 on 2026-09-29 after work_link create/propose/accept and parent/notes/why, +410 bytes)
+- **work:** local items named after migration 086 are origin 'manual'
+- **ag:** config comments, CDPATH safety, shim/harness hardening; tests
+- **ag:** stricter flag parsing, resume picker, --flag=value
+- **ag:** never replace a foreign ag; doctor detects shadowing
+- **desktop:** put back the nulls the hub strips, so the Hosts view stops crashing
+- **terminal:** the selection follows its text when the screen scrolls
+- **catalog:** name the checkout when its directory cannot be made
+
+### Documentation
+- **assets:** the interactive mockups of the Assets workspace, beside the spec
+- **work:** shared work context — skill, user guide, hook matcher, command count, spec status
+- **assets:** the S1a implementation plan — identities, scan tick, remote import, unlayered guard
+- public-safe spec/plan copies; deferred follow-ups
+- add architecture diagrams (standalone, hub, mobile)
+- **work:** implementation plan for shared work context (roadmap part 1); mark the list-only plan superseded
+- **assets:** hosts accept catalogs explicitly, so a personal host can run an org's assets
+- **assets:** the Assets workspace design — inbox over layers, scopes and org catalogs, authoring and skill tests
+- **work:** shared work context — keep today's Work header, add a List | Grouped toggle; trackers are already connected on the hub
+- **work:** shared work context — map every existing Work feature into the new view; owner's mockup review
+- **work:** design for shared work context (AI task system roadmap part 1)
+- capture AI task system vision, roadmap and countermeasures
+- **work:** implementation plan for the internal task list; spec revisions after reading the code
+- **work:** design for one internal task list (own + dispatched tasks)
 ## [0.4.2] - 2026-09-29
 
 ### Added
@@ -2297,6 +2356,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.4.3]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.3
 [0.4.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.2
 [0.4.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.1
 [0.4.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.0
