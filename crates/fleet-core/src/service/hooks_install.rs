@@ -52,7 +52,7 @@ pub fn hook_entry(hook_url: &str, token: &str) -> serde_json::Value {
 /// shape (before the pane header was added) must still match so re-merging
 /// upgrades an old install rather than leaving a duplicate beside the new
 /// one.
-fn is_fleet_hook_entry(h: &serde_json::Value) -> bool {
+pub(crate) fn is_fleet_hook_entry(h: &serde_json::Value) -> bool {
     let url_is_fleet = h
         .get("url")
         .and_then(|u| u.as_str())
@@ -71,6 +71,15 @@ fn is_fleet_hook_entry(h: &serde_json::Value) -> bool {
         && url_is_fleet
         && bearer
         && h.get("timeout").and_then(|t| t.as_u64()) == Some(u64::from(HOOK_TIMEOUT_SECS))
+}
+
+/// True when `h` is fleet's SessionStart `command` hook: a curl that sends
+/// the headers file fleet writes and the pane header.
+pub(crate) fn is_fleet_command_entry(h: &serde_json::Value) -> bool {
+    h.get("type").and_then(|t| t.as_str()) == Some("command")
+        && h.get("command").and_then(|c| c.as_str()).is_some_and(|c| {
+            c.contains(&format!(".claude/{HOOK_HEADERS_FILE}")) && c.contains("X-Fleet-Pane")
+        })
 }
 
 /// Matcher of fleet's PostToolUse hook (Claude Code matchers are regexes):

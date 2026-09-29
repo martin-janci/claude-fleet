@@ -1,11 +1,11 @@
 //! Claude Code renderer, scanner and installed-asset enumeration.
 
 use super::{
-    ConfigMerge, FileWrite, Harness, HostSnapshot, ManifestMerge, MergeMode, RenderPlan,
-    Unsupported,
+    canonical_json, dir_hash, mcp_secret_like, ConfigMerge, FileWrite, Harness, HostSnapshot,
+    InstalledAsset, ManifestMerge, MergeMode, RenderPlan, Unsupported,
 };
 use crate::ipc_error::IpcError;
-use crate::service::catalog::model::{Asset, AssetSpec, Kind};
+use crate::service::catalog::model::{sha256_hex, Asset, AssetSpec, Kind};
 use serde_json::{json, Value};
 
 pub const SETTINGS_PATH: &str = "~/.claude/settings.json";
@@ -474,6 +474,113 @@ impl Harness for Claude {
             }
         }
         out
+    }
+
+    fn installed_detail(&self, snap: &HostSnapshot) -> Vec<InstalledAsset> {
+        use crate::service::hooks_install::{is_fleet_command_entry, is_fleet_hook_entry};
+        use crate::service::provision::{FLEET_MCP_SERVER, FLEET_SKILL_NAMES};
+        let is_fleet = |e: &Value| is_fleet_hook_entry(e) || is_fleet_command_entry(e);
+        self.installed(snap)
+            .into_iter()
+            .map(|(kind, name)| {
+                let (hash, secret_like, fleet_owned) = match kind {
+                    Kind::Skill => (
+                        dir_hash(snap, &format!("{SKILLS_DIR}/{name}/")),
+                        false,
+                        FLEET_SKILL_NAMES.contains(&name.as_str()),
+                    ),
+                    Kind::Agent => (
+                        snap.files.get(&format!("{AGENTS_DIR}/{name}.md")).cloned(),
+                        false,
+                        false,
+                    ),
+                    Kind::Hook => {
+                        let mut groups: Vec<Value> = Vec::new();
+                        let (mut any, mut all_fleet, mut secret) = (false, true, false);
+                        if let Some(hooks) = snap
+                            .configs
+                            .get(SETTINGS_PATH)
+                            .and_then(|v| v.get("hooks"))
+                            .and_then(Value::as_object)
+                        {
+                            for (event, entries) in hooks {
+                                for g in entries.as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+                                    let matcher = g.get("matcher").and_then(Value::as_str);
+                                    if hook_asset_name(event, matcher) != name {
+                                        continue;
+                                    }
+                                    let inner: Vec<Value> = g
+                                        .get("hooks")
+                                        .and_then(Value::as_array)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    let own: Vec<Value> =
+                                        inner.iter().filter(|e| !is_fleet(e)).cloned().collect();
+                                    any |= !inner.is_empty();
+                                    all_fleet &= own.is_empty();
+                                    secret |= own.iter().any(|e| {
+                                        e.get("headers")
+                                            .and_then(Value::as_object)
+                                            .is_some_and(|h| !h.is_empty())
+                                    });
+                                    if !own.is_empty() {
+                                        let mut kept = serde_json::Map::new();
+                                        if let Some(m) = matcher {
+                                            kept.insert("matcher".into(), Value::String(m.into()));
+                                        }
+                                        kept.insert("hooks".into(), Value::Array(own));
+                                        groups.push(Value::Object(kept));
+                                    }
+                                }
+                            }
+                        }
+                        let hash = (!groups.is_empty())
+                            .then(|| sha256_hex(canonical_json(&Value::Array(groups)).as_bytes()));
+                        (hash, secret, any && all_fleet)
+                    }
+                    Kind::McpServer => {
+                        let v = snap
+                            .configs
+                            .get(CLAUDE_JSON_PATH)
+                            .and_then(|c| c.get("mcpServers"))
+                            .and_then(|m| m.get(&name));
+                        (
+                            v.map(|v| sha256_hex(canonical_json(v).as_bytes())),
+                            v.is_some_and(mcp_secret_like),
+                            name == FLEET_MCP_SERVER,
+                        )
+                    }
+                    Kind::PluginRef => {
+                        let entry = snap
+                            .configs
+                            .get(PLUGINS_PATH)
+                            .and_then(|v| v.get("plugins"))
+                            .and_then(Value::as_object)
+                            .and_then(|m| {
+                                m.iter()
+                                    .find(|(k, _)| k.split('@').next() == Some(name.as_str()))
+                            });
+                        (
+                            entry.map(|(k, v)| {
+                                sha256_hex(
+                                    canonical_json(&serde_json::json!({"key": k, "value": v}))
+                                        .as_bytes(),
+                                )
+                            }),
+                            false,
+                            false,
+                        )
+                    }
+                };
+                InstalledAsset {
+                    kind,
+                    name,
+                    hash,
+                    secret_like,
+                    fleet_owned,
+                }
+            })
+            .collect()
     }
 
     fn manifest_path(&self) -> &'static str {
@@ -977,5 +1084,95 @@ eyJwbHVnaW5zIjp7InN1cGVycG93ZXJzQHN1cGVycG93ZXJzLW1hcmtldHBsYWNlIjpbeyJ2ZXJzaW9u
         assert_eq!(unmap_tier("opus"), Some("strong"));
         assert_eq!(map_event("after_tool"), Some("PostToolUse"));
         assert_eq!(unmap_event("UserPromptSubmit"), Some("prompt_submit"));
+    }
+
+    fn detail_snap() -> HostSnapshot {
+        let mut s = HostSnapshot::default();
+        s.files
+            .insert(format!("{SKILLS_DIR}/worktree/SKILL.md"), "aa".into());
+        s.files
+            .insert(format!("{SKILLS_DIR}/worktree/scripts/go.sh"), "bb".into());
+        s.files.insert(
+            format!("{SKILLS_DIR}/claude-fleet-control/SKILL.md"),
+            "cc".into(),
+        );
+        s.files
+            .insert(format!("{AGENTS_DIR}/pm-qa.md"), "dd".into());
+        s.configs.insert(
+            SETTINGS_PATH.into(),
+            serde_json::json!({"hooks": {
+                "Stop": [
+                    {"hooks": [{"type": "command", "command": "node stop.mjs"}]},
+                    {"hooks": [{"type": "http", "url": "http://127.0.0.1:4180/hook",
+                                 "headers": {"Authorization": "Bearer T"}, "timeout": 5}]}
+                ],
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "http", "url": "http://127.0.0.1:4180/hook",
+                                 "headers": {"Authorization": "Bearer T"}, "timeout": 5}]}
+                ]
+            }}),
+        );
+        s.configs.insert(
+            CLAUDE_JSON_PATH.into(),
+            serde_json::json!({"mcpServers": {
+                "claude-fleet": {"type": "http", "url": "http://x/mcp", "headers": {"Authorization": "Bearer T"}},
+                "jira": {"type": "stdio", "command": "npx", "env": {"JIRA_TOKEN": "abc"}},
+                "fs": {"type": "stdio", "command": "mcp-fs"}
+            }}),
+        );
+        s
+    }
+
+    fn detail<'a>(d: &'a [InstalledAsset], kind: Kind, name: &str) -> &'a InstalledAsset {
+        d.iter().find(|a| a.kind == kind && a.name == name).unwrap()
+    }
+
+    #[test]
+    fn installed_detail_hashes_skill_dirs_order_independently() {
+        let d = Claude.installed_detail(&detail_snap());
+        let want = sha256_hex(b"SKILL.md=aa\nscripts/go.sh=bb");
+        assert_eq!(
+            detail(&d, Kind::Skill, "worktree").hash.as_deref(),
+            Some(want.as_str())
+        );
+        assert_eq!(detail(&d, Kind::Agent, "pm-qa").hash.as_deref(), Some("dd"));
+    }
+
+    #[test]
+    fn installed_detail_marks_fleet_internals() {
+        let d = Claude.installed_detail(&detail_snap());
+        assert!(detail(&d, Kind::Skill, "claude-fleet-control").fleet_owned);
+        assert!(!detail(&d, Kind::Skill, "worktree").fleet_owned);
+        assert!(detail(&d, Kind::McpServer, "claude-fleet").fleet_owned);
+        // `hook_asset_name("UserPromptSubmit", None)` is "prompt-submit" —
+        // pinned via `Claude.installed(&detail_snap())` rather than an `a ||
+        // b` guess (controller ruling).
+        assert!(detail(&d, Kind::Hook, "prompt-submit").fleet_owned);
+        // "stop" mixes the user's hook with fleet's: not fleet-owned, and the
+        // hash covers the user's entry only (no token in it).
+        let stop = detail(&d, Kind::Hook, "stop");
+        assert!(!stop.fleet_owned);
+        let user_only =
+            serde_json::json!([{"hooks": [{"type": "command", "command": "node stop.mjs"}]}]);
+        assert_eq!(
+            stop.hash.as_deref(),
+            Some(sha256_hex(canonical_json(&user_only).as_bytes()).as_str())
+        );
+    }
+
+    #[test]
+    fn installed_detail_flags_secret_like_mcp_servers() {
+        let d = Claude.installed_detail(&detail_snap());
+        assert!(detail(&d, Kind::McpServer, "jira").secret_like);
+        assert!(!detail(&d, Kind::McpServer, "fs").secret_like);
+    }
+
+    #[test]
+    fn canonical_json_sorts_keys_recursively() {
+        let a = serde_json::json!({"b": 1, "a": {"d": 2, "c": [ {"y": 1, "x": 2} ]}});
+        assert_eq!(
+            canonical_json(&a),
+            r#"{"a":{"c":[{"x":2,"y":1}],"d":2},"b":1}"#
+        );
     }
 }
