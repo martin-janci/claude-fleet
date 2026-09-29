@@ -1,0 +1,326 @@
+// Dataset B (the Jev test map, section 3): the same 16 boards in en, sk, cs and de, one row per section per language.
+// Rows with the same pair id are one section; each language's board is translated with it. LLM-written (D43), not yet spot-checked by the owner.
+{"section": "Ideas", "project_sections": ["Ideas", "To do", "In progress", "Waiting for review", "Done", "Won't do"], "expect": "todo", "lang": "en", "pair": "b01.1"}
+{"section": "To do", "project_sections": ["Ideas", "To do", "In progress", "Waiting for review", "Done", "Won't do"], "expect": "todo", "lang": "en", "pair": "b01.2"}
+{"section": "In progress", "project_sections": ["Ideas", "To do", "In progress", "Waiting for review", "Done", "Won't do"], "expect": "in_progress", "lang": "en", "pair": "b01.3"}
+{"section": "Waiting for review", "project_sections": ["Ideas", "To do", "In progress", "Waiting for review", "Done", "Won't do"], "expect": "in_progress", "lang": "en", "pair": "b01.4"}
+{"section": "Done", "project_sections": ["Ideas", "To do", "In progress", "Waiting for review", "Done", "Won't do"], "expect": "done", "lang": "en", "pair": "b01.5"}
+{"section": "Won't do", "project_sections": ["Ideas", "To do", "In progress", "Waiting for review", "Done", "Won't do"], "expect": "not_planned", "lang": "en", "pair": "b01.6"}
+{"section": "Nápady", "project_sections": ["Nápady", "Treba urobiť", "Rozpracované", "Čaká na kontrolu", "Hotovo", "Nebudeme robiť"], "expect": "todo", "lang": "sk", "pair": "b01.1"}
+{"section": "Treba urobiť", "project_sections": ["Nápady", "Treba urobiť", "Rozpracované", "Čaká na kontrolu", "Hotovo", "Nebudeme robiť"], "expect": "todo", "lang": "sk", "pair": "b01.2"}
+{"section": "Rozpracované", "project_sections": ["Nápady", "Treba urobiť", "Rozpracované", "Čaká na kontrolu", "Hotovo", "Nebudeme robiť"], "expect": "in_progress", "lang": "sk", "pair": "b01.3"}
+{"section": "Čaká na kontrolu", "project_sections": ["Nápady", "Treba urobiť", "Rozpracované", "Čaká na kontrolu", "Hotovo", "Nebudeme robiť"], "expect": "in_progress", "lang": "sk", "pair": "b01.4"}
+{"section": "Hotovo", "project_sections": ["Nápady", "Treba urobiť", "Rozpracované", "Čaká na kontrolu", "Hotovo", "Nebudeme robiť"], "expect": "done", "lang": "sk", "pair": "b01.5"}
+{"section": "Nebudeme robiť", "project_sections": ["Nápady", "Treba urobiť", "Rozpracované", "Čaká na kontrolu", "Hotovo", "Nebudeme robiť"], "expect": "not_planned", "lang": "sk", "pair": "b01.6"}
+{"section": "Nápady", "project_sections": ["Nápady", "K udělání", "Rozpracováno", "Čeká na kontrolu", "Hotovo", "Nebudeme dělat"], "expect": "todo", "lang": "cs", "pair": "b01.1"}
+{"section": "K udělání", "project_sections": ["Nápady", "K udělání", "Rozpracováno", "Čeká na kontrolu", "Hotovo", "Nebudeme dělat"], "expect": "todo", "lang": "cs", "pair": "b01.2"}
+{"section": "Rozpracováno", "project_sections": ["Nápady", "K udělání", "Rozpracováno", "Čeká na kontrolu", "Hotovo", "Nebudeme dělat"], "expect": "in_progress", "lang": "cs", "pair": "b01.3"}
+{"section": "Čeká na kontrolu", "project_sections": ["Nápady", "K udělání", "Rozpracováno", "Čeká na kontrolu", "Hotovo", "Nebudeme dělat"], "expect": "in_progress", "lang": "cs", "pair": "b01.4"}
+{"section": "Hotovo", "project_sections": ["Nápady", "K udělání", "Rozpracováno", "Čeká na kontrolu", "Hotovo", "Nebudeme dělat"], "expect": "done", "lang": "cs", "pair": "b01.5"}
+{"section": "Nebudeme dělat", "project_sections": ["Nápady", "K udělání", "Rozpracováno", "Čeká na kontrolu", "Hotovo", "Nebudeme dělat"], "expect": "not_planned", "lang": "cs", "pair": "b01.6"}
+{"section": "Ideen", "project_sections": ["Ideen", "Zu erledigen", "In Arbeit", "Wartet auf Prüfung", "Erledigt", "Wird nicht gemacht"], "expect": "todo", "lang": "de", "pair": "b01.1"}
+{"section": "Zu erledigen", "project_sections": ["Ideen", "Zu erledigen", "In Arbeit", "Wartet auf Prüfung", "Erledigt", "Wird nicht gemacht"], "expect": "todo", "lang": "de", "pair": "b01.2"}
+{"section": "In Arbeit", "project_sections": ["Ideen", "Zu erledigen", "In Arbeit", "Wartet auf Prüfung", "Erledigt", "Wird nicht gemacht"], "expect": "in_progress", "lang": "de", "pair": "b01.3"}
+{"section": "Wartet auf Prüfung", "project_sections": ["Ideen", "Zu erledigen", "In Arbeit", "Wartet auf Prüfung", "Erledigt", "Wird nicht gemacht"], "expect": "in_progress", "lang": "de", "pair": "b01.4"}
+{"section": "Erledigt", "project_sections": ["Ideen", "Zu erledigen", "In Arbeit", "Wartet auf Prüfung", "Erledigt", "Wird nicht gemacht"], "expect": "done", "lang": "de", "pair": "b01.5"}
+{"section": "Wird nicht gemacht", "project_sections": ["Ideen", "Zu erledigen", "In Arbeit", "Wartet auf Prüfung", "Erledigt", "Wird nicht gemacht"], "expect": "not_planned", "lang": "de", "pair": "b01.6"}
+{"section": "New requests", "project_sections": ["New requests", "Triage", "Investigating", "Waiting on customer", "Resolved", "Duplicates"], "expect": "todo", "lang": "en", "pair": "b02.1"}
+{"section": "Triage", "project_sections": ["New requests", "Triage", "Investigating", "Waiting on customer", "Resolved", "Duplicates"], "expect": "todo", "lang": "en", "pair": "b02.2"}
+{"section": "Investigating", "project_sections": ["New requests", "Triage", "Investigating", "Waiting on customer", "Resolved", "Duplicates"], "expect": "in_progress", "lang": "en", "pair": "b02.3"}
+{"section": "Waiting on customer", "project_sections": ["New requests", "Triage", "Investigating", "Waiting on customer", "Resolved", "Duplicates"], "expect": "in_progress", "lang": "en", "pair": "b02.4", "note": "ambiguous: started, waiting on someone"}
+{"section": "Resolved", "project_sections": ["New requests", "Triage", "Investigating", "Waiting on customer", "Resolved", "Duplicates"], "expect": "done", "lang": "en", "pair": "b02.5"}
+{"section": "Duplicates", "project_sections": ["New requests", "Triage", "Investigating", "Waiting on customer", "Resolved", "Duplicates"], "expect": "not_planned", "lang": "en", "pair": "b02.6"}
+{"section": "Nové požiadavky", "project_sections": ["Nové požiadavky", "Triedenie", "Prešetrujeme", "Čaká sa na zákazníka", "Vyriešené", "Duplicity"], "expect": "todo", "lang": "sk", "pair": "b02.1"}
+{"section": "Triedenie", "project_sections": ["Nové požiadavky", "Triedenie", "Prešetrujeme", "Čaká sa na zákazníka", "Vyriešené", "Duplicity"], "expect": "todo", "lang": "sk", "pair": "b02.2"}
+{"section": "Prešetrujeme", "project_sections": ["Nové požiadavky", "Triedenie", "Prešetrujeme", "Čaká sa na zákazníka", "Vyriešené", "Duplicity"], "expect": "in_progress", "lang": "sk", "pair": "b02.3"}
+{"section": "Čaká sa na zákazníka", "project_sections": ["Nové požiadavky", "Triedenie", "Prešetrujeme", "Čaká sa na zákazníka", "Vyriešené", "Duplicity"], "expect": "in_progress", "lang": "sk", "pair": "b02.4", "note": "ambiguous: started, waiting on someone"}
+{"section": "Vyriešené", "project_sections": ["Nové požiadavky", "Triedenie", "Prešetrujeme", "Čaká sa na zákazníka", "Vyriešené", "Duplicity"], "expect": "done", "lang": "sk", "pair": "b02.5"}
+{"section": "Duplicity", "project_sections": ["Nové požiadavky", "Triedenie", "Prešetrujeme", "Čaká sa na zákazníka", "Vyriešené", "Duplicity"], "expect": "not_planned", "lang": "sk", "pair": "b02.6"}
+{"section": "Nové požadavky", "project_sections": ["Nové požadavky", "Třídění", "Prošetřujeme", "Čeká se na zákazníka", "Vyřešeno", "Duplicity"], "expect": "todo", "lang": "cs", "pair": "b02.1"}
+{"section": "Třídění", "project_sections": ["Nové požadavky", "Třídění", "Prošetřujeme", "Čeká se na zákazníka", "Vyřešeno", "Duplicity"], "expect": "todo", "lang": "cs", "pair": "b02.2"}
+{"section": "Prošetřujeme", "project_sections": ["Nové požadavky", "Třídění", "Prošetřujeme", "Čeká se na zákazníka", "Vyřešeno", "Duplicity"], "expect": "in_progress", "lang": "cs", "pair": "b02.3"}
+{"section": "Čeká se na zákazníka", "project_sections": ["Nové požadavky", "Třídění", "Prošetřujeme", "Čeká se na zákazníka", "Vyřešeno", "Duplicity"], "expect": "in_progress", "lang": "cs", "pair": "b02.4", "note": "ambiguous: started, waiting on someone"}
+{"section": "Vyřešeno", "project_sections": ["Nové požadavky", "Třídění", "Prošetřujeme", "Čeká se na zákazníka", "Vyřešeno", "Duplicity"], "expect": "done", "lang": "cs", "pair": "b02.5"}
+{"section": "Duplicity", "project_sections": ["Nové požadavky", "Třídění", "Prošetřujeme", "Čeká se na zákazníka", "Vyřešeno", "Duplicity"], "expect": "not_planned", "lang": "cs", "pair": "b02.6"}
+{"section": "Neue Anfragen", "project_sections": ["Neue Anfragen", "Sichtung", "In Untersuchung", "Wartet auf Kunden", "Gelöst", "Duplikate"], "expect": "todo", "lang": "de", "pair": "b02.1"}
+{"section": "Sichtung", "project_sections": ["Neue Anfragen", "Sichtung", "In Untersuchung", "Wartet auf Kunden", "Gelöst", "Duplikate"], "expect": "todo", "lang": "de", "pair": "b02.2"}
+{"section": "In Untersuchung", "project_sections": ["Neue Anfragen", "Sichtung", "In Untersuchung", "Wartet auf Kunden", "Gelöst", "Duplikate"], "expect": "in_progress", "lang": "de", "pair": "b02.3"}
+{"section": "Wartet auf Kunden", "project_sections": ["Neue Anfragen", "Sichtung", "In Untersuchung", "Wartet auf Kunden", "Gelöst", "Duplikate"], "expect": "in_progress", "lang": "de", "pair": "b02.4", "note": "ambiguous: started, waiting on someone"}
+{"section": "Gelöst", "project_sections": ["Neue Anfragen", "Sichtung", "In Untersuchung", "Wartet auf Kunden", "Gelöst", "Duplikate"], "expect": "done", "lang": "de", "pair": "b02.5"}
+{"section": "Duplikate", "project_sections": ["Neue Anfragen", "Sichtung", "In Untersuchung", "Wartet auf Kunden", "Gelöst", "Duplikate"], "expect": "not_planned", "lang": "de", "pair": "b02.6"}
+{"section": "Planned", "project_sections": ["Planned", "Development", "Testing", "Ready to release", "Released"], "expect": "todo", "lang": "en", "pair": "b03.1"}
+{"section": "Development", "project_sections": ["Planned", "Development", "Testing", "Ready to release", "Released"], "expect": "in_progress", "lang": "en", "pair": "b03.2"}
+{"section": "Testing", "project_sections": ["Planned", "Development", "Testing", "Ready to release", "Released"], "expect": "in_progress", "lang": "en", "pair": "b03.3"}
+{"section": "Ready to release", "project_sections": ["Planned", "Development", "Testing", "Ready to release", "Released"], "expect": "in_progress", "lang": "en", "pair": "b03.4", "note": "position: after testing, not released yet"}
+{"section": "Released", "project_sections": ["Planned", "Development", "Testing", "Ready to release", "Released"], "expect": "done", "lang": "en", "pair": "b03.5"}
+{"section": "Naplánované", "project_sections": ["Naplánované", "Vývoj", "Testovanie", "Pripravené na vydanie", "Vydané"], "expect": "todo", "lang": "sk", "pair": "b03.1"}
+{"section": "Vývoj", "project_sections": ["Naplánované", "Vývoj", "Testovanie", "Pripravené na vydanie", "Vydané"], "expect": "in_progress", "lang": "sk", "pair": "b03.2"}
+{"section": "Testovanie", "project_sections": ["Naplánované", "Vývoj", "Testovanie", "Pripravené na vydanie", "Vydané"], "expect": "in_progress", "lang": "sk", "pair": "b03.3"}
+{"section": "Pripravené na vydanie", "project_sections": ["Naplánované", "Vývoj", "Testovanie", "Pripravené na vydanie", "Vydané"], "expect": "in_progress", "lang": "sk", "pair": "b03.4", "note": "position: after testing, not released yet"}
+{"section": "Vydané", "project_sections": ["Naplánované", "Vývoj", "Testovanie", "Pripravené na vydanie", "Vydané"], "expect": "done", "lang": "sk", "pair": "b03.5"}
+{"section": "Naplánováno", "project_sections": ["Naplánováno", "Vývoj", "Testování", "Připraveno k vydání", "Vydáno"], "expect": "todo", "lang": "cs", "pair": "b03.1"}
+{"section": "Vývoj", "project_sections": ["Naplánováno", "Vývoj", "Testování", "Připraveno k vydání", "Vydáno"], "expect": "in_progress", "lang": "cs", "pair": "b03.2"}
+{"section": "Testování", "project_sections": ["Naplánováno", "Vývoj", "Testování", "Připraveno k vydání", "Vydáno"], "expect": "in_progress", "lang": "cs", "pair": "b03.3"}
+{"section": "Připraveno k vydání", "project_sections": ["Naplánováno", "Vývoj", "Testování", "Připraveno k vydání", "Vydáno"], "expect": "in_progress", "lang": "cs", "pair": "b03.4", "note": "position: after testing, not released yet"}
+{"section": "Vydáno", "project_sections": ["Naplánováno", "Vývoj", "Testování", "Připraveno k vydání", "Vydáno"], "expect": "done", "lang": "cs", "pair": "b03.5"}
+{"section": "Geplant", "project_sections": ["Geplant", "Entwicklung", "Test", "Bereit zur Veröffentlichung", "Veröffentlicht"], "expect": "todo", "lang": "de", "pair": "b03.1"}
+{"section": "Entwicklung", "project_sections": ["Geplant", "Entwicklung", "Test", "Bereit zur Veröffentlichung", "Veröffentlicht"], "expect": "in_progress", "lang": "de", "pair": "b03.2"}
+{"section": "Test", "project_sections": ["Geplant", "Entwicklung", "Test", "Bereit zur Veröffentlichung", "Veröffentlicht"], "expect": "in_progress", "lang": "de", "pair": "b03.3"}
+{"section": "Bereit zur Veröffentlichung", "project_sections": ["Geplant", "Entwicklung", "Test", "Bereit zur Veröffentlichung", "Veröffentlicht"], "expect": "in_progress", "lang": "de", "pair": "b03.4", "note": "position: after testing, not released yet"}
+{"section": "Veröffentlicht", "project_sections": ["Geplant", "Entwicklung", "Test", "Bereit zur Veröffentlichung", "Veröffentlicht"], "expect": "done", "lang": "de", "pair": "b03.5"}
+{"section": "Topic pool", "project_sections": ["Topic pool", "Writing", "Editing", "Published", "Dropped"], "expect": "todo", "lang": "en", "pair": "b04.1"}
+{"section": "Writing", "project_sections": ["Topic pool", "Writing", "Editing", "Published", "Dropped"], "expect": "in_progress", "lang": "en", "pair": "b04.2"}
+{"section": "Editing", "project_sections": ["Topic pool", "Writing", "Editing", "Published", "Dropped"], "expect": "in_progress", "lang": "en", "pair": "b04.3"}
+{"section": "Published", "project_sections": ["Topic pool", "Writing", "Editing", "Published", "Dropped"], "expect": "done", "lang": "en", "pair": "b04.4"}
+{"section": "Dropped", "project_sections": ["Topic pool", "Writing", "Editing", "Published", "Dropped"], "expect": "not_planned", "lang": "en", "pair": "b04.5"}
+{"section": "Zásobník tém", "project_sections": ["Zásobník tém", "Píše sa", "Korektúry", "Publikované", "Zahodené"], "expect": "todo", "lang": "sk", "pair": "b04.1"}
+{"section": "Píše sa", "project_sections": ["Zásobník tém", "Píše sa", "Korektúry", "Publikované", "Zahodené"], "expect": "in_progress", "lang": "sk", "pair": "b04.2"}
+{"section": "Korektúry", "project_sections": ["Zásobník tém", "Píše sa", "Korektúry", "Publikované", "Zahodené"], "expect": "in_progress", "lang": "sk", "pair": "b04.3"}
+{"section": "Publikované", "project_sections": ["Zásobník tém", "Píše sa", "Korektúry", "Publikované", "Zahodené"], "expect": "done", "lang": "sk", "pair": "b04.4"}
+{"section": "Zahodené", "project_sections": ["Zásobník tém", "Píše sa", "Korektúry", "Publikované", "Zahodené"], "expect": "not_planned", "lang": "sk", "pair": "b04.5"}
+{"section": "Zásobník témat", "project_sections": ["Zásobník témat", "Píše se", "Korektury", "Publikováno", "Zahozeno"], "expect": "todo", "lang": "cs", "pair": "b04.1"}
+{"section": "Píše se", "project_sections": ["Zásobník témat", "Píše se", "Korektury", "Publikováno", "Zahozeno"], "expect": "in_progress", "lang": "cs", "pair": "b04.2"}
+{"section": "Korektury", "project_sections": ["Zásobník témat", "Píše se", "Korektury", "Publikováno", "Zahozeno"], "expect": "in_progress", "lang": "cs", "pair": "b04.3"}
+{"section": "Publikováno", "project_sections": ["Zásobník témat", "Píše se", "Korektury", "Publikováno", "Zahozeno"], "expect": "done", "lang": "cs", "pair": "b04.4"}
+{"section": "Zahozeno", "project_sections": ["Zásobník témat", "Píše se", "Korektury", "Publikováno", "Zahozeno"], "expect": "not_planned", "lang": "cs", "pair": "b04.5"}
+{"section": "Themenspeicher", "project_sections": ["Themenspeicher", "Wird geschrieben", "Lektorat", "Veröffentlicht", "Verworfen"], "expect": "todo", "lang": "de", "pair": "b04.1"}
+{"section": "Wird geschrieben", "project_sections": ["Themenspeicher", "Wird geschrieben", "Lektorat", "Veröffentlicht", "Verworfen"], "expect": "in_progress", "lang": "de", "pair": "b04.2"}
+{"section": "Lektorat", "project_sections": ["Themenspeicher", "Wird geschrieben", "Lektorat", "Veröffentlicht", "Verworfen"], "expect": "in_progress", "lang": "de", "pair": "b04.3"}
+{"section": "Veröffentlicht", "project_sections": ["Themenspeicher", "Wird geschrieben", "Lektorat", "Veröffentlicht", "Verworfen"], "expect": "done", "lang": "de", "pair": "b04.4"}
+{"section": "Verworfen", "project_sections": ["Themenspeicher", "Wird geschrieben", "Lektorat", "Veröffentlicht", "Verworfen"], "expect": "not_planned", "lang": "de", "pair": "b04.5"}
+{"section": "Reported", "project_sections": ["Reported", "Confirmed", "Fixing", "Fix verified", "Cannot reproduce"], "expect": "todo", "lang": "en", "pair": "b05.1"}
+{"section": "Confirmed", "project_sections": ["Reported", "Confirmed", "Fixing", "Fix verified", "Cannot reproduce"], "expect": "todo", "lang": "en", "pair": "b05.2", "note": "position: confirmed bug, not being fixed yet"}
+{"section": "Fixing", "project_sections": ["Reported", "Confirmed", "Fixing", "Fix verified", "Cannot reproduce"], "expect": "in_progress", "lang": "en", "pair": "b05.3"}
+{"section": "Fix verified", "project_sections": ["Reported", "Confirmed", "Fixing", "Fix verified", "Cannot reproduce"], "expect": "done", "lang": "en", "pair": "b05.4"}
+{"section": "Cannot reproduce", "project_sections": ["Reported", "Confirmed", "Fixing", "Fix verified", "Cannot reproduce"], "expect": "not_planned", "lang": "en", "pair": "b05.5"}
+{"section": "Nahlásené", "project_sections": ["Nahlásené", "Potvrdené", "Opravuje sa", "Oprava overená", "Nedá sa reprodukovať"], "expect": "todo", "lang": "sk", "pair": "b05.1"}
+{"section": "Potvrdené", "project_sections": ["Nahlásené", "Potvrdené", "Opravuje sa", "Oprava overená", "Nedá sa reprodukovať"], "expect": "todo", "lang": "sk", "pair": "b05.2", "note": "position: confirmed bug, not being fixed yet"}
+{"section": "Opravuje sa", "project_sections": ["Nahlásené", "Potvrdené", "Opravuje sa", "Oprava overená", "Nedá sa reprodukovať"], "expect": "in_progress", "lang": "sk", "pair": "b05.3"}
+{"section": "Oprava overená", "project_sections": ["Nahlásené", "Potvrdené", "Opravuje sa", "Oprava overená", "Nedá sa reprodukovať"], "expect": "done", "lang": "sk", "pair": "b05.4"}
+{"section": "Nedá sa reprodukovať", "project_sections": ["Nahlásené", "Potvrdené", "Opravuje sa", "Oprava overená", "Nedá sa reprodukovať"], "expect": "not_planned", "lang": "sk", "pair": "b05.5"}
+{"section": "Nahlášeno", "project_sections": ["Nahlášeno", "Potvrzeno", "Opravuje se", "Oprava ověřena", "Nelze reprodukovat"], "expect": "todo", "lang": "cs", "pair": "b05.1"}
+{"section": "Potvrzeno", "project_sections": ["Nahlášeno", "Potvrzeno", "Opravuje se", "Oprava ověřena", "Nelze reprodukovat"], "expect": "todo", "lang": "cs", "pair": "b05.2", "note": "position: confirmed bug, not being fixed yet"}
+{"section": "Opravuje se", "project_sections": ["Nahlášeno", "Potvrzeno", "Opravuje se", "Oprava ověřena", "Nelze reprodukovat"], "expect": "in_progress", "lang": "cs", "pair": "b05.3"}
+{"section": "Oprava ověřena", "project_sections": ["Nahlášeno", "Potvrzeno", "Opravuje se", "Oprava ověřena", "Nelze reprodukovat"], "expect": "done", "lang": "cs", "pair": "b05.4"}
+{"section": "Nelze reprodukovat", "project_sections": ["Nahlášeno", "Potvrzeno", "Opravuje se", "Oprava ověřena", "Nelze reprodukovat"], "expect": "not_planned", "lang": "cs", "pair": "b05.5"}
+{"section": "Gemeldet", "project_sections": ["Gemeldet", "Bestätigt", "Wird behoben", "Behebung bestätigt", "Nicht reproduzierbar"], "expect": "todo", "lang": "de", "pair": "b05.1"}
+{"section": "Bestätigt", "project_sections": ["Gemeldet", "Bestätigt", "Wird behoben", "Behebung bestätigt", "Nicht reproduzierbar"], "expect": "todo", "lang": "de", "pair": "b05.2", "note": "position: confirmed bug, not being fixed yet"}
+{"section": "Wird behoben", "project_sections": ["Gemeldet", "Bestätigt", "Wird behoben", "Behebung bestätigt", "Nicht reproduzierbar"], "expect": "in_progress", "lang": "de", "pair": "b05.3"}
+{"section": "Behebung bestätigt", "project_sections": ["Gemeldet", "Bestätigt", "Wird behoben", "Behebung bestätigt", "Nicht reproduzierbar"], "expect": "done", "lang": "de", "pair": "b05.4"}
+{"section": "Nicht reproduzierbar", "project_sections": ["Gemeldet", "Bestätigt", "Wird behoben", "Behebung bestätigt", "Nicht reproduzierbar"], "expect": "not_planned", "lang": "de", "pair": "b05.5"}
+{"section": "Inbox", "project_sections": ["Inbox", "Next actions", "Working on it", "Someday", "Finished"], "expect": "todo", "lang": "en", "pair": "b06.1"}
+{"section": "Next actions", "project_sections": ["Inbox", "Next actions", "Working on it", "Someday", "Finished"], "expect": "todo", "lang": "en", "pair": "b06.2"}
+{"section": "Working on it", "project_sections": ["Inbox", "Next actions", "Working on it", "Someday", "Finished"], "expect": "in_progress", "lang": "en", "pair": "b06.3"}
+{"section": "Someday", "project_sections": ["Inbox", "Next actions", "Working on it", "Someday", "Finished"], "expect": "todo", "lang": "en", "pair": "b06.4", "note": "ambiguous: maybe-later vs never"}
+{"section": "Finished", "project_sections": ["Inbox", "Next actions", "Working on it", "Someday", "Finished"], "expect": "done", "lang": "en", "pair": "b06.5"}
+{"section": "Doručené", "project_sections": ["Doručené", "Ďalšie kroky", "Pracujem na tom", "Niekedy", "Dokončené"], "expect": "todo", "lang": "sk", "pair": "b06.1"}
+{"section": "Ďalšie kroky", "project_sections": ["Doručené", "Ďalšie kroky", "Pracujem na tom", "Niekedy", "Dokončené"], "expect": "todo", "lang": "sk", "pair": "b06.2"}
+{"section": "Pracujem na tom", "project_sections": ["Doručené", "Ďalšie kroky", "Pracujem na tom", "Niekedy", "Dokončené"], "expect": "in_progress", "lang": "sk", "pair": "b06.3"}
+{"section": "Niekedy", "project_sections": ["Doručené", "Ďalšie kroky", "Pracujem na tom", "Niekedy", "Dokončené"], "expect": "todo", "lang": "sk", "pair": "b06.4", "note": "ambiguous: maybe-later vs never"}
+{"section": "Dokončené", "project_sections": ["Doručené", "Ďalšie kroky", "Pracujem na tom", "Niekedy", "Dokončené"], "expect": "done", "lang": "sk", "pair": "b06.5"}
+{"section": "Došlé", "project_sections": ["Došlé", "Další kroky", "Pracuji na tom", "Někdy", "Dokončeno"], "expect": "todo", "lang": "cs", "pair": "b06.1"}
+{"section": "Další kroky", "project_sections": ["Došlé", "Další kroky", "Pracuji na tom", "Někdy", "Dokončeno"], "expect": "todo", "lang": "cs", "pair": "b06.2"}
+{"section": "Pracuji na tom", "project_sections": ["Došlé", "Další kroky", "Pracuji na tom", "Někdy", "Dokončeno"], "expect": "in_progress", "lang": "cs", "pair": "b06.3"}
+{"section": "Někdy", "project_sections": ["Došlé", "Další kroky", "Pracuji na tom", "Někdy", "Dokončeno"], "expect": "todo", "lang": "cs", "pair": "b06.4", "note": "ambiguous: maybe-later vs never"}
+{"section": "Dokončeno", "project_sections": ["Došlé", "Další kroky", "Pracuji na tom", "Někdy", "Dokončeno"], "expect": "done", "lang": "cs", "pair": "b06.5"}
+{"section": "Eingang", "project_sections": ["Eingang", "Nächste Schritte", "Daran arbeite ich", "Irgendwann", "Abgeschlossen"], "expect": "todo", "lang": "de", "pair": "b06.1"}
+{"section": "Nächste Schritte", "project_sections": ["Eingang", "Nächste Schritte", "Daran arbeite ich", "Irgendwann", "Abgeschlossen"], "expect": "todo", "lang": "de", "pair": "b06.2"}
+{"section": "Daran arbeite ich", "project_sections": ["Eingang", "Nächste Schritte", "Daran arbeite ich", "Irgendwann", "Abgeschlossen"], "expect": "in_progress", "lang": "de", "pair": "b06.3"}
+{"section": "Irgendwann", "project_sections": ["Eingang", "Nächste Schritte", "Daran arbeite ich", "Irgendwann", "Abgeschlossen"], "expect": "todo", "lang": "de", "pair": "b06.4", "note": "ambiguous: maybe-later vs never"}
+{"section": "Abgeschlossen", "project_sections": ["Eingang", "Nächste Schritte", "Daran arbeite ich", "Irgendwann", "Abgeschlossen"], "expect": "done", "lang": "de", "pair": "b06.5"}
+{"section": "Applicants", "project_sections": ["Applicants", "Phone screen", "Onsite interview", "Offer sent", "Hired", "Rejected"], "expect": "todo", "lang": "en", "pair": "b07.1"}
+{"section": "Phone screen", "project_sections": ["Applicants", "Phone screen", "Onsite interview", "Offer sent", "Hired", "Rejected"], "expect": "in_progress", "lang": "en", "pair": "b07.2"}
+{"section": "Onsite interview", "project_sections": ["Applicants", "Phone screen", "Onsite interview", "Offer sent", "Hired", "Rejected"], "expect": "in_progress", "lang": "en", "pair": "b07.3"}
+{"section": "Offer sent", "project_sections": ["Applicants", "Phone screen", "Onsite interview", "Offer sent", "Hired", "Rejected"], "expect": "in_progress", "lang": "en", "pair": "b07.4", "note": "ambiguous: waiting on the candidate"}
+{"section": "Hired", "project_sections": ["Applicants", "Phone screen", "Onsite interview", "Offer sent", "Hired", "Rejected"], "expect": "done", "lang": "en", "pair": "b07.5"}
+{"section": "Rejected", "project_sections": ["Applicants", "Phone screen", "Onsite interview", "Offer sent", "Hired", "Rejected"], "expect": "not_planned", "lang": "en", "pair": "b07.6"}
+{"section": "Uchádzači", "project_sections": ["Uchádzači", "Telefonický pohovor", "Osobný pohovor", "Ponuka odoslaná", "Prijatí", "Zamietnutí"], "expect": "todo", "lang": "sk", "pair": "b07.1"}
+{"section": "Telefonický pohovor", "project_sections": ["Uchádzači", "Telefonický pohovor", "Osobný pohovor", "Ponuka odoslaná", "Prijatí", "Zamietnutí"], "expect": "in_progress", "lang": "sk", "pair": "b07.2"}
+{"section": "Osobný pohovor", "project_sections": ["Uchádzači", "Telefonický pohovor", "Osobný pohovor", "Ponuka odoslaná", "Prijatí", "Zamietnutí"], "expect": "in_progress", "lang": "sk", "pair": "b07.3"}
+{"section": "Ponuka odoslaná", "project_sections": ["Uchádzači", "Telefonický pohovor", "Osobný pohovor", "Ponuka odoslaná", "Prijatí", "Zamietnutí"], "expect": "in_progress", "lang": "sk", "pair": "b07.4", "note": "ambiguous: waiting on the candidate"}
+{"section": "Prijatí", "project_sections": ["Uchádzači", "Telefonický pohovor", "Osobný pohovor", "Ponuka odoslaná", "Prijatí", "Zamietnutí"], "expect": "done", "lang": "sk", "pair": "b07.5"}
+{"section": "Zamietnutí", "project_sections": ["Uchádzači", "Telefonický pohovor", "Osobný pohovor", "Ponuka odoslaná", "Prijatí", "Zamietnutí"], "expect": "not_planned", "lang": "sk", "pair": "b07.6"}
+{"section": "Uchazeči", "project_sections": ["Uchazeči", "Telefonický pohovor", "Osobní pohovor", "Nabídka odeslána", "Přijati", "Zamítnuti"], "expect": "todo", "lang": "cs", "pair": "b07.1"}
+{"section": "Telefonický pohovor", "project_sections": ["Uchazeči", "Telefonický pohovor", "Osobní pohovor", "Nabídka odeslána", "Přijati", "Zamítnuti"], "expect": "in_progress", "lang": "cs", "pair": "b07.2"}
+{"section": "Osobní pohovor", "project_sections": ["Uchazeči", "Telefonický pohovor", "Osobní pohovor", "Nabídka odeslána", "Přijati", "Zamítnuti"], "expect": "in_progress", "lang": "cs", "pair": "b07.3"}
+{"section": "Nabídka odeslána", "project_sections": ["Uchazeči", "Telefonický pohovor", "Osobní pohovor", "Nabídka odeslána", "Přijati", "Zamítnuti"], "expect": "in_progress", "lang": "cs", "pair": "b07.4", "note": "ambiguous: waiting on the candidate"}
+{"section": "Přijati", "project_sections": ["Uchazeči", "Telefonický pohovor", "Osobní pohovor", "Nabídka odeslána", "Přijati", "Zamítnuti"], "expect": "done", "lang": "cs", "pair": "b07.5"}
+{"section": "Zamítnuti", "project_sections": ["Uchazeči", "Telefonický pohovor", "Osobní pohovor", "Nabídka odeslána", "Přijati", "Zamítnuti"], "expect": "not_planned", "lang": "cs", "pair": "b07.6"}
+{"section": "Bewerber", "project_sections": ["Bewerber", "Telefoninterview", "Vorstellungsgespräch", "Angebot verschickt", "Eingestellt", "Abgelehnt"], "expect": "todo", "lang": "de", "pair": "b07.1"}
+{"section": "Telefoninterview", "project_sections": ["Bewerber", "Telefoninterview", "Vorstellungsgespräch", "Angebot verschickt", "Eingestellt", "Abgelehnt"], "expect": "in_progress", "lang": "de", "pair": "b07.2"}
+{"section": "Vorstellungsgespräch", "project_sections": ["Bewerber", "Telefoninterview", "Vorstellungsgespräch", "Angebot verschickt", "Eingestellt", "Abgelehnt"], "expect": "in_progress", "lang": "de", "pair": "b07.3"}
+{"section": "Angebot verschickt", "project_sections": ["Bewerber", "Telefoninterview", "Vorstellungsgespräch", "Angebot verschickt", "Eingestellt", "Abgelehnt"], "expect": "in_progress", "lang": "de", "pair": "b07.4", "note": "ambiguous: waiting on the candidate"}
+{"section": "Eingestellt", "project_sections": ["Bewerber", "Telefoninterview", "Vorstellungsgespräch", "Angebot verschickt", "Eingestellt", "Abgelehnt"], "expect": "done", "lang": "de", "pair": "b07.5"}
+{"section": "Abgelehnt", "project_sections": ["Bewerber", "Telefoninterview", "Vorstellungsgespräch", "Angebot verschickt", "Eingestellt", "Abgelehnt"], "expect": "not_planned", "lang": "de", "pair": "b07.6"}
+{"section": "Briefs", "project_sections": ["Briefs", "Sketching", "Client feedback", "On hold", "Approved"], "expect": "todo", "lang": "en", "pair": "b08.1"}
+{"section": "Sketching", "project_sections": ["Briefs", "Sketching", "Client feedback", "On hold", "Approved"], "expect": "in_progress", "lang": "en", "pair": "b08.2"}
+{"section": "Client feedback", "project_sections": ["Briefs", "Sketching", "Client feedback", "On hold", "Approved"], "expect": "in_progress", "lang": "en", "pair": "b08.3"}
+{"section": "On hold", "project_sections": ["Briefs", "Sketching", "Client feedback", "On hold", "Approved"], "expect": "in_progress", "lang": "en", "pair": "b08.4", "note": "ambiguous: started but paused"}
+{"section": "Approved", "project_sections": ["Briefs", "Sketching", "Client feedback", "On hold", "Approved"], "expect": "done", "lang": "en", "pair": "b08.5"}
+{"section": "Zadania", "project_sections": ["Zadania", "Skicovanie", "Pripomienky klienta", "Pozastavené", "Schválené"], "expect": "todo", "lang": "sk", "pair": "b08.1"}
+{"section": "Skicovanie", "project_sections": ["Zadania", "Skicovanie", "Pripomienky klienta", "Pozastavené", "Schválené"], "expect": "in_progress", "lang": "sk", "pair": "b08.2"}
+{"section": "Pripomienky klienta", "project_sections": ["Zadania", "Skicovanie", "Pripomienky klienta", "Pozastavené", "Schválené"], "expect": "in_progress", "lang": "sk", "pair": "b08.3"}
+{"section": "Pozastavené", "project_sections": ["Zadania", "Skicovanie", "Pripomienky klienta", "Pozastavené", "Schválené"], "expect": "in_progress", "lang": "sk", "pair": "b08.4", "note": "ambiguous: started but paused"}
+{"section": "Schválené", "project_sections": ["Zadania", "Skicovanie", "Pripomienky klienta", "Pozastavené", "Schválené"], "expect": "done", "lang": "sk", "pair": "b08.5"}
+{"section": "Zadání", "project_sections": ["Zadání", "Skicování", "Připomínky klienta", "Pozastaveno", "Schváleno"], "expect": "todo", "lang": "cs", "pair": "b08.1"}
+{"section": "Skicování", "project_sections": ["Zadání", "Skicování", "Připomínky klienta", "Pozastaveno", "Schváleno"], "expect": "in_progress", "lang": "cs", "pair": "b08.2"}
+{"section": "Připomínky klienta", "project_sections": ["Zadání", "Skicování", "Připomínky klienta", "Pozastaveno", "Schváleno"], "expect": "in_progress", "lang": "cs", "pair": "b08.3"}
+{"section": "Pozastaveno", "project_sections": ["Zadání", "Skicování", "Připomínky klienta", "Pozastaveno", "Schváleno"], "expect": "in_progress", "lang": "cs", "pair": "b08.4", "note": "ambiguous: started but paused"}
+{"section": "Schváleno", "project_sections": ["Zadání", "Skicování", "Připomínky klienta", "Pozastaveno", "Schváleno"], "expect": "done", "lang": "cs", "pair": "b08.5"}
+{"section": "Briefings", "project_sections": ["Briefings", "Skizzieren", "Kundenfeedback", "Pausiert", "Freigegeben"], "expect": "todo", "lang": "de", "pair": "b08.1"}
+{"section": "Skizzieren", "project_sections": ["Briefings", "Skizzieren", "Kundenfeedback", "Pausiert", "Freigegeben"], "expect": "in_progress", "lang": "de", "pair": "b08.2"}
+{"section": "Kundenfeedback", "project_sections": ["Briefings", "Skizzieren", "Kundenfeedback", "Pausiert", "Freigegeben"], "expect": "in_progress", "lang": "de", "pair": "b08.3"}
+{"section": "Pausiert", "project_sections": ["Briefings", "Skizzieren", "Kundenfeedback", "Pausiert", "Freigegeben"], "expect": "in_progress", "lang": "de", "pair": "b08.4", "note": "ambiguous: started but paused"}
+{"section": "Freigegeben", "project_sections": ["Briefings", "Skizzieren", "Kundenfeedback", "Pausiert", "Freigegeben"], "expect": "done", "lang": "de", "pair": "b08.5"}
+{"section": "Requests", "project_sections": ["Requests", "Scheduled", "Rolling out", "Monitoring", "Live", "Rolled back"], "expect": "todo", "lang": "en", "pair": "b09.1"}
+{"section": "Scheduled", "project_sections": ["Requests", "Scheduled", "Rolling out", "Monitoring", "Live", "Rolled back"], "expect": "todo", "lang": "en", "pair": "b09.2"}
+{"section": "Rolling out", "project_sections": ["Requests", "Scheduled", "Rolling out", "Monitoring", "Live", "Rolled back"], "expect": "in_progress", "lang": "en", "pair": "b09.3"}
+{"section": "Monitoring", "project_sections": ["Requests", "Scheduled", "Rolling out", "Monitoring", "Live", "Rolled back"], "expect": "in_progress", "lang": "en", "pair": "b09.4", "note": "position: after rollout, before live"}
+{"section": "Live", "project_sections": ["Requests", "Scheduled", "Rolling out", "Monitoring", "Live", "Rolled back"], "expect": "done", "lang": "en", "pair": "b09.5"}
+{"section": "Rolled back", "project_sections": ["Requests", "Scheduled", "Rolling out", "Monitoring", "Live", "Rolled back"], "expect": "not_planned", "lang": "en", "pair": "b09.6", "note": "ambiguous: undone vs to redo"}
+{"section": "Požiadavky", "project_sections": ["Požiadavky", "V pláne", "Nasadzuje sa", "Monitorovanie", "V prevádzke", "Vrátené späť"], "expect": "todo", "lang": "sk", "pair": "b09.1"}
+{"section": "V pláne", "project_sections": ["Požiadavky", "V pláne", "Nasadzuje sa", "Monitorovanie", "V prevádzke", "Vrátené späť"], "expect": "todo", "lang": "sk", "pair": "b09.2"}
+{"section": "Nasadzuje sa", "project_sections": ["Požiadavky", "V pláne", "Nasadzuje sa", "Monitorovanie", "V prevádzke", "Vrátené späť"], "expect": "in_progress", "lang": "sk", "pair": "b09.3"}
+{"section": "Monitorovanie", "project_sections": ["Požiadavky", "V pláne", "Nasadzuje sa", "Monitorovanie", "V prevádzke", "Vrátené späť"], "expect": "in_progress", "lang": "sk", "pair": "b09.4", "note": "position: after rollout, before live"}
+{"section": "V prevádzke", "project_sections": ["Požiadavky", "V pláne", "Nasadzuje sa", "Monitorovanie", "V prevádzke", "Vrátené späť"], "expect": "done", "lang": "sk", "pair": "b09.5"}
+{"section": "Vrátené späť", "project_sections": ["Požiadavky", "V pláne", "Nasadzuje sa", "Monitorovanie", "V prevádzke", "Vrátené späť"], "expect": "not_planned", "lang": "sk", "pair": "b09.6", "note": "ambiguous: undone vs to redo"}
+{"section": "Požadavky", "project_sections": ["Požadavky", "V plánu", "Nasazuje se", "Monitorování", "V provozu", "Vráceno zpět"], "expect": "todo", "lang": "cs", "pair": "b09.1"}
+{"section": "V plánu", "project_sections": ["Požadavky", "V plánu", "Nasazuje se", "Monitorování", "V provozu", "Vráceno zpět"], "expect": "todo", "lang": "cs", "pair": "b09.2"}
+{"section": "Nasazuje se", "project_sections": ["Požadavky", "V plánu", "Nasazuje se", "Monitorování", "V provozu", "Vráceno zpět"], "expect": "in_progress", "lang": "cs", "pair": "b09.3"}
+{"section": "Monitorování", "project_sections": ["Požadavky", "V plánu", "Nasazuje se", "Monitorování", "V provozu", "Vráceno zpět"], "expect": "in_progress", "lang": "cs", "pair": "b09.4", "note": "position: after rollout, before live"}
+{"section": "V provozu", "project_sections": ["Požadavky", "V plánu", "Nasazuje se", "Monitorování", "V provozu", "Vráceno zpět"], "expect": "done", "lang": "cs", "pair": "b09.5"}
+{"section": "Vráceno zpět", "project_sections": ["Požadavky", "V plánu", "Nasazuje se", "Monitorování", "V provozu", "Vráceno zpět"], "expect": "not_planned", "lang": "cs", "pair": "b09.6", "note": "ambiguous: undone vs to redo"}
+{"section": "Anforderungen", "project_sections": ["Anforderungen", "Eingeplant", "Wird ausgerollt", "Beobachtung", "Produktiv", "Zurückgerollt"], "expect": "todo", "lang": "de", "pair": "b09.1"}
+{"section": "Eingeplant", "project_sections": ["Anforderungen", "Eingeplant", "Wird ausgerollt", "Beobachtung", "Produktiv", "Zurückgerollt"], "expect": "todo", "lang": "de", "pair": "b09.2"}
+{"section": "Wird ausgerollt", "project_sections": ["Anforderungen", "Eingeplant", "Wird ausgerollt", "Beobachtung", "Produktiv", "Zurückgerollt"], "expect": "in_progress", "lang": "de", "pair": "b09.3"}
+{"section": "Beobachtung", "project_sections": ["Anforderungen", "Eingeplant", "Wird ausgerollt", "Beobachtung", "Produktiv", "Zurückgerollt"], "expect": "in_progress", "lang": "de", "pair": "b09.4", "note": "position: after rollout, before live"}
+{"section": "Produktiv", "project_sections": ["Anforderungen", "Eingeplant", "Wird ausgerollt", "Beobachtung", "Produktiv", "Zurückgerollt"], "expect": "done", "lang": "de", "pair": "b09.5"}
+{"section": "Zurückgerollt", "project_sections": ["Anforderungen", "Eingeplant", "Wird ausgerollt", "Beobachtung", "Produktiv", "Zurückgerollt"], "expect": "not_planned", "lang": "de", "pair": "b09.6", "note": "ambiguous: undone vs to redo"}
+{"section": "1. Sprint backlog", "project_sections": ["1. Sprint backlog", "2. Doing", "3. Code review", "4. QA", "5. Merged"], "expect": "todo", "lang": "en", "pair": "b10.1"}
+{"section": "2. Doing", "project_sections": ["1. Sprint backlog", "2. Doing", "3. Code review", "4. QA", "5. Merged"], "expect": "in_progress", "lang": "en", "pair": "b10.2"}
+{"section": "3. Code review", "project_sections": ["1. Sprint backlog", "2. Doing", "3. Code review", "4. QA", "5. Merged"], "expect": "in_progress", "lang": "en", "pair": "b10.3"}
+{"section": "4. QA", "project_sections": ["1. Sprint backlog", "2. Doing", "3. Code review", "4. QA", "5. Merged"], "expect": "in_progress", "lang": "en", "pair": "b10.4"}
+{"section": "5. Merged", "project_sections": ["1. Sprint backlog", "2. Doing", "3. Code review", "4. QA", "5. Merged"], "expect": "done", "lang": "en", "pair": "b10.5"}
+{"section": "1. Backlog šprintu", "project_sections": ["1. Backlog šprintu", "2. Robí sa", "3. Revízia kódu", "4. Testovanie", "5. Zlúčené"], "expect": "todo", "lang": "sk", "pair": "b10.1"}
+{"section": "2. Robí sa", "project_sections": ["1. Backlog šprintu", "2. Robí sa", "3. Revízia kódu", "4. Testovanie", "5. Zlúčené"], "expect": "in_progress", "lang": "sk", "pair": "b10.2"}
+{"section": "3. Revízia kódu", "project_sections": ["1. Backlog šprintu", "2. Robí sa", "3. Revízia kódu", "4. Testovanie", "5. Zlúčené"], "expect": "in_progress", "lang": "sk", "pair": "b10.3"}
+{"section": "4. Testovanie", "project_sections": ["1. Backlog šprintu", "2. Robí sa", "3. Revízia kódu", "4. Testovanie", "5. Zlúčené"], "expect": "in_progress", "lang": "sk", "pair": "b10.4"}
+{"section": "5. Zlúčené", "project_sections": ["1. Backlog šprintu", "2. Robí sa", "3. Revízia kódu", "4. Testovanie", "5. Zlúčené"], "expect": "done", "lang": "sk", "pair": "b10.5"}
+{"section": "1. Backlog sprintu", "project_sections": ["1. Backlog sprintu", "2. Dělá se", "3. Revize kódu", "4. Testování", "5. Sloučeno"], "expect": "todo", "lang": "cs", "pair": "b10.1"}
+{"section": "2. Dělá se", "project_sections": ["1. Backlog sprintu", "2. Dělá se", "3. Revize kódu", "4. Testování", "5. Sloučeno"], "expect": "in_progress", "lang": "cs", "pair": "b10.2"}
+{"section": "3. Revize kódu", "project_sections": ["1. Backlog sprintu", "2. Dělá se", "3. Revize kódu", "4. Testování", "5. Sloučeno"], "expect": "in_progress", "lang": "cs", "pair": "b10.3"}
+{"section": "4. Testování", "project_sections": ["1. Backlog sprintu", "2. Dělá se", "3. Revize kódu", "4. Testování", "5. Sloučeno"], "expect": "in_progress", "lang": "cs", "pair": "b10.4"}
+{"section": "5. Sloučeno", "project_sections": ["1. Backlog sprintu", "2. Dělá se", "3. Revize kódu", "4. Testování", "5. Sloučeno"], "expect": "done", "lang": "cs", "pair": "b10.5"}
+{"section": "1. Sprint-Backlog", "project_sections": ["1. Sprint-Backlog", "2. Läuft", "3. Code-Review", "4. Qualitätssicherung", "5. Gemergt"], "expect": "todo", "lang": "de", "pair": "b10.1"}
+{"section": "2. Läuft", "project_sections": ["1. Sprint-Backlog", "2. Läuft", "3. Code-Review", "4. Qualitätssicherung", "5. Gemergt"], "expect": "in_progress", "lang": "de", "pair": "b10.2"}
+{"section": "3. Code-Review", "project_sections": ["1. Sprint-Backlog", "2. Läuft", "3. Code-Review", "4. Qualitätssicherung", "5. Gemergt"], "expect": "in_progress", "lang": "de", "pair": "b10.3"}
+{"section": "4. Qualitätssicherung", "project_sections": ["1. Sprint-Backlog", "2. Läuft", "3. Code-Review", "4. Qualitätssicherung", "5. Gemergt"], "expect": "in_progress", "lang": "de", "pair": "b10.4"}
+{"section": "5. Gemergt", "project_sections": ["1. Sprint-Backlog", "2. Läuft", "3. Code-Review", "4. Qualitätssicherung", "5. Gemergt"], "expect": "done", "lang": "de", "pair": "b10.5"}
+{"section": "Proposals", "project_sections": ["Proposals", "Organizing", "Happened", "Cancelled"], "expect": "todo", "lang": "en", "pair": "b11.1"}
+{"section": "Organizing", "project_sections": ["Proposals", "Organizing", "Happened", "Cancelled"], "expect": "in_progress", "lang": "en", "pair": "b11.2"}
+{"section": "Happened", "project_sections": ["Proposals", "Organizing", "Happened", "Cancelled"], "expect": "done", "lang": "en", "pair": "b11.3"}
+{"section": "Cancelled", "project_sections": ["Proposals", "Organizing", "Happened", "Cancelled"], "expect": "not_planned", "lang": "en", "pair": "b11.4"}
+{"section": "Návrhy", "project_sections": ["Návrhy", "Organizuje sa", "Prebehlo", "Zrušené"], "expect": "todo", "lang": "sk", "pair": "b11.1"}
+{"section": "Organizuje sa", "project_sections": ["Návrhy", "Organizuje sa", "Prebehlo", "Zrušené"], "expect": "in_progress", "lang": "sk", "pair": "b11.2"}
+{"section": "Prebehlo", "project_sections": ["Návrhy", "Organizuje sa", "Prebehlo", "Zrušené"], "expect": "done", "lang": "sk", "pair": "b11.3"}
+{"section": "Zrušené", "project_sections": ["Návrhy", "Organizuje sa", "Prebehlo", "Zrušené"], "expect": "not_planned", "lang": "sk", "pair": "b11.4"}
+{"section": "Návrhy", "project_sections": ["Návrhy", "Organizuje se", "Proběhlo", "Zrušeno"], "expect": "todo", "lang": "cs", "pair": "b11.1"}
+{"section": "Organizuje se", "project_sections": ["Návrhy", "Organizuje se", "Proběhlo", "Zrušeno"], "expect": "in_progress", "lang": "cs", "pair": "b11.2"}
+{"section": "Proběhlo", "project_sections": ["Návrhy", "Organizuje se", "Proběhlo", "Zrušeno"], "expect": "done", "lang": "cs", "pair": "b11.3"}
+{"section": "Zrušeno", "project_sections": ["Návrhy", "Organizuje se", "Proběhlo", "Zrušeno"], "expect": "not_planned", "lang": "cs", "pair": "b11.4"}
+{"section": "Vorschläge", "project_sections": ["Vorschläge", "In Organisation", "Stattgefunden", "Abgesagt"], "expect": "todo", "lang": "de", "pair": "b11.1"}
+{"section": "In Organisation", "project_sections": ["Vorschläge", "In Organisation", "Stattgefunden", "Abgesagt"], "expect": "in_progress", "lang": "de", "pair": "b11.2"}
+{"section": "Stattgefunden", "project_sections": ["Vorschläge", "In Organisation", "Stattgefunden", "Abgesagt"], "expect": "done", "lang": "de", "pair": "b11.3"}
+{"section": "Abgesagt", "project_sections": ["Vorschläge", "In Organisation", "Stattgefunden", "Abgesagt"], "expect": "not_planned", "lang": "de", "pair": "b11.4"}
+{"section": "Questions", "project_sections": ["Questions", "Reading", "Experiments running", "Written up", "Dead ends"], "expect": "todo", "lang": "en", "pair": "b12.1"}
+{"section": "Reading", "project_sections": ["Questions", "Reading", "Experiments running", "Written up", "Dead ends"], "expect": "in_progress", "lang": "en", "pair": "b12.2"}
+{"section": "Experiments running", "project_sections": ["Questions", "Reading", "Experiments running", "Written up", "Dead ends"], "expect": "in_progress", "lang": "en", "pair": "b12.3"}
+{"section": "Written up", "project_sections": ["Questions", "Reading", "Experiments running", "Written up", "Dead ends"], "expect": "done", "lang": "en", "pair": "b12.4"}
+{"section": "Dead ends", "project_sections": ["Questions", "Reading", "Experiments running", "Written up", "Dead ends"], "expect": "not_planned", "lang": "en", "pair": "b12.5"}
+{"section": "Otázky", "project_sections": ["Otázky", "Čítam", "Bežiace experimenty", "Spísané", "Slepé uličky"], "expect": "todo", "lang": "sk", "pair": "b12.1"}
+{"section": "Čítam", "project_sections": ["Otázky", "Čítam", "Bežiace experimenty", "Spísané", "Slepé uličky"], "expect": "in_progress", "lang": "sk", "pair": "b12.2"}
+{"section": "Bežiace experimenty", "project_sections": ["Otázky", "Čítam", "Bežiace experimenty", "Spísané", "Slepé uličky"], "expect": "in_progress", "lang": "sk", "pair": "b12.3"}
+{"section": "Spísané", "project_sections": ["Otázky", "Čítam", "Bežiace experimenty", "Spísané", "Slepé uličky"], "expect": "done", "lang": "sk", "pair": "b12.4"}
+{"section": "Slepé uličky", "project_sections": ["Otázky", "Čítam", "Bežiace experimenty", "Spísané", "Slepé uličky"], "expect": "not_planned", "lang": "sk", "pair": "b12.5"}
+{"section": "Otázky", "project_sections": ["Otázky", "Čtu", "Běžící experimenty", "Sepsáno", "Slepé uličky"], "expect": "todo", "lang": "cs", "pair": "b12.1"}
+{"section": "Čtu", "project_sections": ["Otázky", "Čtu", "Běžící experimenty", "Sepsáno", "Slepé uličky"], "expect": "in_progress", "lang": "cs", "pair": "b12.2"}
+{"section": "Běžící experimenty", "project_sections": ["Otázky", "Čtu", "Běžící experimenty", "Sepsáno", "Slepé uličky"], "expect": "in_progress", "lang": "cs", "pair": "b12.3"}
+{"section": "Sepsáno", "project_sections": ["Otázky", "Čtu", "Běžící experimenty", "Sepsáno", "Slepé uličky"], "expect": "done", "lang": "cs", "pair": "b12.4"}
+{"section": "Slepé uličky", "project_sections": ["Otázky", "Čtu", "Běžící experimenty", "Sepsáno", "Slepé uličky"], "expect": "not_planned", "lang": "cs", "pair": "b12.5"}
+{"section": "Fragen", "project_sections": ["Fragen", "Lektüre", "Laufende Experimente", "Ausgearbeitet", "Sackgassen"], "expect": "todo", "lang": "de", "pair": "b12.1"}
+{"section": "Lektüre", "project_sections": ["Fragen", "Lektüre", "Laufende Experimente", "Ausgearbeitet", "Sackgassen"], "expect": "in_progress", "lang": "de", "pair": "b12.2"}
+{"section": "Laufende Experimente", "project_sections": ["Fragen", "Lektüre", "Laufende Experimente", "Ausgearbeitet", "Sackgassen"], "expect": "in_progress", "lang": "de", "pair": "b12.3"}
+{"section": "Ausgearbeitet", "project_sections": ["Fragen", "Lektüre", "Laufende Experimente", "Ausgearbeitet", "Sackgassen"], "expect": "done", "lang": "de", "pair": "b12.4"}
+{"section": "Sackgassen", "project_sections": ["Fragen", "Lektüre", "Laufende Experimente", "Ausgearbeitet", "Sackgassen"], "expect": "not_planned", "lang": "de", "pair": "b12.5"}
+{"section": "To invoice", "project_sections": ["To invoice", "Invoiced", "Paid", "Written off"], "expect": "todo", "lang": "en", "pair": "b13.1"}
+{"section": "Invoiced", "project_sections": ["To invoice", "Invoiced", "Paid", "Written off"], "expect": "in_progress", "lang": "en", "pair": "b13.2", "note": "ambiguous: sent, waiting for payment"}
+{"section": "Paid", "project_sections": ["To invoice", "Invoiced", "Paid", "Written off"], "expect": "done", "lang": "en", "pair": "b13.3"}
+{"section": "Written off", "project_sections": ["To invoice", "Invoiced", "Paid", "Written off"], "expect": "not_planned", "lang": "en", "pair": "b13.4"}
+{"section": "Na fakturáciu", "project_sections": ["Na fakturáciu", "Vyfakturované", "Zaplatené", "Odpísané"], "expect": "todo", "lang": "sk", "pair": "b13.1"}
+{"section": "Vyfakturované", "project_sections": ["Na fakturáciu", "Vyfakturované", "Zaplatené", "Odpísané"], "expect": "in_progress", "lang": "sk", "pair": "b13.2", "note": "ambiguous: sent, waiting for payment"}
+{"section": "Zaplatené", "project_sections": ["Na fakturáciu", "Vyfakturované", "Zaplatené", "Odpísané"], "expect": "done", "lang": "sk", "pair": "b13.3"}
+{"section": "Odpísané", "project_sections": ["Na fakturáciu", "Vyfakturované", "Zaplatené", "Odpísané"], "expect": "not_planned", "lang": "sk", "pair": "b13.4"}
+{"section": "K fakturaci", "project_sections": ["K fakturaci", "Vyfakturováno", "Zaplaceno", "Odepsáno"], "expect": "todo", "lang": "cs", "pair": "b13.1"}
+{"section": "Vyfakturováno", "project_sections": ["K fakturaci", "Vyfakturováno", "Zaplaceno", "Odepsáno"], "expect": "in_progress", "lang": "cs", "pair": "b13.2", "note": "ambiguous: sent, waiting for payment"}
+{"section": "Zaplaceno", "project_sections": ["K fakturaci", "Vyfakturováno", "Zaplaceno", "Odepsáno"], "expect": "done", "lang": "cs", "pair": "b13.3"}
+{"section": "Odepsáno", "project_sections": ["K fakturaci", "Vyfakturováno", "Zaplaceno", "Odepsáno"], "expect": "not_planned", "lang": "cs", "pair": "b13.4"}
+{"section": "Zu fakturieren", "project_sections": ["Zu fakturieren", "Fakturiert", "Bezahlt", "Abgeschrieben"], "expect": "todo", "lang": "de", "pair": "b13.1"}
+{"section": "Fakturiert", "project_sections": ["Zu fakturieren", "Fakturiert", "Bezahlt", "Abgeschrieben"], "expect": "in_progress", "lang": "de", "pair": "b13.2", "note": "ambiguous: sent, waiting for payment"}
+{"section": "Bezahlt", "project_sections": ["Zu fakturieren", "Fakturiert", "Bezahlt", "Abgeschrieben"], "expect": "done", "lang": "de", "pair": "b13.3"}
+{"section": "Abgeschrieben", "project_sections": ["Zu fakturieren", "Fakturiert", "Bezahlt", "Abgeschrieben"], "expect": "not_planned", "lang": "de", "pair": "b13.4"}
+{"section": "Untranslated", "project_sections": ["Untranslated", "Translating", "Proofreading", "Delivered"], "expect": "todo", "lang": "en", "pair": "b14.1"}
+{"section": "Translating", "project_sections": ["Untranslated", "Translating", "Proofreading", "Delivered"], "expect": "in_progress", "lang": "en", "pair": "b14.2"}
+{"section": "Proofreading", "project_sections": ["Untranslated", "Translating", "Proofreading", "Delivered"], "expect": "in_progress", "lang": "en", "pair": "b14.3"}
+{"section": "Delivered", "project_sections": ["Untranslated", "Translating", "Proofreading", "Delivered"], "expect": "done", "lang": "en", "pair": "b14.4"}
+{"section": "Nepreložené", "project_sections": ["Nepreložené", "Prekladá sa", "Jazyková korektúra", "Odovzdané"], "expect": "todo", "lang": "sk", "pair": "b14.1"}
+{"section": "Prekladá sa", "project_sections": ["Nepreložené", "Prekladá sa", "Jazyková korektúra", "Odovzdané"], "expect": "in_progress", "lang": "sk", "pair": "b14.2"}
+{"section": "Jazyková korektúra", "project_sections": ["Nepreložené", "Prekladá sa", "Jazyková korektúra", "Odovzdané"], "expect": "in_progress", "lang": "sk", "pair": "b14.3"}
+{"section": "Odovzdané", "project_sections": ["Nepreložené", "Prekladá sa", "Jazyková korektúra", "Odovzdané"], "expect": "done", "lang": "sk", "pair": "b14.4"}
+{"section": "Nepřeloženo", "project_sections": ["Nepřeloženo", "Překládá se", "Jazyková korektura", "Předáno"], "expect": "todo", "lang": "cs", "pair": "b14.1"}
+{"section": "Překládá se", "project_sections": ["Nepřeloženo", "Překládá se", "Jazyková korektura", "Předáno"], "expect": "in_progress", "lang": "cs", "pair": "b14.2"}
+{"section": "Jazyková korektura", "project_sections": ["Nepřeloženo", "Překládá se", "Jazyková korektura", "Předáno"], "expect": "in_progress", "lang": "cs", "pair": "b14.3"}
+{"section": "Předáno", "project_sections": ["Nepřeloženo", "Překládá se", "Jazyková korektura", "Předáno"], "expect": "done", "lang": "cs", "pair": "b14.4"}
+{"section": "Unübersetzt", "project_sections": ["Unübersetzt", "Wird übersetzt", "Korrekturlesen", "Geliefert"], "expect": "todo", "lang": "de", "pair": "b14.1"}
+{"section": "Wird übersetzt", "project_sections": ["Unübersetzt", "Wird übersetzt", "Korrekturlesen", "Geliefert"], "expect": "in_progress", "lang": "de", "pair": "b14.2"}
+{"section": "Korrekturlesen", "project_sections": ["Unübersetzt", "Wird übersetzt", "Korrekturlesen", "Geliefert"], "expect": "in_progress", "lang": "de", "pair": "b14.3"}
+{"section": "Geliefert", "project_sections": ["Unübersetzt", "Wird übersetzt", "Korrekturlesen", "Geliefert"], "expect": "done", "lang": "de", "pair": "b14.4"}
+{"section": "Later", "project_sections": ["Later", "This quarter", "Now", "Shipped", "Parked"], "expect": "todo", "lang": "en", "pair": "b15.1"}
+{"section": "This quarter", "project_sections": ["Later", "This quarter", "Now", "Shipped", "Parked"], "expect": "todo", "lang": "en", "pair": "b15.2", "note": "ambiguous: planned vs started"}
+{"section": "Now", "project_sections": ["Later", "This quarter", "Now", "Shipped", "Parked"], "expect": "in_progress", "lang": "en", "pair": "b15.3"}
+{"section": "Shipped", "project_sections": ["Later", "This quarter", "Now", "Shipped", "Parked"], "expect": "done", "lang": "en", "pair": "b15.4"}
+{"section": "Parked", "project_sections": ["Later", "This quarter", "Now", "Shipped", "Parked"], "expect": "not_planned", "lang": "en", "pair": "b15.5", "note": "ambiguous: shelved vs later"}
+{"section": "Neskôr", "project_sections": ["Neskôr", "Tento kvartál", "Teraz", "Dodané", "Odložené"], "expect": "todo", "lang": "sk", "pair": "b15.1"}
+{"section": "Tento kvartál", "project_sections": ["Neskôr", "Tento kvartál", "Teraz", "Dodané", "Odložené"], "expect": "todo", "lang": "sk", "pair": "b15.2", "note": "ambiguous: planned vs started"}
+{"section": "Teraz", "project_sections": ["Neskôr", "Tento kvartál", "Teraz", "Dodané", "Odložené"], "expect": "in_progress", "lang": "sk", "pair": "b15.3"}
+{"section": "Dodané", "project_sections": ["Neskôr", "Tento kvartál", "Teraz", "Dodané", "Odložené"], "expect": "done", "lang": "sk", "pair": "b15.4"}
+{"section": "Odložené", "project_sections": ["Neskôr", "Tento kvartál", "Teraz", "Dodané", "Odložené"], "expect": "not_planned", "lang": "sk", "pair": "b15.5", "note": "ambiguous: shelved vs later"}
+{"section": "Později", "project_sections": ["Později", "Toto čtvrtletí", "Teď", "Dodáno", "Odloženo"], "expect": "todo", "lang": "cs", "pair": "b15.1"}
+{"section": "Toto čtvrtletí", "project_sections": ["Později", "Toto čtvrtletí", "Teď", "Dodáno", "Odloženo"], "expect": "todo", "lang": "cs", "pair": "b15.2", "note": "ambiguous: planned vs started"}
+{"section": "Teď", "project_sections": ["Později", "Toto čtvrtletí", "Teď", "Dodáno", "Odloženo"], "expect": "in_progress", "lang": "cs", "pair": "b15.3"}
+{"section": "Dodáno", "project_sections": ["Později", "Toto čtvrtletí", "Teď", "Dodáno", "Odloženo"], "expect": "done", "lang": "cs", "pair": "b15.4"}
+{"section": "Odloženo", "project_sections": ["Později", "Toto čtvrtletí", "Teď", "Dodáno", "Odloženo"], "expect": "not_planned", "lang": "cs", "pair": "b15.5", "note": "ambiguous: shelved vs later"}
+{"section": "Später", "project_sections": ["Später", "Dieses Quartal", "Jetzt", "Ausgeliefert", "Geparkt"], "expect": "todo", "lang": "de", "pair": "b15.1"}
+{"section": "Dieses Quartal", "project_sections": ["Später", "Dieses Quartal", "Jetzt", "Ausgeliefert", "Geparkt"], "expect": "todo", "lang": "de", "pair": "b15.2", "note": "ambiguous: planned vs started"}
+{"section": "Jetzt", "project_sections": ["Später", "Dieses Quartal", "Jetzt", "Ausgeliefert", "Geparkt"], "expect": "in_progress", "lang": "de", "pair": "b15.3"}
+{"section": "Ausgeliefert", "project_sections": ["Später", "Dieses Quartal", "Jetzt", "Ausgeliefert", "Geparkt"], "expect": "done", "lang": "de", "pair": "b15.4"}
+{"section": "Geparkt", "project_sections": ["Später", "Dieses Quartal", "Jetzt", "Ausgeliefert", "Geparkt"], "expect": "not_planned", "lang": "de", "pair": "b15.5", "note": "ambiguous: shelved vs later"}
+{"section": "Drafts to start", "project_sections": ["Drafts to start", "Drafting", "Legal review", "Signed", "Withdrawn"], "expect": "todo", "lang": "en", "pair": "b16.1"}
+{"section": "Drafting", "project_sections": ["Drafts to start", "Drafting", "Legal review", "Signed", "Withdrawn"], "expect": "in_progress", "lang": "en", "pair": "b16.2"}
+{"section": "Legal review", "project_sections": ["Drafts to start", "Drafting", "Legal review", "Signed", "Withdrawn"], "expect": "in_progress", "lang": "en", "pair": "b16.3"}
+{"section": "Signed", "project_sections": ["Drafts to start", "Drafting", "Legal review", "Signed", "Withdrawn"], "expect": "done", "lang": "en", "pair": "b16.4"}
+{"section": "Withdrawn", "project_sections": ["Drafts to start", "Drafting", "Legal review", "Signed", "Withdrawn"], "expect": "not_planned", "lang": "en", "pair": "b16.5"}
+{"section": "Na spracovanie", "project_sections": ["Na spracovanie", "Pripravuje sa", "Právna kontrola", "Podpísané", "Stiahnuté"], "expect": "todo", "lang": "sk", "pair": "b16.1"}
+{"section": "Pripravuje sa", "project_sections": ["Na spracovanie", "Pripravuje sa", "Právna kontrola", "Podpísané", "Stiahnuté"], "expect": "in_progress", "lang": "sk", "pair": "b16.2"}
+{"section": "Právna kontrola", "project_sections": ["Na spracovanie", "Pripravuje sa", "Právna kontrola", "Podpísané", "Stiahnuté"], "expect": "in_progress", "lang": "sk", "pair": "b16.3"}
+{"section": "Podpísané", "project_sections": ["Na spracovanie", "Pripravuje sa", "Právna kontrola", "Podpísané", "Stiahnuté"], "expect": "done", "lang": "sk", "pair": "b16.4"}
+{"section": "Stiahnuté", "project_sections": ["Na spracovanie", "Pripravuje sa", "Právna kontrola", "Podpísané", "Stiahnuté"], "expect": "not_planned", "lang": "sk", "pair": "b16.5"}
+{"section": "Ke zpracování", "project_sections": ["Ke zpracování", "Připravuje se", "Právní kontrola", "Podepsáno", "Staženo"], "expect": "todo", "lang": "cs", "pair": "b16.1"}
+{"section": "Připravuje se", "project_sections": ["Ke zpracování", "Připravuje se", "Právní kontrola", "Podepsáno", "Staženo"], "expect": "in_progress", "lang": "cs", "pair": "b16.2"}
+{"section": "Právní kontrola", "project_sections": ["Ke zpracování", "Připravuje se", "Právní kontrola", "Podepsáno", "Staženo"], "expect": "in_progress", "lang": "cs", "pair": "b16.3"}
+{"section": "Podepsáno", "project_sections": ["Ke zpracování", "Připravuje se", "Právní kontrola", "Podepsáno", "Staženo"], "expect": "done", "lang": "cs", "pair": "b16.4"}
+{"section": "Staženo", "project_sections": ["Ke zpracování", "Připravuje se", "Právní kontrola", "Podepsáno", "Staženo"], "expect": "not_planned", "lang": "cs", "pair": "b16.5"}
+{"section": "Zu bearbeiten", "project_sections": ["Zu bearbeiten", "In Vorbereitung", "Rechtliche Prüfung", "Unterschrieben", "Zurückgezogen"], "expect": "todo", "lang": "de", "pair": "b16.1"}
+{"section": "In Vorbereitung", "project_sections": ["Zu bearbeiten", "In Vorbereitung", "Rechtliche Prüfung", "Unterschrieben", "Zurückgezogen"], "expect": "in_progress", "lang": "de", "pair": "b16.2"}
+{"section": "Rechtliche Prüfung", "project_sections": ["Zu bearbeiten", "In Vorbereitung", "Rechtliche Prüfung", "Unterschrieben", "Zurückgezogen"], "expect": "in_progress", "lang": "de", "pair": "b16.3"}
+{"section": "Unterschrieben", "project_sections": ["Zu bearbeiten", "In Vorbereitung", "Rechtliche Prüfung", "Unterschrieben", "Zurückgezogen"], "expect": "done", "lang": "de", "pair": "b16.4"}
+{"section": "Zurückgezogen", "project_sections": ["Zu bearbeiten", "In Vorbereitung", "Rechtliche Prüfung", "Unterschrieben", "Zurückgezogen"], "expect": "not_planned", "lang": "de", "pair": "b16.5"}

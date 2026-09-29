@@ -120,7 +120,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   never stored; `tracker.connect` backs Settings → Trackers
   (`settings.trackers`), which replaced WorkSettings' tracker list.
   P5: `set_setting { propose: true, why }` leaves a proposal, never a
-  write (`service/settings_review.rs`, migration 082); every registered
+  write (`service/settings_review.rs`, migration 083); every registered
   write is audited through `settings::set_by` with its `Actor`; layout L6
   `review_apply` (Settings → Proposed changes, `fleet-hub settings`), a
   field's inline suggestion and History, search as a plain-words command
@@ -381,7 +381,14 @@ work-link | status-map` (`service/decide/bench/`: BM25, leakage guard, time
 split, calibration, the test map's acceptance lines, D39 `--export-unlinked`
 / `--labels`) with the `claude -p haiku` baseline (D33,
 `service/decide/haiku.rs`: a named host of the SAME org only, prompt on
-stdin). J1 has no live adapter: it waits on its acceptance lines. Label
+stdin). J1 has no live adapter: it waits on its acceptance lines.
+Their diagnostics are built too (evidence, never an acceptance line):
+`--perturb` (dataset C, `bench/perturb.rs`; J3 in `status_map_robust.rs`,
+J1 in `work_link_robust.rs`), J3's paired languages (dataset B, `pair` ids,
+`--paired-fixture`), `--floor-sweep` and `--question-set` (drafts in
+`service/testdata/decide/questions/`, dev only), and `fleet_health.decide`
+(`service::decide::health`, *degraded* per test map §7; the desktop's *Jev
+degraded* Attention item). Label
 hygiene (D34) is built: an agent never overturns a person's rejection,
 `store::Decider` records `agent` / `agent_started` vs `manual` / `started`
 (`PERSON_SOURCES` gate write-back, auto-trust and person counts), and a

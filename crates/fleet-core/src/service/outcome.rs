@@ -17,6 +17,19 @@ use std::time::{Duration, Instant};
 /// How long a session's PR probe result is trusted before `gh` is asked again.
 pub const PR_PROBE_TTL: Duration = Duration::from_secs(300);
 
+/// How often a steady PR's `sessions.pr_checked_at` is re-stamped. A changed
+/// reading is stamped at once; an unchanged one only when the stored stamp
+/// is at least this old, so a PR that sits green costs one row event per
+/// refresh instead of one per probe. Two probe windows.
+pub const PR_CHECKED_REFRESH_SECS: i64 = 2 * PR_PROBE_TTL.as_secs() as i64;
+
+/// A `pr_checked_at` older than this describes the past: the probe has not
+/// observed the PR for a while (host unreachable, `gh` failing). Three
+/// probe windows, so a steady PR re-stamped every
+/// [`PR_CHECKED_REFRESH_SECS`] and probed every [`PR_PROBE_TTL`] never
+/// crosses it while its probes succeed.
+pub const PR_EVIDENCE_STALE_SECS: i64 = 3 * PR_PROBE_TTL.as_secs() as i64;
+
 /// Line prefix the probe script prints before each session's result.
 const RESULT_PREFIX: &str = "__FLEET_PR__\t";
 /// Sentinel the script prints (and exits with) when `gh` is not on PATH.
@@ -29,11 +42,18 @@ const RC_NO_CWD: &str = "97";
 /// Line prefix of a session's commit messages since its upstream (work
 /// graph M4.2: commit trailers). Lines are joined with `\x1f`.
 const TRAILERS_PREFIX: &str = "__FLEET_TRAILERS__\t";
+/// Line prefix of a session's worktree state (result evidence §1):
+/// `<name>\t<HEAD>\t<commits ahead of upstream>\t<dirty 0|1>`, each field
+/// empty when git could not answer it.
+const GIT_PREFIX: &str = "__FLEET_GIT__\t";
 /// The `gh pr view` fields fleet reads. `headRefName` … `closingIssuesReferences`
 /// are work detection's (M4.2): read, parsed and dropped — the body is capped
 /// at 4k by `--jq` and never stored. `state` tells tidy-up a merged PR (M7).
+/// `headRefOid` … `isDraft` are result evidence's: the commit the checks
+/// describe, and what else stands between the PR and a merge.
 const PR_FIELDS: &str =
-    "url,statusCheckRollup,headRefName,title,body,closingIssuesReferences,state";
+    "url,statusCheckRollup,headRefName,title,body,closingIssuesReferences,state,\
+     headRefOid,reviewDecision,mergeStateStatus,isDraft";
 /// The fields an older `gh` without `closingIssuesReferences` (or `--jq`)
 /// still answers: the probe falls back to them.
 const PR_FIELDS_BASIC: &str = "url,statusCheckRollup";
@@ -48,7 +68,74 @@ pub struct PrInfo {
     /// What work detection reads from the PR (M4.2), `None` without a PR or
     /// when the host's `gh` answered only the basic fields.
     pub signals: Option<crate::service::work::detect::PrSignals>,
+    /// What the evidence card reads (result evidence §1), `None` without a
+    /// PR or when the host's `gh` answered only the basic fields.
+    pub evidence: Option<PrEvidence>,
 }
+
+/// One PR's evidence as the probe read it: the commit GitHub's checks
+/// describe, the worktree's own commit next to it, and what else stands
+/// between the PR and a merge. Stored as JSON in `sessions.pr_evidence`
+/// (design `docs/specs/2026-09-29-result-evidence-design.md` §2). Every
+/// field is optional on the wire: an absent one is "not observed", never
+/// "fine".
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct PrEvidence {
+    /// `headRefOid`: the commit the check rollup belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_oid: Option<String>,
+    /// The worktree's `HEAD` when the probe ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_head: Option<String>,
+    /// Commits on `HEAD` not on its upstream; `None` without an upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<u32>,
+    /// Tracked files differ from `HEAD`; `None` when git could not tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dirty: Option<bool>,
+    #[serde(default)]
+    pub draft: bool,
+    /// `reviewDecision`: APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED;
+    /// `None` for GitHub's `""` (the repository requires no review).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_decision: Option<String>,
+    /// `mergeStateStatus`: CLEAN | BLOCKED | BEHIND | DIRTY | UNSTABLE |
+    /// HAS_HOOKS | DRAFT | UNKNOWN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_state: Option<String>,
+    #[serde(default)]
+    pub checks: CheckSummary,
+}
+
+/// The check rollup, counted (result evidence §1). `failing` is non-empty
+/// exactly when [`reduce_ci_status`] says `failing`: both read
+/// [`classify_check`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct CheckSummary {
+    #[serde(default)]
+    pub total: u32,
+    #[serde(default)]
+    pub pending: u32,
+    /// Skipped or neutral: neither a pass nor a blocker.
+    #[serde(default)]
+    pub skipped: u32,
+    /// At most [`FAILING_CHECKS_MAX`]; `failing_total` counts them all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failing: Vec<FailingCheck>,
+    #[serde(default)]
+    pub failing_total: u32,
+}
+
+/// One failing check, by the name GitHub shows.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FailingCheck {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// Most failing checks one summary names.
+pub const FAILING_CHECKS_MAX: usize = 5;
 
 /// Build the per-host probe script. `targets` is `(tmux_name, cwd)` for every
 /// session due this pass. Each value is shell-quoted; the output is one
@@ -69,16 +156,25 @@ pub fn build_pr_probe_script(targets: &[(String, String)]) -> String {
         // The full field list first; an older `gh` that refuses a field or
         // `--jq` gets the basic list (a "no pull requests found" answer is
         // already final). Then the commit messages since the upstream, for
-        // their trailers: no extra round trip, at most 200 lines / 8k.
+        // their trailers: no extra round trip, at most 200 lines / 8k. Then
+        // the worktree's HEAD, its lead on the upstream and whether tracked
+        // files differ from HEAD (result evidence §1): local reads, no
+        // network. `git diff --quiet` exits 1 for a change and >1 when it
+        // cannot tell, which must not read as "clean".
         script.push_str(&format!(
             "if cd {cwd} 2>/dev/null; then \
              out=\"$(gh pr view --json {fields} --jq '.body |= ((. // \"\")[0:4000])' 2>&1)\"; rc=$?; \
              if [ \"$rc\" -ne 0 ] && ! printf '%s' \"$out\" | grep -qi 'no pull requests found'; then \
              out=\"$(gh pr view --json {basic} 2>&1)\"; rc=$?; fi; \
              msgs=\"$(git log --format=%B '@{{u}}..HEAD' 2>/dev/null | head -n 200 | head -c 8000 | tr '\\n\\t' '\\037 ')\"; \
-             else out=''; rc={rc_no_cwd}; msgs=''; fi; \
+             head=\"$(git rev-parse HEAD 2>/dev/null)\"; \
+             ahead=\"$(git rev-list --count '@{{u}}..HEAD' 2>/dev/null)\"; \
+             git diff --quiet HEAD -- 2>/dev/null; \
+             case $? in 0) dirty=0;; 1) dirty=1;; *) dirty='';; esac; \
+             else out=''; rc={rc_no_cwd}; msgs=''; head=''; ahead=''; dirty=''; fi; \
              printf '{prefix}%s\\t%s\\t%s\\n' {name} \"$rc\" \"$(printf '%s' \"$out\" | tr -d '\\n\\t')\"; \
-             printf '{tprefix}%s\\t%s\\n' {name} \"$msgs\"\n",
+             printf '{tprefix}%s\\t%s\\n' {name} \"$msgs\"; \
+             printf '{gprefix}%s\\t%s\\t%s\\t%s\\n' {name} \"$head\" \"$ahead\" \"$dirty\"\n",
             name = quote(name),
             cwd = quote(cwd),
             fields = PR_FIELDS,
@@ -86,6 +182,7 @@ pub fn build_pr_probe_script(targets: &[(String, String)]) -> String {
             rc_no_cwd = RC_NO_CWD,
             prefix = RESULT_PREFIX.replace('\t', "\\t"),
             tprefix = TRAILERS_PREFIX.replace('\t', "\\t"),
+            gprefix = GIT_PREFIX.replace('\t', "\\t"),
         ));
     }
     script
@@ -111,11 +208,24 @@ pub enum ProbeOutput {
 pub fn parse_pr_probe_output(stdout: &str) -> ProbeOutput {
     let mut out = HashMap::new();
     let mut trailers: HashMap<String, String> = HashMap::new();
+    let mut git: HashMap<String, GitState> = HashMap::new();
     for line in stdout.lines() {
         match line.trim() {
             NO_GH_MARKER => return ProbeOutput::NoGh,
             NO_AUTH_MARKER => return ProbeOutput::NoAuth,
             _ => {}
+        }
+        if let Some(rest) = line.strip_prefix(GIT_PREFIX) {
+            let mut f = rest.split('\t');
+            if let Some(name) = f.next() {
+                let state = parse_git_state(
+                    f.next().unwrap_or(""),
+                    f.next().unwrap_or(""),
+                    f.next().unwrap_or(""),
+                );
+                git.insert(name.to_string(), state);
+            }
+            continue;
         }
         if let Some(rest) = line.strip_prefix(TRAILERS_PREFIX) {
             if let Some((name, msgs)) = rest.split_once('\t') {
@@ -143,7 +253,41 @@ pub fn parse_pr_probe_output(stdout: &str) -> ProbeOutput {
             sig.add_trailers(&msgs);
         }
     }
+    // Likewise the worktree's git state: it is evidence about a PR, so it
+    // rides only a PR whose evidence fields `gh` answered.
+    for (name, st) in git {
+        if let Some(ev) = out.get_mut(&name).and_then(|i| i.evidence.as_mut()) {
+            ev.local_head = st.head;
+            ev.ahead = st.ahead;
+            ev.dirty = st.dirty;
+        }
+    }
     ProbeOutput::Results(out)
+}
+
+/// One `__FLEET_GIT__` record, each field `None` when git did not answer.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct GitState {
+    head: Option<String>,
+    ahead: Option<u32>,
+    dirty: Option<bool>,
+}
+
+/// Pure: read the three git fields. A HEAD that is not a hex object id, a
+/// count that is not a number (no upstream prints nothing) and a dirty flag
+/// other than `0` / `1` are all "not observed".
+fn parse_git_state(head: &str, ahead: &str, dirty: &str) -> GitState {
+    let head = head.trim();
+    GitState {
+        head: (head.len() >= 7 && head.len() <= 64 && head.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| head.to_ascii_lowercase()),
+        ahead: ahead.trim().parse().ok(),
+        dirty: match dirty.trim() {
+            "0" => Some(false),
+            "1" => Some(true),
+            _ => None,
+        },
+    }
 }
 
 /// Pure: turn one `(gh exit code, output)` record into an observation, or
@@ -190,10 +334,39 @@ pub fn pr_info_from_json(json: &str) -> PrInfo {
         .get("headRefName")
         .is_some()
         .then(|| crate::service::work::detect::PrSignals::from_gh_json(&v));
+    let evidence = v
+        .get("headRefOid")
+        .is_some()
+        .then(|| evidence_from_json(&v));
     PrInfo {
         pr_url,
         ci_status,
         signals,
+        evidence,
+    }
+}
+
+/// Pure: the evidence fields of one full `gh pr view` answer. The worktree
+/// fields are filled in by the parser from the `__FLEET_GIT__` line.
+fn evidence_from_json(v: &serde_json::Value) -> PrEvidence {
+    let text = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+            .map(str::to_string)
+    };
+    PrEvidence {
+        head_oid: text("headRefOid").map(|o| o.to_ascii_lowercase()),
+        review_decision: text("reviewDecision").map(|d| d.to_ascii_uppercase()),
+        merge_state: text("mergeStateStatus").map(|m| m.to_ascii_uppercase()),
+        draft: v.get("isDraft").and_then(|d| d.as_bool()).unwrap_or(false),
+        checks: v
+            .get("statusCheckRollup")
+            .and_then(|r| r.as_array())
+            .map(|c| summarize_checks(c))
+            .unwrap_or_default(),
+        ..PrEvidence::default()
     }
 }
 
@@ -201,40 +374,94 @@ pub fn pr_info_from_json(json: &str) -> PrInfo {
 /// still-running check, otherwise passing. `None` when there are no checks.
 ///
 /// GitHub's rollup mixes two shapes: check runs (`status` +
-/// `conclusion`) and commit statuses (`state`). Both are handled.
+/// `conclusion`) and commit statuses (`state`). Both are handled, by
+/// [`classify_check`].
 pub fn reduce_ci_status(checks: &[serde_json::Value]) -> Option<String> {
     if checks.is_empty() {
         return None;
     }
     let mut pending = false;
     for c in checks {
-        let conclusion = c
-            .get("conclusion")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_ascii_uppercase());
-        let status = c
-            .get("status")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_ascii_uppercase());
-        let state = c
-            .get("state")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_ascii_uppercase());
-        match (conclusion.as_deref(), status.as_deref(), state.as_deref()) {
-            (
-                Some("FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE"),
-                _,
-                _,
-            )
-            | (_, _, Some("FAILURE" | "ERROR")) => return Some("failing".into()),
-            (_, Some("QUEUED" | "IN_PROGRESS" | "PENDING" | "WAITING" | "REQUESTED"), _)
-            | (_, _, Some("PENDING" | "EXPECTED")) => pending = true,
-            // Check run still without a conclusion is in flight.
-            (None, Some(_), None) => pending = true,
-            _ => {}
+        match classify_check(c) {
+            CheckState::Failing => return Some("failing".into()),
+            CheckState::Pending => pending = true,
+            CheckState::Passing | CheckState::Skipped => {}
         }
     }
     Some(if pending { "pending" } else { "passing" }.into())
+}
+
+/// Count a PR's check rollup for the evidence card: how many, how many
+/// still running or skipped, and the failing ones by name.
+pub fn summarize_checks(checks: &[serde_json::Value]) -> CheckSummary {
+    let mut out = CheckSummary {
+        total: checks.len() as u32,
+        ..CheckSummary::default()
+    };
+    for c in checks {
+        match classify_check(c) {
+            CheckState::Failing => {
+                out.failing_total += 1;
+                if out.failing.len() < FAILING_CHECKS_MAX {
+                    let field = |k: &str| {
+                        c.get(k)
+                            .and_then(|x| x.as_str())
+                            .filter(|x| !x.is_empty())
+                            .map(str::to_string)
+                    };
+                    out.failing.push(FailingCheck {
+                        // Check runs have a `name`, commit statuses a `context`.
+                        name: field("name")
+                            .or_else(|| field("context"))
+                            .unwrap_or_else(|| "(unnamed check)".into()),
+                        url: field("detailsUrl")
+                            .or_else(|| field("targetUrl"))
+                            .filter(|u| u.starts_with("https://")),
+                    });
+                }
+            }
+            CheckState::Pending => out.pending += 1,
+            CheckState::Skipped => out.skipped += 1,
+            CheckState::Passing => {}
+        }
+    }
+    out
+}
+
+/// What one rollup entry says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckState {
+    Failing,
+    Pending,
+    /// A skipped or neutral run: it blocks nothing and proves nothing.
+    Skipped,
+    Passing,
+}
+
+/// Pure: classify one rollup entry, a check run or a commit status. The
+/// single definition [`reduce_ci_status`] and [`summarize_checks`] share, so
+/// the badge and the card cannot disagree about a check.
+pub fn classify_check(c: &serde_json::Value) -> CheckState {
+    let upper = |k: &str| {
+        c.get(k)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_ascii_uppercase())
+    };
+    let (conclusion, status, state) = (upper("conclusion"), upper("status"), upper("state"));
+    match (conclusion.as_deref(), status.as_deref(), state.as_deref()) {
+        (
+            Some("FAILURE" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE"),
+            _,
+            _,
+        )
+        | (_, _, Some("FAILURE" | "ERROR")) => CheckState::Failing,
+        (_, Some("QUEUED" | "IN_PROGRESS" | "PENDING" | "WAITING" | "REQUESTED"), _)
+        | (_, _, Some("PENDING" | "EXPECTED")) => CheckState::Pending,
+        // Check run still without a conclusion is in flight.
+        (None, Some(_), None) => CheckState::Pending,
+        (Some("SKIPPED" | "NEUTRAL"), _, _) => CheckState::Skipped,
+        _ => CheckState::Passing,
+    }
 }
 
 /// Process-wide probe throttle: `(host, tmux_name) → last probe`, plus the
@@ -539,5 +766,246 @@ mod tests {
         cache.retain_host("h", &["a".to_string()]);
         let cands = vec![("b".to_string(), "/b".to_string())];
         assert_eq!(cache.due("h", &cands).len(), 1, "b's stamp was dropped");
+    }
+
+    // ── result evidence (docs/specs/2026-09-29-result-evidence-design.md) ──
+
+    /// A full `gh pr view` answer shaped like claude-fleet #381 (measured
+    /// 2026-09-29): repository without required reviews, so `reviewDecision`
+    /// is `""`; merged, so `mergeStateStatus` is `UNKNOWN`.
+    fn full_answer(rollup: serde_json::Value) -> String {
+        serde_json::json!({
+            "url": "https://github.com/o/r/pull/381",
+            "statusCheckRollup": rollup,
+            "headRefName": "fix/x",
+            "title": "t",
+            "body": "",
+            "closingIssuesReferences": [],
+            "state": "OPEN",
+            "headRefOid": "621183B14FE358FC587E2D7B8401F3830244506F",
+            "reviewDecision": "",
+            "mergeStateStatus": "unknown",
+            "isDraft": false
+        })
+        .to_string()
+    }
+
+    fn run(name: &str, conclusion: &str) -> serde_json::Value {
+        serde_json::json!({
+            "__typename": "CheckRun", "name": name, "status": "COMPLETED",
+            "conclusion": conclusion,
+            "detailsUrl": format!("https://github.com/o/r/actions/runs/1/job/{name}")
+        })
+    }
+
+    #[test]
+    fn script_reads_evidence_fields_and_the_worktree_state() {
+        let script = build_pr_probe_script(&[("dev".into(), "/w/x".into())]);
+        for f in [
+            "headRefOid",
+            "reviewDecision",
+            "mergeStateStatus",
+            "isDraft",
+        ] {
+            assert!(PR_FIELDS.contains(f), "{f} is asked for");
+            assert!(
+                !PR_FIELDS_BASIC.contains(f),
+                "the old-gh fallback stays basic"
+            );
+        }
+        assert!(script.contains("git rev-parse HEAD"));
+        assert!(script.contains("git rev-list --count '@{u}..HEAD'"));
+        assert!(script.contains("git diff --quiet HEAD --"));
+        assert!(
+            script.contains("*) dirty='';;"),
+            "a diff that cannot tell is not clean"
+        );
+        assert!(script.contains("__FLEET_GIT__\\t%s"));
+        assert!(
+            !PR_FIELDS.contains(char::is_whitespace),
+            "the line continuation leaves no space inside the field list"
+        );
+    }
+
+    #[test]
+    fn evidence_reads_the_full_answer_and_treats_empty_as_absent() {
+        let info = pr_info_from_json(&full_answer(serde_json::json!([
+            run("rust", "SUCCESS"),
+            run("docs", "SKIPPED")
+        ])));
+        let ev = info.evidence.expect("full answer has evidence");
+        assert_eq!(
+            ev.head_oid.as_deref(),
+            Some("621183b14fe358fc587e2d7b8401f3830244506f")
+        );
+        assert_eq!(ev.review_decision, None, "\"\" = no review requirement");
+        assert_eq!(ev.merge_state.as_deref(), Some("UNKNOWN"));
+        assert!(!ev.draft);
+        assert_eq!(ev.checks.total, 2);
+        assert_eq!(ev.checks.skipped, 1);
+        assert!(ev.checks.failing.is_empty());
+        assert_eq!(
+            ev.local_head, None,
+            "worktree fields come from the git line"
+        );
+        assert_eq!(
+            info.ci_status.as_deref(),
+            Some("passing"),
+            "the badge is unchanged"
+        );
+    }
+
+    #[test]
+    fn evidence_is_absent_from_a_basic_answer() {
+        let info = pr_info_from_json(
+            "{\"url\":\"https://github.com/o/r/pull/1\",\"statusCheckRollup\":[]}",
+        );
+        assert!(info.pr_url.is_some());
+        assert_eq!(info.evidence, None);
+    }
+
+    #[test]
+    fn summary_names_failing_checks_from_both_shapes_capped() {
+        let mut rollup: Vec<serde_json::Value> = (0..7)
+            .map(|i| run(&format!("job-{i}"), "FAILURE"))
+            .collect();
+        rollup.push(serde_json::json!({
+            "__typename": "StatusContext", "context": "ci/legacy", "state": "ERROR",
+            "targetUrl": "https://ci.example/1"
+        }));
+        rollup.push(serde_json::json!({ "status": "IN_PROGRESS", "name": "slow" }));
+        rollup.push(serde_json::json!({
+            "name": "evil", "conclusion": "FAILURE", "detailsUrl": "javascript:alert(1)"
+        }));
+        let s = summarize_checks(&rollup);
+        assert_eq!(s.total, 10);
+        assert_eq!(s.pending, 1);
+        assert_eq!(s.failing_total, 9);
+        assert_eq!(s.failing.len(), FAILING_CHECKS_MAX);
+        assert_eq!(s.failing[0].name, "job-0");
+        assert_eq!(
+            s.failing[0].url.as_deref(),
+            Some("https://github.com/o/r/actions/runs/1/job/job-0")
+        );
+        let legacy = summarize_checks(&rollup[7..8]);
+        assert_eq!(legacy.failing[0].name, "ci/legacy");
+        assert_eq!(
+            legacy.failing[0].url.as_deref(),
+            Some("https://ci.example/1")
+        );
+        let evil = summarize_checks(&rollup[9..10]);
+        assert_eq!(evil.failing[0].url, None, "only https links are kept");
+    }
+
+    /// The card and the badge read one classifier: over every rollup shape
+    /// the tests know, the summary names a failing check exactly when the
+    /// badge says `failing`, and counts a pending one exactly when the badge
+    /// would otherwise say `pending`.
+    #[test]
+    fn summary_and_badge_agree_on_every_fixture() {
+        let shapes = [
+            check("COMPLETED", Some("SUCCESS")),
+            check("COMPLETED", Some("FAILURE")),
+            check("COMPLETED", Some("TIMED_OUT")),
+            check("COMPLETED", Some("SKIPPED")),
+            check("COMPLETED", Some("NEUTRAL")),
+            check("IN_PROGRESS", None),
+            check("QUEUED", None),
+            check("WEIRD", None),
+            serde_json::json!({ "state": "SUCCESS" }),
+            serde_json::json!({ "state": "ERROR" }),
+            serde_json::json!({ "state": "PENDING" }),
+            serde_json::json!({}),
+        ];
+        let mut rollups: Vec<Vec<serde_json::Value>> = vec![vec![]];
+        for a in &shapes {
+            rollups.push(vec![a.clone()]);
+            for b in &shapes {
+                rollups.push(vec![a.clone(), b.clone()]);
+            }
+        }
+        for r in rollups {
+            let badge = reduce_ci_status(&r);
+            let sum = summarize_checks(&r);
+            assert_eq!(
+                sum.failing_total > 0,
+                badge.as_deref() == Some("failing"),
+                "{r:?}"
+            );
+            if badge.as_deref() != Some("failing") {
+                assert_eq!(
+                    sum.pending > 0,
+                    badge.as_deref() == Some("pending"),
+                    "{r:?}"
+                );
+            }
+            assert_eq!(sum.total == 0, badge.is_none(), "{r:?}");
+        }
+    }
+
+    #[test]
+    fn git_line_rides_only_a_pr_with_evidence() {
+        let full = full_answer(serde_json::json!([]));
+        let stdout = format!(
+            "__FLEET_PR__\tclean\t0\t{full}\n\
+             __FLEET_GIT__\tclean\t621183b14fe358fc587e2d7b8401f3830244506f\t0\t0\n\
+             __FLEET_PR__\tahead\t0\t{full}\n\
+             __FLEET_GIT__\tahead\tABCDEF1234567\t2\t1\n\
+             __FLEET_PR__\tnoup\t0\t{full}\n\
+             __FLEET_GIT__\tnoup\tabcdef1\t\t\n\
+             __FLEET_PR__\tgarbled\t0\t{full}\n\
+             __FLEET_GIT__\tgarbled\tnot-a-sha\tmany\tmaybe\n\
+             __FLEET_PR__\tbasic\t0\t{{\"url\":\"https://github.com/o/r/pull/2\",\"statusCheckRollup\":[]}}\n\
+             __FLEET_GIT__\tbasic\tabcdef1\t0\t0\n\
+             __FLEET_PR__\tnopr\t1\tno pull requests found for branch \"x\"\n\
+             __FLEET_GIT__\tnopr\tabcdef1\t0\t1\n\
+             __FLEET_GIT__\tstray\tabcdef1\t0\t0\n"
+        );
+        let ProbeOutput::Results(map) = parse_pr_probe_output(&stdout) else {
+            panic!("results");
+        };
+        let ev = |n: &str| map[n].evidence.clone();
+        let clean = ev("clean").unwrap();
+        assert_eq!(clean.local_head, clean.head_oid);
+        assert_eq!((clean.ahead, clean.dirty), (Some(0), Some(false)));
+        let ahead = ev("ahead").unwrap();
+        assert_eq!(ahead.local_head.as_deref(), Some("abcdef1234567"));
+        assert_eq!((ahead.ahead, ahead.dirty), (Some(2), Some(true)));
+        let noup = ev("noup").unwrap();
+        assert_eq!(noup.local_head.as_deref(), Some("abcdef1"));
+        assert_eq!(
+            (noup.ahead, noup.dirty),
+            (None, None),
+            "no upstream is not 0"
+        );
+        let garbled = ev("garbled").unwrap();
+        assert_eq!(
+            (garbled.local_head, garbled.ahead, garbled.dirty),
+            (None, None, None)
+        );
+        assert_eq!(
+            ev("basic"),
+            None,
+            "no evidence fields, nothing to attach to"
+        );
+        assert_eq!(map["nopr"], PrInfo::default(), "no PR, nothing to assess");
+        assert!(!map.contains_key("stray"));
+    }
+
+    #[test]
+    fn evidence_round_trips_as_stored_json() {
+        let mut ev = pr_info_from_json(&full_answer(serde_json::json!([run("rust", "FAILURE")])))
+            .evidence
+            .unwrap();
+        ev.local_head = Some("abcdef1".into());
+        ev.ahead = Some(1);
+        ev.dirty = Some(false);
+        let json = serde_json::to_string(&ev).unwrap();
+        assert_eq!(serde_json::from_str::<PrEvidence>(&json).unwrap(), ev);
+        // An older reader's (or a hand-edited) empty object still parses.
+        assert_eq!(
+            serde_json::from_str::<PrEvidence>("{}").unwrap(),
+            PrEvidence::default()
+        );
     }
 }

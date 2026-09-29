@@ -284,10 +284,14 @@ async fn shadow_asks_every_section_and_records_the_rule_as_baseline() {
     let text = p.lines().join("\n");
     assert!(text.contains("agree on 1 of 2"), "{text}");
     assert!(text.contains("DIFFER"), "{text}");
-    // The envelope's own stats see the comparison too.
+    // The envelope's own stats count the same comparison: the three
+    // sections the rule abstained on are not "compared".
     let stats = w.store.lock().unwrap().decision_stats(0).unwrap();
     let answered = stats.iter().find(|s| s.fallback.is_none()).unwrap();
-    assert_eq!((answered.compared, answered.agreed), (5, 1));
+    assert_eq!(
+        (answered.runs, answered.compared, answered.agreed),
+        (5, 2, 1)
+    );
 }
 
 #[tokio::test]

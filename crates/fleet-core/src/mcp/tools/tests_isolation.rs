@@ -3744,6 +3744,38 @@ async fn fleet_healths_tracker_roll_up_is_fenced_by_org() {
     }
 }
 
+/// The decision envelope's health is the hub's: the master and an unbound
+/// paired client read it, a per-host token and an org-bound client do not.
+#[tokio::test]
+async fn fleet_healths_decide_block_is_the_hubs_alone() {
+    let fx = fixture(false);
+    {
+        let s = fx.t.store.lock().unwrap();
+        crate::service::settings::set(&s, crate::service::settings::DECIDE_JEV_ENABLED, "true")
+            .unwrap();
+        crate::service::settings::set(
+            &s,
+            crate::service::settings::DECIDE_JEV_STATUS_MAP,
+            "shadow",
+        )
+        .unwrap();
+    }
+    for who in EVERYONE {
+        let a = call(&fx, *who, "fleet_health", json!({})).await;
+        assert_eq!(code(&a), "OK", "{who:?}: {a:?}");
+        let v: Value = serde_json::from_str(text(&a)).unwrap();
+        let sees = !(who.is_host() || who.is_bound());
+        assert_eq!(v.get("decide").is_some(), sees, "{who:?}: {v}");
+        if sees {
+            assert_eq!(
+                v["decide"]["modes"]["status_map"],
+                json!("shadow"),
+                "{who:?}"
+            );
+        }
+    }
+}
+
 /// Spend on A's, B's and the unassigned host's sessions: 100, 20 000 and
 /// 3 000 micro-USD, all today.
 fn seed_usage(fx: &Fx) {

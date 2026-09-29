@@ -140,6 +140,29 @@ evaluation is judged on. They are few: one per decision a person made.
 - **One feature:** its mode to `off` (`fleet-hub decide mode status_map off`).
 - **The key:** `fleet-hub decide clear-key`.
 
+## Health: is it working?
+
+`fleet_health` (the desktop's `health_check`, the hub's `fleet_health`
+tool) carries a `decide` block while the kill switch is on or any feature
+is not `off` — the test map's "degraded" (§7):
+
+| Field | Meaning |
+|---|---|
+| `enabled`, `modes` | The kill switch, and every feature that is on (`shadow` / `assist`). |
+| `attempts` | Live runs in the last hour that meant to ask. A configuration's refusal (`not_owner`, `flag_off`, `mode_off`, `org_off`, `no_key`) and a spent budget are not attempts. A benchmark's runs never count. |
+| `failures`, `failure_rate` | Of them, the service failing: `timeout`, `http_error`, `rate_limited`, `breaker_open`. |
+| `breaker_open` | The live circuit breaker refuses calls. |
+| `budget_spent` | Today's input-token budget is spent — planned, so never `degraded`. |
+| `degraded`, `reason` | The switch is on, a feature is on, and the breaker is open (`breaker_open`) or more than 20% of at least 5 attempts failed (`failure_rate`). |
+
+A degraded envelope needs nothing done to stay safe: every answer falls
+back to what fleet does today by itself. It is for a person to look — the
+desktop shows one **Jev degraded** item in the Attention strip (to Settings
+→ *Decisions (Jev)*), and `fleet-hub decide status` prints the same
+judgement as its `health` line. Only the master token and an unbound
+paired client read the block; a per-host token and an org-bound client get
+none of it.
+
 ## `status_map` — Asana section proposals (J3)
 
 An Asana task's status comes from its section: the map a person confirmed
@@ -324,7 +347,10 @@ reads a desktop's `state.db`) and print ids, words and numbers only:
 the flag, the modes, which orgs consented, whether a key is configured
 (never the key), the live breaker, today's tokens and cost (the live
 features' and the benchmark's apart; the budget counts both), and runs
-per feature, `live` or `bench`, provider, fallback and org.
+per feature, `live` or `bench`, provider, fallback and org. Its `agreed
+X/Y` counts only the runs whose baseline decided: a section the keyword
+rule abstained on (baseline `none`) has nothing to agree with, so it is
+not among the `Y` — the same count `decide proposals` prints.
 
 ### The key on a standalone desktop
 
@@ -362,6 +388,7 @@ fleet-hub decide bench work-link [--split dev|test|all] [--provider none|bm25|je
                                  [--haiku-host ALIAS] [--haiku-model haiku] [--haiku-timeout 120]
                                  [--days 365] [--org ID] [--max-cases N] [--max-calls 500]
                                  [--labels FILE] [--db FILE] [--json]
+                                 [--perturb fold|typo|code ...]
 fleet-hub decide bench work-link --export-unlinked 150 --out FILE
 ```
 
@@ -483,6 +510,22 @@ fewer than 200 cases — the dataset, the none-cases, a cell or the English
 cell — is NOT JUDGED. The thresholds of 1–2 need Jev's dev answers: run
 `--split all` (the note says so otherwise).
 
+**Robustness (dataset C, `--perturb`).** Each case a model would be
+asked (the reported side of A, and H) is asked once more with its first
+prompt perturbed — `fold` (diacritics removed, case kept), `typo` (one
+deterministic typo in one word of four letters or more) or `code` (every
+fenced code block replaced by `[code: <lang>, N lines]`, decision D42's
+A/B) — only when the perturbation changes it, as `<case>.<perturbation>`.
+Each variant is compared with its original at the provider's **raw pick**
+(before any threshold chosen on dev; a "none of these" case is right when
+it abstains): each side's accuracy on answered and coverage, how often the
+answer changed, the accuracy difference with its bootstrap interval, and
+McNemar's exact test on who was right — the verdict (`worse` / `better` at
+p < 0.05, else `no difference`; *not judged* under 60 pairs, test map §3).
+A diagnostic: it changes no acceptance line. Each perturbation is its own
+pass of at most `--max-calls` calls; a provider with fewer than 5 pairs is
+left out of the lines.
+
 **Hand labels (D39, dataset H).** `--export-unlinked N --out FILE` writes N
 sessions with a first prompt and no confirmed or suggested link, spread over
 the window, one JSON line each: the redacted prompt, the candidates (ids and
@@ -508,7 +551,11 @@ fleet-hub decide bench status-map --labels sections.jsonl       # the owner's ha
 fleet-hub decide bench status-map --fixture --provider rule --provider jev [--max-calls 500] [--db FILE] [--json]
 fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host ALIAS
 fleet-hub decide bench status-map --labels sections.jsonl --provider jev --provider haiku --haiku-host ALIAS \
-    [--split dev|test|all] [--question FILE]
+    [--split dev|test|all] [--question FILE ...] [--floor-sweep]
+fleet-hub decide bench status-map --fixture --provider rule --provider jev \
+    --perturb fold --perturb typo --perturb emoji --perturb no-board --perturb shuffle-board
+fleet-hub decide bench status-map --paired-fixture --provider rule --provider jev   # en / sk / cs / de
+fleet-hub decide bench status-map --fixture --split dev --provider jev --question-set --floor-sweep
 ```
 
 **The cases** are labeled sections, one JSON line each:
@@ -639,6 +686,78 @@ the provider's p50 latency over the same cases is under a tenth of haiku's
 JUDGED under 200 paired cases or without a haiku run (the reason is
 printed). The overall verdict is PASS only when all four pass.
 
+### Diagnostics: robustness, languages, the floor, the wording
+
+None of these changes an acceptance line (no card registers a threshold on
+them); each is evidence for a decision a person makes. They print after the
+breakdown and are in `--json` under `robustness`, `languages` and
+`floor_sweep` (absent when not asked for).
+
+**Robustness (dataset C, `--perturb`).** Each reported section is asked
+once more as a person or a board might have written it: `fold`
+(diacritics removed on the whole board: `rozpracované` → `rozpracovane`),
+`typo` (one deterministic typo in the section's name, and in its entry on
+the board), `emoji` (a neutral emoji — 📌 🔹 ⭐ 🟣 📁 🌀, none of them a
+status — before every name of the board), `no-board` (the section's name
+alone) or `shuffle-board` (the board in another order: what is left
+without the position). A variant exists only when the perturbation changes
+what is sent; its keyword rule is read again on the new name. Each is
+compared with its original over the pairs both answered usably: accuracy on
+answered and coverage on both sides, `done` precision on both sides, how
+often the answer changed, the accuracy difference with its bootstrap
+interval, and McNemar's exact test on who was right — the verdict (`worse`
+/ `better` at p < 0.05, else `no difference`; *not judged* under 60 pairs).
+A lost answer counts as much as a wrong one there, which is why McNemar,
+not accuracy on answered, decides. Each perturbation is its own pass of at
+most `--max-calls` calls.
+
+**Languages (dataset B).** Rows with the same `pair` id are one section in
+several languages, each with its board translated:
+
+```json
+{"section": "Hotovo", "project_sections": ["Nápady", "Treba urobiť", "Rozpracované", "Hotovo"],
+ "expect": "done", "lang": "sk", "pair": "b01.5"}
+```
+
+When the rows carry pairs, the report compares every language with the
+`en` row of the same pair (the same numbers and verdict as robustness).
+`--paired-fixture` reads the built-in paired set,
+`crates/fleet-core/src/service/testdata/decide/status_map_paired.jsonl`:
+16 boards (software, support, releases, content, bugs, GTD, hiring,
+design, ops, a numbered sprint, events, research, invoices, translation,
+a roadmap, legal) in en, sk, cs and de — 81 pairs, 324 rows, 32 marked
+ambiguous. Like the main set it is **LLM-written (D43) and not yet
+spot-checked by the owner**, and it has no org. A split breaks pairs (the
+languages' boards differ), so run it with the default `--split all`.
+
+**The floor sweep (`--floor-sweep`).** The adapter asks at a confidence
+floor of 0.5; Jev's answers under it are kept already, so the sweep costs
+no call. For `jev` and `haiku` it prints, at every floor from 0 and 0.30 to
+0.95 (step 0.05; `*` marks 0.5): answers, coverage, accuracy on answered,
+the same where the rule abstains, and `done` precision. With `--split all`
+it also names **the lowest floor the dev boards would choose** — `done`
+precision ≥ 0.97 (when anything applies as done) and accuracy ≥ 0.90 where
+the rule abstains, over at least 20 such answers — and that floor's numbers
+on the test boards. The adapter's floor changes only with a code change and
+a new decision row; the sweep is the evidence for one.
+
+**The question set (`--question-set`).** Three rewordings of the adapter's
+question ship in
+`crates/fleet-core/src/service/testdata/decide/questions/`:
+`v2-position` (read the name first, then a concrete rule for the position),
+`v2-multilingual` (names in any language, with or without diacritics,
+emoji and numbering, with examples in sk / cs / de) and `v2-careful-done`
+(`done` only when the name says finished; ready, waiting and almost done
+are in progress). `--question-set` asks the adapter's question and each of
+them — one report each, one pass of at most `--max-calls` calls each —
+then prints one comparison of the model providers where the rule abstains
+(coverage, accuracy, `done` precision and n, ECE, calls, tokens). **Only
+with `--split dev`**: compare wordings on dev, then judge the one you chose
+once with `--split test --question FILE`, and only then adopt it in the
+adapter as `status_map.v2`. `--question` may be repeated to compare your
+own files the same way. With more than one question `--json` prints
+`{"reports": [...], "questions": [...]}`.
+
 ## The `claude -p haiku` baseline (D33)
 
 `--provider haiku` answers each benchmark question with a Claude model in
@@ -733,10 +852,25 @@ A checklist for the owner, on the hub, before any feature leaves `off`:
    Claude account may see these prompts, of the cases' own org — cases of
    any other org are skipped as `other_org`) so the haiku lines are judged
    on the same cases.
+   Then the diagnostics on the same key and budget (each pass bounded by
+   `--max-calls`):
+   - robustness: `status-map --labels sections.jsonl --provider rule
+     --provider jev --perturb fold --perturb typo --perturb emoji --perturb
+     no-board --perturb shuffle-board`, and `work-link --split all
+     --provider bm25 --provider jev --perturb fold --perturb typo --perturb
+     code` (the code placeholder is D42's A/B);
+   - languages: `status-map --paired-fixture --provider rule --provider jev`
+     (and your own paired rows, `pair` ids);
+   - the wording: `status-map --labels sections.jsonl --split dev --provider
+     jev --question-set --floor-sweep`, then the chosen wording once with
+     `--split test --question FILE --floor-sweep`.
 5. **Read the acceptance lines** of each report: PASS / FAIL / NOT JUDGED
    against the thresholds registered in the test map, the calibration, and
    the per-language cells (a cell that falls back stays off for that
    language). A threshold changes only with a new decision row.
+   While a feature runs live, watch `fleet_health.decide` (*Health*,
+   above): the desktop's **Jev degraded** item, or `fleet-hub decide
+   status`'s `health` line.
 6. **Shadow per org** — only for a card that passed: set
    `decide.jev.<feature>` at `shadow`, consent only the orgs whose cells
    passed, and leave the rest off. Assist comes after shadow's own exit

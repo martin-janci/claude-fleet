@@ -283,6 +283,19 @@ pub struct SessionRow {
     /// caller (`OrgScope::redact_row`): another org's link would move it.
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub work_rev: i64,
+    /// What the PR probe last read as evidence about the session's PR
+    /// (migration 082, result evidence): the commit the checks describe,
+    /// the worktree's own HEAD, review and merge state. `None` without a
+    /// PR, before the first probe, or from a host whose `gh` answers only
+    /// the basic fields. Absent from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_evidence: Option<crate::service::outcome::PrEvidence>,
+    /// When the probe last observed the PR (migration 082): exact when the
+    /// evidence changed, else at most `outcome::PR_CHECKED_REFRESH_SECS`
+    /// old while probes succeed. A reading older than
+    /// `outcome::PR_EVIDENCE_STALE_SECS` describes the past.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_checked_at: Option<i64>,
 }
 
 fn is_zero_i64(n: &i64) -> bool {
@@ -395,8 +408,19 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
     " AS org_id, prompt_submit_seq, stale_working_at, \
      (SELECT COALESCE(SUM(l.version * 1000003 + l.id), 0) FROM work_links l \
         JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
-       WHERE p.session_id = sessions.id AND l.ended_at IS NULL) AS work_rev"
+       WHERE p.session_id = sessions.id AND l.ended_at IS NULL) AS work_rev, \
+     pr_evidence, pr_checked_at"
 );
+
+/// Decode `sessions.pr_evidence`. Malformed text (never written by us)
+/// reads as no evidence rather than failing every session read.
+pub(super) fn decode_pr_evidence(
+    raw: Option<String>,
+) -> Option<crate::service::outcome::PrEvidence> {
+    raw.as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(|s| serde_json::from_str(s).ok())
+}
 
 /// Decode the `sessions.tags` JSON column. NULL, empty, or malformed text
 /// (never written by us, but a hand-edited DB is possible) reads as no tags
@@ -489,6 +513,8 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         prompt_submit_seq: row.get(58)?,
         stale_working_at: row.get(59)?,
         work_rev: row.get(60)?,
+        pr_evidence: decode_pr_evidence(row.get(61)?),
+        pr_checked_at: row.get(62)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
@@ -1227,6 +1253,10 @@ pub struct ReconcileSession<'a> {
     /// sweep respects: a row whose pane is visibly working is never demoted,
     /// whatever the agents cadence let the status say this pass.
     pub pane_working: bool,
+    /// The PR's evidence this pass read (result evidence), governed by
+    /// `pr_observed` like `ci_status`: authoritative when the probe ran (a
+    /// `None` clears it), preserved when it did not.
+    pub pr_evidence: Option<crate::service::outcome::PrEvidence>,
 }
 
 /// All inputs for applying one host's probe result atomically. Consumed by
