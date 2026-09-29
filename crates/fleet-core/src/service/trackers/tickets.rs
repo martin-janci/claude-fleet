@@ -112,6 +112,23 @@ pub(crate) fn allowed(scope: &OrgScope, s: &Store) -> Result<Option<HashSet<i64>
     Ok(Some(out))
 }
 
+/// May `scope` read `item`? Exactly `allowed(scope, s)` containing its id,
+/// for the callers that ask about one item: without building the set of
+/// every item the caller may see.
+pub(crate) fn item_visible(
+    scope: &OrgScope,
+    s: &Store,
+    item: &WorkItemRow,
+) -> Result<bool, IpcError> {
+    match scope {
+        OrgScope::All => Ok(true),
+        OrgScope::Org { .. } => Ok(scope.sees_org(s.item_org(item.id)?)),
+        OrgScope::Host { alias, .. } => {
+            Ok(s.work_item_on_host(alias, item.id)? && scope.sees_org(s.item_org(item.id)?))
+        }
+    }
+}
+
 /// The live sessions working on `key` as far as the item of `item_org` is
 /// concerned. A link whose session is in one org while the item is in
 /// another — a bare `ref_key` that `work_link` deliberately kept bare
@@ -355,6 +372,24 @@ pub async fn lookup(
     // (two sites can share a project key). A bare key asks every cache.
     let cached = match (&tracker, by_url) {
         (Some(t), true) => lock(store)?.tracker_item_for_key_in(t.id, &key)?,
+        // A scoped caller's BARE key asks for the item IT may see: two
+        // trackers (two sites, one per org) can hold the same key, which the
+        // unscoped answer calls ambiguous and would refuse the caller over.
+        // Not a URL whose tracker stayed open (the key's claimants are
+        // several): that URL names one site's ticket, and another site's
+        // item with the same key is a different ticket — it stays
+        // ambiguous, as before.
+        (_, false) if !scope.is_all() => {
+            let s = lock(store)?;
+            let mut found = None;
+            for item in s.tracker_items_for_key(&key)? {
+                if item_visible(scope, &s, &item)? {
+                    found = Some(item);
+                    break;
+                }
+            }
+            found
+        }
         _ => lock(store)?.tracker_item_for_key(&key)?,
     };
     let item_id = match cached {
@@ -417,14 +452,12 @@ pub async fn lookup(
         }
     };
     let s = lock(store)?;
-    if let Some(allowed) = allowed(scope, &s)? {
-        if !allowed.contains(&item_id) {
-            return Err(orgs::not_visible_to(scope, &key));
-        }
-    }
     let item = s
         .get_work_item(item_id)?
         .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "item vanished"))?;
+    if !item_visible(scope, &s, &item)? {
+        return Err(orgs::not_visible_to(scope, &key));
+    }
     let meta = s.work_item_meta(item_id)?;
     let t = s
         .list_trackers()?
@@ -614,12 +647,10 @@ pub async fn resolve_start(
         (Some(id), None) => {
             let s = lock(store)?;
             // Out of scope reads exactly as unknown: no existence oracle.
-            if allowed(scope, &s)?.is_some_and(|a| !a.contains(&id)) {
-                return Err(orgs::not_found("work item", id));
-            }
-            let item = s
-                .get_work_item(id)?
-                .ok_or_else(|| orgs::not_found("work item", id))?;
+            let item = match s.get_work_item(id)? {
+                Some(item) if item_visible(scope, &s, &item)? => item,
+                _ => return Err(orgs::not_found("work item", id)),
+            };
             let key = item.key.clone().ok_or_else(|| {
                 IpcError::new(codes::E_INVALID, "that work item has no key to start from")
             })?;

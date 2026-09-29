@@ -895,6 +895,21 @@ impl Store {
     /// A removed tracker's rows (kept for the links that point at them) do
     /// not count: they would shadow the same site re-added.
     pub fn tracker_item_for_key(&self, key: &str) -> Result<Option<WorkItemRow>, IpcError> {
+        let rows = self.tracker_items_for_key(key)?;
+        let trackers: BTreeSet<Option<i64>> = rows.iter().map(|r| r.tracker_id).collect();
+        Ok(if trackers.len() == 1 {
+            rows.into_iter().next()
+        } else {
+            None
+        })
+    }
+
+    /// Every tracker item `key` names (its key or an alias), across every
+    /// tracker that still exists: an exact key before an alias, then oldest
+    /// first. [`Store::tracker_item_for_key`] is the first row when all of
+    /// them are one tracker's; a scoped reader walks this list instead, for
+    /// the one IT may see (two sites, one per org, can share a key).
+    pub fn tracker_items_for_key(&self, key: &str) -> Result<Vec<WorkItemRow>, IpcError> {
         let key = super::normalize_work_ref(key)?;
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {ITEM_COLUMNS} FROM work_items \
@@ -903,15 +918,10 @@ impl Store {
                                     WHERE value = ?1)) \
              ORDER BY (key = ?1) DESC, id"
         ))?;
-        let rows: Vec<WorkItemRow> = stmt
+        let rows = stmt
             .query_map(rusqlite::params![key], map_item)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let trackers: BTreeSet<Option<i64>> = rows.iter().map(|r| r.tracker_id).collect();
-        Ok(if trackers.len() == 1 {
-            rows.into_iter().next()
-        } else {
-            None
-        })
+        Ok(rows)
     }
 
     /// The item `key` names (its key or an alias) in ONE tracker's cache:
@@ -1017,6 +1027,21 @@ impl Store {
         )?;
         let rows = stmt.query_map(rusqlite::params![host], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Is item `item_id` one of [`Store::work_item_ids_on_host`]'s? The same
+    /// fence for one item, without listing every item of the host.
+    pub fn work_item_on_host(&self, host: &str, item_id: i64) -> Result<bool, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM work_links l \
+             LEFT JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+             LEFT JOIN sessions s ON s.id = p.session_id \
+             WHERE l.item_id = ?2 AND l.state = 'confirmed' AND \
+               ((l.ended_at IS NULL AND s.host_alias = ?1) OR \
+                (l.ended_at IS NOT NULL AND l.snap_host = ?1)))",
+            rusqlite::params![host, item_id],
+            |r| r.get(0),
+        )?)
     }
 
     /// Where work on `prefix`-keys last ran: `(project_id, host)` of the

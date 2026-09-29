@@ -619,10 +619,9 @@ pub fn gather_stored(
     reader: &crate::service::orgs::OrgScope,
 ) -> Result<Gathered, IpcError> {
     let key = crate::store::normalize_work_ref(key)?;
-    let item = match s.work_item_by_key(&key)? {
-        Some(i) if reader.sees_org(s.item_org(i.id)?) => Some(i),
-        _ => None,
-    };
+    // The first item carrying `key` inside the reader's orgs: two trackers
+    // can hold the same key (one per org), and the other org's is not it.
+    let item = crate::service::orgs::org_item_for_key(s, reader, &key)?;
     let mut live = s.live_work_sessions_for_key(&key)?;
     let mut ended: Vec<WorkLinkRow> = s.ended_work_links_for_key(&key)?;
     let mut journal = s.journal_for_key(&key)?;

@@ -266,7 +266,14 @@ pub fn card(store: &Mutex<Store>, key: &str, scope: &OrgScope) -> Result<TicketC
     let key = crate::store::normalize_work_ref(key)?;
     let s = lock(store)?;
     orgs::require_key(&s, scope, &key)?;
-    let Some(item) = s.work_item_by_key(&key)? else {
+    // The first item carrying `key` this caller may read (a local item
+    // with an org of its own, work graph M14, is fenced like a ticket): two
+    // trackers can hold the same key, one per org.
+    let item = orgs::visible_item_for_key(&s, scope, &key)?;
+    if item.is_none() && !s.work_items_by_key(&key)?.is_empty() {
+        return Err(orgs::not_visible_to(scope, &key));
+    }
+    let Some(item) = item else {
         // No cached item, so no tracker to ask either way: `describe_offer`
         // always answers `None` here, but it still names the key the way
         // the other two call sites do (ruling 2's flattening applies
@@ -287,13 +294,6 @@ pub fn card(store: &Mutex<Store>, key: &str, scope: &OrgScope) -> Result<TicketC
         });
     };
     let org_id = s.item_org(item.id)?;
-    if let Some(allowed) = crate::service::trackers::tickets::allowed(scope, &s)? {
-        // A local item with an org of its own (work graph M14) is fenced
-        // like a ticket.
-        if !allowed.contains(&item.id) && (item.tracker_id.is_some() || !scope.sees_org(org_id)) {
-            return Err(orgs::not_visible_to(scope, &key));
-        }
-    }
     let meta = s.work_item_meta(item.id)?;
     let acceptance = meta
         .description
