@@ -831,6 +831,13 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         tracing::warn!("{warning}");
     }
     persist(&store, &r)?;
+    // `/events` stamps `needs_attention` without a store, so it is handed
+    // the `context_full` threshold `list_sessions` reads; later writes
+    // (`set_setting`, `fleet-hub decide` and the desktop all go through the
+    // running hub) reach it through `service::settings::set`.
+    if let Ok(s) = store.lock() {
+        bus.set_context_red_pct(fleet_core::service::health::context_red_pct(&s));
+    }
     if !r.local_host {
         // Before the control API and the ticks start: from here on every
         // tool or command naming host `local` is refused with E_NOTFOUND

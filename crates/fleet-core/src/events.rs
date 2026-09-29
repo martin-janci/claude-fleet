@@ -424,6 +424,13 @@ pub trait EventBus: Send + Sync {
     fn emit_change(&self, change: &RowChange) {
         self.emit(change);
     }
+
+    /// `health.context_red_pct` was written; `pct` is the value now in force.
+    /// Not an event: a bus that stamps derived fields onto its frames (the
+    /// hub's [`BroadcastEventBus`], for `needs_attention`'s `context_full`)
+    /// keeps its copy of the threshold in step with the store through this.
+    /// Every other bus ignores it.
+    fn context_red_pct_changed(&self, _pct: f64) {}
 }
 
 /// Silently drops every event. For tests and any context that doesn't need
@@ -493,6 +500,12 @@ pub struct BroadcastEventBus {
     generation: u64,
     /// Unix seconds when a subscriber was last present. See [`RING_GRACE_SECS`].
     last_subscriber_at: AtomicI64,
+    /// `health.context_red_pct` as `f64::to_bits`, the threshold the stamped
+    /// `needs_attention` judges `context_full` at. The bus holds no store, so
+    /// `fleet-hub serve` sets it at startup and `service::settings::set`
+    /// refreshes it on every write of the setting
+    /// ([`EventBus::context_red_pct_changed`]).
+    context_red_pct: AtomicU64,
 }
 
 /// Every event name a [`RowChange`] renders to — the exact strings
@@ -607,7 +620,21 @@ impl BroadcastEventBus {
                 .map(|d| d.as_nanos() as u64)
                 .unwrap_or(1),
             last_subscriber_at: AtomicI64::new(0),
+            context_red_pct: AtomicU64::new(
+                crate::service::attention::DEFAULT_CONTEXT_RED_PCT.to_bits(),
+            ),
         }
+    }
+
+    /// Judge `context_full` in the stamped `needs_attention` at `pct` from
+    /// now on — the value of `health.context_red_pct` in force.
+    pub fn set_context_red_pct(&self, pct: f64) {
+        self.context_red_pct.store(pct.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The threshold [`Self::set_context_red_pct`] last set.
+    pub fn context_red_pct(&self) -> f64 {
+        f64::from_bits(self.context_red_pct.load(Ordering::Relaxed))
     }
 
     /// Identifies this process's sequence; see [`EventMessage::seq`].
@@ -670,6 +697,10 @@ impl Default for BroadcastEventBus {
 }
 
 impl EventBus for BroadcastEventBus {
+    fn context_red_pct_changed(&self, pct: f64) {
+        self.set_context_red_pct(pct);
+    }
+
     fn emit(&self, e: &RowChange) {
         // The usual state of a hub nobody has connected a phone to. Checked
         // FIRST because `payload()` serializes a whole store row, and a
@@ -716,13 +747,13 @@ impl EventBus for BroadcastEventBus {
         // that listed once and then follows this stream keeps the hub's
         // answer instead of losing it on the row's first change. Here and
         // not in `payload()`: the desktop's Tauri bus shares that, and
-        // deserialises the payload straight back into `SessionRow`. The bus
-        // holds no store, so `context_full` is judged at the default
-        // threshold, not `health.context_red_pct` — the one reader that
-        // still can differ from `list_sessions` when the setting moves.
+        // deserialises the payload straight back into `SessionRow`.
+        // `context_full` is judged at `health.context_red_pct`, the same
+        // threshold `list_sessions` reads — held on the bus, which has no
+        // store (see `Self::context_red_pct`).
         if let RowChange::SessionCreated(row) | RowChange::SessionUpdated(row) = e {
             if let (Some(att), serde_json::Value::Object(map)) = (
-                crate::service::attention::needs_attention(row),
+                crate::service::attention::needs_attention_with(row, self.context_red_pct()),
                 &mut payload,
             ) {
                 if let Ok(v) = serde_json::to_value(att) {
@@ -1189,6 +1220,71 @@ mod tests {
             "a session that needs nobody carries no key: {}",
             msg.payload
         );
+    }
+
+    /// A row at 90 % context, live and working.
+    fn ninety_percent_row() -> SessionRow {
+        let s = crate::store::Store::open_in_memory().unwrap();
+        s.upsert_host("hosta").unwrap();
+        s.upsert_session("dev", "hosta", None, None, 1, 1, "running", None)
+            .unwrap();
+        let mut row = s.get_session("dev", "hosta").unwrap().expect("row");
+        row.claude_status = Some("working".into());
+        row.context_pct = Some(90.0);
+        row
+    }
+
+    /// `list_sessions` judges `context_full` at `health.context_red_pct`, so
+    /// the stream must too: at 95 a 90 % row needs nobody, at the default 85
+    /// it is `context_full` — or a phone following `/events` would disagree
+    /// with the list it just fetched.
+    #[tokio::test]
+    async fn the_stream_judges_context_full_at_the_bus_threshold() {
+        let row = ninety_percent_row();
+
+        let bus = BroadcastEventBus::new(4);
+        let default = crate::service::attention::DEFAULT_CONTEXT_RED_PCT;
+        assert_eq!(bus.context_red_pct(), default);
+        let mut rx = bus.subscribe();
+        bus.emit(&RowChange::SessionUpdated(row.clone()));
+        let msg = rx.recv().await.unwrap();
+        let reason = &msg.payload["needs_attention"]["reason"];
+        assert_eq!(reason, "context_full", "{}", msg.payload);
+
+        bus.set_context_red_pct(95.0);
+        bus.emit(&RowChange::SessionUpdated(row));
+        let msg = rx.recv().await.unwrap();
+        assert!(
+            msg.payload.get("needs_attention").is_none(),
+            "90 % is under a 95 % threshold: {}",
+            msg.payload
+        );
+    }
+
+    /// A write of `health.context_red_pct` through `settings::set` reaches
+    /// the store's bus, so a running hub's stream follows the setting
+    /// without a restart.
+    #[tokio::test]
+    async fn setting_the_threshold_updates_the_bus() {
+        use crate::service::settings;
+        let bus = std::sync::Arc::new(BroadcastEventBus::new(4));
+        let dyn_bus: std::sync::Arc<dyn EventBus> = bus.clone();
+        let s = crate::store::Store::open_with_bus_in_memory(dyn_bus).unwrap();
+
+        settings::set(&s, settings::HEALTH_CONTEXT_RED_PCT, "95").unwrap();
+        assert_eq!(bus.context_red_pct(), 95.0);
+
+        let mut rx = bus.subscribe();
+        bus.emit(&RowChange::SessionUpdated(ninety_percent_row()));
+        let msg = rx.recv().await.unwrap();
+        assert!(
+            msg.payload.get("needs_attention").is_none(),
+            "{}",
+            msg.payload
+        );
+
+        settings::set(&s, settings::HEALTH_CONTEXT_RED_PCT, "70").unwrap();
+        assert_eq!(bus.context_red_pct(), 70.0);
     }
 
     /// Replay is what makes a reconnect cost the events missed rather than a

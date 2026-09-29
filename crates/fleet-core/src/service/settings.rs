@@ -910,6 +910,11 @@ pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
         _ => v.to_string(),
     };
     s.set_setting(key, &stored)?;
+    if key == HEALTH_CONTEXT_RED_PCT {
+        // The hub's `/events` stamps `needs_attention` without a store; keep
+        // its threshold equal to the one `list_sessions` now reads.
+        s.context_red_pct_changed(crate::service::health::context_red_pct(s));
+    }
     Ok(())
 }
 
