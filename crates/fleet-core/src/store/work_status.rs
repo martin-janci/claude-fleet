@@ -1,12 +1,14 @@
 //! Who decided an item's status (design 2026-09-28 §2). The only writers of
 //! `work_items.status_set_by` live here: a person's explicit setting, and the
 //! derived stamp made when a session's PR is seen merged — by
-//! `Store::set_pr_signals`, where that fact is recorded, and by
-//! `Store::tidy_sessions`, which reads the same signal. Both are also
-//! the only local-item writers of `status_changed_at` (a tracker item's is
-//! written by `store::tracker_items` on every sync) — without it, the tidy
-//! planner's `done_long` (`service/gc/tidy.rs`) can never see a local item
-//! as long done, whoever set it.
+//! `Store::set_pr_signals`, where that fact is recorded, and by the
+//! reconcile pass's second call once links settle — both only on a signal
+//! that just CHANGED (`Store::tidy_sessions` reads the stored signal and
+//! never stamps). A person's setting and the derived stamp are also the only
+//! local-item writers of `status_changed_at` (a tracker item's is written by
+//! `store::tracker_items` on every sync) — without it, the tidy planner's
+//! `done_long` (`service/gc/tidy.rs`) can never see a local item as long
+//! done, whoever set it.
 
 use super::{now_unix, Store, WorkItemRow};
 use crate::ipc_error::{codes, IpcError};
@@ -46,13 +48,15 @@ pub const STATUS_CATEGORIES: [&str; 3] = ["todo", "in_progress", "done"];
 ///    handover while every other surface said `todo` (the final
 ///    whole-branch review's finding 2).
 ///
-/// Changing one without the others is exactly the drift this macro exists
-/// to avoid; `store::rows::tests::the_sql_macro_and_the_rust_function_agree_arm_by_arm`,
+/// The two SQL copies (1 and 2) share one fragment,
+/// [`crate::working_link_sql!`], and differ only in how they name the item
+/// (`= i.id` here, `IS NOT NULL` with the item selected there); the Rust
+/// filter in handover (3) is the only other copy. Change the fragment and
+/// that filter together;
+/// `store::rows::tests::the_sql_macro_and_the_rust_function_agree_arm_by_arm`,
 /// `service::work::view_tests`'s equivalent scenarios and
 /// `handover::tests::a_bare_ref_links_working_session_does_not_lift_the_item`
-/// are what would catch it landing wrong, but there is no automatic check
-/// that the SQL texts themselves stay in lockstep — read all three before
-/// editing any.
+/// are what would catch it landing wrong.
 ///
 /// SQLite cannot call into Rust, so this duplicates `effective_status`'s
 /// logic rather than calling it — `store::rows::tests::
@@ -102,24 +106,41 @@ pub const STATUS_CATEGORIES: [&str; 3] = ["todo", "in_progress", "done"];
 #[macro_export]
 macro_rules! effective_status_sql {
     () => {
-        "CASE WHEN i.id IS NULL THEN NULL \
-              WHEN i.status_category = '' THEN NULL \
-              WHEN i.status_set_by IN ('person', 'derived') THEN \
-                CASE i.status_category WHEN 'done' THEN 'done' \
-                                        WHEN 'in_progress' THEN 'in_progress' \
-                                        ELSE 'todo' END \
-              WHEN i.source = 'local' AND EXISTS ( \
-                     SELECT 1 FROM work_links es_l \
-                       JOIN participants es_p ON es_p.id = es_l.participant_id \
-                                              AND es_p.retired_at IS NULL \
-                       JOIN sessions es_s     ON es_s.id = es_p.session_id \
-                      WHERE es_l.item_id = i.id AND es_l.ended_at IS NULL \
-                        AND es_l.state = 'confirmed' AND es_s.claude_status = 'working') \
-                THEN 'in_progress' \
-              ELSE CASE i.status_category WHEN 'done' THEN 'done' \
-                                           WHEN 'in_progress' THEN 'in_progress' \
-                                           ELSE 'todo' END \
-         END"
+        concat!(
+            "CASE WHEN i.id IS NULL THEN NULL \
+                  WHEN i.status_category = '' THEN NULL \
+                  WHEN i.status_set_by IN ('person', 'derived') THEN \
+                    CASE i.status_category WHEN 'done' THEN 'done' \
+                                            WHEN 'in_progress' THEN 'in_progress' \
+                                            ELSE 'todo' END \
+                  WHEN i.source = 'local' AND EXISTS (SELECT 1 ",
+            $crate::working_link_sql!(),
+            " AND es_l.item_id = i.id) \
+                    THEN 'in_progress' \
+                  ELSE CASE i.status_category WHEN 'done' THEN 'done' \
+                                               WHEN 'in_progress' THEN 'in_progress' \
+                                               ELSE 'todo' END \
+             END"
+        )
+    };
+}
+
+/// "A confirmed, unended `work_links` row on a session that is presently
+/// `claude_status = 'working'`", `FROM` through `WHERE`, with the aliases
+/// `es_l` / `es_p` / `es_s`. The one SQL text of the condition
+/// [`crate::effective_status_sql!`] and
+/// `Store::work_items_with_working_session` share (see the former's doc for
+/// the third, Rust copy); each appends its own item test with `AND`. A
+/// macro, so both can `concat!` it.
+#[macro_export]
+macro_rules! working_link_sql {
+    () => {
+        "FROM work_links es_l \
+           JOIN participants es_p ON es_p.id = es_l.participant_id \
+                                  AND es_p.retired_at IS NULL \
+           JOIN sessions es_s     ON es_s.id = es_p.session_id \
+          WHERE es_l.ended_at IS NULL AND es_l.state = 'confirmed' \
+            AND es_s.claude_status = 'working'"
     };
 }
 
@@ -193,8 +214,8 @@ impl Store {
     /// does: it is what the tidy planner's `done_long` reads.
     ///
     /// Reached through [`Self::stamp_derived_done_for_session`] from two
-    /// places, and only those two — see that method for which, and why one
-    /// of them is not enough.
+    /// places, both on a merged signal that just CHANGED — see that method
+    /// for which, and why one of them is not enough.
     pub fn stamp_derived_done(&self, item_id: i64) -> Result<bool, IpcError> {
         let wrote = self.conn.execute(
             "UPDATE work_items SET status_category = 'done', status_set_by = 'derived', \
@@ -234,10 +255,14 @@ impl Store {
     ///   unless `work.auto_tidy` is on (default off, D2), so before this
     ///   site existed a merged PR followed by a `kill_session` lost `done`
     ///   permanently unless a person happened to open Tidy-up first.
-    /// * `Store::tidy_sessions` — kept because it is free (the pass already
-    ///   reads every session's `pr_signals`) and because a person opening
-    ///   Tidy-up should see delivered work as `done` in that same answer,
-    ///   not one probe later. Idempotent, so a second site is harmless.
+    /// * `service::sessions::reconcile`'s PR probe, once more after the
+    ///   links have settled — only when `set_pr_signals` reported a change.
+    ///
+    /// Only the sites that see the merged signal CHANGE stamp. A stored,
+    /// stale merged signal must never stamp: after the session is pointed
+    /// at new work (`link_session_work` demotes the old primary), it would
+    /// mark the NEW item delivered. `Store::tidy_sessions` used to stamp
+    /// from the stored signal and no longer does; it is a read.
     ///
     /// The PRIMARY link only, deliberately: a session may hold confirmed
     /// secondary links (an epic, a ticket it also touched), and "my PR

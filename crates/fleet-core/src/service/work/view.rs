@@ -1667,7 +1667,7 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
         section_pages(g, &summaries, &others, &org_names, args, per_task)
     };
     let review_total = if args.with_review_total {
-        Some(review_of(g, scope, None, Some(1))?.total)
+        Some(review_count(g, scope, &built))
     } else {
         None
     };
@@ -2098,6 +2098,111 @@ fn review_rank(kind: &str) -> u8 {
     }
 }
 
+/// One session's review candidates: what [`review_of`] makes items of and
+/// [`review_count`] counts, judged once so the two cannot drift.
+struct SessionReview<'g> {
+    row: &'g SessionRow,
+    /// Its suggested links (each other's alternatives).
+    suggestions: Vec<&'g ViewLink>,
+    /// Every suggestion or conflict, with its kind.
+    flagged: Vec<(&'g ViewLink, &'static str)>,
+    /// The newest confirmed link and how many there are, when the session
+    /// has confirmed links and none is primary.
+    no_primary: Option<(&'g ViewLink, usize)>,
+}
+
+/// Every session's review candidates under `scope`, from tasks already
+/// built.
+fn review_candidates<'g>(
+    g: &'g Graph,
+    scope: &OrgScope,
+    built: &[Built<'g>],
+) -> Vec<SessionReview<'g>> {
+    // Every live session with a primary, visible or not: "no primary" is
+    // judged on the whole session, so an invisible primary never reads as
+    // a missing one.
+    let has_primary: BTreeSet<i64> = g
+        .links
+        .iter()
+        .filter(|l| l.link.ended_at.is_none() && l.link.is_primary && l.link.state == "confirmed")
+        .filter_map(|l| l.session_id)
+        .collect();
+    let mut by_session: BTreeMap<i64, Vec<(&'g ViewLink, &'static str)>> = BTreeMap::new();
+    for b in built {
+        for &(l, st) in &b.visible {
+            if let Some(sid) = l
+                .session_id
+                .filter(|_| matches!(st, "active" | "suggested"))
+            {
+                by_session.entry(sid).or_default().push((l, st));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (sid, links) in by_session {
+        let Some(row) = g.sessions.get(&sid) else {
+            continue;
+        };
+        // A per-host token decides only its own host's sessions, so its
+        // inbox holds nothing else.
+        if scope.host().is_some_and(|h| h != row.host_alias) {
+            continue;
+        }
+        let suggestions: Vec<&'g ViewLink> = links
+            .iter()
+            .filter(|(_, st)| *st == "suggested")
+            .map(|(l, _)| *l)
+            .collect();
+        let flagged: Vec<(&'g ViewLink, &'static str)> = links
+            .iter()
+            .filter_map(|&(l, st)| {
+                let kind = match st {
+                    "suggested" => "suggestion",
+                    "active" if needs_review(g, l, st) => {
+                        let item = l.link.item_id.and_then(|i| g.items.get(&i));
+                        if item.is_some_and(|i| i.item.unavailable_at.is_some()) {
+                            "unavailable"
+                        } else {
+                            "cross_org"
+                        }
+                    }
+                    _ => return None,
+                };
+                Some((l, kind))
+            })
+            .collect();
+        let confirmed: Vec<&'g ViewLink> = links
+            .iter()
+            .filter(|(_, st)| *st == "active")
+            .map(|(l, _)| *l)
+            .collect();
+        let no_primary = if has_primary.contains(&sid) {
+            None
+        } else {
+            confirmed
+                .iter()
+                .max_by_key(|l| (l.link.decided_at.unwrap_or(l.link.created_at), l.link.id))
+                .map(|l| (*l, confirmed.len()))
+        };
+        out.push(SessionReview {
+            row,
+            suggestions,
+            flagged,
+            no_primary,
+        });
+    }
+    out
+}
+
+/// `review.total` under `scope`, from tasks already built: counts what
+/// [`review_of`] would list, without building any item.
+fn review_count(g: &Graph, scope: &OrgScope, built: &[Built<'_>]) -> u32 {
+    review_candidates(g, scope, built)
+        .iter()
+        .map(|s| s.flagged.len() + usize::from(s.no_primary.is_some()))
+        .sum::<usize>() as u32
+}
+
 /// [`review`] over a loaded graph.
 pub(crate) fn review_of(
     g: &Graph,
@@ -2113,27 +2218,7 @@ pub(crate) fn review_of(
         .iter()
         .flat_map(|b| b.visible.iter().map(move |(l, _)| (l.link.id, b)))
         .collect();
-    // Every live session with a primary, visible or not: "no primary" is
-    // judged on the whole session, so an invisible primary never reads as
-    // a missing one.
-    let has_primary: BTreeSet<i64> = g
-        .links
-        .iter()
-        .filter(|l| l.link.ended_at.is_none() && l.link.is_primary && l.link.state == "confirmed")
-        .filter_map(|l| l.session_id)
-        .collect();
     let mut items: Vec<(ReviewKey, ReviewItem)> = Vec::new();
-    let mut by_session: BTreeMap<i64, Vec<(&ViewLink, &str)>> = BTreeMap::new();
-    for b in &built {
-        for (l, st) in &b.visible {
-            if let Some(sid) = l
-                .session_id
-                .filter(|_| matches!(*st, "active" | "suggested"))
-            {
-                by_session.entry(sid).or_default().push((l, st));
-            }
-        }
-    }
     let make = |kind: &str,
                 l: &ViewLink,
                 row: &SessionRow,
@@ -2170,47 +2255,11 @@ pub(crate) fn review_of(
             created_at: l.link.decided_at.unwrap_or(l.link.created_at),
         }
     };
-    for (sid, links) in &by_session {
-        let Some(row) = g.sessions.get(sid) else {
-            continue;
-        };
-        // A per-host token decides only its own host's sessions, so its
-        // inbox holds nothing else.
-        if scope.host().is_some_and(|h| h != row.host_alias) {
-            continue;
-        }
-        let suggestions: Vec<&ViewLink> = links
-            .iter()
-            .filter(|(_, st)| *st == "suggested")
-            .map(|(l, _)| *l)
-            .collect();
-        for (l, st) in links {
-            // One line per piece of evidence that reads as evidence.
-            let why = || -> Vec<String> {
-                l.link
-                    .evidence
-                    .iter()
-                    .filter_map(|e| serde_json::from_value::<Evidence>(e.clone()).ok())
-                    .map(|e| why_of(&e))
-                    .collect::<Vec<_>>()
-            };
-            let kind = match *st {
-                "suggested" => Some("suggestion"),
-                "active" if needs_review(g, l, st) => {
-                    let item = l.link.item_id.and_then(|i| g.items.get(&i));
-                    if item.is_some_and(|i| i.item.unavailable_at.is_some()) {
-                        Some("unavailable")
-                    } else {
-                        Some("cross_org")
-                    }
-                }
-                _ => None,
-            };
-            let Some(kind) = kind else {
-                continue;
-            };
+    for s in review_candidates(g, scope, &built) {
+        let row = s.row;
+        for &(l, kind) in &s.flagged {
             let alts = if kind == "suggestion" {
-                suggestions
+                s.suggestions
                     .iter()
                     .filter(|o| o.link.id != l.link.id)
                     .filter_map(|o| {
@@ -2229,7 +2278,14 @@ pub(crate) fn review_of(
             } else {
                 Vec::new()
             };
-            let mut w = why();
+            // One line per piece of evidence that reads as evidence.
+            let mut w: Vec<String> = l
+                .link
+                .evidence
+                .iter()
+                .filter_map(|e| Evidence::deserialize(e).ok())
+                .map(|e| why_of(&e))
+                .collect();
             if w.is_empty() {
                 w.push(match kind {
                     "cross_org" => "the task's org and the session's differ".into(),
@@ -2243,36 +2299,24 @@ pub(crate) fn review_of(
                 it,
             ));
         }
-        let confirmed: Vec<&ViewLink> = links
-            .iter()
-            .filter(|(_, st)| *st == "active")
-            .map(|(l, _)| *l)
-            .collect();
-        if !confirmed.is_empty() && !has_primary.contains(sid) {
-            let newest = confirmed
-                .iter()
-                .max_by_key(|l| (l.link.decided_at.unwrap_or(l.link.created_at), l.link.id))
-                .copied();
-            if let Some(l) = newest {
-                let it = make(
-                    "no_primary",
-                    l,
-                    row,
-                    vec![format!(
-                        "{} tasks and none is primary; the sidebar cannot group it",
-                        confirmed.len()
-                    )],
-                    Vec::new(),
-                );
-                items.push((
-                    ReviewKey(
-                        review_rank("no_primary"),
-                        -it.created_at,
-                        it.review_id.clone(),
-                    ),
-                    it,
-                ));
-            }
+        if let Some((l, count)) = s.no_primary {
+            let it = make(
+                "no_primary",
+                l,
+                row,
+                vec![format!(
+                    "{count} tasks and none is primary; the sidebar cannot group it"
+                )],
+                Vec::new(),
+            );
+            items.push((
+                ReviewKey(
+                    review_rank("no_primary"),
+                    -it.created_at,
+                    it.review_id.clone(),
+                ),
+                it,
+            ));
         }
     }
     items.sort_by(|a, b| a.0.cmp(&b.0));

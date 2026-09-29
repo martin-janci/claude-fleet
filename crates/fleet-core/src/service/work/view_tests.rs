@@ -703,6 +703,29 @@ fn dump_wire_samples_when_asked() {
         "tree",
         serde_json::to_value(page(&w, &OrgScope::All, WorkTreeFilters::default())).unwrap(),
     );
+    // The same read with one open section (paged past its first task) and
+    // the inbox's total, as WorkTree's refresh asks for them.
+    write(
+        "tree_sections",
+        serde_json::to_value(
+            tree(
+                &w.st,
+                &OrgScope::All,
+                &TreeArgs {
+                    limit: Some(200),
+                    sections: vec![SectionAsk {
+                        org_id: Some(w.org_a),
+                        group_id: format!("tracker:{}:TP", w.tracker),
+                        limit: Some(1),
+                    }],
+                    with_review_total: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
     write(
         "task",
         serde_json::to_value(task(&w.st, &OrgScope::All, "item:2").unwrap()).unwrap(),
@@ -1777,4 +1800,78 @@ fn a_legacy_done_item_a_session_resumes_is_lifted_and_stays_unarchived() {
         !t.archived,
         "a session working it now is not archived, lifted status or not"
     );
+}
+
+/// A tree's `review_total` is counted from the tree's own tasks, never by
+/// building the inbox: it equals `review.total` under every scope, with a
+/// suggestion, a cross-org conflict and a session with no primary in it.
+#[test]
+fn a_tree_review_total_counts_what_the_review_lists_under_every_scope() {
+    let w = world();
+    link(&w, w.s1, w.t1, true);
+    link(&w, w.s1, w.t2, false);
+    {
+        let s = w.st.lock().unwrap();
+        crate::service::work::detect::on_prompt(&s, w.s2, "please look at TK-3", false).unwrap();
+        let b_item = s
+            .create_local_work_item(Some("BETA-1"), "Beta work")
+            .unwrap();
+        s.seed_local_item_org(b_item.id, Some(w.org_b));
+        s.link_session_work(w.s1, WorkTarget::Item(b_item.id), "manual")
+            .unwrap();
+    }
+    // s1 keeps three confirmed links and none is primary.
+    for l in links_of(&w, w.s1).links {
+        w.st.lock()
+            .unwrap()
+            .seed_link_primary(l.link.link_id, false);
+    }
+    let all = review(&w.st, &OrgScope::All, None, None).unwrap();
+    for kind in ["suggestion", "cross_org", "no_primary"] {
+        assert!(
+            all.items.iter().any(|i| i.kind == kind),
+            "{kind} in {:?}",
+            all.items
+        );
+    }
+    let scopes = [
+        OrgScope::All,
+        bound(w.org_a),
+        strict(w.org_a),
+        bound(w.org_b),
+        strict(w.org_b),
+        OrgScope::Host {
+            alias: "h1".into(),
+            org: Some(w.org_a),
+            isolated: Default::default(),
+        },
+        OrgScope::Host {
+            alias: "elsewhere".into(),
+            org: Some(w.org_a),
+            isolated: Default::default(),
+        },
+    ];
+    for (n, scope) in scopes.iter().enumerate() {
+        let inbox = review(&w.st, scope, None, Some(1)).unwrap();
+        for filters in [
+            WorkTreeFilters::default(),
+            WorkTreeFilters {
+                archived: Some(true),
+                ..Default::default()
+            },
+        ] {
+            let t = tree(
+                &w.st,
+                scope,
+                &TreeArgs {
+                    filters,
+                    limit: Some(1),
+                    with_review_total: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(t.review_total, Some(inbox.total), "scope {n}: {scope:?}");
+        }
+    }
 }

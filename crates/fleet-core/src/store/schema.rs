@@ -920,7 +920,40 @@ const MIGRATIONS: &[Migration] = &[
         85,
         include_str!("../../migrations/085_work_unlinks_item_index.sql"),
     ),
+    // 084's `idx_work_items_status_set` had no reader; dropped.
+    Migration::plain(
+        86,
+        include_str!("../../migrations/086_drop_status_set_index.sql"),
+    ),
 ];
+
+/// The migration that holds the newest `sessions_row_version_bump`. A later
+/// migration that rebuilds the trigger moves this number with it
+/// (`the_row_version_trigger_migration_is_the_latest_rebuild` fails
+/// otherwise).
+const ROW_VERSION_TRIGGER_MIGRATION: i64 = 82;
+
+/// The `DROP TRIGGER … CREATE TRIGGER sessions_row_version_bump … END;` block
+/// of [`ROW_VERSION_TRIGGER_MIGRATION`], verbatim: the newest definition,
+/// for a repair that re-ran an older rebuild and has to put it back.
+fn latest_row_version_trigger_sql() -> &'static str {
+    const DROP: &str = "DROP TRIGGER IF EXISTS sessions_row_version_bump;";
+    const END: &str = "\nEND;";
+    let sql = MIGRATIONS
+        .iter()
+        .find(|m| m.version == ROW_VERSION_TRIGGER_MIGRATION)
+        .expect("the row_version trigger migration is registered")
+        .sql;
+    let start = sql
+        .find(DROP)
+        .expect("the row_version trigger migration drops the trigger");
+    let end = start
+        + sql[start..]
+            .find(END)
+            .expect("the row_version trigger migration ends the trigger")
+        + END.len();
+    &sql[start..end]
+}
 
 /// One schema migration. `already_applied`, when set, reports whether the
 /// migration's change is already in the schema, for a migration that cannot
@@ -1097,9 +1130,12 @@ impl Store {
     /// 065–068 by their `already_applied` guards, 064 by
     /// `tracker_webhooks` still existing — and run here when the recorded
     /// version is past it and the artefact is missing. Their scripts are
-    /// ADD COLUMN plus `IF NOT EXISTS` / `DROP … IF EXISTS` DDL, and 065's
-    /// trigger rebuild is still the latest one, so running them late is
-    /// what running them in order would have left.
+    /// ADD COLUMN plus `IF NOT EXISTS` / `DROP … IF EXISTS` DDL, so running
+    /// them late is what running them in order would have left — except
+    /// 065's `sessions_row_version_bump` rebuild, which 082 rebuilt again.
+    /// When 065 re-runs here, the newest definition
+    /// ([`latest_row_version_trigger_sql`]) is put back after it, in the same
+    /// transaction.
     fn repair_skipped_main_migrations(&self) -> Result<()> {
         /// `(table, column, column definition)` added by `main`'s 034 and 036.
         const COLUMNS: &[(&str, &str, &str)] = &[
@@ -1128,6 +1164,7 @@ impl Store {
         let recorded: i64 = tx
             .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap_or(0);
+        let mut reran_065 = false;
         for m in MIGRATIONS
             .iter()
             .filter(|m| (64..=68).contains(&m.version) && m.version <= recorded)
@@ -1152,7 +1189,11 @@ impl Store {
                     m.version
                 );
                 tx.execute_batch(m.sql)?;
+                reran_065 |= m.version == 65;
             }
+        }
+        if reran_065 && recorded >= ROW_VERSION_TRIGGER_MIGRATION {
+            tx.execute_batch(latest_row_version_trigger_sql())?;
         }
         tx.commit()?;
         Ok(())
@@ -3871,11 +3912,18 @@ mod tests {
         assert!(orgs_has_bound_sees_unassigned(&s.conn).unwrap(), "067");
         assert!(orgs_has_jev_allowed(&s.conn).unwrap(), "068");
         assert!(!s.has_table("tracker_webhooks").unwrap(), "064");
+        let trigger = row_version_trigger_sql(&s);
         assert!(
-            row_version_trigger_sql(&s)
-                .contains("NEW.stale_working_at IS NOT OLD.stale_working_at"),
+            trigger.contains("NEW.stale_working_at IS NOT OLD.stale_working_at"),
             "065's trigger rebuild ran"
         );
+        // ...and was superseded again by the newest rebuild (082), not left
+        // as 065 wrote it.
+        assert!(
+            trigger.contains("NEW.pr_evidence IS NOT OLD.pr_evidence"),
+            "the newest row_version trigger is back: {trigger}"
+        );
+        assert!(trigger.contains("NEW.pr_checked_at IS NOT OLD.pr_checked_at"));
         let backfill: i64 = s
             .conn
             .query_row("SELECT backfill FROM usage_daily", [], |r| r.get(0))
@@ -3884,6 +3932,41 @@ mod tests {
         // A second open is a no-op.
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// [`ROW_VERSION_TRIGGER_MIGRATION`] names the NEWEST migration that
+    /// rebuilds `sessions_row_version_bump`, and the block the collision
+    /// repair re-applies is that migration's full trigger.
+    #[test]
+    fn the_row_version_trigger_migration_is_the_latest_rebuild() {
+        let newest = MIGRATIONS
+            .iter()
+            .filter(|m| m.sql.contains("CREATE TRIGGER sessions_row_version_bump"))
+            .map(|m| m.version)
+            .max()
+            .unwrap();
+        assert_eq!(newest, ROW_VERSION_TRIGGER_MIGRATION);
+        let block = latest_row_version_trigger_sql();
+        assert!(block.starts_with("DROP TRIGGER IF EXISTS sessions_row_version_bump;"));
+        assert!(block.contains("CREATE TRIGGER sessions_row_version_bump"));
+        assert!(block.ends_with("END;"));
+        assert!(block.contains("NEW.pr_checked_at IS NOT OLD.pr_checked_at"));
+    }
+
+    /// 086 drops 084's unused `idx_work_items_status_set`.
+    #[test]
+    fn migration_086_drops_the_status_set_index() {
+        let s = Store::open_in_memory().unwrap();
+        let n: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_work_items_status_set'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }
 

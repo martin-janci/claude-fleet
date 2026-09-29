@@ -274,6 +274,39 @@ fn a_stale_merged_signal_never_stamps_newly_named_work() {
     assert_eq!(row.status_set_by, None);
 }
 
+/// The Tidy-up read is a READ (review finding 3): `tidy_sessions` sees the
+/// stored merged signal (and reports it as `pr_merged`) but never stamps the
+/// work the session is on now. The read is open to per-host tokens and
+/// bound clients; a stale merged signal stamping newly named work from it
+/// would be the same hazard the `n > 0` gate closed in `set_pr_signals`.
+#[test]
+fn tidy_up_never_stamps_from_a_stale_merged_signal() {
+    let s = store();
+    s.upsert_host("h").unwrap();
+    let sid = s
+        .upsert_session("dev", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let merged = serde_json::json!({ "head": "feat/a", "state": "MERGED" }).to_string();
+    assert_eq!(
+        s.set_pr_signals("h", "dev", Some(&merged)).unwrap(),
+        Some(sid)
+    );
+    // Work named after the merge was recorded, as the primary, confirmed.
+    let b = s.create_local_work_item(Some("B-1"), "work B").unwrap();
+    let b_link = s
+        .link_session_work(sid, crate::store::WorkTarget::Item(b.id), "manual")
+        .unwrap();
+    assert!(b_link.is_primary);
+    assert_eq!(b_link.state, "confirmed");
+
+    let tidy = s.tidy_sessions().unwrap();
+    let t = tidy.iter().find(|t| t.row.id == sid).unwrap();
+    assert!(t.pr_merged, "the read still reports the merged PR");
+    let row = s.get_work_item(b.id).unwrap().unwrap();
+    assert_eq!(row.status_category, "todo", "a read must not deliver work");
+    assert_eq!(row.status_set_by, None);
+}
+
 /// What the caller's second call is for (`service::sessions::reconcile`,
 /// after `resolve_session`): the signal can change before the link the stamp
 /// needs exists, and `set_pr_signals` runs before the resolver that creates

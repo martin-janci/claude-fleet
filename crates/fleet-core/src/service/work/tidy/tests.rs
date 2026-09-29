@@ -458,23 +458,22 @@ async fn auto_tidy_acts_only_on_the_allowed_reasons() {
     assert_eq!(r.auto_reasons, vec![TidyReason::DoneIdle]);
 }
 
-/// End to end, through the real read path — no hand-stamping and no
+/// End to end, through the real paths — no hand-stamping and no
 /// hand-built `TidyLink`: a merged PR reaches `Store::stamp_derived_done`
-/// via `tidy_sessions()` (inside `work_tidy`), and the planner classifies
-/// the result as `pr_merged_idle`. Proves the two halves — the stamp write
-/// and the reason classification — actually meet (task 3 fix round 3).
+/// via `Store::set_pr_signals` (what the reconcile probe calls), and the
+/// planner classifies the result as `pr_merged_idle`. Proves the two halves
+/// — the stamp write and the reason classification — actually meet (task 3
+/// fix round 3). The Tidy-up read itself never stamps: see
+/// `store::work_status::tests::tidy_up_never_stamps_from_a_stale_merged_signal`.
 #[test]
 fn a_merged_prs_stamp_is_offered_as_pr_merged_idle_end_to_end() {
     let store = Mutex::new(Store::open_in_memory().unwrap());
     let (sid, item_id) = seed_session_and_item(&store, "just-merged");
+    let merged = serde_json::json!({ "state": "MERGED" }).to_string();
     store
         .lock()
         .unwrap()
-        .conn_ref()
-        .execute(
-            "UPDATE sessions SET pr_signals = '{\"state\":\"MERGED\"}' WHERE id = ?1",
-            [sid],
-        )
+        .set_pr_signals("local", "just-merged", Some(&merged))
         .unwrap();
     let r = work_tidy(&store, &OrgScope::All, NOW).unwrap();
     let c = r

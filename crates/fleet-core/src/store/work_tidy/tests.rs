@@ -219,8 +219,9 @@ fn tidy_sessions_reads_status_pr_tasks_and_protections() {
     assert!(tb.open_tasks, "the worker of an open task");
 }
 
-/// The merged-PR signal `tidy_sessions` already reads (work graph M7)
-/// stamps the linked local item `done`, once — see `Store::stamp_derived_done`.
+/// A merged PR stamps the linked local item `done`, once, where the signal
+/// changes (`Store::set_pr_signals`, see `Store::stamp_derived_done`) — the
+/// Tidy-up read (`tidy_sessions`) only reports `pr_merged` and never stamps.
 #[test]
 fn a_merged_pr_stamps_its_linked_local_item_done() {
     let s = Store::open_in_memory().unwrap();
@@ -228,14 +229,10 @@ fn a_merged_pr_stamps_its_linked_local_item_done() {
     let item = s.create_local_work_item(None, "auth refactor").unwrap();
     s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
         .unwrap();
-    s.conn
-        .execute(
-            "UPDATE sessions SET pr_signals = '{\"head\":\"x\",\"state\":\"MERGED\"}' \
-             WHERE id = ?1",
-            [sid],
-        )
+    s.set_pr_signals("h", "dev", Some("{\"head\":\"x\",\"state\":\"MERGED\"}"))
         .unwrap();
-    s.tidy_sessions().unwrap();
+    let all = s.tidy_sessions().unwrap();
+    assert!(all.iter().find(|t| t.row.id == sid).unwrap().pr_merged);
     let row = s.get_work_item(item.id).unwrap().unwrap();
     assert_eq!(row.status_category, "done");
     assert_eq!(row.status_set_by.as_deref(), Some("derived"));

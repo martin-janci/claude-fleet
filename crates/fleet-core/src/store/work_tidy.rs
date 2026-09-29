@@ -193,17 +193,15 @@ impl Store {
                         serde_json::from_str::<crate::service::work::detect::PrSignals>(s).ok()
                     })
                     .is_some_and(|s| s.is_merged());
-                // A merged PR stamps its linked local item `done`, once (see
-                // `Store::stamp_derived_done_for_session`, which both stamp
-                // sites share so neither can drift). The site that makes the
-                // feature work is `Store::set_pr_signals` — the background
-                // sweep never reaches this one with `work.auto_tidy` off.
-                // This one stays because it is free and because a person
-                // opening Tidy-up should see delivered work as `done` in
-                // that same answer; it is idempotent.
-                if pr_merged {
-                    self.stamp_derived_done_for_session(row.id)?;
-                }
+                // Read-only: this pass never stamps `done`. The stored
+                // `pr_signals` may be stale (merged long ago, the session
+                // since pointed at NEW work), and stamping here would mark
+                // that new item delivered — from a read open to per-host
+                // tokens and bound clients. Only the sites that see the
+                // merged signal CHANGE stamp (`Store::set_pr_signals` and
+                // the reconcile PR probe, both through
+                // `Store::stamp_derived_done_for_session`); `PrMergedIdle`
+                // reads what they wrote (`status_set_by = 'derived'`).
                 let (snoozed_until, never) = flags.remove(&row.id).unwrap_or_default();
                 Ok(TidySession {
                     link: links.remove(&row.id),

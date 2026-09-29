@@ -531,8 +531,11 @@ pub fn scope_sees_tracker(scope: &OrgScope, tracker_org: Option<i64>) -> bool {
 }
 
 /// The roll-up for `scope`, reading `metrics` (the sync's in-memory table)
-/// and the store only. `now` is unix seconds.
-pub fn trackers_from_store(
+/// and the store only. `now` is unix seconds. A test reference: production
+/// (`health_for`) reads the hosts once and calls [`trackers_scoped`], and
+/// the tests check the two-pass build against this one.
+#[cfg(test)]
+pub(crate) fn trackers_from_store(
     s: &Store,
     scope: &OrgScope,
     metrics: &dyn Fn(&[i64]) -> Vec<SyncMetrics>,
@@ -548,10 +551,10 @@ pub fn trackers_from_store(
     trackers_scoped(s, scope, metrics, now, &org_hosts)
 }
 
-/// [`trackers_from_store`] with an org-bound client's visible hosts already
-/// in hand (`org_hosts`, read only for [`OrgScope::Org`]): one grouped count
-/// of failed writes and one backlog count over those hosts, not one query
-/// per tracker and per host.
+/// The tracker roll-up for `scope`, with an org-bound client's visible
+/// hosts already in hand (`org_hosts`, read only for [`OrgScope::Org`]):
+/// one grouped count of failed writes and one backlog count over those
+/// hosts, not one query per tracker and per host.
 fn trackers_scoped(
     s: &Store,
     scope: &OrgScope,

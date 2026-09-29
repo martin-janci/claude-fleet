@@ -273,6 +273,23 @@ fn may_answer(trackers: &[super::TrackerRow], tracker_id: i64, key: &str) -> boo
     claims.contains(&tracker_id) && (!by_prefix || claims.len() == 1)
 }
 
+/// The per-host ticket fence (M3 plan, decision 6), one copy for both
+/// [`Store::work_item_ids_on_host`] (the set, `tickets::allowed`) and
+/// [`Store::work_item_on_host`] (one item, `tickets::item_visible`): a
+/// confirmed link whose live session runs on `?1`, or an ended link that
+/// ran there. `FROM` through `WHERE`; each caller appends its item filter
+/// with `AND`.
+macro_rules! host_item_fence {
+    () => {
+        "FROM work_links l \
+         LEFT JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+         LEFT JOIN sessions s ON s.id = p.session_id \
+         WHERE l.state = 'confirmed' AND \
+           ((l.ended_at IS NULL AND s.host_alias = ?1) OR \
+            (l.ended_at IS NOT NULL AND l.snap_host = ?1))"
+    };
+}
+
 impl Store {
     fn tracker_item_id(&self, tracker_id: i64, external_id: &str) -> Result<Option<i64>, IpcError> {
         Ok(self
@@ -1071,14 +1088,11 @@ impl Store {
     /// there, or an ended link that ran there. The per-host token's fence
     /// (M3 plan, decision 6).
     pub fn work_item_ids_on_host(&self, host: &str) -> Result<Vec<i64>, IpcError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT l.item_id FROM work_links l \
-             LEFT JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
-             LEFT JOIN sessions s ON s.id = p.session_id \
-             WHERE l.item_id IS NOT NULL AND l.state = 'confirmed' AND \
-               ((l.ended_at IS NULL AND s.host_alias = ?1) OR \
-                (l.ended_at IS NOT NULL AND l.snap_host = ?1))",
-        )?;
+        let mut stmt = self.conn.prepare(concat!(
+            "SELECT DISTINCT l.item_id ",
+            host_item_fence!(),
+            " AND l.item_id IS NOT NULL"
+        ))?;
         let rows = stmt.query_map(rusqlite::params![host], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -1087,12 +1101,11 @@ impl Store {
     /// fence for one item, without listing every item of the host.
     pub fn work_item_on_host(&self, host: &str, item_id: i64) -> Result<bool, IpcError> {
         Ok(self.conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM work_links l \
-             LEFT JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
-             LEFT JOIN sessions s ON s.id = p.session_id \
-             WHERE l.item_id = ?2 AND l.state = 'confirmed' AND \
-               ((l.ended_at IS NULL AND s.host_alias = ?1) OR \
-                (l.ended_at IS NOT NULL AND l.snap_host = ?1)))",
+            concat!(
+                "SELECT EXISTS (SELECT 1 ",
+                host_item_fence!(),
+                " AND l.item_id = ?2)"
+            ),
             rusqlite::params![host, item_id],
             |r| r.get(0),
         )?)

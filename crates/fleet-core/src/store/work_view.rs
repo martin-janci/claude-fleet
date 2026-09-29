@@ -229,22 +229,20 @@ impl Store {
     /// and, with it, every `tree` / `task` / `session_tasks` / `review`
     /// call that loads a `Graph`.
     ///
-    /// This `WHERE`, `crate::effective_status_sql!`'s `EXISTS`
-    /// (`store/work_status.rs`) and
-    /// `service::work::handover::gather_stored`'s `has_working_session` must
-    /// read as the same condition — all three answer "is a confirmed,
-    /// unended `work_links` row naming this item on a session with
-    /// `claude_status = 'working'`" — so a caller sees the same lift
-    /// whichever path served it. The macro's doc lists all three; check
-    /// them before changing any.
+    /// This query and `crate::effective_status_sql!`'s `EXISTS`
+    /// (`store/work_status.rs`) share one SQL fragment,
+    /// `crate::working_link_sql!`, so they read as the same condition — "a
+    /// confirmed, unended `work_links` row naming this item on a session
+    /// with `claude_status = 'working'`" — and a caller sees the same lift
+    /// whichever path served it. The only other copy is the Rust filter in
+    /// `service::work::handover::gather_stored`'s `has_working_session`;
+    /// change it with the fragment.
     pub fn work_items_with_working_session(&self) -> Result<Vec<(i64, i64)>, IpcError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT l.item_id, p.session_id FROM work_links l \
-             JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
-             JOIN sessions s     ON s.id = p.session_id \
-             WHERE l.ended_at IS NULL AND l.state = 'confirmed' \
-               AND s.claude_status = 'working' AND l.item_id IS NOT NULL",
-        )?;
+        let mut stmt = self.conn.prepare(concat!(
+            "SELECT DISTINCT es_l.item_id, es_p.session_id ",
+            crate::working_link_sql!(),
+            " AND es_l.item_id IS NOT NULL"
+        ))?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
