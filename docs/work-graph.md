@@ -751,7 +751,10 @@ it. `0` keeps a table forever.
 - `work.retention.journal_days` (365): the work journal. Kept regardless of
   age: rows of an open conversation, of a live-linked session, and of work
   that is not done or still has a live link; an undelivered handover and
-  one addressed to a live session.
+  one addressed to a live session. Work fleet tracks itself keeps its
+  journal and handover history whatever its status — marking your own work
+  done never puts its history on a clock — the same line the ticket cache
+  draws by sweeping only tickets.
 - `work.retention.tracker_items_days` (180): cached tickets in done. Kept
   while any link, live or ended, names one, and while it is the parent of a
   kept ticket.
