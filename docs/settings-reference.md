@@ -106,6 +106,7 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | Setting | Default | Range | What it does |
 |---|---|---|---|
 | `provision.force_git_tree` | `false` | on / off | Write fleet's skills even when a host's ~/.claude/skills is inside a git work tree, such as a dotfiles checkout. Off: provisioning refuses such a host. Asks to confirm. |
+| `provision.install_ag` | `true` | on / off | Provisioning installs fleet's ag launcher (~/.local/share/ag) and a cl command (claude --yolo) in ~/.local/bin on each host; sessions launch through it when the host has no cl of its own. Off: provisioning leaves ag alone. |
 
 ## Work graph
 

@@ -1309,6 +1309,18 @@
       ]
     },
     {
+      "default_widget": "switch",
+      "key": "provision.install_ag",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Install the ag launcher",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "number",
       "key": "work.retention.journal_days",
       "kind": {
