@@ -184,7 +184,8 @@ impl Store {
     }
 
     /// Record one transition. `false` when this `(target, attempt, phase)`
-    /// was already recorded (a replayed report). Keeps the newest
+    /// was already recorded (a replayed report); an attempt-less report is
+    /// never a replay (migration 087's partial unique index). Keeps the newest
     /// [`UPDATE_EVENTS_PER_TARGET`] rows of `target`.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_update_event(
@@ -494,6 +495,24 @@ mod tests {
             1_000_000_000 + super::UPDATE_EVENT_RETENTION_SECS + 10
         ));
         assert_eq!(s.update_events("hub:self", 10).unwrap().len(), 1);
+    }
+
+    /// Migration 087: attempt-less reports (checking / available / idle)
+    /// are never replays, so each one is logged; a real attempt's
+    /// transition is still recorded once.
+    #[test]
+    fn attempt_less_events_are_all_recorded_but_attempt_replays_are_not() {
+        let s = Store::open_in_memory().unwrap();
+        let ins = |attempt: Option<&str>, at| {
+            s.insert_update_event("client:1", attempt, "checking", None, None, None, None, at)
+                .unwrap()
+        };
+        assert!(ins(None, 1_000_000_000));
+        assert!(ins(None, 1_000_000_001), "a second checking is recorded");
+        assert_eq!(s.update_events("client:1", 10).unwrap().len(), 2);
+        assert!(ins(Some("a1"), 1_000_000_002));
+        assert!(!ins(Some("a1"), 1_000_000_003), "a replay adds nothing");
+        assert_eq!(s.update_events("client:1", 10).unwrap().len(), 3);
     }
 
     #[test]

@@ -542,6 +542,8 @@ fixture `tests/decide_cases.json`, `UpdatePhase`, and `UpdateChannel` with
 **S4a (the hub side) is landed:**
 - migration 079 (`update_desired`, `update_observed`, `update_events`, and
   `update_docs`, the signed-document cache, re-verified on every read);
+  087 keys `update_events` on `(target, attempt, phase)` for real attempts
+  only, so every attempt-less report is logged;
 - `service/update/` (`check` / `report` / `status` / `pin` / `refresh`,
   plus the refresh tick in `fleet-hub serve`, which records `hub:self`);
 - `POST /update/check` and `POST /update/report` (`mcp/update_route.rs`,

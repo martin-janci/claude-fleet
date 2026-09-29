@@ -767,10 +767,18 @@ fn a_report_without_an_attempt_is_always_the_observed_state() {
         observed(),
         (Some("a1".into()), "success".into(), "0.3.4".into())
     );
-    // The same (target, no attempt, checking) event is already recorded, so
-    // nothing new is logged, but the report is still the latest state.
-    assert!(!report(&store, &c, &checking("0.3.4"), NOW + 30).unwrap());
+    // An attempt-less report is never a replay (migration 087): the second
+    // `checking` is logged too, and it is the latest state.
+    assert!(report(&store, &c, &checking("0.3.4"), NOW + 30).unwrap());
     assert_eq!(observed(), (None, "checking".into(), "0.3.4".into()));
+    assert_eq!(
+        lock(&store)
+            .unwrap()
+            .update_events("client:1", 10)
+            .unwrap()
+            .len(),
+        4
+    );
 }
 
 #[tokio::test]

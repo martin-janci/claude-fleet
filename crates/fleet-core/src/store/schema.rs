@@ -925,6 +925,14 @@ const MIGRATIONS: &[Migration] = &[
         86,
         include_str!("../../migrations/086_drop_status_set_index.sql"),
     ),
+    // `update_events`: 079's inline `UNIQUE (target, attempt, phase)` becomes
+    // a partial unique index over real attempts only, so attempt-less
+    // reports are all logged. A table rebuild that starts from a clean copy
+    // each time, safe to re-run.
+    Migration::plain(
+        87,
+        include_str!("../../migrations/087_update_events_attempt_unique.sql"),
+    ),
 ];
 
 /// The migration that holds the newest `sessions_row_version_bump`. A later
