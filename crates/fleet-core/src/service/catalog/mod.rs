@@ -7,6 +7,7 @@ pub mod admin;
 pub mod author;
 pub mod author_session;
 pub mod harness;
+pub mod identity;
 pub mod import;
 pub mod inventory;
 pub mod layer;
@@ -196,6 +197,10 @@ pub struct AssetListing {
     pub assets: Vec<AssetSummary>,
     pub unmanaged: Vec<AssetInventoryRow>,
     pub problems: Vec<Problem>,
+    /// Assets S1a: `unmanaged` rows grouped per (kind, name) and classified.
+    /// Absent from older hubs; the frontend groups client-side then.
+    #[serde(default)]
+    pub identities: Vec<identity::AssetIdentity>,
 }
 
 /// Which hosts hold this catalog asset, and in what state. `unmanaged` and
@@ -225,6 +230,7 @@ pub fn inventory(store: &Mutex<Store>) -> Result<Vec<AssetInventoryRow>, IpcErro
 pub fn list_assets(store: &Mutex<Store>) -> Result<AssetListing, IpcError> {
     require_config(store)?;
     let rows = inventory(store)?;
+    let identities = identity::group_identities(&rows);
     with_catalog(|cat| {
         Ok(AssetListing {
             head: cat.head.clone(),
@@ -254,6 +260,7 @@ pub fn list_assets(store: &Mutex<Store>) -> Result<AssetListing, IpcError> {
                 .cloned()
                 .collect(),
             problems: cat.problems.clone(),
+            identities,
         })
     })
 }
