@@ -47,6 +47,38 @@ pub fn strip_nulls(v: &mut serde_json::Value) {
     }
 }
 
+/// The inverse of [`strip_nulls`], for a client that cannot treat an absent
+/// key as `None` (the desktop's frontend checks `=== null`): put a `null`
+/// back for every key `template` holds as `null` and `v` lacks, recursively
+/// (objects by key, arrays by position).
+///
+/// `template` is the same row as `v`, round-tripped through its type — so it
+/// has every field the type knows, with `null` where the value is `None`.
+/// Nothing in `v` is ever removed or overwritten, and nothing but `null` is
+/// ever added: a field the template does not know (a newer peer's) survives,
+/// and a defaulted `[]` or `false` is not invented.
+pub fn restore_nulls(v: &mut serde_json::Value, template: &serde_json::Value) {
+    match (v, template) {
+        (serde_json::Value::Object(map), serde_json::Value::Object(tmpl)) => {
+            for (k, t) in tmpl {
+                match map.get_mut(k) {
+                    Some(val) => restore_nulls(val, t),
+                    None if t.is_null() => {
+                        map.insert(k.clone(), serde_json::Value::Null);
+                    }
+                    None => {}
+                }
+            }
+        }
+        (serde_json::Value::Array(arr), serde_json::Value::Array(tmpl)) => {
+            for (val, t) in arr.iter_mut().zip(tmpl) {
+                restore_nulls(val, t);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,6 +96,46 @@ mod tests {
         let mut v = json!({ "row": { "a": null, "b": 1 }, "rows": [{ "c": null, "d": 2 }] });
         strip_nulls(&mut v);
         assert_eq!(v, json!({ "row": { "b": 1 }, "rows": [{ "d": 2 }] }));
+    }
+
+    #[test]
+    fn restore_puts_back_exactly_the_nulls_strip_took() {
+        let full = json!({
+            "id": 7,
+            "pr_url": null,
+            "usage": { "five_hour": { "utilization": 0.0, "resets_at": null }, "opus": null },
+            "rows": [{ "c": null, "d": 2 }],
+        });
+        let mut v = full.clone();
+        strip_nulls(&mut v);
+        restore_nulls(&mut v, &full);
+        assert_eq!(v, full);
+    }
+
+    #[test]
+    fn restore_keeps_a_field_the_template_does_not_know() {
+        // A newer hub's field survives: restoring only ever adds nulls.
+        let mut v = json!({ "id": 7, "new_field": [1, 2], "nested": { "x": 1, "y": true } });
+        restore_nulls(
+            &mut v,
+            &json!({ "id": 7, "gone": null, "nested": { "x": 1, "z": null } }),
+        );
+        assert_eq!(
+            v,
+            json!({ "id": 7, "new_field": [1, 2], "gone": null, "nested": { "x": 1, "y": true, "z": null } })
+        );
+    }
+
+    #[test]
+    fn restore_never_overwrites_a_value_or_invents_a_non_null() {
+        // Only a missing key whose template value is null is filled; a
+        // defaulted `[]` or `false` in the template is not the wire's to add.
+        let mut v = json!({ "a": 1 });
+        restore_nulls(
+            &mut v,
+            &json!({ "a": null, "tags": [], "flag": false, "b": null }),
+        );
+        assert_eq!(v, json!({ "a": 1, "b": null }));
     }
 
     #[test]
