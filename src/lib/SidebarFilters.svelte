@@ -67,9 +67,7 @@
     loadError,
     onRefresh,
     onCollapse,
-    showTasks,
     showSettings,
-    onOpenTasks,
     onOpenSettings,
     needsYouCount,
     selectMode,
@@ -91,9 +89,7 @@
     loadError: string | null;
     onRefresh: () => void;
     onCollapse?: () => void;
-    showTasks: boolean;
     showSettings: boolean;
-    onOpenTasks: () => void;
     onOpenSettings: () => void;
     needsYouCount: number;
     selectMode: boolean;
@@ -256,14 +252,6 @@
       >
     </div>
     <span class="spacer"></span>
-    <button
-      class="btn btn--quiet btn--icon"
-      onclick={() => onOpenTasks()}
-      title="Tasks (fleet-wide)"
-      aria-label="Tasks"
-      aria-expanded={showTasks}
-      data-testid="tasks-open"
-    >☑</button>
     <button
       class="btn btn--quiet btn--icon"
       onclick={() => onOpenSettings()}

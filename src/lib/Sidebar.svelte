@@ -91,11 +91,9 @@
   import { push, pushError } from './toasts';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
-  import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import BulkPromptDialog from './BulkPromptDialog.svelte';
   import NameWorkDialog from './NameWorkDialog.svelte';
-  import TasksPanel from './TasksPanel.svelte';
   import SidebarFilters from './SidebarFilters.svelte';
   import SessionRowItem from './SessionRowItem.svelte';
   import ResumeButton from './ResumeButton.svelte';
@@ -119,8 +117,6 @@
   import WorkTree from './WorkTree.svelte';
   import { sidebarView } from './work_view';
   import { isRecency, withinRecency, type Recency } from './session_status';
-
-  let showTasks = $state(false);
 
   // Optional collapse handler injected by the parent (App.svelte). When
   // present, a ‹ button appears in the sidebar header so the user can
@@ -1151,7 +1147,7 @@
     />
   {/snippet}
 
-  <!-- The shared chrome (Refresh, Needs you, bulk actions, Tasks, Settings,
+  <!-- The shared chrome (Refresh, Needs you, bulk actions, Settings,
        Attention) stays in both views; only the list below swaps. -->
   <SidebarFilters
     listView={$sidebarView}
@@ -1162,9 +1158,7 @@
     {loadError}
     {onRefresh}
     {onCollapse}
-    {showTasks}
     showSettings={$settingsOpen}
-    onOpenTasks={() => (showTasks = true)}
     onOpenSettings={() => settingsOpen.set(true)}
     needsYouCount={needsYouTotal}
     {selectMode}
@@ -1588,12 +1582,6 @@
 
 {#if $settingsOpen}
   <SettingsDialog onClose={() => settingsOpen.set(false)} />
-{/if}
-
-{#if showTasks}
-  <Modal title="Tasks" onclose={() => (showTasks = false)} width="640px" testid="tasks-dialog">
-    <TasksPanel />
-  </Modal>
 {/if}
 
 {#if nameWorkFor}
