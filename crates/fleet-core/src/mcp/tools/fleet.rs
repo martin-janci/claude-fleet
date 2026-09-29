@@ -17,7 +17,8 @@ impl FleetTools {
         hub: uptime and last reconcile pass; tunnels_mode none|reverse; \
         peer_links_total. \
         hosts[]: per host disk_home_pct/disk_low, claude_behind, \
-        agent_behind, hooks_silent.")]
+        agent_behind, hooks_silent. decide (master only): Jev's last \
+        hour, degraded if its breaker is open or >20% failed.")]
     pub(super) async fn fleet_health(
         &self,
         Extension(caller): Extension<Caller>,
@@ -90,6 +91,11 @@ impl FleetTools {
             )
             .ok()
         });
+        // The decision envelope is the hub's own business: a per-host token
+        // or an org-bound client gets none of it.
+        if caller.host_alias.is_some() || caller.is_scoped() {
+            h.decide = None;
+        }
         // An agent reads it: a tracker's error is the tracker's text.
         h.trackers.fence_errors();
         ok_json_compact(&h)

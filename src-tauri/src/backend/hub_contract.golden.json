@@ -241,6 +241,7 @@
       "context_red",
       "context_red_pct",
       "db_ready",
+      "decide",
       "ghosts",
       "hosts",
       "hosts_reachable",
@@ -258,6 +259,18 @@
       "usage_by_day",
       "usage_by_host",
       "version"
+    ],
+    "Health.decide": [
+      "attempts",
+      "breaker_open",
+      "budget_spent",
+      "degraded",
+      "enabled",
+      "failure_rate",
+      "failures",
+      "modes",
+      "reason",
+      "window_secs"
     ],
     "Health.hub": [
       "reconcile",

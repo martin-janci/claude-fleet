@@ -819,6 +819,7 @@ fn write_reachable_host(
             intel_observed: pane.is_some(),
             ci_status: pr.and_then(|p| p.ci_status.clone()),
             pr_observed: pr.is_some(),
+            pr_evidence: pr.and_then(|p| p.evidence.clone()),
             tmux_pane_id: sess.pane_id.clone(),
             pending_input: pane.and_then(|p| p.pending_input.clone()),
             // The spinner on screen is life, whether or not this pass asked

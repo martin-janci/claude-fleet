@@ -2161,6 +2161,13 @@ docker compose exec fleet-hub fleet-hub catalog reload --pull   # after a push t
 - `reload [--pull]` re-reads the checkout (optionally `git pull --ff-only`
   first). Nothing pulls on its own.
 - `show` prints the path, remote and last loaded commit.
+- The checkout, and every directory above it, must be readable by the user
+  the hub runs as (`fleet` in the image and in `fleet-hub.service`). A path
+  set by another user — `sudo fleet-hub catalog set ~/agent-assets` — is one
+  the running hub cannot read: every paired client's Assets tab then fails
+  with `E_IO: catalog checkout <path>: Permission denied`. Run `catalog set`
+  as the hub's user (`sudo -u fleet fleet-hub …`, or `docker compose exec`,
+  which already is) with a path under its data directory.
 
 The hub also loads the configured catalog when it starts. A desktop whose
 `state.db` was copied over (*Migrating from the desktop*) brings its

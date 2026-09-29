@@ -1,4 +1,5 @@
 import { invokeCmd, type Result } from './result';
+import type { DecideHealth } from './decide_health';
 import type { TrackersHealth } from './tracker_health';
 
 export interface Health {
@@ -9,6 +10,9 @@ export interface Health {
   trackers?: TrackersHealth;
   /** The hub's context threshold (percent); absent from an older hub. */
   context_red_pct?: number;
+  /** The Jev decision envelope's last hour; absent when it is off, from an
+   *  older hub, and for a scoped caller. */
+  decide?: DecideHealth;
 }
 
 /**
