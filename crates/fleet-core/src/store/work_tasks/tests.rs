@@ -221,3 +221,14 @@ fn deciding_something_that_is_not_a_proposal_is_refused() {
         codes::E_INVALID
     );
 }
+
+#[test]
+fn local_items_named_after_the_migration_are_manual_too() {
+    let s = Store::open_in_memory().unwrap();
+    let it = s.create_local_work_item(Some("OPS-9"), "ops").unwrap();
+    assert_eq!(it.origin.as_deref(), Some("manual"));
+    s.upsert_host("h").unwrap();
+    let sid = s.upsert_session("w", "h", None, None, 1, 1, "running", None).unwrap();
+    let (named, _) = s.name_session_work(sid, None, "named work").unwrap();
+    assert_eq!(named.origin.as_deref(), Some("manual"));
+}
