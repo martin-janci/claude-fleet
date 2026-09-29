@@ -3,7 +3,7 @@
   // the severity word + glyph, and the reset line (with pace on weekly).
   // A number is printed only while it is valid: `~` when stale, `? left` when
   // expired, `—` when the window is missing, `checking…` before first load.
-  import type { UsageWindow } from './account_usage_store';
+  import type { UsageWindow } from '../../account_usage_store';
   import UsageBar from './UsageBar.svelte';
   import {
     formatReset,
@@ -16,7 +16,7 @@
     severityBadge,
     type ModelBucket,
     type UsageWindowKind,
-  } from './account_usage';
+  } from '../../account_usage';
 
   let {
     name,

@@ -123,6 +123,13 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   item that takes it (Usage's window and host); Usage → Work graph usage
   (`usage.work`, source `work.usage` over `UsageSummary::rows`) replaced
   the hand-built WorkUsage panel and the `work_usage` command.
+  P4d: layout L8 `embed` places catalog items in the desktop's own
+  screens at a closed `Slot`; account usage (`account_usage { view }`,
+  live source `accounts.usage` over `list_account_usage`) is drawn that
+  way in Host detail, the Hosts list, the New-session chips and the
+  footer, and on Usage → Claude accounts. Embed pages are not in
+  `list_pages`: the desktop reads `src/lib/pages/embeds.generated.json`
+  (REGEN_PAGE_DOCS); the views are `src/lib/pages/usage/`.
   P5: `set_setting { propose: true, why }` leaves a proposal, never a
   write (`service/settings_review.rs`, migration 083); every registered
   write is audited through `settings::set_by` with its `Actor`; layout L6
@@ -163,7 +170,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 214
+  verdict is written down once, in `backend/verdicts.rs`, for all 217
   commands; `backend/tests_routing.rs` reads the handler list from `lib.rs`, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table

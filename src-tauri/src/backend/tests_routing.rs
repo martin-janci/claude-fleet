@@ -160,6 +160,9 @@ const PROJECT_TREE_PAYLOAD: &str = r#"{"project":{"id":7,"owner":"o","repo":"r",
 /// A `work_link { summarize }` answer (work graph M13.4c).
 const SUMMARY_PAYLOAD: &str = r#"{"key":"ABC-1","link_id":4,"host_alias":"hetzner","claude_session_id":"0f8fad5b-d9cb-469f-a165-70867728950e","model":"haiku","journal_id":9,"at":1,"summary":"fenced"}"#;
 const TASK_PAYLOAD: &str = r#"{"id":11,"state":"cancelled","created_at":1}"#;
+/// A native item (`TASK-<id>`, shared work context), as `work_link
+/// { create | accept | reject }` answers it.
+const NATIVE_ITEM_PAYLOAD: &str = r#"{"id":9,"source":"local","key":"TASK-9","title":"Write notes","status_category":"todo","created_at":1,"updated_at":1,"origin":"manual"}"#;
 /// A complete `MoveReport` wrapped as a `MoveOutcome::Moved` — all twelve
 /// report fields plus the internal tag `"kind":"moved"`, the last field a
 /// whole `SessionRow` (the same one as [`SESSION_PAYLOAD`]) whose own `kind`
@@ -788,6 +791,60 @@ fn routed_read_cases() -> Vec<Case> {
                         item_id: 3,
                         title: "Ops, renamed".into(),
                     },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Shared work context (design 2026-09-29).
+        (
+            "create_work_task",
+            "work_link",
+            json!({ "session_id": null, "action": "create", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "title": "Write notes",
+                    "parent": "item:5", "project_id": 3, "notes": "v1" }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::create_work_task(
+                    b,
+                    commands::work::CreateWorkTaskArgs {
+                        title: "Write notes".into(),
+                        parent: Some("item:5".into()),
+                        project_id: Some(3),
+                        notes: Some("v1".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "accept_work_proposal",
+            "work_link",
+            json!({ "session_id": null, "action": "accept", "key": null, "item_id": 9,
+                    "link_id": null, "source": null }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::decide_work_proposal(
+                    b,
+                    commands::work::WorkProposalArgs { item_id: 9 },
+                    true,
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "reject_work_proposal",
+            "work_link",
+            json!({ "session_id": null, "action": "reject", "key": null, "item_id": 9,
+                    "link_id": null, "source": null }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::decide_work_proposal(
+                    b,
+                    commands::work::WorkProposalArgs { item_id: 9 },
+                    false,
                     s,
                 ))
                 .map(|_| ())
@@ -4263,6 +4320,22 @@ fn resource_commands_exist() {
         assert!(
             super::verdicts::verdict(cmd).is_some(),
             "a resource names `{cmd}`, which has no hub verdict"
+        );
+    }
+    // A live data source is loaded by a desktop command too.
+    for live in fleet_core::pages::sources::SOURCES
+        .iter()
+        .filter_map(|s| s.live)
+    {
+        assert!(
+            registered.iter().any(|c| c == live.command),
+            "a live source names `{}`, which lib.rs does not register",
+            live.command
+        );
+        assert!(
+            super::verdicts::verdict(live.command).is_some(),
+            "a live source names `{}`, which has no hub verdict",
+            live.command
         );
     }
 }

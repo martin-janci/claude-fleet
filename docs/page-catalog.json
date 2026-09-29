@@ -67,12 +67,23 @@
         "record",
         "table",
         "chart",
+        "account_usage",
         "action",
         "notice",
         "link"
       ],
       "supported": true
+    },
+    {
+      "id": "embed",
+      "items": [
+        "account_usage"
+      ],
+      "supported": true
     }
+  ],
+  "page_usage_views": [
+    "block"
   ],
   "resources": [
     {
@@ -1916,7 +1927,57 @@
       ]
     }
   ],
+  "slots": [
+    {
+      "id": "host_detail",
+      "views": [
+        "block"
+      ]
+    },
+    {
+      "id": "hosts_group_title",
+      "views": [
+        "freshness"
+      ]
+    },
+    {
+      "id": "hosts_group",
+      "views": [
+        "bars"
+      ]
+    },
+    {
+      "id": "new_session_chip",
+      "views": [
+        "chip"
+      ]
+    },
+    {
+      "id": "new_session_host",
+      "views": [
+        "line",
+        "warning"
+      ]
+    },
+    {
+      "id": "status_footer",
+      "views": [
+        "footer"
+      ]
+    }
+  ],
   "sources": [
+    {
+      "help": "Each Claude account's plan headroom: the 5-hour and weekly windows, per-model limits, when it was checked and from which host, and when a refresh is allowed.",
+      "id": "accounts.usage",
+      "label": "Claude account usage",
+      "live": {
+        "command": "list_account_usage",
+        "event": "account_usage"
+      },
+      "params": [],
+      "shape": "account_usage"
+    },
     {
       "fields": [
         {

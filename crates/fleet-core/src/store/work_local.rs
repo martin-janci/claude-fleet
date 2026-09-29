@@ -143,8 +143,8 @@ impl Store {
         let now = now_unix();
         let tx = self.conn.unchecked_transaction()?;
         self.conn.execute(
-            "INSERT INTO work_items (source, key, title, created_at, updated_at) \
-             VALUES ('local', ?1, ?2, ?3, ?3)",
+            "INSERT INTO work_items (source, key, title, origin, created_at, updated_at) \
+             VALUES ('local', ?1, ?2, 'manual', ?3, ?3)",
             rusqlite::params![key, title, now],
         )?;
         let item_id = self.conn.last_insert_rowid();

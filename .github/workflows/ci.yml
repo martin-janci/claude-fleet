@@ -64,6 +64,23 @@ jobs:
           command -v sqlite3 >/dev/null || { sudo apt-get update -q && sudo apt-get install -yq sqlite3; }
           bash scripts/hub-deploy-scripts-test.sh
 
+  # tools/ag (the agent launcher) against fake claude/codex binaries. macOS
+  # runs it under the stock /bin/bash 3.2 — the whole point of ag's
+  # bash-3.2 rules — because the test pins PATH to $FAKE:/usr/bin:/bin.
+  ag:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: ag launcher tests
+        run: bash scripts/ag-test.sh
+      - name: shellcheck ag
+        if: runner.os == 'Linux'
+        run: shellcheck -s bash tools/ag/ag tools/ag/lib/*.sh tools/ag/drivers/*.sh tools/ag/install.sh scripts/ag-test.sh
+
   rust:
     strategy:
       fail-fast: false

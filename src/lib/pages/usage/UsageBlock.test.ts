@@ -1,8 +1,8 @@
 import { fireEvent, render, screen, within } from '@testing-library/svelte';
 import { describe, it, expect, vi } from 'vitest';
 import UsageBlock from './UsageBlock.svelte';
-import type { AccountUsage, AccountUsageSnapshot, UsageStatus } from './account_usage_store';
-import type { AccountRow } from './accounts';
+import type { AccountUsage, AccountUsageSnapshot, UsageStatus } from '../../account_usage_store';
+import type { AccountRow } from '../../accounts';
 
 // Mon 2026-09-14 14:32:00 UTC.
 const NOW = 1789396320;

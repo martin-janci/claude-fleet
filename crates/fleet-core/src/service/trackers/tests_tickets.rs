@@ -2382,3 +2382,113 @@ async fn a_multi_repo_start_holds_the_key_for_the_batch() {
     let s = fx.store.lock().unwrap();
     InFlight::claim(&s, "ABC-3").expect("released once the batch ends");
 }
+
+#[test]
+fn a_subtask_starts_in_its_project_with_the_ticket_brief_then_its_own() {
+    let s = Store::open_in_memory().unwrap();
+    let pid = s.upsert_project("acme", "api", "/src/api").unwrap();
+    let ticket = s
+        .create_local_work_item(Some("OM-110"), "Qomora harmonization")
+        .unwrap();
+    let sub = s
+        .create_native_item(&crate::store::NativeItem {
+            title: "SELECT stats",
+            parent_id: Some(ticket.id),
+            project_id: Some(pid),
+            notes: Some("suppliers, shared EANs"),
+        })
+        .unwrap();
+    let store = Mutex::new(s);
+    let got = with_native_defaults(
+        &store,
+        &StartArgs {
+            item_id: Some(sub.id),
+            ..Default::default()
+        },
+        &OrgScope::All,
+    )
+    .unwrap();
+    assert_eq!(got.project_id, Some(pid));
+    let brief = got.brief.unwrap();
+    assert!(brief.contains("OM-110 Qomora harmonization"), "{brief}");
+    assert!(brief.contains("## Subtask"), "{brief}");
+    assert!(
+        brief.ends_with("SELECT stats\n\nsuppliers, shared EANs"),
+        "{brief}"
+    );
+    let mine = with_native_defaults(
+        &store,
+        &StartArgs {
+            item_id: Some(sub.id),
+            project_id: Some(7),
+            brief: Some("mine".into()),
+            ..Default::default()
+        },
+        &OrgScope::All,
+    )
+    .unwrap();
+    assert_eq!(
+        (mine.project_id, mine.brief.as_deref()),
+        (Some(7), Some("mine"))
+    );
+}
+
+#[tokio::test]
+async fn an_unaccepted_proposal_cannot_be_started() {
+    let s = Store::open_in_memory().unwrap();
+    let t = s.create_local_work_item(Some("OM-110"), "Qomora").unwrap();
+    let p = s
+        .propose_subtask(&crate::store::Proposal {
+            parent_id: t.id,
+            title: "idea",
+            notes: None,
+            why: None,
+            proposed_by: "x",
+        })
+        .unwrap();
+    let store = Mutex::new(s);
+    let e = resolve_start(
+        &store,
+        &StartArgs {
+            item_id: Some(p.id),
+            ..Default::default()
+        },
+        &OrgScope::All,
+        &crate::service::trackers::default_net(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+}
+
+#[test]
+fn a_subtask_start_never_carries_a_parent_the_caller_cannot_see() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let ticket = s
+        .create_local_work_item(Some("SECRET-1"), "Other org's ticket")
+        .unwrap();
+    let sub = s
+        .create_native_item(&crate::store::NativeItem {
+            title: "Mine",
+            parent_id: Some(ticket.id),
+            project_id: None,
+            notes: None,
+        })
+        .unwrap();
+    let scope = OrgScope::for_host(&s, "h").unwrap();
+    let store = Mutex::new(s);
+    let got = with_native_defaults(
+        &store,
+        &StartArgs {
+            item_id: Some(sub.id),
+            ..Default::default()
+        },
+        &scope,
+    )
+    .unwrap();
+    let brief = got.brief.unwrap();
+    assert!(!brief.contains("SECRET-1"), "{brief}");
+    assert!(!brief.contains("Other org"), "{brief}");
+    assert_eq!(brief, "Mine");
+}

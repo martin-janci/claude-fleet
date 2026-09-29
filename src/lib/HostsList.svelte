@@ -6,15 +6,10 @@
   // the quick switcher. No destructive controls here — no ×, no 🚫.
   import type { AccountUsageSnapshot } from './account_usage_store';
   import AccountNickname from './AccountNickname.svelte';
-  import UsageBar from './UsageBar.svelte';
+  import EmbedSlot from './pages/EmbedSlot.svelte';
   import { hubStatus, hubBlock } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
-  import {
-    compactWindow,
-    freshnessMark,
-    type HostGroup,
-    type HostRowInfo,
-  } from './hosts_view';
+  import type { HostGroup, HostRowInfo } from './hosts_view';
 
   const nicknameBlocked = $derived(hubBlock('set_account_nickname', $hubStatus));
 
@@ -62,11 +57,6 @@
     oneditstart: (uuid: string) => void;
     oneditdone: () => void;
   } = $props();
-
-  const MINI = [
-    { kind: '5h' as const, short: '5h' },
-    { kind: 'weekly' as const, short: 'wk' },
-  ];
 
   function optionIdFor(alias: string): string {
     return `${listId}-opt-${alias.replace(/[^A-Za-z0-9_-]/g, '_')}`;
@@ -122,30 +112,11 @@
               <span class="group-label" data-testid="group-label">{g.label}</span>
             {/if}
             {#if g.accountUuid}
-              {@const tier = snap?.subscription ?? g.account?.seat_tier ?? null}
-              {@const fm = freshnessMark(snap, now)}
-              {#if tier}<span class="tier" data-testid="group-tier">{tier}</span>{/if}
-              <span class="fresh fresh-{fm.state}" title={fm.title} data-testid="group-freshness">{fm.mark}</span>
+              <EmbedSlot slot="hosts_group_title" ctx={{ now, locale, timeZone, account: g.account, snapshot: snap }} />
             {/if}
           </div>
           {#if g.accountUuid}
-            {#each MINI as { kind, short } (kind)}
-              {@const cw = compactWindow(kind, snap, now, locale, timeZone)}
-              {@const win = snap?.usage ? (kind === '5h' ? snap.usage.five_hour : snap.usage.seven_day) : null}
-              <div class="mini" data-testid="group-usage-{kind}">
-                <span class="mini-name">{short}</span>
-                <UsageBar
-                  window={kind}
-                  {win}
-                  fetchedAt={snap?.fetched_at ?? null}
-                  {now}
-                  hasExtraUsage={g.account?.has_extra_usage ?? false}
-                  compact
-                />
-                <span class="mini-left" class:muted={cw.freshness !== 'fresh'}>{cw.left}</span>
-                {#if cw.reset}<span class="mini-reset">· {cw.reset}</span>{/if}
-              </div>
-            {/each}
+            <EmbedSlot slot="hosts_group" ctx={{ now, locale, timeZone, account: g.account, snapshot: snap }} />
           {/if}
         </div>
         {#each g.hosts as h (h.alias)}
@@ -229,28 +200,6 @@
     min-width: 0;
   }
   .group-label { font-weight: 600; color: var(--fg-muted); }
-  .tier { color: var(--fg-muted); font-size: 0.7rem; }
-  .fresh {
-    margin-left: auto;
-    color: var(--fg-muted);
-    font-size: 0.7rem;
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-  }
-  .fresh-expired { color: var(--usage-warn); }
-  .mini {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    font-size: 0.7rem;
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-    min-width: 0;
-  }
-  .mini-name { width: 1.3rem; color: var(--fg-muted); }
-  .mini-left { font-weight: 600; }
-  .mini-left.muted { color: var(--fg-muted); font-weight: 400; }
-  .mini-reset { color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; }
   .host-row {
     display: flex;
     align-items: center;

@@ -87,8 +87,9 @@ pub(crate) fn is_fleet_command_entry(h: &serde_json::Value) -> bool {
 /// `ExitWorktree` with `action: "remove"` drops it. The `WorktreeCreate` /
 /// `WorktreeRemove` hook EVENTS are deliberately never installed: they
 /// replace git's own worktree creation / removal, so an http hook there would
-/// break it on every host.
-pub const WORKTREE_TOOL_MATCHER: &str = "EnterWorktree|ExitWorktree";
+/// break it on every host. `TaskCreate|TaskUpdate|TodoWrite` carry agent
+/// steps (design 2026-09-29 §2; `service::work::steps::CLAUDE_STEP_TOOLS`).
+pub const POST_TOOL_MATCHER: &str = "EnterWorktree|ExitWorktree|TaskCreate|TaskUpdate|TodoWrite";
 
 /// `SessionEnd` reasons fleet cares about. `logout` / `prompt_input_exit` /
 /// `other` mean the Claude process is gone (→ stopped). `clear` and `resume`
@@ -116,8 +117,8 @@ pub enum HookKind {
 /// The hook events fleet installs, with their matcher and installation kind.
 /// `Stop` is the completion signal (turn over → idle, `turn_seq` bump),
 /// `UserPromptSubmit` the busy signal (turn starting → working),
-/// `PostToolUse(EnterWorktree|ExitWorktree)` the worktree registration and
-/// removal, `SessionEnd` the exit/conversation-end signal, `StopFailure` the
+/// `PostToolUse(EnterWorktree|ExitWorktree|TaskCreate|TaskUpdate|TodoWrite)`
+/// the worktree registration and removal plus agent steps, `SessionEnd` the exit/conversation-end signal, `StopFailure` the
 /// API-error completion (→ idle, `turn_seq` bump, `stop_failure` timeline
 /// event), `Notification` the waiting-on-a-human signal (→ blocked),
 /// `SessionStart` the conversation-open signal (installed as a command hook,
@@ -126,7 +127,7 @@ pub enum HookKind {
 pub const FLEET_HOOK_EVENTS: &[(&str, &str, HookKind)] = &[
     ("Stop", "", HookKind::Http),
     ("UserPromptSubmit", "", HookKind::Http),
-    ("PostToolUse", WORKTREE_TOOL_MATCHER, HookKind::Http),
+    ("PostToolUse", POST_TOOL_MATCHER, HookKind::Http),
     ("SessionEnd", SESSION_END_MATCHER, HookKind::Http),
     ("StopFailure", "", HookKind::Http),
     ("Notification", NOTIFICATION_MATCHER, HookKind::Http),
@@ -790,7 +791,7 @@ mod tests {
         let http_expect = [
             ("Stop", ""),
             ("UserPromptSubmit", ""),
-            ("PostToolUse", WORKTREE_TOOL_MATCHER),
+            ("PostToolUse", POST_TOOL_MATCHER),
             ("SessionEnd", SESSION_END_MATCHER),
             ("StopFailure", ""),
             ("Notification", NOTIFICATION_MATCHER),
@@ -826,7 +827,7 @@ mod tests {
         assert_eq!(h["url"], "http://127.0.0.1:4180/hook");
         assert_eq!(h["headers"]["Authorization"], "Bearer tok");
         let ptu = v["hooks"]["PostToolUse"].as_array().unwrap();
-        assert_eq!(ptu[0]["matcher"], WORKTREE_TOOL_MATCHER);
+        assert_eq!(ptu[0]["matcher"], POST_TOOL_MATCHER);
         // The busy signal (Wave 3 Track E) rides the same bearer entry.
         let ups = v["hooks"]["UserPromptSubmit"].as_array().unwrap();
         assert_eq!(ups.len(), 1);
@@ -859,6 +860,30 @@ mod tests {
     }
 
     #[test]
+    fn the_post_tool_matcher_names_every_step_tool_and_upgrades_an_older_install() {
+        // Design 2026-09-29 §2: the steps ride the same PostToolUse entry.
+        let tools: Vec<&str> = POST_TOOL_MATCHER.split('|').collect();
+        for t in crate::service::work::steps::CLAUDE_STEP_TOOLS {
+            assert!(tools.contains(t), "{t} missing from {POST_TOOL_MATCHER}");
+        }
+        // A host provisioned with the worktree-only matcher gets the new one
+        // in place, not a second fleet entry beside it.
+        let old = serde_json::json!({
+            "hooks": { "PostToolUse": [{
+                "matcher": "EnterWorktree|ExitWorktree",
+                "hooks": [hook_entry("http://127.0.0.1:4180/hook", "old")]
+            }] }
+        })
+        .to_string();
+        let out = merge_hook_into_settings_json(&old, "http://127.0.0.1:4180/hook", "tok").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let ptu = v["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(ptu.len(), 1, "{ptu:?}");
+        assert_eq!(ptu[0]["matcher"], POST_TOOL_MATCHER);
+        assert!(hook_shape().contains(&format!("PostToolUse|{POST_TOOL_MATCHER}|http;")));
+    }
+
+    #[test]
     fn merge_hook_replaces_a_stale_worktree_create_entry() {
         // Earlier provisions registered PostToolUse(matcher "WorktreeCreate"),
         // which matches no tool. A re-provision must swap it for
@@ -875,7 +900,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let ptu = v["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(ptu.len(), 1, "{ptu:?}");
-        assert_eq!(ptu[0]["matcher"], WORKTREE_TOOL_MATCHER);
+        assert_eq!(ptu[0]["matcher"], POST_TOOL_MATCHER);
         assert!(!out.contains("WorktreeCreate"));
         assert_eq!(
             out,
@@ -906,7 +931,7 @@ mod tests {
         );
         // Fleet's EnterWorktree hook landed.
         assert!(
-            ptu.iter().any(|b| b["matcher"] == WORKTREE_TOOL_MATCHER),
+            ptu.iter().any(|b| b["matcher"] == POST_TOOL_MATCHER),
             "fleet EnterWorktree hook must be present: {ptu:?}"
         );
         // Unrelated top-level keys preserved.
@@ -920,7 +945,7 @@ mod tests {
         let ptu2 = v2["hooks"]["PostToolUse"].as_array().unwrap();
         let fleet_count = ptu2
             .iter()
-            .filter(|b| b["matcher"] == WORKTREE_TOOL_MATCHER)
+            .filter(|b| b["matcher"] == POST_TOOL_MATCHER)
             .count();
         assert_eq!(
             fleet_count, 1,
@@ -933,7 +958,7 @@ mod tests {
         // Token updated on the surviving entry.
         let fleet_hdr = ptu2
             .iter()
-            .find(|b| b["matcher"] == WORKTREE_TOOL_MATCHER)
+            .find(|b| b["matcher"] == POST_TOOL_MATCHER)
             .unwrap()["hooks"][0]["headers"]["Authorization"]
             .as_str()
             .unwrap();

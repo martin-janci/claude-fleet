@@ -3414,8 +3414,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// message (`git log -L` on this constant), not here: a log in this
     /// comment conflicted on every merge. Measured at 67,546 on 2026-09-29
     /// (`session_tool_detail` merged with the native item status work,
-    /// declarative pages P5–P6 and update S4b).
-    const BUDGET_BYTES: usize = 67_646;
+    /// declarative pages P5–P6 and update S4b). Measured at 67,956 on
+    /// 2026-09-29 after shared work context (`work_link` create / propose /
+    /// accept and its `parent` / `notes` / `why` parameters, +410 bytes).
+    const BUDGET_BYTES: usize = 68_056;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -8712,10 +8714,13 @@ async fn without_an_approver_only_a_paired_client_creates_a_remote() {
 async fn list_pages_serves_the_compiled_page_bundle() {
     let (tools, _guards, _store) = client_tools();
     let v = result_json(&tools.list_pages().await.unwrap());
-    assert_eq!(
-        v["pages"].as_array().unwrap().len(),
-        crate::pages::all().len()
-    );
+    // Every page a person navigates to; never an embed page, which places
+    // items in the desktop's own screens (declarative pages L8).
+    let pages = v["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), crate::pages::navigable().len());
+    assert!(pages
+        .iter()
+        .all(|p| p["layout"] != "embed" && p.get("slot").is_none()));
     assert!(v["actions"].as_array().is_some());
     assert!(v["resources"].as_array().is_some());
 }

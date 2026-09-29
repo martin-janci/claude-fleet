@@ -7,6 +7,9 @@ vi.mock('../clipboard', () => ({ copyText: vi.fn(() => Promise.resolve(true)) })
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { copyText } from '../clipboard';
 import { hosts, type HostRow } from '../hosts';
+import { accounts } from '../accounts';
+import { accountUsage } from '../account_usage_store';
+import { WORK, GMAIL, snapshot } from '../hosts_fixture';
 import PageView from './PageView.svelte';
 import { fleetSettings, SETTING_DEFAULTS } from '../fleet_settings';
 import { allDescriptors, bundle, registryRouter } from './testing';
@@ -245,6 +248,43 @@ describe('PageView — data and links', () => {
     expect(screen.queryByTestId('page-filters')).toBeNull();
     expect(screen.queryByTestId('section-Counts')).toBeNull();
     expect(inv.mock.calls.some((c) => c[0] === 'fetch_page_source')).toBe(false);
+  });
+
+  it('Claude accounts: a usage block per account from the live store, refreshed through the floor (L8)', async () => {
+    accounts.set([WORK, GMAIL]);
+    accountUsage.set({ [WORK.uuid]: snapshot(WORK.uuid, { next_try_at: 0 }) });
+    show('usage.accounts');
+    const blocks = await screen.findAllByTestId('usage-block');
+    expect(blocks).toHaveLength(2);
+    expect(inv.mock.calls.some((c) => c[0] === 'fetch_page_source')).toBe(false);
+    inv.mockImplementation(async (cmd: string) =>
+      cmd === 'refresh_account_usage' ? snapshot(WORK.uuid) : null,
+    );
+    const work = screen
+      .getAllByTestId('accounts-usage-account')
+      .find((el) => el.getAttribute('data-uuid') === WORK.uuid)!;
+    await fireEvent.click(within(work).getByTestId('usage-refresh'));
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('refresh_account_usage', { args: { account_uuid: WORK.uuid } }),
+    );
+    accounts.set([]);
+    accountUsage.set({});
+  });
+
+  it('Claude accounts: none yet, and nothing on a paired desktop', async () => {
+    accounts.set([]);
+    const { unmount } = render(PageView, {
+      props: { page: pageOf('usage.accounts'), pages: bundle.pages, descs, values: defaults, sources: bundle.sources, onnavigate: () => {} },
+    });
+    expect(screen.getByTestId('accounts-usage-empty')).toBeInTheDocument();
+    unmount();
+    accounts.set([WORK]);
+    render(PageView, {
+      props: { page: pageOf('usage.accounts'), pages: bundle.pages, descs, values: defaults, sources: bundle.sources, remote: true, onnavigate: () => {} },
+    });
+    expect(screen.getByTestId('page-data-remote')).toBeInTheDocument();
+    expect(screen.queryByTestId('usage-block')).toBeNull();
+    accounts.set([]);
   });
 
   it('follows a link to another page', async () => {

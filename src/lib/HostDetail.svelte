@@ -37,7 +37,7 @@
   import { hubConnection } from './hub_connection';
   import AccountNickname from './AccountNickname.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
-  import UsageBlock from './UsageBlock.svelte';
+  import EmbedSlot from './pages/EmbedSlot.svelte';
 
   let {
     host,
@@ -356,16 +356,21 @@
         {#if account.email}<span class="muted">{account.email}</span>{/if}
       </div>
     {/if}
-    <UsageBlock
-      {account}
-      {snapshot}
-      {sharedWith}
-      {now}
-      {locale}
-      {timeZone}
-      {suppressUnavailable}
-      onRefresh={account ? onrefreshusage : undefined}
-      refreshBlocked={refreshUsageBlocked}
+    <!-- Usage is the embed page `embed.host_detail` (declarative pages L8). -->
+    <EmbedSlot
+      slot="host_detail"
+      ctx={{
+        now,
+        locale,
+        timeZone,
+        host,
+        account,
+        snapshot,
+        sharedWith,
+        suppressUnavailable,
+        onrefresh: onrefreshusage,
+        refreshBlocked: refreshUsageBlocked,
+      }}
     />
   </section>
 

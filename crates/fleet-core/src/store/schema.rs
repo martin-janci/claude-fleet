@@ -383,6 +383,16 @@ fn work_items_has_status_set_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 086 (shared work context).
+fn work_items_has_origin(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'origin'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 067 (work graph M14.1b, D31).
 fn orgs_has_bound_sees_unassigned(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -920,6 +930,14 @@ const MIGRATIONS: &[Migration] = &[
         85,
         include_str!("../../migrations/085_work_unlinks_item_index.sql"),
     ),
+    // Shared work context (design 2026-09-29): origin, project, notes, job
+    // and proposal columns on `work_items`. The ADD COLUMNs are not
+    // idempotent, so the same guard 084 uses; the backfill and indexes are.
+    Migration {
+        version: 86,
+        sql: include_str!("../../migrations/086_shared_work_context.sql"),
+        already_applied: Some(work_items_has_origin),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -3835,6 +3853,58 @@ mod tests {
         assert_eq!(rv2, rv, "the stamp is bookkeeping: no row_version bump");
         s.conn
             .execute_batch("DELETE FROM schema_version WHERE version >= 81;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_086_adds_the_shared_work_columns_backfills_origin_and_is_safe_to_rerun() {
+        let s = store_at_version(85);
+        s.conn
+            .execute_batch(
+                "INSERT INTO work_items (source, key, title, created_at, updated_at) VALUES ('local', 'OPS', 'named', 1, 1);
+                 INSERT INTO work_items (source, key, title, created_at, updated_at) VALUES ('jira', 'TK-1', 'ticket', 1, 1);",
+            )
+            .unwrap();
+        assert!(!work_items_has_origin(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let got: Vec<(String, String)> = s
+            .conn
+            .prepare("SELECT title, origin FROM work_items ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            got,
+            vec![
+                ("named".into(), "manual".into()),
+                ("ticket".into(), "detected".into())
+            ]
+        );
+        for col in [
+            "project_id",
+            "notes",
+            "task_id",
+            "proposal_state",
+            "proposed_by",
+            "proposal_why",
+        ] {
+            let n: i64 = s
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = ?1",
+                    [col],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{col}");
+        }
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 86;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
