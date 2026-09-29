@@ -79,6 +79,7 @@ pub(crate) fn sample_session() -> SessionRow {
         turn_seq: 7,
         last_stop_at: Some(1_725_000_900),
         stale_working_at: Some(1_790_500_000),
+        stale_demoted_at: None,
         work_rev: 17,
         parent_session_id: Some(5),
         tags: vec!["tag-a".into(), "tag-b".into()],

@@ -286,13 +286,9 @@ impl FleetTools {
         )?;
         // A stale-demoted row reads `idle` only because nothing moved; a
         // long tool call looks exactly like that. Ask the pane (S5 + F2).
-        // The demotion's memory, not the attention stamp: an attach or the
-        // TTL ends the reason, not the guess.
-        let demoted = lock(&self.store)
-            .map_err(to_mcp_err)?
-            .stale_demoted_by_id(row.id)
-            .map_err(|e| to_mcp_err(e.into()))?;
-        let live = if crate::store::needs_pane_confirmation(&row, demoted) {
+        // The demotion's memory (`stale_demoted_at`), not the attention
+        // stamp: an attach or the TTL ends the reason, not the guess.
+        let live = if crate::store::needs_pane_confirmation(&row) {
             tasks::LivePaneProbe {
                 store: &self.store,
                 ssh: &self.ssh,
@@ -302,7 +298,7 @@ impl FleetTools {
         } else {
             None
         };
-        run_prompt_ready(&row, demoted, live.as_deref())?;
+        run_prompt_ready(&row, live.as_deref())?;
         let _permit = self.long_poll_permit(&caller, "run_prompt")?;
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
         let before = row.turn_seq;

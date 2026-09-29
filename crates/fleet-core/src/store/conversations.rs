@@ -349,21 +349,28 @@ impl Store {
         source: StartSource,
         transcript_path: Option<&str>,
     ) -> Result<Option<SessionRow>, IpcError> {
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "UPDATE conversations SET start_source = ?3,                  transcript_path = COALESCE(?4, transcript_path)              WHERE session_id = ?1 AND claude_session_id = ?2",
-            rusqlite::params![
-                session_id,
-                claude_session_id,
-                source.as_str(),
-                transcript_path
-            ],
-        )?;
-        tx.execute(
-            "UPDATE sessions SET transcript_path = COALESCE(?2, transcript_path),                  context_tokens = 0, context_pct = 0, context_stale = 1              WHERE id = ?1 AND claude_session_id = ?3",
-            rusqlite::params![session_id, transcript_path, claude_session_id],
-        )?;
-        tx.commit()?;
+        // SAVEPOINT, as `rebind_conversation` / `revert_rebind`: a raw
+        // `BEGIN` fails inside `Store::atomically`.
+        self.in_savepoint("relabel_conversation", |_| -> Result<(), IpcError> {
+            self.conn.execute(
+                "UPDATE conversations SET start_source = ?3, \
+                     transcript_path = COALESCE(?4, transcript_path) \
+                 WHERE session_id = ?1 AND claude_session_id = ?2",
+                rusqlite::params![
+                    session_id,
+                    claude_session_id,
+                    source.as_str(),
+                    transcript_path
+                ],
+            )?;
+            self.conn.execute(
+                "UPDATE sessions SET transcript_path = COALESCE(?2, transcript_path), \
+                     context_tokens = 0, context_pct = 0, context_stale = 1 \
+                 WHERE id = ?1 AND claude_session_id = ?3",
+                rusqlite::params![session_id, transcript_path, claude_session_id],
+            )?;
+            Ok(())
+        })?;
         self.bus.conversations_changed(session_id);
         Ok(self.emit_session(session_id)?)
     }
@@ -790,7 +797,8 @@ mod tests {
         let source = |s: &Store| -> String {
             s.conn
                 .query_row(
-                    "SELECT start_source FROM conversations WHERE session_id = ?1                      AND claude_session_id = ?2",
+                    "SELECT start_source FROM conversations WHERE session_id = ?1 \
+                     AND claude_session_id = ?2",
                     rusqlite::params![id, A],
                     |r| r.get(0),
                 )
@@ -824,6 +832,29 @@ mod tests {
             s.session_transcript_path(id).unwrap().as_deref(),
             Some("/p/new.jsonl")
         );
+    }
+
+    /// `relabel_conversation` runs in a SAVEPOINT, like its siblings, so it
+    /// nests inside `Store::atomically` (a raw `BEGIN` there would fail).
+    #[test]
+    fn relabelling_a_conversation_nests_inside_atomically() {
+        let (s, _bus) = store_with_recorder();
+        let id = session(&s);
+        s.set_claude_session_id(id, A).unwrap();
+        s.atomically(|s| s.relabel_conversation(id, A, StartSource::Fork, Some("/p/new.jsonl")))
+            .expect("a relabel inside an open transaction succeeds");
+        let (source, stale): (String, i64) = s
+            .conn
+            .query_row(
+                "SELECT c.start_source, s.context_stale FROM conversations c \
+                 JOIN sessions s ON s.id = c.session_id \
+                 WHERE c.session_id = ?1 AND c.claude_session_id = ?2",
+                rusqlite::params![id, A],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(source, "fork");
+        assert_eq!(stale, 1);
     }
 
     /// Work graph M4.6: the classification nudge is stamped per

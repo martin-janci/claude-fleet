@@ -95,8 +95,7 @@ fn an_attach_acknowledges_a_stale_working_stamp() {
         "the cleared stamp is a visible change (065's trigger bumps it)"
     );
     assert!(
-        s.stale_demoted(&after.host_alias, &after.tmux_name)
-            .unwrap(),
+        after.stale_demoted_at.is_some(),
         "an attach ends the reason, not the demotion's veto"
     );
     assert!(

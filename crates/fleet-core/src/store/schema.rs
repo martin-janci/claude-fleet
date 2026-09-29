@@ -3360,9 +3360,9 @@ mod tests {
     /// The `sessions` columns migration 063's `sessions_row_version_bump`
     /// deliberately does NOT watch: `row_version` itself (an explicit
     /// `row_version + 1` must not re-trigger), and per-pass bookkeeping that
-    /// is not a `SessionRow` field (the reconcile's stamp, 072's usage
-    /// backfill mark, 080's stale-working veto memory, 081's pane spinner
-    /// stamp). Every other column is
+    /// is not on the wire (the reconcile's stamp, 072's usage backfill mark,
+    /// 080's stale-working veto memory — a `#[serde(skip)]` `SessionRow`
+    /// field — and 081's pane spinner stamp). Every other column is
     /// watched, so a write that changes it bumps the counter.
     const ROW_VERSION_UNWATCHED: [&str; 6] = [
         "row_version",

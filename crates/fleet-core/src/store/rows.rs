@@ -213,6 +213,17 @@ pub struct SessionRow {
     /// older than the column sends none.
     #[serde(default)]
     pub stale_working_at: Option<i64>,
+    /// The stale-working demotion's own memory (`sessions.stale_demoted_at`,
+    /// migration 080): set with `stale_working_at` by the tick, but lifted
+    /// only by a hook, a pane that shows a live turn, or the row being
+    /// `working` / `blocked` again — never by an attach or the TTL. While
+    /// set, the row's stored `idle` is a guess (`store::trusted_status`).
+    /// Server-side only: `#[serde(skip)]` keeps it off the wire, the row
+    /// events and the hub JSON (a deserialized row reads `None`), and
+    /// [`SessionRow::eq_ignoring_row_version`] ignores it, so a change to it
+    /// alone is not a client-visible change.
+    #[serde(skip)]
+    pub stale_demoted_at: Option<i64>,
     /// The requester session that dispatched the task this row is working
     /// on; NULL for top-level sessions.
     #[serde(default)]
@@ -290,8 +301,9 @@ fn is_zero_i64(n: &i64) -> bool {
 }
 
 impl SessionRow {
-    /// Field-by-field equality excluding `row_version`: whether two reads of
-    /// this row carry the same user-visible content.
+    /// Field-by-field equality excluding `row_version` and the server-only
+    /// `stale_demoted_at`: whether two reads of this row carry the same
+    /// user-visible content.
     ///
     /// See the note above the `PartialEq` derive: plain `==` cannot answer
     /// that question, because `row_version` also moves for a change no wire
@@ -303,11 +315,13 @@ impl SessionRow {
     /// once per session per pass, and a `SessionRow` is some forty fields
     /// with a dozen heap allocations among them.
     pub fn eq_ignoring_row_version(&self, other: &Self) -> bool {
-        if self.row_version == other.row_version {
+        if self.row_version == other.row_version && self.stale_demoted_at == other.stale_demoted_at
+        {
             return self == other;
         }
         Self {
             row_version: other.row_version,
+            stale_demoted_at: other.stale_demoted_at,
             ..self.clone()
         } == *other
     }
@@ -392,7 +406,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                 COALESCE(l.decided_at, l.created_at) DESC, l.id DESC \
        LIMIT 1) AS work_suggested, ",
     crate::session_org_sql!("sessions"),
-    " AS org_id, prompt_submit_seq, stale_working_at, \
+    " AS org_id, prompt_submit_seq, stale_working_at, stale_demoted_at, \
      (SELECT COALESCE(SUM(l.version * 1000003 + l.id), 0) FROM work_links l \
         JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
        WHERE p.session_id = sessions.id AND l.ended_at IS NULL) AS work_rev"
@@ -488,7 +502,8 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         org_id: row.get(57)?,
         prompt_submit_seq: row.get(58)?,
         stale_working_at: row.get(59)?,
-        work_rev: row.get(60)?,
+        stale_demoted_at: row.get(60)?,
+        work_rev: row.get(61)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
@@ -715,19 +730,15 @@ pub fn turn_over(status: Option<&str>) -> bool {
 /// asked the pane or it could not tell. Any other row's stored status
 /// stands.
 ///
-/// `demoted` is the demotion's own memory, `sessions.stale_demoted_at`
-/// (migration 080, read with `Store::stale_demoted_by_id`; not a
-/// `SessionRow` field): an attach or `reconcile.stale_working_ttl_secs`
-/// clears the `stale_working_at` attention stamp, but the stored `idle` is
-/// still a guess until a hook or the pane lifts the demotion. The stamp
-/// counts too, so a caller whose flag read failed errs towards asking.
-pub fn trusted_status<'a>(
-    row: &'a SessionRow,
-    demoted: bool,
-    live: Option<&'a str>,
-) -> Option<&'a str> {
+/// The demotion's own memory is `row.stale_demoted_at` (migration 080): an
+/// attach or `reconcile.stale_working_ttl_secs` clears the
+/// `stale_working_at` attention stamp, but the stored `idle` is still a
+/// guess until a hook or the pane lifts the demotion. The stamp counts too,
+/// so a row read without the column (a hub's JSON) errs towards asking
+/// while it is set.
+pub fn trusted_status<'a>(row: &'a SessionRow, live: Option<&'a str>) -> Option<&'a str> {
     let stored = row.claude_status.as_deref();
-    if needs_pane_confirmation(row, demoted) {
+    if needs_pane_confirmation(row) {
         live
     } else {
         stored
@@ -736,16 +747,17 @@ pub fn trusted_status<'a>(
 
 /// [`turn_over`] of the row's [`trusted_status`] with no pane reading: a
 /// stale-demoted row is never over on its stored `idle` alone.
-pub fn turn_over_row(row: &SessionRow, demoted: bool) -> bool {
-    turn_over(trusted_status(row, demoted, None))
+pub fn turn_over_row(row: &SessionRow) -> bool {
+    turn_over(trusted_status(row, None))
 }
 
-/// Whether `row` is stale-demoted (`demoted`, or its attention stamp still
-/// set) with a stored status that only a live pane reading can confirm (see
-/// [`trusted_status`]): the one case a turn-over check should spend a
-/// `session_activity` probe on.
-pub fn needs_pane_confirmation(row: &SessionRow, demoted: bool) -> bool {
-    (demoted || row.stale_working_at.is_some()) && turn_over(row.claude_status.as_deref())
+/// Whether `row` is stale-demoted (`stale_demoted_at`, or its attention
+/// stamp still set) with a stored status that only a live pane reading can
+/// confirm (see [`trusted_status`]): the one case a turn-over check should
+/// spend a `session_activity` probe on.
+pub fn needs_pane_confirmation(row: &SessionRow) -> bool {
+    (row.stale_demoted_at.is_some() || row.stale_working_at.is_some())
+        && turn_over(row.claude_status.as_deref())
 }
 
 /// SQL fragment: the new `idle_since` given the OLD row's `idle_since` and the
@@ -1427,5 +1439,41 @@ mod tests {
         let row: ProjectRow =
             serde_json::from_str(current_hub).expect("a current hub's project row parses");
         assert!(row.system, "the flag survives the wire when it is sent");
+    }
+
+    /// `stale_demoted_at` (migration 080) is read into `SessionRow` for the
+    /// server's own turn-over checks, but never leaves it: not on the wire,
+    /// not in a row event, not in a hub's JSON — and a row parsed from one
+    /// reads `None`.
+    #[test]
+    fn stale_demoted_at_is_read_but_never_serialized() {
+        let s = crate::store::Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("w", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'idle', stale_demoted_at = 7 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.stale_demoted_at, Some(7));
+        let json = serde_json::to_value(&row).unwrap();
+        assert!(
+            json.get("stale_demoted_at").is_none(),
+            "stale_demoted_at must stay off the wire: {json}"
+        );
+        assert!(
+            json.get("stale_working_at").is_some(),
+            "its neighbour is on it"
+        );
+        let back: SessionRow = serde_json::from_value(json).unwrap();
+        assert_eq!(back.stale_demoted_at, None);
+        assert!(
+            back.eq_ignoring_row_version(&row),
+            "a demoted-only difference is not a visible one"
+        );
     }
 }

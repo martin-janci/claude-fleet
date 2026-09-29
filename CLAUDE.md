@@ -369,6 +369,21 @@ ages out lost external rows. Attention reasons `stop_failed`,
 `context_full`, `stale_working`, `ci_failing`. Plan
 `docs/superpowers/plans/2026-09-27-session-state-machine.md`.
 
+The stale-working acknowledgement (#381) is landed, per
+`docs/superpowers/plans/2026-09-28-stale-working-acknowledge.md`: the tick
+runs `Store::expire_stale_working`, which lifts the `stale_working_at`
+stamp once the row is working / blocked again or older than
+`reconcile.stale_working_ttl_secs`; an attach (`touch_session`) clears it
+too. Migration 080 adds `stale_demoted_at`, the reconcile veto's own
+memory: cleared by a hook, a pane that shows a live turn, or the row being
+`working` / `blocked` again — never by an attach or the TTL — and while it
+is set a turn-over check asks the pane (`store::trusted_status`). It is a
+`#[serde(skip)]` `SessionRow` field: off the wire, and a change to it alone
+emits nothing. Migration 081 adds `pane_working_at`, so a long tool call
+whose spinner is on screen is not stale. The sweep judges only rows a
+reconcile pass observed within the window (`last_reconciled_at`), so an
+unreachable or unprobed host's `working` rows are never demoted.
+
 Hub ops and accounting (plan D, #344) is landed: `fleet_health.hub`
 (uptime, reconcile timing), process gauges on `/metrics`, a transcript's
 first read booked as `backfill` apart from the day's live cost (migration

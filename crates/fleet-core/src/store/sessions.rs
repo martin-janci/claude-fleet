@@ -1426,6 +1426,12 @@ impl Store {
     /// moving it) — the spinner stamp is the pane evidence. A demoted row's
     /// `idle` is a guess: `store::trusted_status` makes turn-over checks ask
     /// the pane before believing it while `stale_demoted_at` is set.
+    /// Only a row a reconcile pass observed live within the window
+    /// (`last_reconciled_at >= now - stale_secs`) is judged: on a host that
+    /// is unreachable or has not been probed, the missing hooks and the
+    /// still tmux clock say nothing about the session, and demoting it
+    /// would stamp `stale_working` on every `working` row of a host that
+    /// merely went offline.
     /// Pane-less and `shell` rows are never judged (no hooks or turns to
     /// miss); a demoted row is not judged twice — even once an attach or the
     /// TTL has lifted its attention stamp, since the demotion itself still
@@ -1452,6 +1458,7 @@ impl Store {
                    AND COALESCE(context_at, 0) < ?2 AND COALESCE(usage_updated_at, 0) < ?2 \
                    AND COALESCE(pane_working_at, 0) < ?2 \
                    AND last_activity_at < ?2 AND created_at < ?2 \
+                   AND COALESCE(last_reconciled_at, 0) >= ?2 \
                  RETURNING id",
             )?
             .query_map(rusqlite::params![now, cutoff], |r| r.get(0))?
@@ -1524,46 +1531,6 @@ impl Store {
             }
         }
         Ok(out)
-    }
-
-    /// Whether the tick's stale-working rule demoted this row and nothing
-    /// has lifted the demotion since (`stale_demoted_at`, migration 080):
-    /// the reconcile's `stale_working_veto` reads it for the prior row,
-    /// since an attach or the TTL may have cleared `stale_working_at` while
-    /// the demotion still stands. `false` for a row that does not exist.
-    pub fn stale_demoted(
-        &self,
-        host_alias: &str,
-        tmux_name: &str,
-    ) -> Result<bool, rusqlite::Error> {
-        use rusqlite::OptionalExtension;
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT stale_demoted_at IS NOT NULL FROM sessions \
-                 WHERE host_alias = ?1 AND tmux_name = ?2",
-                rusqlite::params![host_alias, tmux_name],
-                |r| r.get::<_, bool>(0),
-            )
-            .optional()?
-            .unwrap_or(false))
-    }
-
-    /// [`Store::stale_demoted`] by row id: whether the tick's stale-working
-    /// rule demoted this row and nothing has lifted the demotion since. What
-    /// `store::trusted_status` takes as `demoted`. `false` for a row that
-    /// does not exist.
-    pub fn stale_demoted_by_id(&self, id: i64) -> Result<bool, rusqlite::Error> {
-        use rusqlite::OptionalExtension;
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT stale_demoted_at IS NOT NULL FROM sessions WHERE id = ?1",
-                [id],
-                |r| r.get::<_, bool>(0),
-            )
-            .optional()?
-            .unwrap_or(false))
     }
 
     /// The Notification hook's write. `status` is the mapped status;
@@ -3677,6 +3644,10 @@ mod tests {
         s.conn_ref()
             .execute("UPDATE sessions SET kind = 'shell' WHERE id = ?1", [sh])
             .unwrap();
+        // A reconcile pass observed all three just now.
+        s.conn_ref()
+            .execute("UPDATE sessions SET last_reconciled_at = 9990", [])
+            .unwrap();
 
         let demoted = s.age_out_stale_working(10_000, 1_800).unwrap();
         assert_eq!(
@@ -3712,6 +3683,9 @@ mod tests {
         // Stamped rows are not judged again: a later sweep demotes only
         // `busy` (unstamped, and quiet since 9_500 by then), never `quiet`
         // a second time; `0` turns the rule off.
+        s.conn_ref()
+            .execute("UPDATE sessions SET last_reconciled_at = 19990", [])
+            .unwrap();
         assert_eq!(
             s.age_out_stale_working(20_000, 1_800)
                 .unwrap()
@@ -3729,6 +3703,94 @@ mod tests {
                 .unwrap()
                 .stale_working_at,
             None
+        );
+    }
+
+    /// Review follow-up (F1): the sweep judges only rows a reconcile pass
+    /// has observed within the window. A host that went offline (or was
+    /// never probed) stops stamping `last_reconciled_at`, and its quiet
+    /// `working` rows must not all turn `idle` with a `stale_working`
+    /// reason; the same row seen by a pass inside the window is demoted,
+    /// and the read-back carries the demotion's memory (`stale_demoted_at`,
+    /// a server-only `SessionRow` field).
+    #[test]
+    fn age_out_stale_working_judges_only_rows_a_pass_observed() {
+        let s = store();
+        let id = s
+            .upsert_session("dark", "local", None, None, 1, 1_000, "running", None)
+            .unwrap();
+        let never = s
+            .upsert_session("never", "local", None, None, 1, 1_000, "running", None)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'working', last_reconciled_at = 2000 \
+                 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'working' WHERE id = ?1",
+                [never],
+            )
+            .unwrap();
+
+        // Last observed at 2_000, judged at 10_000 with a 1_800 s window:
+        // the host has been dark since, nothing is known.
+        assert!(s.age_out_stale_working(10_000, 1_800).unwrap().is_empty());
+        for row_id in [id, never] {
+            let row = s.get_session_by_id(row_id).unwrap().unwrap();
+            assert_eq!(row.claude_status.as_deref(), Some("working"));
+            assert_eq!(row.stale_working_at, None);
+            assert_eq!(row.stale_demoted_at, None);
+            assert!(
+                !s.list_session_events(row_id, 10)
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.kind == "stale_working"),
+                "an unobserved row gets no stale_working event"
+            );
+        }
+
+        // A pass sees it again (still no hook, no turn, no spinner): now
+        // the quiet spell is evidence.
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET last_reconciled_at = 9950 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        let demoted = s.age_out_stale_working(10_000, 1_800).unwrap();
+        assert_eq!(demoted.iter().map(|r| r.id).collect::<Vec<_>>(), vec![id]);
+        assert_eq!(demoted[0].stale_demoted_at, Some(10_000));
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.claude_status.as_deref(), Some("idle"));
+        assert_eq!(row.stale_working_at, Some(10_000));
+        assert_eq!(
+            row.stale_demoted_at,
+            Some(10_000),
+            "get_session_by_id reads the demotion's memory"
+        );
+        assert!(s
+            .list_session_events(id, 10)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "stale_working"));
+        // An attach acknowledges the reason; the row still carries the
+        // demotion.
+        assert!(s.touch_session(id).unwrap());
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.stale_working_at, None);
+        assert_eq!(row.stale_demoted_at, Some(10_000));
+        assert_eq!(
+            s.get_session_by_id(never)
+                .unwrap()
+                .unwrap()
+                .claude_status
+                .as_deref(),
+            Some("working"),
+            "a row no pass ever observed is never judged"
         );
     }
 
@@ -3815,7 +3877,13 @@ mod tests {
                 .unwrap();
             id
         };
-        let demoted = |name: &str| s.stale_demoted("local", name).unwrap();
+        let demoted = |name: &str| {
+            s.get_session(name, "local")
+                .unwrap()
+                .unwrap()
+                .stale_demoted_at
+                .is_some()
+        };
         let stamp = |id: i64| s.get_session_by_id(id).unwrap().unwrap().stale_working_at;
 
         // Every hook write clears both.

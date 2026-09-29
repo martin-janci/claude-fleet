@@ -671,11 +671,11 @@ derive from them.
   idle`. `idle`, `completed`, `stopped` and `failed` mean the turn is over
   (what `wait_for_session { until: "idle" }` and `run_prompt` wait for);
   `blocked` is a dialog inside a turn. A row the tick demoted from `working`
-  after `reconcile.stale_working_secs` with no sign of life carries
-  `stale_working_at` and reads `idle`, but that is only a guess (one long tool
-  call looks the same): `run_prompt`, `move_session` and `wait_for_session`
-  ask its pane first and count it as mid-turn unless the pane shows the idle
-  prompt.
+  after `reconcile.stale_working_secs` with no sign of life (judged only while
+  its host is being reconciled) carries `stale_working_at` and reads `idle`,
+  but that is only a guess (one long tool call looks the same): `run_prompt`,
+  `move_session` and `wait_for_session` ask its pane first and count it as
+  mid-turn unless the pane shows the idle prompt.
 - **`stuck_kind`**: `auth_menu | reconnect | trust_prompt | oom |
   press_enter`.
 - **`needs_attention.reason`** (on session rows and `/events` frames), most

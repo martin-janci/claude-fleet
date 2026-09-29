@@ -699,23 +699,34 @@ fn write_reachable_host(
     // no other writer lands between this read, the write and the
     // read-back. `None` is a first sighting (no stored row yet).
     let mut priors: Vec<(String, Option<Prior>)> = Vec::with_capacity(live.len());
-    // Every row on this host (ghost / lost / pane-less included) with
-    // the Claude id it holds, so an inferred cwd match can be checked
-    // against the ids other rows already own.
-    let stored_ids: HashMap<String, Option<String>> = s
+    // Every row on this host (ghost / lost / pane-less included), read
+    // once: each live session's prior row, account and stale-working
+    // memory come from here, not from three point queries per session.
+    // `s` is held for this whole function and the loop below only reads,
+    // so the map is what the write sees.
+    let stored: HashMap<String, SessionRow> = s
         .list_sessions_for_host(&host.alias)?
         .into_iter()
-        .map(|r| (r.tmux_name, r.claude_session_id))
+        .map(|r| (r.tmux_name.clone(), r))
+        .collect();
+    // The Claude id every stored row holds, so an inferred cwd match can be
+    // checked against the ids other rows already own.
+    let stored_ids: HashMap<String, Option<String>> = stored
+        .iter()
+        .map(|(name, r)| (name.clone(), r.claude_session_id.clone()))
         .collect();
     let agents = pair_session_agents(live, agent_rows, &stored_ids, host.alias == "local");
     for sess in live {
         keep.push(sess.name.clone());
         let project_id = find_project_id_for_path(projects, &host.alias, &sess.path, &paths);
+        // The PRIOR stored row (transition detection below, and the
+        // stale-working veto); `None` is a first sighting.
+        let prior_row = stored.get(&sess.name);
         // Preservation invariant: if the session already has an
         // account_uuid in the DB, keep it; only capture the host's
         // current account for newly-discovered sessions.
-        let account_uuid = s
-            .get_session_account(&host.alias, &sess.name)?
+        let account_uuid = prior_row
+            .and_then(|p| p.account_uuid.clone())
             .or_else(|| host_account.clone());
         let worktree_key = worktree_key_for_host(&sess.path.to_string_lossy(), &paths);
         // The running Claude agent this session is paired with (see
@@ -738,43 +749,12 @@ fn write_reachable_host(
             .as_deref()
             .and_then(|s| s.parse::<crate::service::pane_intel::ClaudeStatus>().ok());
         let pane_status = pane.and_then(|p| p.derived_status);
-        // Transition-detection: remember the PRIOR stored values (the
-        // upsert below overwrites them). A first sighting skips the
-        // status/stuck detection but still opens its conversation; a
-        // read failure skips the session entirely. Read here, before the
-        // candidate, because the stale-working veto needs the stored stamp.
-        let prior_read = s.get_session(&sess.name, &host.alias);
-        if let Err(e) = &prior_read {
-            tracing::warn!(
-                host = %host.alias,
-                session = %sess.name,
-                error = %e,
-                "[reconcile] prior row read failed"
-            );
-            s.ensure_in_tx()?;
-        }
-        let prior_row = prior_read.as_ref().ok().cloned().flatten();
         // The veto is armed by the attention stamp OR by the demotion's own
-        // memory (`stale_demoted_at`, not a `SessionRow` field): an attach
-        // or `reconcile.stale_working_ttl_secs` ends the reason, not the
-        // demotion. A failed read leaves the veto to the stamp alone.
-        let stale = match &prior_row {
-            None => false,
-            Some(p) if p.stale_working_at.is_some() => true,
-            Some(_) => match s.stale_demoted(&host.alias, &sess.name) {
-                Ok(demoted) => demoted,
-                Err(e) => {
-                    tracing::warn!(
-                        host = %host.alias,
-                        session = %sess.name,
-                        error = %e,
-                        "[reconcile] stale-demoted read failed"
-                    );
-                    s.ensure_in_tx()?;
-                    false
-                }
-            },
-        };
+        // memory (`stale_demoted_at`): an attach or
+        // `reconcile.stale_working_ttl_secs` ends the reason, not the
+        // demotion.
+        let stale =
+            prior_row.is_some_and(|p| p.stale_working_at.is_some() || p.stale_demoted_at.is_some());
         // Prefer the authoritative `claude agents` status; fall back to
         // the pane heuristic per `status_candidate` — full weight when
         // this pass actually asked, `Blocked`-only otherwise (a
@@ -789,16 +769,17 @@ fn write_reachable_host(
         )
         .map(|s| s.as_str().to_string());
         let stuck_kind = pane.and_then(|p| p.stuck.map(|k| k.as_str().to_string()));
-        if prior_read.is_ok() {
-            priors.push((
-                sess.name.clone(),
-                prior_row.map(|p| Prior {
-                    claude_status: p.claude_status,
-                    stuck_kind: p.stuck_kind,
-                    claude_session_id: p.claude_session_id,
-                }),
-            ));
-        }
+        // Transition-detection: remember the PRIOR stored values (the
+        // upsert below overwrites them). A first sighting skips the
+        // status/stuck detection but still opens its conversation.
+        priors.push((
+            sess.name.clone(),
+            prior_row.map(|p| Prior {
+                claude_status: p.claude_status.clone(),
+                stuck_kind: p.stuck_kind.clone(),
+                claude_session_id: p.claude_session_id.clone(),
+            }),
+        ));
         sessions.push(ReconcileSession {
             tmux_name: &sess.name,
             project_id,
@@ -2135,8 +2116,10 @@ pub(super) fn stale_working_veto(
 }
 
 /// The tick's stale-`working` sweep: reads `reconcile.stale_working_secs`
-/// and demotes every qualifying row (`Store::age_out_stale_working`).
-/// Best-effort; returns how many rows were demoted.
+/// and demotes every qualifying row (`Store::age_out_stale_working`) —
+/// only rows a reconcile pass observed within that window, so a skipped
+/// or failed pass, or an unreachable host, demotes nothing. Best-effort;
+/// returns how many rows were demoted.
 pub fn age_out_stale_working(store: &Mutex<Store>) -> usize {
     let Ok(s) = store.lock() else {
         return 0;

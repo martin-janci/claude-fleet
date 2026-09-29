@@ -212,6 +212,17 @@ fn stale_probe(s: &Store, pane_status: crate::service::pane_intel::ClaudeStatus)
     probe
 }
 
+/// Stamp every row as observed by a reconcile pass at `at`: the stale sweep
+/// judges only rows a pass saw within its window.
+fn observed_at(s: &Store, at: i64) {
+    s.conn_for_test()
+        .execute(
+            "UPDATE sessions SET last_reconciled_at = ?1",
+            rusqlite::params![at],
+        )
+        .unwrap();
+}
+
 /// `dev-a` on `vps`, `working` by the agents' status, then demoted by the
 /// tick's stale-working rule (both the attention stamp and the veto armed).
 fn demoted_dev_a(s: &mut Store, projects: &[ProjectRow]) -> SessionRow {
@@ -254,6 +265,8 @@ fn an_attach_ends_the_stale_working_reason_but_keeps_the_demotion() {
         "the cached agents status must not undo the demotion after an attach"
     );
     assert_eq!(get(&s).stale_working_at, None, "the reason stays ended");
+    // The sweep judges only rows a pass observed within its window.
+    observed_at(&s, now_unix() + 3_600);
     assert!(
         s.age_out_stale_working(now_unix() + 3_600, 60)
             .unwrap()
@@ -267,6 +280,7 @@ fn an_attach_ends_the_stale_working_reason_but_keeps_the_demotion() {
     let probe = stale_probe(&s, ClaudeStatus::Working);
     reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
     assert_eq!(get(&s).claude_status.as_deref(), Some("working"));
+    observed_at(&s, now_unix() + 3_600);
     let again = s.age_out_stale_working(now_unix() + 3_600, 60).unwrap();
     assert_eq!(again.len(), 1, "a lifted demotion re-arms the rule");
 }
@@ -292,6 +306,7 @@ fn an_expired_stale_working_stamp_keeps_the_demotion() {
         Some("idle"),
         "the cached agents status must not undo the demotion after the TTL"
     );
+    observed_at(&s, now_unix() + 2 * ttl);
     assert!(
         s.age_out_stale_working(now_unix() + 2 * ttl, 60)
             .unwrap()
@@ -455,6 +470,7 @@ fn row(
         turn_seq: 0,
         last_stop_at: None,
         stale_working_at: None,
+        stale_demoted_at: None,
         work_rev: 0,
         parent_session_id: None,
         tags: Vec::new(),
