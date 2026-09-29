@@ -276,8 +276,12 @@ impl Calibration {
         if self.n.0 == 0 {
             return "-".into();
         }
-        let f = |x: Option<f64>| x.map(|v| format!("{v:.3}")).unwrap_or_else(|| "-".into());
-        format!("ECE {} Brier {} (n {})", f(self.ece), f(self.brier), self.n)
+        format!(
+            "ECE {} Brier {} (n {})",
+            f3(self.ece),
+            f3(self.brier),
+            self.n
+        )
     }
 }
 
