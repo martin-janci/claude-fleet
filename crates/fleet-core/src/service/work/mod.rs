@@ -18,6 +18,7 @@ pub mod retention;
 #[cfg(test)]
 mod scale_tests;
 pub mod status;
+pub mod steps;
 pub mod structure;
 pub mod summary;
 pub mod tidy;
