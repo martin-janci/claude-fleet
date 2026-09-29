@@ -92,9 +92,15 @@ describe('WorkChip', () => {
     });
     const chip = screen.getByTestId('work-chip');
     expect(chip.className).toContain('unbound');
-    expect(chip.title).toContain('connect its tracker in Settings → Work to see ZED-9');
     // The dot still shows the local item's own live status.
     expect(screen.getByTestId('work-chip-dot').className).toContain('dot-progress');
+    // …and the hint no longer contradicts it (final review, item 6): it says
+    // whose status the dot is, and what connecting a tracker would ADD —
+    // never "connect a tracker to see its status" beside a status dot.
+    expect(chip.title).toContain(
+      "the dot is fleet's own status; connect its tracker in Settings → Work to see ZED-9's too",
+    );
+    expect(chip.title).not.toContain("to see ZED-9's status");
   });
 });
 

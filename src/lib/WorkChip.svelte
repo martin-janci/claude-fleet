@@ -6,6 +6,11 @@
   // last sync is older than twice the interval. A ticket-shaped key no
   // connected tracker owns says where to connect one.
   //
+  // A ticket-shaped key with no connected tracker also says where to connect
+  // one — and when the chip already draws a status dot of its own (local
+  // work whose key happens to look like a ticket), the hint says whose
+  // status the dot is rather than claiming there is none.
+  //
   // Work graph M4: solid is a confirmed link; a small ring marks one that
   // detection made by itself (auto); `suggested` renders a dashed chip with
   // `?` — a guess nobody has decided. The tooltip always says why.
@@ -49,6 +54,9 @@
     !!workKey.trackerBacked && !!tracker && trackerStale(tracker, now(), interval),
   );
   const ticketShaped = $derived(/^[A-Z][A-Z0-9_]{1,9}-\d{1,7}$/.test(workKey.key));
+  /** The chip is drawing a status dot: exactly the condition the dot itself
+   *  renders under, so the tooltip and the dot can never disagree. */
+  const ownStatus = $derived(!!workKey.status && !workKey.status.unavailable);
   const unbound = $derived(!suggested && !workKey.trackerBacked && ticketShaped && !tracker);
   // Work graph M6: which tracker, once there is more than one kind.
   const prov = $derived(
@@ -59,7 +67,17 @@
     if (workKey.trackerBacked) t += ` · ${syncedAgo(tracker, now())}`;
     if (stale) t += ' (stale: the tracker has not synced lately)';
     if (prov) t = `${prov.label} · ${t}`;
-    if (unbound) t += ` · connect its tracker in Settings → Work to see ${workKey.key}'s status`;
+    // A local item with a coincidentally ticket-shaped key is `unbound` AND
+    // has a status of its own — the dot. Saying "connect its tracker to see
+    // its status" next to a status dot claims two contradictory things about
+    // the same chip (final review, item 6), so when the chip already shows
+    // one, the hint says whose status the dot is and what a tracker would
+    // add instead of pretending there is none.
+    if (unbound) {
+      t += ownStatus
+        ? ` · the dot is fleet's own status; connect its tracker in Settings → Work to see ${workKey.key}'s too`
+        : ` · connect its tracker in Settings → Work to see ${workKey.key}'s status`;
+    }
     if (suggested) t += ' · suggestion: Confirm (y) or Not this (n)';
     return t;
   });
