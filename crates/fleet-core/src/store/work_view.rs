@@ -223,11 +223,14 @@ impl Store {
     /// and, with it, every `tree` / `task` / `session_tasks` / `review`
     /// call that loads a `Graph`.
     ///
-    /// This `WHERE` and `crate::effective_status_sql!`'s `EXISTS`
-    /// (`store/work_status.rs`) must read as the same condition — both
-    /// answer "is a confirmed, unended `work_links` row's session
+    /// This `WHERE`, `crate::effective_status_sql!`'s `EXISTS`
+    /// (`store/work_status.rs`) and
+    /// `service::work::handover::gather_stored`'s `has_working_session` must
+    /// read as the same condition — all three answer "is a confirmed,
+    /// unended `work_links` row naming this item on a session with
     /// `claude_status = 'working'`" — so a caller sees the same lift
-    /// whichever path served it. Check both before changing either.
+    /// whichever path served it. The macro's doc lists all three; check
+    /// them before changing any.
     pub fn work_items_with_working_session(&self) -> Result<Vec<(i64, i64)>, IpcError> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT l.item_id, p.session_id FROM work_links l \

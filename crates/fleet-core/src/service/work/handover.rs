@@ -663,9 +663,27 @@ pub fn gather_stored(
     // local item (`i.source != "local"`) — that hid exactly the status this
     // whole feature exists to show; `effective_status` now answers for a
     // local item too, not only a tracker's.
-    let has_working_session = live
-        .iter()
-        .any(|(l, row)| l.state == "confirmed" && row.claude_status.as_deref() == Some("working"));
+    //
+    // The lift belongs to the ITEM, so the link must name it
+    // (`l.item_id == item.id`) — the third copy of this condition, and the
+    // one the final whole-branch review found saying something different.
+    // `live` comes from `Store::live_work_sessions_for_key`, which is
+    // key-shaped on purpose (`l.ref_key = ?1 OR l.item_id IN (…)`) so a
+    // bare `ref_key` link with no item at all counts toward this key's
+    // sessions, conversations and journal. It must NOT count toward the
+    // item's status: `crate::effective_status_sql!`'s `EXISTS` and
+    // `Store::work_items_with_working_session`'s `WHERE` both require
+    // `item_id`, and a handover that read `in_progress` while the Work
+    // view, the session row and the card all read `todo` would make the
+    // status untrustworthy exactly where a person reads it as a summary.
+    // `state == "confirmed"` is redundant (the query filters it) and kept
+    // as the written form of the shared condition.
+    let item_id = item.as_ref().map(|i| i.id);
+    let has_working_session = live.iter().any(|(l, row)| {
+        matches!((l.item_id, item_id), (Some(a), Some(b)) if a == b)
+            && l.state == "confirmed"
+            && row.claude_status.as_deref() == Some("working")
+    });
     let mut input = HandoverInput {
         key: key.clone(),
         title: item
@@ -1159,6 +1177,44 @@ Verify the git state before acting; this summary may be stale. Full context: the
 
         let g = gather_stored(&s, "xyz-1", None, &crate::service::orgs::OrgScope::All).unwrap();
         assert_eq!(g.input.status.as_deref(), Some("in_progress"));
+    }
+
+    /// The lift belongs to the ITEM, not the key (final review, finding 2):
+    /// a confirmed, working session holding a bare `ref_key` link with no
+    /// `item_id` does NOT lift the item's handover status — the Work view,
+    /// the session row and the card all read `todo` for it
+    /// (`crate::effective_status_sql!` and
+    /// `Store::work_items_with_working_session` both require `item_id`), and
+    /// the handover must not be the one surface that disagrees.
+    ///
+    /// The bare link still counts as one of the key's SESSIONS, which is
+    /// what `Store::live_work_sessions_for_key` is key-shaped for.
+    #[test]
+    fn a_bare_ref_links_working_session_does_not_lift_the_item() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let sid = s
+            .upsert_session("bare", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        // The link first, so it has no item to bind to; the item after, so
+        // the key resolves to a real row whose status is being computed.
+        s.link_session_work(sid, crate::store::WorkTarget::Key("BARE-9"), "manual")
+            .unwrap();
+        s.create_local_work_item(Some("BARE-9"), "Ship it").unwrap();
+        s.set_claude_session_id(sid, "c-bare-9").unwrap();
+        s.set_claude_status_by_session_id("c-bare-9", "working")
+            .unwrap();
+
+        let g = gather_stored(&s, "bare-9", None, &crate::service::orgs::OrgScope::All).unwrap();
+        assert_eq!(
+            g.input.status.as_deref(),
+            Some("todo"),
+            "a link with no item_id must not lift the item's status"
+        );
+        assert_eq!(
+            g.input.live_sessions, 1,
+            "it is still one of the key's sessions"
+        );
     }
 
     #[test]

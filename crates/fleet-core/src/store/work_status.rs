@@ -27,16 +27,32 @@ pub const STATUS_CATEGORIES: [&str; 3] = ["todo", "in_progress", "done"];
 /// LOCAL item (`source = 'local'`) to `in_progress`; otherwise the stored
 /// value, normalised to one of the three categories.
 ///
-/// The `EXISTS` here and `Store::work_items_with_working_session`'s `WHERE`
-/// must express the same condition — both read "a confirmed, unended
-/// `work_links` row whose session is `claude_status = 'working'`" — because
-/// a caller can see the same item's lift through either path (`Graph::load`
-/// via the latter, a session row via this macro) and they must agree.
-/// Changing one without the other is exactly the drift this macro exists
-/// to avoid; `store::rows::tests::the_sql_macro_and_the_rust_function_agree_arm_by_arm`
-/// and `service::work::view_tests`'s equivalent scenarios are what would
-/// catch it landing wrong, but there is no automatic check that the two
-/// SQL texts themselves stay in lockstep — read both before editing either.
+/// THREE places express "a confirmed, unended `work_links` row, naming THIS
+/// item, whose session is `claude_status = 'working'`", and they must all
+/// read the same, because a caller can see the same item's lift through any
+/// of them and they must agree:
+///
+/// 1. the `EXISTS` here (a session row, via `SESSION_COLUMNS` and
+///    `Store::primary_work_by_session`);
+/// 2. `Store::work_items_with_working_session`'s `WHERE` (`Graph::load` for
+///    the Work view, and `card.rs` for one item);
+/// 3. `service::work::handover::gather_stored`'s `has_working_session`,
+///    which filters an already-fetched, already-org-fenced list in Rust
+///    rather than asking SQL — it holds the item, so the `item_id` half of
+///    the condition is `l.item_id == item.id`. It reads a KEY-shaped list
+///    (`Store::live_work_sessions_for_key` matches bare `ref_key` links with
+///    no item), so that `item_id` test is load-bearing there, not a
+///    tautology: without it a bare-ref link's working session lifted the
+///    handover while every other surface said `todo` (the final
+///    whole-branch review's finding 2).
+///
+/// Changing one without the others is exactly the drift this macro exists
+/// to avoid; `store::rows::tests::the_sql_macro_and_the_rust_function_agree_arm_by_arm`,
+/// `service::work::view_tests`'s equivalent scenarios and
+/// `handover::tests::a_bare_ref_links_working_session_does_not_lift_the_item`
+/// are what would catch it landing wrong, but there is no automatic check
+/// that the SQL texts themselves stay in lockstep — read all three before
+/// editing any.
 ///
 /// SQLite cannot call into Rust, so this duplicates `effective_status`'s
 /// logic rather than calling it — `store::rows::tests::
