@@ -2,8 +2,14 @@
 // TerminalView.svelte, F5b). The selection and every other reactive value
 // stay in the component; this controller reads and writes them through
 // `MouseHost` and owns only the in-progress gesture state.
-import { encodeMouse, type Screen } from './ansi';
-import { expandSelection, modeForClickCount, type CellPos, type SelectMode } from './terminal_selection';
+import { encodeMouse, type RowShift, type Screen } from './ansi';
+import {
+  expandSelection,
+  modeForClickCount,
+  shiftCell,
+  type CellPos,
+  type SelectMode,
+} from './terminal_selection';
 import { copyOnSelect } from './prefs';
 import { get } from 'svelte/store';
 
@@ -363,11 +369,28 @@ export function createMouseController(host: MouseHost) {
     lastMotionCell = null;
   }
 
+  /** Carry the gesture in progress along with rows the screen scrolled: the
+   *  raw anchor of a drag, and the cell of a deferred press, stay on the text
+   *  they were put on. The component moves its own endpoints; this keeps the
+   *  next pointer move from expanding from the old, now-wrong cell. A
+   *  wholesale content swap (`null`) ends a drag-select — nothing it was
+   *  anchored to is left. */
+  function shiftRows(shift: RowShift) {
+    const cols = host.lastCols();
+    if (shift === null) {
+      if (selecting) clearLocalGesture();
+      return;
+    }
+    if (selectAnchor) selectAnchor = shiftCell(selectAnchor, shift, cols);
+    if (selectFocus) selectFocus = shiftCell(selectFocus, shift, cols);
+    if (pendingPress) pendingPress = { ...pendingPress, cell: shiftCell(pendingPress.cell, shift, cols) };
+  }
+
   /** Remove the window-level listeners of a gesture still in progress. */
   function dispose() {
     removeWindowListeners?.();
     cancelGesture = null;
   }
 
-  return { onWheel, onMousedown, reset, dispose };
+  return { onWheel, onMousedown, reset, dispose, shiftRows };
 }

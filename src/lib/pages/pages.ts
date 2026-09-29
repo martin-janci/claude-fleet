@@ -54,7 +54,7 @@ export type Item =
   | { type: 'field'; key: string; widget?: Widget; hint?: string; when?: Condition }
   | { type: 'stat'; source: SourceRef; field?: string; label?: string }
   | { type: 'record'; source: SourceRef }
-  | { type: 'table'; source: SourceRef; columns?: string[] }
+  | { type: 'table'; source: SourceRef; columns?: string[]; copy?: boolean }
   | { type: 'chart'; source: SourceRef; chart: 'line' | 'bar' | 'stacked_bar' | 'sparkline'; title?: string }
   | { type: 'notice'; tone: 'info' | 'warn' | 'danger'; text: string }
   | { type: 'custom'; component: CustomComponent }
@@ -76,6 +76,15 @@ export interface Tab {
   sections: Section[];
 }
 
+/** One control in a data page's filter bar (`model.rs` `Filter`). */
+export interface Filter {
+  param: string;
+  label?: string;
+  /** A `days` filter's options; a `host` filter has none. */
+  choices?: number[];
+  default?: number;
+}
+
 export interface Page {
   spec: string;
   id: string;
@@ -89,6 +98,8 @@ export interface Page {
   list_items?: Item[];
   /** A `review_apply` page's proposals (`pages/review.ts`). */
   review?: 'settings';
+  /** A `data_page`'s filter bar: each sets the same-named source param. */
+  filters?: Filter[];
   sections?: Section[];
   tabs?: Tab[];
 }
@@ -109,7 +120,14 @@ export type SourceShape =
   | { shape: 'rows'; columns: Column[] }
   | { shape: 'series'; x: Column; y: Column[] };
 
-export type SourceSpec = { id: string; label: string; help: string } & SourceShape;
+export interface SourceParam {
+  name: string;
+  ty: { type: 'days'; min: number; max: number } | { type: 'host_alias' };
+  default: number | null;
+  help: string;
+}
+
+export type SourceSpec = { id: string; label: string; help: string; params?: SourceParam[] } & SourceShape;
 
 /** A button on a page (`pages/actions.rs`): one existing command, no
  *  arguments; the page's data items are re-read after it. */
@@ -387,4 +405,59 @@ export function formatCell(ty: ColType, v: unknown, now = Math.floor(Date.now() 
     default:
       return String(v);
   }
+}
+
+// ── a data page's filter bar ──
+
+/** The value of each filter: a `days` filter's number, a `host` filter's
+ *  alias, or `null` for "All hosts". */
+export type FilterValues = Record<string, number | string | null>;
+
+/** Whether `f` is a host filter: it offers the hosts, not `choices`. */
+export function isHostFilter(f: Filter): boolean {
+  return (f.choices ?? []).length === 0;
+}
+
+/** What each filter starts at: its default, else its first choice; a host
+ *  filter starts at every host. */
+export function filterDefaults(page: Page): FilterValues {
+  const out: FilterValues = {};
+  for (const f of page.filters ?? []) {
+    out[f.param] = isHostFilter(f) ? null : (f.default ?? f.choices![0]);
+  }
+  return out;
+}
+
+/** `ref` with the page's filters set on every parameter its source
+ *  declares. The validator keeps a filtered param out of `ref.params`; an
+ *  unset host filter sends nothing, so the source reads every host. */
+export function boundRef(ref: SourceRef, spec: SourceSpec | undefined, values: FilterValues): SourceRef {
+  const declared = new Set((spec?.params ?? []).map((p) => p.name));
+  const params: Record<string, unknown> = { ...(ref.params ?? {}) };
+  for (const [name, v] of Object.entries(values)) {
+    if (declared.has(name) && v !== null) params[name] = v;
+  }
+  return Object.keys(params).length ? { id: ref.id, params } : { id: ref.id };
+}
+
+/** "last 30 d, host alpha": the filters as words, for a copied table. */
+export function filterSummary(page: Page, values: FilterValues): string {
+  return (page.filters ?? [])
+    .map((f) => {
+      const v = values[f.param];
+      if (isHostFilter(f)) return v === null || v === undefined ? '' : `host ${v}`;
+      return `last ${v} d`;
+    })
+    .filter(Boolean)
+    .join(', ');
+}
+
+/** A table as plain text: its title line, then one line per row, the first
+ *  cell then the rest (`links: 3 made (manual 3)`). */
+export function tableText(title: string, columns: Column[], rows: Record<string, unknown>[]): string {
+  const lines = rows.map((row) => {
+    const cells = columns.map((c) => formatCell(c.ty, row[c.id]));
+    return cells.length > 1 ? `${cells[0]}: ${cells.slice(1).join(', ')}` : (cells[0] ?? '');
+  });
+  return [title, ...lines].join('\n');
 }

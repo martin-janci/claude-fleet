@@ -178,9 +178,6 @@ const REASONS = {
     'section proposals are tracker administration, and a client is never the fleet’s administrator — use `fleet-hub decide proposals`',
   decide_status_map_proposal:
     'applying a section proposal writes the tracker’s section map, and a client is never the fleet’s administrator — use `fleet-hub decide proposals apply|reject`',
-  // Work graph M13.2: `work_admin { usage }` is master-only on the hub.
-  work_usage:
-    'the work graph’s usage counts are the hub’s administration, and a client is never the fleet’s administrator — use `fleet-hub work usage`',
   // Organisations (work graph M5): the per-host tokens' boundary is set on
   // the hub only; `work_admin` is master-only.
   add_org:

@@ -1,8 +1,9 @@
 // Settings → General → Work since declarative pages P4: the introduction and
-// the usage counts. Trackers moved to the generated Trackers page
+// a link to the usage counts, the generated `usage.work` data page (its own
+// tests are in pages/PageView.test.ts). Trackers moved to the generated Trackers page
 // (pages/TrackerPage.test.ts, pages/FlowView.test.ts, TrackerExtras.test.ts,
 // and the connect flow's own tests in crates/fleet-core/src/pages/flows.rs).
-import { render, screen, waitFor } from '@testing-library/svelte';
+import { fireEvent, render, screen } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 
@@ -35,20 +36,21 @@ function route() {
 beforeEach(() => hubStatus.set({ ...STANDALONE }));
 
 describe('Settings → General → Work', () => {
-  it('points at the generated pages, and shows the Usage section, which reads the counts on mount (M13.2)', async () => {
+  it('points at the generated pages, and links to the usage page without reading anything itself (M13.2)', async () => {
     const inv = route();
-    render(WorkSettings);
+    const onopen = vi.fn();
+    render(WorkSettings, { onopen });
     expect(screen.getByTestId('work-section').textContent).toContain('their own pages');
-    await waitFor(() => expect(screen.getByTestId('work-usage')).toBeInTheDocument());
-    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'work_usage')).toBe(true));
+    await fireEvent.click(screen.getByTestId('work-usage-link'));
+    expect(onopen).toHaveBeenCalledWith('usage.work');
+    expect(inv).not.toHaveBeenCalled();
   });
 
-  it('paired with a hub: no Usage section, and never asks for usage (M13.2: work_admin is the hub master’s)', async () => {
+  it('paired with a hub: no usage link (M13.2: work_admin is the hub master’s)', async () => {
     hubStatus.set(remote);
-    const inv = route();
-    render(WorkSettings);
+    route();
+    render(WorkSettings, { onopen: vi.fn() });
     await tick();
-    expect(screen.queryByTestId('work-usage')).toBeNull();
-    expect(inv.mock.calls.some((c) => c[0] === 'work_usage')).toBe(false);
+    expect(screen.queryByTestId('work-usage-link')).toBeNull();
   });
 });

@@ -1,19 +1,34 @@
 <script lang="ts">
-  // A `stat`, `record`, `table` or `chart` item: reads its data source once
-  // when shown (and again when a page action changes it), and formats each
-  // value by the column type the source declares (`list_pages` carries the
-  // shapes).
-  import { onMount } from 'svelte';
+  // A `stat`, `record`, `table` or `chart` item: reads its data source when
+  // shown, again when a page action changes it or a filter changes its
+  // params, and formats each value by the column type the source declares
+  // (`list_pages` carries the shapes).
+  import { untrack } from 'svelte';
   import Chart from './Chart.svelte';
-  import { fetchSource, formatCell, type Column, type Item, type SourceSpec } from './pages';
+  import { copyText } from '../clipboard';
+  import {
+    fetchSource,
+    formatCell,
+    tableText,
+    type Column,
+    type Item,
+    type SourceRef,
+    type SourceSpec,
+  } from './pages';
 
   let {
     item,
     spec,
+    source = item.source,
+    copyTitle,
     tick = 0,
   }: {
     item: Extract<Item, { type: 'stat' | 'record' | 'table' | 'chart' }>;
     spec: SourceSpec | undefined;
+    /** What to read: the item's source with the page's filters bound. */
+    source?: SourceRef;
+    /** A copied table's first line; the source's label when absent. */
+    copyTitle?: string;
     /** Bumped when the page's data changed (a page action ran): re-read. */
     tick?: number;
   } = $props();
@@ -21,23 +36,33 @@
   let data = $state<unknown>(null);
   let error = $state<string | null>(null);
   let loaded = $state(false);
+  let copied = $state(false);
+  /** Only the newest read lands: a slow answer for an older filter never
+   *  overwrites a newer one. */
+  let reads = 0;
 
-  async function read() {
-    const r = await fetchSource(item.source);
+  async function read(ref: SourceRef) {
+    const mine = ++reads;
+    copied = false;
+    const r = await fetchSource(ref);
+    if (mine !== reads) return;
     loaded = true;
     error = null;
     if (r.ok) data = r.value;
     else error = r.error.message;
   }
 
-  onMount(() => void read());
-  let seen = 0;
+  // Once when shown, then on every new tick or filter value — by value, so
+  // a re-bound ref with the same params reads nothing.
+  const readKey = $derived(`${tick}|${JSON.stringify(source)}`);
   $effect(() => {
-    if (tick !== seen) {
-      seen = tick;
-      void read();
-    }
+    void readKey;
+    untrack(() => void read(source));
   });
+
+  async function copy() {
+    copied = await copyText(tableText(copyTitle ?? spec?.label ?? '', tableColumns, rows));
+  }
 
   const testid = $derived(`data-${item.type}-${item.source.id}`);
   const rows = $derived(Array.isArray(data) ? (data as Record<string, unknown>[]) : []);
@@ -81,7 +106,14 @@
   </dl>
 {:else if item.type === 'table'}
   <div class="table-wrap" data-testid={testid}>
-    <p class="caption">{spec.label}</p>
+    <div class="caption">
+      <p>{spec.label}</p>
+      {#if item.type === 'table' && item.copy}
+        <button type="button" class="copy" data-testid={`${testid}-copy`} disabled={!loaded || rows.length === 0} onclick={() => void copy()}
+          >{copied ? 'Copied' : 'Copy as text'}</button
+        >
+      {/if}
+    </div>
     {#if loaded && rows.length === 0}
       <p class="empty">Nothing yet.</p>
     {:else}
@@ -145,8 +177,18 @@
     margin: 0;
   }
   .caption {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     font-size: 0.8rem;
     margin: 0 0 0.25rem;
+  }
+  .caption p {
+    margin: 0;
+  }
+  .copy {
+    font: inherit;
+    font-size: 0.72rem;
   }
   table {
     width: 100%;

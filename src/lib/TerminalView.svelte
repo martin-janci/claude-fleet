@@ -5,9 +5,9 @@
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { selectedSession } from './selection';
   import { hostByAlias } from './hosts';
-  import { Screen, rowToRuns, runsKey, runStyleCss, type Run } from './ansi';
+  import { Screen, rowToRuns, runsKey, runStyleCss, type Run, type RowShift } from './ansi';
   import { pointInRect, dropPoint } from './geometry';
-  import { selectionRects, type CellPos } from './terminal_selection';
+  import { selectionRects, shiftSelection, type CellPos } from './terminal_selection';
   import { nativeWriteText } from './clipboard_native';
   import { hintAnchor } from './hints';
   import { toIpcError } from './result';
@@ -257,6 +257,28 @@
   function clearSelection() {
     selAnchor = null;
     selFocus = null;
+  }
+
+  /** Keep the selection on the text it covers while the screen scrolls it —
+   *  tmux copy-mode under the wheel, claude streaming output past the bottom
+   *  margin. The selection lives in grid cells, so without this the
+   *  highlight stayed on fixed cells and the text slid away under it. A
+   *  wholesale content swap (alt screen, reset, resize) drops it. */
+  function followRowShifts(shifts: RowShift[]) {
+    for (const shift of shifts) {
+      mouse.shiftRows(shift);
+      if (!selAnchor || !selFocus) continue;
+      if (shift === null) {
+        clearSelection();
+        continue;
+      }
+      const next = shiftSelection(selAnchor, selFocus, shift, lastCols);
+      if (!next) clearSelection();
+      else if (next.anchor !== selAnchor || next.focus !== selFocus) {
+        selAnchor = next.anchor;
+        selFocus = next.focus;
+      }
+    }
   }
 
   /** Is a drag-drop point inside the terminal grid? `dropPoint` puts it in
@@ -592,6 +614,9 @@
     lastCols = next.cols;
     lastRows = next.rows;
     screen.resize(next.rows, next.cols);
+    // Now, not on the next drain: a selection made before tmux's repaint
+    // arrives would otherwise be dropped by this resize's stale swap.
+    followRowShifts(screen.takeRowShifts());
     renderVersion++;
     lastResizeAt = Date.now();
     if (ptyOpen) {
@@ -659,6 +684,7 @@
         console.error('[terminal] screen.write failed', e);
         reportTerminalError(e);
       }
+      followRowShifts(screen.takeRowShifts());
       renderVersion++;
       // Answer any terminal queries (DSR cursor position, DA) the output
       // carried — the parser has no back-channel, so we forward its replies.

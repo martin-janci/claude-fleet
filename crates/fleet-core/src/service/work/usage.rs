@@ -366,71 +366,100 @@ fn pairs(m: &BTreeMap<String, u64>) -> String {
 }
 
 impl UsageSummary {
-    /// The plain-text form: `fleet-hub work usage`, the desktop's Copy, a
-    /// run record. One line per group; counts and ids only.
+    /// The plain-text form: `fleet-hub work usage`, a run record. One line
+    /// per group; counts and ids only.
     pub fn lines(&self) -> Vec<String> {
+        let mut out = vec![format!("work graph usage, last {} d", self.days)];
+        out.extend(self.rows().into_iter().map(|(g, v)| format!("{g}: {v}")));
+        out
+    }
+
+    /// One `(group, what it counted)` pair per line of [`Self::lines`]
+    /// after its header: the rows of the `work.usage` data source, so the
+    /// desktop's page and the CLI say the same words.
+    pub fn rows(&self) -> Vec<(String, String)> {
         let d = &self.detection;
-        let mut out = vec![
-            format!("work graph usage, last {} d", self.days),
-            format!(
-                "links: {} made ({})",
-                self.links.created,
-                pairs(&self.links.by_source)
+        let mut out: Vec<(String, String)> = vec![
+            (
+                "links".into(),
+                format!(
+                    "{} made ({})",
+                    self.links.created,
+                    pairs(&self.links.by_source)
+                ),
             ),
-            format!(
-                "detection: {} suggested, {} confirmed by a person, {} confirmed by an agent, \
-                 {} promoted, {} rejected, {} withdrawn, {} carried, {} expired; \
-                 median decision {}; {} nudges",
-                d.suggested,
-                d.confirmed_by_person,
-                d.confirmed_by_agent,
-                d.promoted,
-                d.rejected,
-                d.withdrawn,
-                d.carried,
-                d.expired,
-                d.median_decision_secs.map_or("n/a".into(), duration),
-                d.nudges
+            (
+                "detection".into(),
+                format!(
+                    "{} suggested, {} confirmed by a person, {} confirmed by an agent, \
+                     {} promoted, {} rejected, {} withdrawn, {} carried, {} expired; \
+                     median decision {}; {} nudges",
+                    d.suggested,
+                    d.confirmed_by_person,
+                    d.confirmed_by_agent,
+                    d.promoted,
+                    d.rejected,
+                    d.withdrawn,
+                    d.carried,
+                    d.expired,
+                    d.median_decision_secs.map_or("n/a".into(), duration),
+                    d.nudges
+                ),
             ),
-            format!(
-                "handover: {} requested, {} written, {} missing, {} send failed",
-                self.handover.requested,
-                self.handover.written,
-                self.handover.missing,
-                self.handover.send_failed
+            (
+                "handover".into(),
+                format!(
+                    "{} requested, {} written, {} missing, {} send failed",
+                    self.handover.requested,
+                    self.handover.written,
+                    self.handover.missing,
+                    self.handover.send_failed
+                ),
             ),
-            format!(
-                "resume: {} ({} with a brief, {} without)",
-                self.resume.resumed, self.resume.with_brief, self.resume.without_brief
+            (
+                "resume".into(),
+                format!(
+                    "{} ({} with a brief, {} without)",
+                    self.resume.resumed, self.resume.with_brief, self.resume.without_brief
+                ),
             ),
-            format!(
-                "journal: {} briefs queued, {} delivered; {} compaction summaries, \
-                 {} session summaries, {} PR links written",
-                self.journal.briefs_queued,
-                self.journal.briefs_delivered,
-                self.journal.compact_summaries,
-                self.journal.summaries,
-                self.journal.write_backs
+            (
+                "journal".into(),
+                format!(
+                    "{} briefs queued, {} delivered; {} compaction summaries, \
+                     {} session summaries, {} PR links written",
+                    self.journal.briefs_queued,
+                    self.journal.briefs_delivered,
+                    self.journal.compact_summaries,
+                    self.journal.summaries,
+                    self.journal.write_backs
+                ),
             ),
-            format!(
-                "tidy: {} applied, {} kept, {} auto-tidied ({})",
-                self.tidy.applied,
-                self.tidy.kept,
-                self.tidy.auto_tidied,
-                pairs(&self.tidy.auto_by_reason)
+            (
+                "tidy".into(),
+                format!(
+                    "{} applied, {} kept, {} auto-tidied ({})",
+                    self.tidy.applied,
+                    self.tidy.kept,
+                    self.tidy.auto_tidied,
+                    pairs(&self.tidy.auto_by_reason)
+                ),
             ),
         ];
         if self.trackers.is_empty() {
-            out.push("trackers: none".into());
+            out.push(("trackers".into(), "none".into()));
         }
         for t in &self.trackers {
-            out.push(format!(
-                "tracker {}: {} passes, {} failed, {} items skipped (since the sync started)",
-                t.tracker_id, t.passes, t.passes_failed, t.items_failed
+            out.push((
+                format!("tracker {}", t.tracker_id),
+                format!(
+                    "{} passes, {} failed, {} items skipped (since the sync started)",
+                    t.passes, t.passes_failed, t.items_failed
+                ),
             ));
         }
         for u in &self.unrecorded {
-            out.push(format!("not recorded: {u}"));
+            out.push(("not recorded".into(), u.clone()));
         }
         out
     }

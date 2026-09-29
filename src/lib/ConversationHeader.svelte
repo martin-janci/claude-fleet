@@ -9,6 +9,7 @@
     relativeTime,
     statusChip,
     switcherEntries,
+    switcherLabel,
     type BackgroundEntry,
     type ConversationSummary,
   } from './conversation';
@@ -108,7 +109,12 @@
       ? entries.find((c) => c.current)
       : entries.find((c) => c.claude_session_id === viewing),
   );
-  const title = $derived(shown ? conversationTitle(shown) : viewing === null ? 'Current' : 'Earlier conversation');
+  const label = $derived(
+    shown ? switcherLabel(shown) : { when: viewing === null ? 'Current' : 'Earlier conversation', source: '' },
+  );
+  // The full title, turn count included, for the tooltip: the button drops
+  // the source on a narrow header and never shows the count.
+  const title = $derived(shown ? conversationTitle(shown) : label.when);
   const meter = $derived(viewing === null ? contextMeter(session) : null);
   // An earlier conversation shows its own model; the current one prefers the
   // row's live value.
@@ -244,13 +250,14 @@
   <div class="switcher-wrap" bind:this={wrap}>
     <button
       type="button"
-      class="switcher"
+      class="btn btn--quiet is-bounded switcher"
       data-testid="conv-switcher"
       aria-haspopup="listbox"
       aria-expanded={open}
+      {title}
       bind:this={button}
       onclick={() => (open = !open)}
-      >{title}{#if newerAvailable}<span class="dot" role="img" aria-label="newer conversation available" data-testid="conv-switcher-dot" title="A newer conversation started"></span>{/if}<span class="caret">▾</span></button
+      ><span class="sw-when">{label.when}</span>{#if label.source}<span class="sw-source">{label.source}</span>{/if}{#if newerAvailable}<span class="dot" role="img" aria-label="newer conversation available" data-testid="conv-switcher-dot" title="A newer conversation started"></span>{/if}<span class="caret" aria-hidden="true">▾</span></button
     >
     {#if open}
       <ul class="menu" role="listbox" tabindex="-1" data-testid="conv-switcher-menu" bind:this={menu} onkeydown={onMenuKey}>
@@ -294,6 +301,8 @@
   {:else}
     <div class="facts">
     {#if meter}
+      <!-- The level colours the fill only; the numbers stay neutral until
+           the level is worth a colour of its own (warn / crit). -->
       <span
         class="ctx"
         data-testid="conv-ctx"
@@ -303,14 +312,17 @@
         aria-valuemin="0"
         aria-valuemax="100"
         aria-valuenow={Math.round(meter.pct)}
+        aria-valuetext={meter.label}
         aria-label="context usage"
         title={meter.title}
-        style="color: {contextColor(meter.level)}; border-color: {contextColor(meter.level)};"
-        ><span class="ctx-bar" style="width: {Math.min(100, Math.max(0, meter.pct))}%; background: {contextColor(meter.level)};"></span><span class="ctx-pct">{meter.label}</span></span
+        style="--ctx-tone: {contextColor(meter.level)};"
+        ><span class="ctx-track" aria-hidden="true"><span class="ctx-fill" style="width: {Math.min(100, Math.max(0, meter.pct))}%;"></span></span
+        ><span class="ctx-pct">{meter.pctLabel}</span
+        >{#if meter.tokensLabel}<span class="ctx-tokens">{meter.tokensLabel}</span>{/if}</span
       >
     {/if}
+    {#if status}<span class="tag status" data-testid="conv-status" data-status={status} title="Status: {status}"><span class="status-dot" aria-hidden="true"></span><span class="status-word">{status}</span></span>{/if}
     {#if model}<span class="tag tag--mono" data-testid="conv-model">{model}</span>{/if}
-    {#if status}<span class="tag" data-testid="conv-status" data-status={status}>{status}</span>{/if}
     {#if lastEvent}<span class="tag last-event" data-testid="conv-last-event">{lastEvent}</span>{/if}
     </div>
   {/if}
@@ -327,7 +339,9 @@
           data-testid="conv-turns-button"
           aria-expanded={turnsOpen}
           bind:this={turnsButton}
-          onclick={onTurnsToggle}>{turnEntries.length} turn{turnEntries.length === 1 ? '' : 's'}<span class="caret">▾</span></button
+          aria-label="{turnEntries.length} turn{turnEntries.length === 1 ? '' : 's'}"
+          title="Jump to a turn"
+          onclick={onTurnsToggle}>{turnEntries.length}<span class="tool-word">{turnEntries.length === 1 ? ' turn' : ' turns'}</span><span class="caret" aria-hidden="true">▾</span></button
         >
         {#if turnsOpen}
           <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
@@ -351,7 +365,9 @@
           class="btn btn--quiet"
           data-testid="conv-background-button"
           aria-expanded={backgroundOpen}
-          onclick={onBackgroundToggle}>{bgCount} background<span class="caret">▾</span></button
+          aria-label="{bgCount} background"
+          title="Background work"
+          onclick={onBackgroundToggle}>{bgCount}<span class="tool-word">{' background'}</span><span class="caret" aria-hidden="true">▾</span></button
         >
         {#if backgroundOpen}
           <div class="turn-index bg-groups" data-testid="conv-background-list">
@@ -393,35 +409,44 @@
     background: var(--bg-pane);
     border-bottom: 1px solid var(--border);
   }
+  /* A flex box so the button inside may shrink (and clip) rather than
+     overflow onto the meter; the queries below keep it from having to. */
   .switcher-wrap {
     position: relative;
+    display: flex;
     flex: 0 1 auto;
     min-width: 0;
   }
+  /* A bounded .btn: the same 24px box as every other control in the row,
+     so nothing sits taller than its neighbours. */
   .switcher {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    max-width: 42ch;
-    padding: 0.25rem 0.6rem;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--bg);
-    color: var(--fg);
-    font-size: 0.8rem;
+    justify-content: flex-start;
+    gap: 6px;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    color: var(--control-fg);
+  }
+  .sw-when {
+    flex: 0 0 auto;
+    font-weight: 500;
+  }
+  /* The part that yields: it ellipsizes first, then goes (container
+     queries below). A text node directly in a flex box cannot ellipsize,
+     which is why it has a span of its own. */
+  .sw-source {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
-    cursor: pointer;
-  }
-  .switcher:hover {
-    border-color: var(--accent);
+    color: var(--control-fg-quiet);
   }
   .caret {
+    flex: 0 0 auto;
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: 9px;
   }
   .dot {
+    flex: 0 0 auto;
     display: inline-block;
     width: 8px;
     height: 8px;
@@ -477,7 +502,9 @@
     display: flex;
     align-items: center;
     gap: var(--control-gap);
-    flex: 1 1 auto;
+    /* Basis 0: the switcher and the tools get their size first, the facts
+       take what is left — so a squeeze clips a fact, never a control. */
+    flex: 1 1 0;
     min-width: 0;
     /* The row itself never wraps and .switcher-wrap/.tools guard their own
        widths; this is the backstop that keeps the non-elastic tags (.ctx,
@@ -614,6 +641,30 @@
   .tag[data-status='failed'] {
     color: var(--usage-crit);
   }
+  /* Status reads as a light plus a word; the light carries the tone. */
+  .status {
+    --status-tone: var(--control-border-strong);
+  }
+  .status-dot {
+    flex: 0 0 auto;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--status-tone);
+  }
+  .status[data-status='working'] {
+    --status-tone: var(--accent);
+  }
+  .status[data-status='completed'] {
+    --status-tone: var(--usage-ok);
+  }
+  .status[data-status='compacting'],
+  .status[data-status='blocked'] {
+    --status-tone: var(--usage-warn);
+  }
+  .status[data-status='failed'] {
+    --status-tone: var(--usage-crit);
+  }
   .tag.last-event {
     flex: 1 1 auto;
     min-width: 0;
@@ -621,52 +672,117 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  /* A hairline divider instead of two competing pill borders. */
-  .facts .tag + .tag::before {
+  /* A hairline between facts instead of competing pill borders. */
+  .facts > * + .tag::before {
     content: '';
     width: 1px;
     height: 11px;
-    margin-right: var(--control-gap);
+    /* + the tag's own 4px gap = the row's 6px on the other side. */
+    margin-right: calc(var(--control-gap) - 4px);
     background: var(--control-border);
   }
+  /* The context meter: a slim gauge, then the numbers. Information, not a
+     control, so no border and no pill (controls.css: a bordered pill says
+     "click me"). The one place the bar spends colour. */
   .ctx {
-    position: relative;
     display: inline-flex;
     align-items: center;
+    gap: 6px;
     flex: 0 0 auto;
-    height: 18px;
-    padding: 0 7px;
-    border: 1px solid;
-    border-radius: var(--radius-pill);
-    overflow: hidden;
+    height: var(--control-h);
     font-size: var(--control-font-sm);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+    cursor: default;
   }
   .ctx[data-stale='true'] {
     opacity: 0.55;
   }
-  .ctx-bar {
+  .ctx-track {
+    position: relative;
+    flex: 0 0 auto;
+    width: 44px;
+    height: 4px;
+    border-radius: 2px;
+    overflow: hidden;
+    background: var(--control-border);
+  }
+  .ctx-fill {
     position: absolute;
     inset: 0 auto 0 0;
-    opacity: 0.22;
+    border-radius: inherit;
+    background: var(--ctx-tone);
+  }
+  /* Stale: the fill is a guess until the next reply, so it is drawn as one. */
+  .ctx[data-stale='true'] .ctx-fill {
+    background: repeating-linear-gradient(
+      90deg,
+      var(--ctx-tone) 0 3px,
+      transparent 3px 5px
+    );
   }
   .ctx-pct {
-    position: relative;
+    color: var(--control-fg);
+    font-weight: 500;
   }
-  /* A pane narrow enough that the 1.1rem gutters cost more than they give
-     (the rule the old .toolbar carried, now the header's). */
+  .ctx[data-level='warn'] .ctx-pct,
+  .ctx[data-level='crit'] .ctx-pct {
+    color: var(--ctx-tone);
+  }
+  .ctx-tokens {
+    color: var(--control-fg-quiet);
+  }
+  /* Narrowing pane: the row sheds detail in order of value instead of
+     letting .facts' overflow:hidden clip whatever happens to be last.
+     Every dropped piece stays in a tooltip or an aria-label. Thresholds
+     are the worst case measured (a last event and background work both
+     showing), at the app's 14px root. */
+  @container chat (max-width: 52rem) {
+    .ctx-tokens {
+      display: none;
+    }
+  }
+  /* A sliver of the last event is noise, and the source is the switcher's
+     secondary half (the full title is its tooltip and the menu). */
+  @container chat (max-width: 44rem) {
+    .tag.last-event,
+    .sw-source {
+      display: none;
+    }
+  }
+  /* The tool buttons keep their counts and lose their words (the
+     aria-label keeps the whole name). */
+  @container chat (max-width: 38rem) {
+    .tool-word {
+      display: none;
+    }
+  }
+  /* The 1.1rem gutters cost more than they give (the rule the old .toolbar
+     carried, now the header's). */
   @container chat (max-width: 34rem) {
     .conv-header {
       padding-inline: 0.6rem;
     }
   }
-  /* The model tag is the lowest-value fact (status and the context meter
-     matter more, last-event already truncates itself) — drop it before the
-     row is narrow enough to need .facts' overflow:hidden backstop above. */
-  @container chat (max-width: 26rem) {
+  /* The model is the lowest-value fact left. */
+  @container chat (max-width: 30rem) {
     .facts .tag--mono {
       display: none;
+    }
+  }
+  /* Phone width: a shorter gauge, and the light alone says the status —
+     the word stays for screen readers and in the title. */
+  @container chat (max-width: 24rem) {
+    .ctx-track {
+      width: 28px;
+    }
+    .status-word {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
     }
   }
 </style>
