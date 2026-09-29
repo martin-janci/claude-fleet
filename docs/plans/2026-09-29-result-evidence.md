@@ -59,45 +59,40 @@ Paths are relative to `crates/fleet-core/src/` unless they start with `src/`,
 
 ## Phase 2: assess and show
 
-### Step 4. `service/evidence.rs`: the assessment (pure)
+### Step 4. The assessment, on both sides (pure)
 
-- `Evidence` (stored `PrEvidence` + `checked_at` + optional `reviews`),
-  `assess(&Evidence, now, ttl) -> Assessment` as in design §5.
-- Table test: one row per line of the §5 table, plus combinations
-  (failing + dirty keeps both reasons, dirty first; old + passing reads
-  Unknown).
+- `service/evidence.rs`: `assess(pr_url, &PrEvidence, checked_at, now) ->
+  Option<Assessment>` with `Verdict` and `Reason` codes (design §5 and its
+  phase-2 refinements), plus `is_stale`.
+- `src/lib/evidence.ts`: the mirror, and `describeReason` for the wording.
+- `service/testdata/evidence_cases.json`: 29 hand-written cases, run by both
+  suites. A Rust test fails when a reason code has no case.
+- `PrEvidence.state` (OPEN | CLOSED | MERGED), read by the probe.
 
-### Step 5. The on-demand read
+### Step 5. UI
 
-- `evidence::refresh(store, shell, session_id) -> Assessment`: take the row
-  and its cwd under the lock, drop it, run the one-target probe script, then
-  run `gh api 'repos/{owner}/{repo}/pulls/<n>/reviews' --jq '[.[] | {login:
-  .user.login, state, commit_id, submitted_at}]'` when `review_decision` is
-  set or the PR has reviews. Keep the latest review per login. Write back
-  through `set_pr_evidence`, then assess.
-- Every interpolated value goes through `shell::quote`. `<n>` is parsed as
-  an integer before it is interpolated.
-- Tauri command `session_evidence_refresh` in `src-tauri/src/commands/`
-  (thin, validates the id). Hub path: add a verdict row if the hub proxies
-  it, then `REGEN_HUB_VERDICTS=1`.
-- Tests: fake `HostShell` answers for no PR, PR without reviews, a stale
-  review, and gh failing (returns Unknown with the stored reading, no write).
+- `PrResult.svelte` as the **Result** row in `SessionDetails.svelte`.
+- `SessionRowItem.svelte`: the CI badge dims when `isStale`, and its tooltip
+  says when it was last checked.
+- `WorkTaskDetail.svelte`: a verdict chip beside each live linked session's PR.
+- Vitest: the card per verdict, the stale badge in the sidebar, and the Work
+  chip (live session only).
 
-### Step 6. UI
+(The on-demand read planned here moved to phase 3, with the MCP tool that
+also gives it a hub path.)
 
-- `src/lib/evidence.ts`: TS mirror of `Assessment`, plus a client-side
-  `isStale(pr_checked_at, now)` for the badge.
-- `src/lib/EvidenceCard.svelte` in `SessionDetails.svelte` (replaces the CI
-  chip at about line 551): verdict + short commit, reasons, "checked N min
-  ago", a refresh button. Refresh once on open when the reading is older
-  than the TTL.
-- `SessionRowItem.svelte`: dim the CI badge when `isStale`.
-- Work item detail: one line per linked session with a PR, worst verdict
-  first. The `work_keys.ts` roll-up stays untouched.
-- Vitest: card rendering per verdict, the refresh-on-open rule, and the
-  stale dimming.
+## Phase 3: fresh reads, tasks and agents
 
-## Phase 3: tasks and agents
+### Step 6. The on-demand read (moved from phase 2)
+
+- `evidence::refresh(store, shell, session_id)`: the one-target probe script
+  that ignores the TTL, then `gh api 'repos/{owner}/{repo}/pulls/<n>/reviews'`
+  for the review commits (`gh pr view` leaves `latestReviews[].commit.oid`
+  empty). Keep the latest review per login and mark it stale when its commit
+  is not the head. Write back through the reconcile upsert's rule, then
+  assess, with a new `review_stale` reason.
+- Exposed as the fresh-read MCP tool of Step 8. The desktop's refresh button
+  routes to it on a hub and calls the service locally.
 
 ### Step 7. `result_commit` on dispatch tasks
 

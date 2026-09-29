@@ -103,6 +103,11 @@ pub struct PrEvidence {
     /// HAS_HOOKS | DRAFT | UNKNOWN.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merge_state: Option<String>,
+    /// `state`: OPEN | CLOSED | MERGED. Also in `pr_signals` (tidy-up reads
+    /// it there); here so the assessment can say "merged" without it.
+    /// Absent from readings stored before it was added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
     #[serde(default)]
     pub checks: CheckSummary,
 }
@@ -360,6 +365,7 @@ fn evidence_from_json(v: &serde_json::Value) -> PrEvidence {
         head_oid: text("headRefOid").map(|o| o.to_ascii_lowercase()),
         review_decision: text("reviewDecision").map(|d| d.to_ascii_uppercase()),
         merge_state: text("mergeStateStatus").map(|m| m.to_ascii_uppercase()),
+        state: text("state").map(|m| m.to_ascii_uppercase()),
         draft: v.get("isDraft").and_then(|d| d.as_bool()).unwrap_or(false),
         checks: v
             .get("statusCheckRollup")
@@ -840,6 +846,7 @@ mod tests {
         );
         assert_eq!(ev.review_decision, None, "\"\" = no review requirement");
         assert_eq!(ev.merge_state.as_deref(), Some("UNKNOWN"));
+        assert_eq!(ev.state.as_deref(), Some("OPEN"));
         assert!(!ev.draft);
         assert_eq!(ev.checks.total, 2);
         assert_eq!(ev.checks.skipped, 1);

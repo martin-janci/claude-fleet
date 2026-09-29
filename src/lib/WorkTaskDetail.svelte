@@ -16,6 +16,7 @@
   import { orgs as orgStore } from './orgs';
   import { openExternal } from './open_external';
   import { timeAgo } from './session_status';
+  import { assessRow, hasReading, verdictColor, verdictLabel } from './evidence';
   import { describeEvidence, onWorkChangedDebounced, resumeWork } from './work';
   import { providerInfo, startWork, unavailableLabel } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
@@ -142,6 +143,12 @@
 
   const task: WorkTask | null = $derived(detail?.task ?? null);
   const grouped = $derived(groupSessionLinks(task?.sessions ?? []));
+  // A coarse clock for the Result chips' staleness (minute-level is plenty).
+  let nowSec = $state(Math.floor(Date.now() / 1000));
+  $effect(() => {
+    const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 60_000);
+    return () => clearInterval(t);
+  });
   const liveLink = $derived(grouped.active.find((l) => l.session_id != null && $sessions.some((r) => r.id === l.session_id)) ?? null);
   const lastPast = $derived(grouped.past.find((l) => l.resumable !== false) ?? null);
   const ruleName = $derived(task?.group?.rule_id != null ? (rules.find((r) => r.id === task.group.rule_id)?.name ?? null) : null);
@@ -420,6 +427,17 @@
                 {#if l.branch}branch {l.branch} · {/if}{#if l.created_at}linked {timeAgo(l.created_at)}{/if}{#if l.end_reason} · ended: {l.end_reason}{/if}{#if l.resumable === false} · not resumable{/if}
                 {#if l.pr_url}
                   · <button class="link-btn" type="button" onclick={() => void openExternal(l.pr_url ?? '')}>PR</button>
+                  {@const liveRow = kind !== 'past' && l.session_id != null ? $sessions.find((r) => r.id === l.session_id) : undefined}
+                  {@const result = liveRow ? assessRow(liveRow, nowSec) : null}
+                  {#if hasReading(result)}
+                    · <span
+                      class="result"
+                      data-testid="work-task-link-result"
+                      data-verdict={result.verdict}
+                      style="color: {verdictColor(result.verdict)};"
+                      title="Result of the session's PR; open the session for the reasons"
+                    >{verdictLabel(result.verdict)}</span>
+                  {/if}
                 {/if}
               </p>
             </li>
