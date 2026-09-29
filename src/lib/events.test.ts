@@ -88,6 +88,16 @@ describe('subscribeToRowEvents', () => {
     expect(seen).toEqual([[{ what: 'placement', task_id: 'item:3' }, { what: 'resync' }]]);
   });
 
+  it('delivers update:changed to onUpdateChanged as one batch, dropping unreadable frames', async () => {
+    const seen: unknown[][] = [];
+    await subscribeToRowEvents({ onUpdateChanged: (changes) => seen.push(changes) });
+    fire('update:changed', { what: 'observed', target: 'client:3' });
+    fire('update:changed', { target: 'client:4' }); // no `what`
+    fire('update:changed', { what: 'channel' });
+    await flush();
+    expect(seen).toEqual([[{ what: 'observed', target: 'client:3' }, { what: 'channel' }]]);
+  });
+
   it('delivers settings:changed keys to onSettingsChanged as one batch, dropping malformed frames', async () => {
     const seen: string[][] = [];
     await subscribeToRowEvents({ onSettingsChanged: (keys) => seen.push(keys) });

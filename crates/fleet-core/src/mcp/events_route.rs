@@ -334,10 +334,12 @@ fn accepted_list(kinds: Option<&Vec<String>>) -> Vec<String> {
 /// carry no session to scope them by; a host's token reads its own orgs'
 /// tickets through `work { … }` (the M3 plan's decision 6, kept by M5 —
 /// stricter than an org filter, and nothing on a host needs the stream).
+/// `update` frames name every target of the fleet; a scoped caller reads
+/// its own row through `update_status`.
 /// `session` frames are fenced per frame instead ([`fence_frame`]).
 /// `settings` frames name operator settings, which only the master token
 /// reads (`get_settings`); nothing on a host or an org-bound phone needs them.
-pub const HOST_BOUND_HIDDEN_KINDS: &[&str] = &["work", "settings"];
+pub const HOST_BOUND_HIDDEN_KINDS: &[&str] = &["work", "settings", "update"];
 
 /// Narrow the requested kinds for a host-bound caller; everyone else keeps
 /// what they asked for.
