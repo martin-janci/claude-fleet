@@ -460,6 +460,7 @@ pub fn compute_states(
             host_hash: None,
             scanned_at,
             managed: true,
+            ..Default::default()
         });
     }
     // Both the catalog name and the install name (when `install_as` is set,
@@ -481,8 +482,8 @@ pub fn compute_states(
         .iter()
         .map(|a| (a.kind(), a.header.name.clone()))
         .collect();
-    for (kind, name) in harness.installed(snap) {
-        let key = (kind, name.clone());
+    for a in harness.installed_detail(snap) {
+        let key = (a.kind, a.name.clone());
         if !install_names.contains(&key) && catalog_names.contains(&key) {
             // Suppressed, and not because the host holds what the catalog
             // renders: this identifier is some asset's *catalog* name while
@@ -491,8 +492,8 @@ pub fn compute_states(
             // (see the primary-key note above). Say so at least once.
             tracing::debug!(
                 host = host_alias,
-                kind = kind.as_str(),
-                identifier = %name,
+                kind = a.kind.as_str(),
+                identifier = %a.name,
                 "installed identifier collides with a catalog name; not reported as unmanaged"
             );
         }
@@ -500,18 +501,20 @@ pub fn compute_states(
             && !catalog_names.contains(&key)
             && !orphans
                 .iter()
-                .any(|o| o.kind == kind.as_str() && o.name == name)
+                .any(|o| o.kind == a.kind.as_str() && o.name == a.name)
         {
             rows.push(AssetInventoryRow {
                 host_alias: host_alias.to_string(),
                 harness: harness.id().to_string(),
-                kind: kind.as_str().to_string(),
-                name,
+                kind: a.kind.as_str().to_string(),
+                name: a.name,
                 state: AssetState::Unmanaged.as_str().into(),
                 catalog_hash: None,
-                host_hash: None,
+                host_hash: a.hash,
                 scanned_at,
                 managed: false,
+                secret_like: a.secret_like,
+                fleet_owned: a.fleet_owned,
             });
         }
     }
@@ -863,6 +866,40 @@ mod tests {
         assert_eq!(
             rows.iter().find(|r| r.name == "h").unwrap().state,
             "in_sync"
+        );
+    }
+
+    #[test]
+    fn unmanaged_rows_carry_hash_and_flags() {
+        let cat = Catalog::default();
+        let mut snap = HostSnapshot::default();
+        snap.files
+            .insert("~/.claude/skills/extra/SKILL.md".into(), "aa".into());
+        snap.files.insert(
+            "~/.claude/skills/claude-fleet-control/SKILL.md".into(),
+            "bb".into(),
+        );
+        let rows = compute_states(
+            &cat,
+            &Claude,
+            "local",
+            &snap,
+            &Manifest::default(),
+            &empty(),
+            1,
+        );
+        let extra = rows.iter().find(|r| r.name == "extra").unwrap();
+        assert_eq!(extra.state, "unmanaged");
+        assert_eq!(
+            extra.host_hash.as_deref(),
+            Some(crate::service::catalog::model::sha256_hex(b"SKILL.md=aa").as_str())
+        );
+        assert!(!extra.fleet_owned);
+        assert!(
+            rows.iter()
+                .find(|r| r.name == "claude-fleet-control")
+                .unwrap()
+                .fleet_owned
         );
     }
 

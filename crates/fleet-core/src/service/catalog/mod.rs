@@ -674,6 +674,7 @@ mod tests {
                         host_hash: None,
                         scanned_at: 1,
                         managed: false,
+                        ..Default::default()
                     },
                     crate::store::AssetInventoryRow {
                         host_alias: "local".into(),
@@ -685,6 +686,7 @@ mod tests {
                         host_hash: None,
                         scanned_at: 1,
                         managed: false,
+                        ..Default::default()
                     },
                 ],
             )
@@ -789,6 +791,7 @@ mod tests {
             host_hash: None,
             scanned_at: 1,
             managed,
+            ..Default::default()
         };
         store
             .lock()

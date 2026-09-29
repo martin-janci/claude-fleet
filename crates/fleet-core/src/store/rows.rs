@@ -1178,6 +1178,12 @@ pub struct AssetInventoryRow {
     pub scanned_at: i64,
     /// Whether the host's fleet manifest names this asset (migration 031).
     pub managed: bool,
+    /// Its config looks like it carries a credential (migration 087).
+    #[serde(default)]
+    pub secret_like: bool,
+    /// Fleet provisioned it: its own hooks, MCP entry or skills (087).
+    #[serde(default)]
+    pub fleet_owned: bool,
 }
 
 /// A secret name known to the sync engine (migration 031). Never carries the

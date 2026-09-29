@@ -19,6 +19,8 @@ export interface AssetInventoryRow {
   host_alias: string; harness: string; kind: string; name: string; state: string;
   catalog_hash: string | null; host_hash: string | null; scanned_at: number;
   managed: boolean;
+  /** Present from hubs with migration 087; absent on older ones. */
+  secret_like?: boolean; fleet_owned?: boolean;
 }
 export interface HostState { host_alias: string; harness: string; state: string }
 export interface Problem { path: string; message: string }
