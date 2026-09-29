@@ -17,8 +17,17 @@ const list = [conv({ id: 2, claude_session_id: 'bbb', start_source: 'clear', cur
 describe('ConversationHeader', () => {
   it('shows the current conversation, context, model and status', () => {
     render(ConversationHeader, { session: session(), conversations: list, viewing: null, lastEvent: '/compact 3m ago', newerAvailable: false, onSelect: vi.fn() });
-    expect(screen.getByTestId('conv-switcher').textContent).toContain('Current · /clear · 1 turn');
-    expect(screen.getByTestId('conv-ctx').textContent).toContain('42k / 200k · 21%');
+    const switcher = screen.getByTestId('conv-switcher');
+    expect(switcher.textContent).toContain('Current');
+    expect(switcher.textContent).toContain('/clear');
+    // The turn count lives in the turn index, not in a second, possibly
+    // disagreeing number on the switcher; the tooltip keeps the full title.
+    expect(switcher.textContent).not.toContain('turn');
+    expect(switcher.getAttribute('title')).toBe('Current · /clear · 1 turn');
+    const ctx = screen.getByTestId('conv-ctx');
+    expect(ctx.textContent).toContain('21%');
+    expect(ctx.textContent).toContain('42k / 200k');
+    expect(ctx.getAttribute('aria-valuetext')).toBe('42k / 200k · 21%');
     expect(screen.getByTestId('conv-model').textContent).toContain('opus-5');
     expect(screen.getByTestId('conv-status').textContent).toContain('idle');
     expect(screen.getByTestId('conv-last-event').textContent).toContain('/compact 3m ago');
@@ -58,7 +67,7 @@ describe('ConversationHeader', () => {
 
   it('shows 0 after a clear', () => {
     render(ConversationHeader, { session: session({ context_pct: 0, context_tokens: 0 }), conversations: list, viewing: null, lastEvent: null, newerAvailable: false, onSelect: vi.fn() });
-    expect(screen.getByTestId('conv-ctx').textContent).toContain('0 / 200k · 0%');
+    expect(screen.getByTestId('conv-ctx').getAttribute('aria-valuetext')).toBe('0 / 200k · 0%');
   });
 
   it('works with an empty conversation list (phase-1 hub not yet reached)', () => {
@@ -154,7 +163,10 @@ describe('ConversationHeader', () => {
       newerAvailable: false, onSelect: vi.fn(), ...findProps,
     });
     expect(screen.getByTestId('conv-find-button')).toBeTruthy();
-    expect(screen.getByTestId('conv-turns-button').textContent).toContain('1 turn');
+    const turns = screen.getByTestId('conv-turns-button');
+    expect(turns.textContent).toContain('1 turn');
+    // A narrow header hides the word; the accessible name keeps it.
+    expect(turns.getAttribute('aria-label')).toBe('1 turn');
   });
 
   it('disables the find button when there is nothing to search', () => {

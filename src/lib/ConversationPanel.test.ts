@@ -2251,7 +2251,7 @@ describe('ConversationPanel conversations', () => {
     const header = screen.getByTestId('conv-header');
     expect(header.textContent).toContain('Current');
     expect(header.contains(screen.getByTestId('conv-ctx'))).toBe(true);
-    expect(screen.getByTestId('conv-ctx').textContent).toContain('42k / 200k · 21%');
+    expect(screen.getByTestId('conv-ctx').getAttribute('aria-valuetext')).toBe('42k / 200k · 21%');
     // the composer no longer carries its own meter
     expect(screen.getByTestId('conv-composer').querySelector('[data-testid="conv-ctx"]')).toBeNull();
   });
