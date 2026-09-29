@@ -78,7 +78,14 @@ export type RowEventHandlers = {
   /** One call per flush with the key of every `settings:changed`
    *  (declarative pages P3: the key only), in order, duplicates kept. */
   onSettingsChanged?: (keys: string[]) => void;
+  /** One call per flush with every `update:changed` (update design §11: ids
+   *  only), in order: re-read `update_status`. */
+  onUpdateChanged?: (changes: UpdateChanged[]) => void;
 };
+
+/** The payload of `update:changed`: what moved, never the row itself. */
+/** `what` is observed | pin | channel today; a newer hub may add others. */
+export type UpdateChanged = { what: string; target?: string };
 
 type Queued =
   | { name: 'session:created' | 'session:updated'; payload: SessionRow }
@@ -112,7 +119,8 @@ type Queued =
   | { name: 'work:tracker'; payload: TrackerRow }
   | { name: 'work:tracker_removed'; payload: { id: number } }
   | { name: 'work:changed'; payload: unknown }
-  | { name: 'settings:changed'; payload: { key: string } };
+  | { name: 'settings:changed'; payload: { key: string } }
+  | { name: 'update:changed'; payload: UpdateChanged };
 
 /**
  * Subscribe to every row-change event from the backend. Returns a single
@@ -152,6 +160,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     const workEvents: WorkEvent[] = [];
     const workChanges: WorkChanged[] = [];
     const settingsKeys: string[] = [];
+    const updateChanges: UpdateChanged[] = [];
     for (const ev of batch) {
       switch (ev.name) {
         case 'session:created':
@@ -244,6 +253,17 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
         case 'settings:changed':
           if (typeof ev.payload?.key === 'string') settingsKeys.push(ev.payload.key);
           break;
+        case 'update:changed': {
+          // Ids only, so anything readable is enough: a newer hub's `what`
+          // still means "re-read".
+          const p = ev.payload as Partial<UpdateChanged> | null;
+          if (p && typeof p.what === 'string') {
+            updateChanges.push(
+              typeof p.target === 'string' ? { what: p.what, target: p.target } : { what: p.what },
+            );
+          }
+          break;
+        }
       }
     }
     if (sessionEvents.length > 0) handlers.onSessionEvents?.(sessionEvents);
@@ -257,6 +277,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     if (workEvents.length > 0) handlers.onWorkEvents?.(workEvents);
     if (workChanges.length > 0) handlers.onWorkChanged?.(workChanges);
     if (settingsKeys.length > 0) handlers.onSettingsChanged?.(settingsKeys);
+    if (updateChanges.length > 0) handlers.onUpdateChanged?.(updateChanges);
   };
 
   const enqueue = (ev: Queued) => {
@@ -296,6 +317,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     work: !!handlers.onWorkEvents,
     workChanged: !!handlers.onWorkChanged,
     settingsChanged: !!handlers.onSettingsChanged,
+    updateChanged: !!handlers.onUpdateChanged,
   };
 
   const sub = <N extends Queued['name']>(
@@ -335,6 +357,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('work:tracker_removed', wanted.work),
     sub('work:changed', wanted.workChanged),
     sub('settings:changed', wanted.settingsChanged),
+    sub('update:changed', wanted.updateChanged),
   ]);
   return () => {
     disposed = true;

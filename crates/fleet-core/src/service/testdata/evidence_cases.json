@@ -1,0 +1,775 @@
+[
+  {
+    "name": "no PR: nothing to assess",
+    "now": 100000,
+    "pr_url": null,
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      }
+    },
+    "checked_at": 99940,
+    "want": null
+  },
+  {
+    "name": "PR but never probed (older hub)",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": null,
+    "checked_at": null,
+    "want": {
+      "verdict": "unknown",
+      "reasons": [
+        "no_evidence"
+      ]
+    }
+  },
+  {
+    "name": "PR probed by an old gh: no evidence fields",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": null,
+    "checked_at": 99940,
+    "want": {
+      "verdict": "unknown",
+      "reasons": [
+        "no_evidence"
+      ]
+    }
+  },
+  {
+    "name": "clean, pushed, checks green",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      }
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "ready",
+      "reasons": [
+        "checks_passed"
+      ]
+    }
+  },
+  {
+    "name": "approved review adds no reason",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      },
+      "review_decision": "APPROVED",
+      "merge_state": "CLEAN"
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "ready",
+      "reasons": [
+        "checks_passed"
+      ]
+    }
+  },
+  {
+    "name": "green but the reading is old",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      }
+    },
+    "checked_at": 99099,
+    "want": {
+      "verdict": "unknown",
+      "reasons": [
+        "stale",
+        "checks_passed"
+      ]
+    }
+  },
+  {
+    "name": "exactly at the threshold is still fresh",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      }
+    },
+    "checked_at": 99100,
+    "want": {
+      "verdict": "ready",
+      "reasons": [
+        "checks_passed"
+      ]
+    }
+  },
+  {
+    "name": "old reading of a failing PR is not a confident Blocked",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 2,
+        "failing": [
+          {
+            "name": "rust (ubuntu-24.04)",
+            "url": "https://github.com/o/r/actions/runs/1"
+          },
+          {
+            "name": "hub-headless"
+          }
+        ]
+      }
+    },
+    "checked_at": 95000,
+    "want": {
+      "verdict": "unknown",
+      "reasons": [
+        "stale",
+        "checks_failing"
+      ]
+    }
+  },
+  {
+    "name": "dirty worktree and failing checks, dirty first",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": true,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 2,
+        "failing": [
+          {
+            "name": "rust (ubuntu-24.04)",
+            "url": "https://github.com/o/r/actions/runs/1"
+          },
+          {
+            "name": "hub-headless"
+          }
+        ]
+      }
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "blocked",
+      "reasons": [
+        "dirty",
+        "checks_failing"
+      ]
+    }
+  },
+  {
+    "name": "unpushed commits with green CI on the older commit",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "f10e8661fba4259429887bb31a8e7aab58771eee",
+      "ahead": 2,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      }
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "blocked",
+      "reasons": [
+        "unpushed"
+      ]
+    }
+  },
+  {
+    "name": "worktree on another commit, not ahead",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "f10e8661fba4259429887bb31a8e7aab58771eee",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      }
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "unknown",
+      "reasons": [
+        "head_mismatch"
+      ]
+    }
+  },
+  {
+    "name": "no upstream: lead unknown, same commit is fine",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      }
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "ready",
+      "reasons": [
+        "checks_passed"
+      ]
+    }
+  },
+  {
+    "name": "probe without the git line: worktree fields absent",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      }
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "ready",
+      "reasons": [
+        "checks_passed"
+      ]
+    }
+  },
+  {
+    "name": "checks still running",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 2,
+        "skipped": 0,
+        "failing_total": 0
+      }
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "waiting",
+      "reasons": [
+        "checks_pending"
+      ]
+    }
+  },
+  {
+    "name": "failing and pending: both listed, failing decides",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 1,
+        "skipped": 0,
+        "failing_total": 2,
+        "failing": [
+          {
+            "name": "rust (ubuntu-24.04)",
+            "url": "https://github.com/o/r/actions/runs/1"
+          },
+          {
+            "name": "hub-headless"
+          }
+        ]
+      }
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "blocked",
+      "reasons": [
+        "checks_failing",
+        "checks_pending"
+      ]
+    }
+  },
+  {
+    "name": "no checks configured is not a pass",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 0,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      }
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "waiting",
+      "reasons": [
+        "no_checks"
+      ]
+    }
+  },
+  {
+    "name": "only skipped checks count as passed",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 2,
+        "pending": 0,
+        "skipped": 2,
+        "failing_total": 0
+      }
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "ready",
+      "reasons": [
+        "checks_passed"
+      ]
+    }
+  },
+  {
+    "name": "draft needing review",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": true,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      },
+      "review_decision": "REVIEW_REQUIRED"
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "waiting",
+      "reasons": [
+        "draft",
+        "review_required"
+      ]
+    }
+  },
+  {
+    "name": "changes requested",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      },
+      "review_decision": "CHANGES_REQUESTED"
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "blocked",
+      "reasons": [
+        "changes_requested"
+      ]
+    }
+  },
+  {
+    "name": "merge conflicts",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      },
+      "merge_state": "DIRTY"
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "blocked",
+      "reasons": [
+        "merge_conflicts"
+      ]
+    }
+  },
+  {
+    "name": "branch behind base",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      },
+      "merge_state": "BEHIND"
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "waiting",
+      "reasons": [
+        "behind"
+      ]
+    }
+  },
+  {
+    "name": "blocked by branch rules fleet cannot see",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      },
+      "merge_state": "BLOCKED"
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "waiting",
+      "reasons": [
+        "merge_blocked"
+      ]
+    }
+  },
+  {
+    "name": "blocked, explained by the required review",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      },
+      "merge_state": "BLOCKED",
+      "review_decision": "REVIEW_REQUIRED"
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "waiting",
+      "reasons": [
+        "review_required"
+      ]
+    }
+  },
+  {
+    "name": "GitHub still computing mergeability is no reason",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      },
+      "merge_state": "UNKNOWN"
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "ready",
+      "reasons": [
+        "checks_passed"
+      ]
+    }
+  },
+  {
+    "name": "stale and blocked by branch rules",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "OPEN",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      },
+      "merge_state": "BLOCKED"
+    },
+    "checked_at": 99000,
+    "want": {
+      "verdict": "unknown",
+      "reasons": [
+        "stale",
+        "merge_blocked"
+      ]
+    }
+  },
+  {
+    "name": "merged, with work left in the worktree",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "f10e8661fba4259429887bb31a8e7aab58771eee",
+      "ahead": 1,
+      "dirty": true,
+      "draft": false,
+      "state": "MERGED",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 2,
+        "failing": [
+          {
+            "name": "rust (ubuntu-24.04)",
+            "url": "https://github.com/o/r/actions/runs/1"
+          },
+          {
+            "name": "hub-headless"
+          }
+        ]
+      }
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "merged",
+      "reasons": [
+        "merged",
+        "dirty",
+        "unpushed"
+      ]
+    }
+  },
+  {
+    "name": "merged long ago stays merged",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "state": "MERGED",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      }
+    },
+    "checked_at": 1,
+    "want": {
+      "verdict": "merged",
+      "reasons": [
+        "merged"
+      ]
+    }
+  },
+  {
+    "name": "closed without merging",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": true,
+      "state": "CLOSED",
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      }
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "closed",
+      "reasons": [
+        "closed"
+      ]
+    }
+  },
+  {
+    "name": "reading from before the state field was stored",
+    "now": 100000,
+    "pr_url": "https://github.com/o/r/pull/1",
+    "evidence": {
+      "head_oid": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "local_head": "1490bc3a9275fba9c26757c531b7702f5a68df8c",
+      "ahead": 0,
+      "dirty": false,
+      "draft": false,
+      "checks": {
+        "total": 3,
+        "pending": 0,
+        "skipped": 0,
+        "failing_total": 0
+      }
+    },
+    "checked_at": 99940,
+    "want": {
+      "verdict": "ready",
+      "reasons": [
+        "checks_passed"
+      ]
+    }
+  }
+]

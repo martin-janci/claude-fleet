@@ -80,6 +80,17 @@ impl FleetTools {
                 }
             }
         }
+        // Update design §9: the channel and the targets that need a person,
+        // scoped as `update_status` is. A read that fails leaves it out.
+        h.updates = self.reader().lock().ok().and_then(|s| {
+            crate::service::update::health(
+                &s,
+                &caller,
+                &crate::service::update::trusted_keys(),
+                crate::store::now_unix(),
+            )
+            .ok()
+        });
         // The decision envelope is the hub's own business: a per-host token
         // or an org-bound client gets none of it.
         if caller.host_alias.is_some() || caller.is_scoped() {

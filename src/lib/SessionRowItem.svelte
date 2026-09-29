@@ -31,6 +31,7 @@
   import { attentionIdleMinutes } from './notify';
   import { pushError } from './toasts';
   import { rowElapsed, rowPrompt, timeAgo } from './session_status';
+  import { isStale } from './evidence';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import AnswerPrompt from './AnswerPrompt.svelte';
@@ -131,6 +132,9 @@
   const sessSelected = $derived($selectedSession?.id === sess.id);
   const ctxLevel = $derived(contextLevel(sess.context_pct));
   const elapsed = $derived(rowElapsed(sess, nowSec));
+  // An old reading describes the past (result evidence): dim the badge
+  // rather than let yesterday's `passing` look current.
+  const ciStale = $derived(isStale(sess.pr_checked_at, nowSec));
   // The row's triage bucket (P13). Published as data-bucket because component
   // CSS never reaches jsdom, so this is how tests assert a row's triage state.
   const triage = $derived(rank(sess, { idleSecs: $attentionIdleMinutes * 60, now: nowSec }));
@@ -825,9 +829,12 @@
                 <span class="sep" aria-hidden="true">·</span>
                 <span
                   class="ci-badge"
+                  class:ci-badge--stale={ciStale}
                   data-testid="ci-badge"
                   style="color: {ciStatusColor(sess.ci_status)};"
-                  title="CI checks: {sess.ci_status}"
+                  title={ciStale && sess.pr_checked_at != null
+                    ? `CI checks: ${sess.ci_status}, last checked ${timeAgo(sess.pr_checked_at, nowSec * 1000)}`
+                    : `CI checks: ${sess.ci_status}`}
                 >{ciStatusLabel(sess.ci_status)}</span>
               {/if}
             {/if}
@@ -1043,6 +1050,9 @@
     white-space: nowrap;
     opacity: 0.75;
     font-variant-numeric: tabular-nums;
+  }
+  .ci-badge--stale {
+    opacity: 0.45;
   }
   .ci-badge {
     font-size: 0.6rem;

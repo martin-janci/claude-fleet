@@ -54,6 +54,8 @@ export interface PrEvidence {
   draft: boolean;
   review_decision?: string;
   merge_state?: string;
+  /** OPEN | CLOSED | MERGED; absent from readings stored before it was added. */
+  state?: string;
   checks: CheckSummary;
 }
 

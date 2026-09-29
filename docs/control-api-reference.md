@@ -533,7 +533,9 @@ Parameters: `action`, `component`, `mandatory`, `reason`, `target`, `version`
 
 ### `update_status`
 
-Fleet updates: the verified release channel, each target's version, phase and what the hub would tell it now, per-component counts, pins. A per-host or org-bound token sees itself only.
+Fleet updates: the verified release channel, each target's version, phase and what the hub would tell it now, per-component counts, pins; with target, why. A per-host or org-bound token sees itself only.
+
+Parameters: `target`
 
 ### `usage_report`
 

@@ -324,6 +324,7 @@ fn sample_health() -> Health {
         hub: Some(sample_hub_health()),
         tunnels_mode: Some("none".into()),
         peer_links_total: 2,
+        updates: None,
         decide: Some(sample_decide_health()),
     }
 }

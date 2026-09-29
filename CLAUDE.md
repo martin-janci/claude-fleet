@@ -508,6 +508,15 @@ against `keys.rs` before it leaves the runner
 (`scripts/release-update-scripts-test.sh`, CI hub-headless). See
 `docs/RELEASING.md` → *Update manifest and channels*.
 
+**Half of S4b is landed:** `X-Fleet-Client` (`fleet_update::client_header`)
+recorded into `update_observed` on `last_seen_at`'s once-a-minute beat in
+`authorize`; the `update:changed` row event (kind `update`, ids only, in
+`HOST_BOUND_HIDDEN_KINDS`); `fleet_health.updates` (`service::update::health`:
+`update_required`, `update_failed`, `update_rolled_back`, `rollback_failed`,
+`channel_stale`); and `update_status { target }`, the design's
+`update_check_for`. Left: the per-target `update:decision` push, hub-e2e
+section U, rollouts (S9).
+
 **S3 is landed:** `service::update::git_check` (Git mode: a `GitCheck`
 from the hub's own settings, pin and last-seen sequence) and `fleet-hub
 update check [--track] [--json]`, which reads the published channel and
@@ -517,5 +526,5 @@ Trusted keys are `fleet_update::keys::RELEASE_KEYS`: the owner's release
 key since #384 (made on the owner's machine by `scripts/release-key.sh`;
 the secret half is only the `RELEASE_SIGNING_KEY` secret and the owner's
 backup). Nothing is offered until 0.4.1 publishes the first channel; an
-`e2e` build also reads `FLEET_UPDATE_E2E_KEYS`. S2b (nightly), S4b and
-S6–S9 are not built; the other §13 questions wait on the owner.
+`e2e` build also reads `FLEET_UPDATE_E2E_KEYS`. S2b (nightly), the rest
+of S4b and S6–S9 are not built; the other §13 questions wait on the owner.
