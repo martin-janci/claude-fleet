@@ -262,6 +262,51 @@ describe('the row work menu', () => {
     expect(screen.queryByTestId('work-rename')).toBeNull();
   });
 
+  // The branch's only back-compat branch, and the one thing every other
+  // fixture here stops covering by setting `kind`: a hub too old to send
+  // `kind` at all. Without this case, deleting the `status_category == null
+  // && !url` fallback in `SessionRowItem.svelte` leaves the suite green.
+  it('falls back to the old heuristic for a hub that sends no kind', async () => {
+    vi.mocked(invoke).mockResolvedValue([]);
+    const oldHub = live({
+      work: {
+        link_id: 3,
+        item_id: 41,
+        key: 'OPS',
+        title: 'Ops cleanup',
+        source: 'manual',
+        // No `kind`, and no `status_category` / `url` — an old hub's local
+        // item, which followed the same tracker-only rule the fallback
+        // assumes.
+      },
+    });
+    render(SessionRowItem, { props: props(oldHub) });
+    await openMenu();
+    await fireEvent.click(screen.getByTestId('work-rename'));
+    await tick();
+    expect((screen.getByTestId('name-work-title') as HTMLInputElement).value).toBe('Ops cleanup');
+  });
+
+  // …and the other half of the fallback: an old hub's TICKET, which that
+  // hub does send a `status_category` (or a `url`) for.
+  it('a kind-less ticket is still not offered Rename…', async () => {
+    vi.mocked(invoke).mockResolvedValue([]);
+    const oldHubTicket = live({
+      work: {
+        link_id: 4,
+        item_id: 42,
+        key: 'ABC-3',
+        title: 'Login',
+        source: 'manual',
+        status_category: 'todo',
+      },
+    });
+    render(SessionRowItem, { props: props(oldHubTicket) });
+    await openMenu();
+    expect(screen.getByTestId('work-name')).toBeTruthy();
+    expect(screen.queryByTestId('work-rename')).toBeNull();
+  });
+
   it('kind, not the absence of status_category, decides Rename… (fix round 2)', async () => {
     vi.mocked(invoke).mockResolvedValue([]);
     // A tracker item that has not synced a status yet: `kind` says
