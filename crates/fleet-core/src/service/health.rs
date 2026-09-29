@@ -94,6 +94,13 @@ pub struct Health {
     /// Per-field default: an older hub omits it.
     #[serde(default)]
     pub hosts: Vec<HostHealthRow>,
+    /// The fleet's own software updates (update design §9): the channel's
+    /// state and the targets that need a person. Filled by `fleet_health`
+    /// on a hub (`service::update::health`); `None` elsewhere and from an
+    /// older hub. Not sent when `None`: no desktop reads it yet, so it is
+    /// not in the desktop's wire contract (`hub_contract.golden.json`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updates: Option<crate::service::update::UpdatesHealth>,
 }
 
 /// `fleet_health.hub`: this process's uptime and its last reconcile pass.
@@ -671,6 +678,7 @@ pub fn health_from_store(s: &Store) -> Health {
         hub: Some(hub_health()),
         tunnels_mode: Some(tunnels_mode(s)),
         peer_links_total: s.peer_links_total().unwrap_or_default(),
+        updates: None,
         // The live agents are overlaid by `fleet_health`, which holds the
         // registry; from the store alone the stored hello is what there is.
         hosts: hosts_health(
@@ -800,6 +808,7 @@ pub fn health_check(store: &Mutex<Store>) -> Health {
             hub: None,
             tunnels_mode: None,
             peer_links_total: 0,
+            updates: None,
             hosts: Vec::new(),
         },
     }
@@ -1265,6 +1274,7 @@ mod tests {
             hub: None,
             tunnels_mode: None,
             peer_links_total: 0,
+            updates: None,
             hosts: Vec::new(),
         })
         .expect("Health serialises");

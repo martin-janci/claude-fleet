@@ -977,6 +977,13 @@ pub struct CatalogAdminParams {
     pub confirm_nonce: Option<String>,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema, Default)]
+pub struct UpdateStatusParams {
+    /// client:<id>, agent:<alias> or hub:self: its whole decision.
+    #[serde(default)]
+    pub target: Option<String>,
+}
+
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct UpdateAdminParams {
     /// pin | unpin | refresh.

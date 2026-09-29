@@ -642,9 +642,19 @@ Index by area (names only; see the reference for details):
   pins; a read any client may make, but a per-host or org-bound token sees
   its own row only) and `update_admin` (master token only: `pin` a version
   for a component or one target, where a pin below installed is a rollback;
-  `unpin`; `refresh` to re-read the signed channel now). The update wire
-  itself, `POST /update/check` and `/update/report`, is not a tool: see
-  `docs/updates.md`.
+  `unpin`; `refresh` to re-read the signed channel now). `update_status {
+  target }` answers for one target (`client:<id>`, `agent:<alias>`,
+  `hub:self`) with its whole decision — status, reason code, the release it
+  would be offered and whether it is mandatory — the dashboard's "why"; a
+  scoped token may ask about itself only. `fleet_health.updates` names what
+  needs a person: `update_required`, `update_failed`,
+  `update_rolled_back`, `rollback_failed` per target, and
+  `channel_stale`. Events: `update:changed` carries ids only — `{ what:
+  observed | pin | channel, target? }` — when a target's reported build or
+  phase, a pin or the verified channel changes; a client re-reads
+  `update_status`. It never reaches a per-host token or an org-bound
+  client. The update wire itself, `POST /update/check` and
+  `/update/report`, is not a tool: see `docs/updates.md`.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
   read, but master token only, since the values name hosts and their

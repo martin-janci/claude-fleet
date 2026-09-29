@@ -105,6 +105,33 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   answer: no channel published yet, a document no trusted key signed, or
   GitHub unreachable.
 
+## What the hub knows without being asked
+
+- **`X-Fleet-Client`.** A client names its build on every request:
+
+  ```
+  X-Fleet-Client: desktop/0.4.1 (macos-aarch64; build 1a2b3c4; contract 5-6)
+  ```
+
+  The hub records it as the client's observed version, at most once a
+  minute (the same beat as its "last seen"), so the dashboard knows what a
+  desktop or a phone runs before it ever calls `/update/check`. Only a
+  paired client token is recorded, only for a client component, and only
+  what the header says about the build: the phase and the last error stay
+  the client's own reports. A missing or garbled header records nothing.
+- **What needs a person.** `fleet_health.updates` carries the channel's
+  state (`fresh`, `stale`, `none`) and one entry per target that needs a
+  person: `update_required` (the hub would refuse it until it updates),
+  `update_failed`, `update_rolled_back` and `rollback_failed` (from its
+  reported phase), plus `channel_stale` when the verified channel is past
+  its signed expiry.
+- **Why.** `update_status { target: "client:3" }` is one target's whole
+  decision: what it would be offered, why, and whether it is mandatory.
+- **Changes.** `/events` carries `update:changed` (ids only) when a
+  target's reported build or phase, a pin, or the verified channel
+  changes. A per-host token and an org-bound client never receive it; they
+  read their own row through `update_status`.
+
 ## Settings
 
 | key | default | what it does |

@@ -79,6 +79,17 @@ impl FleetTools {
                 }
             }
         }
+        // Update design §9: the channel and the targets that need a person,
+        // scoped as `update_status` is. A read that fails leaves it out.
+        h.updates = self.reader().lock().ok().and_then(|s| {
+            crate::service::update::health(
+                &s,
+                &caller,
+                &crate::service::update::trusted_keys(),
+                crate::store::now_unix(),
+            )
+            .ok()
+        });
         // An agent reads it: a tracker's error is the tracker's text.
         h.trackers.fence_errors();
         ok_json_compact(&h)

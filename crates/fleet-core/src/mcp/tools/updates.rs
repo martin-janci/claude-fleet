@@ -9,13 +9,28 @@ use crate::service::update;
 impl FleetTools {
     #[tool(description = "Fleet updates: the verified release channel, \
         each target's version, phase and what the hub would tell it now, \
-        per-component counts, pins. A per-host or org-bound token sees \
-        itself only.")]
+        per-component counts, pins; with target, why. A per-host or \
+        org-bound token sees itself only.")]
     pub(super) async fn update_status(
         &self,
         Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<UpdateStatusParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit("update_status", "");
+        audit(
+            "update_status",
+            &p.target.as_deref().unwrap_or("").escape_debug().to_string(),
+        );
+        if let Some(target) = p.target.as_deref() {
+            let d = update::check_for(
+                &self.store,
+                &caller,
+                target,
+                &update::trusted_keys(),
+                crate::store::now_unix(),
+            )
+            .map_err(to_mcp_err)?;
+            return ok_json_compact(&d);
+        }
         let st = update::status(
             &self.store,
             &caller,
