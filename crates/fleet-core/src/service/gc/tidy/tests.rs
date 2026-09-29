@@ -160,6 +160,57 @@ fn a_stamped_done_classifies_as_pr_merged_not_done_idle() {
     );
 }
 
+/// The other half of that rule, and the hole it opened (final review round
+/// 2): `sessions.pr_signals` is deleted with its session row, so
+/// `TidySession::pr_merged` can be gone while the stamp it produced stays.
+/// `DoneIdle` is gated on `!stamped` and `PrMergedIdle` used to need the
+/// live signal, so such a session matched NO reason at all and lingered in
+/// tidy-up forever. The stamp is now enough on its own.
+#[test]
+fn a_stamped_done_is_still_pr_merged_once_the_signal_is_gone() {
+    let signal_gone = TidySession {
+        link: Some(TidyLink {
+            status_set_by: Some("derived".into()),
+            ..link("done", 3 * DAY)
+        }),
+        // The probe's answer went with the session row it lived on.
+        pr_merged: false,
+        ..session(1, 5 * HOUR)
+    };
+    assert_eq!(
+        reasons(&run(&[signal_gone], &cfg())),
+        vec![(1, TidyReason::PrMergedIdle, TidyAction::SafeKill)],
+        "a stamped done with no live signal must still be offered, and as a merge"
+    );
+}
+
+/// …and the stamp does not manufacture a merge out of a status it does not
+/// own: `'person'` and a tracker item's `None` are unchanged, and `derived`
+/// paired with a status that is not `done` (which the writers never produce)
+/// is not read as one either.
+#[test]
+fn only_a_derived_done_counts_as_a_merge_without_a_signal() {
+    let persons_done = TidySession {
+        link: Some(TidyLink {
+            status_set_by: Some("person".into()),
+            ..link("done", 3 * DAY)
+        }),
+        ..session(1, 5 * HOUR)
+    };
+    let derived_but_not_done = TidySession {
+        link: Some(TidyLink {
+            status_set_by: Some("derived".into()),
+            ..link("in_progress", 3 * DAY)
+        }),
+        ..session(2, 5 * HOUR)
+    };
+    assert_eq!(
+        reasons(&run(&[persons_done, derived_but_not_done], &cfg())),
+        vec![(1, TidyReason::DoneIdle, TidyAction::SafeKill)],
+        "the person's done stays DoneIdle; the non-done derived row is no candidate"
+    );
+}
+
 #[test]
 fn thresholds_are_respected() {
     // Done for only one day; idle for only an hour; a ghost with a week left.

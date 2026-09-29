@@ -146,8 +146,19 @@ then kill the session", because the session's `pr_signals` go with its row.
 Tidy-up should see delivered work as `done` in that same answer; the write is
 idempotent, so two sites are harmless. Both go through
 `Store::stamp_derived_done_for_session`, so neither can drift from the other: it
-stamps the session's live, confirmed, **primary** link's item — a merged PR says
-nothing about a secondary link (an epic, a ticket the session also touched).
+stamps the session's live, confirmed, **primary** link's item — the work the
+session is *on*, not everything it is attached to (a merged PR says less about a
+secondary link, an epic or a ticket the session also touched). That narrows the
+reach; it does not make the stamp selective about the kind of item, so an epic
+that is itself the primary work is stamped like any other.
+
+And **only when the stored signal changed.** A stale merged signal must never
+stamp work the session is pointed at later: pick different work on a session
+still sitting on its merged branch and the next probe would otherwise mark the
+new item `done` for good. The case the change-gate cannot cover — a link
+confirmed after the merge was first seen, since `resolve_session` runs after
+`set_pr_signals` — is covered by a second call from the reconcile pass, once
+that same changed signal's links have settled.
 
 `in_progress` stays computed in the read path, because it is transient by
 nature: it means "a session is working on this right now", and there is nothing
@@ -184,6 +195,13 @@ tidy classifies the session as `PrMergedIdle`, not `DoneIdle`. The status stays
 truthful and the reason stays faithful to its origin, so a reason allow-list
 keeps the meaning its author chose. A person's `done` keeps classifying as
 `DoneIdle`, because that is what it is.
+
+`PrMergedIdle` is therefore decided by the **stamp**, not by the live
+`pr_signals`. It has to be: the signal is deleted with its session row, so a
+rule that needed it would leave a stamped `done` matching neither reason —
+`DoneIdle` is refused it and `PrMergedIdle` would no longer see the merge — and
+the session would linger in tidy-up forever. The stamp is the durable half of
+the same fact.
 
 ## 3. Epics
 

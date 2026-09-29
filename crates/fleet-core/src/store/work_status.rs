@@ -241,8 +241,11 @@ impl Store {
     ///
     /// The PRIMARY link only, deliberately: a session may hold confirmed
     /// secondary links (an epic, a ticket it also touched), and "my PR
-    /// merged" says nothing about those — stamping them would mark an epic
-    /// delivered because one child's PR landed.
+    /// merged" says less about those than about the work the session is on.
+    /// It NARROWS the blast radius, it does not eliminate it — an epic that
+    /// is itself the session's primary work is stamped like any other item,
+    /// which is correct as far as this method can tell: the only thing it
+    /// knows is "this session's work", and that is what a person chose.
     pub fn stamp_derived_done_for_session(&self, session_id: i64) -> Result<usize, IpcError> {
         let items: Vec<i64> = {
             let mut stmt = self.conn.prepare(

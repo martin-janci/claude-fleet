@@ -497,6 +497,45 @@ fn a_merged_prs_stamp_is_offered_as_pr_merged_idle_end_to_end() {
     assert!(row.status_changed_at.is_some());
 }
 
+/// End to end for the other half (final review round 2): the merged signal
+/// is gone — `sessions.pr_signals` is deleted with its session row, and a
+/// probe that can no longer find the PR writes `NULL` — but the stamp it
+/// left behind still offers the session as `pr_merged_idle`. Before this it
+/// matched no reason at all and lingered in tidy-up forever.
+#[test]
+fn a_stamped_done_is_still_offered_once_its_signal_is_gone_end_to_end() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let (sid, item_id) = seed_session_and_item(&store, "signal-gone");
+    {
+        let s = store.lock().unwrap();
+        let merged = serde_json::json!({ "state": "MERGED" }).to_string();
+        s.set_pr_signals("local", "signal-gone", Some(&merged))
+            .unwrap();
+        assert_eq!(
+            s.get_work_item(item_id).unwrap().unwrap().status_category,
+            "done"
+        );
+        // The signal goes the way it really goes: the probe no longer finds
+        // a PR for this session.
+        s.set_pr_signals("local", "signal-gone", None).unwrap();
+        assert!(s.tidy_sessions().unwrap().iter().all(|t| !t.pr_merged));
+        // The stamp's own clock, into this file's synthetic frame.
+        s.conn_ref()
+            .execute(
+                "UPDATE work_items SET status_changed_at = 0 WHERE id = ?1",
+                [item_id],
+            )
+            .unwrap();
+    }
+    let r = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    let c = r
+        .candidates
+        .iter()
+        .find(|c| c.session_id == sid)
+        .expect("a stamped done must still be offered with no live signal");
+    assert_eq!(c.reason, TidyReason::PrMergedIdle);
+}
+
 /// Finding 1 of the final whole-branch review, and the one that made half
 /// the feature not work as shipped: the derived `done` must be stamped by
 /// the path that RECORDS the merged PR, not only by the one tidy happens to

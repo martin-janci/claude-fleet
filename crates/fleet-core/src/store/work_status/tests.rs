@@ -156,8 +156,10 @@ fn a_merged_pr_stamps_the_sessions_primary_work_only() {
         .upsert_session("dev", "h", None, None, 1, 1, "running", None)
         .unwrap();
     // The primary link (the first one a session gets), then a secondary
-    // confirmed link to other local work: "my PR merged" says nothing about
-    // the second one — an epic must not go `done` because a child's PR did.
+    // confirmed link to other local work: the stamp follows the work the
+    // session is ON, not everything it is attached to. (An epic that IS the
+    // primary link is stamped like anything else — this narrows the reach,
+    // it does not make the stamp selective about what kind of item it is.)
     let (primary, _) = s
         .name_session_work(sid, Some("PRIM-1"), "the work")
         .unwrap();
@@ -221,4 +223,84 @@ fn a_merged_pr_with_no_linked_item_stamps_nothing() {
     s.link_session_work(sid, crate::store::WorkTarget::Key("BARE-1"), "manual")
         .unwrap();
     assert_eq!(s.stamp_derived_done_for_session(sid).unwrap(), 0);
+}
+
+/// The hazard the `n > 0` gate closes, and the worst shape this feature has:
+/// a STALE merged signal must never stamp work the session was pointed at
+/// LATER. A session sits on its merged branch; its work A is stamped; a
+/// person then names work B on the same session, which demotes A's link
+/// (`take_primary`) and makes B the primary. The next probe reads the SAME
+/// signals — unchanged, so `set_pr_signals` writes nothing — and B must stay
+/// `todo`. Stamping it would put a permanent, unattended, false `done` on
+/// the one field this branch exists to make trustworthy.
+#[test]
+fn a_stale_merged_signal_never_stamps_newly_named_work() {
+    let s = store();
+    s.upsert_host("h").unwrap();
+    let sid = s
+        .upsert_session("dev", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let (a, _) = s.name_session_work(sid, Some("A-1"), "work A").unwrap();
+    let merged = serde_json::json!({ "head": "feat/a", "state": "MERGED" }).to_string();
+    assert_eq!(
+        s.set_pr_signals("h", "dev", Some(&merged)).unwrap(),
+        Some(sid),
+        "the first probe changes the stored value"
+    );
+    assert_eq!(
+        s.get_work_item(a.id).unwrap().unwrap().status_category,
+        "done"
+    );
+
+    // A person points the session at different work: `link_session_work`'s
+    // `take_primary` demotes A's link and B becomes the primary.
+    let b = s.create_local_work_item(Some("B-1"), "work B").unwrap();
+    let b_link = s
+        .link_session_work(sid, crate::store::WorkTarget::Item(b.id), "manual")
+        .unwrap();
+    assert!(b_link.is_primary, "linking work takes the primary link");
+
+    // The same probe answer again, on the same unchanged branch.
+    assert_eq!(
+        s.set_pr_signals("h", "dev", Some(&merged)).unwrap(),
+        None,
+        "nothing changed, so nothing new is known"
+    );
+    let row = s.get_work_item(b.id).unwrap().unwrap();
+    assert_eq!(
+        row.status_category, "todo",
+        "a merged signal already accounted for must not deliver work named after it"
+    );
+    assert_eq!(row.status_set_by, None);
+}
+
+/// What the caller's second call is for (`service::sessions::reconcile`,
+/// after `resolve_session`): the signal can change before the link the stamp
+/// needs exists, and `set_pr_signals` runs before the resolver that creates
+/// it. The first write knows the merge and finds nothing to stamp; calling
+/// the shared method again once the link is confirmed writes what the first
+/// could not see.
+#[test]
+fn the_stamp_can_be_made_again_once_the_link_is_confirmed() {
+    let s = store();
+    s.upsert_host("h").unwrap();
+    let sid = s
+        .upsert_session("dev", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let merged = serde_json::json!({ "state": "MERGED" }).to_string();
+    assert_eq!(
+        s.set_pr_signals("h", "dev", Some(&merged)).unwrap(),
+        Some(sid)
+    );
+    // No link yet: the merge is known, there is nothing to deliver.
+    let item = s
+        .create_local_work_item(Some("LATE-1"), "late work")
+        .unwrap();
+    assert_eq!(item.status_category, "todo");
+    s.link_session_work(sid, crate::store::WorkTarget::Item(item.id), "manual")
+        .unwrap();
+    assert_eq!(s.stamp_derived_done_for_session(sid).unwrap(), 1);
+    let row = s.get_work_item(item.id).unwrap().unwrap();
+    assert_eq!(row.status_category, "done");
+    assert_eq!(row.status_set_by.as_deref(), Some("derived"));
 }
