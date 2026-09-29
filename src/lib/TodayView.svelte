@@ -13,6 +13,7 @@
   import { copyText } from './clipboard';
   import { openExternal } from './open_external';
   import { timeAgo } from './session_status';
+  import { statusDotClass } from './trackers';
   import { candidatesFor, inScope, refreshTidy, requestTidy, tidyReport } from './tidy';
   import {
     loadToday,
@@ -21,6 +22,7 @@
     standupText,
     isEmptyView,
     groupLabel,
+    groupStatusLabel,
     sessionPhrase,
     type Today,
     type TodayBucket,
@@ -128,7 +130,17 @@
       <li class="group" data-testid="today-group">
         <div class="head">
           <span class="label" class:nowork={!g.key}>{groupLabel(g)}</span>
-          {#if g.status_name}<span class="status">{g.status_name}</span>{/if}
+          <!-- The status the group is in: a tracker's own name, or the
+               effective status of work fleet tracks itself (native item
+               status — `status_category` here is already the live-lifted
+               answer, so a local item's "in progress" shows too). The dot
+               is the same vocabulary the sidebar's work chip draws. -->
+          {#if groupStatusLabel(g)}
+            <span class="status" data-testid="today-group-status">
+              <span class="dot {statusDotClass(g.status_category)}" aria-hidden="true"></span
+              >{groupStatusLabel(g)}</span
+            >
+          {/if}
           {#if g.url}
             <button class="btn btn--quiet link" type="button" onclick={() => void openExternal(g.url ?? '')}
               >Open ticket</button
@@ -288,6 +300,28 @@
   .meta {
     color: var(--fg-muted);
     font-size: 0.8rem;
+  }
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+  .dot {
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 50%;
+    display: inline-block;
+    background: var(--fg-muted);
+  }
+  .dot-todo,
+  .dot-unknown {
+    background: var(--fg-muted);
+  }
+  .dot-progress {
+    background: var(--accent, #3b82f6);
+  }
+  .dot-done {
+    background: var(--ok, #22c55e);
   }
   .sessions {
     padding-left: 0.6rem;

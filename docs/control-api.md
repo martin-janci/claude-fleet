@@ -486,8 +486,15 @@ Index by area (names only; see the reference for details):
   starts only there (`E_FORBIDDEN` says why); it never receives `work:*`
   frames on `/events`. Events: `work:item`, `work:tracker`,
   `work:tracker_removed` — emitted only when something a reader sees
-  changed; a session's `work` carries its item's `status_category`,
-  `status_name`, `url` and `unavailable`. `work:changed` (work graph M14)
+  changed; a session's `work` carries its item's `kind` (`tracker` | `local`
+  | `ref`), `status_category`, `status_name`, `url` and `unavailable`.
+  `status_category` is the tracker's own status — `null` for a local item or
+  a bare key, by design, since a paired phone tells a local item apart from
+  a ticket by that absence (native item status task 4). `effective_status`
+  is the live answer instead: the stored value with a person's override, a
+  merged-PR's stamped `done`, or a currently-working session's live
+  `in_progress` applied — present for a local item too, and the field a
+  status display should read. `work:changed` (work graph M14)
   carries ids only — `{ what: placement | rule | view | org, task_id?,
   rule_id?, view_id? }` — after a Work view structure write; a client
   re-reads what it shows. Like every `work:*` frame it never reaches a
@@ -609,6 +616,11 @@ Index by area (names only; see the reference for details):
   item). `work_link { action: "name", item_id, title }` renames a local
   item (a ticket is `E_INVALID`) and returns the item; both emit
   `session:updated` for the rows that show it and `work:item`.
+  `work_link { action: "set_status", item_id, status }` sets a local item's
+  status to `todo`, `in_progress` or `done` and returns the item; a ticket is
+  `E_INVALID` too, naming it — its status belongs to its tracker, and the
+  next sync would otherwise overwrite it here. The setting is final: fleet
+  never derives a status back over what a person set.
   `work { action: "local_items" }` lists local items (`id`, `key`, `title`,
   `created_at`, `updated_at`, `live_sessions`), newest change first.
   Readonly tokens cannot name or rename. A per-host token names work only on

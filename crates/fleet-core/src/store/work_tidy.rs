@@ -59,7 +59,8 @@ impl Store {
                 "SELECT p.session_id, l.id, COALESCE(i.key, l.ref_key), i.status_category, \
                         i.status_name, i.resolution, i.status_changed_at, l.archived_at, \
                         l.tidy_snoozed_until, l.tidy_never, \
-                        COALESCE((SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id), CASE WHEN i.tracker_id IS NULL THEN i.org_id END) \
+                        COALESCE((SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id), CASE WHEN i.tracker_id IS NULL THEN i.org_id END), \
+                        i.status_set_by \
                  FROM work_links l \
                  JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
                  LEFT JOIN work_items i ON i.id = l.item_id \
@@ -80,6 +81,7 @@ impl Store {
                         snoozed_until: r.get(8)?,
                         never: r.get::<_, i64>(9)? != 0,
                         org_id: r.get(10)?,
+                        status_set_by: r.get(11)?,
                     },
                 ))
             })?;
@@ -182,8 +184,7 @@ impl Store {
             .flat_map(|t| [t.worker_session_id, t.requester_session_id])
             .flatten()
             .collect();
-        Ok(rows
-            .into_iter()
+        rows.into_iter()
             .map(|row| {
                 let (touch, signals, branch) = extra.remove(&row.id).unwrap_or_default();
                 let pr_merged = signals
@@ -192,8 +193,19 @@ impl Store {
                         serde_json::from_str::<crate::service::work::detect::PrSignals>(s).ok()
                     })
                     .is_some_and(|s| s.is_merged());
+                // A merged PR stamps its linked local item `done`, once (see
+                // `Store::stamp_derived_done_for_session`, which both stamp
+                // sites share so neither can drift). The site that makes the
+                // feature work is `Store::set_pr_signals` — the background
+                // sweep never reaches this one with `work.auto_tidy` off.
+                // This one stays because it is free and because a person
+                // opening Tidy-up should see delivered work as `done` in
+                // that same answer; it is idempotent.
+                if pr_merged {
+                    self.stamp_derived_done_for_session(row.id)?;
+                }
                 let (snoozed_until, never) = flags.remove(&row.id).unwrap_or_default();
-                TidySession {
+                Ok(TidySession {
                     link: links.remove(&row.id),
                     in_progress: in_progress.contains(&row.id),
                     snoozed_until,
@@ -205,9 +217,9 @@ impl Store {
                     any_link: any_link.contains(&row.id),
                     kept_until: kept.get(&row.id).copied(),
                     row,
-                }
+                })
             })
-            .collect())
+            .collect()
     }
 
     /// Keep a session out of tidy-up until `until` (work graph M11.3): a

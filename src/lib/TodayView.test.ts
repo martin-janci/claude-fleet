@@ -62,6 +62,45 @@ describe('TodayView', () => {
     expect(screen.getByText('PAY-7 <i>Refund</i>')).toBeTruthy();
   });
 
+  // Minor M3 of the final review: `today.rs::digest` fills
+  // `status_category` from the item's EFFECTIVE status, but the desktop
+  // header rendered only `status_name` — tracker-only — so the fix was
+  // wire- and phone-only here, while docs/work-graph.md promises it on
+  // every surface.
+  it('the group header shows a local item\'s effective status, not only a tracker name', async () => {
+    const withStatus: Today = {
+      ...digest,
+      groups: [
+        {
+          bucket: 'in_progress',
+          key: 'OPS',
+          title: 'Ops cleanup',
+          // Work fleet tracks itself: no tracker, so no `status_name` — its
+          // live status is all there is.
+          status_category: 'in_progress',
+          sessions: [{ id: 41, name: 'pay', host_alias: 'mefistos', last_activity_at: 100 }],
+        },
+        {
+          bucket: 'waiting',
+          key: 'PAY-7',
+          title: 'Refund',
+          status_category: 'todo',
+          status_name: 'In Review',
+          sessions: [{ id: 42, name: 'old', host_alias: 'mefistos', attention: 'waiting', last_activity_at: 100 }],
+        },
+      ],
+    };
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => (cmd === 'work_today' ? withStatus : null));
+    render(TodayView);
+    await flush();
+    const shown = screen.getAllByTestId('today-group-status').map((e) => e.textContent?.trim());
+    expect(shown).toEqual(['In Review', 'in progress']);
+    // Copy standup says the same thing, so the two cannot disagree.
+    await fireEvent.click(screen.getByTestId('today-copy'));
+    const text = vi.mocked(copyText).mock.calls[0][0] as string;
+    expect(text).toContain('OPS Ops cleanup — in progress');
+  });
+
   it('a session jumps to it and closes the view', async () => {
     const onclose = vi.fn();
     render(TodayView, { onclose });

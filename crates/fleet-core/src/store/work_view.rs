@@ -7,7 +7,9 @@
 //! Nothing here decides visibility: `service::work::view` filters by the
 //! caller's `OrgScope`, and `service::work::structure` gates the writes.
 
-use super::work::{link_columns_prefixed, map_item, map_link, ITEM_COLUMNS, LINK_COLUMN_COUNT};
+use super::work::{
+    link_columns_prefixed, map_item, map_link, ITEM_COLUMNS, ITEM_COLUMN_COUNT, LINK_COLUMN_COUNT,
+};
 use super::{now_unix, ItemMeta, Store, WorkItemRow, WorkLinkRow};
 use crate::events::{EventBus as _, RowChange, WorkChanged};
 use crate::ipc_error::{codes, IpcError};
@@ -183,12 +185,12 @@ impl Store {
                 OR EXISTS (SELECT 1 FROM work_links l WHERE l.item_id = w.id)"
         ))?;
         let rows = stmt.query_map([], |r| {
-            let meta: Option<String> = r.get(23)?;
+            let meta: Option<String> = r.get(ITEM_COLUMN_COUNT)?;
             Ok(ViewItem {
                 item: map_item(r)?,
                 meta: ItemMeta::parse(meta.as_deref()),
-                containers: json_list(r.get(24)?),
-                own_org: r.get(25)?,
+                containers: json_list(r.get(ITEM_COLUMN_COUNT + 1)?),
+                own_org: r.get(ITEM_COLUMN_COUNT + 2)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -197,6 +199,48 @@ impl Store {
     /// Every link, with the live session its participant is on.
     pub fn work_view_links(&self) -> Result<Vec<ViewLink>, IpcError> {
         self.view_links_where("1 = 1", rusqlite::params![])
+    }
+
+    /// `(item_id, session_id)` for every live confirmed link whose session
+    /// is presently working (native item status, design 2026-09-28 §2 rule
+    /// 3): what `service::work::status::effective_status` lifts to
+    /// `in_progress` (for a local item; the function itself gates on
+    /// `source`). One query for the whole page — the shape
+    /// `Store::tidy_sessions`'s `in_progress` set already uses, joined
+    /// through `sessions` instead of filtered by the item's own stored
+    /// category.
+    ///
+    /// Returns the session too, not just the item id, so the caller can
+    /// fence the lift by `OrgScope` (`Graph::load` does: a scope that
+    /// cannot see the session must not see its "working" derived either —
+    /// fix round 2, a caller-side check this store method does not make).
+    ///
+    /// `l.item_id IS NOT NULL` is load-bearing, not an optimisation: a
+    /// `work_links` row may name a bare `ref_key` with no item yet
+    /// (migration 046's CHECK allows either), and `l.item_id` is `NULL` for
+    /// one. Without this clause, `r.get::<_, i64>(0)` on that NULL would
+    /// **error** — not silently admit a bogus id — failing the whole query
+    /// and, with it, every `tree` / `task` / `session_tasks` / `review`
+    /// call that loads a `Graph`.
+    ///
+    /// This `WHERE`, `crate::effective_status_sql!`'s `EXISTS`
+    /// (`store/work_status.rs`) and
+    /// `service::work::handover::gather_stored`'s `has_working_session` must
+    /// read as the same condition — all three answer "is a confirmed,
+    /// unended `work_links` row naming this item on a session with
+    /// `claude_status = 'working'`" — so a caller sees the same lift
+    /// whichever path served it. The macro's doc lists all three; check
+    /// them before changing any.
+    pub fn work_items_with_working_session(&self) -> Result<Vec<(i64, i64)>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT l.item_id, p.session_id FROM work_links l \
+             JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+             JOIN sessions s     ON s.id = p.session_id \
+             WHERE l.ended_at IS NULL AND l.state = 'confirmed' \
+               AND s.claude_status = 'working' AND l.item_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// The links of one session's participant (live, suggested, rejected

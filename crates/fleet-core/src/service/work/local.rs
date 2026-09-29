@@ -233,7 +233,16 @@ pub fn rename_local_item(
 
 /// A local item is visible: always to `All`; to a per-host token through
 /// one of its visible links.
-fn local_item_visible(s: &Store, scope: &OrgScope, item_id: i64) -> Result<bool, IpcError> {
+///
+/// `pub(super)`: `service::work::status::set_status` reuses this exact fence
+/// rather than a second copy of it (a tracker item's is `Store::item_org` +
+/// `OrgScope::sees_org`, applied at that call site the way `rename_local_item`
+/// below does).
+pub(super) fn local_item_visible(
+    s: &Store,
+    scope: &OrgScope,
+    item_id: i64,
+) -> Result<bool, IpcError> {
     if scope.is_all() {
         return Ok(true);
     }

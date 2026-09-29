@@ -16,7 +16,7 @@
 //!   has an item for (by key or alias), gets `item_id`; `ref_key` stays for
 //!   history. A prefix two trackers claim is never bound (C28 / §0.3).
 
-use super::work::{map_item, ITEM_COLUMNS};
+use super::work::{map_item, ITEM_COLUMNS, ITEM_COLUMN_COUNT};
 use super::{now_unix, Store, WorkItemRow};
 use crate::events::EventBus as _;
 use crate::ipc_error::{codes, IpcError};
@@ -997,7 +997,7 @@ impl Store {
              ORDER BY COALESCE(updated_ext, 0) DESC, id DESC"
         ))?;
         let rows = stmt.query_map(rusqlite::params![tracker_id], |r| {
-            let meta: Option<String> = r.get(23)?;
+            let meta: Option<String> = r.get(ITEM_COLUMN_COUNT)?;
             Ok((map_item(r)?, ItemMeta::parse(meta.as_deref())))
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

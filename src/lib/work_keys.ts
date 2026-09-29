@@ -36,13 +36,22 @@ export interface WorkKey {
   auto?: boolean;
   /** The link's "why" (`from the branch · rule R3`). */
   why?: string;
-  /** A linked tracker item's status (work graph M3), for the chip's dot. */
+  /** A linked item's status, for the chip's dot: `category` is the LIVE
+   *  answer (native item status, fix round 3) — a tracker item's synced
+   *  status, or a local item's own (including the working-session lift) —
+   *  so a local item's status shows here too, not only a tracker's. */
   status?: {
     category: string;
     name: string | null;
     url: string | null;
     unavailable: boolean;
   };
+  /** True when a CONNECTED tracker backs this key (`status_category` was
+   *  present) — `WorkChip`'s "connect its tracker" hint keys off this, not
+   *  off `status` alone: a local item now has a `status` too, and reading
+   *  "has a status" as "a tracker owns it" would wrongly suppress the hint
+   *  for a ticket-shaped key that is actually local work. */
+  trackerBacked?: boolean;
 }
 
 // The recogniser is shared with the hub (work graph M4.1):
@@ -332,10 +341,18 @@ export function workKeyFor(
   const linked = s.work?.key || s.work?.title;
   if (s.work && linked) {
     const w = s.work;
+    // `trackerBacked` stays keyed on `status_category` alone (tracker-only
+    // on the wire, by design): it is the "a real tracker backs this" gate.
+    // The dot's `category` prefers `effective_status` (native item status,
+    // fix round 3), so a local item's own live status shows too — falling
+    // back to `status_category` for a hub old enough not to send the
+    // newer field.
+    const trackerBacked = !!(w.status_category || w.unavailable);
+    const category = w.effective_status ?? w.status_category;
     const status =
-      w.status_category || w.unavailable
+      category || w.unavailable
         ? {
-            category: w.status_category ?? 'unknown',
+            category: category ?? 'unknown',
             name: w.status_name ?? null,
             url: w.url ?? null,
             unavailable: !!w.unavailable,
@@ -343,6 +360,7 @@ export function workKeyFor(
         : undefined;
     const out: WorkKey = { key: linked, source: 'link', from: w.title };
     if (status) out.status = status;
+    if (trackerBacked) out.trackerBacked = true;
     if (w.strength && AUTO_LINK_SOURCES.includes(w.source)) out.auto = true;
     if (w.rule || AUTO_LINK_SOURCES.includes(w.source)) out.why = linkWhy(w.source, w.rule);
     return out;
@@ -440,22 +458,30 @@ export function workGroupPrSummary(rows: readonly SessionRow[]): {
 export function workGroupTicket(
   key: string,
   rows: readonly SessionRow[],
-): { title: string; status: WorkKey['status'] } | null {
+): { title: string; status: WorkKey['status']; trackerBacked?: boolean } | null {
   for (const s of rows) {
     const w = s.work;
     if (!w || w.key !== key) continue;
-    if (!w.title && !w.status_category && !w.unavailable) continue;
+    // `category` prefers `effective_status` (native item status, fix
+    // round 3), so a local item's live status shows in the group header
+    // too, not only a tracker's; `trackerBacked` stays on `status_category`
+    // alone, the tracker-only wire field, for anything that needs to know
+    // whether a real tracker backs this key.
+    const category = w.effective_status ?? w.status_category;
+    if (!w.title && !category && !w.unavailable) continue;
+    const trackerBacked = !!(w.status_category || w.unavailable);
     return {
       title: w.title,
       status:
-        w.status_category || w.unavailable
+        category || w.unavailable
           ? {
-              category: w.status_category ?? 'unknown',
+              category: category ?? 'unknown',
               name: w.status_name ?? null,
               url: w.url ?? null,
               unavailable: !!w.unavailable,
             }
           : undefined,
+      ...(trackerBacked ? { trackerBacked: true } : {}),
     };
   }
   return null;
