@@ -314,9 +314,10 @@ fleet-hub decide bench … --provider haiku --haiku-host ALIAS [--haiku-model ha
 
 The key is never an argument (shell history, `ps`). `set-key` and
 `clear-key` write the hub's database (`--data-dir`, else the hub's default)
-directly, like `fleet-hub tracker
-webhook`; the running hub reads the key at its next call. `status`,
-`runs` and `proposals` (the listing) open the database read-only (no running hub needed; `--db FILE`
+directly (the key is read like `fleet-hub tracker set-credential`'s
+secret: stdin, `--from-env` or `--ref`, never argv); the running hub reads
+the key at its next call. `status`, `runs` and `proposals` (the listing)
+open the database read-only (no running hub needed; `--db FILE`
 reads a desktop's `state.db`) and print ids, words and numbers only:
 the flag, the modes, which orgs consented, whether a key is configured
 (never the key), the live breaker, today's tokens and cost (the live

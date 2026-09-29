@@ -44,6 +44,15 @@
 //!   not apply to a full-text cache — that would reopen `DESCRIPTION_MAX_CHARS`
 //!   by the back door.
 //!
+//! * **`tracker_writes`** (the write-back outbox, M13.4e; by `updated_at`,
+//!   on `work.retention.journal_days`'s window): only settled rows
+//!   (`done` / `failed`); a `pending` write is never swept, however old. No
+//!   liveness rule beyond that: a done row that goes lets the same PR queue
+//!   again (the tracker upserts the same remote link — one call, no change),
+//!   and a failed row stays for the whole window, so `fleet_health`'s
+//!   `write_failures` still counts it. Its status `rows` count EVERY outbox
+//!   row, pending included, like the journal's.
+//!
 //! There is no pinned-note concept in the schema; a note is kept by the
 //! journal rules above. `0` days keeps a table forever.
 
@@ -83,14 +92,18 @@ pub enum RetentionTable {
     /// The `describe` cache (`work_item_descriptions`): pure age, no
     /// liveness, and never "forever" — see the module doc.
     Descriptions,
+    /// The write-back outbox (`tracker_writes`): settled rows by age, a
+    /// pending write never — see the module doc.
+    TrackerWrites,
 }
 
 impl RetentionTable {
-    pub const ALL: [RetentionTable; 4] = [
+    pub const ALL: [RetentionTable; 5] = [
         RetentionTable::Journal,
         RetentionTable::TrackerItems,
         RetentionTable::WorkEvents,
         RetentionTable::Descriptions,
+        RetentionTable::TrackerWrites,
     ];
 
     /// The SQL table.
@@ -100,6 +113,7 @@ impl RetentionTable {
             RetentionTable::TrackerItems => "work_items",
             RetentionTable::WorkEvents => "session_events",
             RetentionTable::Descriptions => "work_item_descriptions",
+            RetentionTable::TrackerWrites => "tracker_writes",
         }
     }
 
@@ -114,6 +128,12 @@ impl RetentionTable {
                 WITH eligible(id) AS ( \
                   SELECT item_id FROM work_item_descriptions WHERE fetched_at < ?1)"
                 .to_string(),
+            // Settled rows only: a pending write is never swept.
+            RetentionTable::TrackerWrites => "\
+                WITH eligible(id) AS ( \
+                  SELECT id FROM tracker_writes \
+                  WHERE state IN ('done', 'failed') AND updated_at < ?1)"
+                .to_string(),
         }
     }
 
@@ -121,9 +141,10 @@ impl RetentionTable {
     /// table's own primary key, which is `item_id` for the describe cache.
     fn key_col(self) -> &'static str {
         match self {
-            RetentionTable::Journal | RetentionTable::TrackerItems | RetentionTable::WorkEvents => {
-                "id"
-            }
+            RetentionTable::Journal
+            | RetentionTable::TrackerItems
+            | RetentionTable::WorkEvents
+            | RetentionTable::TrackerWrites => "id",
             RetentionTable::Descriptions => "item_id",
         }
     }
@@ -140,6 +161,8 @@ impl RetentionTable {
                 kinds_sql()
             ),
             RetentionTable::Descriptions => "SELECT COUNT(*) FROM work_item_descriptions".into(),
+            // Every outbox row, pending included (the module doc).
+            RetentionTable::TrackerWrites => "SELECT COUNT(*) FROM tracker_writes".into(),
         }
     }
 }

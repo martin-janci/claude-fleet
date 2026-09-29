@@ -14,7 +14,7 @@
 //!   the fork leaves none. `--tools ''` disables every built-in tool and
 //!   `--strict-mcp-config` (with no `--mcp-config`) loads no MCP server, so
 //!   the run can only read the conversation and answer. `--settings
-//!   '{"hooks":{}}'` keeps fleet's hooks out, so it cannot journal or
+//!   '{"disableAllHooks":true}'` keeps fleet's hooks out, so it cannot journal or
 //!   deliver into itself. [`summary_script`] builds exactly this, and a test
 //!   pins it.
 //! * **In the conversation's own directory.** `--resume` finds a transcript

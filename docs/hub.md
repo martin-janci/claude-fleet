@@ -1557,8 +1557,10 @@ fleet-hub decide proposals reject 814                    # "not this": stays unm
 
 `enable`, `disable`, `mode`, `unassigned` and `set` change the `decide.*`
 settings over the running hub's `set_setting` (loopback, master token),
-like `org set`: the hub checks the value and audits the change. `set-key` and `clear-key` write `state.db` directly, like
-`fleet-hub tracker webhook`; `status`, `runs` and `proposals` open it
+like `org set`: the hub checks the value and audits the change. `set-key`
+and `clear-key` write `state.db` directly (the key is read like
+`fleet-hub tracker set-credential`'s secret: stdin, `--from-env` or
+`--ref`, never argv); `status`, `runs` and `proposals` open it
 read-only and print ids, words and numbers — never the key; the section
 names `proposals` shows come from the trackers' stored config, never from
 the record. `tracker section-map` is a `work_admin update` over loopback

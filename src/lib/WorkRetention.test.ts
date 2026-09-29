@@ -53,6 +53,26 @@ describe('work_retention lines', () => {
         would_delete: 4,
       }),
     ).toBe('full descriptions: 7 rows, 4 older than 30 d');
+    // The write-back outbox: its own row, age only, and a pending write is
+    // never counted — only settled ones.
+    expect(
+      retentionLine({
+        table: 'tracker_writes',
+        setting: 'work.retention.journal_days',
+        days: 365,
+        rows: 5,
+        would_delete: 4,
+      }),
+    ).toBe('PR link outbox: 5 rows, 4 sent or given up and older than 365 d');
+    expect(
+      retentionLine({
+        table: 'tracker_writes',
+        setting: 'work.retention.journal_days',
+        days: 0,
+        rows: 5,
+        would_delete: 0,
+      }),
+    ).toBe('PR link outbox: 5 rows, kept forever');
   });
 });
 

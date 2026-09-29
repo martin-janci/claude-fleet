@@ -675,6 +675,11 @@ impl TrackerSync {
             if let Err(e) = crate::service::work::detect::resolve_session(&s, sid) {
                 tracing::debug!(error = %e.message, "[work] resolve after bind failed");
             }
+            // A person's bare-key link that now names an item: its PR may
+            // already be open (M13.4e).
+            if let Err(e) = super::write_back::on_session_pr(&s, sid) {
+                tracing::debug!(error = %e.message, "[write-back] not queued after bind");
+            }
         }
         // The pass-wide visibility rule (see this method's doc comment):
         // every batch above already tolerated its own per-item failures, so

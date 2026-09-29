@@ -1066,6 +1066,14 @@ fn work_link_locked<'a>(
     if let Err(e) = detect::resolve_session(s, session_id) {
         tracing::debug!(error = %e.message, "[work] resolve after a decision failed");
     }
+    // A link made after the PR: the probe queues only when the PR's signals
+    // change, so queue its write-back here (M13.4e). `on_pr` keeps it to a
+    // person's confirmed link; the outbox makes a repeat a no-op.
+    if matches!(args.action.as_str(), "link" | "confirm") {
+        if let Err(e) = crate::service::trackers::write_back::on_session_pr(s, session_id) {
+            tracing::debug!(error = %e.message, "[write-back] not queued after a link");
+        }
+    }
     s.get_session_by_id(session_id)?
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found")))
 }

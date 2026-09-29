@@ -35,6 +35,10 @@ pub struct JournalCounts {
     pub briefs_delivered: u64,
     pub resume_briefs: u64,
     pub compact_summaries: u64,
+    /// Session summaries (`summary` rows, `work_link { summarize }`).
+    pub summaries: u64,
+    /// PR links written back to a tracker (`write_back` rows).
+    pub write_backs: u64,
 }
 
 /// `'a','b'` for a list of compile-time vocabulary words. Only lowercase
@@ -210,7 +214,7 @@ impl Store {
 
     /// Briefs queued (`handover` rows) and delivered, the briefs a resume
     /// queued (their meta names the resumed `link_id`), and harvested
-    /// compaction summaries, in the window.
+    /// compaction summaries, session summaries and write-backs, in the window.
     pub fn usage_journal(&self, since: i64, until: i64) -> Result<JournalCounts, IpcError> {
         Ok(self.conn.query_row(
             "SELECT
@@ -219,9 +223,11 @@ impl Store {
                COALESCE(SUM(kind = 'handover' AND at >= ?1 AND at < ?2
                    AND (CASE WHEN json_valid(meta)
                              THEN json_extract(meta, '$.link_id') END) IS NOT NULL), 0),
-               COALESCE(SUM(kind = 'compact_summary' AND at >= ?1 AND at < ?2), 0)
+               COALESCE(SUM(kind = 'compact_summary' AND at >= ?1 AND at < ?2), 0),
+               COALESCE(SUM(kind = 'summary' AND at >= ?1 AND at < ?2), 0),
+               COALESCE(SUM(kind = 'write_back' AND at >= ?1 AND at < ?2), 0)
              FROM work_journal
-            WHERE kind IN ('handover', 'compact_summary')",
+            WHERE kind IN ('handover', 'compact_summary', 'summary', 'write_back')",
             [since, until],
             |r| {
                 Ok(JournalCounts {
@@ -229,6 +235,8 @@ impl Store {
                     briefs_delivered: count(r.get(1)?),
                     resume_briefs: count(r.get(2)?),
                     compact_summaries: count(r.get(3)?),
+                    summaries: count(r.get(4)?),
+                    write_backs: count(r.get(5)?),
                 })
             },
         )?)

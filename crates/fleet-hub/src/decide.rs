@@ -2,9 +2,9 @@
 //! (Jev evaluation, D35–D37; `fleet_core::service::decide`,
 //! `docs/decisions.md`).
 //!
-//! * `set-key` / `clear-key` write the hub's database directly, like
-//!   `fleet-hub tracker webhook`: the key never travels through a tool
-//!   argument or reply, and the running hub reads it at its next call.
+//! * `set-key` / `clear-key` write the hub's database directly: the key
+//!   never travels through a tool argument or reply, and the running hub
+//!   reads it at its next call.
 //!   **The key is never an argument** (`ps`, shell history): it is read from
 //!   stdin, from a variable named by `--from-env`, or stored as a reference
 //!   (`--ref env:NAME` / `--ref file:/run/secrets/jev`) the hub resolves at

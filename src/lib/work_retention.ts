@@ -48,6 +48,7 @@ export const RETENTION_TABLE_LABELS: Readonly<Record<string, string>> = {
   work_items: 'done tickets',
   session_events: 'work timeline',
   work_item_descriptions: 'full descriptions',
+  tracker_writes: 'PR link outbox',
 };
 
 export function retentionTableLabel(table: string): string {
@@ -62,6 +63,10 @@ export function retentionLine(t: RetentionTableStatus): string {
   // age alone, and the cache of a live-linked ticket goes with the rest.
   if (t.table === 'work_item_descriptions')
     return `${label}: ${t.rows} rows, ${t.would_delete} older than ${t.days} d`;
+  // The write-back outbox: age only too, but a write still waiting to be
+  // sent is never swept, so only the settled (sent or given-up) rows count.
+  if (t.table === 'tracker_writes')
+    return `${label}: ${t.rows} rows, ${t.would_delete} sent or given up and older than ${t.days} d`;
   return `${label}: ${t.rows} rows, ${t.would_delete} older than ${t.days} d with nothing live on them`;
 }
 

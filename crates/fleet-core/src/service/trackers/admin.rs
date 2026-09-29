@@ -592,6 +592,17 @@ pub(crate) fn update_locked(
     }
     s.emit_tracker(id)?;
     let updated = s.require_tracker(id)?;
+    if !row.settings.write_back.pr_remote_link && updated.settings.write_back.pr_remote_link {
+        // Turned on: the PRs already open on linked sessions would wait for
+        // their signals to change. Never fails the update.
+        if let Err(e) = super::write_back::on_enabled(s, id) {
+            tracing::debug!(
+                tracker_id = id,
+                "[write-back] not queued on enable: {}",
+                e.message
+            );
+        }
+    }
     if changed_settings {
         // J3: a person's section map is the reference the
         // `status_map` proposals are measured against. Never fails

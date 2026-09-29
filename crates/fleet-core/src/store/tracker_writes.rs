@@ -8,7 +8,10 @@
 //! each ([`Store::finish_tracker_write`], [`Store::retry_tracker_write`]);
 //! after [`WRITE_MAX_ATTEMPTS`] a row stays `failed` and counts in
 //! `fleet_health`. Settled rows go once they are older than the journal's
-//! retention window ([`Store::sweep_tracker_writes`]).
+//! retention window: the GC sweep deletes them as
+//! [`RetentionTable::TrackerWrites`](super::RetentionTable::TrackerWrites)
+//! (`store::work_retention`), so `work_admin { status }` reports the
+//! outbox with the other swept tables.
 
 use super::{now_unix, Store};
 use crate::ipc_error::IpcError;
@@ -177,6 +180,27 @@ impl Store {
         Ok(())
     }
 
+    /// Sessions with a PR that hold a live confirmed link to an item of
+    /// `tracker_id`: `(session_id, pr_url)`, once each. What turning the
+    /// tracker's write-back on queues for (the caller filters sources and
+    /// orgs through `write_back::on_pr`).
+    pub fn pr_sessions_linked_to_tracker(
+        &self,
+        tracker_id: i64,
+    ) -> Result<Vec<(i64, String)>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT s.id, s.pr_url FROM sessions s \
+               JOIN participants p ON p.session_id = s.id \
+               JOIN work_links l ON l.participant_id = p.id \
+               JOIN work_items i ON i.id = l.item_id \
+             WHERE s.pr_url IS NOT NULL AND l.ended_at IS NULL \
+               AND l.state = 'confirmed' AND i.tracker_id = ?1 \
+             ORDER BY s.id",
+        )?;
+        let rows = stmt.query_map([tracker_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Writes a tracker has given up on (`fleet_health`'s `write_failures`).
     pub fn tracker_write_failures(&self, tracker_id: i64) -> Result<u64, IpcError> {
         let n: i64 = self.conn.query_row(
@@ -185,23 +209,6 @@ impl Store {
             |r| r.get(0),
         )?;
         Ok(n.max(0) as u64)
-    }
-
-    /// Drop at most `limit` settled rows (`done` / `failed`) last touched
-    /// before `cutoff`; `pending` rows are never swept. A done row that goes
-    /// lets the same PR queue again; the tracker then upserts the same
-    /// remote link, so that costs one call and changes nothing. A failed row
-    /// is kept for the whole window, so `fleet_health`'s `write_failures`
-    /// still counts it. Returns how many went. Run by the GC retention sweep
-    /// (M12.3), one batch per store lock.
-    pub fn sweep_tracker_writes(&self, cutoff: i64, limit: usize) -> Result<usize, IpcError> {
-        Ok(self.conn.execute(
-            "DELETE FROM tracker_writes WHERE id IN (\
-               SELECT id FROM tracker_writes \
-               WHERE state IN ('done', 'failed') AND updated_at < ?1 \
-               ORDER BY id LIMIT ?2)",
-            rusqlite::params![cutoff, limit as i64],
-        )?)
     }
 }
 
@@ -303,8 +310,15 @@ mod tests {
         let due = s.due_tracker_writes(t, now_unix() + 1, 10).unwrap();
         s.finish_tracker_write(due[0].id).unwrap();
         s.retry_tracker_write(due[1].id, "no", None, true).unwrap();
-        assert_eq!(s.sweep_tracker_writes(now_unix() + 10, 1).unwrap(), 1);
-        assert_eq!(s.sweep_tracker_writes(now_unix() + 10, 100).unwrap(), 1);
+        // The GC sweep's path: a one-day window seen from a day ahead, so
+        // every row written just now is past the cutoff.
+        let t_w = crate::store::RetentionTable::TrackerWrites;
+        let now = now_unix() + 10 + 86_400;
+        assert_eq!(s.retention_eligible(t_w, now, 1).unwrap(), 2);
+        assert_eq!(s.retention_delete_batch(t_w, now, 1, 1).unwrap(), 1);
+        assert_eq!(s.retention_delete_batch(t_w, now, 1, 100).unwrap(), 1);
+        assert_eq!(s.retention_eligible(t_w, now, 1).unwrap(), 0);
+        assert_eq!(s.retention_rows(t_w).unwrap(), 1, "the pending row");
         assert_eq!(
             s.due_tracker_writes(t, now_unix() + 1, 10).unwrap().len(),
             1

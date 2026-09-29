@@ -816,27 +816,13 @@ pub fn sweep_runs(store: &Mutex<Store>, now: i64) -> usize {
         return 0;
     }
     let cutoff = now - days * 86_400;
-    let mut done = 0;
-    while done < RETENTION_TICK_CAP {
-        let want = RETENTION_BATCH.min(RETENTION_TICK_CAP - done);
-        let n = match store.lock() {
-            Ok(s) => s.sweep_decision_runs(cutoff, want),
-            Err(_) => break,
-        };
-        match n {
-            Ok(n) => {
-                done += n;
-                if n < want {
-                    break;
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "[gc] decision_runs retention sweep failed");
-                break;
-            }
-        }
-    }
-    done
+    crate::service::work::retention::sweep_batches(
+        store,
+        RETENTION_BATCH,
+        RETENTION_TICK_CAP,
+        "decision_runs",
+        |s, want| s.sweep_decision_runs(cutoff, want),
+    )
 }
 
 /// Today's spend.
