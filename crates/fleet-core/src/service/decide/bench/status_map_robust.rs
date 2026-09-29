@@ -28,6 +28,7 @@ use super::status_map::{
     board_key, is_dev_board, Outcome, Outcomes, Provider, SectionCase, ACCEPT_ACCURACY,
     ACCEPT_DONE_PRECISION, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED, CATEGORIES,
 };
+use super::{f2, f3, pct};
 use crate::service::decide::status_map::{self as sm, MIN_CONFIDENCE};
 use crate::service::trackers::asana::{infer_section, section_key};
 use serde::Serialize;
@@ -220,10 +221,6 @@ pub struct Robustness {
     pub providers: Vec<SmPaired>,
 }
 
-fn r3(x: f64) -> f64 {
-    (x * 1000.0).round() / 1000.0
-}
-
 fn done_precision(pairs: &[(&SectionCase, &Outcome)]) -> Option<f64> {
     let (mut n, mut k) = (0u64, 0u64);
     for (c, o) in pairs {
@@ -232,7 +229,7 @@ fn done_precision(pairs: &[(&SectionCase, &Outcome)]) -> Option<f64> {
             k += u64::from(sm::applied_category(c.expect) == Some("done"));
         }
     }
-    (n > 0).then(|| r3(k as f64 / n as f64))
+    pct(k, n)
 }
 
 /// PURE: one provider's comparison of `var` against `reference` over the
@@ -446,10 +443,6 @@ pub fn answer_at(o: &Outcome, floor: f64) -> Option<&str> {
     o.confidence.is_none_or(|c| c + 1e-9 >= floor).then_some(m)
 }
 
-fn ratio(k: u64, n: u64) -> Option<f64> {
-    (n > 0).then(|| r3(k as f64 / n as f64))
-}
-
 /// PURE: one floor over `rows` (usable outcomes only).
 pub fn floor_row(rows: &[(&SectionCase, &Outcome)], floor: f64) -> FloorRow {
     let (mut n, mut ans, mut ok) = (0u64, 0u64, 0u64);
@@ -476,13 +469,13 @@ pub fn floor_row(rows: &[(&SectionCase, &Outcome)], floor: f64) -> FloorRow {
     FloorRow {
         floor,
         answered: ans,
-        coverage: ratio(ans, n),
-        accuracy_on_answered: ratio(ok, ans),
+        coverage: pct(ans, n),
+        accuracy_on_answered: pct(ok, ans),
         rule_abstained_answered: ra_ans,
-        rule_abstained_coverage: ratio(ra_ans, ra_n),
-        rule_abstained_accuracy: ratio(ra_ok, ra_ans),
+        rule_abstained_coverage: pct(ra_ans, ra_n),
+        rule_abstained_accuracy: pct(ra_ok, ra_ans),
         done_answers: done_n,
-        done_precision: ratio(done_k, done_n),
+        done_precision: pct(done_k, done_n),
         current: (floor - MIN_CONFIDENCE).abs() < 1e-9,
     }
 }
@@ -540,14 +533,6 @@ pub fn floor_sweep(cases: &[SectionCase], outs: &Outcomes, both_sides: bool) -> 
 }
 
 // --- lines ----------------------------------------------------------------------------
-
-fn f2(x: Option<f64>) -> String {
-    x.map(|v| format!("{v:.2}")).unwrap_or_else(|| "-".into())
-}
-
-fn f3(x: Option<f64>) -> String {
-    x.map(|v| format!("{v:.3}")).unwrap_or_else(|| "-".into())
-}
 
 fn paired_line(p: &SmPaired) -> String {
     format!(

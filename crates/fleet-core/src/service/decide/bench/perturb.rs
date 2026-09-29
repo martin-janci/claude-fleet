@@ -20,7 +20,7 @@
 //! unpaired cases). These are diagnostics: no card registers a threshold on
 //! them, so they never change an acceptance verdict.
 
-use super::{bootstrap_acc_diff, Paired, SplitMix64};
+use super::{bootstrap_acc_diff, f2, f3, pct, round3, Paired, SplitMix64};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -302,14 +302,6 @@ pub struct PairedCompare {
     pub verdict: &'static str,
 }
 
-fn r3(x: f64) -> f64 {
-    (x * 1000.0).round() / 1000.0
-}
-
-fn ratio(k: u64, n: u64) -> Option<f64> {
-    (n > 0).then(|| r3(k as f64 / n as f64))
-}
-
 /// PURE: [`PairedCompare`] of `obs`, the bootstrap with `resamples` and
 /// `seed`.
 pub fn compare(
@@ -347,20 +339,20 @@ pub fn compare(
     PairedCompare {
         provider,
         pairs: n,
-        ref_accuracy_on_answered: ratio(ref_ok, ref_ans),
-        ref_coverage: ratio(ref_ans, n),
-        accuracy_on_answered: ratio(var_ok, var_ans),
-        coverage: ratio(var_ans, n),
+        ref_accuracy_on_answered: pct(ref_ok, ref_ans),
+        ref_coverage: pct(ref_ans, n),
+        accuracy_on_answered: pct(var_ok, var_ans),
+        coverage: pct(var_ans, n),
         changed,
-        change_rate: ratio(changed, n),
+        change_rate: pct(changed, n),
         mcnemar: McNemar {
             only_ref_right: b,
             only_var_right: c,
-            p: r3(p),
+            p: round3(p),
         },
-        diff: ci.map(|x| r3(x.0)),
-        lo: ci.map(|x| r3(x.1)),
-        hi: ci.map(|x| r3(x.2)),
+        diff: ci.map(|x| round3(x.0)),
+        lo: ci.map(|x| round3(x.1)),
+        hi: ci.map(|x| round3(x.2)),
         verdict,
     }
 }
@@ -369,17 +361,15 @@ impl PairedCompare {
     /// One line: `jev  n 212  acc@ans 0.910 → 0.884 (−0.026 [−0.05, −0.004])
     /// cov 0.71 → 0.69  changed 0.09  McNemar 14/6 p 0.115 → worse`.
     pub fn line(&self) -> String {
-        let f = |x: Option<f64>| x.map(|v| format!("{v:.3}")).unwrap_or_else(|| "-".into());
-        let f2 = |x: Option<f64>| x.map(|v| format!("{v:.2}")).unwrap_or_else(|| "-".into());
         format!(
             "{:<5} n {:>4}  acc@ans {} → {} ({} [{}, {}])  cov {} → {}  changed {}  McNemar {}/{} p {:.3} → {}{}",
             self.provider,
             self.pairs,
-            f(self.ref_accuracy_on_answered),
-            f(self.accuracy_on_answered),
-            f(self.diff),
-            f(self.lo),
-            f(self.hi),
+            f3(self.ref_accuracy_on_answered),
+            f3(self.accuracy_on_answered),
+            f3(self.diff),
+            f3(self.lo),
+            f3(self.hi),
             f2(self.ref_coverage),
             f2(self.coverage),
             f2(self.change_rate),
