@@ -504,4 +504,24 @@ describe('WorkTaskDetail', () => {
     await flush();
     expect(get(selectedTaskId)).toBe('item:12');
   });
+
+  it('placement and rules sit behind a disclosure; the work sections come before Sessions, the steps after', async () => {
+    handlers.work_task = () => ({
+      ...trackerTask,
+      subtasks: [{ task_id: 'item:41', item_id: 41, key: 'TASK-41', title: 'SELECT stats', origin: 'manual', status: 'todo', live_sessions: 0 }],
+      steps: [{ label: 'ABC-12 login', claude_session_id: 'c1', steps: [{ text: 'Read ABC-12', state: 'completed', at: 1 }] }],
+    });
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    const more = screen.getByTestId('work-task-more') as HTMLDetailsElement;
+    expect(more.open).toBe(false);
+    expect(within(more).getByTestId('work-task-place')).toBeTruthy();
+    expect(within(more).getByTestId('work-task-org')).toBeTruthy();
+    await fireEvent.click(screen.getByText('Placement & rules'));
+    const sessionsHead = screen.getByText('Sessions');
+    const before = (a: Node, b: Node) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+    expect(before(screen.getByTestId('task-subtasks'), sessionsHead)).toBe(true);
+    expect(before(sessionsHead, screen.getByTestId('task-steps'))).toBe(true);
+    expect(screen.getByTestId('task-step').textContent).toContain('Read ABC-12');
+  });
 });

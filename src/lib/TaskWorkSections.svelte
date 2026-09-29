@@ -1,0 +1,366 @@
+<script lang="ts">
+  // The task page's shared-work sections (design 2026-09-29 §4): the brief
+  // (a native task's notes), subtasks (+ add, Start), agent proposals
+  // (accept / reject; rejected behind a toggle), delegated jobs with their
+  // result, and agent steps per session — "per the agent", never a status.
+  // `part` splits them around the page's Sessions list: the work above it,
+  // the steps below. All text renders as text.
+  import { createWorkTask, decideWorkProposal } from './work';
+  import { startWork } from './trackers';
+  import { selectSessionExplicitly } from './selection';
+  import { hubStatus, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
+  import { openTask, readErrorText, type TaskDetail } from './work_view';
+  import type { Result } from './result';
+
+  let { detail, part = 'all' }: { detail: TaskDetail; part?: 'all' | 'work' | 'steps' } = $props();
+
+  const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
+  const showWork = $derived(part !== 'steps');
+  const showSteps = $derived(part !== 'work');
+  // A subtask's parent is never itself a subtask; a bare key has no item.
+  const canAddSubtask = $derived(detail.task.item_id != null && !detail.task.parent_task_id);
+
+  let adding = $state(false);
+  let newTitle = $state('');
+  let busy = $state(false);
+  let showRejected = $state(false);
+  let err = $state<string | null>(null);
+  let addInput = $state<HTMLInputElement | null>(null);
+  $effect(() => {
+    if (adding) addInput?.focus();
+  });
+
+  async function run<T>(p: Promise<Result<T>>): Promise<Result<T>> {
+    busy = true;
+    const r = await p;
+    busy = false;
+    err = r.ok ? null : readErrorText(r.error);
+    return r;
+  }
+
+  async function addSubtask() {
+    const title = newTitle.trim();
+    if (!title || busy) return;
+    const r = await run(createWorkTask({ title, parent: detail.task.task_id }));
+    if (!r.ok) return;
+    newTitle = '';
+    adding = false;
+  }
+
+  async function startSubtask(itemId: number, projectId: number | null | undefined) {
+    const r = await run(startWork({ item_id: itemId, ...(projectId != null ? { project_id: projectId } : {}) }));
+    if (r.ok) selectSessionExplicitly(r.value);
+  }
+</script>
+
+<div class="tws">
+  {#if err}<p class="err" role="alert" data-testid="task-sections-error">{err}</p>{/if}
+
+  {#if showWork}
+    {#if detail.notes}
+      <section>
+        <h4>Brief</h4>
+        <p class="text" data-testid="task-notes">{detail.notes}</p>
+      </section>
+    {/if}
+
+    <section data-testid="task-subtasks">
+      <h4>
+        Subtasks <span class="n">{detail.subtasks?.length ?? 0}</span>
+        {#if canAddSubtask}
+          <button class="btn btn--quiet" type="button" data-testid="task-add-subtask" onclick={() => (adding = true)}>+ Add subtask</button>
+        {/if}
+      </h4>
+      {#if adding}
+        <input
+          class="add"
+          aria-label="Subtask title"
+          placeholder="Subtask title — Enter to add, Esc to cancel"
+          bind:this={addInput}
+          bind:value={newTitle}
+          onkeydown={(e) => {
+            if (e.key === 'Enter') void addSubtask();
+            if (e.key === 'Escape') adding = false;
+          }}
+        />
+      {/if}
+      {#each detail.subtasks ?? [] as s (s.item_id)}
+        <div class="row" data-testid="task-subtask">
+          <span class="dot dot--{s.status ?? 'todo'}" aria-hidden="true"></span>
+          <button class="link" type="button" onclick={() => openTask(s.task_id)}>{s.title}</button>
+          {#if s.key}<span class="key">{s.key}</span>{/if}
+          {#if s.origin === 'agent'}<span class="chip agent">delegated job</span>{:else if s.origin === 'proposed'}<span class="chip prop"
+              >from a proposal</span
+            >{/if}
+          <span class="spacer"></span>
+          {#if s.status === 'todo' && s.live_sessions === 0}
+            <button
+              class="btn"
+              type="button"
+              data-testid="task-subtask-start"
+              disabled={busy || startBlocked !== null}
+              title={startBlocked ?? 'Start a session for this subtask'}
+              onclick={() => void startSubtask(s.item_id, s.project_id)}>Start</button
+            >
+          {:else}
+            <span class="muted">{s.live_sessions > 0 ? `${s.live_sessions} live` : (s.job_state ?? s.status ?? '')}</span>
+          {/if}
+        </div>
+      {:else}
+        {#if !adding}<p class="muted">No subtasks yet.</p>{/if}
+      {/each}
+    </section>
+
+    {#if (detail.proposals?.length ?? 0) > 0 || (detail.rejected_proposals?.length ?? 0) > 0}
+      <section data-testid="task-proposals">
+        <h4>Proposals <span class="n">{detail.proposals?.length ?? 0}</span><span class="hint">agents propose, you decide</span></h4>
+        {#each detail.proposals ?? [] as p (p.item_id)}
+          <div class="prop-card" data-testid="task-proposal">
+            <div><strong>{p.title}</strong> {#if p.key}<span class="key">{p.key}</span>{/if}</div>
+            {#if p.why}<p class="text">{p.why}</p>{/if}
+            {#if p.notes}<p class="text muted">{p.notes}</p>{/if}
+            {#if p.proposed_by}<p class="muted small">Proposed by {p.proposed_by}</p>{/if}
+            <div class="acts">
+              <button
+                class="btn btn--primary"
+                type="button"
+                data-testid="task-proposal-accept"
+                disabled={busy}
+                onclick={() => void run(decideWorkProposal(p.item_id, true))}>Accept</button
+              >
+              <button
+                class="btn"
+                type="button"
+                data-testid="task-proposal-reject"
+                disabled={busy}
+                onclick={() => void run(decideWorkProposal(p.item_id, false))}>Reject</button
+              >
+            </div>
+          </div>
+        {/each}
+        {#if (detail.rejected_proposals?.length ?? 0) > 0}
+          <button
+            class="btn btn--quiet"
+            type="button"
+            data-testid="task-rejected-toggle"
+            aria-expanded={showRejected}
+            onclick={() => (showRejected = !showRejected)}
+            >{showRejected ? 'Hide' : 'Show'} rejected ({detail.rejected_proposals?.length})</button
+          >
+          {#if showRejected}
+            <ul class="rejected">
+              {#each detail.rejected_proposals ?? [] as r (r.item_id)}<li>{r.title}</li>{/each}
+            </ul>
+          {/if}
+        {/if}
+      </section>
+    {/if}
+
+    {#if (detail.jobs?.length ?? 0) > 0 || detail.job_result}
+      <section data-testid="task-jobs">
+        <h4>Delegated jobs <span class="n">{detail.jobs?.length ?? 0}</span></h4>
+        {#if detail.job_result}
+          <p class="text result" data-testid="task-own-job-result">{detail.job_result}</p>
+        {/if}
+        {#each detail.jobs ?? [] as j (j.item_id)}
+          <div class="job">
+            <div>
+              <strong>{j.title}</strong> <span class="state state--{j.state}">{j.state}</span>{#if j.worker}<span class="muted">
+                  · {j.worker}</span
+                >{/if}
+            </div>
+            {#if j.result}<p class="text result" data-testid="task-job-result">{j.result}</p>{/if}
+          </div>
+        {/each}
+      </section>
+    {/if}
+  {/if}
+
+  {#if showSteps}
+    <section data-testid="task-steps">
+      <h4>Agent steps <span class="hint">from Claude Code tasks · per the agent, not proof of done</span></h4>
+      {#each detail.steps ?? [] as g, i (g.claude_session_id)}
+        {@const steps = g.steps ?? []}
+        <details open={i === 0}>
+          <summary>{g.label} <span class="muted">{steps.filter((s) => s.state === 'completed').length}/{steps.length}</span></summary>
+          <ul>
+            {#each steps as s, k (k)}
+              <li class="step step--{s.state}" data-testid="task-step">
+                <span class="m" aria-hidden="true"
+                  >{s.state === 'completed' ? '✓' : s.state === 'in_progress' ? '◐' : s.state === 'cancelled' ? '×' : '○'}</span
+                >{s.text}
+              </li>
+            {/each}
+          </ul>
+        </details>
+      {:else}
+        <p class="muted">No agent steps recorded.</p>
+      {/each}
+    </section>
+  {/if}
+</div>
+
+<style>
+  .tws {
+    display: grid;
+    gap: 12px;
+    margin: 0.6rem 0;
+  }
+  h4 {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin: 0 0 6px;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--fg-muted);
+  }
+  h4 .btn {
+    margin-left: auto;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+  .n {
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+  }
+  .hint {
+    margin-left: auto;
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 400;
+  }
+  .text {
+    margin: 0;
+    white-space: pre-wrap;
+    max-width: 72ch;
+  }
+  .row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 3px 0;
+  }
+  .spacer {
+    flex: 1;
+  }
+  .link {
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--fg);
+    font: inherit;
+    cursor: pointer;
+    text-align: left;
+  }
+  .link:hover {
+    text-decoration: underline;
+  }
+  .key {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    color: var(--fg-muted);
+  }
+  .chip {
+    font-size: 0.7rem;
+    border-radius: 999px;
+    padding: 0 6px;
+    white-space: nowrap;
+  }
+  .prop {
+    background: color-mix(in srgb, var(--usage-warn, #b45309) 14%, transparent);
+    color: var(--usage-warn, #b45309);
+  }
+  .agent {
+    background: color-mix(in srgb, #7c3aed 12%, transparent);
+    color: #7c3aed;
+  }
+  .prop-card {
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    display: grid;
+    gap: 4px;
+    margin-bottom: 6px;
+  }
+  .acts {
+    display: flex;
+    gap: 6px;
+  }
+  .job {
+    padding: 4px 0;
+  }
+  .result {
+    border-left: 2px solid #7c3aed;
+    padding-left: 8px;
+  }
+  .state--done {
+    color: var(--usage-ok, #2e7d32);
+  }
+  .state--failed,
+  .state--cancelled {
+    color: var(--usage-crit, #c62828);
+  }
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    border: 1.5px solid var(--fg-muted);
+    flex: none;
+  }
+  .dot--in_progress {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .dot--done {
+    background: var(--usage-ok, #2e7d32);
+    border-color: var(--usage-ok, #2e7d32);
+  }
+  details {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 8px;
+    margin-bottom: 4px;
+  }
+  summary {
+    cursor: pointer;
+  }
+  ul {
+    list-style: none;
+    margin: 4px 0;
+    padding: 0 0 0 12px;
+  }
+  .step {
+    display: flex;
+    gap: 6px;
+  }
+  .m {
+    font-family: var(--mono);
+    color: var(--fg-muted);
+    width: 1em;
+    flex: none;
+  }
+  .step--completed .m {
+    color: var(--usage-ok, #2e7d32);
+  }
+  .step--in_progress .m {
+    color: var(--accent);
+  }
+  .muted {
+    color: var(--fg-muted);
+    margin: 0;
+  }
+  .small {
+    font-size: 0.75rem;
+  }
+  .err {
+    color: var(--usage-crit, #c62828);
+    margin: 0;
+  }
+  .add {
+    width: 100%;
+    margin-bottom: 4px;
+  }
+</style>
