@@ -1,0 +1,31 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings.control_api",
+  "title": "Control API",
+  "parent": "settings",
+  "layout": "category",
+  "intro": "The embedded MCP server an AI assistant drives the fleet through. Read-only here.",
+  "sections": [
+    {
+      "title": "Server",
+      "items": [
+        {
+          "type": "field",
+          "key": "mcp.enabled"
+        },
+        {
+          "type": "field",
+          "key": "mcp.port"
+        },
+        {
+          "type": "field",
+          "key": "mcp.confirm_destructive"
+        },
+        {
+          "type": "field",
+          "key": "mcp.broadcast_interval_secs"
+        }
+      ]
+    }
+  ]
+}

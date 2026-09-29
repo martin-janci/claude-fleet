@@ -30,6 +30,7 @@ mod rows;
 pub(crate) mod scale_fixture;
 mod schema;
 mod sessions;
+mod setting_review;
 mod tasks;
 #[cfg(test)]
 mod test_support;
@@ -61,8 +62,8 @@ pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use decisions::{
     is_decision_word, DecisionKeyStatus, DecisionRunFilter, DecisionRunRow, DecisionStatRow,
     NewDecisionRun, RunScope, DECISION_BENCH_SUBJECT, DECISION_CALL_FAILURES, DECISION_FALLBACKS,
-    DECISION_FOLLOWUPS, DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_PERSON_FOLLOWUPS,
-    DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
+    DECISION_FOLLOWUPS, DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_NO_BASELINE,
+    DECISION_PERSON_FOLLOWUPS, DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
 };
 pub use layers::HostLayerRow;
 pub use nl_census::{
@@ -87,6 +88,10 @@ pub use schema::known_schema_version;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
+pub use setting_review::{
+    NewSettingProposal, SettingAuditRow, SettingProposalRow, DECIDED_PROPOSAL_KEEP_SECS,
+    SETTING_AUDIT_KEEP,
+};
 pub(crate) use tracker_items::ItemUpsertOutcome;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
 pub use tracker_writes::{
@@ -535,6 +540,14 @@ impl Store {
             rusqlite::params![key, value],
         )?;
         Ok(())
+    }
+
+    /// Emit `settings:changed` for `key` (declarative pages P3). Called by
+    /// `service::settings::set` after a validated write, not by
+    /// [`Self::set_setting`]: most rows in this table are internal state
+    /// nobody renders.
+    pub fn emit_settings_changed(&self, key: &str) {
+        self.bus.emit(&RowChange::SettingsChanged(key.to_string()));
     }
 
     /// Forget a key, so the next `get_setting` answers `None` and its reader

@@ -125,14 +125,24 @@ fn clone_parent(path: &Path) -> &Path {
 
 /// Clone `remote` into `path` when `path` has no `.git`. With no remote, the
 /// directory must already be a git repo.
+///
+/// A checkout this process may not read is reported as that, with its path:
+/// `exists()` answers `false` for it, and taking that for "no checkout" sent
+/// the clone into the same unreadable directory, where it failed with a bare
+/// `Permission denied (os error 13)` naming nothing — the usual cause being a
+/// path set by one user (`sudo fleet-hub catalog set ~/…`) and read by the
+/// hub's own (`fleet`).
 pub fn ensure_repo(path: &Path, remote: Option<&str>) -> Result<(), IpcError> {
-    if path.join(".git").exists() {
-        return Ok(());
+    let git_dir = path.join(".git");
+    match git_dir.try_exists() {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(e) => return Err(unreadable(path, &e)),
     }
     match remote {
         Some(url) => {
             let parent = clone_parent(path);
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent).map_err(|e| unreadable(parent, &e))?;
             let target = path.to_string_lossy().to_string();
             git(parent, &["clone", "-q", url, &target])?;
             Ok(())
@@ -145,6 +155,22 @@ pub fn ensure_repo(path: &Path, remote: Option<&str>) -> Result<(), IpcError> {
             ),
         )),
     }
+}
+
+/// `path` could not be read or created by this process: an `E_IO` that says
+/// which path, and — for a permission error — whose permission is missing.
+fn unreadable(path: &Path, e: &std::io::Error) -> IpcError {
+    let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
+        "; the catalog checkout and every directory above it must be readable \
+         by the user fleet runs as (on a hub: `fleet`), so set a path it owns, \
+         e.g. under its data directory"
+    } else {
+        ""
+    };
+    IpcError::new(
+        crate::ipc_error::codes::E_IO,
+        format!("catalog checkout {}: {e}{hint}", path.display()),
+    )
 }
 
 pub fn pull(path: &Path) -> Result<(), IpcError> {
@@ -983,6 +1009,48 @@ mod tests {
         let _ = fs::remove_dir_all(&missing);
         let err = ensure_repo(&missing, None).unwrap_err();
         assert_eq!(err.code, "E_CATALOG_GIT");
+    }
+
+    /// A checkout that cannot even be probed is reported as that, with its
+    /// path — never taken for "no checkout" and cloned over. A file where a
+    /// directory should be stands in for an unreadable one, which the root
+    /// test runner could read anyway. Unix fails the probe itself
+    /// (`NotADirectory`); Windows reads the path as absent and fails creating
+    /// the clone's parent, so the message names at least that parent.
+    #[test]
+    fn ensure_repo_names_a_checkout_it_cannot_probe() {
+        let base = tmp("ensure-repo-unprobeable");
+        let file = base.join("file");
+        fs::write(&file, "x").unwrap();
+        let path = file.join("agent-assets");
+        let err = ensure_repo(&path, Some("/nonexistent/remote.git")).unwrap_err();
+        assert_eq!(err.code, "E_IO", "{}", err.message);
+        assert!(
+            err.message.contains(&*file.to_string_lossy()),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_permission_error_says_whose_permission() {
+        let e = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let err = unreadable(std::path::Path::new("/home/me/src/agent-assets"), &e);
+        assert!(
+            err.message.contains("/home/me/src/agent-assets"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("the user fleet runs as"),
+            "{}",
+            err.message
+        );
+        let other = unreadable(
+            std::path::Path::new("/x"),
+            &std::io::Error::from(std::io::ErrorKind::NotFound),
+        );
+        assert!(!other.message.contains("runs as"), "{}", other.message);
     }
 
     #[test]

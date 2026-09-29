@@ -141,6 +141,15 @@ fn sessions_has_row_version(conn: &Connection) -> rusqlite::Result<bool> {
 /// `already_applied` guard of migration 081: `sessions` already has its
 /// `pane_working_at` column, and `ALTER TABLE ... ADD COLUMN` would fail
 /// again. See [`Migration`].
+fn sessions_has_pr_evidence(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'pr_evidence'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn sessions_has_pane_working_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'pane_working_at'",
@@ -872,6 +881,17 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/081_pane_working_at.sql"),
         already_applied: Some(sessions_has_pane_working_at),
     },
+    // Result evidence: `sessions.pr_evidence` / `pr_checked_at` (two ADD
+    // COLUMNs, one guard) and 065's `sessions_row_version_bump` rebuilt to
+    // watch them: both are `SessionRow` fields.
+    Migration {
+        version: 82,
+        sql: include_str!("../../migrations/082_result_evidence.sql"),
+        already_applied: Some(sessions_has_pr_evidence),
+    },
+    // Declarative pages P5: `setting_proposals` and `setting_audit`. New
+    // tables and indexes, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(83, include_str!("../../migrations/083_setting_review.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

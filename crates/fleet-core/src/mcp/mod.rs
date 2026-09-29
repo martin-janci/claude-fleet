@@ -323,6 +323,7 @@ async fn authorize(
                                     "[mcp] could not touch client token"
                                 );
                             }
+                            record_client_header(&s, &caller, request.headers(), now);
                         }
                         Err(_) => cache.untouch(client.id),
                     }
@@ -333,12 +334,34 @@ async fn authorize(
                     if let Err(e) = s.touch_client_token(client.id, now) {
                         tracing::debug!(error = %e.message, "[mcp] could not touch client token");
                     }
+                    record_client_header(&s, &caller, request.headers(), now);
                 }
             }
         }
     }
     request.extensions_mut().insert(caller);
     Ok(next.run(request).await)
+}
+
+/// What a client's `X-Fleet-Client` says it runs (update design §6.3), on
+/// the same once-a-minute beat as its `last_seen_at`. Best effort: a missing
+/// or garbled header records nothing.
+fn record_client_header(
+    s: &crate::store::Store,
+    caller: &auth::Caller,
+    headers: &axum::http::HeaderMap,
+    now: i64,
+) {
+    let Some(h) = headers
+        .get(fleet_update::client_header::CLIENT_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(fleet_update::client_header::ClientHeader::parse)
+    else {
+        return;
+    };
+    if let Err(e) = crate::service::update::record_client_header(s, caller, &h, now) {
+        tracing::debug!(error = %e.message, "[mcp] could not record X-Fleet-Client");
+    }
 }
 
 /// The liveness body, exactly as `/healthz` answers it.
@@ -1243,8 +1266,14 @@ mod tests {
             hook_hq.contains("401"),
             "per-host token must not authorize via query:\n{hook_hq}"
         );
-        // A paired client's token authorizes /mcp…
-        let client_ok = round_trip(addr, &post("/mcp", Some("client-tok"), None, "{}")).await;
+        // A paired client's token authorizes /mcp… (saying what it runs, as
+        // every client does: update design §6.3)
+        let with_client_header = post("/mcp", Some("client-tok"), None, "{}").replacen(
+            "Connection: close\r\n",
+            "Connection: close\r\nX-Fleet-Client: android/0.2.36 (linux-aarch64; contract 1-6)\r\n",
+            1,
+        );
+        let client_ok = round_trip(addr, &with_client_header).await;
         assert!(
             client_ok.contains("200 OK"),
             "client token must pass on /mcp:\n{client_ok}"
@@ -1263,6 +1292,15 @@ mod tests {
             assert!(
                 phone.last_seen_at.is_some(),
                 "authorize() must touch last_seen_at for a client request"
+            );
+            // …and recorded the version its X-Fleet-Client names.
+            let seen = s
+                .update_observed(&format!("client:{}", phone.id))
+                .unwrap()
+                .expect("X-Fleet-Client recorded as the client's observed build");
+            assert_eq!(
+                (seen.component.as_str(), seen.version.as_str()),
+                ("android", "0.2.36")
             );
         }
         // …a revoked one never does (the store filters it out)…

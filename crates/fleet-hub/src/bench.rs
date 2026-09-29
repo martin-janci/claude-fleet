@@ -31,10 +31,13 @@ use crate::config::{self, HubOptions};
 use crate::out;
 use crate::serve;
 use clap::Subcommand;
+use fleet_core::service::decide::bench::perturb::Perturbation;
 use fleet_core::service::decide::bench::status_map as sm;
+use fleet_core::service::decide::bench::status_map_robust as robust;
 use fleet_core::service::decide::bench::work_link::{
     self as wl, BenchOptions, Provider, Shape, Split,
 };
+use fleet_core::service::decide::bench::work_link_robust as wlr;
 use fleet_core::service::decide::haiku::{self, Haiku, HaikuConfig};
 use fleet_core::service::decide::DecideCtx;
 use fleet_core::service::nl::Detector;
@@ -106,6 +109,13 @@ pub enum BenchCmd {
         /// above a threshold chosen on dev; two calls). [default: choice]
         #[arg(long, value_parser = ["choice", "choice+noul"])]
         shape: Option<String>,
+        /// Also ask every asked case with its first prompt perturbed
+        /// (dataset C) and compare each variant with its original at the
+        /// provider's raw pick: fold (no diacritics), typo, code (fenced
+        /// blocks replaced by `[code: <lang>, N lines]`, D42). Repeat it.
+        /// Each perturbation is its own pass of at most --max-calls calls.
+        #[arg(long = "perturb", value_parser = ["fold", "typo", "code"], conflicts_with = "export_unlinked")]
+        perturb: Vec<String>,
     },
     /// Card J3: an Asana section's status category. Cases are labeled
     /// sections (--labels FILE, one JSON line each: section,
@@ -125,8 +135,27 @@ pub enum BenchCmd {
         /// Use the built-in synthetic set (LLM-written, D43; not yet
         /// spot-checked). Its rows have no org: a jev call's consent is
         /// decide.jev.unassigned.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "paired_fixture")]
         fixture: bool,
+        /// Use the built-in paired set (dataset B): 16 boards, each in en,
+        /// sk, cs and de, one `pair` id per section; the report compares
+        /// every language with English on the same pairs. LLM-written
+        /// (D43), no org.
+        #[arg(long, conflicts_with = "labels")]
+        paired_fixture: bool,
+        /// Also ask every case perturbed (dataset C) and compare each
+        /// variant with its original: fold (no diacritics), typo, emoji,
+        /// no-board, shuffle-board (repeat it). Only cases the perturbation
+        /// changes are asked; each perturbation is its own pass of at most
+        /// --max-calls calls.
+        #[arg(long = "perturb", value_parser = ["fold", "typo", "emoji", "no-board", "shuffle-board"])]
+        perturb: Vec<String>,
+        /// Report jev's and haiku's numbers at every confidence floor
+        /// (0-0.95); with --split all, also the lowest floor the dev boards
+        /// would choose under card J3's precision lines, on test. No extra
+        /// call: the answers under the floor are kept already.
+        #[arg(long)]
+        floor_sweep: bool,
         /// A provider to run: none, todo, rule, jev, haiku (repeat it).
         /// [default: todo and rule]. jev sends each section's name and its
         /// board's names to TypeSafe through the envelope's gate; haiku
@@ -147,9 +176,17 @@ pub enum BenchCmd {
         /// Ask jev and haiku this question instead of the adapter's: JSON
         /// {version, instructions, options: {todo, in_progress, done,
         /// not_planned, unsure}}. The state sent stays the adapter's; jev's
-        /// runs are recorded as status_map.bench.q.<version>.
+        /// runs are recorded as status_map.bench.q.<version>. Repeat it to
+        /// compare wordings: one report each, then a comparison.
         #[arg(long, value_name = "FILE")]
-        question: Option<PathBuf>,
+        question: Vec<PathBuf>,
+        /// Compare the adapter's question with every built-in rewording
+        /// (crates/fleet-core/src/service/testdata/decide/questions): one
+        /// pass of at most --max-calls calls each. Only with --split dev:
+        /// wordings are compared on dev and the chosen one is judged once
+        /// on test.
+        #[arg(long)]
+        question_set: bool,
         /// The database jev runs are gated by and recorded in, instead of
         /// the hub's (only read with --provider jev).
         #[arg(long, value_name = "FILE")]
@@ -272,7 +309,9 @@ pub async fn run(
             export_unlinked,
             out: out_path,
             shape,
+            perturb,
         } => {
+            let perturb = parse_wl_perturb(&perturb)?;
             let split = Split::parse(split.as_deref().unwrap_or("test"))
                 .ok_or("--split is dev, test or all")?;
             let shape = Shape::parse(shape.as_deref().unwrap_or("choice"))
@@ -335,7 +374,9 @@ pub async fn run(
                 let ctx = DecideCtx::jev(Arc::clone(&store));
                 let note = haiku.as_ref().map(Haiku::consent_note);
                 let outs = wl::run_providers_with(&loaded, &o, Some(&ctx), haiku.as_ref()).await;
-                let mut r = wl::report(&loaded, &o, &outs);
+                let robustness =
+                    wl_robustness(&loaded, &o, &outs, Some(&ctx), haiku.as_ref(), &perturb).await;
+                let mut r = wl::report(&loaded, &o, &outs).with_robustness(robustness);
                 r.notes.extend(note);
                 r
             } else {
@@ -346,7 +387,9 @@ pub async fn run(
                 let haiku = bind_haiku(&ssh, haiku_cfg, &store)?;
                 let note = haiku.as_ref().map(Haiku::consent_note);
                 let outs = wl::run_providers_with(&loaded, &o, None, haiku.as_ref()).await;
-                let mut r = wl::report(&loaded, &o, &outs);
+                let robustness =
+                    wl_robustness(&loaded, &o, &outs, None, haiku.as_ref(), &perturb).await;
+                let mut r = wl::report(&loaded, &o, &outs).with_robustness(robustness);
                 r.notes.extend(note);
                 r
             };
@@ -362,40 +405,112 @@ pub async fn run(
         BenchCmd::StatusMap {
             labels,
             fixture,
+            paired_fixture,
+            perturb,
+            floor_sweep,
             providers,
             haiku,
             max_calls,
             split,
             question,
+            question_set,
             db,
             json,
         } => {
             let split = sm_split(split.as_deref())?;
             let ssh = fleet_core::ssh::SshClient::new();
-            let report = status_map(
+            let extras = SmExtras {
+                fixture: match (fixture, paired_fixture) {
+                    (_, true) => Some(SmFixture::Paired),
+                    (true, false) => Some(SmFixture::Sections),
+                    _ => None,
+                },
+                perturb: parse_perturb(&perturb)?,
+                floor_sweep,
+                questions: question.iter().map(PathBuf::as_path).collect(),
+                question_set,
+            };
+            let reports = status_map_with(
                 labels.as_deref(),
-                fixture,
+                &extras,
                 &providers,
                 &haiku,
                 &ssh,
                 max_calls,
                 db.as_deref(),
                 split,
-                question.as_deref(),
                 opts,
                 env,
             )
             .await?;
-            if json {
-                out::line(&serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?);
+            let compared: Vec<robust::QuestionRow> = if reports.len() > 1 {
+                reports.iter().flat_map(robust::question_rows).collect()
             } else {
-                for l in report.lines() {
-                    out::line(&l);
+                Vec::new()
+            };
+            if json {
+                let v = match reports.as_slice() {
+                    [one] => serde_json::to_value(one),
+                    many => serde_json::to_value(serde_json::json!({
+                        "reports": many,
+                        "questions": compared,
+                    })),
+                }
+                .map_err(|e| e.to_string())?;
+                out::line(&serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?);
+            } else {
+                for (i, r) in reports.iter().enumerate() {
+                    if i > 0 {
+                        out::line("");
+                        out::line(&"=".repeat(78));
+                    }
+                    for l in r.lines() {
+                        out::line(&l);
+                    }
+                }
+                if !compared.is_empty() {
+                    out::line("");
+                    for l in robust::question_lines(&compared) {
+                        out::line(&l);
+                    }
                 }
             }
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+fn parse_wl_perturb(v: &[String]) -> Result<Vec<Perturbation>, String> {
+    let mut ps: Vec<Perturbation> = v
+        .iter()
+        .map(|p| {
+            Perturbation::parse(p)
+                .filter(|p| Perturbation::WORK_LINK.contains(p))
+                .ok_or_else(|| format!("unknown perturbation {p:?}"))
+        })
+        .collect::<Result<_, _>>()?;
+    ps.sort();
+    ps.dedup();
+    Ok(ps)
+}
+
+/// Each perturbation's pass over the asked cases (`work-link --perturb`),
+/// compared with the originals' outcomes `outs`.
+async fn wl_robustness(
+    loaded: &wl::Loaded,
+    o: &BenchOptions,
+    outs: &wl::Outcomes,
+    ctx: Option<&DecideCtx>,
+    haiku: Option<&Haiku<'_>>,
+    perturb: &[Perturbation],
+) -> Vec<wlr::WlRobustness> {
+    let mut v = Vec::with_capacity(perturb.len());
+    for &p in perturb {
+        let vl = wlr::variants(loaded, o, p);
+        let vouts = wl::run_providers_with(&vl, o, ctx, haiku).await;
+        v.push(wlr::robustness(p, loaded, o, outs, &vl, &vouts));
+    }
+    v
 }
 
 fn parse_sm_providers(v: &[String]) -> Result<Vec<sm::Provider>, String> {
@@ -437,13 +552,93 @@ fn read_question(
         .map_err(|e| format!("{}: {e}", file.display()))
 }
 
-/// `decide bench status-map`: the labeled sections (or the built-in set)
-/// through the providers. Only `--provider jev` opens a database — for
-/// writing, as the envelope records every call. `--provider haiku` runs on
-/// `ssh` against `--haiku-host`, whose org it reads from the database
-/// (read-only). Only the `split` side's boards are asked; `question` (a
-/// file) rewords what jev and haiku are asked.
+/// The built-in label sets `status-map` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SmFixture {
+    /// The synthetic sections (D43).
+    Sections,
+    /// The paired set (dataset B).
+    Paired,
+}
+
+/// What a `status-map` run asks beyond one pass of the labeled sections.
+#[derive(Debug, Default)]
+struct SmExtras<'a> {
+    fixture: Option<SmFixture>,
+    perturb: Vec<Perturbation>,
+    floor_sweep: bool,
+    questions: Vec<&'a Path>,
+    question_set: bool,
+}
+
+fn parse_perturb(v: &[String]) -> Result<Vec<Perturbation>, String> {
+    let mut ps: Vec<Perturbation> = v
+        .iter()
+        .map(|p| {
+            Perturbation::parse(p)
+                .filter(|p| Perturbation::STATUS_MAP.contains(p))
+                .ok_or_else(|| format!("unknown perturbation {p:?}"))
+        })
+        .collect::<Result<_, _>>()?;
+    ps.sort();
+    ps.dedup();
+    Ok(ps)
+}
+
+/// The questions a run asks, in order: `None` is the adapter's. With the
+/// question set, the adapter's and every built-in rewording (only on dev),
+/// then the files; else the files, or the adapter's alone. Two wordings of
+/// the same version are refused (their runs would be recorded as one).
+fn sm_questions(
+    x: &SmExtras<'_>,
+    providers: &[sm::Provider],
+    split: Split,
+) -> Result<Vec<Option<sm::QuestionOverride>>, String> {
+    let mut qs: Vec<Option<sm::QuestionOverride>> = Vec::new();
+    if x.question_set {
+        if !providers.iter().any(|p| p.is_model()) {
+            return Err(
+                "--question-set goes with --provider jev or --provider haiku (only a model is asked it)"
+                    .into(),
+            );
+        }
+        if split != Split::Dev {
+            return Err(
+                "--question-set runs only with --split dev: compare wordings on dev, then judge the \
+                 chosen one once with --split test --question FILE"
+                    .into(),
+            );
+        }
+        qs.push(None);
+        for (file, json) in robust::QUESTION_SET {
+            qs.push(Some(
+                sm::parse_question(json).map_err(|e| format!("built-in {file}: {e}"))?,
+            ));
+        }
+    }
+    for f in &x.questions {
+        qs.push(read_question(Some(f), providers)?);
+    }
+    if qs.is_empty() {
+        qs.push(None);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for q in &qs {
+        let v = q.as_ref().map_or_else(
+            || sm::QUESTION_VERSION.to_string(),
+            |q| q.recorded_version(),
+        );
+        if !seen.insert(v.clone()) {
+            return Err(format!("two questions have the same version {v}"));
+        }
+    }
+    Ok(qs)
+}
+
+/// `decide bench status-map`, one report (the adapter's question, or one
+/// question file) — what the tests drive.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn status_map(
     labels: Option<&Path>,
     fixture: bool,
@@ -457,25 +652,65 @@ async fn status_map(
     opts: &HubOptions,
     env: &HashMap<String, String>,
 ) -> Result<sm::Report, String> {
-    let raw = match (labels, fixture) {
-        (Some(file), _) => {
-            std::fs::read_to_string(file).map_err(|e| format!("read {}: {e}", file.display()))?
-        }
-        (None, true) => sm::FIXTURE.to_string(),
-        (None, false) => {
-            return Err(
-                "give the labeled sections with --labels FILE, or --fixture for the built-in \
-                 synthetic set"
-                    .into(),
-            )
-        }
+    let x = SmExtras {
+        fixture: fixture.then_some(SmFixture::Sections),
+        questions: question.into_iter().collect(),
+        ..Default::default()
     };
+    let mut v = status_map_with(
+        labels, &x, providers, haiku_args, ssh, max_calls, db, split, opts, env,
+    )
+    .await?;
+    Ok(v.remove(0))
+}
+
+/// `decide bench status-map`: the labeled sections (or a built-in set)
+/// through the providers, one report per question ([`sm_questions`]). Only
+/// `--provider jev` opens a database — for writing, as the envelope records
+/// every call. `--provider haiku` runs on `ssh` against `--haiku-host`,
+/// whose org it reads from the database (read-only). Only the `split`
+/// side's boards are asked. Each perturbation of `x` asks the cases it
+/// changes once more (its own pass, at most `max_calls` calls) and compares
+/// them with the originals; `x.floor_sweep` adds the model providers'
+/// numbers at every floor (no call).
+#[allow(clippy::too_many_arguments)]
+async fn status_map_with(
+    labels: Option<&Path>,
+    x: &SmExtras<'_>,
+    providers: &[String],
+    haiku_args: &HaikuArgs,
+    ssh: &dyn fleet_core::ssh::SshExec,
+    max_calls: Option<usize>,
+    db: Option<&Path>,
+    split: Split,
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+) -> Result<Vec<sm::Report>, String> {
+    let raw =
+        match (labels, x.fixture) {
+            (Some(file), _) => std::fs::read_to_string(file)
+                .map_err(|e| format!("read {}: {e}", file.display()))?,
+            (None, Some(SmFixture::Sections)) => sm::FIXTURE.to_string(),
+            (None, Some(SmFixture::Paired)) => robust::PAIRED_FIXTURE.to_string(),
+            (None, None) => return Err(
+                "give the labeled sections with --labels FILE, or --fixture (or --paired-fixture) \
+                 for a built-in synthetic set"
+                    .into(),
+            ),
+        };
     let mut rows = sm::parse_labels(&raw).map_err(|e| match labels {
         Some(f) => format!("{}: {e}", f.display()),
         None => format!("the built-in set: {e}"),
     })?;
     let providers = parse_sm_providers(providers)?;
-    let question = read_question(question, &providers)?;
+    let questions = sm_questions(x, &providers, split)?;
+    if x.floor_sweep && !providers.iter().any(|p| p.is_model()) {
+        return Err(
+            "--floor-sweep goes with --provider jev or --provider haiku (only a model states a \
+             confidence)"
+                .into(),
+        );
+    }
     let max_calls = max_calls.unwrap_or(sm::DEFAULT_MAX_CALLS);
     let haiku = match haiku_args.config(providers.contains(&sm::Provider::Haiku))? {
         Some(cfg) => {
@@ -501,40 +736,80 @@ async fn status_map(
     let (cases, dropped) = sm::cases(&rows);
     let (cases, split_sizes) = sm::split_cases(cases, split);
     let note = haiku.as_ref().map(Haiku::consent_note);
-    let outs = if providers.contains(&sm::Provider::Jev) {
+    let ctx = if providers.contains(&sm::Provider::Jev) {
         let path = db_path(db, opts, env)?;
         let store = Store::open_with_bus(&path, Arc::new(fleet_core::events::NoopEventBus))
             .map_err(|e| format!("open {}: {e}", path.display()))?;
+        let passes = questions.len() * (1 + x.perturb.len());
         out::error(&format!(
             "jev: asking only for sections whose org (or, with none, decide.jev.unassigned) passes \
-             the gate, at most {max_calls} calls; each call is recorded in decision_runs"
+             the gate, at most {max_calls} calls a pass ({passes} pass(es)); each call is recorded \
+             in decision_runs"
         ));
-        let ctx = DecideCtx::jev(Arc::new(Mutex::new(store)));
-        sm::run_providers_with(
-            &cases,
-            &providers,
-            Some(&ctx),
-            haiku.as_ref(),
-            max_calls,
-            question.as_ref(),
-        )
-        .await
+        Some(DecideCtx::jev(Arc::new(Mutex::new(store))))
     } else {
-        sm::run_providers_with(
+        None
+    };
+    let variants: Vec<(Perturbation, Vec<(usize, sm::SectionCase)>)> = x
+        .perturb
+        .iter()
+        .map(|&p| (p, robust::variants(&cases, p)))
+        .collect();
+    let mut reports = Vec::with_capacity(questions.len());
+    for question in &questions {
+        let outs = sm::run_providers_with(
             &cases,
             &providers,
-            None,
+            ctx.as_ref(),
             haiku.as_ref(),
             max_calls,
             question.as_ref(),
         )
-        .await
-    };
-    let mut r = sm::report(&cases, &outs, rows.len(), dropped, labels.is_none())
-        .with_split(split, split_sizes)
-        .with_question(question.as_ref());
-    r.notes.extend(note);
-    Ok(r)
+        .await;
+        let mut robustness = Vec::with_capacity(variants.len());
+        for (p, vs) in &variants {
+            let vcases: Vec<sm::SectionCase> = vs.iter().map(|(_, v)| v.clone()).collect();
+            let vouts = sm::run_providers_with(
+                &vcases,
+                &providers,
+                ctx.as_ref(),
+                haiku.as_ref(),
+                max_calls,
+                question.as_ref(),
+            )
+            .await;
+            robustness.push(robust::robustness(*p, &cases, &outs, vs, &vouts));
+        }
+        let sweep = if x.floor_sweep {
+            robust::floor_sweep(&cases, &outs, split == Split::All)
+        } else {
+            Vec::new()
+        };
+        let mut r = sm::report(&cases, &outs, rows.len(), dropped, labels.is_none())
+            .with_split(split, split_sizes.clone())
+            .with_question(question.as_ref())
+            .with_robustness(robustness)
+            .with_floor_sweep(sweep);
+        if labels.is_none() && x.fixture == Some(SmFixture::Paired) {
+            r.source = "paired-fixture";
+            r.notes.retain(|n| !n.contains(sm::FIXTURE_PATH));
+            r.notes.push(format!(
+                "the built-in paired set is synthetic ({}): LLM-written (D43), not yet spot-checked \
+                 by the owner — its language comparison is indicative",
+                robust::PAIRED_FIXTURE_PATH
+            ));
+        }
+        if !x.perturb.is_empty() {
+            r.notes.push(
+                "each perturbation asks the cases it changes once more (its own pass of at most \
+                 --max-calls calls); its comparison is a diagnostic, not an acceptance line"
+                    .into(),
+            );
+        }
+        r.notes.extend(note.clone());
+        reports.push(r);
+    }
+    Ok(reports)
 }
 
 #[cfg(test)]
@@ -601,6 +876,36 @@ mod tests {
         assert!(parse(&["work-link", "--shape", "noul"]).is_err());
         assert!(parse(&["status-map", "--provider", "bm25"]).is_err());
         assert!(parse(&["status-map", "--fixture", "--labels", "x.jsonl"]).is_err());
+    }
+
+    #[test]
+    fn work_link_takes_its_perturbations() {
+        let Ok(BenchCmd::WorkLink { perturb, .. }) = parse(&[
+            "work-link",
+            "--perturb",
+            "code",
+            "--perturb",
+            "fold",
+            "--perturb",
+            "code",
+        ]) else {
+            panic!("work-link");
+        };
+        assert_eq!(
+            parse_wl_perturb(&perturb).unwrap(),
+            vec![Perturbation::Fold, Perturbation::Code]
+        );
+        assert!(parse(&["work-link", "--perturb", "no-board"]).is_err());
+        assert!(parse(&[
+            "work-link",
+            "--perturb",
+            "typo",
+            "--export-unlinked",
+            "5",
+            "--out",
+            "x"
+        ])
+        .is_err());
     }
 
     #[test]
@@ -1044,14 +1349,14 @@ mod tests {
             panic!("status-map");
         };
         assert_eq!(split.as_deref(), Some("dev"));
-        assert_eq!(question.as_deref(), Some(Path::new("q.json")));
+        assert_eq!(question, vec![PathBuf::from("q.json")]);
         let Ok(BenchCmd::StatusMap {
             split, question, ..
         }) = parse(&["status-map", "--fixture"])
         else {
             panic!("status-map");
         };
-        assert_eq!((split, question), (None, None));
+        assert_eq!((split, question), (None, vec![]));
         // The default is every case; a split is a board-level one.
         assert_eq!(sm_split(None), Ok(Split::All));
         assert_eq!(sm_split(Some("test")), Ok(Split::Test));
@@ -1355,5 +1660,191 @@ mod tests {
         .await
         .unwrap_err();
         assert!(e.contains("/nonexistent/state.db"), "{e}");
+    }
+
+    // --- perturbations, the paired set, the floor sweep, the question set ---------
+
+    #[test]
+    fn status_map_parses_its_diagnostic_flags() {
+        let Ok(BenchCmd::StatusMap {
+            perturb,
+            floor_sweep,
+            paired_fixture,
+            question_set,
+            ..
+        }) = parse(&[
+            "status-map",
+            "--paired-fixture",
+            "--perturb",
+            "typo",
+            "--perturb",
+            "no-board",
+            "--floor-sweep",
+            "--question-set",
+        ])
+        else {
+            panic!("status-map");
+        };
+        assert!(floor_sweep && paired_fixture && question_set);
+        assert_eq!(
+            parse_perturb(&perturb).unwrap(),
+            vec![Perturbation::Typo, Perturbation::NoBoard]
+        );
+        // `code` is work-link's; nothing else is a perturbation.
+        assert!(parse(&["status-map", "--fixture", "--perturb", "code"]).is_err());
+        assert!(parse(&["status-map", "--fixture", "--perturb", "upper"]).is_err());
+        assert!(parse(&["status-map", "--fixture", "--paired-fixture"]).is_err());
+        assert!(parse(&["status-map", "--labels", "x.jsonl", "--paired-fixture"]).is_err());
+    }
+
+    async fn sm_with(
+        x: &SmExtras<'_>,
+        providers: &[&str],
+        haiku: &HaikuArgs,
+        ssh: &dyn fleet_core::ssh::SshExec,
+        db: Option<&Path>,
+        split: Split,
+    ) -> Result<Vec<sm::Report>, String> {
+        let providers: Vec<String> = providers.iter().map(|p| p.to_string()).collect();
+        status_map_with(
+            None,
+            x,
+            &providers,
+            haiku,
+            ssh,
+            None,
+            db,
+            split,
+            &HubOptions::default(),
+            &HashMap::new(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn status_map_perturbs_and_compares_languages_offline() {
+        let never = Canned::default();
+        let x = SmExtras {
+            fixture: Some(SmFixture::Paired),
+            perturb: vec![Perturbation::Fold, Perturbation::Typo],
+            ..Default::default()
+        };
+        let r = sm_with(
+            &x,
+            &["rule"],
+            &HaikuArgs::default(),
+            &never,
+            None,
+            Split::All,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.len(), 1);
+        let r = &r[0];
+        assert_eq!(r.source, "paired-fixture");
+        assert_eq!(r.sizes.cases, 324);
+        assert!(r
+            .notes
+            .iter()
+            .any(|n| n.contains(robust::PAIRED_FIXTURE_PATH)));
+        assert!(!r.notes.iter().any(|n| n.contains(sm::FIXTURE_PATH)));
+        let l = r.languages.as_ref().unwrap();
+        assert_eq!(l.pairs, 81);
+        let kinds: Vec<&str> = r.robustness.iter().map(|x| x.perturbation).collect();
+        assert_eq!(kinds, vec!["fold", "typo"]);
+        assert!(r.robustness.iter().all(|x| x.changed > 0));
+        let text = r.lines().join("\n");
+        assert!(text.contains("robustness (dataset C") && text.contains("languages (dataset B"));
+        assert!(never.hosts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_sweep_and_the_question_set_need_a_model_and_the_set_needs_dev() {
+        let never = Canned::default();
+        let no = HaikuArgs::default();
+        let sweep = SmExtras {
+            fixture: Some(SmFixture::Sections),
+            floor_sweep: true,
+            ..Default::default()
+        };
+        let e = sm_with(&sweep, &["rule"], &no, &never, None, Split::All)
+            .await
+            .unwrap_err();
+        assert!(e.contains("--floor-sweep"), "{e}");
+        let set = SmExtras {
+            fixture: Some(SmFixture::Sections),
+            question_set: true,
+            ..Default::default()
+        };
+        let e = sm_with(&set, &["rule"], &no, &never, None, Split::Dev)
+            .await
+            .unwrap_err();
+        assert!(e.contains("--question-set"), "{e}");
+        let e = sm_with(&set, &["jev"], &no, &never, None, Split::All)
+            .await
+            .unwrap_err();
+        assert!(e.contains("--split dev"), "{e}");
+        assert!(never.hosts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_question_set_asks_every_wording_on_dev_and_compares_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        {
+            let s = Store::open_with_bus(&db, Arc::new(fleet_core::events::NoopEventBus)).unwrap();
+            s.upsert_host("gpu1").unwrap();
+        }
+        let envelope = serde_json::json!({
+            "type": "result",
+            "result": "{\"choice\": \"done\", \"confidence\": 0.9}",
+            "usage": { "input_tokens": 50, "output_tokens": 5 },
+            "total_cost_usd": 0.001,
+        });
+        let fake = Canned {
+            stdout: format!("fleet-haiku=run\n{envelope}\n"),
+            ..Default::default()
+        };
+        let gpu1 = HaikuArgs {
+            haiku_host: Some("gpu1".into()),
+            ..Default::default()
+        };
+        let x = SmExtras {
+            fixture: Some(SmFixture::Sections),
+            question_set: true,
+            floor_sweep: true,
+            ..Default::default()
+        };
+        let reports = sm_with(&x, &["haiku"], &gpu1, &fake, Some(&db), Split::Dev)
+            .await
+            .unwrap();
+        assert_eq!(reports.len(), 1 + robust::QUESTION_SET.len());
+        assert_eq!(
+            reports[0].question,
+            format!("the adapter's {}", "status_map.v1")
+        );
+        let dev = reports[0].sizes.cases as usize;
+        // Every wording asked every dev case once, and its words went out.
+        assert_eq!(fake.hosts().len(), dev * reports.len());
+        let stdins = fake.stdins.lock().unwrap().clone();
+        for (_, json) in robust::QUESTION_SET {
+            let q = sm::parse_question(json).unwrap();
+            assert!(stdins.iter().any(|p| p.contains(&q.instructions[..60])));
+        }
+        let rows: Vec<robust::QuestionRow> =
+            reports.iter().flat_map(robust::question_rows).collect();
+        let names: Vec<&str> = rows.iter().map(|r| r.question.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "adapter",
+                "v2-position",
+                "v2-multilingual",
+                "v2-careful-done"
+            ]
+        );
+        // The sweep is there, without a dev choice (dev only).
+        assert_eq!(reports[0].floor_sweep.len(), 1);
+        assert!(reports[0].floor_sweep[0].dev_choice.is_none());
     }
 }

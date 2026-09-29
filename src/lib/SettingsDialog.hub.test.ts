@@ -9,6 +9,8 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SettingsDialog from './SettingsDialog.svelte';
 import { hosts } from './hosts';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { allDescriptors, bundle } from './pages/testing';
+import { settingProposals, settingsWritable } from './pages/review';
 
 const mcpStatusObj = {
   enabled: false,
@@ -53,6 +55,8 @@ function route(overrides: Record<string, unknown> = {}) {
         return [];
       case 'get_fleet_settings':
         return {};
+      case 'list_pages':
+        return bundle;
       default:
         return null;
     }
@@ -251,32 +255,25 @@ describe('the panels that do not apply to a hub client', () => {
     hubStatus.set(remote);
   });
 
-  // Requirement (a): these six are called UNPROMPTED and now return
-  // E_LOCAL_ONLY, so remote mode showed errors where those panels are.
-  it('does not call the local-only commands it used to call on mount', async () => {
+  // Requirement (a): the local-only ones are not called unprompted; the
+  // fleet's settings are the hub's since declarative pages P6, so those are.
+  it('does not call the local-only commands on mount, and reads the settings from the hub', async () => {
     const inv = route();
     render(SettingsDialog, { props: { onClose: () => {} } });
     await screen.findByTestId('hub-section');
-    await tick();
-    await tick();
-    for (const cmd of ['mcp_status', 'get_fleet_settings']) {
-      expect(inv.mock.calls.some((c) => c[0] === cmd), cmd).toBe(false);
+    await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'describe_fleet_settings')).toBe(true));
+    expect(inv.mock.calls.some((c) => c[0] === 'mcp_status')).toBe(false);
+    for (const cmd of ['get_fleet_settings', 'setting_proposals']) {
+      expect(inv.mock.calls.some((c) => c[0] === cmd), cmd).toBe(true);
     }
   });
 
-  it('replaces each of them with the reason instead of an error', async () => {
+  it('the control API panel is still the reason: it is the hub’s', async () => {
     route();
     render(SettingsDialog, { props: { onClose: () => {} } });
-    for (const testid of ['projects-remote', 'automation-remote', 'limits-remote', 'mcp-remote']) {
-      const note = await screen.findByTestId(testid);
-      expect(note.textContent, testid).toContain('fleet.example.com');
-    }
-    // …and the controls are gone rather than present-but-broken.
-    expect(screen.queryByTestId('projects-save')).toBeNull();
-    expect(screen.queryByTestId('gc-enabled')).toBeNull();
+    expect((await screen.findByTestId('mcp-remote')).textContent).toContain('fleet.example.com');
     expect(screen.queryByTestId('mcp-enable')).toBeNull();
   });
-
   it('still renders Diagnostics, which is about THIS process either way', async () => {
     route();
     render(SettingsDialog, { props: { onClose: () => {} } });
@@ -290,7 +287,7 @@ describe('the panels that do not apply to a hub client', () => {
     await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'mcp_status')).toBe(true));
     expect(inv.mock.calls.some((c) => c[0] === 'get_fleet_settings')).toBe(true);
     expect(screen.getByTestId('projects-section')).toBeInTheDocument();
-    expect(screen.getByTestId('automation-section')).toBeInTheDocument();
+    expect(inv.mock.calls.some((c) => c[0] === 'describe_fleet_settings')).toBe(true);
     expect(screen.queryByTestId('projects-remote')).toBeNull();
   });
 });
@@ -414,5 +411,67 @@ describe('a client token stranded by a half-finished pairing', () => {
     await tick();
     await tick();
     expect(inv.mock.calls.some((c) => c[0] === 'hub_stranded_token')).toBe(false);
+  });
+});
+
+
+// Declarative pages P6: a paired desktop's generated pages are the hub's
+// settings — one line says so, a trusted device edits them, an untrusted one
+// reads them, and a hub that serves none leaves its reason.
+describe('the hub’s settings on a paired desktop (P6)', () => {
+  const described = allDescriptors.map((d) => ({ ...d, value: d.key === 'playbooks.press_enter' ? 'true' : d.value }));
+
+  beforeEach(() => {
+    hubStatus.set(remote);
+    settingProposals.set([]);
+    settingsWritable.set(true);
+  });
+
+  it('a trusted device edits the hub’s values, through the hub', async () => {
+    const inv = route({
+      describe_fleet_settings: described,
+      get_fleet_settings: { 'playbooks.press_enter': 'true' },
+      setting_proposals: { can_write: true, proposals: [] },
+      set_fleet_setting: { 'playbooks.press_enter': 'false' },
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-settings.automation'));
+    const box = (await screen.findByTestId('setting-playbooks-press-enter')) as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    expect(screen.getByTestId('hub-scope-note').textContent).toContain('paired as laptop');
+    expect(screen.queryByTestId('hub-scope-readonly')).toBeNull();
+    await fireEvent.click(box);
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'playbooks.press_enter', value: 'false' }),
+    );
+    // Data items and page actions read this app's store: none on a paired desktop.
+    expect(inv.mock.calls.some((c) => c[0] === 'fetch_page_source')).toBe(false);
+  });
+
+  it('an untrusted device reads them, and is told how to be trusted', async () => {
+    route({
+      describe_fleet_settings: described,
+      get_fleet_settings: { 'playbooks.press_enter': 'true' },
+      setting_proposals: { can_write: false, proposals: [] },
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-settings.automation'));
+    await screen.findByTestId('hub-scope-note');
+    expect(screen.getByTestId('hub-scope-readonly').textContent).toContain('fleet-hub client trust laptop');
+    // Shown, not editable: the value in words, no switch.
+    expect(screen.getByTestId('setting-playbooks-press-enter').tagName).toBe('SPAN');
+    expect(screen.getByTestId('setting-playbooks-press-enter').textContent).toBe('On');
+  });
+
+  it('a hub that serves no settings leaves its reason and its answer', async () => {
+    route({
+      describe_fleet_settings: ipcError('E_FORBIDDEN', 'describe_fleet_settings: get_settings is not a client-callable tool'),
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-settings.automation'));
+    const note = await screen.findByTestId('pages-remote');
+    await waitFor(() => expect(note.textContent).toContain('did not serve its settings'));
+    expect(screen.getByTestId('pages-remote-error').textContent).toContain('not a client-callable tool');
+    expect(screen.queryByTestId('setting-row-playbooks.press_enter')).toBeNull();
   });
 });

@@ -22,6 +22,43 @@ export type StuckKind = (typeof STUCK_KINDS)[number];
 /** Reduced PR check status populated by reconcile (migration 019). */
 export type CiStatus = 'passing' | 'failing' | 'pending';
 
+/** One failing check of a PR, by the name GitHub shows (result evidence). */
+export interface FailingCheck {
+  name: string;
+  url?: string;
+}
+
+/** The PR's check rollup, counted. Mirrors Rust `outcome::CheckSummary`. */
+export interface CheckSummary {
+  total: number;
+  pending: number;
+  skipped: number;
+  failing?: FailingCheck[];
+  failing_total: number;
+}
+
+/**
+ * What the PR probe last read as evidence about a session's PR (migration
+ * 082). Mirrors Rust `outcome::PrEvidence`; every optional field absent
+ * means "not observed", never "fine".
+ */
+export interface PrEvidence {
+  /** The commit GitHub's checks describe (`headRefOid`). */
+  head_oid?: string;
+  /** The worktree's HEAD when the probe ran. */
+  local_head?: string;
+  /** Commits not on the upstream; absent without an upstream. */
+  ahead?: number;
+  /** Tracked files differ from HEAD; absent when git could not tell. */
+  dirty?: boolean;
+  draft: boolean;
+  review_decision?: string;
+  merge_state?: string;
+  /** OPEN | CLOSED | MERGED; absent from readings stored before it was added. */
+  state?: string;
+  checks: CheckSummary;
+}
+
 export interface SessionRow {
   id: number;
   tmux_name: string;
@@ -74,6 +111,10 @@ export interface SessionRow {
   /** Last Stop hook (turn completed). */
   last_turn_at: number | null;
   ci_status: CiStatus | null;
+  /** The PR's evidence (migration 082); absent without a PR or from an older hub. */
+  pr_evidence?: PrEvidence | null;
+  /** When the probe last observed the PR (unix secs); absent without a PR. */
+  pr_checked_at?: number | null;
   // Orchestration fields (migration 020).
   /** Completed turns, bumped by every Stop hook. */
   turn_seq: number;

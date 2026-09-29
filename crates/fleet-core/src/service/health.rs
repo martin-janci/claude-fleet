@@ -94,6 +94,19 @@ pub struct Health {
     /// Per-field default: an older hub omits it.
     #[serde(default)]
     pub hosts: Vec<HostHealthRow>,
+    /// The fleet's own software updates (update design §9): the channel's
+    /// state and the targets that need a person. Filled by `fleet_health`
+    /// on a hub (`service::update::health`); `None` elsewhere and from an
+    /// older hub. Not sent when `None`: no desktop reads it yet, so it is
+    /// not in the desktop's wire contract (`hub_contract.golden.json`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updates: Option<crate::service::update::UpdatesHealth>,
+    /// The decision envelope (Jev): its live calls over the last hour and
+    /// whether they are failing (`degraded`, test map §7). `None` when it
+    /// is off, in a window onto a hub, and for a scoped caller. Per-field
+    /// default: an older hub omits it.
+    #[serde(default)]
+    pub decide: Option<crate::service::decide::DecideHealth>,
 }
 
 /// `fleet_health.hub`: this process's uptime and its last reconcile pass.
@@ -671,6 +684,7 @@ pub fn health_from_store(s: &Store) -> Health {
         hub: Some(hub_health()),
         tunnels_mode: Some(tunnels_mode(s)),
         peer_links_total: s.peer_links_total().unwrap_or_default(),
+        updates: None,
         // The live agents are overlaid by `fleet_health`, which holds the
         // registry; from the store alone the stored hello is what there is.
         hosts: hosts_health(
@@ -681,6 +695,7 @@ pub fn health_from_store(s: &Store) -> Health {
             crate::app_version::get(),
             now_unix(),
         ),
+        decide: crate::service::decide::health(s, now_unix()),
     }
 }
 
@@ -765,6 +780,7 @@ pub fn blank_rollups(h: &mut Health) {
     h.tunnels.clear();
     h.tunnels_flapping = 0;
     h.trackers = Default::default();
+    h.decide = None;
 }
 
 fn now_unix() -> i64 {
@@ -800,7 +816,9 @@ pub fn health_check(store: &Mutex<Store>) -> Health {
             hub: None,
             tunnels_mode: None,
             peer_links_total: 0,
+            updates: None,
             hosts: Vec::new(),
+            decide: None,
         },
     }
 }
@@ -858,6 +876,8 @@ mod tests {
             last_stop_at: None,
             stale_working_at: None,
             work_rev: 0,
+            pr_evidence: None,
+            pr_checked_at: None,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
@@ -1265,7 +1285,9 @@ mod tests {
             hub: None,
             tunnels_mode: None,
             peer_links_total: 0,
+            updates: None,
             hosts: Vec::new(),
+            decide: None,
         })
         .expect("Health serialises");
         let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");

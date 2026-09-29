@@ -1,0 +1,569 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Page",
+  "description": "One page: a route (`id`), a layout, and its content as sections or tabs\nof sections.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "description": "Dotted lowercase route, e.g. \"settings.automation\". Also the deep\nlink: `settings/<id>#<key>`.",
+      "type": "string"
+    },
+    "intro": {
+      "description": "One plain sentence under the title.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "layout": {
+      "$ref": "#/$defs/Layout"
+    },
+    "list_items": {
+      "description": "A `master_detail` page's items about the whole collection, shown\nabove the list: notices and custom items only.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Item"
+      }
+    },
+    "parent": {
+      "description": "The page this one sits under in the page tree.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "resource": {
+      "description": "A `master_detail` page's resource (`pages::resources`): the list\nshows its records, and the sections lay out one record's fields —\na `field` item's `key` names a field of the resource there.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "review": {
+      "description": "A `review_apply` page's proposals: what the page lists for a person\nto apply or reject.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReviewSource"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sections": {
+      "description": "Either `sections` or `tabs`, never both.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Section"
+      }
+    },
+    "spec": {
+      "description": "Always \"fleet.page/1\".",
+      "type": "string"
+    },
+    "tabs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Tab"
+      }
+    },
+    "title": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "spec",
+    "id",
+    "title",
+    "layout"
+  ],
+  "$defs": {
+    "ChartKind": {
+      "type": "string",
+      "enum": [
+        "line",
+        "bar",
+        "stacked_bar",
+        "sparkline"
+      ]
+    },
+    "Condition": {
+      "description": "When an item, section or tab is shown. Exactly one form per condition:\n`{key, eq}`, `{key, in}`, `{key, truthy}`, `{all}`, `{any}` or `{not}`.\nNo expressions: a need beyond these becomes a data source or a widget.",
+      "type": "object",
+      "properties": {
+        "all": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/Condition"
+          }
+        },
+        "any": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/Condition"
+          }
+        },
+        "eq": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "in": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "key": {
+          "description": "A registered setting key.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "not": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "truthy": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "CustomComponent": {
+      "description": "The registered hand-written components. Each one is a debt: when the\ncatalog can express it (a data source plus an action), it is replaced\nand removed from this list.",
+      "oneOf": [
+        {
+          "description": "\"Show what auto-tidy would do\": the tidy candidates the ticked\nreasons would act on (work graph M7.3; `AutoTidyPreview.svelte`).\nWaits on a `work.tidy` data source with a param from the page.",
+          "type": "string",
+          "const": "auto_tidy_preview"
+        },
+        {
+          "description": "Proposed orgs (from owners of live sessions and tracker sites), one\nclick each to create with their rule and tracker (work graph M5.4;\n`OrgSuggestions.svelte`). Waits on actions that chain.",
+          "type": "string",
+          "const": "org_suggestions"
+        },
+        {
+          "description": "A tracker's last sync pass, Asana's section map and Jev's proposals\nfor it (work graph M11.4, M6, Jev J3; `TrackerExtras.svelte`). Shown\nin a tracker's detail. Waits on the review_apply layout (P5), which\ntakes the proposals, and a choice-map field for the section map.",
+          "type": "string",
+          "const": "tracker_extras"
+        }
+      ]
+    },
+    "Item": {
+      "description": "One thing on a page. Tagged by `type`, one shape per purpose.",
+      "oneOf": [
+        {
+          "description": "An editable setting. Its label, help, bounds, danger and default come\nfrom the registry; `hint` adds one line under it on this page only.",
+          "type": "object",
+          "properties": {
+            "hint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "key": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "field"
+            },
+            "when": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Condition"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "widget": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Widget"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "key"
+          ]
+        },
+        {
+          "description": "One number: a `scalar` source, or one `field` of a `record` source.",
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source": {
+              "$ref": "#/$defs/SourceRef"
+            },
+            "type": {
+              "type": "string",
+              "const": "stat"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "source"
+          ]
+        },
+        {
+          "description": "A read-only key → value list of a `record` source.",
+          "type": "object",
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/SourceRef"
+            },
+            "type": {
+              "type": "string",
+              "const": "record"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "source"
+          ]
+        },
+        {
+          "description": "A table of a `rows` source; `columns` picks and orders them (all when\nempty).",
+          "type": "object",
+          "properties": {
+            "columns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "source": {
+              "$ref": "#/$defs/SourceRef"
+            },
+            "type": {
+              "type": "string",
+              "const": "table"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "source"
+          ]
+        },
+        {
+          "description": "A chart of a `series` source.",
+          "type": "object",
+          "properties": {
+            "chart": {
+              "$ref": "#/$defs/ChartKind"
+            },
+            "source": {
+              "$ref": "#/$defs/SourceRef"
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "chart"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "source",
+            "chart"
+          ]
+        },
+        {
+          "description": "A static callout.",
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "tone": {
+              "$ref": "#/$defs/Tone"
+            },
+            "type": {
+              "type": "string",
+              "const": "notice"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "tone",
+            "text"
+          ]
+        },
+        {
+          "description": "A hand-written component registered in code: the one escape hatch\n(design §8), for what the catalog cannot express yet. Closed set,\ncapped at [`crate::pages::catalog::MAX_CUSTOM`] uses across all\npages.",
+          "type": "object",
+          "properties": {
+            "component": {
+              "$ref": "#/$defs/CustomComponent"
+            },
+            "type": {
+              "type": "string",
+              "const": "custom"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "component"
+          ]
+        },
+        {
+          "description": "A button that runs a page action (`pages::actions`), then re-reads\nthe page's data items.",
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "action"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "action"
+          ]
+        },
+        {
+          "description": "A link to another page.",
+          "type": "object",
+          "properties": {
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "page": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "link"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "page"
+          ]
+        }
+      ]
+    },
+    "Layout": {
+      "description": "The prepared layouts (design §4). A layout decides spacing, saving\n(auto-save or draft) and how the page degrades on a phone; a spec never\nstyles anything itself.",
+      "oneOf": [
+        {
+          "description": "L1: scalar settings in sections, auto-saved.",
+          "type": "string",
+          "const": "category"
+        },
+        {
+          "description": "L2: a list of resources with a detail pane.",
+          "type": "string",
+          "const": "master_detail"
+        },
+        {
+          "description": "L3: a step-by-step wizard.",
+          "type": "string",
+          "const": "flow"
+        },
+        {
+          "description": "L4: one object with a draft and Apply.",
+          "type": "string",
+          "const": "object_editor"
+        },
+        {
+          "description": "L5: cards of values and links, nothing editable.",
+          "type": "string",
+          "const": "cards"
+        },
+        {
+          "description": "L6: a diff of proposed changes to accept or reject.",
+          "type": "string",
+          "const": "review_apply"
+        },
+        {
+          "description": "L7: stats, charts and tables over data sources.",
+          "type": "string",
+          "const": "data_page"
+        }
+      ]
+    },
+    "ReviewSource": {
+      "description": "What a `review_apply` page reviews. Closed: each is a list of proposed\nchanges with an apply and a reject command behind it.",
+      "oneOf": [
+        {
+          "description": "Settings an agent proposed over the control API (`set_setting\n{ propose: true }`): `setting_proposals`, applied or rejected with\n`decide_setting_proposals`.",
+          "type": "string",
+          "const": "settings"
+        }
+      ]
+    },
+    "Section": {
+      "description": "A titled group of items. `collapsible` makes it an accordion; an\n`advanced` section starts collapsed.",
+      "type": "object",
+      "properties": {
+        "advanced": {
+          "type": "boolean"
+        },
+        "collapsible": {
+          "type": "boolean"
+        },
+        "intro": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Item"
+          }
+        },
+        "title": {
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "items"
+      ]
+    },
+    "SourceRef": {
+      "description": "A data source by id, with literal parameters.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ]
+    },
+    "Tab": {
+      "type": "object",
+      "properties": {
+        "sections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Section"
+          }
+        },
+        "title": {
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "sections"
+      ]
+    },
+    "Tone": {
+      "type": "string",
+      "enum": [
+        "info",
+        "warn",
+        "danger"
+      ]
+    },
+    "Widget": {
+      "description": "The widgets a `field` may ask for instead of its kind's default. Each\naccepts only some setting kinds (`catalog::accepts`).",
+      "type": "string",
+      "enum": [
+        "switch",
+        "number",
+        "duration",
+        "select",
+        "radio",
+        "multiselect",
+        "text",
+        "textarea",
+        "key_value_table",
+        "id_list",
+        "readonly"
+      ]
+    }
+  }
+}

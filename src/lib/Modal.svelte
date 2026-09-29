@@ -15,6 +15,7 @@
     onclose,
     closeOnBackdrop = true,
     width,
+    maxWidth,
     testid,
     children,
   }: {
@@ -29,6 +30,9 @@
     closeOnBackdrop?: boolean;
     /** CSS width of the dialog box (e.g. "480px"). */
     width?: string;
+    /** Overrides the default cap of min(90vw, 720px), for the one dialog
+     *  that lays out a page tree beside its content (Settings). */
+    maxWidth?: string;
     testid?: string;
     children: Snippet;
   } = $props();
@@ -124,6 +128,7 @@
   bind:this={dialog}
   class="modal"
   style:width={width}
+  style:max-width={maxWidth}
   aria-label={title ?? label}
   aria-modal="true"
   oncancel={onCancel}

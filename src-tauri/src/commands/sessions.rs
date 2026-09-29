@@ -305,46 +305,6 @@ pub async fn purge_project(
     bg_sessions::purge_project(args, &store, &ssh).await
 }
 
-// ── Operator settings (Wave 2 Track D) ──────────────────────────────────────
-//
-// Typed key/value settings behind the Settings dialog's automation toggles
-// (playbooks, GC, reconcile cadence). The registry in `service::settings`
-// owns the key list, defaults and validation; these wrappers only adapt
-// `tauri::State`.
-//
-// Local-only in remote mode, and this is the one pair where returning the
-// local answer would be actively misleading: these settings govern the
-// reconcile tick, the GC sweeper and the playbooks, none of which this
-// process runs when a hub owns the fleet. Showing this app's values would
-// show settings that do nothing, and writing one would change nothing.
-
-/// Every registered operator setting with its effective value.
-#[tauri::command]
-pub fn get_fleet_settings(
-    backend: State<'_, Arc<FleetBackend>>,
-    store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
-    backend.refuse_local_only("get_fleet_settings")?;
-    let s = lock(&store)?;
-    Ok(fleet_core::service::settings::read_all(&s))
-}
-
-/// Validate and persist one operator setting. `E_INVALID` for an unknown key
-/// or a value of the wrong shape. Returns the full effective map so the
-/// dialog can re-render from one source of truth.
-#[tauri::command]
-pub fn set_fleet_setting(
-    key: String,
-    value: String,
-    backend: State<'_, Arc<FleetBackend>>,
-    store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
-    backend.refuse_local_only("set_fleet_setting")?;
-    let s = lock(&store)?;
-    fleet_core::service::settings::set(&s, &key, &value)?;
-    Ok(fleet_core::service::settings::read_all(&s))
-}
-
 // ── Session timeline (Q9) ───────────────────────────────────────────────────
 
 /// Default and ceiling for `session_history`'s `limit`. The store caps the
