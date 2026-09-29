@@ -146,6 +146,9 @@ check "fleet_health is asked with the readonly token" grep -q '^curl-stdin: Auth
 check "…which never reaches curl's command line" test -z "$(grep '^curl .*cl_readonly' "$FAKE_LOG")"
 check "…against /mcp/json on the public URL" grep -q 'https://fleet.example.com/mcp/json' "$FAKE_LOG"
 check "…and the version is confirmed" grep -q 'fleet_health.version = 0.3.1' "$ROOT/upgrade1.log"
+# The documented way to mint the readonly token is copied by hand: its
+# command line must end at the chmod, with no prose glued onto it.
+check "the readonly-token recipe ends at its chmod" grep -qE '^#.*\| jq -r \.token > readonly\.token && chmod 600 readonly\.token$' "$REPO/deploy/hub/upgrade.sh"
 
 : >"$FAKE_LOG"
 PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" bash "$U/upgrade.sh" missing >"$ROOT/upgrade2.log" 2>&1

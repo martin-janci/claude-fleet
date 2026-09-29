@@ -183,6 +183,38 @@ impl Store {
         Ok(())
     }
 
+    /// The keys written after audit row `after`, oldest first and each once,
+    /// with the newest row's id (`after` when there is none). `after: None`
+    /// only reads the newest id: where a watcher starts from. The running
+    /// hub follows writes another process made to its database this way
+    /// (`fleet-hub settings apply`).
+    pub fn setting_audit_since(&self, after: Option<i64>) -> Result<(i64, Vec<String>)> {
+        let Some(after) = after else {
+            let last: i64 =
+                self.conn
+                    .query_row("SELECT COALESCE(MAX(id), 0) FROM setting_audit", [], |r| {
+                        r.get(0)
+                    })?;
+            return Ok((last, Vec::new()));
+        };
+        let mut st = self
+            .conn
+            .prepare("SELECT id, key FROM setting_audit WHERE id > ?1 ORDER BY id")?;
+        let rows = st.query_map([after], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut last = after;
+        let mut keys: Vec<String> = Vec::new();
+        for row in rows {
+            let (id, key) = row?;
+            last = id;
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        Ok((last, keys))
+    }
+
     /// A key's writes, newest first.
     pub fn setting_audit(&self, key: &str, limit: i64) -> Result<Vec<SettingAuditRow>> {
         let mut st = self.conn.prepare(
@@ -270,5 +302,26 @@ mod tests {
         assert_eq!(h[0].after, "false");
         assert_eq!(h[0].proposal_id, Some(3));
         assert_eq!(h[1].before, None);
+    }
+
+    #[test]
+    fn audit_since_names_each_key_written_after_a_row_once() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.setting_audit_since(None).unwrap(), (0, vec![]));
+        s.insert_setting_audit("gc.enabled", None, "true", "person", None, None)
+            .unwrap();
+        let (start, keys) = s.setting_audit_since(None).unwrap();
+        assert!(start > 0);
+        assert!(keys.is_empty(), "None only reads where to start");
+        assert_eq!(s.setting_audit_since(Some(start)).unwrap(), (start, vec![]));
+        s.insert_setting_audit("work.recent_days", None, "3", "person", None, None)
+            .unwrap();
+        s.insert_setting_audit("gc.enabled", Some("true"), "false", "person", None, None)
+            .unwrap();
+        s.insert_setting_audit("work.recent_days", Some("3"), "4", "person", None, None)
+            .unwrap();
+        let (last, keys) = s.setting_audit_since(Some(start)).unwrap();
+        assert_eq!(last, start + 3);
+        assert_eq!(keys, ["work.recent_days", "gc.enabled"]);
     }
 }

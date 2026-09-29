@@ -9,7 +9,8 @@
 //! any build never changes the database it copies. `VACUUM INTO` reads one
 //! consistent snapshot while the hub keeps writing (WAL), and writes a
 //! compacted copy with no `-wal` / `-shm` beside it. The copy is written as
-//! `<dest>.part`, checked with `PRAGMA integrity_check`, synced, and only
+//! `<dest>.part` (created `0600` on unix, since it holds every secret in
+//! the database), checked with `PRAGMA integrity_check`, synced, and only
 //! then renamed into place: a `<dest>` that exists is always a whole, sound
 //! backup.
 
@@ -53,6 +54,20 @@ pub fn backup_to(src: &Path, dest: &Path) -> Result<BackupInfo, String> {
     conn.busy_timeout(std::time::Duration::from_secs(10))
         .map_err(|e| e.to_string())?;
     let result = (|| {
+        // The copy holds the master token and every stored secret: `0600` from
+        // its first byte, as `deploy/hub/backup.sh` writes it. `VACUUM INTO`
+        // fills an existing empty file and keeps its mode; without this it would
+        // create the file `0666 & ~umask`.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&part)
+                .map_err(|e| format!("create {}: {e}", part.display()))?;
+        }
         conn.execute("VACUUM INTO ?1", [part_str])
             .map_err(|e| format!("copy {}: {e}", src.display()))?;
         let copy = Connection::open_with_flags(&part, OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -141,6 +156,12 @@ mod tests {
         assert_eq!(info.schema, Some(schema));
         assert!(info.bytes > 0);
         assert!(!part_path(&dest).exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "a backup holds secrets: {mode:o}");
+        }
 
         let copy = Store::open_read_only(&dest).unwrap();
         assert_eq!(
@@ -179,7 +200,19 @@ mod tests {
         let _store = Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap();
         let dest = dir.path().join("b.db");
         std::fs::write(part_path(&dest), b"half a backup").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let loose = std::fs::Permissions::from_mode(0o644);
+            std::fs::set_permissions(part_path(&dest), loose).unwrap();
+        }
         backup_to(&db, &dest).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "the stale part's mode is not kept");
+        }
         assert!(Store::open_read_only(&dest)
             .unwrap()
             .schema_version()

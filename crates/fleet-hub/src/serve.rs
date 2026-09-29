@@ -656,7 +656,7 @@ pub fn backup(
         Some(p) => p,
         None => {
             let dir = data_dir.join("backups");
-            std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+            private_backup_dir(&dir)?;
             default_backup_path(&dir, prefix, fleet_core::store::now_unix())
         }
     };
@@ -674,6 +674,36 @@ pub fn backup(
         ));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The default backups directory, `0700` like `deploy/hub/backup.sh`
+/// makes it: created so, and an existing looser one tightened. A copy holds
+/// the master token and every stored secret. (`--to` names a directory the
+/// operator chose; only the copy itself is `0600` there.)
+fn private_backup_dir(dir: &std::path::Path) -> Result<(), String> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(dir)
+        .map_err(|e| format!("create {}: {e}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir)
+            .map_err(|e| format!("read {}: {e}", dir.display()))?
+            .permissions()
+            .mode();
+        if mode & 0o077 != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| format!("make {} private (0700): {e}", dir.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// `<dir>/<prefix>-YYYYmmdd-HHMMSS.db` in UTC, as `deploy/hub/backup.sh`
@@ -823,9 +853,11 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     }
     persist(&store, &r)?;
     // `/events` stamps `needs_attention` without a store, so it is handed
-    // the `context_full` threshold `list_sessions` reads; later writes
-    // (`set_setting`, `fleet-hub decide` and the desktop all go through the
-    // running hub) reach it through `service::settings::set`.
+    // the `context_full` threshold `list_sessions` reads. Later writes
+    // through the running hub (`set_setting`, `fleet-hub decide`, the
+    // desktop) reach it through `service::settings::set`; `fleet-hub
+    // settings apply` writes state.db from its own process, and reaches it
+    // through the settings watch started with the ticks below.
     if let Ok(s) = store.lock() {
         bus.set_context_red_pct(fleet_core::service::health::context_red_pct(&s));
     }
@@ -1056,6 +1088,13 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         ticks_cancel.clone(),
     );
 
+    // Settings another process wrote (`fleet-hub settings apply`): the
+    // `/events` threshold, the update refresh's wake-up and the `settings`
+    // frame, as `service::settings::set` does in-process. Stopped with the
+    // ticks.
+    let settings_watch_handle =
+        crate::settings::spawn_watch(Arc::clone(&store), Arc::clone(&bus), ticks_cancel.clone());
+
     wait_for_signal().await?;
     tracing::info!("fleet-hub stopping");
     // Cancel the ticks BEFORE tearing down the MCP server below: cancellation
@@ -1090,6 +1129,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     tick_handles.push(peer_handle);
     tick_handles.push(ready_handle);
     tick_handles.push(update_handle);
+    tick_handles.push(settings_watch_handle);
     if let Some(h) = tracker_handle {
         tick_handles.push(h);
     }
@@ -1200,6 +1240,23 @@ mod tests {
         let err = backup(&opts, &HashMap::new(), None, "../evil", false).unwrap_err();
         assert!(err.contains("--prefix"), "{err}");
         assert!(!dir.path().join("backups").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_default_backups_dir_is_private_and_a_looser_one_is_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join("a").join("backups");
+        private_backup_dir(&fresh).unwrap();
+        assert_eq!(mode(&fresh), 0o700);
+
+        let loose = dir.path().join("backups");
+        std::fs::create_dir(&loose).unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o755)).unwrap();
+        private_backup_dir(&loose).unwrap();
+        assert_eq!(mode(&loose), 0o700);
     }
 
     fn resolved(local_host: bool) -> Resolved {

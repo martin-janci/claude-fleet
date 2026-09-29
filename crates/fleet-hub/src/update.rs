@@ -11,7 +11,7 @@ use crate::out;
 use crate::serve;
 use clap::Subcommand;
 use fleet_core::service::update::{self as upd, GitCheck, HttpsFetch};
-use fleet_core::store::Store;
+use fleet_core::store::{now_unix, Store};
 use fleet_update::channel::CheckOutcome;
 use fleet_update::wire::Installed;
 use fleet_update::{Artifact, Component, Track, Version};
@@ -38,13 +38,6 @@ pub enum UpdateCmd {
         #[arg(long)]
         json: bool,
     },
-}
-
-fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 fn parse_track(s: &str) -> Result<Track, String> {
@@ -95,7 +88,7 @@ pub async fn run(
             };
             let req = upd::hub_self_request(installed);
             let fetch = HttpsFetch::new(Some(&setup.base_url));
-            let outcome = upd::git_check(fetch, setup, upd::trusted_keys(), &req, now())
+            let outcome = upd::git_check(fetch, setup, upd::trusted_keys(), &req, now_unix())
                 .await
                 .map_err(|e| format!("{}: {}", e.code, e.message))?;
             if json {

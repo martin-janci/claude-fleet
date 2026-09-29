@@ -207,8 +207,9 @@ docker compose exec fleet-hub fleet-hub --version    # fleet-hub 0.2.41
 docker compose images fleet-hub                      # the tag and image id in use
 ```
 
-Over the network, and only with the master token, `fleet_health` reports the
-same string in its `version` field (see the `curl` under *Setup* above). To see
+Over the network, `fleet_health` reports the same string in its `version`
+field (see the `curl` under *Setup* above). Any client token reads it — a
+readonly one included — so the master token is not needed. To see
 which exact image — not just which version — is running:
 
 ```bash
@@ -316,8 +317,8 @@ the 30 s grace applies, and only then takes the backup (`backup.sh`, kept as
 of the stopped hub, so no write between the backup and the upgrade is lost
 by a rollback. It then moves `FLEET_HUB_TAG`, starts the hub, waits for the
 image's own healthcheck, and checks `fleet-hub --version`. With a readonly
-client token in `readonly.token` beside the compose file (`fleet-hub pair
---mode readonly upgrade-check`) it also asks `fleet_health` over the public
+client token in `readonly.token` beside the compose file (see *A readonly
+token for scripts* below) it also asks `fleet_health` over the public
 URL — never the master token, and passed to `curl` on stdin, not its command
 line. On any failure after the stop it prints the rollback, naming the image
 that ran before: a tag can be re-pushed, so if `<old tag>` no longer points
@@ -337,6 +338,23 @@ install. With a tag set, a missing `state.db` (or no `sqlite3`) stops the
 upgrade before the hub is touched (point `FLEET_HUB_DATA` at the right
 directory) — it never migrates without a backup. An upgrade never prunes an older
 version's `pre-<version>-*.db` (see *Backups*).
+
+**A readonly token for scripts.** `fleet-hub pair` never prints a token: it
+mints a one-use pairing code and shows it as a QR code and a
+`<public url>/pair#<CODE>` URL (the code is the part after the `#`, valid
+for `--ttl` seconds, 600 by default). A script has no app to scan it with,
+so redeem the code by hand — the token is only ever in the `POST /pair`
+answer:
+
+```bash
+fleet-hub pair --name upgrade-check --mode readonly     # note the CODE after /pair#
+curl -s -X POST https://fleet.example.com/pair \
+  -H 'Content-Type: application/json' -d '{"code":"<CODE>"}' \
+  | jq -r .token > readonly.token && chmod 600 readonly.token
+```
+
+The client appears in `fleet-hub client list` as `upgrade-check`, and
+`fleet-hub client revoke upgrade-check` retires it.
 
 **Order across the three binaries.** Today (contract 4 on both sides,
 proto 1 on both sides) the order is a habit: hub, then desktop, then the
@@ -392,7 +410,10 @@ docker compose exec fleet-hub fleet-hub backup --prefix pre-0.3.4 --json
 ```
 
 The default path is `<data dir>/backups/<prefix>-<UTC stamp>.db`, the same
-name `backup.sh` uses. `--to <path>` names the file instead. This is the
+name `backup.sh` uses. `--to <path>` names the file instead. Like
+`backup.sh`, it writes every copy `0600`; the default `backups/` directory
+is created `0700`, and an existing looser one is tightened (a `--to`
+directory is left as it is). This is the
 backup `fleet-updater` takes before it replaces the hub (update design
 `docs/superpowers/specs/2026-09-28-update-channel-design.md` §8).
 
@@ -465,7 +486,8 @@ so hourly files stay group-readable. Docker's own capture of the same lines
 is capped at 3 × 10 MB. **Watching it.** Uptime Kuma: an HTTP keyword monitor
 on `/healthz` (`fleet-hub ok`) and a JSON-query monitor posting `tools/call
 fleet_health` to `/mcp/json` with a readonly client token (`fleet-hub pair
---mode readonly kuma`) — never the master — on `db_ready`, `hosts_reachable`,
+--name kuma --mode readonly`, redeemed as in *A readonly token for
+scripts*) — never the master — on `db_ready`, `hosts_reachable`,
 `tunnels_flapping` and `hub.reconcile.consecutive_failures`.
 
 **Tidying a hand-upgraded deployment.** A directory upgraded by hand tends to
@@ -2076,6 +2098,11 @@ fleet-hub settings apply 4 7            # apply by id
 fleet-hub settings reject 5             # reject by id
 fleet-hub settings history work.recent_days [--limit N] [--json]
 ```
+
+`apply` writes `state.db` from its own process, recorded as `person`. The
+running hub picks the change up within 5 s: it re-reads the values it keeps
+in memory (`health.context_red_pct` for `/events`, the update track and
+check interval) and sends paired devices the `settings` frame.
 
 **On a paired device** (declarative pages P6). The desktop paired with this
 hub shows these settings in its own Settings pages, read and written
