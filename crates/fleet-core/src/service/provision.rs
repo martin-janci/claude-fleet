@@ -28,6 +28,60 @@ pub(crate) const CLAUDE_DIR: &str = "~/.claude";
 const CLAUDE_MD_PATH: &str = "~/.claude/CLAUDE.md";
 const TMUX_CONF: &str = "~/.tmux.conf";
 
+/// fleet's `ag` launcher (tools/ag, F2), shipped to every host. Path
+/// relative to [`AG_STAGE_DIR`] → content. `every_ag_file_is_compiled_in`
+/// keeps this list in step with the directory.
+pub(crate) const AG_FILES: &[(&str, &str)] = &[
+    ("ag", include_str!("../../../../tools/ag/ag")),
+    (
+        "install.sh",
+        include_str!("../../../../tools/ag/install.sh"),
+    ),
+    (
+        "drivers/claude.sh",
+        include_str!("../../../../tools/ag/drivers/claude.sh"),
+    ),
+    (
+        "drivers/codex.sh",
+        include_str!("../../../../tools/ag/drivers/codex.sh"),
+    ),
+    (
+        "lib/args.sh",
+        include_str!("../../../../tools/ag/lib/args.sh"),
+    ),
+    (
+        "lib/config.sh",
+        include_str!("../../../../tools/ag/lib/config.sh"),
+    ),
+    (
+        "lib/doctor.sh",
+        include_str!("../../../../tools/ag/lib/doctor.sh"),
+    ),
+    (
+        "lib/harness.sh",
+        include_str!("../../../../tools/ag/lib/harness.sh"),
+    ),
+    (
+        "lib/launch.sh",
+        include_str!("../../../../tools/ag/lib/launch.sh"),
+    ),
+    (
+        "lib/shims.sh",
+        include_str!("../../../../tools/ag/lib/shims.sh"),
+    ),
+    (
+        "lib/util.sh",
+        include_str!("../../../../tools/ag/lib/util.sh"),
+    ),
+];
+/// Where provisioning stages [`AG_FILES`] before running their installer.
+const AG_STAGE_DIR: &str = "~/.local/share/fleet/ag-src";
+/// The alias every provisioned host gets: `cl` = Claude Code without
+/// permission prompts, the same launch fleet's panes use.
+const AG_CL_ALIAS: &str = "cl=claude --yolo";
+/// install.sh copies a dozen small files and runs `ag shims` + `ag doctor`.
+const AG_INSTALL_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Sentinel-delimited block claude-fleet maintains in each host's
 /// `~/.claude/CLAUDE.md`. Idempotent: appended if absent, refreshed in place
 /// if the body changed, left alone if up to date. Anything outside the
@@ -42,15 +96,20 @@ If you run inside a fleet tmux session, use the **fleet-friendly-name** skill to
 label this session; it defines when to fire and how to look up your `host_alias`.";
 
 /// SHA-256 over everything provisioning ships that is CONTENT (not a
-/// secret, not a URL): both skills, the managed CLAUDE.md body and the
-/// hook shape. Stored per host by `set_host_provisioned`; a host whose
-/// stored value differs is `provision_stale` (hosts F1: every host ran
-/// skills from 15 hub upgrades ago, and nothing compared).
+/// secret, not a URL): both skills, the managed CLAUDE.md body, the
+/// hook shape, and the ag launcher. Stored per host by
+/// `set_host_provisioned`; a host whose stored value differs is
+/// `provision_stale` (hosts F1: every host ran skills from 15 hub
+/// upgrades ago, and nothing compared).
 pub fn fingerprint() -> &'static str {
     static FP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     FP.get_or_init(|| {
+        let ag: String = AG_FILES
+            .iter()
+            .map(|(path, body)| format!("{path}\u{0}{body}\u{0}"))
+            .collect();
         crate::mcp::auth::sha256_hex(&format!(
-            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}",
+            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}",
             crate::service::hooks_install::hook_shape()
         ))
     })
@@ -246,6 +305,11 @@ pub async fn provision_content_only(
         base.session_start_context,
     )
     .await?;
+    if install_ag(store) {
+        if let Some(w) = provision_ag(ssh, host).await {
+            tracing::warn!(host, warning = %w, "[provision] ag launcher");
+        }
+    }
     if let Ok(s) = store.lock() {
         let _ = s.set_host_provisioned(host, true);
     }
@@ -499,7 +563,8 @@ pub async fn wsl_hooks_warning(ssh: &dyn SshExec, host: &str, port: u16) -> Opti
 /// provisioned. Shared by [`provision_hosts`] and the per-host Rotate action.
 ///
 /// `Ok(Some(warning))` is provisioned but degraded: a WSL distribution whose
-/// hooks cannot reach this desktop ([`wsl_hooks_warning`]).
+/// hooks cannot reach this desktop ([`wsl_hooks_warning`]), the `ag`
+/// launcher not installing ([`provision_ag`]), or both (joined with `; `).
 pub async fn provision_host_with_token(
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
@@ -554,10 +619,19 @@ pub async fn provision_host_with_token(
     if host != "local" && !base.public && !routes_to_agent(store, host)? && !wsl {
         tunnels.ensure(host, base.port, base.port);
     }
-    let warning = if wsl && !base.public {
+    let wsl_warning = if wsl && !base.public {
         wsl_hooks_warning(ssh, host, base.port).await
     } else {
         None
+    };
+    let ag_warning = if install_ag(store) {
+        provision_ag(ssh, host).await
+    } else {
+        None
+    };
+    let warning = match (wsl_warning, ag_warning) {
+        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+        (a, b) => a.or(b),
     };
     if let Ok(s) = store.lock() {
         let _ = s.set_host_provisioned(host, true);
@@ -581,6 +655,71 @@ pub async fn provision_tmux_clipboard(ssh: &dyn SshExec, host: &str) -> Result<(
     let addition = "\n# Enable OSC 52 clipboard (added by claude-fleet)\nset -g set-clipboard on\n";
     let merged = format!("{}{}", existing.trim_end(), addition);
     write_host_file(ssh, host, dir, TMUX_CONF, &merged).await
+}
+
+/// `bash -lc` body that runs the staged installer (see [`provision_ag`]).
+fn ag_install_script() -> String {
+    let stage = remote_path(AG_STAGE_DIR);
+    format!(
+        "bash {stage}/install.sh --from {stage} --alias {} </dev/null 2>&1",
+        quote(AG_CL_ALIAS)
+    )
+}
+
+/// `provision.install_ag` (default on).
+fn install_ag(store: &Mutex<Store>) -> bool {
+    lock(store)
+        .map(|s| {
+            crate::service::settings::get_bool(&s, crate::service::settings::PROVISION_INSTALL_AG)
+        })
+        .unwrap_or(false)
+}
+
+/// Step 5 (F2): stage fleet's `ag` launcher under [`AG_STAGE_DIR`] (with a
+/// `.fleet-managed` marker, which the installer copies along) and run its
+/// installer: `~/.local/share/ag`, `~/.local/bin/ag`, a config with the
+/// `cl` alias unless the user already has one, and the `cl` shim.
+/// Optional by design — `None` when installed, otherwise a warning and
+/// provisioning carries on: the pane command's fallback still reaches
+/// plain `claude` (see `tmux::CL_FALLBACK`).
+pub async fn provision_ag(ssh: &dyn SshExec, host: &str) -> Option<String> {
+    let files = AG_FILES.iter().map(|(rel, body)| {
+        let dir = match rel.rsplit_once('/') {
+            Some((d, _)) => format!("{AG_STAGE_DIR}/{d}"),
+            None => AG_STAGE_DIR.to_string(),
+        };
+        (dir, format!("{AG_STAGE_DIR}/{rel}"), body.to_string())
+    });
+    let marker = (
+        AG_STAGE_DIR.to_string(),
+        format!("{AG_STAGE_DIR}/{MANAGED_MARKER}"),
+        marker_content(),
+    );
+    for (dir, path, body) in files.chain(std::iter::once(marker)) {
+        if let Err(e) = write_host_file(ssh, host, &dir, &path, &body).await {
+            return Some(format!("ag launcher not installed: {}", e.message));
+        }
+    }
+    match crate::ssh::run_shell(ssh, host, &ag_install_script(), AG_INSTALL_TIMEOUT).await {
+        Ok(out) if out.status.success() => None,
+        Ok(out) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let tail: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+            let tail = tail[tail.len().saturating_sub(3)..].join(" | ");
+            Some(format!(
+                "ag launcher not installed (install.sh exit {}): {}",
+                out.status
+                    .code()
+                    .map_or_else(|| "signal".to_string(), |c| c.to_string()),
+                tail.chars().take(300).collect::<String>()
+            ))
+        }
+        Err(e) => Some(format!("ag launcher not installed: {}", e.message)),
+    }
 }
 
 /// Ensure `~/.claude/CLAUDE.md` on `host` contains the claude-fleet managed
@@ -1827,12 +1966,16 @@ mod tests {
 
     /// hosts F1: the content fingerprint that `provision_stale` compares.
     #[test]
-    fn fingerprint_is_stable_and_covers_skills_claude_md_and_the_hook_shape() {
+    fn fingerprint_is_stable_and_covers_skills_claude_md_the_hook_shape_and_ag() {
         let fp = fingerprint();
         assert_eq!(fp.len(), 64, "sha256 hex");
         assert_eq!(fp, fingerprint(), "computed once, same every call");
+        let ag: String = AG_FILES
+            .iter()
+            .map(|(p, b)| format!("{p}\u{0}{b}\u{0}"))
+            .collect();
         let expected = crate::mcp::auth::sha256_hex(&format!(
-            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}",
+            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}",
             crate::service::hooks_install::hook_shape()
         ));
         assert_eq!(fp, expected);
@@ -1842,6 +1985,101 @@ mod tests {
         assert!(shape.contains("Stop||http"));
         assert!(shape.contains("SessionStart||command"));
         assert!(shape.contains("fleet-hook.headers"));
+        // And an ag change moves the value too — not just carried along inert.
+        let without_ag = crate::mcp::auth::sha256_hex(&format!(
+            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}",
+            crate::service::hooks_install::hook_shape()
+        ));
+        assert_ne!(
+            fp, without_ag,
+            "an ag change must make hosts provision_stale"
+        );
+    }
+
+    /// F2: every file of tools/ag (except README.md) is compiled in, so a
+    /// new lib/driver file cannot silently stay off the hosts.
+    #[test]
+    fn every_ag_file_is_compiled_in() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/ag");
+        let mut on_disk = Vec::new();
+        for sub in ["", "lib", "drivers"] {
+            for e in std::fs::read_dir(root.join(sub)).expect("read tools/ag") {
+                let e = e.unwrap();
+                if e.file_type().unwrap().is_file() {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    if name != "README.md" {
+                        on_disk.push(if sub.is_empty() {
+                            name
+                        } else {
+                            format!("{sub}/{name}")
+                        });
+                    }
+                }
+            }
+        }
+        on_disk.sort();
+        let mut listed: Vec<String> = AG_FILES.iter().map(|(p, _)| p.to_string()).collect();
+        listed.sort();
+        assert_eq!(on_disk, listed, "list every tools/ag file in AG_FILES");
+    }
+
+    /// The exact script / calls [`provision_ag`] issues on a fresh host:
+    /// every [`AG_FILES`] entry staged, then its marker, then the installer.
+    fn ag_stage_steps() -> Vec<Step> {
+        let mut steps = Vec::new();
+        for (rel, body) in AG_FILES {
+            let path = format!("{AG_STAGE_DIR}/{rel}");
+            let dir = match rel.rsplit_once('/') {
+                Some((d, _)) => format!("{AG_STAGE_DIR}/{d}"),
+                None => AG_STAGE_DIR.to_string(),
+            };
+            steps.push(Step::Script(remote_write_script(&dir, &path, body)));
+        }
+        steps.push(Step::Script(remote_write_script(
+            AG_STAGE_DIR,
+            &format!("{AG_STAGE_DIR}/{MANAGED_MARKER}"),
+            &marker_content(),
+        )));
+        steps.push(Step::Script(ag_install_script()));
+        steps
+    }
+
+    #[tokio::test]
+    async fn provision_ag_stages_the_tree_then_runs_its_installer() {
+        let fake = fresh_host();
+        assert_eq!(provision_ag(&fake, "h1").await, None);
+        let calls = fake.calls();
+        let steps: Vec<Step> = calls.iter().map(step_of).collect();
+        assert_eq!(steps, ag_stage_steps());
+        assert_quoting_invariants(&calls);
+    }
+
+    #[test]
+    fn ag_install_script_is_quoted_and_adds_the_cl_alias() {
+        assert_eq!(
+            ag_install_script(),
+            "bash \"$HOME\"/'.local/share/fleet/ag-src'/install.sh --from \"$HOME\"/'.local/share/fleet/ag-src' --alias 'cl=claude --yolo' </dev/null 2>&1"
+        );
+    }
+
+    /// A failed install is a warning, never an error: the pane command's
+    /// fallback still reaches plain `claude`.
+    #[tokio::test]
+    async fn provision_ag_failure_is_a_warning() {
+        let fake = fresh_host();
+        fake.on(
+            Match::script(&ag_install_script()),
+            Reply::fail(
+                5,
+                "install.sh: /home/fake/.local/bin/ag exists and is not ours",
+            ),
+        );
+        let warning = provision_ag(&fake, "h1").await.expect("a warning");
+        assert!(
+            warning.starts_with("ag launcher not installed"),
+            "{warning}"
+        );
+        assert!(warning.contains("exit 5"), "{warning}");
     }
 
     /// hosts F1: the unattended refresh writes skills and hooks with the
@@ -2676,5 +2914,25 @@ mod tests {
         let s = store.lock().unwrap();
         let hosts = s.list_hosts().unwrap();
         assert!(hosts.iter().find(|h| h.alias == "h").unwrap().provisioned);
+    }
+
+    /// F2: `provision.install_ag` defaults on, so an ordinary
+    /// `provision_host_with_token` call also stages and installs the ag
+    /// launcher, with no warning when it succeeds.
+    #[tokio::test]
+    async fn provision_host_with_token_installs_ag_by_default() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        store.lock().unwrap().insert_host("h", Some("h")).unwrap();
+        let tunnels = quiet_tunnels();
+        let fake = fresh_host();
+        let warning = provision_host_with_token(&store, &fake, &tunnels, "h", &base(), false)
+            .await
+            .unwrap();
+        assert_eq!(warning, None);
+        let script = ag_install_script();
+        assert!(fake
+            .calls()
+            .iter()
+            .any(|c| c.script().as_deref() == Some(script.as_str())));
     }
 }
