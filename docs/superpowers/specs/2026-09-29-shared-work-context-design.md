@@ -166,8 +166,11 @@ A proposed-but-not-accepted item cannot be started (`E_INVALID "accept the propo
   - a badge with its number of open proposals,
   - the live-session count,
   - **Start**.
-- A **+ New task** field sits on top. ▾ adds a project and notes.
-- ⋯ opens the existing org/group tree (Grouped view), Review and Placement rules.
+- The Work tab's existing header stays as it is: the **Tasks | Review** tabs, ⚙ placement rules, the saved-view select with *Save as…*, search, *▾ Filters*, *Assigned to me* and *To review*.
+- One control is added to that header: a **List | Grouped** toggle. List is the new status view and the default. Grouped is today's org → group tree, unchanged.
+- A **+ New task** field sits at the top of the List. ▾ adds a project and notes.
+- Each row keeps today's facts: tracker badge, key and title, the tracker's own status name (e.g. *Backlog*, *In Development*), org, `N active · N past`, the ★ session occurrences, and the needs-you dot.
+- A ticket's section comes from Fleet's effective status plus live sessions, not from the tracker's status name. A Jira *Done* ticket with a live session sits in Doing and still shows *Done* in its row.
 - The ☑ Tasks popover is removed, because jobs are in the list. `TasksPanel` stays in the session details.
 
 **Task page (the details pane, `WorkTaskDetail`).** Sections, in this order:
@@ -196,8 +199,8 @@ Nothing the Work tab does today is dropped. The new list is a new default view o
 | **Filters bar** (`WorkFiltersBar`): search, the Filters panel (org, tracker, status, sessions), the *Mine* and *Review* toggles | Stays on top of My work, as the same component and the same `WorkTreeFilters` object, and filters the list. The status filter narrows which sections show. |
 | *Archived* toggle | Replaced in My work by the Done section, which always reads archived tasks. It stays in Grouped view. |
 | **Saved views** (`work_views`, shared with the phone and other desktops) | Stay in the filter bar and apply to My work. A saved view is the same filters object, so existing views keep working. |
-| Org → group tree, placements, placement rules | ⋯ → **Grouped view** (today's `WorkTree`, unchanged) and ⋯ → **Placement rules**. |
-| Review tab (link suggestions) | ⋯ → **Review**. The attention strip's link-suggestion entry is unchanged. |
+| Org → group tree, placements, placement rules | The **List \| Grouped** toggle's Grouped side (today's `WorkTree`, unchanged). Placement rules stay on the header's ⚙. |
+| Review tab (link suggestions) | Unchanged: the header's **Review** tab. |
 | Attention strip (`ScopeAttention`, `TrackerAttention`, `LinkReview`, `TidyReview`) | Unchanged. |
 | **Today view** (the details empty state, ⌘⇧T) | Unchanged. Part 2 may feed it task summaries. |
 | ⌘⇧W (Sessions ↔ Work), ⌘⇧O (cycle org), ⌘K *My work / Current sprint / Recent* | Unchanged. ⌘⇧O cycles the same org filter, so it now filters My work. |
@@ -264,7 +267,7 @@ These carry over, adapted to this model:
 
 ## 9. Prerequisite and open items
 
-- **Prerequisite for "my work":** connect the PapayaPOS Jira in Settings → Work. There are 0 trackers today.
+- **Trackers:** the hub (`fleet.rlt.sk`) already has *Papaya POS Jira* and *SalesTwins Asana* connected, with orgs 32bit, Papaya POS and SalesTwins. An earlier "0 trackers" reading came from a local instance, not the hub. "My work" needs no setup.
 - **To verify before the plan:**
   - Claude Code's current todo/task tool names and input shapes, and whether subagent (`Task`) calls should become steps;
   - whether `PostToolUse` fires for them with the input in the payload.
