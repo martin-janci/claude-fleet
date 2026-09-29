@@ -786,11 +786,11 @@ pub struct HostRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
     /// When `claude_version` / `tmux_version` were last read from the host
-    /// (migration 072). `None`: never — the values are whatever `add_host`
+    /// (migration 076). `None`: never — the values are whatever `add_host`
     /// or an older store left. Per-field default: an older hub omits it.
     #[serde(default)]
     pub claude_version_at: Option<i64>,
-    /// Health sample from the last reachable probe (migration 073). All
+    /// Health sample from the last reachable probe (migration 077). All
     /// per-field default: an older hub omits them.
     #[serde(default)]
     pub disk_home_free_kb: Option<i64>,
@@ -813,7 +813,7 @@ pub struct HostRow {
     /// The fleet-agent version its last hello reported (agent hosts).
     #[serde(default)]
     pub agent_version: Option<String>,
-    /// When `provision_hosts` last completed on this host (migration 074).
+    /// When `provision_hosts` last completed on this host (migration 078).
     #[serde(default)]
     pub provisioned_at: Option<i64>,
     /// `provisioned` but with content older than this build ships (or
@@ -824,7 +824,7 @@ pub struct HostRow {
 
 /// The volatile half of a host row, as `host:pinged` carries it (host
 /// identity & health, task 2): a value that moves every pass must not turn
-/// every ping into a full-row `host:probed`. Mirrors the migration-073
+/// every ping into a full-row `host:probed`. Mirrors the migration-077
 /// columns.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HostHealth {

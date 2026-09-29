@@ -43,6 +43,9 @@ impl FleetTools {
             health::overlay_agents(&mut h.hosts, &live, crate::app_version::get());
         }
         if let Some(host) = caller.host_alias.as_deref() {
+            // Its own host's telemetry (disk, load, versions) only; the host
+            // counts stay fleet-wide, as the usage note says.
+            h.hosts.retain(|r| r.alias == host);
             match self.reader().lock() {
                 Ok(s) => {
                     health::scope_usage_to_host(&mut h, &s, host);

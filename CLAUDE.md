@@ -377,6 +377,25 @@ first read booked as `backfill` apart from the day's live cost (migration
 `docs/hub.md` → *Backups* / *Upgrade with the script*, plan
 `docs/superpowers/plans/2026-09-27-hub-ops-accounting.md`.
 
+Host identity and health (#354) is landed, per
+`docs/superpowers/plans/2026-09-27-host-identity-health.md`: migrations
+076 (`hosts.claude_version_at`), 077 (the health sample — disk / load /
+mem / uptime, `health_at`, `last_hook_at`, `agent_version`) and 078
+(`provision_fingerprint` / `provisioned_at`). The reconcile probe reads
+versions every `VERSIONS_REFRESH_SECS` (6 h) and the health sample every
+pass, which rides `host:pinged`; `fleet_health.hosts[]` (`disk_low` /
+`claude_behind` / `agent_behind` / `hooks_silent`) is judged against
+`health.version_max_age_secs`, `health.disk_low_pct`,
+`health.claude_max_behind` and `health.hooks_silent_secs`. One rule,
+`service::hosts::active_hosts`, picks the hosts of every host loop: a
+hidden host is skipped by reconcile, not reaped. `merge_host` /
+`fleet-hub host merge <from> <into>` retires a renamed alias (its
+worktrees, sessions, usage, asset inventory, org rules and org move to the
+target); a provisioning records its content fingerprint, so an older one
+reads `provision_stale` (`fleet-hub provision --host <alias>
+--content-only` refreshes it); `forget_project` drops a project row, and
+`refresh_projects` drops rows that vanished.
+
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;
 `/clear`, `/resume` and compaction tracked as conversation switches;

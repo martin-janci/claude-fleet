@@ -3792,8 +3792,9 @@ fn seed_usage(fx: &Fx) {
 async fn fleet_healths_totals_are_fenced_for_an_org_bound_client() {
     let fx = fixture(false);
     seed_usage(&fx);
-    // (daily cost, usage_by_host keys, hosts_total, sessions_total)
-    let read = |a: &Answer| -> (i64, Vec<String>, i64, i64) {
+    // (daily cost, usage_by_host keys, hosts_total, sessions_total,
+    // hosts[] aliases)
+    let read = |a: &Answer| -> (i64, Vec<String>, i64, i64, Vec<String>) {
         let v: Value = serde_json::from_str(text(a)).unwrap();
         let day: i64 = v["usage_by_day"]
             .as_array()
@@ -3805,27 +3806,40 @@ async fn fleet_healths_totals_are_fenced_for_an_org_bound_client() {
             .as_object()
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default();
+        let mut rows: Vec<String> = v["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["alias"].as_str().unwrap().to_string())
+            .collect();
+        rows.sort();
         (
             day,
             hosts,
             v["hosts_total"].as_i64().unwrap(),
             v["sessions_total"].as_i64().unwrap(),
+            rows,
         )
     };
     let names = |hs: &[&str]| hs.iter().map(|h| h.to_string()).collect::<Vec<_>>();
-    let everything = (23_100, names(&["h-a", "h-b", "h-n"]), 3, 4);
+    let all = names(&["h-a", "h-b", "h-n"]);
+    let everything = (23_100, all.clone(), 3, 4, all);
+    let (an, bn) = (names(&["h-a", "h-n"]), names(&["h-b", "h-n"]));
+    let (ha, hb, hn) = (names(&["h-a"]), names(&["h-b"]), names(&["h-n"]));
     for who in EVERYONE {
         let a = call(&fx, *who, "fleet_health", json!({})).await;
         assert_eq!(code(&a), "OK", "{who:?}: {a:?}");
         let want = match who {
             // D31 on (the default): the org's hosts and h-n. s_x is A's
             // too; B's s_b and its 20 000 are nowhere.
-            Who::BoundA => (3_100, names(&["h-a", "h-n"]), 2, 3),
-            Who::BoundB => (23_000, names(&["h-b", "h-n"]), 2, 2),
-            // As before: its own host's spend, fleet-wide counts.
-            Who::HostA => (100, names(&["h-a"]), 3, 4),
-            Who::HostB => (20_000, names(&["h-b"]), 3, 4),
-            Who::HostNone => (3_000, names(&["h-n"]), 3, 4),
+            // hosts[] (disk, load, versions) is narrowed the same way.
+            Who::BoundA => (3_100, an.clone(), 2, 3, an.clone()),
+            Who::BoundB => (23_000, bn.clone(), 2, 2, bn.clone()),
+            // As before: its own host's spend, fleet-wide counts; hosts[]
+            // is its own host's row only.
+            Who::HostA => (100, ha.clone(), 3, 4, ha.clone()),
+            Who::HostB => (20_000, hb.clone(), 3, 4, hb.clone()),
+            Who::HostNone => (3_000, hn.clone(), 3, 4, hn.clone()),
             _ => everything.clone(),
         };
         assert_eq!(read(&a), want, "{who:?}");
@@ -3842,8 +3856,8 @@ async fn fleet_healths_totals_are_fenced_for_an_org_bound_client() {
         is_ok(Who::Master, &a, "D31 off");
     }
     for (who, want) in [
-        (Who::BoundA, (100, names(&["h-a"]), 1, 2)),
-        (Who::BoundB, (20_000, names(&["h-b"]), 1, 1)),
+        (Who::BoundA, (100, ha.clone(), 1, 2, ha.clone())),
+        (Who::BoundB, (20_000, hb.clone(), 1, 1, hb.clone())),
         (Who::Master, everything.clone()),
         (Who::ClientReadonly, everything.clone()),
     ] {

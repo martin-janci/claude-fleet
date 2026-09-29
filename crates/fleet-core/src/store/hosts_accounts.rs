@@ -202,7 +202,7 @@ impl Store {
     }
 
     /// Stamp when the host's versions were last read from the host itself
-    /// (migration 072). Written by the reconcile pass only on a pass whose
+    /// (migration 076). Written by the reconcile pass only on a pass whose
     /// probe carried a `versions` section, and by `probe_host`; the
     /// versions themselves still travel through `update_host_probe`. No
     /// event: the same transaction's `update_host_probe_in_tx` announces
@@ -215,7 +215,7 @@ impl Store {
         Ok(())
     }
 
-    /// Write one health sample (migration 073). No event: the reconcile
+    /// Write one health sample (migration 077). No event: the reconcile
     /// transaction's `update_host_probe_in_tx` announces the row and puts
     /// this sample on the ping.
     pub fn set_host_health(
@@ -450,7 +450,7 @@ impl Store {
     }
 
     /// Mark a host provisioned (or not). With `true` the content fingerprint
-    /// this build ships and the time are recorded too (migration 074), so
+    /// this build ships and the time are recorded too (migration 078), so
     /// `HostRow::provision_stale` can compare on every later read; with
     /// `false` both are cleared.
     pub fn set_host_provisioned(
@@ -482,6 +482,8 @@ impl Store {
     /// `from` session whose `claude_session_id` already exists under `into`
     /// is dropped (the newer alias observed the same agent), a `from`
     /// session whose `tmux_name` clashes is dropped too, the rest move.
+    /// An asset-inventory row or org rule `into` already has keeps
+    /// `into`'s; `into` takes `from`'s org only when it has none.
     pub fn merge_host_alias(
         &self,
         from: &str,
@@ -595,6 +597,33 @@ impl Store {
             rusqlite::params![from, into],
         )?;
         tx.execute("DELETE FROM host_tokens WHERE host_alias = ?1", [from])?;
+        // Asset inventory (migrations 030/031): `into`'s own scan wins a
+        // clash on (harness, kind, name); the rest move.
+        tx.execute(
+            "UPDATE OR IGNORE asset_inventory SET host_alias = ?2 WHERE host_alias = ?1",
+            rusqlite::params![from, into],
+        )?;
+        tx.execute("DELETE FROM asset_inventory WHERE host_alias = ?1", [from])?;
+        // Org rules (migration 050): a `from` rule identical to one `into`
+        // already has goes (the same test `add_org_rule` refuses a
+        // duplicate by, across orgs); the rest now name `into`.
+        tx.execute(
+            "DELETE FROM org_rules WHERE host_alias = ?1 AND EXISTS (
+               SELECT 1 FROM org_rules r2 WHERE r2.host_alias = ?2
+                  AND r2.owner IS org_rules.owner AND r2.repo IS org_rules.repo
+                  AND r2.path_prefix IS org_rules.path_prefix)",
+            rusqlite::params![from, into],
+        )?;
+        tx.execute(
+            "UPDATE org_rules SET host_alias = ?2 WHERE host_alias = ?1",
+            rusqlite::params![from, into],
+        )?;
+        // The host's org: an org `into` already has is kept.
+        tx.execute(
+            "UPDATE hosts SET org_id = (SELECT org_id FROM hosts WHERE alias = ?1) \
+             WHERE alias = ?2 AND org_id IS NULL",
+            rusqlite::params![from, into],
+        )?;
         tx.execute("DELETE FROM hosts WHERE alias = ?1", [from])?;
         tx.commit()?;
         for id in &dropped {
@@ -1059,6 +1088,80 @@ mod tests {
             s.merge_host_alias("nope", "a").unwrap_err().code,
             "E_NOTFOUND"
         );
+    }
+
+    /// The merge left `asset_inventory`, `org_rules.host_alias` and
+    /// `hosts.org_id` on the deleted alias.
+    #[test]
+    fn merge_host_alias_moves_inventory_org_rules_and_org_id() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("from", None).unwrap();
+        s.insert_host("into", None).unwrap();
+        let org1 = s.add_org("one", None, false).unwrap().id;
+        let org2 = s.add_org("two", None, false).unwrap().id;
+        s.set_host_org("from", Some(org1)).unwrap();
+        s.conn_for_test()
+            .execute_batch(
+                "INSERT INTO asset_inventory (host_alias, harness, kind, name, state, scanned_at) VALUES
+                   ('from','claude','skill','clash','drift',1),
+                   ('into','claude','skill','clash','in_sync',2),
+                   ('from','claude','skill','only','in_sync',1);",
+            )
+            .unwrap();
+        let rule = |org_id: i64, host: &str, owner: Option<&str>| OrgRuleRow {
+            org_id,
+            owner: owner.map(str::to_string),
+            host_alias: Some(host.to_string()),
+            ..Default::default()
+        };
+        s.add_org_rule(rule(org1, "from", Some("acme"))).unwrap();
+        s.add_org_rule(rule(org1, "into", Some("acme"))).unwrap();
+        s.add_org_rule(rule(org1, "from", None)).unwrap();
+
+        s.merge_host_alias("from", "into").unwrap();
+
+        assert_eq!(s.host_org("into").unwrap(), Some(org1));
+        let count =
+            |sql: &str| -> i64 { s.conn_for_test().query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(
+            count("SELECT COUNT(*) FROM asset_inventory WHERE host_alias='from'"),
+            0
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM org_rules WHERE host_alias='from'"),
+            0
+        );
+        let clash_state: String = s
+            .conn_for_test()
+            .query_row(
+                "SELECT state FROM asset_inventory WHERE host_alias='into' AND name='clash'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(clash_state, "in_sync", "into's own scan wins a clash");
+        assert_eq!(
+            count("SELECT COUNT(*) FROM asset_inventory WHERE host_alias='into' AND name='only'"),
+            1
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM org_rules WHERE host_alias='into' AND owner='acme'"),
+            1,
+            "the duplicate rule collapsed to one"
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM org_rules WHERE host_alias='into' AND owner IS NULL"),
+            1,
+            "the host-only rule moved"
+        );
+
+        // An `into` that already has an org keeps it.
+        s.insert_host("b", None).unwrap();
+        s.insert_host("c", None).unwrap();
+        s.set_host_org("b", Some(org1)).unwrap();
+        s.set_host_org("c", Some(org2)).unwrap();
+        s.merge_host_alias("b", "c").unwrap();
+        assert_eq!(s.host_org("c").unwrap(), Some(org2));
     }
 
     #[test]

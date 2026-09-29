@@ -2201,8 +2201,10 @@ sessions that were live on it are ghosted with `lost_reason =
 local_disabled` on every start (nothing probes `local` on such a hub, so
 they would otherwise stay live and refuse every action); they are ghosted
 on the start that finds them and reaped on the next
-(`retire_local_sessions`); any host nothing probes is reaped the same way
-each reconcile pass. `refresh_projects` has no
+(`retire_local_sessions`), and each reconcile pass reaps that `local` the
+same way. A host you hide yourself is different: Hide is reversible, so its
+sessions are only frozen at their last-known state, and Unhide finds them
+again. `refresh_projects` has no
 local projects directory to scan there and returns the stored list, after
 folding duplicate worktree rows; `forget_project {project_id}` (master) drops
 a row the scan can never revisit. And the

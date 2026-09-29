@@ -56,8 +56,8 @@ fn usage_daily_has_backfill(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 072: `sessions` already has its
-/// `usage_backfill_until` column.
+/// `already_applied` guard of migration 075: `sessions` already has its
+/// `launch_model` column.
 fn sessions_has_launch_model(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'launch_model'",
@@ -67,6 +67,8 @@ fn sessions_has_launch_model(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 072: `sessions` already has its
+/// `usage_backfill_until` column.
 fn sessions_has_usage_backfill_until(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'usage_backfill_until'",
@@ -175,7 +177,7 @@ fn sessions_has_stale_demoted_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 072: `hosts` already has its
+/// `already_applied` guard of migration 076: `hosts` already has its
 /// `claude_version_at` column, and `ALTER TABLE ... ADD COLUMN` would fail
 /// again. See [`Migration`].
 fn hosts_has_claude_version_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -187,7 +189,7 @@ fn hosts_has_claude_version_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 073: `hosts` already has its
+/// `already_applied` guard of migration 077: `hosts` already has its
 /// `health_at` column (and the eight beside it), and `ALTER TABLE ... ADD
 /// COLUMN` would fail again. See [`Migration`].
 fn hosts_has_health_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -199,7 +201,7 @@ fn hosts_has_health_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 074: `hosts` already has its
+/// `already_applied` guard of migration 078: `hosts` already has its
 /// `provision_fingerprint` column (and `provisioned_at` beside it), and
 /// `ALTER TABLE ... ADD COLUMN` would fail again. See [`Migration`].
 fn hosts_has_provision_fingerprint(conn: &Connection) -> rusqlite::Result<bool> {
@@ -1007,7 +1009,7 @@ impl Store {
         Ok(())
     }
 
-    /// Migration 072's backfill: a row the tick demoted before the veto had
+    /// Migration 080's backfill: a row the tick demoted before the veto had
     /// its own column (`stale_working_at` set, `stale_demoted_at` not) keeps
     /// its veto. Runs on every open, after the collision repair, because an
     /// UPDATE of `sessions` compiles 065's row_version trigger, which names

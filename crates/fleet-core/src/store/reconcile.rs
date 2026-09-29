@@ -190,8 +190,9 @@ impl Store {
             .collect()
     }
 
-    /// Two-phase reap for a host nothing probes (hidden, or `local` on a
-    /// hub without a local host): every live row is ghosted this call and
+    /// Two-phase reap for a host nothing will ever probe (`local` on a hub
+    /// without a local host — never a user-hidden host, whose rows Unhide
+    /// must bring back): every live row is ghosted this call and
     /// every already-ghost row is deleted, both kinds, no TTL exemption —
     /// nothing on such a host can be resumed from here. A ghosted row also
     /// loses `claude_status` / `stuck_kind` / `current_activity`: a dead
@@ -963,8 +964,10 @@ mod tests {
     use super::*;
     use crate::store::test_support::*;
 
-    /// data-sync F2/F5, hub-ops F6: a host nothing probes (hidden, or `local`
-    /// on a hub without one) kept its rows forever, some still `working`.
+    /// data-sync F2/F5, hub-ops F6: `local` on a hub without a local host (the
+    /// one host nothing will ever probe) kept its rows forever, some still
+    /// `working`. A user-hidden host is never reaped (see
+    /// `reconcile_keeps_a_hidden_hosts_rows_and_unhide_restores_them`).
     #[test]
     fn reap_host_ghosts_ghosts_live_rows_then_deletes_ghosts_without_a_probe() {
         let s = Store::open_in_memory().unwrap();

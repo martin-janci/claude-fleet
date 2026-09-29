@@ -1668,9 +1668,10 @@ pub(crate) async fn reconcile_sessions_with(
         if deps.local_host {
             s.upsert_host("local")?;
         }
-        // One hidden/local rule for every host loop (hub-ops F6): hidden
-        // rows never enter the snapshot now; `reap_hidden_hosts` (step 4)
-        // handles what they still hold.
+        // One hidden/local rule for every host loop (hub-ops F6,
+        // `hosts::is_active`): hidden rows never enter the snapshot, their
+        // sessions stay frozen at their last-known state; a disabled
+        // `local` is reaped by `reap_unprobed_local` (step 4).
         crate::service::hosts::active_hosts(s.list_hosts()?, deps.local_host)
             .into_iter()
             .map(|h| {
@@ -1749,37 +1750,40 @@ pub(crate) async fn reconcile_sessions_with(
         tokio::task::yield_now().await;
     }
 
-    // 4. Hosts nothing probes — hidden rows, and `local` on a hub without a
-    //    local host — still hold session rows (a copied desktop store, a
-    //    host hidden after its rename). Reap them here, one savepoint per
-    //    host, so "hidden" stops meaning "immortal" (data-sync F2/F5).
-    reap_hidden_hosts(store, deps, now_unix());
+    // 4. `local` on a hub without a local host (`hub.local_host=false`) is
+    //    the one host nothing will ever probe, yet it can still hold rows (a
+    //    copied desktop store). Reap them here so they are not immortal
+    //    (data-sync F2/F5). A user-HIDDEN host is left alone: Hide is
+    //    reversible (Undo, Unhide), so its rows stay frozen at their
+    //    last-known state — names, work links, timeline and resumable
+    //    `claude_session_id`s intact — until the host is shown again.
+    reap_unprobed_local(store, deps, now_unix());
     Ok(())
 }
 
-/// Step 4 of [`reconcile_sessions_with`]. Best-effort per host: a failure
-/// is logged and the next pass tries again.
-pub(super) fn reap_hidden_hosts(store: &Mutex<Store>, deps: &ReconcileDeps, now: i64) {
+/// Step 4 of [`reconcile_sessions_with`]: ghost, then (next pass) delete the
+/// rows of `local` when this process has no local host. That is exactly the
+/// `local` case of [`crate::service::hosts::is_active`] — hidden hosts, the
+/// other inactive case, keep their rows. Best-effort: a failure is logged
+/// and the next pass tries again.
+pub(super) fn reap_unprobed_local(store: &Mutex<Store>, deps: &ReconcileDeps, now: i64) {
+    use crate::service::projects::LOCAL_HOST;
+    if deps.local_host {
+        return;
+    }
     let Ok(s) = lock(store) else { return };
-    let Ok(rows) = s.list_hosts() else { return };
-    for h in rows {
-        let unprobed = h.hidden || (!deps.local_host && h.alias == "local");
-        if !unprobed {
-            continue;
-        }
-        match s.reap_host_ghosts(&h.alias, now) {
-            Ok(n) if n > 0 => tracing::info!(
-                host = %h.alias,
-                reaped = n,
-                "[reconcile] reaped rows of an unprobed host"
-            ),
-            Ok(_) => {}
-            Err(e) => tracing::warn!(
-                host = %h.alias,
-                error = %e,
-                "[reconcile] reap of an unprobed host failed"
-            ),
-        }
+    match s.reap_host_ghosts(LOCAL_HOST, now) {
+        Ok(n) if n > 0 => tracing::info!(
+            host = LOCAL_HOST,
+            reaped = n,
+            "[reconcile] reaped rows of the disabled local host"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            host = LOCAL_HOST,
+            error = %e,
+            "[reconcile] reap of the disabled local host failed"
+        ),
     }
 }
 

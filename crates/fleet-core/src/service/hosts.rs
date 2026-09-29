@@ -49,9 +49,15 @@ pub fn list_hosts(store: &Mutex<Store>) -> Result<Vec<HostRow>, IpcError> {
 /// unreachable host to re-probe it, a kill loop must not.
 pub fn active_hosts(rows: Vec<HostRow>, local_enabled: bool) -> Vec<HostRow> {
     rows.into_iter()
-        .filter(|h| !h.hidden)
-        .filter(|h| local_enabled || h.alias != crate::service::projects::LOCAL_HOST)
+        .filter(|h| is_active(h, local_enabled))
         .collect()
+}
+
+/// The single definition behind [`active_hosts`]: not hidden, and not
+/// `local` when this process has no local host. Reachability is not part
+/// of it (see [`active_hosts`]).
+pub fn is_active(h: &HostRow, local_enabled: bool) -> bool {
+    !h.hidden && (local_enabled || h.alias != crate::service::projects::LOCAL_HOST)
 }
 
 /// One agent host, as `agent_status` reports it.
@@ -835,7 +841,13 @@ mod tests {
             vec!["local", "mac", "trn"],
             "reachability is the caller's business, hidden is not"
         );
-        assert_eq!(names(active_hosts(rows, false)), vec!["mac", "trn"]);
+        assert_eq!(names(active_hosts(rows.clone(), false)), vec!["mac", "trn"]);
+
+        // `is_active` is the one predicate behind it.
+        assert!(!is_active(&rows[2], true), "hidden is never active");
+        assert!(!is_active(&rows[0], false), "local without a local host");
+        assert!(is_active(&rows[0], true), "local with a local host");
+        assert!(is_active(&rows[3], false), "unreachable is still active");
     }
 
     #[tokio::test]

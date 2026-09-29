@@ -155,7 +155,7 @@ pub struct HostHealthRow {
     /// More than `health.claude_max_behind` patch releases behind the
     /// fleet's newest FRESH version.
     pub claude_behind: bool,
-    /// An agent host whose agent is not the hub's version.
+    /// An agent host whose agent is older than the hub (not merely different).
     pub agent_behind: bool,
     /// Reachable, has a live non-external session, and no hook from its
     /// token within `hooks_silent_secs`.
@@ -172,6 +172,14 @@ pub struct HostHealthThresholds {
 /// A version stamp young enough to compare: the same 24 h the desktop's
 /// `health.version_max_age_secs` defaults to.
 const VERSION_FRESH_SECS: i64 = 86_400;
+
+/// A health sample (`HostRow::health_at`) young enough to judge `disk_low`
+/// on. The sample is rewritten on every reconcile pass (~20 s) of a
+/// reachable host, so one an hour old means the host stopped answering and
+/// its disk reading says nothing about now. The desktop's health line uses
+/// the same value (`HEALTH_SAMPLE_FRESH_SECS` in `src/lib/hosts_view.ts`);
+/// keep the two equal.
+pub const HEALTH_SAMPLE_FRESH_SECS: i64 = 3600;
 
 /// `2.1.282` → `[2, 1, 282]`; `None` when not a dotted number.
 fn version_parts(v: &str) -> Option<Vec<i64>> {
@@ -220,6 +228,10 @@ pub fn hosts_health(
                 }
                 _ => None,
             };
+            // A stale sample keeps its percent but raises no flag.
+            let sample_fresh = h
+                .health_at
+                .is_some_and(|at| now - at <= HEALTH_SAMPLE_FRESH_SECS);
             let live = agents
                 .iter()
                 .find(|(a, _)| a == &h.alias)
@@ -236,7 +248,7 @@ pub fn hosts_health(
                 claude_version_at: h.claude_version_at,
                 agent_version: agent_version.clone(),
                 disk_home_pct,
-                disk_low: disk_home_pct.is_some_and(|p| p >= t.disk_low_pct),
+                disk_low: sample_fresh && disk_home_pct.is_some_and(|p| p >= t.disk_low_pct),
                 claude_behind: match (&newest, &h.claude_version) {
                     (Some(n), Some(v)) if fresh(h) => {
                         patch_behind(v, n).is_some_and(|b| b > t.claude_max_behind)
@@ -253,8 +265,17 @@ pub fn hosts_health(
         .collect()
 }
 
+/// An agent host whose agent is OLDER than the hub. An agent ahead of the
+/// hub (after a hub rollback) is not behind, and a version that is not a
+/// dotted number flags nothing — as the desktop's `compareVersions`.
 fn agent_behind(transport: &str, agent_version: Option<&str>, hub_version: &str) -> bool {
-    transport == "agent" && agent_version.is_some_and(|v| v != hub_version)
+    transport == "agent"
+        && agent_version.is_some_and(|v| {
+            matches!(
+                (version_parts(v), version_parts(hub_version)),
+                (Some(a), Some(b)) if a < b
+            )
+        })
 }
 
 /// Overlay the agents connected right now onto [`Health::hosts`]: the live
@@ -712,7 +733,7 @@ pub fn hosts_in_scope(s: &Store, scope: &OrgScope) -> Vec<HostRow> {
 
 /// Re-derive every roll-up that sums across hosts for an org-bound client
 /// (work graph M14), so nothing in `fleet_health` counts another org's
-/// hosts or sessions: host counts and the tunnels over
+/// hosts or sessions: host counts, the tunnels and `hosts[]` over
 /// [`hosts_in_scope`]; session counts over the sessions the client may
 /// list ([`OrgScope::sees_row`]); per-host spend over those sessions on
 /// those hosts; the daily spend over those hosts' `usage_daily` rows. The
@@ -722,6 +743,8 @@ pub fn scope_to_org(h: &mut Health, s: &Store, scope: &OrgScope) {
     let hosts = hosts_in_scope(s, scope);
     let visible: std::collections::BTreeSet<String> =
         hosts.iter().map(|x| x.alias.clone()).collect();
+    // Per-host telemetry (disk, load, versions) of the hosts it sees only.
+    h.hosts.retain(|r| visible.contains(&r.alias));
     let sessions: Vec<SessionRow> = s
         .list_all_sessions()
         .unwrap_or_default()
@@ -765,6 +788,7 @@ pub fn blank_rollups(h: &mut Health) {
     h.tunnels.clear();
     h.tunnels_flapping = 0;
     h.trackers = Default::default();
+    h.hosts.clear();
 }
 
 fn now_unix() -> i64 {
@@ -920,12 +944,14 @@ mod tests {
         full.transport = "agent".into();
         full.agent_version = Some("0.2.26".into());
         full.last_hook_at = Some(now - 7200);
+        full.health_at = Some(now - 60);
         let mut fine = host("fine", true);
         fine.disk_home_free_kb = Some(72_000_000);
         fine.disk_home_total_kb = Some(96_000_000);
         fine.claude_version = Some("2.1.282".into());
         fine.claude_version_at = Some(now - 60);
         fine.last_hook_at = Some(now - 60);
+        fine.health_at = Some(now - 60);
         let sessions = vec![
             session_on("full", Some("working")),
             session_on("fine", Some("idle")),
@@ -971,6 +997,60 @@ mod tests {
         overlay_agents(&mut rows, &[("trn".into(), "0.3.1".into())], "0.3.1");
         assert_eq!(rows[0].agent_version.as_deref(), Some("0.3.1"));
         assert!(!rows[0].agent_behind);
+        // A live agent AHEAD of the hub (a hub rollback) is not behind.
+        rows[0].agent_behind = true;
+        overlay_agents(&mut rows, &[("trn".into(), "0.4.0".into())], "0.3.1");
+        assert_eq!(rows[0].agent_version.as_deref(), Some("0.4.0"));
+        assert!(!rows[0].agent_behind);
+    }
+
+    /// `agent_behind` is "older than the hub", not "different from it".
+    #[test]
+    fn agent_behind_only_when_older() {
+        assert!(agent_behind("agent", Some("0.2.26"), "0.3.1"));
+        assert!(!agent_behind("agent", Some("0.4.0"), "0.3.1"));
+        assert!(!agent_behind("agent", Some("0.3.1"), "0.3.1"));
+        assert!(!agent_behind("agent", Some("garbage"), "0.3.1"));
+        assert!(!agent_behind("agent", None, "0.3.1"));
+        assert!(!agent_behind("ssh", Some("0.2.26"), "0.3.1"));
+    }
+
+    /// A disk sample from a host that stopped answering keeps its percent
+    /// but no longer raises `disk_low`; neither does a host never sampled.
+    #[test]
+    fn hosts_health_ignores_a_stale_disk_sample() {
+        let now = 1_700_000_000;
+        let t = HostHealthThresholds {
+            disk_low_pct: 90,
+            claude_max_behind: 30,
+            hooks_silent_secs: 3600,
+        };
+        let mut stale = host("stale", true);
+        stale.disk_home_free_kb = Some(3_000_000);
+        stale.disk_home_total_kb = Some(150_000_000);
+        stale.health_at = Some(now - 2 * 3600);
+        let mut unstamped = stale.clone();
+        unstamped.alias = "unstamped".into();
+        unstamped.health_at = None;
+        let rows = hosts_health(&[stale, unstamped], &[], &t, &[], "0.3.1", now);
+        for r in &rows {
+            assert_eq!(r.disk_home_pct, Some(98), "{}", r.alias);
+            assert!(!r.disk_low, "{}", r.alias);
+        }
+    }
+
+    /// An org-bound client whose scope could not be read is told nothing,
+    /// per-host telemetry included.
+    #[test]
+    fn blank_rollups_clears_the_host_rows() {
+        let mut h = health_check(&Mutex::new(Store::open_in_memory().unwrap()));
+        h.hosts = vec![HostHealthRow {
+            alias: "h-b".into(),
+            disk_home_pct: Some(98),
+            ..Default::default()
+        }];
+        blank_rollups(&mut h);
+        assert!(h.hosts.is_empty());
     }
 
     /// F8: two `-term` shells were `by_status.unknown = 2`, a third said

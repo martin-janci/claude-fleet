@@ -234,16 +234,24 @@ export function hostAttention(args: {
     };
   }
   // hosts F4 / ux F-14: two hosts sat at 98 % disk with no signal anywhere.
+  // A stale sample (the host stopped answering) earns no mark: the disk may
+  // have been cleaned up since.
   const disk = diskMeter(host);
-  if (disk && disk.pct >= diskLowPct) {
+  if (disk && healthSampleFresh(host, now) && disk.pct >= diskLowPct) {
     return {
       kind: 'disk_low',
       glyph: '▮',
       title: `${host.alias} is at ${disk.pct}% disk in $HOME (${gb(host.disk_home_free_kb ?? 0)} free): transcripts, worktrees and moves onto it will fail with ENOSPC.`,
     };
   }
-  // hosts F5: an agent that is not the hub's version silently lacks features.
-  if (host.transport === 'agent' && hubVersion && host.agent_version && host.agent_version !== hubVersion) {
+  // hosts F5: an agent older than the hub silently lacks features. One ahead
+  // (after a hub rollback) or unparseable earns no mark.
+  if (
+    host.transport === 'agent' &&
+    hubVersion &&
+    host.agent_version &&
+    compareVersions(host.agent_version, hubVersion) < 0
+  ) {
     return {
       kind: 'agent_old',
       glyph: '⬆',
@@ -297,6 +305,17 @@ export function diskMeter(h: HostRow): DiskMeter | null {
   return { pct, text: `${pct}% · ${gb(free)} free`, level };
 }
 
+/**
+ * A health sample older than this is stale: its disk reading earns no
+ * `disk_low` mark. The same value as the Rust `health::HEALTH_SAMPLE_FRESH_SECS`.
+ */
+export const HEALTH_SAMPLE_FRESH_SECS = 3600;
+
+/** The host's health sample was taken within `HEALTH_SAMPLE_FRESH_SECS`. */
+export function healthSampleFresh(h: HostRow, now: number): boolean {
+  return h.health_at != null && now - h.health_at <= HEALTH_SAMPLE_FRESH_SECS;
+}
+
 function days(secs: number): string {
   return secs >= 86400 ? `${Math.floor(secs / 86400)}d` : formatAge(secs);
 }
@@ -310,8 +329,10 @@ export function healthLine(h: HostRow, now: number): string {
   if (h.load_1m != null) parts.push(`load ${h.load_1m.toFixed(1)}`);
   if (h.uptime_secs != null) parts.push(`up ${days(h.uptime_secs)}`);
   if (h.transport === 'agent' && h.agent_version) parts.push(`agent ${h.agent_version}`);
-  void now;
-  return parts.length ? parts.join(' · ') : 'sampled, nothing readable';
+  if (!parts.length) parts.push('nothing readable');
+  const stale = healthSampleFresh(h, now) ? '' : ' (stale)';
+  parts.push(`sampled ${formatAge(now - h.health_at)} ago${stale}`);
+  return parts.join(' · ');
 }
 
 /** `checked 2h ago` for the claude/tmux version stamp. */
