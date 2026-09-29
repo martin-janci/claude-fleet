@@ -198,7 +198,7 @@ describe('PageView — data and links', () => {
     const days = (await screen.findByTestId('page-filter-days')) as HTMLSelectElement;
     expect(days.value).toBe('30');
     const hostSel = screen.getByTestId('page-filter-host') as HTMLSelectElement;
-    expect([...hostSel.options].map((o) => o.textContent)).toEqual(['All hosts', 'alpha', 'beta']);
+    expect(Array.from(hostSel.options).map((o) => o.textContent)).toEqual(['All hosts', 'alpha', 'beta']);
     await waitFor(() => expect(inv).toHaveBeenCalledWith('fetch_page_source', { id: 'usage.total', params: null }));
 
     await fireEvent.change(days, { target: { value: '7' } });
