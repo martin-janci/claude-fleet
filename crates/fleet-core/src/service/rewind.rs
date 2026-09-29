@@ -580,7 +580,7 @@ async fn rewind_conversation_with(
         crate::service::sessions::validate_new_worktree_name(name)?;
     }
     // Snapshot under one short lock; every I/O below happens with it released.
-    let (sess, claude_id, stored_transcript_path, fallback_cwd) = {
+    let (sess, claude_id, stored_transcript_path, fallback_cwd, launch) = {
         let s = lock(store)?;
         let sess = s
             .get_session_by_id(args.session_id)?
@@ -636,7 +636,16 @@ async fn rewind_conversation_with(
                 None => None,
             },
         };
-        (sess, claude_id, stored_transcript_path, fallback_cwd)
+        // A fork opens on the source's model / effort, as recreate, repair
+        // and move do; a rewind keeps them through `restart_session`.
+        let launch = crate::service::sessions::stored_launch(&s, sess.id);
+        (
+            sess,
+            claude_id,
+            stored_transcript_path,
+            fallback_cwd,
+            launch,
+        )
     };
 
     // A shell row has no Claude: its restart respawns a bare shell, which
@@ -647,6 +656,13 @@ async fn rewind_conversation_with(
             "a shell session has no Claude conversation to rewind or fork",
         ));
     }
+    // A fork starts a session in the source's project, so one with no
+    // project is refused here, before the copy (or a new worktree) is made:
+    // refused after it, the copy would stay behind as an orphan transcript.
+    let fork_project_id = match args.mode {
+        RewindMode::Fork => Some(project_id_for_fork(sess.project_id)?),
+        RewindMode::Rewind => None,
+    };
     // Rewind respawns the pane, so doing it mid-turn throws the turn away —
     // and "mid-turn" is not only `working`: a `blocked` session is waiting
     // on a permission prompt or a question INSIDE its turn. So the rule is
@@ -682,7 +698,7 @@ async fn rewind_conversation_with(
     // and nothing else can say what it is (`RewindArgs::new_worktree`).
     let new_wt: Option<NewWorktree> = match args.new_worktree.as_deref() {
         Some(name) => {
-            let project_id = project_id_for_fork(sess.project_id)?;
+            let project_id = project_id_for_fork(fork_project_id)?;
             let path = ops
                 .add_worktree(&sess.host_alias, src_tmux, fallback_cwd.as_deref(), name)
                 .await?;
@@ -796,7 +812,7 @@ async fn rewind_conversation_with(
             // written, beside the source's transcript. New worktree: its row
             // is recorded now, so `new_session` starts in an EXISTING
             // worktree — the path above, which the copy already names.
-            let project_id = project_id_for_fork(sess.project_id)?;
+            let project_id = project_id_for_fork(fork_project_id)?;
             let worktree_id = match &new_wt {
                 None => sess.worktree_id,
                 Some(wt) => match lock(store).and_then(|s| {
@@ -830,8 +846,8 @@ async fn rewind_conversation_with(
                     start_command: None,
                     friendly_name: None,
                     resume_claude_session_id: Some(new_id.clone()),
-                    model: None,
-                    effort: None,
+                    model: launch.model.clone(),
+                    effort: launch.effort.clone(),
                 })
                 .await;
             // A failed start leaves nothing a new-worktree fork made: the
@@ -1848,6 +1864,8 @@ mod tests {
         restart_err: Option<IpcError>,
         restarts: std::sync::Mutex<Vec<(String, String)>>,
         spawns: std::sync::Mutex<Vec<Option<String>>>,
+        /// Each spawn's `(model, effort)`.
+        launches: std::sync::Mutex<Vec<(Option<String>, Option<String>)>>,
         /// Where `add_worktree` makes its tree (`<root>/wt/<name>`) and
         /// `claude_projects_dir` points (`<root>/projects`).
         root: Option<std::path::PathBuf>,
@@ -1869,6 +1887,7 @@ mod tests {
                 restart_err: None,
                 restarts: Default::default(),
                 spawns: Default::default(),
+                launches: Default::default(),
                 root: None,
                 add_err: None,
                 remove_err: None,
@@ -1918,6 +1937,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(args.resume_claude_session_id.clone());
+            self.launches
+                .lock()
+                .unwrap()
+                .push((args.model.clone(), args.effort.clone()));
             self.log
                 .lock()
                 .unwrap()
@@ -2097,6 +2120,66 @@ mod tests {
                 .claude_session_id
                 .as_deref(),
             Some(OLD)
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A fork opens on the source's model and effort, as recreate, repair
+    /// and move do, not on the host's default.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fork_carries_the_sources_model_and_effort() {
+        let (d, _src, s, id) = local_session("idle");
+        s.set_session_launch_model(id, Some("opus")).unwrap();
+        s.set_session_effort(id, Some("high")).unwrap();
+        let store = std::sync::Mutex::new(s);
+        let ops = FakeOps::new(&store, Some("idle"));
+        let ssh = std::sync::Arc::new(SshClient::new());
+        rewind_conversation_with(args(id, RewindMode::Fork, Some(A2)), &store, &ssh, &ops)
+            .await
+            .expect("the fork starts");
+        assert_eq!(
+            ops.launches.lock().unwrap().as_slice(),
+            &[(Some("opus".to_string()), Some("high".to_string()))]
+        );
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    /// A same-worktree fork of a session with no project is refused BEFORE
+    /// the copy: refused after it, the `.jsonl` would stay as an orphan that
+    /// `discover_lost_sessions` later reports.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_same_worktree_fork_without_a_project_is_refused_before_the_copy() {
+        let d = tmp();
+        let src = fixture(&d);
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("sess", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.rebind_conversation(
+            id,
+            OLD,
+            StartSource::Fleet,
+            Some(src.to_str().unwrap()),
+            None,
+        )
+        .unwrap();
+        s.set_session_claude_status_for_test(id, "idle");
+        let store = std::sync::Mutex::new(s);
+        let ops = FakeOps::new(&store, Some("idle"));
+        let ssh = std::sync::Arc::new(SshClient::new());
+        let err =
+            rewind_conversation_with(args(id, RewindMode::Fork, Some(A2)), &store, &ssh, &ops)
+                .await
+                .expect_err("no project to fork into");
+        assert_eq!(err.code, codes::E_INVALID_STATE);
+        assert_eq!(ops.spawns(), 0);
+        assert_eq!(
+            jsonl_files(&d),
+            vec![format!("{OLD}.jsonl")],
+            "no copy was written"
         );
         std::fs::remove_dir_all(&d).ok();
     }
