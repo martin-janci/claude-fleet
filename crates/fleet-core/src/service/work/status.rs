@@ -46,7 +46,9 @@ pub fn set_status(
 /// precedence over the stored `status_category`.
 ///
 /// Precedence: a person's setting (`status_set_by = "person"`) is final;
-/// a stamped `done` (`"derived"`) is not undone by new work; otherwise a
+/// a stamped `done` (`"derived"`) is not undone by new work; a job's status
+/// (`"task"`, an agent subtask mirroring its dispatched job) is final like a
+/// stamped `done`; otherwise a
 /// confirmed link whose session is presently working lifts a **local**
 /// item to `in_progress` — a tracker item's column is its tracker's (§2,
 /// "who may be overridden"), so a working session must never move it;
@@ -97,7 +99,7 @@ pub fn effective_status(
         return None;
     }
     Some(match status_set_by {
-        Some("person") | Some("derived") => normalize(status_category),
+        Some("person") | Some("derived") | Some("task") => normalize(status_category),
         _ if has_working_session && source == "local" => "in_progress",
         _ => normalize(status_category),
     })
@@ -142,6 +144,18 @@ mod effective_status_tests {
             Some("done"),
             "narrowing status_set_by's IN ('person','derived') to only 'person' \
              would read this back as in_progress instead"
+        );
+    }
+
+    #[test]
+    fn a_jobs_status_is_final_over_the_live_lift() {
+        assert_eq!(
+            effective_status("todo", Some("task"), "local", true),
+            Some("todo")
+        );
+        assert_eq!(
+            effective_status("done", Some("task"), "local", true),
+            Some("done")
         );
     }
 
