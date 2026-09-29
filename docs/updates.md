@@ -82,7 +82,8 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   minimum) is held, never served.
 - **Re-read the channel now.** `update_admin { action: refresh }`. The hub
   also re-reads it every `update.check_interval_secs`, and at once when
-  `update.track` or `update.check_interval_secs` changes. A failed read
+  `update.track` or `update.check_interval_secs` changes (within 5 s when
+  `fleet-hub settings apply` changed it from outside the hub). A failed read
   keeps the last good copy, is logged at `warn`, and
   `update_status.last_refresh` says why it failed.
   `FLEET_UPDATE_CHANNEL_URL` points the hub at a mirror. It changes only
@@ -113,15 +114,18 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
 
 ## What the hub knows without being asked
 
-- **`X-Fleet-Client`.** A client names its build on every request:
+- **`X-Fleet-Client`.** A client may name its build on a request:
 
   ```
   X-Fleet-Client: desktop/0.4.1 (macos-aarch64; build 1a2b3c4; contract 5-6)
   ```
 
-  The hub records it as the client's observed version, at most once a
-  minute (the same beat as its "last seen"), so the dashboard knows what a
-  desktop or a phone runs before it ever calls `/update/check`. Only a
+  When a client sends it, the hub records it as the client's observed
+  version, at most once a minute (the same beat as its "last seen"), so the
+  dashboard knows what that client runs before it ever calls
+  `/update/check`. fleet-mobile sends it (slice S8). The desktop does not
+  send it yet — no slice gives it the header — so a paired desktop has a
+  row only once it calls `/update/check` or reports. Only a
   paired client token is recorded, only for a client component, and only
   what the header says about the build: the phase and the last error stay
   the client's own reports. A missing or garbled header records nothing.

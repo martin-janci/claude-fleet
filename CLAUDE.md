@@ -445,6 +445,28 @@ first read booked as `backfill` apart from the day's live cost (migration
 `docs/hub.md` → *Backups* / *Upgrade with the script*, plan
 `docs/superpowers/plans/2026-09-27-hub-ops-accounting.md`.
 
+Result evidence is landed (#390 / #392): the PR probe stores what it read
+about a session's PR — head commit, worktree HEAD, review / merge state,
+the check rollup with failing checks by name — in `sessions.pr_evidence`
+with `pr_checked_at` (migration 082). One rule turns it into a verdict and
+reasons, `service/evidence.rs` in Rust and `src/lib/evidence.ts` in TS,
+held in step by the shared fixture `service/testdata/evidence_cases.json`;
+a reading older than `outcome::PR_EVIDENCE_STALE_SECS` is `unknown`. The UI
+is the Result card (`PrResult.svelte`) and the stale CI badge on a session
+row. Spec `docs/specs/2026-09-29-result-evidence-design.md`.
+
+Native item status is landed (#394): work with no ticket can be in progress
+and done. Migration 084 adds `work_items.status_set_by` / `status_set_at`;
+precedence is person > derived (the PR probe's `done` stamp when it first
+sees the session's PR merged: `Store::set_pr_signals` and the reconcile
+pass's second call; the Tidy-up read never stamps) > live (a working
+session lifts a local item to `in_progress`), computed in one place,
+`service::work::status::effective_status` (and `effective_status_sql!`).
+A person sets it with `work_link { action: set_status }`; the desktop
+affordance for it is a follow-up. Migration 085 indexes
+`work_unlinks.item_id`. Plan
+`docs/superpowers/plans/2026-09-28-native-item-status.md`.
+
 Host identity and health (#354) is landed, per
 `docs/superpowers/plans/2026-09-27-host-identity-health.md`: migrations
 076 (`hosts.claude_version_at`), 077 (the health sample — disk / load /
@@ -544,12 +566,13 @@ against `keys.rs` before it leaves the runner
 
 **Half of S4b is landed:** `X-Fleet-Client` (`fleet_update::client_header`)
 recorded into `update_observed` on `last_seen_at`'s once-a-minute beat in
-`authorize`; the `update:changed` row event (kind `update`, ids only, in
-`HOST_BOUND_HIDDEN_KINDS`); `fleet_health.updates` (`service::update::health`:
-`update_required`, `update_failed`, `update_rolled_back`, `rollback_failed`,
-`channel_stale`); and `update_status { target }`, the design's
-`update_check_for`. Left: the per-target `update:decision` push, hub-e2e
-section U, rollouts (S9).
+`authorize` when a client sends it (fleet-mobile, slice S8; the desktop's
+hub transport does not send it yet); the `update:changed` row event (kind
+`update`, ids only, in `HOST_BOUND_HIDDEN_KINDS`); `fleet_health.updates`
+(`service::update::health`: `update_required`, `update_failed`,
+`update_rolled_back`, `rollback_failed`, `channel_stale`); and
+`update_status { target }`, the design's `update_check_for`. Left: the
+per-target `update:decision` push, hub-e2e section U, rollouts (S9).
 
 **S3 is landed:** `service::update::git_check` (Git mode: a `GitCheck`
 from the hub's own settings, pin and last-seen sequence) and `fleet-hub

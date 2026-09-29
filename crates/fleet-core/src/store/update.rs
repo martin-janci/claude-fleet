@@ -228,16 +228,41 @@ impl Store {
         Ok(n == 1)
     }
 
-    /// The row id of the first transition recorded for `(target, attempt)`:
-    /// the order in which the hub first heard of each attempt. `None` when
-    /// none is kept.
-    pub fn update_attempt_first_seen(
-        &self,
-        target: &str,
-        attempt: &str,
-    ) -> Result<Option<i64>, IpcError> {
+    /// Whether `target` has an attempt the hub first heard of after
+    /// `attempt`: attempts are ordered by the row id of their first kept
+    /// transition, over every attempt in the log (not only the observed
+    /// row's, which an attempt-less report clears). `false` when no event of
+    /// `attempt` is kept. An attempt the log has forgotten (the retention
+    /// window or the per-target cap dropped it) has nothing to order it by
+    /// here; `service::update::report` decides that case with
+    /// [`Store::update_attempt_kept`] before it logs the report.
+    pub fn update_newer_attempt_seen(&self, target: &str, attempt: &str) -> Result<bool, IpcError> {
         Ok(self.conn.query_row(
-            "SELECT MIN(id) FROM update_events WHERE target = ?1 AND attempt = ?2",
+            "SELECT EXISTS (SELECT 1 FROM update_events \
+               WHERE target = ?1 AND attempt <> '' AND attempt <> ?2 \
+               GROUP BY attempt \
+               HAVING MIN(id) > (SELECT MIN(id) FROM update_events \
+                                 WHERE target = ?1 AND attempt = ?2))",
+            [target, attempt],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Whether the log keeps any event of `attempt` for `target`.
+    pub fn update_attempt_kept(&self, target: &str, attempt: &str) -> Result<bool, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM update_events WHERE target = ?1 AND attempt = ?2)",
+            [target, attempt],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Whether the log keeps an event of any attempt of `target` other than
+    /// `attempt` (attempt-less events do not count).
+    pub fn update_other_attempt_kept(&self, target: &str, attempt: &str) -> Result<bool, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM update_events \
+               WHERE target = ?1 AND attempt <> '' AND attempt <> ?2)",
             [target, attempt],
             |r| r.get(0),
         )?)
@@ -507,11 +532,12 @@ mod tests {
         assert_eq!(rows[0].attempt, format!("a{}", cap + 4));
         assert_eq!(rows.last().unwrap().attempt, "a5");
         assert_eq!(s.update_events("client:2", 10).unwrap().len(), 1);
-        assert_eq!(s.update_attempt_first_seen("client:1", "a0").unwrap(), None);
-        assert!(s
-            .update_attempt_first_seen("client:1", "a5")
-            .unwrap()
-            .is_some());
+        // A forgotten attempt has no kept event to order it by.
+        assert!(!s.update_newer_attempt_seen("client:1", "a0").unwrap());
+        assert!(s.update_newer_attempt_seen("client:1", "a5").unwrap());
+        assert!(!s
+            .update_newer_attempt_seen("client:1", &format!("a{}", cap + 4))
+            .unwrap());
     }
 
     #[test]

@@ -1,6 +1,8 @@
 //! `X-Fleet-Client` (update design §6.3): every client says what it runs on
 //! every request, so the hub knows a desktop's or a phone's version without
-//! it ever calling `/update`.
+//! it ever calling `/update`. Today only fleet-mobile sends it (slice S8);
+//! the desktop's hub transport does not yet, so the hub records a desktop
+//! only once it calls `/update/check` or reports.
 //!
 //! ```text
 //! X-Fleet-Client: desktop/0.4.1 (macos-aarch64; build 1a2b3c4; contract 5-6)

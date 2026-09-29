@@ -568,13 +568,12 @@ fn a_late_or_replayed_report_never_overwrites_a_newer_attempt() {
     };
     let a1 = desktop_report("a1", UpdatePhase::Installing, "0.3.3");
     assert!(report(&store, &c, &a1, NOW).unwrap());
-    assert!(report(
-        &store,
-        &c,
-        &desktop_report("a2", UpdatePhase::Success, "0.3.4"),
-        NOW + 10
-    )
-    .unwrap());
+    for (phase, at) in [
+        (UpdatePhase::Downloading, NOW + 9),
+        (UpdatePhase::Success, NOW + 10),
+    ] {
+        assert!(report(&store, &c, &desktop_report("a2", phase, "0.3.4"), at).unwrap());
+    }
     let a2 = || ("a2".to_string(), "success".to_string(), "0.3.4".to_string());
     // A replay of a1's report: nothing recorded, nothing overwritten.
     assert!(!report(&store, &c, &a1, NOW + 20).unwrap());
@@ -603,17 +602,141 @@ fn a_late_or_replayed_report_never_overwrites_a_newer_attempt() {
             .update_events("client:1", 10)
             .unwrap()
             .len(),
-        3
+        4
     );
-    // A new attempt is state again.
+    // A new attempt, opened at `downloading`, is state again.
     assert!(report(
         &store,
         &c,
-        &desktop_report("a3", UpdatePhase::Checking, "0.3.4"),
+        &desktop_report("a3", UpdatePhase::Downloading, "0.3.4"),
         NOW + 30
     )
     .unwrap());
     assert_eq!(observed().0, "a3");
+}
+
+#[test]
+fn a_late_older_attempt_stays_history_after_an_attempt_less_report() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let c = client(1, TokenMode::Full, None);
+    let observed = || {
+        let o = lock(&store)
+            .unwrap()
+            .update_observed("client:1")
+            .unwrap()
+            .unwrap();
+        (o.attempt, o.phase, o.version)
+    };
+    // a2 opens at `downloading`, so it replaces a1 as state and its
+    // success is the observed row before the attempt-less report arrives.
+    let steps = [
+        (desktop_report("a1", UpdatePhase::Installing, "0.3.3"), NOW),
+        (
+            desktop_report("a2", UpdatePhase::Downloading, "0.3.4"),
+            NOW + 9,
+        ),
+        (
+            desktop_report("a2", UpdatePhase::Success, "0.3.4"),
+            NOW + 10,
+        ),
+    ];
+    for (r, at) in &steps {
+        assert!(report(&store, &c, r, *at).unwrap());
+    }
+    assert_eq!(
+        observed(),
+        (Some("a2".into()), "success".into(), "0.3.4".into())
+    );
+    assert!(report(
+        &store,
+        &c,
+        &Report {
+            attempt: None,
+            ..desktop_report("", UpdatePhase::Checking, "0.3.4")
+        },
+        NOW + 20
+    )
+    .unwrap());
+    assert_eq!(observed(), (None, "checking".into(), "0.3.4".into()));
+    // The observed row no longer names a2, but the log still orders a1
+    // before it: the late failure is logged, not state.
+    assert!(report(
+        &store,
+        &c,
+        &desktop_report("a1", UpdatePhase::Failed, "0.3.3"),
+        NOW + 30
+    )
+    .unwrap());
+    let (_, phase, version) = observed();
+    assert_eq!(version, "0.3.4");
+    assert_ne!(phase, "failed");
+    assert_eq!(observed(), (None, "checking".into(), "0.3.4".into()));
+    // A new attempt is still state.
+    assert!(report(
+        &store,
+        &c,
+        &desktop_report("a3", UpdatePhase::Downloading, "0.3.4"),
+        NOW + 40
+    )
+    .unwrap());
+    assert_eq!(observed().0.as_deref(), Some("a3"));
+}
+
+#[test]
+fn a_pruned_older_attempt_reported_late_stays_history() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let c = client(1, TokenMode::Full, None);
+    for (phase, at) in [
+        (UpdatePhase::Downloading, NOW),
+        (UpdatePhase::Installing, NOW + 1),
+    ] {
+        assert!(report(&store, &c, &desktop_report("a1", phase, "0.3.3"), at).unwrap());
+    }
+    // Fill the log past the per-target cap so that a1's events are dropped.
+    let cap = crate::store::UPDATE_EVENTS_PER_TARGET;
+    {
+        let s = lock(&store).unwrap();
+        for i in 0..cap {
+            assert!(s
+                .insert_update_event(
+                    "client:1",
+                    Some(&format!("filler{i}")),
+                    "checking",
+                    None,
+                    None,
+                    None,
+                    None,
+                    NOW + 10 + i64::from(i),
+                )
+                .unwrap());
+        }
+    }
+    let after = NOW + 10 + i64::from(cap);
+    for (phase, at) in [
+        (UpdatePhase::Downloading, after),
+        (UpdatePhase::Success, after + 1),
+    ] {
+        assert!(report(&store, &c, &desktop_report("a2", phase, "0.3.4"), at).unwrap());
+    }
+    {
+        let s = lock(&store).unwrap();
+        assert!(!s.update_attempt_kept("client:1", "a1").unwrap());
+        assert!(s.update_attempt_kept("client:1", "a2").unwrap());
+    }
+    // A late or retried failure of the forgotten a1 is logged, not state.
+    assert!(report(
+        &store,
+        &c,
+        &desktop_report("a1", UpdatePhase::Failed, "0.3.3"),
+        after + 10
+    )
+    .unwrap());
+    let s = lock(&store).unwrap();
+    assert!(s.update_attempt_kept("client:1", "a1").unwrap());
+    let o = s.update_observed("client:1").unwrap().unwrap();
+    assert_eq!(o.attempt.as_deref(), Some("a2"));
+    assert_eq!(o.version, "0.3.4");
+    assert_ne!(o.phase, "failed");
 }
 
 #[test]

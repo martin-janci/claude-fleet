@@ -166,13 +166,6 @@ pub struct Identity {
 }
 
 const CLIENT_COMPONENTS: &[Component] = &[Component::Desktop, Component::Android, Component::Ios];
-const ALL_COMPONENTS: &[Component] = &[
-    Component::Hub,
-    Component::Agent,
-    Component::Desktop,
-    Component::Android,
-    Component::Ios,
-];
 
 pub fn identity(caller: &Caller) -> Result<Identity, IpcError> {
     if caller.mode == TokenMode::Peer {
@@ -204,7 +197,7 @@ pub fn identity(caller: &Caller) -> Result<Identity, IpcError> {
     }
     Ok(Identity {
         target: "operator".into(),
-        allowed: ALL_COMPONENTS,
+        allowed: &Component::ALL,
         may_report: false,
     })
 }
@@ -438,7 +431,12 @@ pub fn record_client_header(
 /// state that comes with it. Idempotent on `(target, attempt, phase)` for a
 /// report that carries an attempt: a replayed report adds nothing and returns
 /// `false`, and a late report of an older attempt is logged but never
-/// overwrites the newer attempt's observed state. A report without an attempt
+/// overwrites the newer attempt's observed state. An attempt the log no
+/// longer keeps (the retention window or the per-target cap dropped it) is
+/// treated as older than any other attempt the log holds: unless it opens
+/// with `downloading`, where an attempt is made, its report is logged but not
+/// state. A new attempt whose `downloading` report arrives late is only
+/// delayed until that report or the next one. A report without an attempt
 /// always becomes the observed state; the return says whether its event was
 /// newly recorded.
 pub fn report(
@@ -461,6 +459,10 @@ pub fn report(
     let detail = (!r.detail.is_null()).then(|| r.detail.to_string());
     let s = lock(store)?;
     s.atomically(|s| {
+        let this_attempt = r.attempt.as_deref().unwrap_or("");
+        // Read before the insert below makes every attempt "kept".
+        let kept_before =
+            this_attempt.is_empty() || s.update_attempt_kept(&id.target, this_attempt)?;
         let recorded = s.insert_update_event(
             &id.target,
             r.attempt.as_deref(),
@@ -474,25 +476,26 @@ pub fn report(
         // Only a report that carries an attempt is de-duplicated and
         // ordered: an attempt is made at `downloading`, so an attempt-less
         // report (checking / available / idle) is always the latest state.
-        let this_attempt = r.attempt.as_deref().unwrap_or("");
         if !recorded && !this_attempt.is_empty() {
             return Ok(false);
         }
-        let prev = s.update_observed(&id.target)?;
-        if let Some(p) = &prev {
-            let prev_attempt = p.attempt.as_deref().unwrap_or("");
-            if prev_attempt != this_attempt && !prev_attempt.is_empty() && !this_attempt.is_empty()
-            {
-                // Attempts are ordered by when the hub first heard of them:
-                // a late report of an older attempt is history, not state.
-                let first = |a: &str| s.update_attempt_first_seen(&id.target, a);
-                if let (Some(this), Some(newer)) = (first(this_attempt)?, first(prev_attempt)?) {
-                    if this < newer {
-                        return Ok(true);
-                    }
-                }
-            }
+        // Attempts are ordered by when the hub first heard of them, over
+        // every attempt in the log: a late report of an older attempt is
+        // history, not state, even when an attempt-less report has cleared
+        // the observed row's attempt in between.
+        if !this_attempt.is_empty() && s.update_newer_attempt_seen(&id.target, this_attempt)? {
+            return Ok(true);
         }
+        // An attempt the log had no event of, reported past its opening
+        // `downloading`, is a forgotten old attempt replayed or retried late
+        // whenever another attempt is on record: it is older, so history.
+        if !kept_before
+            && r.phase != UpdatePhase::Downloading
+            && s.update_other_attempt_kept(&id.target, this_attempt)?
+        {
+            return Ok(true);
+        }
+        let prev = s.update_observed(&id.target)?;
         s.upsert_update_observed(&UpdateObservedRow {
             target: id.target.clone(),
             component: r.component.as_str().into(),
@@ -702,14 +705,10 @@ pub fn check_for(
             format!("{target:?} has not reported to this hub (see update_status)"),
         )
     })?;
-    let component =
-        serde_json::from_value::<Component>(serde_json::Value::String(o.component.clone()))
-            .map_err(|_| {
-                IpcError::new(
-                    codes::E_INVALID,
-                    format!("unknown component {:?}", o.component),
-                )
-            })?;
+    let component = o
+        .component
+        .parse::<Component>()
+        .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
     let platform: Platform = o
         .platform
         .as_deref()

@@ -234,7 +234,9 @@ before you do it:
 
 ### The assets
 
-12 per release from 0.3.4 (11 before it), every one version-bearing:
+14 per release from 0.4.1 (12 from 0.3.4, 11 before it). Every one carries
+the version in its name except `SHA256SUMS` and the two update-manifest files,
+whose version is inside them:
 
 | asset | built by |
 |-------|----------|
@@ -245,6 +247,7 @@ before you do it:
 | `fleet-agent-<v>-x86_64-unknown-linux-gnu.tar.gz`, `fleet-hub-<v>-…` | `agent-hub-binaries`, `ubuntu-22.04` |
 | `fleet-agent-<v>-aarch64-unknown-linux-gnu.tar.gz`, `fleet-hub-<v>-…` | `agent-hub-binaries`, `ubuntu-22.04-arm` |
 | `SHA256SUMS` | `checksums` |
+| `release-manifest.json`, `release-manifest.json.minisig` (from 0.4.1; `scripts/release-manifest.sh`) | `manifest` |
 
 The two `.app.tar.gz` bundles are the exception that needed fixing:
 `tauri-action` names them `claude-fleet_<arch>.app.tar.gz` — no version — so
