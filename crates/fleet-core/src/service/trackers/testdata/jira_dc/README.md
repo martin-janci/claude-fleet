@@ -16,6 +16,7 @@ key, and `warningMessages` from `validateQuery: warn`.
 | `search_mine_p1.json`, `_p2.json` | `mine` in two pages: an epic, a story in the active sprint linked to it, a sub-task, Fixed, Won't Do, and an unassigned To Do |
 | `fetch_two.json` | a by-reference search for three, one key missing (a warning) |
 | `fetch_moved.json` | `key in (OLD-7)` answered by the moved `PLAT-7` |
+| `issue_description.json` | `GET /rest/api/2/issue/OPS-1?fields=description`: a plain-text description past the 2,000-char excerpt (conformance scenario 12) |
 | `golden_list.json` | the normalised listing (`REGEN_TRACKER_GOLDENS=1`) |
 
 A CAPTCHA lockout is a 403 with `X-Seraph-LoginReason:

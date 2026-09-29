@@ -1376,7 +1376,7 @@ impl<'a> HostExec<'a> {
     ) -> Result<ScriptOutput, IpcError> {
         let out = if self.host == "local" {
             crate::service::hub::ensure_local_allowed(&self.host)?;
-            let child = tokio::process::Command::new("bash")
+            let child = crate::proc::command("bash")
                 .args(["-lc", script])
                 .kill_on_drop(true)
                 .output();
@@ -2297,13 +2297,18 @@ pub async fn spec_for_session(
                 "sessions outside tmux have no worktree or tmux pane to repair",
             ));
         }
-        seed_for_session(&s, &row)?
+        (
+            seed_for_session(&s, &row)?,
+            crate::service::sessions::stored_launch(&s, row.id),
+        )
     };
+    let (seed, launch) = seed;
     let row = &seed.row;
     let pane_cmd = crate::service::sessions::recreate_pane_command(
         &row.kind,
         row.claude_session_id.as_deref(),
         &row.tmux_name,
+        &launch,
     );
     let is_local = row.host_alias == "local";
     let (project_root, worktree) = if is_local {

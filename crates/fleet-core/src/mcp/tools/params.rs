@@ -97,6 +97,12 @@ pub struct NewSessionParams {
     /// for one a session on the host holds (use restore_host_sessions).
     #[serde(default)]
     pub resume_claude_session_id: Option<String>,
+    /// `claude --model` (alias or id).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// low|medium|high|xhigh|max.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// Approved confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
@@ -148,10 +154,23 @@ pub struct KillSessionParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ForgetProjectParams {
+    /// The project's id.
+    pub project_id: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ProvisionHostsParams {
     /// Mint fresh per-host tokens (invalidates each host's current one).
     #[serde(default)]
     pub rotate: bool,
+    /// One host alias; every active host when omitted.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Skills, CLAUDE.md block and hooks only: no token, no ~/.claude.json
+    /// rewrite, no tunnel.
+    #[serde(default)]
+    pub content_only: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -236,14 +255,14 @@ pub struct RewindConversationParams {
     /// Fleet session id (from list_sessions).
     pub session_id: i64,
     /// Keep the transcript strictly before this turn's prompt_uuid (from
-    /// session_conversation). Omit to keep all of it.
+    /// session_conversation). Required to rewind; omit to fork keeping all
+    /// of it.
     #[serde(default)]
     pub anchor_uuid: Option<String>,
     /// "rewind" restarts this session on the truncated copy; "fork" leaves
     /// it alone and starts a new session on the copy.
     pub mode: String,
-    /// fork only: name a new worktree for the new session; omit to reuse
-    /// this session's.
+    /// Fork into a new worktree+branch of this name, off HEAD.
     #[serde(default)]
     pub new_worktree: Option<String>,
     /// Approved confirmation; required for "rewind".
@@ -507,6 +526,17 @@ pub struct ListHostWorktreesParams {
     pub project_id: i64,
 }
 
+// `add_project`'s arguments plus the operator's confirmation (M9.7; only a
+// `create_remote` carrying the service's token ever needs one).
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AddProjectParams {
+    #[serde(flatten)]
+    pub args: crate::service::add_project::AddProjectArgs,
+    /// Approved confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_nonce: Option<String>,
+}
+
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ListGithubReposParams {
     /// Host whose `gh` login lists the repositories.
@@ -538,6 +568,9 @@ pub struct QuickRepliesParams {
     /// built-in defaults). Omit to read the current list instead.
     #[serde(default)]
     pub set: Option<Vec<crate::service::quick_replies::QuickReply>>,
+    /// With `set`: the list last read; E_CONFLICT if it changed since.
+    #[serde(default)]
+    pub expected: Option<Vec<crate::service::quick_replies::QuickReply>>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -866,7 +899,7 @@ pub struct PairClientParams {
     /// Shown in `list_clients` and in the untrusted-input marker on what it
     /// sends. Rules: see the tool.
     pub name: String,
-    /// `full` (default), `readonly` or `peer`; see the tool.
+    /// `full` (default), `readonly`, `peer` or `updater`; see the tool.
     #[serde(default)]
     pub mode: Option<String>,
     /// Code lifetime: default 600, max 3600; it also dies on first use.
@@ -956,4 +989,42 @@ pub struct SetHostLayersParams {
     /// Context layers, in application order.
     #[serde(default)]
     pub contexts: Vec<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct CatalogAdminParams {
+    /// config|configure|load|get_asset|template|create_asset|update_asset|
+    /// delete_asset|add_resource_bytes|remove_resource|lint_asset|lint_all|
+    /// commit_pending|push|repo_status|inventory|plan_sync|apply_sync|
+    /// last_sync|list_secrets|set_secret|delete_secret|list_layers|
+    /// resolve_preview|propose_layers|set_host_layers|layer_template|
+    /// write_layer|delete_layer
+    pub action: String,
+    /// The desktop command's own argument object.
+    #[serde(default)]
+    pub args: Option<serde_json::Value>,
+    /// apply_sync: nonce of an approved E_CONFIRM_REQUIRED.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateAdminParams {
+    /// pin | unpin | refresh.
+    pub action: String,
+    /// hub | agent | desktop | android | ios.
+    #[serde(default)]
+    pub component: Option<String>,
+    /// One target (hub:self, agent:<alias>, client:<id>); absent = every target.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// pin: the release to serve.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// pin: required, not merely offered.
+    #[serde(default)]
+    pub mandatory: Option<bool>,
+    /// pin: why, for the dashboard.
+    #[serde(default)]
+    pub reason: Option<String>,
 }

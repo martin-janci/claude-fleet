@@ -20,21 +20,23 @@
     rejectWorkLink,
     unlinkSessionWork,
     type WorkRef,
+    onWorkChangedDebounced,
   } from './work';
   import { workTickets, type TicketRow } from './trackers';
   import { timeAgo } from './session_status';
   import {
-    conflictOf,
+    conflictNotice,
     groupSessionLinks,
     isOlderHub,
     setPrimaryWork,
     showTaskInWorkView,
     taskLabel,
-    workChanged,
     workSessionTasks,
+    type ConflictNotice,
     type SessionTaskLink,
     type SessionTasks,
   } from './work_view';
+  import WorkConflictNotice from './WorkConflictNotice.svelte';
   import type { IpcError, Result } from './result';
 
   let { session, debounceMs = 500 }: { session: SessionRow; debounceMs?: number } = $props();
@@ -47,7 +49,7 @@
   // the ticket card above still shows the primary work.
   let unsupported = $state(false);
   let error = $state<string | null>(null);
-  let notice = $state<string | null>(null);
+  let notice = $state<string | ConflictNotice | null>(null);
   let busy = $state(false);
 
   let seq = 0;
@@ -87,19 +89,9 @@
     void load(id);
   });
 
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let first = true;
-  const off = workChanged.subscribe(() => {
-    if (first) {
-      first = false;
-      return;
-    }
-    clearTimeout(timer);
-    timer = setTimeout(() => void load(session.id), debounceMs);
-  });
+  const off = onWorkChangedDebounced(() => void load(session.id), () => debounceMs);
   onDestroy(() => {
     off();
-    clearTimeout(timer);
     clearTimeout(searchTimer);
   });
 
@@ -113,9 +105,13 @@
     const r = await call();
     busy = false;
     if (!r.ok) {
-      notice = conflictOf(r.error)
-        ? `${what}: it changed elsewhere (another window or device); reloaded — check it and try again.`
-        : `${what}: ${r.error.message}`;
+      // The current value names a primary by its task, as this list shows it.
+      const links = data?.links ?? [];
+      notice =
+        conflictNotice(r.error, `${what}: it`, (id) => {
+          const l = links.find((x) => x.link_id === id);
+          return l ? taskLabel(l.task) : null;
+        }) ?? `${what}: ${r.error.message}`;
       await load(session.id);
       return;
     }
@@ -248,7 +244,11 @@
         }}>Add task…</button
       >
     </h3>
-    {#if notice}<p class="notice" role="status" data-testid="session-tasks-notice">{notice}</p>{/if}
+    {#if notice}
+      <p class="notice" role="status" data-testid="session-tasks-notice">
+        {#if typeof notice === 'string'}{notice}{:else}<WorkConflictNotice notice={notice} onreload={() => void load(session.id)} />{/if}
+      </p>
+    {/if}
     {#if adding}
       <div class="add-panel" data-testid="session-tasks-add-panel">
         <input

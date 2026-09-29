@@ -18,6 +18,11 @@ const SKILL_PATH: &str = "~/.claude/skills/claude-fleet-control/SKILL.md";
 const FRIENDLY_NAME_SKILL: &str = include_str!("../../../../skills/fleet-friendly-name/SKILL.md");
 const FRIENDLY_NAME_SKILL_DIR: &str = "~/.claude/skills/fleet-friendly-name";
 const FRIENDLY_NAME_SKILL_PATH: &str = "~/.claude/skills/fleet-friendly-name/SKILL.md";
+/// Written into each managed skill dir: the fingerprint that put it there.
+/// Says "fleet owns this directory" to a human and to a dotfiles sync
+/// (hosts F2 — both skills were tracked and dirty in `~/dotfiles`).
+const MANAGED_MARKER: &str = ".fleet-managed";
+const SKILLS_ROOT: &str = "~/.claude/skills";
 pub(crate) const CLAUDE_JSON: &str = "~/.claude.json";
 pub(crate) const CLAUDE_DIR: &str = "~/.claude";
 const CLAUDE_MD_PATH: &str = "~/.claude/CLAUDE.md";
@@ -35,6 +40,62 @@ This host is managed by claude-fleet (Claude Code sessions in tmux across machin
 Use the **claude-fleet-control** skill to operate sessions over the fleet MCP server.
 If you run inside a fleet tmux session, use the **fleet-friendly-name** skill to
 label this session; it defines when to fire and how to look up your `host_alias`.";
+
+/// SHA-256 over everything provisioning ships that is CONTENT (not a
+/// secret, not a URL): both skills, the managed CLAUDE.md body and the
+/// hook shape. Stored per host by `set_host_provisioned`; a host whose
+/// stored value differs is `provision_stale` (hosts F1: every host ran
+/// skills from 15 hub upgrades ago, and nothing compared).
+pub fn fingerprint() -> &'static str {
+    static FP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FP.get_or_init(|| {
+        crate::mcp::auth::sha256_hex(&format!(
+            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}",
+            crate::service::hooks_install::hook_shape()
+        ))
+    })
+}
+
+fn marker_content() -> String {
+    format!(
+        "claude-fleet manages this directory; provision_hosts overwrites it.\nfingerprint={}\n",
+        fingerprint()
+    )
+}
+
+/// Prints the git toplevel when `~/.claude/skills` (following a symlink)
+/// sits inside a work tree, else nothing.
+fn git_tree_probe_script() -> String {
+    format!(
+        "cd {} 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || true",
+        remote_path(SKILLS_ROOT)
+    )
+}
+
+/// What one `provision_hosts` call covers (host identity & health, task 6).
+#[derive(Debug, Clone, Default)]
+pub struct ProvisionScope {
+    /// Mint fresh tokens (full provisioning only).
+    pub rotate: bool,
+    /// One host, or every active host.
+    pub only_host: Option<String>,
+    /// Skills, CLAUDE.md block and hooks only: no token, no
+    /// `~/.claude.json` rewrite, no tunnel. Safe to run unattended.
+    pub content_only: bool,
+}
+
+/// `provision.force_git_tree`: write the skill dirs even inside a git
+/// checkout (decision B-2: refuse by default).
+fn force_git_tree(store: &Mutex<Store>) -> bool {
+    lock(store)
+        .ok()
+        .and_then(|s| {
+            s.get_setting(crate::service::settings::PROVISION_FORCE_GIT_TREE)
+                .ok()
+                .flatten()
+        })
+        .is_some_and(|v| v == "true")
+}
 
 /// Install the skill + merge the MCP entry on one host. `base.mcp_url()` is the MCP
 /// endpoint that host should use; `token` is that host's own bearer token
@@ -56,17 +117,21 @@ pub async fn provision_one(
     base: &HubBase,
     token: &str,
 ) -> Result<(), IpcError> {
-    // 1. Skills (live-discovered, no restart). Both ship from the repo so
-    //    every fleet host gets the same shared copy.
-    write_host_file(ssh, host, SKILL_DIR, SKILL_PATH, FLEET_SKILL).await?;
-    write_host_file(
-        ssh,
-        host,
-        FRIENDLY_NAME_SKILL_DIR,
-        FRIENDLY_NAME_SKILL_PATH,
-        FRIENDLY_NAME_SKILL,
-    )
-    .await?;
+    provision_one_with(ssh, host, base, token, false).await
+}
+
+/// [`provision_one`] with the git-tree preflight decided by the caller
+/// (`provision.force_git_tree`, read where the store is at hand).
+pub async fn provision_one_with(
+    ssh: &dyn SshExec,
+    host: &str,
+    base: &HubBase,
+    token: &str,
+    force_git_tree: bool,
+) -> Result<(), IpcError> {
+    // 0. + 1. Skills (live-discovered, no restart). Both ship from the repo
+    //    so every fleet host gets the same shared copy.
+    provision_skills(ssh, host, force_git_tree).await?;
     // 1b. Global ~/.claude/CLAUDE.md — keep a managed block in sync so the
     //     fleet-friendly-name skill is invoked on every task start without
     //     the user editing CLAUDE.md by hand.
@@ -99,6 +164,128 @@ pub async fn provision_one(
     )
     .await?;
     Ok(())
+}
+
+/// Steps 0 and 1: refuse to write into somebody else's git checkout unless
+/// told to (`provision.force_git_tree`, decision B-2), then both skills and
+/// their `.fleet-managed` markers (hosts F2).
+async fn provision_skills(
+    ssh: &dyn SshExec,
+    host: &str,
+    force_git_tree: bool,
+) -> Result<(), IpcError> {
+    let toplevel = if host == "local" {
+        String::new()
+    } else {
+        let script = quote(&git_tree_probe_script());
+        let out = ssh
+            .run(host, &["bash", "-lc", &script], PROVISION_TIMEOUT)
+            .await?;
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    if !toplevel.is_empty() && !force_git_tree {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{host}: {SKILLS_ROOT} is inside the git work tree {toplevel}; fleet would overwrite \
+                 tracked files. Untrack {SKILL_DIR} and {FRIENDLY_NAME_SKILL_DIR} there (or add them \
+                 to .gitignore), or set provision.force_git_tree=true to write anyway"
+            ),
+        )
+        .with_details(serde_json::json!({ "skills_dir": SKILLS_ROOT, "git_toplevel": toplevel })));
+    }
+    for (dir, path, body) in [
+        (SKILL_DIR, SKILL_PATH, FLEET_SKILL),
+        (
+            FRIENDLY_NAME_SKILL_DIR,
+            FRIENDLY_NAME_SKILL_PATH,
+            FRIENDLY_NAME_SKILL,
+        ),
+    ] {
+        write_host_file(ssh, host, dir, path, body).await?;
+        write_host_file(
+            ssh,
+            host,
+            dir,
+            &format!("{dir}/{MANAGED_MARKER}"),
+            &marker_content(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// The non-secret half of provisioning (hosts F1): refresh what the
+/// binary ships without touching the token or `~/.claude.json`. Reuses
+/// the host's existing token for the hook headers; a host with none is
+/// refused (`E_NO_TOKEN`) — it needs a full provisioning first.
+pub async fn provision_content_only(
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+    host: &str,
+    base: &HubBase,
+) -> Result<(), IpcError> {
+    let token = {
+        let s = lock(store)?;
+        s.get_host_token(host)?.map(|t| t.token).ok_or_else(|| {
+            IpcError::new(
+                codes::E_NO_TOKEN,
+                format!("{host} has no host token; run a full provision_hosts first"),
+            )
+        })?
+    };
+    let base = &base.with_start_context(&*lock(store)?);
+    let force = force_git_tree(store);
+    provision_skills(ssh, host, force).await?;
+    provision_claude_md(ssh, host).await?;
+    provision_hook(
+        ssh,
+        host,
+        &base.hook_url(),
+        &token,
+        base.session_start_context,
+    )
+    .await?;
+    if let Ok(s) = store.lock() {
+        let _ = s.set_host_provisioned(host, true);
+    }
+    Ok(())
+}
+
+/// Refresh every reachable, non-hidden host whose stored fingerprint is
+/// not this build's, `delay` after start (the first reconcile pass has
+/// refreshed `reachable` by then). Content only: unattended and secret-free.
+pub fn spawn_reprovision_stale(
+    store: Arc<Mutex<Store>>,
+    ssh: Arc<crate::ssh::SshClient>,
+    base: HubBase,
+    delay: Duration,
+) -> tokio::task::JoinHandle<()> {
+    crate::rt::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let stale: Vec<String> = match store.lock() {
+            Ok(s) => crate::service::hosts::active_hosts(
+                s.list_hosts().unwrap_or_default(),
+                crate::service::hub::local_host_enabled(),
+            )
+            .into_iter()
+            .filter(|h| h.provisioned && h.reachable && h.provision_stale)
+            .map(|h| h.alias)
+            .collect(),
+            Err(_) => return,
+        };
+        for host in stale {
+            match provision_content_only(&store, &*ssh, &host, &base).await {
+                Ok(()) => tracing::info!(host, "[provision] refreshed stale content"),
+                Err(e) => tracing::warn!(
+                    host,
+                    code = %e.code,
+                    error = %e.message,
+                    "[provision] stale content not refreshed"
+                ),
+            }
+        }
+    })
 }
 
 const SETTINGS_JSON: &str = "~/.claude/settings.json";
@@ -249,9 +436,70 @@ fn routes_to_agent(store: &Mutex<Store>, host: &str) -> Result<bool, IpcError> {
     Ok(s.agent_host_alias(host)?.as_deref() == Some(host))
 }
 
+/// What [`provision_host_with_token`] reports for a WSL distribution whose
+/// hooks cannot reach this desktop's `127.0.0.1` (WSL2's default NAT
+/// networking): the sessions run, but no hook event ever arrives.
+pub const WSL_HOOKS_UNREACHABLE: &str = "provisioned, but hooks can't reach the desktop from this \
+     WSL distribution (WSL2 NAT networking): enable WSL mirrored networking \
+     (networkingMode=mirrored in %USERPROFILE%\\.wslconfig), run `wsl --shutdown`, then \
+     provision again";
+
+/// Printed by [`hook_reach_script`] when the distribution has neither `curl`
+/// nor `wget` to ask with: the check cannot tell, so it says nothing.
+const HOOK_REACH_NO_CLIENT: &str = "FLEET-HOOKREACH-NOCLIENT";
+
+/// The script, run inside a WSL distribution, that asks this desktop's
+/// `/healthz` on `127.0.0.1:<port>` — the address its hooks post to. It
+/// prints the answer (the listener's own body) or nothing.
+pub fn hook_reach_script(port: u16) -> String {
+    let url = quote(&format!("http://127.0.0.1:{port}/healthz"));
+    format!(
+        "if command -v curl >/dev/null 2>&1; then curl -s -m 5 {url}; \
+         elif command -v wget >/dev/null 2>&1; then wget -q -T 5 -O - {url}; \
+         else echo {HOOK_REACH_NO_CLIENT}; fi"
+    )
+}
+
+/// Read [`hook_reach_script`]'s output: `Some(true)` when this desktop's
+/// listener answered, `Some(false)` when nothing did (or something else did),
+/// `None` when the distribution had no client to ask with.
+pub fn hook_reach_verdict(stdout: &str) -> Option<bool> {
+    if stdout.contains(HOOK_REACH_NO_CLIENT) {
+        return None;
+    }
+    Some(stdout.contains(crate::mcp::HEALTHZ_BODY.trim_end()))
+}
+
+/// For a WSL host of a loopback desktop: can the distribution's hooks reach
+/// `127.0.0.1:<port>`? `Some(`[`WSL_HOOKS_UNREACHABLE`]`)` when they cannot;
+/// `None` when they can, or when the check itself could not run (a failed
+/// `wsl.exe` is the provisioning's error to report, not this one's).
+pub async fn wsl_hooks_warning(ssh: &dyn SshExec, host: &str, port: u16) -> Option<String> {
+    let script = quote(&hook_reach_script(port));
+    let out = ssh
+        .run(host, &["sh", "-c", &script], PROVISION_TIMEOUT)
+        .await
+        .ok()?;
+    match hook_reach_verdict(&String::from_utf8_lossy(&out.stdout)) {
+        Some(false) => {
+            tracing::warn!(
+                host = %host,
+                port,
+                "[provision] hooks cannot reach 127.0.0.1 from this WSL distribution; \
+                 WSL mirrored networking is needed"
+            );
+            Some(WSL_HOOKS_UNREACHABLE.to_string())
+        }
+        _ => None,
+    }
+}
+
 /// Provision ONE host end to end with its own token: resolve/mint → write
 /// files → persist the token → ensure the tunnel (remote host, loopback hub) → mark
 /// provisioned. Shared by [`provision_hosts`] and the per-host Rotate action.
+///
+/// `Ok(Some(warning))` is provisioned but degraded: a WSL distribution whose
+/// hooks cannot reach this desktop ([`wsl_hooks_warning`]).
 pub async fn provision_host_with_token(
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
@@ -259,7 +507,7 @@ pub async fn provision_host_with_token(
     host: &str,
     base: &HubBase,
     rotate: bool,
-) -> Result<(), IpcError> {
+) -> Result<Option<String>, IpcError> {
     let (token, minted) = resolve_host_token(store, host, rotate)?;
     if minted && routes_to_agent(store, host)? {
         // An agent host's new token cannot go the usual way. The usual way
@@ -288,19 +536,33 @@ pub async fn provision_host_with_token(
     }
     // `work.session_start_context` (M4.5) decides how SessionStart installs.
     let base = &base.with_start_context(&*lock(store)?);
-    provision_one(ssh, host, base, &token).await?;
+    provision_one_with(ssh, host, base, &token, force_git_tree(store)).await?;
     commit_host_token(store, host, &token, minted)?;
     // A public hub is reached directly; only a loopback hub needs the
     // reverse tunnel so the host's 127.0.0.1:<port> lands on this machine.
     // An agent host is never dialed over SSH at all, so it has no use for
     // one either — it reaches the hub over its own outbound connection.
-    if host != "local" && !base.public && !routes_to_agent(store, host)? {
+    // A WSL distribution is not dialed over SSH either: `ssh -R` cannot
+    // reach it, and where its hooks can reach this machine at all (WSL1,
+    // WSL2 mirrored networking) they do so on 127.0.0.1 directly.
+    //
+    // No tunnel also means nothing fleet can repair: whether the hooks get
+    // here is WSL's networking mode. So it is checked, from inside the
+    // distribution, and said at once rather than found out from a Stop
+    // that never arrives.
+    let wsl = crate::wsl::is_wsl_host(host);
+    if host != "local" && !base.public && !routes_to_agent(store, host)? && !wsl {
         tunnels.ensure(host, base.port, base.port);
     }
+    let warning = if wsl && !base.public {
+        wsl_hooks_warning(ssh, host, base.port).await
+    } else {
+        None
+    };
     if let Ok(s) = store.lock() {
         let _ = s.set_host_provisioned(host, true);
     }
-    Ok(())
+    Ok(warning)
 }
 
 /// Ensure `~/.tmux.conf` has `set -g set-clipboard on` for OSC 52 passthrough.
@@ -401,15 +663,23 @@ pub async fn provision_hosts(
     ssh: &dyn SshExec,
     tunnels: &Arc<TunnelSupervisor>,
     base: &HubBase,
-    rotate: bool,
+    scope: ProvisionScope,
 ) -> Result<Vec<HostProvisionResult>, IpcError> {
     let hosts = {
         let s = lock(store)?;
-        s.list_hosts()?
+        // One hidden/local rule for every host loop (hub-ops F6).
+        crate::service::hosts::active_hosts(
+            s.list_hosts()?,
+            crate::service::hub::local_host_enabled(),
+        )
     };
     let mut results = Vec::new();
     for h in hosts {
-        if h.hidden {
+        if scope
+            .only_host
+            .as_deref()
+            .is_some_and(|only| only != h.alias)
+        {
             continue;
         }
         if h.alias != "local" && !h.reachable {
@@ -420,12 +690,25 @@ pub async fn provision_hosts(
             });
             continue;
         }
-        match provision_host_with_token(store, ssh, tunnels, &h.alias, base, rotate).await {
-            Ok(()) => {
+        let outcome = if scope.content_only {
+            provision_content_only(store, ssh, &h.alias, base)
+                .await
+                .map(|()| None)
+        } else {
+            provision_host_with_token(store, ssh, tunnels, &h.alias, base, scope.rotate).await
+        };
+        match outcome {
+            Ok(warning) => {
                 results.push(HostProvisionResult {
                     host: h.alias,
                     status: "provisioned".into(),
-                    detail: Some("restart Claude on this host to load the MCP server".into()),
+                    detail: Some(warning.unwrap_or_else(|| {
+                        if scope.content_only {
+                            "skills, CLAUDE.md block and hooks refreshed (no restart needed)".into()
+                        } else {
+                            "restart Claude on this host to load the MCP server".into()
+                        }
+                    })),
                 });
             }
             Err(e) => results.push(HostProvisionResult {
@@ -451,7 +734,12 @@ pub fn reestablish_tunnels(
     }
     let hosts = { lock(store)?.list_hosts()? };
     for h in hosts {
-        if h.provisioned && h.alias != "local" && !h.hidden && h.transport != "agent" {
+        if h.provisioned
+            && h.alias != "local"
+            && !h.hidden
+            && h.transport != "agent"
+            && !crate::wsl::is_wsl_host(&h.alias)
+        {
             tunnels.ensure(&h.alias, base.port, base.port);
         }
     }
@@ -851,6 +1139,52 @@ pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String,
 mod tests {
     use super::*;
 
+    /// A WSL2 distribution under NAT networking reaches nothing on
+    /// `127.0.0.1:<port>`: the check says so; the listener's own answer, or
+    /// a distribution with no client to ask with, says nothing.
+    #[tokio::test]
+    async fn wsl_hooks_warning_reads_the_healthz_answer_from_inside_the_distribution() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let script = hook_reach_script(4180);
+        assert!(
+            script.contains("'http://127.0.0.1:4180/healthz'"),
+            "{script}"
+        );
+        assert!(script.contains("curl -s -m 5"), "{script}");
+        assert!(script.contains("wget -q -T 5 -O -"), "{script}");
+
+        let ssh = FakeSsh::new();
+        ssh.on_host("wsl-nat", Match::contains("healthz"), Reply::fail(7, ""));
+        ssh.on_host(
+            "wsl-mirrored",
+            Match::contains("healthz"),
+            Reply::ok(crate::mcp::HEALTHZ_BODY),
+        );
+        ssh.on_host(
+            "wsl-bare",
+            Match::contains("healthz"),
+            Reply::ok(&format!("{HOOK_REACH_NO_CLIENT}\n")),
+        );
+        ssh.on_host(
+            "wsl-other",
+            Match::contains("healthz"),
+            Reply::ok("<html>not fleet</html>"),
+        );
+        assert_eq!(
+            wsl_hooks_warning(&ssh, "wsl-nat", 4180).await.as_deref(),
+            Some(WSL_HOOKS_UNREACHABLE)
+        );
+        assert_eq!(
+            wsl_hooks_warning(&ssh, "wsl-other", 4180).await.as_deref(),
+            Some(WSL_HOOKS_UNREACHABLE)
+        );
+        assert_eq!(wsl_hooks_warning(&ssh, "wsl-mirrored", 4180).await, None);
+        assert_eq!(wsl_hooks_warning(&ssh, "wsl-bare", 4180).await, None);
+        let call = &ssh.calls_for("wsl-nat")[0];
+        assert_eq!(call.args[..2], ["sh", "-c"]);
+        assert!(WSL_HOOKS_UNREACHABLE.contains("mirrored networking"));
+    }
+
     #[test]
     fn merge_adds_entry_to_empty() {
         let out = merge_mcp_entry("", "http://127.0.0.1:4180/mcp", "tok").unwrap();
@@ -1068,6 +1402,11 @@ mod tests {
     #[tokio::test]
     async fn write_host_file_secret_local_failure_leaves_the_original_untouched() {
         use std::os::unix::fs::PermissionsExt;
+        if crate::service::move_session::carry::tests::skip_as_root(
+            "mode 0500 does not stop uid 0 writing into the directory",
+        ) {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret.json");
         std::fs::write(&path, "original").unwrap();
@@ -1370,12 +1709,24 @@ mod tests {
     fn fresh_host_sequence() -> Vec<Step> {
         use Step::*;
         let mut steps = vec![
-            // 1. skills
+            // 0. the git-tree preflight (task 6): nothing on a fresh host
+            Script(git_tree_probe_script()),
+            // 1. skills, each followed by its ownership marker
             Script(remote_write_script(SKILL_DIR, SKILL_PATH, FLEET_SKILL)),
+            Script(remote_write_script(
+                SKILL_DIR,
+                &format!("{SKILL_DIR}/{MANAGED_MARKER}"),
+                &marker_content(),
+            )),
             Script(remote_write_script(
                 FRIENDLY_NAME_SKILL_DIR,
                 FRIENDLY_NAME_SKILL_PATH,
                 FRIENDLY_NAME_SKILL,
+            )),
+            Script(remote_write_script(
+                FRIENDLY_NAME_SKILL_DIR,
+                &format!("{FRIENDLY_NAME_SKILL_DIR}/{MANAGED_MARKER}"),
+                &marker_content(),
             )),
             // 1b. managed CLAUDE.md block
             Script(remote_read_script(CLAUDE_MD_PATH)),
@@ -1472,6 +1823,128 @@ mod tests {
                 c.command()
             );
         }
+    }
+
+    /// hosts F1: the content fingerprint that `provision_stale` compares.
+    #[test]
+    fn fingerprint_is_stable_and_covers_skills_claude_md_and_the_hook_shape() {
+        let fp = fingerprint();
+        assert_eq!(fp.len(), 64, "sha256 hex");
+        assert_eq!(fp, fingerprint(), "computed once, same every call");
+        let expected = crate::mcp::auth::sha256_hex(&format!(
+            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}",
+            crate::service::hooks_install::hook_shape()
+        ));
+        assert_eq!(fp, expected);
+        // The hook shape names every event, its matcher and kind, and the
+        // SessionStart command template — a new hook event changes it.
+        let shape = crate::service::hooks_install::hook_shape();
+        assert!(shape.contains("Stop||http"));
+        assert!(shape.contains("SessionStart||command"));
+        assert!(shape.contains("fleet-hook.headers"));
+    }
+
+    /// hosts F1: the unattended refresh writes skills and hooks with the
+    /// host's existing token, never `~/.claude.json`, and clears the stale
+    /// mark.
+    #[tokio::test]
+    async fn provision_content_only_refreshes_content_without_touching_claude_json() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("h1", Some("h1")).unwrap();
+            s.update_host_probe("h1", true, None, None, 1).unwrap();
+            s.upsert_host_token("h1", TOKEN).unwrap();
+            s.set_host_provisioned("h1", true).unwrap();
+            s.conn_for_test()
+                .execute(
+                    "UPDATE hosts SET provision_fingerprint='old' WHERE alias='h1'",
+                    [],
+                )
+                .unwrap();
+            assert!(s.get_host_row("h1").unwrap().unwrap().provision_stale);
+        }
+        let fake = fresh_host();
+        provision_content_only(&store, &fake, "h1", &base())
+            .await
+            .unwrap();
+        let steps: Vec<Step> = fake.calls().iter().map(step_of).collect();
+        assert!(steps.contains(&Step::Script(remote_write_script(
+            SKILL_DIR,
+            SKILL_PATH,
+            FLEET_SKILL
+        ))));
+        assert!(steps.contains(&Step::Script(remote_read_script(SETTINGS_JSON))));
+        assert!(
+            !steps.contains(&Step::Script(remote_read_script(CLAUDE_JSON))),
+            "content-only never reads or rewrites ~/.claude.json"
+        );
+        assert!(!fake
+            .calls()
+            .iter()
+            .any(|c| c.command().contains(".claude.json.fleet-tmp")));
+        let row = store.lock().unwrap().get_host_row("h1").unwrap().unwrap();
+        assert!(!row.provision_stale);
+
+        // A host with no token needs a full provisioning first.
+        store.lock().unwrap().insert_host("h2", Some("h2")).unwrap();
+        let err = provision_content_only(&store, &fresh_host(), "h2", &base())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_NO_TOKEN);
+    }
+
+    /// hosts F2: each managed skill dir says who owns it.
+    #[tokio::test]
+    async fn provision_one_writes_a_managed_marker_into_each_skill_dir() {
+        let fake = fresh_host();
+        provision_one(&fake, "h1", &base(), TOKEN).await.unwrap();
+        let steps: Vec<Step> = fake.calls().iter().map(step_of).collect();
+        for dir in [SKILL_DIR, FRIENDLY_NAME_SKILL_DIR] {
+            let marker = format!("{dir}/{MANAGED_MARKER}");
+            assert!(
+                steps.contains(&Step::Script(remote_write_script(
+                    dir,
+                    &marker,
+                    &marker_content()
+                ))),
+                "{marker} written"
+            );
+        }
+    }
+
+    /// hosts F2, decision B-2: a skills dir inside somebody's dotfiles
+    /// checkout is refused unless `provision.force_git_tree`.
+    #[tokio::test]
+    async fn a_skills_dir_inside_a_git_work_tree_is_refused_unless_forced() {
+        let fake = fresh_host();
+        fake.on(
+            Match::script(&git_tree_probe_script()),
+            Reply::ok("/home/fake/dotfiles\n"),
+        );
+        let err = provision_one(&fake, "h1", &base(), TOKEN)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert_eq!(
+            err.details.as_ref().unwrap()["git_toplevel"],
+            "/home/fake/dotfiles"
+        );
+        assert!(err.message.contains("provision.force_git_tree"));
+        assert!(
+            !fake.calls().iter().any(|c| c
+                .script()
+                .is_some_and(|s| s.contains("skills") && s.contains("printf"))),
+            "nothing was written"
+        );
+        let forced = fresh_host();
+        forced.on(
+            Match::script(&git_tree_probe_script()),
+            Reply::ok("/home/fake/dotfiles\n"),
+        );
+        provision_one_with(&forced, "h1", &base(), TOKEN, true)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1650,12 +2123,16 @@ mod tests {
                 );
             }
         }
-        // Skills are re-shipped (same bytes) — the only unconditional writes.
+        // Skills are re-shipped (same bytes) with their `.fleet-managed`
+        // markers (task 6) — the only unconditional writes. The git-tree
+        // preflight reads the dir too but writes nothing.
         let skill_writes = steps
             .iter()
-            .filter(|s| matches!(s, Step::Script(b) if b.contains(".claude/skills")))
+            .filter(
+                |s| matches!(s, Step::Script(b) if b.contains(".claude/skills") && b.contains("printf")),
+            )
             .count();
-        assert_eq!(skill_writes, 2);
+        assert_eq!(skill_writes, 4);
     }
 
     #[tokio::test]
@@ -1734,7 +2211,9 @@ mod tests {
             "{}",
             err.message
         );
-        assert_eq!(fake.calls().len(), 1, "stops at the first failed step");
+        // The git-tree preflight (task 6) reads first, then the first
+        // write fails and nothing after it runs.
+        assert_eq!(fake.calls().len(), 2, "stops at the first failed step");
     }
 
     /// Tunnel supervisor whose "ssh" never exits and records nothing — keeps
@@ -1770,7 +2249,7 @@ mod tests {
             Reply::ok("not json"),
         );
         let tunnels = quiet_tunnels();
-        let results = provision_hosts(&store, &fake, &tunnels, &base(), false)
+        let results = provision_hosts(&store, &fake, &tunnels, &base(), ProvisionScope::default())
             .await
             .unwrap();
         let status = |h: &str| {

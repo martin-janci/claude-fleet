@@ -31,6 +31,10 @@
         {
           "type": "link",
           "page": "settings.review"
+        },
+        {
+          "type": "link",
+          "page": "settings.updates"
         }
       ]
     },

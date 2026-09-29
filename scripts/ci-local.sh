@@ -17,6 +17,8 @@
 #                  cargo build -p fleet-hub --locked   (mirrors the hub-headless CI job)
 #                  cargo build -p fleet-agent --locked (same job; the agent must
 #                  build with neither the Tauri libs nor fleet-core)
+#                  scripts/release-update-scripts-test.sh (same job; skipped
+#                  without minisign)
 #                  On a box without the Tauri system libs (no gtk+-3.0 via
 #                  pkg-config), --rust-only instead runs a headless subset:
 #                  fmt, clippy/test/build scoped to fleet-core, fleet-hub,
@@ -125,11 +127,12 @@ run_rust() {
   if ! pkg-config --exists gtk+-3.0 2>/dev/null; then
     echo "ci-local: no Tauri system libs (gtk+-3.0); running the headless subset only" >&2
     step cargo fmt --all --check
-    step cargo clippy -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent --all-targets -- -D warnings
-    step cargo test -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent
+    step cargo clippy -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent -p fleet-update --all-targets -- -D warnings
+    step cargo test -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent -p fleet-update
     step cargo deny check
     step cargo build -p fleet-hub --locked
     step cargo build -p fleet-agent --locked
+    run_update_scripts
     return
   fi
   step cargo fmt --all --check
@@ -140,6 +143,18 @@ run_rust() {
   # Mirrors the hub-headless CI job (no Tauri libs needed).
   step cargo build -p fleet-hub --locked
   step cargo build -p fleet-agent --locked
+  run_update_scripts
+}
+
+# The update-publishing scripts (hub-headless's step of the same name).
+run_update_scripts() {
+  if ! command -v minisign >/dev/null 2>&1; then
+    echo "ci-local: minisign not found; skipping scripts/release-update-scripts-test.sh" >&2
+    return
+  fi
+  step cargo build -p fleet-update --bin fleet-release --locked
+  step env FLEET_RELEASE=target/debug/fleet-release FLEET_HUB=target/debug/fleet-hub \
+    bash scripts/release-update-scripts-test.sh
 }
 
 # --- hub end-to-end script (opt-in: --hub-e2e) ------------------------------

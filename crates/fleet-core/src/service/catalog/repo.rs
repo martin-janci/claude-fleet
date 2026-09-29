@@ -5,13 +5,13 @@ use super::model::{Asset, Kind, Problem, Resource};
 use super::{E_ASSET_EXISTS, E_ASSET_NOT_FOUND, E_CATALOG_GIT, E_CATALOG_PARSE};
 use crate::ipc_error::codes::E_INVALID;
 use crate::ipc_error::IpcError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u64 = 1;
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Catalog {
     pub assets: Vec<Asset>,
     pub problems: Vec<Problem>,
@@ -40,7 +40,7 @@ struct CatalogFile {
 /// this directly; everything else goes through `git`, which turns a non-zero
 /// status into an `E_CATALOG_GIT`.
 fn git_output(dir: &Path, args: &[&str]) -> Result<std::process::Output, IpcError> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::proc::std_command("git");
     cmd.args(args).current_dir(dir);
     // Tests must not depend on (or be broken by) the host's own global git
     // config or identity environment: isolate every git invocation the
@@ -157,7 +157,7 @@ pub fn head(path: &Path) -> Result<String, IpcError> {
 
 /// Repo working-tree status: dirty file count plus ahead/behind versus the
 /// upstream (`None` for both when there is no upstream).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoStatus {
     pub head: String,
     pub dirty: usize,
@@ -1037,6 +1037,11 @@ mod tests {
         write(&root, "agents/pm/prompt.md", "prompt\n");
         let hooks_dir = root.join("hooks");
         fs::create_dir_all(&hooks_dir).unwrap();
+        if crate::service::move_session::carry::tests::skip_as_root(
+            "mode 000 does not stop uid 0 reading the directory",
+        ) {
+            return;
+        }
         fs::set_permissions(&hooks_dir, fs::Permissions::from_mode(0o000)).unwrap();
 
         let result = load_dir(&root);

@@ -500,56 +500,7 @@ pub fn admin_sync(
             s.emit_tracker(row.id)?;
             json(&row)
         }
-        AdminAction::Update => {
-            let id = args.tracker()?;
-            let row = s.require_tracker(id)?;
-            if args.name.is_none() && args.transport.is_none() && args.settings.is_none() {
-                return Err(IpcError::new(
-                    codes::E_INVALID,
-                    "update needs name, transport or settings",
-                ));
-            }
-            let mut settings = args
-                .settings
-                .as_ref()
-                .map(|v| parse_settings(&row.provider, v))
-                .transpose()?;
-            if let (Some(st), "github") = (settings.as_mut(), row.provider.as_str()) {
-                github_hostname(&row.site_url, st, row.settings.hostname.as_deref())?;
-            }
-            if let Some(n) = args.name.as_deref() {
-                s.rename_tracker(id, n)?;
-            }
-            if let Some(t) = args.transport.as_deref() {
-                let t = crate::store::validate_tracker_transport(t)?;
-                check_transport(&row.provider, &t)?;
-                check_host_transport(&s, &t)?;
-                s.set_tracker_transport(id, &t)?;
-            }
-            let changed_settings = settings.is_some();
-            if let Some(st) = settings {
-                s.set_tracker_settings(id, &st)?;
-            }
-            s.emit_tracker(id)?;
-            let updated = s.require_tracker(id)?;
-            if changed_settings {
-                // J3: a person's section map is the reference the
-                // `status_map` proposals are measured against. Never fails
-                // the update.
-                if let Err(e) = crate::service::decide::status_map::record_followups(
-                    &s,
-                    &updated,
-                    crate::store::now_unix(),
-                ) {
-                    tracing::debug!(
-                        tracker_id = id,
-                        "[decide] status_map follow-up not recorded: {}",
-                        e.message
-                    );
-                }
-            }
-            json(&updated)
-        }
+        AdminAction::Update => update_locked(args, &s),
         AdminAction::SetCredential => {
             let id = args.tracker()?;
             let row = s.set_tracker_credential(
@@ -599,6 +550,65 @@ pub fn admin_sync(
         )),
         AdminAction::Org(o) => crate::service::orgs::admin(o, args, &s),
     }
+}
+
+/// `work_admin { action: update }` on a store the caller has locked: the
+/// same validation, event and `status_map` follow-up as through
+/// [`admin_sync`]. For a caller that must read and write under one lock
+/// (`status_map::decide_proposal`: the settings it merges into are the
+/// ones it replaces).
+pub(crate) fn update_locked(
+    args: &WorkAdminArgs,
+    s: &Store,
+) -> Result<serde_json::Value, IpcError> {
+    let id = args.tracker()?;
+    let row = s.require_tracker(id)?;
+    if args.name.is_none() && args.transport.is_none() && args.settings.is_none() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "update needs name, transport or settings",
+        ));
+    }
+    let mut settings = args
+        .settings
+        .as_ref()
+        .map(|v| parse_settings(&row.provider, v))
+        .transpose()?;
+    if let (Some(st), "github") = (settings.as_mut(), row.provider.as_str()) {
+        github_hostname(&row.site_url, st, row.settings.hostname.as_deref())?;
+    }
+    if let Some(n) = args.name.as_deref() {
+        s.rename_tracker(id, n)?;
+    }
+    if let Some(t) = args.transport.as_deref() {
+        let t = crate::store::validate_tracker_transport(t)?;
+        check_transport(&row.provider, &t)?;
+        check_host_transport(s, &t)?;
+        s.set_tracker_transport(id, &t)?;
+    }
+    let changed_settings = settings.is_some();
+    if let Some(st) = settings {
+        s.set_tracker_settings(id, &st)?;
+    }
+    s.emit_tracker(id)?;
+    let updated = s.require_tracker(id)?;
+    if changed_settings {
+        // J3: a person's section map is the reference the
+        // `status_map` proposals are measured against. Never fails
+        // the update.
+        if let Err(e) = crate::service::decide::status_map::record_followups(
+            s,
+            &updated,
+            crate::store::now_unix(),
+        ) {
+            tracing::debug!(
+                tracker_id = id,
+                "[decide] status_map follow-up not recorded: {}",
+                e.message
+            );
+        }
+    }
+    json(&updated)
 }
 
 /// `work_admin { action: test }`: probe the site, store what it learned

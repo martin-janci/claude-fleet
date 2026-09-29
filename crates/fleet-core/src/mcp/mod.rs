@@ -24,6 +24,7 @@ mod tests_auth_limit;
 mod tests_token_cache;
 mod token_cache;
 mod tools;
+pub mod update_route;
 pub mod wire;
 
 use crate::cancel::CancellationRegistry;
@@ -277,6 +278,10 @@ async fn authorize(
                     .map(|c| c.0.ip()),
                 request.headers(),
             );
+            // The throttle is the log's, not the answer's: a repeat inside
+            // the interval is still `401` (a client reads 401 as "pair
+            // again" and 429 as "the hub is busy, retry" — a revoked desktop
+            // must see the first), logged at debug instead of warn.
             if status == StatusCode::UNAUTHORIZED
                 && state
                     .rate
@@ -286,9 +291,9 @@ async fn authorize(
                 tracing::debug!(
                     %peer,
                     path = %request.uri().path(),
-                    "[mcp] throttled a repeated bad bearer"
+                    "[mcp] rejected request (repeat, not logged at warn)"
                 );
-                return Err(StatusCode::TOO_MANY_REQUESTS);
+                return Err(status);
             }
             // The path only: the URI / query can carry the legacy `?token=`.
             tracing::warn!(%status, %peer, path = %request.uri().path(), "[mcp] rejected request");
@@ -337,7 +342,7 @@ async fn authorize(
 }
 
 /// The liveness body, exactly as `/healthz` answers it.
-const HEALTHZ_BODY: &str = "fleet-hub ok\n";
+pub(crate) const HEALTHZ_BODY: &str = "fleet-hub ok\n";
 
 /// `GET /healthz` — a liveness probe, deliberately **unauthenticated**.
 ///
@@ -435,6 +440,22 @@ fn build_app(
                 .layer(axum::extract::DefaultBodyLimit::max(
                     fleet_proto::report::BODY_MAX,
                 ))
+                .with_state(report_state.clone()),
+        )
+        // `/update/check` and `/update/report`: the frozen update wire
+        // (update-channel design §6). Behind `authorize` like `/report`, and
+        // the one door an `updater` token has.
+        .merge(
+            axum::Router::new()
+                .route(
+                    "/update/check",
+                    axum::routing::post(update_route::handle_check),
+                )
+                .route(
+                    "/update/report",
+                    axum::routing::post(update_route::handle_report),
+                )
+                .layer(axum::extract::DefaultBodyLimit::max(update_route::BODY_MAX))
                 .with_state(report_state),
         )
         .layer(axum::middleware::from_fn_with_state(auth_state, authorize));

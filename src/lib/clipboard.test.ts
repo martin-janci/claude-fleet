@@ -20,6 +20,10 @@ describe('sanitizePaste', () => {
   it('leaves ordinary text untouched', () => {
     expect(sanitizePaste('hello\nworld')).toBe('hello\nworld');
   });
+  it('turns a Windows CRLF into LF and keeps a lone CR', () => {
+    expect(sanitizePaste('a\r\nb\r\n')).toBe('a\nb\n');
+    expect(sanitizePaste('a\rb')).toBe('a\rb');
+  });
 });
 
 describe('framePaste', () => {

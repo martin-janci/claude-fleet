@@ -11,6 +11,7 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 |---|---|---|---|
 | `reconcile.interval_secs` | `20` | seconds, `0` = off | Seconds between background reconcile passes, which refresh session state on every host. Applies after a restart. |
 | `reconcile.stale_working_secs` | `1800` | seconds, `0` = never | How long a working session may go without a hook, a turn, transcript growth or pane output before it reads idle. |
+| `reconcile.stale_working_ttl_secs` | `86400` | seconds, shown in hours, `0` = never by age | How long a session marked stale asks for a look before the tick lifts the mark on its own. An attach or any hook lifts it sooner. |
 
 ## Sessions
 
@@ -95,6 +96,16 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | Setting | Default | Range | What it does |
 |---|---|---|---|
 | `health.context_red_pct` | `85` | 1–100% | Percent of the context window at which a session needs you. The chip turns red here and amber 15 points below. |
+| `health.version_max_age_secs` | `86400` | seconds, shown in hours | How old a host's recorded Claude version may be before the "older than the fleet" badge stops trusting it and shows nothing. |
+| `health.disk_low_pct` | `90` | 50–100% | Used share of a host's home filesystem at which the host reads as disk low. |
+| `health.claude_max_behind` | `30` | 0–1000 | Patch releases a host's Claude may trail the fleet's newest before the host reads as behind. |
+| `health.hooks_silent_secs` | `3600` | seconds, shown in minutes | How long a reachable host with a live session may send no hook before it reads as hooks silent. |
+
+## provision
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `provision.force_git_tree` | `false` | on / off | Write fleet's skills even when a host's ~/.claude/skills is inside a git work tree, such as a dotfiles checkout. Off: provisioning refuses such a host. Asks to confirm. |
 
 ## Work graph
 
@@ -105,6 +116,7 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | `work.retention.timeline_work_events_days` | `180` | 0–3650 days, `0` = forever | Days handover, nudge, tidy and withdrawn-suggestion timeline events are kept; the newest of each kind per session always stays. |
 | `work.recent_days` | `14` | 1–365 days | How long ended work with no live session keeps a sidebar group. |
 | `work.sync_interval_secs` | `300` | seconds, `0` = off | Seconds between tracker sync passes. Under a minute is raised to one. Applies after a restart. |
+| `work.describe_cache_secs` | `300` | seconds, shown in minutes, `0` = off | How long a fetched ticket description is reused before the tracker is asked again; never longer than the done-tickets retention window. |
 | `work.trusted_branch_projects` | `[]` | JSON array of ids | Projects where a sole ticket key in the branch name links automatically; elsewhere it is a suggestion. Set from the work popover. |
 | `work.evidence_snippets` | `true` | on / off | Keep a short, redacted prompt snippet around a detected ticket key as evidence. Off keeps only the matched text. |
 | `work.session_start_context` | `false` | on / off | Give Claude the linked ticket at session start. Makes the start hook synchronous, which can add up to 2 s when the hub is down. Experimental. Applies when the hooks are next installed. |
@@ -115,6 +127,17 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | `work.tidy_idle_unlinked_days` | `7` | 1–90 days | Days a session with no work linked must sit idle and unprompted before Tidy up suggests it. Only ever suggested, never auto-tidied. |
 | `work.auto_tidy` | `false` | on / off | Let the GC sweep act on the allowed tidy reasons by itself, by safe kill or archive only. Off, Tidy up only suggests. An organisation can override it. Asks to confirm. |
 | `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | any of `done_idle`, `pr_merged_idle`, `not_planned` | The tidy reasons auto-tidy may act on. |
+
+## update
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `update.track` | `stable` | `stable` / `beta` / `nightly` | Which releases the hub follows for its fleet. |
+| `update.hub.mode` | `notify` | `manual` / `notify` / `automatic` | manual: only a pinned version; notify: offer the update; automatic: install it at the next quiet point. |
+| `update.agent.mode` | `notify` | `manual` / `notify` / `automatic` | The same choice for fleet-agent on hosts the hub cannot reach. |
+| `update.desktop.mode` | `notify` | `manual` / `notify` / `automatic` | The same choice for the desktop app. |
+| `update.mobile.mode` | `notify` | `manual` / `notify` | manual or notify: a phone never installs an update silently. |
+| `update.check_interval_secs` | `21600` | ≥ 900 seconds | How often the hub re-reads the release channel, and clients check again. |
 
 ## Decisions (Jev)
 

@@ -87,10 +87,56 @@ export function bumpWorkChanged(): void {
   workChanged.update((n) => n + 1);
 }
 
-async function decide(cmd: string, args: Record<string, unknown>): Promise<Result<SessionRow>> {
-  const r = await invokeCmd<SessionRow>(cmd, { args });
+/** A link decision's answer: the session's row and, for a confirm / reject
+ *  of one link by id, that link's version after the write
+ *  (`link_version`, read under the write's own lock; absent from a hub
+ *  built before it). The row the store keeps never carries it. */
+export type DecidedRow = SessionRow & { link_version?: number };
+
+/** Run `fn` once `workChanged` has been quiet for `ms()` after a bump — one
+ *  re-read for a burst (a write's own bump, then its `session:updated`),
+ *  never for the subscription's initial call. `ms` is read per bump, so a
+ *  component can pass its prop. With `maxWaitMs`, the run comes at most
+ *  that long after the first bump it waits for, so a steady stream of
+ *  bumps (a busy fleet) cannot hold it back forever. The returned
+ *  unsubscriber also cancels a pending run. */
+export function onWorkChangedDebounced(
+  fn: () => void,
+  ms: () => number,
+  maxWaitMs?: () => number,
+): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let pendingSince: number | null = null;
+  let first = true;
+  const off = workChanged.subscribe(() => {
+    if (first) {
+      first = false;
+      return;
+    }
+    clearTimeout(timer);
+    let wait = ms();
+    if (maxWaitMs) {
+      const now = Date.now();
+      pendingSince ??= now;
+      wait = Math.max(0, Math.min(wait, pendingSince + maxWaitMs() - now));
+    }
+    timer = setTimeout(() => {
+      pendingSince = null;
+      fn();
+    }, wait);
+  });
+  return () => {
+    off();
+    clearTimeout(timer);
+  };
+}
+
+async function decide(cmd: string, args: Record<string, unknown>): Promise<Result<DecidedRow>> {
+  const r = await invokeCmd<DecidedRow>(cmd, { args });
   if (r.ok) {
-    acceptCommandRow(r.value);
+    const row: DecidedRow = { ...r.value };
+    delete row.link_version;
+    acceptCommandRow(row);
     bumpWorkChanged();
   }
   return r;
@@ -164,7 +210,7 @@ export function confirmSessionWork(
   sessionId: number,
   linkId: number,
   opts: { forceCrossOrg?: boolean } & WorkDecisionGuards = {},
-): Promise<Result<SessionRow>> {
+): Promise<Result<DecidedRow>> {
   return decide('confirm_session_work', {
     session_id: sessionId,
     link_id: linkId,
@@ -179,7 +225,7 @@ export function rejectWorkLink(
   sessionId: number,
   linkId: number,
   opts: Pick<WorkDecisionGuards, 'expectedVersion'> = {},
-): Promise<Result<SessionRow>> {
+): Promise<Result<DecidedRow>> {
   return decide('reject_session_work', { session_id: sessionId, link_id: linkId, ...guards(opts) });
 }
 
@@ -319,10 +365,6 @@ export interface LocalWorkItem {
   updated_at?: number;
   /** Live sessions linked to it (a per-host view counts its host's only). */
   live_sessions?: number;
-}
-
-export function listLocalWorkItems(): Promise<Result<LocalWorkItem[]>> {
-  return invokeCmd<LocalWorkItem[]>('list_local_work_items');
 }
 
 /** Name new local work (a title, an optional key) and link the session to

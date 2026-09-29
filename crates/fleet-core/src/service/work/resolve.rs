@@ -100,11 +100,6 @@ impl Signal {
             Signal::AgentInferred => "agent_inferred",
         }
     }
-
-    /// A state signal: only its present value is a candidate (C10).
-    pub fn is_state(self) -> bool {
-        matches!(self, Signal::Branch | Signal::PrHead | Signal::PrClosing)
-    }
 }
 
 /// Link sources the resolver itself writes. A link with any other source is

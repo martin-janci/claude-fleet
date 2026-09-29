@@ -164,12 +164,15 @@ impl OrgScope {
     /// of it for a session outside the scope's orgs, else a link (primary or
     /// suggestion) whose own org is outside. `work_rejected` — bare keys
     /// with no org of their own, which only the sidebar's fallback
-    /// recognition reads — never reaches a per-host token.
+    /// recognition reads — and `work_rev` (a digest over every link) never
+    /// reach a scoped caller.
     pub fn redact_row(&self, row: &mut SessionRow) {
         if self.is_all() {
             return;
         }
         row.work_rejected.clear();
+        // Another org's hidden link would move it (M14).
+        row.work_rev = 0;
         if !self.sees_org(row.org_id) {
             row.work = None;
             row.work_suggested = None;
@@ -212,6 +215,7 @@ impl OrgScope {
                     && WORK_FIELDS.iter().any(|k| map.contains_key(*k));
                 if is_row {
                     map.remove("work_rejected");
+                    map.remove("work_rev");
                     let org = session_org(map);
                     if !self.sees_org(org) {
                         for k in WORK_FIELDS {
@@ -242,7 +246,7 @@ impl OrgScope {
 }
 
 /// The `SessionRow` fields that are work data.
-pub const WORK_FIELDS: &[&str] = &["work", "work_suggested", "work_rejected"];
+pub const WORK_FIELDS: &[&str] = &["work", "work_suggested", "work_rejected", "work_rev"];
 
 /// What an id outside the scope answers: the words an unknown id gets.
 pub fn not_found(what: &str, id: i64) -> IpcError {
@@ -367,10 +371,8 @@ pub fn require_key(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcErro
     };
     let key = crate::store::normalize_work_ref(key)?;
     let refuse = || Err(not_visible_key(h, &key));
-    if let Some(item) = s.work_item_by_key(&key)? {
-        if !scope.sees_org(s.item_org(item.id)?) {
-            return refuse();
-        }
+    if let KeyItems::OnlyOthers = key_items(s, scope, &key)? {
+        return refuse();
     }
     let mut live: Vec<WorkLinkRow> = s
         .live_work_sessions_for_key(&key)?
@@ -396,6 +398,44 @@ pub fn require_key(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcErro
 /// unassigned local item) must have some work the client may see — a live
 /// or past link whose session is visible to it — or no work at all yet.
 /// Refused as a key nothing is linked to, whether it exists or not.
+/// What the items carrying a key are to `scope`.
+enum KeyItems {
+    /// No item carries the key.
+    None,
+    /// At least one does and `scope` sees its org: the first such item's
+    /// org (`None` for an unassigned one).
+    Visible(Option<i64>),
+    /// Items carry it, every one in an org `scope` does not see.
+    OnlyOthers,
+}
+
+/// Every item carrying `key`, not just the store's first: two trackers can
+/// hold the same key (two Jira sites, one per org, both with `PAY`), and a
+/// caller of the second org must not be refused over the first org's
+/// ticket when its own is right there. An org-assigned item is preferred
+/// over an unassigned one, in the store's order otherwise.
+fn key_items(s: &Store, scope: &OrgScope, key: &str) -> Result<KeyItems, IpcError> {
+    let items = s.work_items_by_key(key)?;
+    if items.is_empty() {
+        return Ok(KeyItems::None);
+    }
+    let mut unassigned = false;
+    for item in &items {
+        let org = s.item_org(item.id)?;
+        if scope.sees_org(org) {
+            if org.is_some() {
+                return Ok(KeyItems::Visible(org));
+            }
+            unassigned = true;
+        }
+    }
+    Ok(if unassigned {
+        KeyItems::Visible(None)
+    } else {
+        KeyItems::OnlyOthers
+    })
+}
+
 fn require_key_bound(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcError> {
     let key = crate::store::normalize_work_ref(key)?;
     let refuse = || {
@@ -404,16 +444,14 @@ fn require_key_bound(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcEr
             format!("nothing is linked to {key}"),
         ))
     };
-    let item = s.work_item_by_key(&key)?;
-    if let Some(item) = &item {
-        let org = s.item_org(item.id)?;
-        if !scope.sees_org(org) {
-            return refuse();
-        }
-        if org.is_some() {
-            return Ok(());
-        }
-    }
+    // An org-assigned item this client sees answers at once; an unassigned
+    // one it sees still needs a link in scope, unless nothing links the key.
+    let has_item = match key_items(s, scope, &key)? {
+        KeyItems::OnlyOthers => return refuse(),
+        KeyItems::Visible(Some(_)) => return Ok(()),
+        KeyItems::Visible(None) => true,
+        KeyItems::None => false,
+    };
     let mut links: Vec<WorkLinkRow> = s
         .live_work_sessions_for_key(&key)?
         .into_iter()
@@ -421,7 +459,7 @@ fn require_key_bound(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcEr
         .collect();
     links.extend(s.ended_work_links_for_key(&key)?);
     if links.is_empty() {
-        return if item.is_some() { Ok(()) } else { refuse() };
+        return if has_item { Ok(()) } else { refuse() };
     }
     scope_links(s, scope, &mut links)?;
     if links.is_empty() {
@@ -470,7 +508,8 @@ pub fn scopes(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<ScopeEntry>,
         .into_iter()
         .filter(|r| r.status != "ghost" && scope.sees_row(r) && scope.sees_org(r.org_id))
         .collect();
-    let needs = |r: &SessionRow| crate::service::attention::needs_attention(r).is_some();
+    let red = crate::service::health::context_red_pct(&s);
+    let needs = |r: &SessionRow| crate::service::attention::needs_attention_with(r, red).is_some();
     let mut out = Vec::new();
     for o in orgs.iter().filter(|o| scope.sees_org(Some(o.id))) {
         let mine: Vec<&SessionRow> = rows.iter().filter(|r| r.org_id == Some(o.id)).collect();

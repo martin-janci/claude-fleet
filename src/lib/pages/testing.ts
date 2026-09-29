@@ -40,7 +40,7 @@ export const SOURCE_DATA: Record<string, unknown> = {
     { kept: 'Done tickets', days: 0, rows: 12, would_delete: 0 },
     { kept: 'Work timeline', days: 90, rows: 500, would_delete: 120 },
   ],
-  'work.retention_last': { at: null, journal: 0, tracker_items: 0, timeline_work_events: 0, tracker_writes: 0 },
+  'work.retention_last': { at: null, journal: 0, tracker_items: 0, timeline_work_events: 0, tracker_writes: 0, describe_cache: 0 },
   'usage.by_model': [
     { model: 'claude-opus-5', sessions: 2, input_tokens: 20, output_tokens: 0, cost_micros: 3_000_000 },
   ],

@@ -40,7 +40,9 @@ self="$(basename "$0")"
 #
 # `kind` groups legs into the workflow matrices: `desktop` is tauri-action,
 # `bins` is the fleet-agent/fleet-hub tarball packaging, `checksums` is the
-# single aggregate job that has no matrix but does produce an asset.
+# single aggregate job that has no matrix but does produce an asset, and
+# `manifest` is the signed update manifest (scripts/release-manifest.sh,
+# update-channel design §4), required from 0.4.1.
 #
 # Runner choices are explained in release.yml (22.04 for the bins legs so the
 # binaries only need glibc 2.35+). The macOS `.app.tar.gz` names here are the
@@ -49,7 +51,8 @@ self="$(basename "$0")"
 # scripts/rename-updater-asset.sh renames them to these afterwards.
 #
 # The Windows leg ships the NSIS installer only (per-user, no admin rights;
-# see docs/windows.md). It is unsigned: there is no Authenticode certificate
+# see docs/windows.md), with Microsoft's ConPTY bundled beside the exe
+# (--config src-tauri/tauri.conpty.conf.json; scripts/fetch-conpty.sh). It is unsigned: there is no Authenticode certificate
 # yet, so SmartScreen warns on first run.
 #
 # `since` is the first version a leg ships in, empty for "always". `assets`
@@ -61,10 +64,11 @@ read_legs() {
 desktop-aarch64-apple-darwin|desktop|macos-latest|aarch64-apple-darwin|--target aarch64-apple-darwin|claude-fleet_{v}_aarch64.dmg claude-fleet_{v}_aarch64.app.tar.gz
 desktop-x86_64-apple-darwin|desktop|macos-latest|x86_64-apple-darwin|--target x86_64-apple-darwin|claude-fleet_{v}_x64.dmg claude-fleet_{v}_x64.app.tar.gz
 desktop-x86_64-linux|desktop|ubuntu-24.04||--bundles appimage,deb|claude-fleet_{v}_amd64.deb claude-fleet_{v}_amd64.AppImage
-desktop-x86_64-windows|desktop|windows-latest||--bundles nsis|claude-fleet_{v}_x64-setup.exe|0.3.4
+desktop-x86_64-windows|desktop|windows-latest||--bundles nsis --config src-tauri/tauri.conpty.conf.json|claude-fleet_{v}_x64-setup.exe|0.3.4
 bins-x86_64-unknown-linux-gnu|bins|ubuntu-22.04|x86_64-unknown-linux-gnu||fleet-agent-{v}-x86_64-unknown-linux-gnu.tar.gz fleet-hub-{v}-x86_64-unknown-linux-gnu.tar.gz
 bins-aarch64-unknown-linux-gnu|bins|ubuntu-22.04-arm|aarch64-unknown-linux-gnu||fleet-agent-{v}-aarch64-unknown-linux-gnu.tar.gz fleet-hub-{v}-aarch64-unknown-linux-gnu.tar.gz
 checksums|checksums|ubuntu-24.04|||SHA256SUMS
+manifest|manifest|ubuntu-24.04|||release-manifest.json release-manifest.json.minisig|0.4.1
 LEGS
 }
 

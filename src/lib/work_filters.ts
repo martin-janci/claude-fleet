@@ -35,7 +35,9 @@ export interface WorkFilters {
   status: StatusFilter;
   assignee: 'all' | 'mine';
   hasSession: HasSessionFilter;
-  /** Show archived rows (archived live sessions and past work). */
+  /** Show archived rows (archived live sessions and past work). Off by
+   *  default: the list stays about what is running; the sidebar says how
+   *  many are hidden and shows them all in one click. */
   archived: boolean;
 }
 
@@ -44,15 +46,15 @@ export const DEFAULT_WORK_FILTERS: WorkFilters = {
   status: 'all',
   assignee: 'all',
   hasSession: 'any',
-  archived: true,
+  archived: false,
 };
 
 export const STATUS_FILTERS: readonly StatusCategoryFilter[] = ['all', 'todo', 'in_progress', 'done'];
 export const STATUS_FILTER_LABELS: Record<StatusCategoryFilter, string> = {
-  all: 'any status',
-  todo: 'to do',
-  in_progress: 'in progress',
-  done: 'done',
+  all: 'Any',
+  todo: 'To do',
+  in_progress: 'In progress',
+  done: 'Done',
 };
 export function statusNameFilter(name: string): StatusNameFilter {
   return `${STATUS_NAME_PREFIX}${name.trim()}` as StatusNameFilter;
@@ -82,9 +84,9 @@ export function statusNamesOf(sessions: readonly Pick<SessionRow, 'work'>[]): st
 
 export const HAS_SESSION_FILTERS: readonly HasSessionFilter[] = ['any', 'yes', 'no'];
 export const HAS_SESSION_LABELS: Record<HasSessionFilter, string> = {
-  any: 'any',
-  yes: 'with session',
-  no: 'past only',
+  any: 'Any',
+  yes: 'Active session',
+  no: 'Past only',
 };
 
 /** The assignee `rowMatches` reads for "mine". Not a name a tracker can
@@ -104,10 +106,49 @@ export function isWorkFilters(v: unknown): v is WorkFilters {
   );
 }
 
-const PREF_KEY = 'sidebar.work-filters';
+const PREF_KEY = 'sidebar.work-filters.v2';
+/** Before archived rows were hidden by default. Every install wrote
+ *  `archived: true` there (the old default), so it says nothing about a
+ *  choice: carry the rest over and start hidden. */
+const PREF_KEY_V1 = 'sidebar.work-filters';
+
+/** Saved filters, field by field: a field that is missing (a pref from
+ *  before it existed) or no longer valid takes its default, and the rest
+ *  are kept — a whole-object check dropped a person's tracker and status
+ *  choices for want of one new field. `null` when there is nothing saved. */
+export function migrateWorkFilters(v: unknown): WorkFilters | null {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
+  const f = v as Record<string, unknown>;
+  const d = DEFAULT_WORK_FILTERS;
+  return {
+    tracker:
+      f.tracker === 'all' || (typeof f.tracker === 'number' && Number.isInteger(f.tracker))
+        ? (f.tracker as WorkFilters['tracker'])
+        : d.tracker,
+    status:
+      STATUS_FILTERS.includes(f.status as StatusCategoryFilter) || isStatusNameFilter(f.status)
+        ? (f.status as StatusFilter)
+        : d.status,
+    assignee: f.assignee === 'all' || f.assignee === 'mine' ? f.assignee : d.assignee,
+    hasSession: HAS_SESSION_FILTERS.includes(f.hasSession as HasSessionFilter)
+      ? (f.hasSession as HasSessionFilter)
+      : d.hasSession,
+    archived: typeof f.archived === 'boolean' ? f.archived : d.archived,
+  };
+}
+
+/** The stored filters: v2, else v1's with the new archived default, each
+ *  read field by field (`migrateWorkFilters`). */
+export function readWorkFilters(): WorkFilters {
+  const raw = (key: string) => readPref<unknown>(key, null, (_v): _v is unknown => true);
+  const v2 = migrateWorkFilters(raw(PREF_KEY));
+  if (v2) return v2;
+  const v1 = migrateWorkFilters(raw(PREF_KEY_V1));
+  return { ...(v1 ?? DEFAULT_WORK_FILTERS), archived: false };
+}
 
 /** Persisted across restarts, like `hostFilter` and `scopeFilter`. */
-export const workFilters = writable<WorkFilters>(readPref(PREF_KEY, DEFAULT_WORK_FILTERS, isWorkFilters));
+export const workFilters = writable<WorkFilters>(readWorkFilters());
 workFilters.subscribe((v) => writePref(PREF_KEY, v));
 
 /** The filters as they apply: a tracker that no longer exists is "all"
@@ -124,22 +165,25 @@ export function effectiveWorkFilters(
     statusNames !== undefined &&
     isStatusNameFilter(f.status) &&
     !statusNames.some((n) => statusNameFilter(n).toLowerCase() === f.status.toLowerCase());
+  const hasSession = workMode ? f.hasSession : 'any';
   return {
     ...f,
     tracker: f.tracker !== 'all' && !trackers.some((t) => t.id === f.tracker) ? 'all' : f.tracker,
     status: goneName ? 'all' : f.status,
-    hasSession: workMode ? f.hasSession : 'any',
+    hasSession,
+    // "Past only" asks for past work, which is archived: show it.
+    archived: f.archived || hasSession === 'no',
   };
 }
 
-/** How many filters narrow the view (the chrome's count). */
+/** How many filters narrow the view (the chrome's count). Archived rows
+ *  are hidden by default, so hiding them is not a filter the user set. */
 export function activeWorkFilterCount(f: WorkFilters): number {
   return (
     (f.tracker !== 'all' ? 1 : 0) +
     (f.status !== 'all' ? 1 : 0) +
     (f.assignee !== 'all' ? 1 : 0) +
-    (f.hasSession !== 'any' ? 1 : 0) +
-    (f.archived ? 0 : 1)
+    (f.hasSession !== 'any' ? 1 : 0)
   );
 }
 
@@ -196,7 +240,7 @@ export function pastWorkFields(
 
 /** The session predicate of the work filters, `null` when none narrows. */
 export function workFilterPredicate(f: WorkFilters, ctx: WorkFilterContext): SessionPredicate {
-  if (activeWorkFilterCount(f) === 0) return null;
+  if (activeWorkFilterCount(f) === 0 && f.archived) return null;
   const rf = toRowFilters(f);
   return (s) => rowMatches(sessionWorkRow(s, ctx), rf);
 }
@@ -210,10 +254,22 @@ export function bothPredicates(a: SessionPredicate, b: SessionPredicate): Sessio
 
 /** The item ids of the hub's `mine` view. */
 export const mineItemIds = writable<ReadonlySet<number>>(new Set());
+/** Whether `mineItemIds` has been read at least once. Until it has, "mine"
+ *  is not applied: an empty set would hide every row behind a filter that
+ *  simply has not loaded yet (or whose read failed). */
+export const mineLoaded = writable(false);
 
 /** Read the `mine` view (a read of the hub's cache; routed on a paired
  *  desktop). A failure keeps the last set. */
 export async function loadMine(): Promise<void> {
   const r = await workTickets({ view: 'mine', limit: 200 });
-  if (r.ok && Array.isArray(r.value)) mineItemIds.set(new Set(r.value.map((t) => t.id)));
+  if (r.ok && Array.isArray(r.value)) {
+    mineItemIds.set(new Set(r.value.map((t) => t.id)));
+    mineLoaded.set(true);
+  }
+}
+
+/** The filters with "mine" set aside until the `mine` view has loaded. */
+export function withMineReady(f: WorkFilters, loaded: boolean): WorkFilters {
+  return f.assignee === 'mine' && !loaded ? { ...f, assignee: 'all' } : f;
 }

@@ -340,9 +340,7 @@ impl Store {
                 .query_map(params.as_slice(), |r| r.get(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             let sql = format!(
-                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2,
-                     claude_status=NULL, stuck_kind=NULL, stuck_since=NULL,
-                     current_activity=NULL, pending_input=NULL
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason=?2, {LOSS_CLEARS}
                  WHERE host_alias=?3 AND status!='ghost' AND {kind_filter}
                    AND COALESCE(last_reconciled_at, 0) < ?4{not_in}
                  RETURNING id"
@@ -414,10 +412,10 @@ impl Store {
         now: i64,
     ) -> Result<Option<SessionRow>, rusqlite::Error> {
         let changed = self.conn.execute(
-            "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='killed',
-                 claude_status=NULL, stuck_kind=NULL, stuck_since=NULL,
-                 current_activity=NULL, pending_input=NULL
-             WHERE id=?2 AND status!='ghost'",
+            &format!(
+                "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='killed', \
+                 {LOSS_CLEARS} WHERE id=?2 AND status!='ghost'"
+            ),
             rusqlite::params![now, id],
         )?;
         let row = fetch_session_by_id(&self.conn, id)?;
@@ -697,6 +695,54 @@ impl Store {
         uuid: &str,
     ) -> Result<(), crate::ipc_error::IpcError> {
         self.rebind_conversation(id, uuid, StartSource::Fleet, None, None)?;
+        Ok(())
+    }
+
+    /// The `claude --model` / `--effort` a session launches with
+    /// (`sessions.launch_model` / `effort_level`); `(None, None)` for a
+    /// missing row. Unvalidated: callers pass them to
+    /// `tmux::ClaudeLaunch::checked`.
+    pub fn session_launch(
+        &self,
+        id: i64,
+    ) -> Result<(Option<String>, Option<String>), rusqlite::Error> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT launch_model, effort_level FROM sessions WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or((None, None)))
+    }
+
+    /// Record the model a session launches with (`None` = the host's
+    /// default). Not client-visible, so no event.
+    pub fn set_session_launch_model(
+        &self,
+        id: i64,
+        model: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE sessions SET launch_model = ?1 WHERE id = ?2",
+            rusqlite::params![model, id],
+        )?;
+        Ok(())
+    }
+
+    /// Record the effort a session runs at (`None` = the host's default).
+    /// `effort_level` is on the row (the sidebar's badge), so this emits
+    /// `session_updated`.
+    pub fn set_session_effort(&self, id: i64, effort: Option<&str>) -> Result<(), rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET effort_level = ?1 WHERE id = ?2 AND effort_level IS NOT ?1",
+            rusqlite::params![effort, id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
         Ok(())
     }
 
@@ -1227,7 +1273,7 @@ impl Store {
                 "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
                      idle_since = COALESCE(idle_since, ?2), pending_input = NULL, \
-                     stale_working_at = NULL{END_COMPACTING} \
+                     stale_working_at = NULL, stale_demoted_at = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],
@@ -1269,7 +1315,7 @@ impl Store {
             &format!(
                 "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
                      last_hook_at = ?2, prompt_submit_seq = prompt_submit_seq + 1, \
-                     pending_input = NULL, stale_working_at = NULL{END_COMPACTING} WHERE id = ?1"
+                     pending_input = NULL, stale_working_at = NULL, stale_demoted_at = NULL{END_COMPACTING} WHERE id = ?1"
             ),
             rusqlite::params![row_id, now_unix()],
         )?;
@@ -1321,7 +1367,7 @@ impl Store {
             "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
                  last_hook_at = ?2, idle_since = COALESCE(idle_since, ?2), \
                  stuck_kind = NULL, stuck_since = NULL, pending_input = NULL, \
-                 stale_working_at = NULL \
+                 stale_working_at = NULL, stale_demoted_at = NULL \
                  WHERE id = ?1",
             rusqlite::params![row_id, now],
         )?;
@@ -1352,7 +1398,7 @@ impl Store {
                 "UPDATE sessions SET claude_status = 'failed', turn_seq = turn_seq + 1, \
                      last_stop_at = ?2, last_turn_at = ?2, last_hook_at = ?2, \
                      idle_since = COALESCE(idle_since, ?2), pending_input = NULL, \
-                     stale_working_at = NULL{END_COMPACTING} \
+                     stale_working_at = NULL, stale_demoted_at = NULL{END_COMPACTING} \
                  WHERE id = ?1"
             ),
             rusqlite::params![row_id, now],
@@ -1368,11 +1414,22 @@ impl Store {
 
     /// The tick's stale-`working` rule (lifecycle F2): a live tmux row that
     /// says `working` but has had no hook, no turn, no transcript growth
-    /// (`context_at`, `usage_updated_at`) and no pane output
+    /// (`context_at`, `usage_updated_at`), no spinner on its pane
+    /// (`pane_working_at`, stamped by every reconcile pass that captured the
+    /// pane showing a live turn) and no tmux session activity
     /// (`last_activity_at`) for `stale_secs` is demoted to `idle` and stamped
-    /// `stale_working_at = now`, which is what the attention model reads.
+    /// `stale_working_at = now`, which is what the attention model reads,
+    /// and `stale_demoted_at = now`, which arms the reconcile's
+    /// `stale_working_veto`. `last_activity_at` is tmux's
+    /// `#{session_activity}`, which moves on a client's input and an attach,
+    /// NOT on pane output (a detached pane can print for hours without
+    /// moving it) — the spinner stamp is the pane evidence. A demoted row's
+    /// `idle` is a guess: `store::trusted_status` makes turn-over checks ask
+    /// the pane before believing it while `stale_demoted_at` is set.
     /// Pane-less and `shell` rows are never judged (no hooks or turns to
-    /// miss); a stamped row is not judged twice; `stale_secs <= 0` is off.
+    /// miss); a demoted row is not judged twice — even once an attach or the
+    /// TTL has lifted its attention stamp, since the demotion itself still
+    /// stands; `stale_secs <= 0` is off.
     /// Returns the demoted rows; each gets `session_updated`, a
     /// `status_change idle` and a `stale_working` timeline entry.
     pub fn age_out_stale_working(
@@ -1387,18 +1444,22 @@ impl Store {
         let ids: Vec<i64> = self
             .conn
             .prepare(
-                "UPDATE sessions SET claude_status = 'idle', idle_since = ?1, stale_working_at = ?1 \
+                "UPDATE sessions SET claude_status = 'idle', idle_since = ?1, \
+                     stale_working_at = ?1, stale_demoted_at = ?1 \
                  WHERE status = 'running' AND claude_status = 'working' \
-                   AND kind NOT IN ('bg','external','shell') AND stale_working_at IS NULL \
+                   AND kind NOT IN ('bg','external','shell') AND stale_demoted_at IS NULL \
                    AND COALESCE(last_hook_at, 0) < ?2 AND COALESCE(last_turn_at, 0) < ?2 \
                    AND COALESCE(context_at, 0) < ?2 AND COALESCE(usage_updated_at, 0) < ?2 \
+                   AND COALESCE(pane_working_at, 0) < ?2 \
                    AND last_activity_at < ?2 AND created_at < ?2 \
                  RETURNING id",
             )?
             .query_map(rusqlite::params![now, cutoff], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut out = Vec::with_capacity(ids.len());
-        let detail = format!("no hook, turn, transcript growth or pane output for {stale_secs}s");
+        let detail = format!(
+            "no hook, turn, transcript growth, pane spinner or tmux session activity for {stale_secs}s"
+        );
         for id in ids {
             for (kind, d) in [
                 ("status_change", "idle"),
@@ -1413,6 +1474,96 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// Lift `stale_working_at` where it no longer asks anything of a person:
+    /// the row is `working` or `blocked` again (a pane read lifted the
+    /// demotion without a hook — `stale_working_veto`), or the stamp is
+    /// older than `ttl_secs` (nobody looked; `0` = never by age). An attach
+    /// clears it too (`touch_session`), and every hook does. Only a row that
+    /// is `working` / `blocked` again also loses `stale_demoted_at` (the
+    /// veto): the TTL ends the reason, not the demotion. Returns the rows
+    /// whose stamp it lifted; each gets `session_updated` once. A row whose
+    /// only change is `stale_demoted_at` is not emitted — nothing a client
+    /// sees changed.
+    pub fn expire_stale_working(
+        &self,
+        now: i64,
+        ttl_secs: i64,
+    ) -> Result<Vec<SessionRow>, rusqlite::Error> {
+        let cutoff = if ttl_secs > 0 {
+            now - ttl_secs
+        } else {
+            i64::MIN
+        };
+        let ids: Vec<i64> = self
+            .conn
+            .prepare(
+                "UPDATE sessions SET stale_working_at = NULL, \
+                     stale_demoted_at = CASE WHEN claude_status IN ('working', 'blocked') \
+                                             THEN NULL ELSE stale_demoted_at END \
+                 WHERE stale_working_at IS NOT NULL \
+                   AND (claude_status IN ('working', 'blocked') OR stale_working_at < ?1) \
+                 RETURNING id",
+            )?
+            .query_map(rusqlite::params![cutoff], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        // An acknowledged demotion (stamp already gone) whose row works
+        // again: disarm the veto too. Silent — `stale_demoted_at` is not on
+        // the wire, and the rows above already lost theirs.
+        self.conn.execute(
+            "UPDATE sessions SET stale_demoted_at = NULL \
+             WHERE stale_demoted_at IS NOT NULL AND stale_working_at IS NULL \
+               AND claude_status IN ('working', 'blocked')",
+            [],
+        )?;
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(row) = self.emit_session(id)? {
+                out.push(row);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Whether the tick's stale-working rule demoted this row and nothing
+    /// has lifted the demotion since (`stale_demoted_at`, migration 080):
+    /// the reconcile's `stale_working_veto` reads it for the prior row,
+    /// since an attach or the TTL may have cleared `stale_working_at` while
+    /// the demotion still stands. `false` for a row that does not exist.
+    pub fn stale_demoted(
+        &self,
+        host_alias: &str,
+        tmux_name: &str,
+    ) -> Result<bool, rusqlite::Error> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT stale_demoted_at IS NOT NULL FROM sessions \
+                 WHERE host_alias = ?1 AND tmux_name = ?2",
+                rusqlite::params![host_alias, tmux_name],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    /// [`Store::stale_demoted`] by row id: whether the tick's stale-working
+    /// rule demoted this row and nothing has lifted the demotion since. What
+    /// `store::trusted_status` takes as `demoted`. `false` for a row that
+    /// does not exist.
+    pub fn stale_demoted_by_id(&self, id: i64) -> Result<bool, rusqlite::Error> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT stale_demoted_at IS NOT NULL FROM sessions WHERE id = ?1",
+                [id],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false))
     }
 
     /// The Notification hook's write. `status` is the mapped status;
@@ -1443,7 +1594,8 @@ impl Store {
         };
         let sql = format!(
             "UPDATE sessions SET claude_status = ?4, last_hook_at = ?2, \
-             stale_working_at = NULL, idle_since = {idle}{stuck_sql} WHERE id = ?1",
+             stale_working_at = NULL, stale_demoted_at = NULL, \
+             idle_since = {idle}{stuck_sql} WHERE id = ?1",
             idle = idle_since_sql("?4", "?2"),
         );
         let kind = match stuck {
@@ -3542,7 +3694,7 @@ mod tests {
                 .claude_status
                 .as_deref(),
             Some("working"),
-            "pane output 500 s ago is not stale"
+            "tmux session activity 500 s ago is not stale"
         );
         assert_eq!(
             s.get_session_by_id(sh).unwrap().unwrap().stale_working_at,
@@ -3578,6 +3730,168 @@ mod tests {
                 .stale_working_at,
             None
         );
+    }
+
+    /// 2026-09-28: the stamp outlived its point. It lifts when the row is
+    /// working or blocked again (a pane read lifted the demotion without a
+    /// hook) and after `ttl_secs`; a fresh stamp on an idle row stays.
+    #[test]
+    fn expire_stale_working_lifts_a_resumed_or_old_stamp_and_keeps_a_fresh_one() {
+        let s = store();
+        let mk = |name: &str, status: &str, at: i64| -> i64 {
+            let id = s
+                .upsert_session(name, "local", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_status = ?2, stale_working_at = ?3 WHERE id = ?1",
+                    rusqlite::params![id, status, at],
+                )
+                .unwrap();
+            id
+        };
+        let fresh = mk("fresh", "idle", 9_000);
+        let old = mk("old", "idle", 1_000);
+        let resumed = mk("resumed", "working", 9_000);
+        let asking = mk("asking", "blocked", 9_000);
+
+        let mut lifted: Vec<i64> = s
+            .expire_stale_working(10_000, 3_600)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        lifted.sort();
+        let mut want = vec![old, resumed, asking];
+        want.sort();
+        assert_eq!(lifted, want);
+        assert_eq!(
+            s.get_session_by_id(fresh)
+                .unwrap()
+                .unwrap()
+                .stale_working_at,
+            Some(9_000),
+            "a fresh stamp on an idle row still asks for a look"
+        );
+
+        // `0`: never by age — but a resumed row still lifts.
+        let ancient = mk("ancient", "idle", 1);
+        let back = mk("back", "working", 1);
+        let lifted: Vec<i64> = s
+            .expire_stale_working(10_000, 0)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(lifted, vec![back]);
+        assert_eq!(
+            s.get_session_by_id(ancient)
+                .unwrap()
+                .unwrap()
+                .stale_working_at,
+            Some(1)
+        );
+    }
+
+    /// Final review of the acknowledgement: `stale_demoted_at` (the veto's
+    /// memory, migration 080) outlives the attention stamp. Every hook
+    /// clears both; the TTL clears only the stamp; a row working or blocked
+    /// again clears both — silently when the stamp was already gone, since
+    /// nothing a client sees changes.
+    #[test]
+    fn stale_demoted_at_ends_with_a_hook_or_a_resumed_row_but_not_the_ttl() {
+        let (s, bus) = crate::store::test_support::store_with_recorder();
+        s.upsert_host("local").unwrap();
+        let mk = |name: &str, status: &str, stamp: Option<i64>| -> i64 {
+            let id = s
+                .upsert_session(name, "local", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET claude_status = ?2, stale_working_at = ?3, \
+                         stale_demoted_at = 500 WHERE id = ?1",
+                    rusqlite::params![id, status, stamp],
+                )
+                .unwrap();
+            id
+        };
+        let demoted = |name: &str| s.stale_demoted("local", name).unwrap();
+        let stamp = |id: i64| s.get_session_by_id(id).unwrap().unwrap().stale_working_at;
+
+        // Every hook write clears both.
+        let stop = mk("stop", "idle", Some(500));
+        s.record_stop_hook_for_row(stop).unwrap();
+        let prompt = mk("prompt", "idle", Some(500));
+        s.record_prompt_submit_hook_for_row(prompt).unwrap();
+        let end = mk("end", "idle", Some(500));
+        s.record_session_end_hook_for_row(end).unwrap();
+        let fail = mk("fail", "idle", Some(500));
+        s.record_stop_failure_hook_for_row(fail).unwrap();
+        let note = mk("note", "idle", Some(500));
+        s.record_notification_hook_for_row(
+            note,
+            crate::service::pane_intel::ClaudeStatus::Blocked,
+            None,
+        )
+        .unwrap();
+        let start = mk("start", "idle", None);
+        s.clear_ended_turn_state(start).unwrap();
+        for (id, name) in [
+            (stop, "stop"),
+            (prompt, "prompt"),
+            (end, "end"),
+            (fail, "fail"),
+            (note, "note"),
+            (start, "start"),
+        ] {
+            assert_eq!(stamp(id), None, "{name}: the hook clears the stamp");
+            assert!(!demoted(name), "{name}: the hook clears the veto");
+        }
+
+        // The TTL ends the reason, not the demotion.
+        let expired = mk("expired", "idle", Some(1_000));
+        // A pane read lifted the demotion (`working` / `blocked` again).
+        let resumed = mk("resumed", "working", Some(9_000));
+        let asking = mk("asking", "blocked", Some(9_000));
+        // Acknowledged earlier (stamp gone), working again: veto only.
+        let acked = mk("acked", "working", None);
+        // Acknowledged and still idle: nothing to lift.
+        let quiet = mk("quiet", "idle", None);
+        bus.take();
+        let mut lifted: Vec<i64> = s
+            .expire_stale_working(10_000, 3_600)
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        lifted.sort();
+        let mut want = vec![expired, resumed, asking];
+        want.sort();
+        assert_eq!(lifted, want, "only a lifted stamp is returned");
+        assert_eq!(stamp(expired), None);
+        assert!(demoted("expired"), "the TTL keeps the veto");
+        assert!(!demoted("resumed"), "a working row lifts the veto");
+        assert!(!demoted("asking"), "a blocked row lifts the veto");
+        assert!(
+            !demoted("acked"),
+            "an acknowledged working row lifts it too"
+        );
+        assert!(demoted("quiet"), "an acknowledged idle row keeps it");
+        let events = bus.take();
+        for id in [expired, resumed, asking] {
+            let ev = format!("session:updated:{id}");
+            assert_eq!(
+                events.iter().filter(|e| **e == ev).count(),
+                1,
+                "{id} is emitted once: {events:?}"
+            );
+        }
+        for id in [acked, quiet] {
+            assert!(
+                !events.contains(&format!("session:updated:{id}")),
+                "{id}: a veto-only change is not a visible change: {events:?}"
+            );
+        }
     }
 
     #[test]

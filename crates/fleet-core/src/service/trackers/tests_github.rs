@@ -105,6 +105,7 @@ impl Harness for GitHubHarness {
             ],
             bare_repo: "acme/api",
             secret: None,
+            describe: true,
         }
     }
 
@@ -178,9 +179,85 @@ impl Harness for GitHubHarness {
             }
         }
     }
+
+    fn script_describe(&self, f: &FakeTransport) {
+        f.once(Method::Post, "/graphql", ok("describe_issue.json"));
+    }
+
+    fn describe_ref(&self) -> &'static str {
+        "acme/api#1"
+    }
 }
 
 crate::conformance_suite!(GitHubHarness);
+
+/// `describe` by node id: the same `nodes(ids: …)` query `fetch` uses, `body`
+/// read straight off the answer — uncapped by `DESCRIPTION_MAX_CHARS`, capped
+/// only at `DESCRIBE_MAX_CHARS` (the conformance suite exercises the
+/// by-repository-and-number path; this is the other one `fetch` supports).
+#[tokio::test]
+async fn describe_by_node_id_reads_body_uncapped() {
+    let f = FakeTransport::new();
+    let long = "z".repeat(crate::service::trackers::DESCRIPTION_MAX_CHARS + 500);
+    let body = json!({
+        "data": { "nodes": [ {
+            "id": "I_kwDOAcme0001",
+            "number": 42,
+            "title": "t",
+            "url": "https://github.com/acme/api/issues/42",
+            "state": "OPEN",
+            "stateReason": null,
+            "updatedAt": "2026-09-21T09:30:00Z",
+            "body": long,
+            "repository": { "nameWithOwner": "acme/api" },
+            "assignees": { "nodes": [] },
+            "issueType": null,
+            "parent": null,
+            "linkedBranches": { "totalCount": 0 },
+            "closedByPullRequestsReferences": { "totalCount": 0 }
+        } ] }
+    });
+    f.once(Method::Post, "/graphql", Ok(Response::json(200, &body)));
+    let p = github(&f);
+    assert!(p.caps().describe, "GitHub implements describe");
+    let out = p
+        .describe(&ItemRef::Id("I_kwDOAcme0001".into()))
+        .await
+        .unwrap()
+        .expect("a describe answer");
+    assert_eq!(
+        out.text.chars().count(),
+        crate::service::trackers::DESCRIPTION_MAX_CHARS + 500
+    );
+    assert_eq!(
+        out.chars,
+        (crate::service::trackers::DESCRIPTION_MAX_CHARS + 500) as i64
+    );
+
+    // Past `DESCRIBE_MAX_CHARS`: cut there, the true length reported.
+    let cap = crate::service::trackers::DESCRIBE_MAX_CHARS;
+    let f = FakeTransport::new();
+    let mut huge = body.clone();
+    huge["data"]["nodes"][0]["body"] = json!("w".repeat(cap + 99));
+    f.once(Method::Post, "/graphql", Ok(Response::json(200, &huge)));
+    let out = github(&f)
+        .describe(&ItemRef::Id("I_kwDOAcme0001".into()))
+        .await
+        .unwrap()
+        .expect("a describe answer");
+    assert_eq!(out.text.chars().count(), cap);
+    assert_eq!(out.chars, (cap + 99) as i64);
+
+    // A reference this tracker cannot resolve to any id or repo/number: no
+    // answer, no request sent.
+    let f = FakeTransport::new();
+    let out = github(&f)
+        .describe(&ItemRef::Key("just some prose, no ticket in it".into()))
+        .await
+        .unwrap();
+    assert!(out.is_none());
+    assert!(f.requests().is_empty());
+}
 
 #[tokio::test]
 async fn a_listing_normalises_keys_assignees_and_the_parent() {
@@ -993,6 +1070,14 @@ mod ghes {
         fn script_error(&self, f: &FakeTransport, case: ErrorCase) {
             GitHubHarness.script_error(f, case)
         }
+
+        fn script_describe(&self, f: &FakeTransport) {
+            GitHubHarness.script_describe(f)
+        }
+
+        fn describe_ref(&self) -> &'static str {
+            "ghe.corp.example/acme/api#1"
+        }
     }
 
     crate::conformance_suite!(GhesHarness);
@@ -1132,4 +1217,25 @@ mod ghes {
         let policy = crate::service::trackers::host_policy(&row);
         assert!(policy("ghe.corp.example") && !policy("api.github.com"));
     }
+}
+
+/// An issue's body becomes the excerpt: cut at `DESCRIPTION_MAX_CHARS`, with
+/// the true length beside it, and an uncut one reports exactly its own
+/// length.
+#[test]
+fn a_body_is_cut_to_the_excerpt_with_its_true_length() {
+    let cap = crate::service::trackers::DESCRIPTION_MAX_CHARS;
+    let f = FakeTransport::new();
+    let mut n = fixture("github", "search_mine_p1.json")["data"]["search"]["nodes"][0].clone();
+    n["body"] = json!("b".repeat(cap + 321));
+    let s = github(&f).snapshot(&n).expect("a snapshot");
+    assert_eq!(
+        s.description.as_deref().map(|d| d.chars().count()),
+        Some(cap)
+    );
+    assert_eq!(s.description_chars, Some((cap + 321) as i64));
+    n["body"] = json!("short body");
+    let s = github(&f).snapshot(&n).expect("a snapshot");
+    assert_eq!(s.description.as_deref(), Some("short body"));
+    assert_eq!(s.description_chars, Some(10));
 }

@@ -8,6 +8,7 @@ use crate::events::{EventBus, RowChange};
 use rusqlite::{Connection, OptionalExtension, Result, TransactionBehavior};
 use std::sync::Arc;
 
+pub mod backup;
 mod bench_work_link;
 mod catalog;
 mod clients;
@@ -39,8 +40,10 @@ mod timeline;
 mod tracker_items;
 mod tracker_writes;
 mod trackers;
+mod update;
 mod usage;
 mod work;
+mod work_describe;
 mod work_detect;
 mod work_journal;
 mod work_local;
@@ -58,8 +61,9 @@ pub use clients::{
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use decisions::{
     is_decision_word, DecisionKeyStatus, DecisionRunFilter, DecisionRunRow, DecisionStatRow,
-    NewDecisionRun, DECISION_CALL_FAILURES, DECISION_FALLBACKS, DECISION_FOLLOWUPS,
-    DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
+    NewDecisionRun, RunScope, DECISION_BENCH_SUBJECT, DECISION_CALL_FAILURES, DECISION_FALLBACKS,
+    DECISION_FOLLOWUPS, DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_PERSON_FOLLOWUPS,
+    DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
 };
 pub use layers::HostLayerRow;
 pub use nl_census::{
@@ -80,6 +84,7 @@ pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};
 pub use rows::*;
+pub use schema::known_schema_version;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
@@ -98,6 +103,9 @@ pub use trackers::{
     validate_tracker_settings, validate_tracker_transport, Secret, TrackerConfig,
     TrackerCredential, TrackerRow, TrackerSettings, TrackerViewRow, WriteBack, TRACKER_AUTH_KINDS,
     TRACKER_PROVIDERS, TRACKER_STATES,
+};
+pub use update::{
+    UpdateDesiredRow, UpdateDocRow, UpdateEventRow, UpdateObservedRow, UPDATE_EVENT_RETENTION_SECS,
 };
 pub use work::{
     canonical_key, github_ref, normalize_work_ref, primary_conflict, split_github_repo, Decider,

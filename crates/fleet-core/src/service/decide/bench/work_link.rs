@@ -4,8 +4,10 @@
 //! **Dataset A** is every confirmed link a PERSON decided (source `manual`
 //! or `started`; never `agent`, `agent_inferred` or a resolver's) whose
 //! conversation kept a first prompt. Its truth is the linked item. Prompts
-//! fleet typed itself (a start, a resume, a quick-reply chip…) are left out
-//! as the census leaves them out. For every case with other candidates a
+//! fleet typed itself (a start, a resume, a quick-reply chip…) and prompts
+//! Claude Code submitted itself (a `<task-notification>`) are left out as
+//! the census leaves them out ([`FleetPrompts::person_text`]; dataset H's
+//! export too). For every case with other candidates a
 //! **none-case** is added: the same state, the candidates without the truth,
 //! and "abstain" as the right answer.
 //!
@@ -60,7 +62,7 @@ use super::{bootstrap_acc_diff, mix, percentile, Calibration, Criterion, Paired,
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::decide::haiku::{reason::OTHER_ORG, Haiku};
 use crate::service::decide::{
-    decide, gate_at, DecideCtx, DecideRequest, Feature, JevRequest, NoulCriteria, Question,
+    decide, gate_bench_at, DecideCtx, DecideRequest, Feature, JevRequest, NoulCriteria, Question,
 };
 use crate::service::nl::census::{FleetPrompts, Shown};
 use crate::service::nl::{self, Ranker};
@@ -88,8 +90,9 @@ pub const ACCEPT_BELOW_HAIKU: f64 = 0.03;
 pub const ACCEPT_CELL_BELOW_ENGLISH: f64 = 0.10;
 /// The English cell the language rule compares against.
 pub const ENGLISH_CELL: &str = "en×en";
-/// `decision_runs.subject_kind` of a benchmark call.
-pub const SUBJECT_KIND: &str = "bench";
+/// `decision_runs.subject_kind` of a benchmark call: gated without the
+/// feature's mode, and kept out of the live breaker, budget and stats.
+pub const SUBJECT_KIND: &str = crate::store::DECISION_BENCH_SUBJECT;
 /// The option that means "none of these".
 pub const NONE_OPTION: &str = "none";
 /// The most candidates a case offers (test map J1: ≤ 50).
@@ -133,41 +136,9 @@ pub const APPROXIMATIONS: &[&str] = &[
     "links of deleted sessions are not read (their conversations went with them)",
 ];
 
-/// Which cases are reported.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Split {
-    Dev,
-    Test,
-    All,
-}
-
-impl Split {
-    pub fn parse(s: &str) -> Option<Split> {
-        match s {
-            "dev" => Some(Split::Dev),
-            "test" => Some(Split::Test),
-            "all" => Some(Split::All),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Split::Dev => "dev",
-            Split::Test => "test",
-            Split::All => "all",
-        }
-    }
-
-    fn keeps(self, dev: bool) -> bool {
-        match self {
-            Split::Dev => dev,
-            Split::Test => !dev,
-            Split::All => true,
-        }
-    }
-}
+/// Which cases are reported (dev: the oldest [`DEV_SHARE_PCT`]% of A by
+/// decision time).
+pub use super::Split;
 
 /// A provider the benchmark asks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -543,7 +514,7 @@ impl BenchOptions {
 pub struct Sizes {
     /// Person-decided links with a first prompt in the window.
     pub a_links_read: Shown,
-    /// Of them, prompts fleet typed itself: left out.
+    /// Of them, prompts fleet (or Claude Code) typed itself: left out.
     pub a_fleet_typed: Shown,
     /// Of them, in another org than `--org`: left out.
     pub a_other_org: Shown,
@@ -560,6 +531,9 @@ pub struct Sizes {
     /// Labels naming an item that is not among the row's candidates: the
     /// candidate set missed the truth (a recall miss, not scored).
     pub h_label_outside: Shown,
+    /// Rows whose session is no longer in the database: their org cannot
+    /// be read from it, so they are left out ([`resolve_label_orgs`]).
+    pub h_session_gone: Shown,
 }
 
 /// Where the truth was, before any model is asked.
@@ -794,10 +768,10 @@ pub fn load(
             sizes.a_other_org.0 += 1;
             continue;
         }
-        if fleet.is_fleet(&row.first_prompt, row.last_prompt.as_deref()) {
+        let Some(prompt) = fleet.person_text(&row.first_prompt, row.last_prompt.as_deref()) else {
             sizes.a_fleet_typed.0 += 1;
             continue;
-        }
+        };
         let Some(truth) = pool.item(row.item_id) else {
             continue;
         };
@@ -805,7 +779,7 @@ pub fn load(
         let slug = (row.source == "started")
             .then(|| branch_slug(truth.key.as_deref().unwrap_or_default(), &truth.title));
         let state = redact_prompt(
-            &row.first_prompt,
+            &prompt,
             &ctx,
             &Redact {
                 branch: row.branch.as_deref(),
@@ -899,7 +873,9 @@ pub fn load(
     let mut cases = truths;
     cases.extend(nones);
     if let Some(rows) = labels {
-        cases.extend(h_cases(rows, ranker, opts, &mut sizes));
+        let rows = resolve_label_orgs(store, rows, &mut sizes)
+            .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
+        cases.extend(h_cases(&rows, ranker, opts, &mut sizes));
     }
     let org_names = store
         .list_orgs()?
@@ -959,8 +935,13 @@ pub fn export_unlinked(
         .bench_unlinked_conversations(opts.since(), opts.max_cases)?
         .into_iter()
         .filter(|r| opts.org.is_none() || opts.org == r.org_id)
-        .filter(|r| !fleet.is_fleet(&r.first_prompt, r.last_prompt.as_deref()))
-        .filter(|r| seen.insert(r.session_id))
+        .filter_map(|r| {
+            let p = fleet
+                .person_text(&r.first_prompt, r.last_prompt.as_deref())?
+                .to_string();
+            Some((r, p))
+        })
+        .filter(|(r, _)| seen.insert(r.session_id))
         .collect();
     if rows.is_empty() {
         return Ok(Vec::new());
@@ -969,9 +950,9 @@ pub fn export_unlinked(
     let mut out = Vec::new();
     let mut at = 0.0;
     while (at as usize) < rows.len() && out.len() < n {
-        let r = &rows[at as usize];
+        let (r, first_prompt) = &rows[at as usize];
         let prompt = redact_prompt(
-            &r.first_prompt,
+            first_prompt,
             &ctx,
             &Redact {
                 branch: r.branch.as_deref(),
@@ -988,6 +969,47 @@ pub fn export_unlinked(
             label: None,
         });
         at += step;
+    }
+    Ok(out)
+}
+
+/// Every hand-label row's org, from the DATABASE, before any case is built
+/// (Jev's consent gate, the haiku org fence and `--org` all trust it), as
+/// `status_map::resolve_label_orgs` does for sections: the row's session's
+/// org as the database computes it now. A row naming another org than
+/// that is refused (the file was edited, or the session's org moved since
+/// the export and its candidates are another org's: export again); a row
+/// whose session is gone is left out and counted (`h_session_gone`),
+/// since nothing can vouch for its org. An error names the row.
+pub fn resolve_label_orgs(
+    store: &Store,
+    rows: &[UnlinkedCase],
+    sizes: &mut Sizes,
+) -> Result<Vec<UnlinkedCase>, String> {
+    let org_name = |o: Option<i64>| o.map_or_else(|| "none".to_string(), |o| o.to_string());
+    let mut out = Vec::with_capacity(rows.len());
+    for (i, r) in rows.iter().enumerate() {
+        let row = i + 1;
+        let Some(session) = store
+            .get_session_by_id(r.session_id)
+            .map_err(|e| format!("row {row}: {e}"))?
+        else {
+            sizes.h_records.0 += 1;
+            sizes.h_session_gone.0 += 1;
+            continue;
+        };
+        if r.org_id != session.org_id {
+            return Err(format!(
+                "row {row}: org_id {} but session {} is in org {}; export the labels again",
+                org_name(r.org_id),
+                r.session_id,
+                org_name(session.org_id)
+            ));
+        }
+        out.push(UnlinkedCase {
+            org_id: session.org_id,
+            ..r.clone()
+        });
     }
     Ok(out)
 }
@@ -1258,7 +1280,7 @@ pub async fn run_jev(
     let mut calls = 0usize;
     for case in cases {
         let gated = match lock(&ctx.store) {
-            Ok(s) => gate_at(&s, Feature::WorkLink, case.org_id, ctx.now()),
+            Ok(s) => gate_bench_at(&s, Feature::WorkLink, case.org_id, ctx.now()),
             Err(_) => Err(crate::service::decide::Fallback::FlagOff),
         };
         if let Err(f) = gated {
@@ -2580,8 +2602,13 @@ impl BenchReport {
         ];
         if s.h_records.0 > 0 {
             v.push(format!(
-                "H: {} rows, {} labeled: {} cases + {} none-cases; {} labels outside their candidates (recall misses, not scored)",
-                s.h_records, s.h_labeled, s.h_cases, s.h_none_cases, s.h_label_outside
+                "H: {} rows, {} labeled: {} cases + {} none-cases; {} labels outside their candidates (recall misses, not scored){}",
+                s.h_records, s.h_labeled, s.h_cases, s.h_none_cases, s.h_label_outside,
+                if s.h_session_gone.0 > 0 {
+                    format!("; {} rows whose session is gone left out", s.h_session_gone)
+                } else {
+                    String::new()
+                }
             ));
         }
         let th = &self.thresholds;

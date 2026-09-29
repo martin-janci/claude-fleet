@@ -197,6 +197,7 @@ pub const SOURCES: &[SourceSpec] = &[
                 col("tracker_items", "Done tickets", ColType::Int),
                 col("timeline_work_events", "Timeline events", ColType::Int),
                 col("tracker_writes", "PR links", ColType::Int),
+                col("describe_cache", "Full descriptions", ColType::Int),
             ],
         },
         params: &[],
@@ -259,6 +260,7 @@ fn retention_label(table: &str) -> &str {
         "work_journal" => "Work journal",
         "work_items" => "Done tickets",
         "session_events" => "Work timeline",
+        "work_item_descriptions" => "Full descriptions",
         other => other,
     }
 }
@@ -381,6 +383,7 @@ pub fn fetch(
                 "tracker_items": l.tracker_items,
                 "timeline_work_events": l.timeline_work_events,
                 "tracker_writes": l.tracker_writes,
+                "describe_cache": l.describe_cache,
             }))
         }
         other => Err(IpcError::new(
@@ -462,6 +465,7 @@ mod tests {
                     last_msg_usage: None,
                     now: at,
                     by_day: Vec::new(),
+                    backfill_until: None,
                 },
             )
             .unwrap();

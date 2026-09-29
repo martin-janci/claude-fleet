@@ -819,6 +819,21 @@
     },
     {
       "default_widget": "duration",
+      "key": "reconcile.stale_working_ttl_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Stale mark lifts after",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
       "key": "sessions.lost_ttl_secs",
       "kind": {
         "max": 315360000,
@@ -1224,6 +1239,76 @@
       ]
     },
     {
+      "default_widget": "duration",
+      "key": "health.version_max_age_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Trust a host's Claude version for",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "health.disk_low_pct",
+      "kind": {
+        "max": 100,
+        "min": 50,
+        "type": "int"
+      },
+      "label": "Disk low at",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "health.claude_max_behind",
+      "kind": {
+        "max": 1000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Claude behind after",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "health.hooks_silent_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Hooks silent after",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "provision.force_git_tree",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Provision into git-tracked skills",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "number",
       "key": "work.retention.journal_days",
       "kind": {
@@ -1288,6 +1373,21 @@
         "type": "secs"
       },
       "label": "Tracker sync interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "work.describe_cache_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Ticket description cache",
       "widgets": [
         "number",
         "duration",
@@ -1429,6 +1529,110 @@
       "label": "Auto-tidy reasons",
       "widgets": [
         "multiselect",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "update.track",
+      "kind": {
+        "options": [
+          "stable",
+          "beta",
+          "nightly"
+        ],
+        "type": "choice"
+      },
+      "label": "Release track",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "update.hub.mode",
+      "kind": {
+        "options": [
+          "manual",
+          "notify",
+          "automatic"
+        ],
+        "type": "choice"
+      },
+      "label": "Hub updates",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "update.agent.mode",
+      "kind": {
+        "options": [
+          "manual",
+          "notify",
+          "automatic"
+        ],
+        "type": "choice"
+      },
+      "label": "Agent updates",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "update.desktop.mode",
+      "kind": {
+        "options": [
+          "manual",
+          "notify",
+          "automatic"
+        ],
+        "type": "choice"
+      },
+      "label": "Desktop updates",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "update.mobile.mode",
+      "kind": {
+        "options": [
+          "manual",
+          "notify"
+        ],
+        "type": "choice"
+      },
+      "label": "Phone updates",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "update.check_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 900,
+        "type": "secs"
+      },
+      "label": "Update check interval",
+      "widgets": [
+        "number",
+        "duration",
         "readonly"
       ]
     },
@@ -1931,6 +2135,11 @@
         {
           "id": "tracker_writes",
           "label": "PR links",
+          "ty": "int"
+        },
+        {
+          "id": "describe_cache",
+          "label": "Full descriptions",
           "ty": "int"
         }
       ],

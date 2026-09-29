@@ -180,11 +180,19 @@ pub fn read_local_host(s: &Store) -> bool {
 /// Set once `hub.local_host` is off: every explicit `local` target is refused.
 static LOCAL_HOST_DISABLED: AtomicBool = AtomicBool::new(false);
 
-/// The refusal for a `local` target on a hub without a local host.
-const LOCAL_DISABLED_MESSAGE: &str = "host local is disabled on this hub (hub.local_host=false)";
+/// The refusal for a `local` target where there is no local host: a hub
+/// started with `hub.local_host=false`, or a Windows desktop, which is a
+/// client only (docs/windows.md) and says so rather than naming a hub.
+pub const LOCAL_DISABLED_MESSAGE: &str = if cfg!(windows) {
+    "host local does not exist on Windows: this desktop is a client for your \
+     Linux and macOS hosts (see docs/windows.md)"
+} else {
+    "host local is disabled on this hub (hub.local_host=false)"
+};
 
 /// Turn the `local` host off for this process. Called once by `fleet-hub
-/// serve` when `hub.local_host` is false; the desktop never calls it.
+/// serve` when `hub.local_host` is false, and by the Windows desktop at
+/// startup.
 /// Idempotent, and there is no way back: a process that disabled `local`
 /// never runs anything on its own machine as a fleet host.
 pub fn disable_local_host() {
@@ -255,6 +263,13 @@ pub const LOST_LOCAL_DISABLED: &str = "local_disabled";
 /// keeps them dismissable and lets the routine prune reap them. Returns
 /// how many rows were retired.
 pub fn retire_local_sessions(s: &Store, now: i64) -> Result<usize, IpcError> {
+    // Reap FIRST (task 5): every row still live is ghosted with its status
+    // cleared, and every row an earlier start already ghosted is deleted —
+    // nothing probes `local` here, so the routine prune never reaches them
+    // (`docs/hub.md` said "pruned like any other ghost"; it was not). The
+    // mark below then labels this start's ghosts `local_disabled`. Reaping
+    // after the mark would delete them in the same start.
+    let reaped = s.reap_host_ghosts(crate::service::projects::LOCAL_HOST, now)?;
     let lost = s.mark_host_sessions_lost(
         crate::service::projects::LOCAL_HOST,
         LOST_LOCAL_DISABLED,
@@ -271,7 +286,7 @@ pub fn retire_local_sessions(s: &Store, now: i64) -> Result<usize, IpcError> {
             );
         }
     }
-    Ok(lost.marked.len() + lost.reclassified.len())
+    Ok(lost.marked.len() + lost.reclassified.len() + reaped)
 }
 
 #[cfg(test)]
@@ -387,6 +402,8 @@ mod tests {
     fn check_local_allowed_refuses_only_local_when_disabled() {
         let e = check_local_allowed("local", false).unwrap_err();
         assert_eq!(e.code, crate::ipc_error::codes::E_NOTFOUND);
+        assert_eq!(e.message, LOCAL_DISABLED_MESSAGE);
+        #[cfg(unix)]
         assert_eq!(
             e.message,
             "host local is disabled on this hub (hub.local_host=false)"
@@ -424,9 +441,35 @@ mod tests {
         let other = s.get_session_by_id(on_devbox).unwrap().unwrap();
         assert_ne!(other.status, "ghost", "a real host's rows are untouched");
 
-        // Idempotent: a second start finds nothing left to retire.
-        assert_eq!(retire_local_sessions(&s, 200).unwrap(), 0);
-        let row = s.get_session_by_id(on_local).unwrap().unwrap();
-        assert_eq!(row.lost_at, Some(100));
+        // The next start reaps what the first one ghosted (task 5): the
+        // row is gone, not "dismissable forever".
+        assert_eq!(retire_local_sessions(&s, 200).unwrap(), 1);
+        assert!(s.get_session_by_id(on_local).unwrap().is_none());
+        let other = s.get_session_by_id(on_devbox).unwrap().unwrap();
+        assert_ne!(other.status, "ghost", "a real host's rows are untouched");
+        // And a third finds nothing at all.
+        assert_eq!(retire_local_sessions(&s, 300).unwrap(), 0);
+    }
+
+    /// data-sync F2: a `local` ghost kept saying `working` from the day it
+    /// was copied; ghosting through the reap clears the live status.
+    #[test]
+    fn retire_local_sessions_clears_the_live_status_of_what_it_ghosts() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("local", None).unwrap();
+        let id = s
+            .upsert_session("a", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET claude_status='working', stuck_kind='oom' WHERE id=?1",
+                [id],
+            )
+            .unwrap();
+        retire_local_sessions(&s, 100).unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.status, "ghost");
+        assert_eq!(row.claude_status, None);
+        assert_eq!(row.stuck_kind, None);
     }
 }

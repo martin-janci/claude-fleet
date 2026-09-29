@@ -72,14 +72,42 @@ impl RetentionDays {
             RetentionTable::Journal => self.journal,
             RetentionTable::TrackerItems => self.tracker_items,
             RetentionTable::WorkEvents => self.timeline_work_events,
+            // The describe cache rides the tracker items' window but never
+            // its "forever": the floor is part of the window itself, so
+            // every caller (status, the sweep, a test) gets one number.
+            RetentionTable::Descriptions => describe_effective_days(self.tracker_items),
         }
+    }
+}
+
+/// The describe cache's own EFFECTIVE window, in days (Task 5):
+/// `tracker_items_days` when it keeps anything at all, else the fixed floor
+/// — `tracker_items_days`'s `0` ("keep forever") must not apply to a
+/// full-text cache, or `DESCRIPTION_MAX_CHARS` would be reopened by the back
+/// door. See `service::work::describe::DESCRIBE_CACHE_RETENTION_FLOOR_DAYS`
+/// and the matching row in `docs/work-graph.md`.
+///
+/// This is what `status()` reports as the row's `days` — never the raw `0`
+/// — so every consumer (the desktop's retention line, `fleet-hub tracker
+/// status`) reads a number that is already true and needs no special case
+/// for this one table: a `days == 0` row really does mean "forever" for
+/// every table including this one, because this one is never given a raw
+/// `0` to report.
+pub(crate) fn describe_effective_days(tracker_items_days: i64) -> i64 {
+    if tracker_items_days > 0 {
+        tracker_items_days
+    } else {
+        crate::service::work::describe::DESCRIBE_CACHE_RETENTION_FLOOR_DAYS
     }
 }
 
 fn setting_of(t: RetentionTable) -> &'static str {
     match t {
         RetentionTable::Journal => settings::WORK_RETENTION_JOURNAL_DAYS,
-        RetentionTable::TrackerItems => settings::WORK_RETENTION_TRACKER_ITEMS_DAYS,
+        // The describe cache is swept by the tracker items' own setting.
+        RetentionTable::TrackerItems | RetentionTable::Descriptions => {
+            settings::WORK_RETENTION_TRACKER_ITEMS_DAYS
+        }
         RetentionTable::WorkEvents => settings::WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS,
     }
 }
@@ -98,6 +126,10 @@ pub struct RetentionSweep {
     /// window.
     #[serde(default)]
     pub tracker_writes: usize,
+    /// The describe cache (Task 5): swept by `tracker_items`'s window, but
+    /// never kept forever — see [`describe_effective_days`].
+    #[serde(default)]
+    pub describe_cache: usize,
 }
 
 impl RetentionSweep {
@@ -106,6 +138,7 @@ impl RetentionSweep {
             RetentionTable::Journal => self.journal += n,
             RetentionTable::TrackerItems => self.tracker_items += n,
             RetentionTable::WorkEvents => self.timeline_work_events += n,
+            RetentionTable::Descriptions => self.describe_cache += n,
         }
     }
 }
@@ -165,6 +198,11 @@ pub fn status(store: &Mutex<Store>, now: i64) -> Result<RetentionStatus, IpcErro
         tables.push(RetentionTableStatus {
             table: t.table().into(),
             setting: setting_of(t).into(),
+            // `days.of` already floors the describe cache's window, so that
+            // row never claims "kept forever" (a `0`) while `would_delete`
+            // says otherwise: every display site (the desktop's retention
+            // line, `fleet-hub tracker status`) reads `days == 0` as
+            // forever, with no table-specific exception.
             days: days.of(t),
             rows,
             would_delete,
@@ -414,10 +452,218 @@ mod tests {
                 .iter()
                 .map(|t| t.table.as_str())
                 .collect::<Vec<_>>(),
-            ["work_journal", "work_items", "session_events"]
+            [
+                "work_journal",
+                "work_items",
+                "session_events",
+                "work_item_descriptions"
+            ]
         );
         assert_eq!(s.tick_cap, RETENTION_TICK_CAP);
         // The record is not a setting anyone can write.
         assert!(settings::set(&st.lock().unwrap(), LAST_SWEEP_KEY, "{}").is_err());
+    }
+
+    /// Task 5: one tracker item with an old cached description and one with
+    /// a fresh one; the sweep (default `work.retention.tracker_items_days`
+    /// = 180) takes only the old one.
+    #[test]
+    fn the_describe_cache_is_swept_with_the_tracker_items() {
+        let st = store();
+        let (old_id, fresh_id) = {
+            let s = st.lock().unwrap();
+            let t = s
+                .add_tracker("jira", "J", "https://acme.atlassian.net")
+                .unwrap()
+                .id;
+            let old_id = s
+                .upsert_tracker_item(
+                    t,
+                    &crate::store::TrackerItemWrite {
+                        external_id: "1".into(),
+                        key: Some("ABC-1".into()),
+                        title: "Old".into(),
+                        status_name: "Done".into(),
+                        status_category: "done".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .id;
+            let fresh_id = s
+                .upsert_tracker_item(
+                    t,
+                    &crate::store::TrackerItemWrite {
+                        external_id: "2".into(),
+                        key: Some("ABC-2".into()),
+                        title: "Fresh".into(),
+                        status_name: "Done".into(),
+                        status_category: "done".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .id;
+            s.put_description(old_id, "old text", 8).unwrap();
+            s.put_description(fresh_id, "fresh text", 10).unwrap();
+            (old_id, fresh_id)
+        };
+        let now = crate::service::catalog::now_secs();
+        st.lock()
+            .unwrap()
+            .conn_for_test()
+            .execute(
+                "UPDATE work_item_descriptions SET fetched_at = ?1 WHERE item_id = ?2",
+                rusqlite::params![now - 200 * 86_400, old_id],
+            )
+            .unwrap();
+        let swept = sweep(&st, now);
+        assert_eq!(swept.describe_cache, 1);
+        let s = st.lock().unwrap();
+        assert_eq!(
+            s.cached_description(old_id, 100_000_000, now).unwrap(),
+            None
+        );
+        assert_eq!(
+            s.cached_description(fresh_id, 100_000_000, now)
+                .unwrap()
+                .as_deref(),
+            Some("fresh text")
+        );
+    }
+
+    /// The ruling that binds this task: `0` ("keep forever" for every other
+    /// window here) must NOT apply to the describe cache — it sweeps at a
+    /// fixed 30-day floor instead.
+    #[test]
+    fn a_zero_tracker_items_window_still_floors_the_describe_cache_at_30_days() {
+        let st = store();
+        settings::set(
+            &st.lock().unwrap(),
+            settings::WORK_RETENTION_TRACKER_ITEMS_DAYS,
+            "0",
+        )
+        .unwrap();
+        let (old_id, fresh_id) = {
+            let s = st.lock().unwrap();
+            let t = s
+                .add_tracker("jira", "J", "https://acme.atlassian.net")
+                .unwrap()
+                .id;
+            let old_id = s
+                .upsert_tracker_item(
+                    t,
+                    &crate::store::TrackerItemWrite {
+                        external_id: "1".into(),
+                        key: Some("ABC-1".into()),
+                        title: "Old".into(),
+                        status_name: "Done".into(),
+                        status_category: "done".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .id;
+            let fresh_id = s
+                .upsert_tracker_item(
+                    t,
+                    &crate::store::TrackerItemWrite {
+                        external_id: "2".into(),
+                        key: Some("ABC-2".into()),
+                        title: "Fresh".into(),
+                        status_name: "Done".into(),
+                        status_category: "done".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .id;
+            s.put_description(old_id, "old text", 8).unwrap();
+            s.put_description(fresh_id, "fresh text", 10).unwrap();
+            (old_id, fresh_id)
+        };
+        let now = crate::service::catalog::now_secs();
+        // 40 days old: kept forever by `tracker_items_days = 0` everywhere
+        // else, but past the describe cache's 30-day floor.
+        st.lock()
+            .unwrap()
+            .conn_for_test()
+            .execute(
+                "UPDATE work_item_descriptions SET fetched_at = ?1 WHERE item_id = ?2",
+                rusqlite::params![now - 40 * 86_400, old_id],
+            )
+            .unwrap();
+        let swept = sweep(&st, now);
+        assert_eq!(swept.tracker_items, 0, "0 keeps the tracker item forever");
+        assert_eq!(swept.describe_cache, 1, "but not the describe cache");
+        let s = st.lock().unwrap();
+        assert_eq!(
+            s.cached_description(old_id, 100_000_000, now).unwrap(),
+            None
+        );
+        assert_eq!(
+            s.cached_description(fresh_id, 100_000_000, now)
+                .unwrap()
+                .as_deref(),
+            Some("fresh text")
+        );
+    }
+
+    /// The bug a re-review caught: with `work.retention.tracker_items_days`
+    /// at `0`, the describe cache's status row must report the EFFECTIVE
+    /// 30-day floor as `days`, not the raw `0` — a `0` there reads to every
+    /// consumer (the desktop's retention line, `fleet-hub tracker status`)
+    /// as "kept forever", which is false for this table and contradicted by
+    /// `would_delete` on the very same row.
+    #[test]
+    fn a_zero_tracker_items_window_reports_the_30_day_floor_in_status() {
+        let st = store();
+        settings::set(
+            &st.lock().unwrap(),
+            settings::WORK_RETENTION_TRACKER_ITEMS_DAYS,
+            "0",
+        )
+        .unwrap();
+        let old_id = {
+            let s = st.lock().unwrap();
+            let t = s
+                .add_tracker("jira", "J", "https://acme.atlassian.net")
+                .unwrap()
+                .id;
+            let old_id = s
+                .upsert_tracker_item(
+                    t,
+                    &crate::store::TrackerItemWrite {
+                        external_id: "1".into(),
+                        key: Some("ABC-1".into()),
+                        title: "Old".into(),
+                        status_name: "Done".into(),
+                        status_category: "done".into(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+                .id;
+            s.put_description(old_id, "old text", 8).unwrap();
+            old_id
+        };
+        let now = crate::service::catalog::now_secs();
+        st.lock()
+            .unwrap()
+            .conn_for_test()
+            .execute(
+                "UPDATE work_item_descriptions SET fetched_at = ?1 WHERE item_id = ?2",
+                rusqlite::params![now - 40 * 86_400, old_id],
+            )
+            .unwrap();
+        let s = status(&st, now).unwrap();
+        let row = s
+            .tables
+            .iter()
+            .find(|t| t.table == "work_item_descriptions")
+            .expect("a status row for the describe cache");
+        assert_eq!(row.days, 30, "the effective window, not the raw 0");
+        assert_eq!(row.would_delete, 1, "the 40-day-old row is past the floor");
+        assert_eq!(row.rows, 1);
     }
 }

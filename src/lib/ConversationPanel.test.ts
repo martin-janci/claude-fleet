@@ -941,6 +941,34 @@ describe('ConversationPanel composer auto-grow', () => {
   });
 });
 
+describe('ConversationPanel model / effort pickers', () => {
+  async function mountPanel(over: Partial<SessionRow> = {}) {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session(over), visible: true });
+    await settle();
+  }
+
+  it('shows the current model and sends /model for a pick, then resets', async () => {
+    await mountPanel({ model: 'claude-opus-5-5' });
+    const pick = screen.getByTestId('conv-model-pick') as HTMLSelectElement;
+    expect(pick.options[0].textContent).toBe('opus 5.5');
+    await fireEvent.change(pick, { target: { value: 'sonnet' } });
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/model sonnet');
+    expect(pick.value).toBe('');
+  });
+
+  it('sends /effort for a pick and keeps it selected', async () => {
+    await mountPanel();
+    const pick = screen.getByTestId('conv-effort-pick') as HTMLSelectElement;
+    await fireEvent.change(pick, { target: { value: 'high' } });
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '/effort high');
+    expect(pick.value).toBe('high');
+  });
+});
+
 describe('ConversationPanel slash commands', () => {
   async function mountWithDraft(text: string) {
     mockedConv.mockReturnValue(ok(conv()));
@@ -1079,6 +1107,58 @@ describe('ConversationPanel quick actions', () => {
     await settle();
     expect(mockedSend).toHaveBeenCalledWith('trn', 'dev-x', '/status');
     expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('an auto-send chip sends on a plain click; Shift+click only fills the box', async () => {
+    composerPresets.set([{ label: 'Go on', text: 'go on', auto_send: true }]);
+    await mount({ host_alias: 'trn', tmux_name: 'dev-x' });
+    const chip = screen.getByTestId('conv-chip');
+    expect(chip.dataset.autoSend).toBe('true');
+    await fireEvent.click(chip, { shiftKey: true });
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    expect(box.value).toBe('go on');
+    expect(mockedSend).not.toHaveBeenCalled();
+    box.value = '';
+    await fireEvent.input(box);
+    await fireEvent.click(chip);
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('trn', 'dev-x', 'go on');
+  });
+
+  it('an auto-send chip is named as one for a screen reader', async () => {
+    composerPresets.set([
+      { label: 'Go on', text: 'go on', auto_send: true },
+      { label: 'Tests', text: 'run the tests' },
+    ]);
+    await mount();
+    const [go, tests] = screen.getAllByTestId('conv-chip');
+    expect(go.getAttribute('aria-label')).toBe('Go on, sends immediately');
+    expect(tests.getAttribute('aria-label')).toBeNull();
+  });
+
+  // An auto-send chip clicked while a permission / choice prompt is up would
+  // type its text (and an Enter) into that prompt's menu.
+  it.each([
+    ['a permission prompt', { claude_status: 'blocked' as const, stuck_kind: null }],
+    ['a stuck screen', { claude_status: 'idle' as const, stuck_kind: 'trust_prompt' as const }],
+  ])('on %s an auto-send chip fills the box instead and says why', async (_what, over) => {
+    composerPresets.set([
+      { label: 'Go on', text: 'go on', auto_send: true },
+      { label: 'Status', text: '/status' },
+    ]);
+    await mount(over);
+    const [go, status] = screen.getAllByTestId('conv-chip');
+    await fireEvent.click(go);
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+    const box = screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+    expect(box.value).toBe('go on');
+    expect(screen.getByTestId('conv-composer-status').textContent).toMatch(/waiting on an answer/);
+    // Shift+click on a fill chip is a one-gesture send too: held the same way.
+    await fireEvent.click(status, { shiftKey: true });
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(box.value).toBe('/status');
   });
 
   it('a session stuck on press_enter gets a chip that sends a bare Enter', async () => {

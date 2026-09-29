@@ -19,6 +19,18 @@ const RECENCY_WINDOW: Record<Recency, number | null> = {
   '30d': 60 * 60 * 24 * 30,
 };
 
+/** A unix-seconds timestamp falls in the recency window (`null`: never,
+ *  unless the window is `all`). One rule for every row the sidebar lists —
+ *  a session by its last activity, a past link by when it ended — so the
+ *  Last active filter narrows every section, not only the project tree. */
+export function withinRecency(ts: number | null | undefined, r: Recency, nowSec: number = Math.floor(Date.now() / 1000)): boolean {
+  const window = RECENCY_WINDOW[r];
+  if (window === null) return true;
+  if (ts == null) return false;
+  const ageSec = nowSec - ts;
+  return ageSec <= window;
+}
+
 export function matchesRecency(p: ProjectTreeRow, r: Recency): boolean {
   const window = RECENCY_WINDOW[r];
   if (window === null) return true;

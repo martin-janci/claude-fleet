@@ -61,11 +61,20 @@ const SUBSCHEMA_MAP: &[&str] = &["properties", "definitions", "$defs", "patternP
 /// in spirit: if either gate changes, this must change with it, and
 /// `tools::tests` checks the two agree for every router tool.
 pub(super) fn visible_to(caller: &Caller, tool: &str) -> bool {
+    // An updater token lists nothing: its only door is `/update/*`.
+    if caller.mode == TokenMode::Updater {
+        return false;
+    }
     let peer_tool = tool == crate::mcp::auth::PEER_TOOL;
     if caller.mode == TokenMode::Peer || peer_tool {
         return caller.mode == TokenMode::Peer && peer_tool;
     }
     if caller.mode == TokenMode::Readonly && !guard::is_readonly_tool(tool) {
+        return false;
+    }
+    // Refused to every per-host token at the central gate (`enforce_admin`);
+    // listing it would cost every host's Claude a definition it can never use.
+    if caller.host_alias.is_some() && guard::NOT_FOR_HOST_TOKENS.contains(&tool) {
         return false;
     }
     guard::access_allows(caller, tool)

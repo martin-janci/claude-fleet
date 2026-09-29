@@ -5,19 +5,21 @@
 //! `add_project` and `list_github_repos` clone / run `gh` ON THE HOST over
 //! the hub's transport to it, so the credentials are the host's, not this
 //! machine's. `call_id` stays local: it keys this process's cancellation
-//! registry, and on a hub the run simply completes (or hits its deadline)
-//! after the desktop stops waiting.
+//! registry, where the hub branch of `add_project` binds it too, so Stop
+//! waiting abandons the HTTP call (decision D3); the hub's run simply
+//! completes (or hits its deadline) after the desktop stops waiting.
 
 use crate::backend::FleetBackend;
-use fleet_core::cancel::CancellationRegistry;
-use fleet_core::ipc_error::IpcError;
-use fleet_core::service::add_project::{self, AddProjectArgs, GithubRepo};
+use fleet_core::cancel::{CancelGuard, CancellationRegistry};
+use fleet_core::ipc_error::{codes, IpcError};
+use fleet_core::service::add_project::{self, AddProjectArgs, AddProjectSource, GithubRepo};
 use fleet_core::service::projects::{self, ProjectTreeRow};
 use fleet_core::ssh::SshClient;
 use fleet_core::store::Store;
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use tauri::State;
+use tokio_util::sync::CancellationToken;
 
 #[tauri::command]
 pub async fn list_projects(
@@ -92,6 +94,12 @@ pub(crate) mod routed {
     /// `commands::projects::add_project`. `call_id` is this process's own
     /// cancellation-registry key and has no hub counterpart, so the hub
     /// branch spells the arguments out rather than serialising the struct.
+    ///
+    /// It is still bound here, in the hub branch: the dialog's Stop waiting
+    /// fires `cancel_command(call_id)`, and without a token under that id the
+    /// click found nothing and the dialog stayed busy for the whole of the
+    /// hub's deadline. Cancelling drops the HTTP call only (D3, no hub-side
+    /// cancel), so the answer says the hub may still finish.
     pub async fn add_project(
         backend: &FleetBackend,
         args: AddProjectArgs,
@@ -99,19 +107,46 @@ pub(crate) mod routed {
         ssh: &Arc<SshClient>,
         reg: &Arc<CancellationRegistry>,
     ) -> Result<ProjectTreeRow, IpcError> {
-        match backend.hub() {
-            Some(hub) => {
-                hub.route(
-                    "add_project",
-                    &serde_json::json!({
-                        "host_alias": args.host_alias,
-                        "source": args.source,
-                    }),
-                )
-                .await
+        let Some(hub) = backend.hub() else {
+            return add_project::add_project(args, store, &**ssh, reg).await;
+        };
+        let (cancel_id, token) = match args.call_id {
+            Some(id) => {
+                let token = CancellationToken::new();
+                reg.bind(id, token.clone());
+                (id, token)
             }
-            None => add_project::add_project(args, store, &**ssh, reg).await,
+            None => reg.register_anonymous(),
+        };
+        let _guard = CancelGuard::new(Arc::clone(reg), cancel_id);
+        let github = matches!(
+            args.source,
+            AddProjectSource::New {
+                create_remote: true,
+                ..
+            }
+        );
+        let body = serde_json::json!({
+            "host_alias": args.host_alias,
+            "source": args.source,
+        });
+        tokio::select! {
+            r = hub.route("add_project", &body) => r,
+            () = token.cancelled() => Err(stopped_waiting(&args.host_alias, github)),
         }
+    }
+
+    /// `E_CANCELLED` for a Stop waiting on a hub client. The dialog shows
+    /// this message verbatim for a `create_remote` run, so it carries the
+    /// same GitHub hedge the service's own cancel does.
+    fn stopped_waiting(host: &str, github: bool) -> IpcError {
+        let mut msg = format!(
+            "Stopped waiting \u{2014} the hub may still finish adding the project on {host}."
+        );
+        if github {
+            msg.push_str(" The GitHub repository may already exist; check GitHub before retrying.");
+        }
+        IpcError::new(codes::E_CANCELLED, msg)
     }
 
     pub async fn list_github_repos(

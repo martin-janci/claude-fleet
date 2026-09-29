@@ -144,6 +144,38 @@ pub fn git_ref(value: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
+/// Validate the name of a branch fleet is about to CREATE (a new worktree's,
+/// a fork's): [`git_ref`] plus git's own `check-ref-format --branch` rules,
+/// the same list as the dialogs' `validateBranchName`
+/// (`src/lib/branch-slug.ts`). [`git_ref`] alone is looser than git, so a
+/// name like `x.lock` or `a:b` would reach `git worktree add` and come back
+/// as raw stderr instead of a clear refusal.
+pub fn branch_name(value: &str) -> Result<(), IpcError> {
+    git_ref(value)?;
+    if value
+        .chars()
+        .any(|c| matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\'))
+    {
+        return Err(invalid("branch must not contain ~ ^ : ? * [ or \\"));
+    }
+    if value.starts_with('/') || value.ends_with('/') {
+        return Err(invalid("branch must not start or end with '/'"));
+    }
+    if value.ends_with('.') || value.ends_with(".lock") {
+        return Err(invalid("branch must not end with '.' or '.lock'"));
+    }
+    if value.contains("//") || value.contains("@{") {
+        return Err(invalid("branch must not contain '//' or '@{'"));
+    }
+    if value.split('/').any(|seg| seg.starts_with('.')) {
+        return Err(invalid("a branch name component must not start with '.'"));
+    }
+    if value == "@" {
+        return Err(invalid("'@' is not a valid branch name"));
+    }
+    Ok(())
+}
+
 /// Validate a git commit hash supplied by the frontend (the commit the user
 /// clicked in the History graph). Git object names are lowercase hex; we
 /// accept an abbreviated or full SHA-1 (4–40 chars) and nothing else, so the
@@ -285,6 +317,41 @@ pub fn friendly_name(value: &str) -> Result<(), IpcError> {
     no_control("friendly name", value)
 }
 
+/// Validate a `claude --model` value: an alias (`opus`, `sonnet[1m]`) or a
+/// full model id (`claude-opus-5-5`). ASCII letters, digits, `.`, `_`, `-`,
+/// `[` and `]` only, at most 64 characters, and never a leading `-` (an
+/// option parser would read it as a flag).
+pub fn claude_model(value: &str) -> Result<(), IpcError> {
+    let ok = !value.is_empty()
+        && value.len() <= 64
+        && !value.starts_with('-')
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '[' | ']'));
+    if ok {
+        Ok(())
+    } else {
+        Err(invalid(
+            "model must be a Claude model alias or id (letters, digits, . _ - [ ])",
+        ))
+    }
+}
+
+/// The levels `claude --effort` takes at launch.
+pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// Validate a `claude --effort` value: one of [`EFFORT_LEVELS`].
+pub fn effort_level(value: &str) -> Result<(), IpcError> {
+    if EFFORT_LEVELS.contains(&value) {
+        Ok(())
+    } else {
+        Err(invalid(format!(
+            "effort must be one of {}",
+            EFFORT_LEVELS.join(", ")
+        )))
+    }
+}
+
 /// Validate that a free-form value (a `claude` prompt) is not empty or
 /// whitespace-only. Use this alone for a positional that the call site places
 /// after `--`: such a value may legitimately begin with `-` (a markdown list).
@@ -403,6 +470,19 @@ mod tests {
         assert!(git_ref("a..b").is_err());
         assert!(git_ref("has space").is_err());
         assert!(git_ref("").is_err());
+    }
+
+    #[test]
+    fn branch_name_follows_gits_rules() {
+        for ok in ["main2", "feature/login", "fork-x", "a\"b", "v1.2"] {
+            assert!(branch_name(ok).is_ok(), "{ok} should be valid");
+        }
+        for bad in [
+            "x.lock", "a:b", "@", "a/", "a.", "/a", "a//b", "a@{1}", ".a", "a/.b", "a~1", "a^",
+            "a?", "a*", "a[b", "a\\b", "a..b", "-a", "a b", "",
+        ] {
+            assert!(branch_name(bad).is_err(), "{bad:?} should be refused");
+        }
     }
 
     #[test]

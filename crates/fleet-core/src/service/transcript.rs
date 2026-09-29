@@ -18,6 +18,13 @@
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::service::fresh;
+// A tag the harness wraps its own blocks in is exactly the list the hook's
+// prompt reader uses (`prompt_origin::is_harness_tag`), so an entry this
+// parser folds away is never stored as a conversation's first prompt, and a
+// person's `<my-widget>…</my-widget>` stays their prompt in both. (A shape
+// rule — "lowercase kebab-case" — used to stand in here, and the two readers
+// disagreed on every tag one accepted and the other did not.)
+use crate::service::prompt_origin::{self, is_harness_tag};
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::{SessionEvent, SessionRow, Store};
@@ -58,8 +65,9 @@ const AGENT_LAUNCH_ACK: &str = "Async agent launched successfully";
 /// Encode a working directory the way Claude Code names its per-project
 /// transcript directory: every char outside `[A-Za-z0-9]` becomes `-`.
 /// The read script does this on the host (after `pwd -P`) with an
-/// equivalent `sed`; this is the tested reference for that rule.
-#[cfg(test)]
+/// equivalent `sed`; this is the tested reference for that rule, and what
+/// a fork into a new worktree names its copy's directory with (the new
+/// tree's path is known here, as `pwd -P` printed it).
 pub fn encode_project_dir(cwd: &str) -> String {
     cwd.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -387,6 +395,17 @@ pub struct ConvTurn {
     /// `serde(default)` because a client may read a hub that predates it.
     #[serde(default)]
     pub prompt_uuid: Option<String>,
+    /// `true` when `prompt` is NOT the whole prompt that opened this turn:
+    /// its head was cut to fit the char budget ([`fit_last_turn`]), or the
+    /// entry carried blocks the text cannot hold (an image, a document) that
+    /// [`prompt_text`] / [`user_text`] drop. Retry re-sends `prompt` as "the
+    /// same prompt", so a client must not offer it on such a turn — it would
+    /// send something different from what the user approved.
+    ///
+    /// `serde(default)` because a client may read a hub that predates it; an
+    /// older hub's `false` is the old behaviour, not a new lie.
+    #[serde(default)]
+    pub prompt_partial: bool,
 }
 
 /// One line of a turn's reply.
@@ -726,6 +745,19 @@ fn prompt_text(content: Option<&serde_json::Value>) -> Option<String> {
     }
 }
 
+/// Whether a user entry's content holds any block that is not `text` — an
+/// image, a document — which [`user_text`] and [`prompt_text`] drop. The
+/// prompt text of such an entry is only part of what was sent
+/// ([`ConvTurn::prompt_partial`]).
+fn has_non_text_blocks(content: Option<&serde_json::Value>) -> bool {
+    match content {
+        Some(serde_json::Value::Array(blocks)) => blocks
+            .iter()
+            .any(|b| b.get("type").and_then(|t| t.as_str()) != Some("text")),
+        _ => false,
+    }
+}
+
 const REMINDER_OPEN: &str = "<system-reminder>";
 const REMINDER_CLOSE: &str = "</system-reminder>";
 
@@ -809,33 +841,25 @@ fn unwrap_pasted(text: &str) -> String {
     out
 }
 
-/// The shape of a tag the harness wraps its own blocks in: lowercase
-/// kebab-case with at least one inner hyphen — `system-reminder`,
-/// `task-notification`, `command-name`, `local-command-stdout`,
-/// `bash-input`, and the ones this build has not met yet.
-///
-/// The rule is what the harness actually emits, not "anything hyphenated":
-/// the earlier `tag.contains('-') || tag.contains('_')` accepted
-/// `<my_config>`, so a config fragment pasted in to be analysed lost its
-/// prompt. Snake case is out (the one snake-cased block Claude Code writes,
-/// `<pasted_content …>`, has its own handling in [`unwrap_pasted`]); so are
-/// upper case and every unhyphenated HTML element.
-fn is_harness_tag(tag: &str) -> bool {
-    tag.len() >= 3
-        && tag.contains('-')
-        && !tag.starts_with('-')
-        && !tag.ends_with('-')
-        && !tag.contains("--")
-        && tag
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+/// An entry made only of listed harness blocks that [`lone_block`] does not
+/// take (several of them, one left unclosed, one with an attribute): the
+/// same "nobody's words" test the hook applies
+/// ([`prompt_origin::is_harness`]), folded under its first tag. A stray
+/// `<local-command-stdout>` with no open command lands here rather than
+/// reading as a prompt.
+fn harness_only(text: &str) -> Option<(String, String)> {
+    if !prompt_origin::is_harness(text) {
+        return None;
+    }
+    let (tag, inner) = prompt_origin::head_block(text.trim())?;
+    Some((tag.to_string(), inner.trim().to_string()))
 }
 
 /// A user entry that is nothing but one `<tag>…</tag>` element — the harness
 /// talking, not the human. Returns the tag name and the text inside.
 ///
 /// Deliberately narrow: the element must be the whole entry, the tag must
-/// look like one of the harness's own ([`is_harness_tag`]), and the open tag
+/// be one of the harness's own ([`is_harness_tag`]), and the open tag
 /// must carry no attributes — the harness writes none, and requiring that is
 /// also what keeps an attribute holding a `>` (`<a-b title="x>y">`) from
 /// leaking its tail into the body. A pasted HTML snippet (`<div>`, `<p>`),
@@ -912,6 +936,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                     ended_at: None,
                     reminders: std::mem::take(&mut pending_reminders),
                     prompt_uuid: None,
+                    prompt_partial: false,
                     items: vec![ConvItem::Compact {
                         trigger: meta
                             .and_then(|m| m.get("trigger"))
@@ -1046,6 +1071,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                 ended_at: None,
                                 reminders: std::mem::take(&mut pending_reminders),
                                 prompt_uuid: None,
+                                prompt_partial: false,
                                 items: Vec::new(),
                             });
                         }
@@ -1070,6 +1096,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                             ended_at: None,
                             reminders: std::mem::take(&mut pending_reminders),
                             prompt_uuid: None,
+                            prompt_partial: false,
                             items: vec![ConvItem::Command {
                                 name,
                                 args: tag_text(&text, "command-args"),
@@ -1108,6 +1135,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                 ended_at: None,
                                 reminders: std::mem::take(&mut pending_reminders),
                                 prompt_uuid: None,
+                                prompt_partial: false,
                                 items: vec![ConvItem::Bash {
                                     command,
                                     stdout: tag_text(&text, "bash-stdout")
@@ -1121,7 +1149,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                     }
                     // Anything else that is one lone harness block: folded
                     // under its tag rather than printed as raw XML.
-                    if let Some((tag, body)) = lone_block(&text) {
+                    if let Some((tag, body)) = lone_block(&text).or_else(|| harness_only(&text)) {
                         push(&mut turns, current.take());
                         tool_items.clear();
                         current = Some(ConvTurn {
@@ -1130,6 +1158,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                             ended_at: None,
                             reminders: std::mem::take(&mut pending_reminders),
                             prompt_uuid: None,
+                            prompt_partial: false,
                             items: vec![ConvItem::Harness {
                                 tag,
                                 body: cap_chars(&body, COMMAND_OUTPUT_MAX_CHARS),
@@ -1149,6 +1178,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                             items: Vec::new(),
                             reminders: Vec::new(),
                             prompt_uuid: None,
+                            prompt_partial: false,
                         });
                         turn.items.push(ConvItem::Interrupt {
                             during_tool: text.contains("for tool use"),
@@ -1170,6 +1200,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                         items: Vec::new(),
                         reminders: std::mem::take(&mut pending_reminders),
                         prompt_uuid: v.get("uuid").and_then(|u| u.as_str()).map(String::from),
+                        prompt_partial: has_non_text_blocks(content),
                     });
                 }
             }
@@ -1182,6 +1213,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                         items: Vec::new(),
                         reminders: std::mem::take(&mut pending_reminders),
                         prompt_uuid: None,
+                        prompt_partial: false,
                     });
                     if let Some(ts) = at() {
                         turn.ended_at = Some(ts);
@@ -1543,6 +1575,9 @@ fn fit_last_turn(turn: &mut ConvTurn, max_chars: usize) -> bool {
     if let Some(prompt) = turn.prompt.as_mut() {
         if prompt.chars().count() > prompt_budget {
             *prompt = prompt.chars().take(prompt_budget).collect();
+            // What is left is not the prompt that was sent: Retry must not
+            // re-send it as if it were.
+            turn.prompt_partial = true;
             cut = true;
         }
     }
@@ -3842,6 +3877,7 @@ mod tests {
             ended_at: None,
             reminders: Vec::new(),
             prompt_uuid: None,
+            prompt_partial: false,
             items: vec![ConvItem::Text {
                 text: "x".repeat(n),
             }],
@@ -3885,6 +3921,7 @@ mod tests {
                 ended_at: None,
                 reminders: Vec::new(),
                 prompt_uuid: None,
+                prompt_partial: false,
                 items: vec![
                     ConvItem::Text { text: "hi".into() },
                     tool_item("Bash(command=ls)", false),
@@ -3896,7 +3933,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(&c).unwrap(),
-            serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","ended_at":null,"reminders":[],"prompt_uuid":null,"items":[
+            serde_json::json!({"turns":[{"prompt":null,"at":"2026-09-13T10:00:00Z","ended_at":null,"reminders":[],"prompt_uuid":null,"prompt_partial":false,"items":[
                 {"kind":"text","text":"hi"},
                 {"kind":"tool","summary":"Bash(command=ls)","error":false,"id":null,"name":"","target":null,"at":null,"ended_at":null,"done":false}]}],
                 "truncated":false,"context":null,"events":[]})
@@ -3922,6 +3959,7 @@ mod tests {
             ended_at: None,
             reminders: Vec::new(),
             prompt_uuid: None,
+            prompt_partial: false,
             items: vec![
                 ConvItem::Text {
                     text: "a".repeat(10),
@@ -3965,6 +4003,7 @@ mod tests {
             ended_at: None,
             reminders: Vec::new(),
             prompt_uuid: None,
+            prompt_partial: false,
             items: vec![ConvItem::Text {
                 text: format!("{}END", "x".repeat(100)),
             }],
@@ -3988,6 +4027,7 @@ mod tests {
             ended_at: None,
             reminders: Vec::new(),
             prompt_uuid: None,
+            prompt_partial: false,
             items: vec![ConvItem::Text {
                 text: "earlier".into(),
             }],
@@ -3998,6 +4038,7 @@ mod tests {
             ended_at: None,
             reminders: Vec::new(),
             prompt_uuid: None,
+            prompt_partial: false,
             items: vec![
                 tool_item("Bash(command=ls)", false),
                 ConvItem::Text {
@@ -4028,6 +4069,7 @@ mod tests {
             ended_at: None,
             reminders: Vec::new(),
             prompt_uuid: None,
+            prompt_partial: false,
             items: vec![ConvItem::Text {
                 text: format!("{}END", "x".repeat(100)),
             }],
@@ -4048,6 +4090,7 @@ mod tests {
             ended_at: None,
             reminders: Vec::new(),
             prompt_uuid: None,
+            prompt_partial: false,
             items: vec![ConvItem::Text { text: "abc".into() }],
         };
         let c = trim_conversation(vec![tiny], 10, 1);
@@ -4781,6 +4824,39 @@ mod tests {
         );
     }
 
+    /// The two readers of a user turn agree: a harness-shaped tag that is
+    /// not on the shared list is the person's (the hook would store it as
+    /// the first prompt, so the view shows it as one), and an entry of
+    /// listed blocks only is never a prompt, even when it is not one lone
+    /// block — a stray command output pair with no command open.
+    #[test]
+    fn the_transcript_and_the_hook_agree_on_what_a_prompt_is() {
+        for text in [
+            "<my-widget>x</my-widget> renders blank",
+            "<my-widget>x</my-widget>",
+        ] {
+            let t = parse_conversation(&jl(&[user(serde_json::json!(text)), asst("ok")]));
+            assert_eq!(t[0].prompt.as_deref(), Some(text));
+            assert!(!crate::service::prompt_origin::is_harness(text));
+        }
+        let stray = "<local-command-stdout>Set model to opus</local-command-stdout>\
+                     <local-command-stderr></local-command-stderr>";
+        let t = parse_conversation(&jl(&[user(serde_json::json!(stray)), asst("ok")]));
+        assert_eq!(t[0].prompt, None, "{:?}", t[0]);
+        assert_eq!(
+            t[0].items[0],
+            ConvItem::Harness {
+                tag: "local-command-stdout".into(),
+                body: "Set model to opus".into(),
+            }
+        );
+        assert!(crate::service::prompt_origin::is_harness(stray));
+        let ide = "<ide_selection>lines 3-9 of pay.rs</ide_selection>";
+        let t = parse_conversation(&jl(&[user(serde_json::json!(ide))]));
+        assert_eq!(t[0].prompt, None);
+        assert!(crate::service::prompt_origin::is_harness(ide));
+    }
+
     /// The accepting case, which the two tests this replaces never reached:
     /// both of their inputs were rejected on other grounds (one does not start
     /// with a tag, the other's tag has no hyphen), so they passed whatever
@@ -4875,6 +4951,7 @@ mod tests {
             }],
             reminders: vec!["r".repeat(500)],
             prompt_uuid: None,
+            prompt_partial: false,
         };
         // Two turns, ~1 022 chars of which 1 000 are reminders: a 100 budget
         // has to see them.
@@ -4999,5 +5076,52 @@ mod tests {
         let wire = r#"{"prompt":"hi","at":null,"ended_at":null,"items":[],"reminders":[]}"#;
         let turn: ConvTurn = serde_json::from_str(wire).expect("must decode without prompt_uuid");
         assert_eq!(turn.prompt_uuid, None);
+        assert!(
+            !turn.prompt_partial,
+            "an older hub sends no prompt_partial; it decodes as the old behaviour"
+        );
+    }
+
+    /// Retry re-sends `prompt` as "the same prompt": a prompt that carried an
+    /// image kept only its text, so re-sending it would send something else.
+    #[test]
+    fn a_prompt_with_an_image_block_is_marked_partial() {
+        let jsonl = concat!(
+            r#"{"type":"user","uuid":"aaaaaaaa-0000-0000-0000-000000000001","sessionId":"s","timestamp":"2026-09-26T09:00:00Z","message":{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}}"#,
+            "\n",
+            r#"{"type":"user","uuid":"aaaaaaaa-0000-0000-0000-000000000002","sessionId":"s","timestamp":"2026-09-26T09:01:00Z","message":{"role":"user","content":[{"type":"text","text":"plain"}]}}"#,
+            "\n",
+        );
+        let turns = parse_conversation(jsonl);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].prompt.as_deref(), Some("what is this?"));
+        assert!(turns[0].prompt_partial, "the image is not in `prompt`");
+        assert!(
+            !turns[1].prompt_partial,
+            "a text-only block list is the whole prompt"
+        );
+    }
+
+    /// The other way `prompt` stops being the whole prompt: a lone turn over
+    /// budget has its prompt's tail cut off by `fit_last_turn`.
+    #[test]
+    fn a_prompt_cut_to_fit_the_budget_is_marked_partial() {
+        let turn = ConvTurn {
+            prompt: Some("p".repeat(500)),
+            at: None,
+            ended_at: None,
+            items: vec![ConvItem::Text {
+                text: "r".repeat(500),
+            }],
+            reminders: Vec::new(),
+            prompt_uuid: Some("aaaaaaaa-0000-0000-0000-000000000001".into()),
+            prompt_partial: false,
+        };
+        let c = trim_conversation(vec![turn.clone()], 10, 600);
+        assert!(c.truncated);
+        assert!(c.turns[0].prompt.as_deref().unwrap().len() < 500);
+        assert!(c.turns[0].prompt_partial, "a cut prompt is not the prompt");
+        let whole = trim_conversation(vec![turn], 10, 10_000);
+        assert!(!whole.turns[0].prompt_partial, "an uncut prompt is");
     }
 }

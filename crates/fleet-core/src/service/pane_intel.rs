@@ -129,6 +129,22 @@ impl ClaudeStatus {
         }
     }
 
+    /// Whether the session is between turns: nothing is generating and
+    /// nothing inside a turn is waiting on the user. `Blocked` is NOT quiet —
+    /// a permission prompt or a question is part of the turn it interrupts.
+    /// The same set as the frontend's `isQuietStatus` (`conversation.ts`), held
+    /// there by the shared fixture `testdata/quiet_statuses.json`; `store::turn_over`
+    /// is defined through it.
+    pub fn is_quiet(self) -> bool {
+        match self {
+            ClaudeStatus::Idle
+            | ClaudeStatus::Completed
+            | ClaudeStatus::Stopped
+            | ClaudeStatus::Failed => true,
+            ClaudeStatus::Working | ClaudeStatus::Blocked => false,
+        }
+    }
+
     /// The value list rendered as `a | b | c`, for quoting verbatim in docs.
     pub fn vocabulary_doc() -> String {
         join_vocabulary(Self::ALL.iter().map(|k| k.as_str()))
@@ -1567,6 +1583,49 @@ Enter to select
         assert!("none".parse::<StuckKind>().is_err());
     }
 
+    /// The shared fixture `src/lib/conversation.test.ts` reads too: one
+    /// answer to "is this turn over?" for `is_quiet`, `store::turn_over` and
+    /// the frontend's `isQuietStatus`, every vocabulary value covered and an
+    /// unknown value (and none) not quiet.
+    #[test]
+    fn quiet_statuses_match_the_shared_fixture() {
+        #[derive(serde::Deserialize)]
+        struct Case {
+            status: Option<String>,
+            quiet: bool,
+        }
+        let cases: Vec<Case> =
+            serde_json::from_str(include_str!("testdata/quiet_statuses.json")).unwrap();
+        for c in &cases {
+            assert_eq!(
+                crate::store::turn_over(c.status.as_deref()),
+                c.quiet,
+                "turn_over({:?})",
+                c.status
+            );
+            if let Some(k) = c
+                .status
+                .as_deref()
+                .and_then(|s| s.parse::<ClaudeStatus>().ok())
+            {
+                assert_eq!(k.is_quiet(), c.quiet, "{k}.is_quiet()");
+            }
+        }
+        for k in ClaudeStatus::ALL {
+            assert!(
+                cases
+                    .iter()
+                    .any(|c| c.status.as_deref() == Some(k.as_str())),
+                "the fixture lacks {k}"
+            );
+        }
+        assert!(cases.iter().any(|c| c.status.is_none()));
+        assert!(cases.iter().any(|c| c
+            .status
+            .as_deref()
+            .is_some_and(|s| s.parse::<ClaudeStatus>().is_err())));
+    }
+
     #[test]
     fn claude_status_round_trips_through_str_and_serde() {
         for k in ClaudeStatus::ALL {
@@ -1594,6 +1653,19 @@ Enter to select
     /// Write sites outside this module still use string literals (files owned
     /// by other work streams). Pin them here so a renamed value becomes a test
     /// failure instead of silent drift.
+    /// Mirrors `isQuietStatus` in `src/lib/conversation.ts`: a rewind's
+    /// mid-turn guard and the clients' poll cadence must agree on what
+    /// "between turns" means. `blocked` is inside a turn.
+    #[test]
+    fn quiet_is_idle_completed_stopped_failed_and_never_working_or_blocked() {
+        let quiet: Vec<&str> = ClaudeStatus::ALL
+            .iter()
+            .filter(|s| s.is_quiet())
+            .map(|s| s.as_str())
+            .collect();
+        assert_eq!(quiet, ["completed", "failed", "stopped", "idle"]);
+    }
+
     #[test]
     fn external_write_site_literals_are_in_vocabulary() {
         // service/hooks.rs: the Stop hook stamps "idle".

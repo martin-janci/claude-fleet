@@ -3,15 +3,105 @@
 
 use directories::ProjectDirs;
 
-/// The platform app data directory (`state.db`, `logs/`), created if missing.
-/// Panics on failure, so it is called once, at startup in [`crate::run`]; IPC
-/// handlers read the managed `commands::diagnostics::AppDataDir` instead.
-pub(crate) fn appdata_dir() -> std::path::PathBuf {
+/// The platform app data directory (`state.db`, `logs/`), created if missing,
+/// and a line for the log when an older build's data was moved into it (or
+/// could not be). Panics on failure, so it is called once, at startup in
+/// [`crate::run`], before logging exists; IPC handlers read the managed
+/// `commands::diagnostics::AppDataDir` instead.
+///
+/// On Windows that is the **Local** profile (`%LOCALAPPDATA%`): the database
+/// holds tracker credentials and per-host tokens, and a Roaming profile is
+/// copied to a server at sign-out on a domain machine. Builds before this one
+/// used Roaming; their files are moved over once ([`move_data_dir`]).
+/// Everywhere else it is `data_dir()`, as it always was.
+pub(crate) fn appdata_dir() -> (std::path::PathBuf, Option<String>) {
     let dirs = ProjectDirs::from("sk", "rlt", "claude-fleet")
         .expect("could not resolve platform appdata dir");
-    let dir = dirs.data_dir();
-    std::fs::create_dir_all(dir).unwrap_or_else(|e| panic!("create appdata dir {dir:?}: {e}"));
-    dir.to_path_buf()
+    let (dir, note) = if cfg!(windows) {
+        let local = dirs.data_local_dir();
+        match move_data_dir(dirs.data_dir(), local) {
+            Ok(0) => (local.to_path_buf(), None),
+            Ok(n) => (
+                local.to_path_buf(),
+                Some(format!(
+                    "moved {n} entries of the app data from {} to {}",
+                    dirs.data_dir().display(),
+                    local.display()
+                )),
+            ),
+            // Nothing was moved (a failure puts back what had been): run on
+            // the old directory rather than a new, empty database.
+            Err(e) => (
+                dirs.data_dir().to_path_buf(),
+                Some(format!(
+                    "app data not moved to {} ({e}); using {}",
+                    local.display(),
+                    dirs.data_dir().display()
+                )),
+            ),
+        }
+    } else {
+        (dirs.data_dir().to_path_buf(), None)
+    };
+    std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create appdata dir {dir:?}: {e}"));
+    (dir, note)
+}
+
+/// The database: its presence decides whether a directory holds app data.
+const DB_FILE: &str = "state.db";
+
+/// Move everything in `old` into `new`, once: only when `old` holds a
+/// database and `new` does not. The database and its `-wal` / `-shm` go
+/// first, then every other entry (logs, the legacy hub token file) that
+/// `new` does not already have. A rename that fails puts back every one
+/// already made and reports the error, so the data is never split between
+/// the two. Returns how many entries moved (0: nothing to do).
+fn move_data_dir(old: &std::path::Path, new: &std::path::Path) -> Result<usize, String> {
+    move_data_dir_with(old, new, |from, to| std::fs::rename(from, to))
+}
+
+/// [`move_data_dir`] with the rename injected (a test makes one fail).
+fn move_data_dir_with(
+    old: &std::path::Path,
+    new: &std::path::Path,
+    rename: impl Fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> Result<usize, String> {
+    if old == new || new.join(DB_FILE).exists() || !old.join(DB_FILE).is_file() {
+        return Ok(0);
+    }
+    std::fs::create_dir_all(new).map_err(|e| format!("create {}: {e}", new.display()))?;
+    let first = [
+        DB_FILE.to_string(),
+        format!("{DB_FILE}-wal"),
+        format!("{DB_FILE}-shm"),
+    ];
+    let mut names: Vec<std::ffi::OsString> = first
+        .iter()
+        .map(std::ffi::OsString::from)
+        .filter(|n| old.join(n).exists())
+        .collect();
+    let mut rest: Vec<std::ffi::OsString> = std::fs::read_dir(old)
+        .map_err(|e| format!("read {}: {e}", old.display()))?
+        .filter_map(|e| e.ok().map(|e| e.file_name()))
+        .filter(|n| !names.contains(n))
+        .collect();
+    rest.sort();
+    names.extend(rest);
+    let mut moved: Vec<&std::ffi::OsString> = Vec::new();
+    for name in &names {
+        let to = new.join(name);
+        if to.exists() {
+            continue;
+        }
+        if let Err(e) = rename(&old.join(name), &to) {
+            for back in moved.iter().rev() {
+                let _ = rename(&new.join(back), &old.join(back));
+            }
+            return Err(format!("move {}: {e}", name.to_string_lossy()));
+        }
+        moved.push(name);
+    }
+    Ok(moved.len())
 }
 
 /// Pure: compute a new PATH that appends any of `common_bin_dirs` that are not
@@ -70,7 +160,7 @@ pub(crate) fn import_login_shell_env() -> bool {
     // Finder-launched GUI app could not find `cl`, and every tmux pane failed
     // with "cl: command not found". `-c` still runs our script and exits (no
     // interactive prompt loop), so output stays clean.
-    let Ok(output) = std::process::Command::new(&shell)
+    let Ok(output) = fleet_core::proc::std_command(&shell)
         .args(["-i", "-l", "-c", &script])
         .output()
     else {
@@ -178,6 +268,88 @@ pub(crate) fn backfill_path_for_gui_launch() {
         std::path::Path::new(d).exists()
     }) {
         std::env::set_var("PATH", new_path);
+    }
+}
+
+#[cfg(test)]
+mod data_dir_tests {
+    use super::*;
+
+    #[test]
+    fn an_older_builds_data_moves_once_with_the_database_first() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("Roaming");
+        let new = root.path().join("Local");
+        std::fs::create_dir_all(old.join("logs")).unwrap();
+        for f in [
+            "state.db",
+            "state.db-wal",
+            "state.db-shm",
+            "hub-client-token",
+        ] {
+            std::fs::write(old.join(f), f).unwrap();
+        }
+        std::fs::write(old.join("logs").join("app.log"), "log").unwrap();
+
+        assert_eq!(move_data_dir(&old, &new), Ok(5));
+        for f in [
+            "state.db",
+            "state.db-wal",
+            "state.db-shm",
+            "hub-client-token",
+        ] {
+            assert_eq!(std::fs::read_to_string(new.join(f)).unwrap(), f);
+            assert!(!old.join(f).exists(), "{f} left behind");
+        }
+        assert!(new.join("logs").join("app.log").is_file());
+
+        // Once: a database in the new place is never overwritten.
+        std::fs::write(old.join("state.db"), "stale").unwrap();
+        assert_eq!(move_data_dir(&old, &new), Ok(0));
+        assert_eq!(
+            std::fs::read_to_string(new.join("state.db")).unwrap(),
+            "state.db"
+        );
+    }
+
+    #[test]
+    fn nothing_moves_without_an_old_database() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("Roaming");
+        let new = root.path().join("Local");
+        assert_eq!(move_data_dir(&old, &new), Ok(0));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("other"), "x").unwrap();
+        assert_eq!(move_data_dir(&old, &new), Ok(0));
+        assert!(old.join("other").exists());
+        assert_eq!(move_data_dir(&old, &old), Ok(0));
+    }
+
+    /// A rename that fails part-way puts back what had moved: the database
+    /// is never left in one directory and its WAL in the other.
+    #[test]
+    fn a_failed_move_puts_back_what_had_moved() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("Roaming");
+        let new = root.path().join("Local");
+        std::fs::create_dir_all(&old).unwrap();
+        for f in ["state.db", "state.db-wal", "state.db-shm"] {
+            std::fs::write(old.join(f), f).unwrap();
+        }
+        let calls = std::cell::Cell::new(0);
+        let r = move_data_dir_with(&old, &new, |from, to| {
+            calls.set(calls.get() + 1);
+            // The third move (`-shm`, held open by another process) fails.
+            if calls.get() == 3 {
+                return Err(std::io::Error::other("in use"));
+            }
+            std::fs::rename(from, to)
+        });
+        assert!(r.unwrap_err().contains("state.db-shm"));
+        for f in ["state.db", "state.db-wal", "state.db-shm"] {
+            assert!(old.join(f).is_file(), "{f} put back");
+            assert!(!new.join(f).exists(), "{f} not split off");
+        }
     }
 }
 

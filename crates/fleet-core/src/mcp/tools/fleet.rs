@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::ipc_error::lock;
+use crate::service::orgs::OrgScope;
 
 #[tool_router(router = fleet_router, vis = "pub(super)")]
 impl FleetTools {
@@ -14,7 +15,9 @@ impl FleetTools {
         detection_backlog: suggestions undecided for detection_backlog_days). \
         A per-host token sees its own host's usage and its org's trackers. \
         hub: uptime and last reconcile pass; tunnels_mode none|reverse; \
-        peer_links_total.")]
+        peer_links_total. \
+        hosts[]: per host disk_home_pct/disk_low, claude_behind, \
+        agent_behind, hooks_silent.")]
     pub(super) async fn fleet_health(
         &self,
         Extension(caller): Extension<Caller>,
@@ -29,6 +32,16 @@ impl FleetTools {
             h.db_ready = false;
         }
         h.set_tunnels(self.tunnels.health());
+        // Host identity & health, task 2: the agents connected right now
+        // outrank the stored hello for `agent_version` / `agent_behind`.
+        if let Some(reg) = self.ssh.agent_registry() {
+            let live: Vec<(String, String)> = reg
+                .snapshot()
+                .into_iter()
+                .map(|a| (a.alias, a.agent_version))
+                .collect();
+            health::overlay_agents(&mut h.hosts, &live, crate::app_version::get());
+        }
         if let Some(host) = caller.host_alias.as_deref() {
             match self.reader().lock() {
                 Ok(s) => {
@@ -55,6 +68,15 @@ impl FleetTools {
                     Err(_) => health::blank_rollups(&mut h),
                 },
                 Err(_) => health::blank_rollups(&mut h),
+            }
+        }
+        // The last reconcile error is the hub's own text about any host —
+        // another org's too; a scoped caller gets that it failed, not why.
+        if caller.is_scoped() {
+            if let Some(r) = h.hub.as_mut().map(|hub| &mut hub.reconcile) {
+                if r.last_error.is_some() {
+                    r.last_error = Some("reconcile failed (details on the hub)".into());
+                }
             }
         }
         // An agent reads it: a tracker's error is the tracker's text.
@@ -86,7 +108,24 @@ impl FleetTools {
             .unwrap_or(0);
         let report = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            usage::report(&s, host.as_deref(), p.since_secs, now).map_err(to_mcp_err)?
+            // Work graph M14: a client bound to an org sees its org's sessions
+            // and hosts only, as in `fleet_health`; a host outside them
+            // answers as an unknown one. (A per-host token is pinned to its
+            // host by `usage_scope`.)
+            let scope = if caller.is_scoped() && caller.host_alias.is_none() {
+                caller.org_scope(&s).map_err(to_mcp_err)?
+            } else {
+                OrgScope::All
+            };
+            if let (Some(h), false) = (host.as_deref(), scope.is_all()) {
+                if !health::hosts_in_scope(&s, &scope)
+                    .iter()
+                    .any(|x| x.alias == h)
+                {
+                    return Err(mcp_err("E_NOTFOUND", format!("no host {h:?}"), None));
+                }
+            }
+            usage::report_on(&s, host.as_deref(), p.since_secs, now, &scope).map_err(to_mcp_err)?
         };
         ok_json_compact(&report)
     }
@@ -126,10 +165,13 @@ impl FleetTools {
 
     #[tool(description = "Read or replace the fleet's quick replies: the \
         chip row the desktop and phone composers draw above the prompt box, \
-        as [{label, text}]. No arguments reads; `set` replaces the whole \
-        list (max 24, [] restores the defaults). Errors: E_INVALID.")]
+        as [{label, text, auto_send}] in order. No arguments reads; `set` \
+        replaces the whole list (max 24, [] restores the defaults; not a \
+        host token or the operator). \
+        Errors: E_INVALID, E_CONFLICT, E_FORBIDDEN.")]
     pub(super) async fn quick_replies(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<QuickRepliesParams>,
     ) -> Result<CallToolResult, McpError> {
         // Chip TEXT is a prompt the operator wrote; the count is the whole
@@ -141,8 +183,21 @@ impl FleetTools {
                 None => "read".to_string(),
             },
         );
+        // The chips are a PERSON's buttons, on every screen of the fleet, and
+        // an auto-send chip is a prompt one tap away. A per-host token is a
+        // host's own Claude and the operator is the UX agent: letting either
+        // rewrite the list would let an agent plant a prompt the person then
+        // sends without reading. Reads stay open to both.
+        if p.set.is_some() && (caller.host_alias.is_some() || caller.is_operator()) {
+            return Err(to_mcp_err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "quick replies are the person's: an agent token may read them, not replace them",
+            )));
+        }
         let entries = match p.set {
-            Some(entries) => quick_replies::replace(&self.store, entries).map_err(to_mcp_err)?,
+            Some(entries) => {
+                quick_replies::replace(&self.store, entries, p.expected).map_err(to_mcp_err)?
+            }
             None => quick_replies::list(&self.store).map_err(to_mcp_err)?,
         };
         ok_json_compact(&entries)
@@ -187,6 +242,30 @@ impl FleetTools {
         ok_json(&hosts::remove_host(args, &self.store).map_err(to_mcp_err)?)
     }
 
+    #[tool(description = "Fold host `from` into `into` in one transaction: \
+        worktrees, fingerprints, dismissals, layers and daily usage move \
+        (usage sums), sessions move unless `into` already has the same \
+        claude_session_id or tmux_name (those are dropped), then `from` is \
+        deleted. For a renamed host (`local` -> `mac`). Master only; may \
+        return E_CONFIRM_REQUIRED.")]
+    pub(super) async fn merge_host(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<hosts::MergeHostArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "merge_host",
+            &format!("from={} into={}", args.from, args.into),
+        );
+        self.confirm_gate(
+            "merge_host",
+            args.confirm_nonce.as_deref(),
+            &format!("from={} into={}", args.from, args.into),
+            &caller,
+        )?;
+        ok_json(&hosts::merge_host(args, &self.store).map_err(to_mcp_err)?)
+    }
+
     #[tool(description = "Hide or show a host (hidden: skipped by \
         reconcile). Returns the host row.")]
     pub(super) async fn hide_host(
@@ -206,12 +285,19 @@ impl FleetTools {
         / EnterWorktree http hooks and this fleet's MCP server entry \
         (per-host bearer token) into every reachable host's ~/.claude.json \
         (a reverse SSH tunnel when the hub is loopback-only). Returns \
-        per-host status; each host must restart Claude to load it.")]
+        per-host status; each host must restart Claude to load it. host: \
+        one alias; content_only: skills, CLAUDE.md and hooks only, no token.")]
     pub(super) async fn provision_hosts(
         &self,
         Parameters(p): Parameters<ProvisionHostsParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit("provision_hosts", &format!("rotate={}", p.rotate));
+        audit(
+            "provision_hosts",
+            &format!(
+                "rotate={} host={:?} content_only={}",
+                p.rotate, p.host, p.content_only
+            ),
+        );
         let base = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?
@@ -221,7 +307,11 @@ impl FleetTools {
             &self.ssh,
             &self.tunnels,
             &base,
-            p.rotate,
+            crate::service::provision::ProvisionScope {
+                rotate: p.rotate,
+                only_host: p.host,
+                content_only: p.content_only,
+            },
         )
         .await
         .map_err(to_mcp_err)?;
@@ -236,7 +326,8 @@ impl FleetTools {
         sees it; the device posts it to /pair once for a token of its own. \
         name: 1-64 chars, no control characters, not a live client's. mode \
         full drives sessions fleet-wide, readonly observes, peer is another \
-        hub's link (see peer_exchange); fleet-admin tools stay out of a \
+        hub's link (see peer_exchange), updater is fleet-updater's (/update \
+        only); fleet-admin tools stay out of a \
         client's reach. Codes are in memory only: a hub restart voids them. \
         org_id binds it to one org (its work and sessions only). Master token \
         only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.")]
@@ -264,6 +355,14 @@ impl FleetTools {
             return Err(mcp_err(
                 codes::E_VALIDATE,
                 "a peer hub link is never bound to an org; drop org_id",
+                None,
+            ));
+        }
+        // `fleet-updater` sends no prompts and belongs to no org.
+        if mode == "updater" && (p.trusted || p.org_id.is_some()) {
+            return Err(mcp_err(
+                codes::E_VALIDATE,
+                "an updater token is never trusted or bound to an org; drop trusted / org_id",
                 None,
             ));
         }

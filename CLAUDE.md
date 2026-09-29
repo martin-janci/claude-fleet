@@ -120,7 +120,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   never stored; `tracker.connect` backs Settings → Trackers
   (`settings.trackers`), which replaced WorkSettings' tracker list.
   P5: `set_setting { propose: true, why }` leaves a proposal, never a
-  write (`service/settings_review.rs`, migration 072); every registered
+  write (`service/settings_review.rs`, migration 082); every registered
   write is audited through `settings::set_by` with its `Actor`; layout L6
   `review_apply` (Settings → Proposed changes, `fleet-hub settings`), a
   field's inline suggestion and History, search as a plain-words command
@@ -143,7 +143,11 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   `store/clients.rs`): a phone or browser pairs through a single-use code
   (`pair_client` → `POST /pair`) for a named, revocable client token
   (`full`/`readonly`) that is never the master and never reaches fleet admin
-  (a trusted, unbound device writes the fleet's settings since pages P6),
+  — except the asset catalog, when the operator grants it per client
+  (`fleet-hub client grant <name> assets`, migration 074; the hub's
+  `catalog_admin` tool, `service/catalog/admin.rs`, reads the grant live),
+  and the fleet's settings, which a trusted device bound to no org writes
+  (declarative pages P6) —
   and follows `GET /events` instead of polling. Hub-only; `fleet-hub
   pair|client` is the operator's side. See `docs/hub.md` → *Pair a phone*.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
@@ -155,8 +159,8 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 214
-  commands; `backend/tests_routing.rs` holds the handler list, each command's
+  verdict is written down once, in `backend/verdicts.rs`, for all 215
+  commands; `backend/tests_routing.rs` reads the handler list from `lib.rs`, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
   in `docs/hub.md`. Adding a command means: a row, then `route`/
@@ -174,6 +178,10 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   SSH/bash command string MUST be quoted with it. The former duplicate copies
   (`shell_quote`/`shell_quote_str`/`shell_escape`) were consolidated — do not
   reintroduce them.
+- Every child process is built by `fleet_core::proc::command` /
+  `std_command`, never `Command::new`: on Windows they set `CREATE_NO_WINDOW`,
+  without which each `ssh.exe` a probe spawns flashes a console window.
+  `no_eprintln_tests::production_code_spawns_through_proc` enforces it.
 - SQLite access goes through `Store` behind a `std::sync::Mutex`. Never hold the
   guard across an `.await`.
 - No blocking I/O under `Mutex<PtyState>` and none on a sync Tauri command (a
@@ -320,7 +328,7 @@ downgrade guard (`store::testgen`), the scale fixture and budget tests
 (`service/work/scale_tests.rs`, migration 058), the `work.retention.*`
 windows (`store/work_retention.rs`), trackers in `fleet_health` with a
 Reconnect Attention item, and the review of the decided-against list
-(`reviews/2026-09-26-work-graph-decisions-revisited.md`).
+(`docs/superpowers/reviews/2026-09-26-work-graph-decisions-revisited.md`).
 M13 (live use, `docs/superpowers/plans/2026-09-26-work-graph-m13-live-use.md`)
 is closed (M13.5, #337): M13.1 (partial sync failures, #320), M13.2
 (`work_admin { usage }`, #323 / #324), M13.4c and M13.4e above are on
@@ -330,7 +338,7 @@ small plans. Two items stay open, waiting on the owner: the acceptance run
 and its triage (M13.3), and D5 (M13.4b). Open decisions are the roadmap's table, and a decision-gated
 feature starts only on the user's "yes".
 Work graph M14 (the Work view: org → group → task → every session, and a
-phone paired to one org) is the one milestone after it (D36): plan
+phone paired to one org) is the one milestone after it (roadmap D36): plan
 `docs/superpowers/plans/2026-09-27-work-graph-m14-work-view.md`, design
 `docs/superpowers/specs/2026-09-27-work-view-design.md`. M14.1a–d (the
 backend: `work { tree | task | session_tasks | review | rules | … }` in
@@ -342,13 +350,17 @@ and `work:changed`) and M14.2–M14.4 (the desktop Work view — `WorkTree`,
 `src/lib/work_view.ts` — and fleet-mobile's *My work*) are landed; the
 desktop re-reads on `onWorkChanged` and the `workChanged` tick in
 `work.ts`. `scripts/hub-e2e.sh` hub W section 10 runs the contract on a
-real hub. M14.5, the acceptance run (Part R), waits on the owner.
+real hub. M14.2 / M14.3 landed in #349 (fixes #357, #359, #361, #365) and
+M14.4 as one PR, fleet-mobile#54; M14.5's docs are on `main`, so only the
+owner's Part R run is open, and *Assign org…* / *Make a rule…* stay
+desktop-only (owner, 2026-09-28; M14's D31–D36 and Jev's D31–D47 share
+numbers, so write "M14-D3x" / "Jev-D3x").
 
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub
 census languages` over `service::nl` (cargo feature `nl-detect`, lingua, ON
 only in fleet-hub — the models add ~45 MB, kept there by D47). The decision
-envelope is built and OFF (D35–D37): `service::decide` (`gate` / `decide`,
+envelope is built and OFF (Jev spec D35–D37; the roadmap's D31–D36 are other decisions): `service::decide` (`gate` / `decide`,
 `DecisionBackend`, `jev.rs` fenced to api.typesafe.ai), `decide.*` settings,
 per-org consent `orgs.jev_allowed` (migration 068), the record
 `decision_runs` + key `decision_secrets` (069; the key is read ONLY by
@@ -379,6 +391,38 @@ person's Clear work holds against the unchanged branch / PR (R9u, migration
 Decisions D31–D47 and what is still open
 are in `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
 
+Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
+here under each reply; Fork, Rewind and Retry are one operation,
+`rewind_conversation` (`service/rewind.rs`), which copies the transcript up
+to the anchor into a new conversation and never changes the original.
+Retry (the client's rewind + `send_prompt`) is offered only when
+`ConvTurn.prompt_partial` is false. A rewind is refused unless the session
+is quiet (live pane probe first) and without an anchor; a failed restart
+reverts the binding (`Store::revert_rebind`) and removes the copy. Fork into
+a NEW worktree (`new_worktree`, the Fork sheet's default) creates the
+worktree first — a fresh branch at the source's HEAD, uncommitted changes
+not carried — then writes the copy under its `pwd -P`, then starts in it;
+a failure after the worktree removes the copy, the tree, the branch and
+the row. Spec
+`docs/superpowers/specs/2026-09-26-reply-actions-design.md`.
+
+Session state machine hardening (plan A, #343) is landed: a `working` row
+with no activity for `reconcile.stale_working_secs` turns `idle` with
+`stale_working_at` (migration 065); a StopFailure reads as failed; one
+threshold, `health.context_red_pct`, drives `context_full`; the `oom`
+playbook is capped by `playbooks.oom_max_attempts`; `gc.external_lost_ttl_secs`
+ages out lost external rows. Attention reasons `stop_failed`,
+`context_full`, `stale_working`, `ci_failing`. Plan
+`docs/superpowers/plans/2026-09-27-session-state-machine.md`.
+
+Hub ops and accounting (plan D, #344) is landed: `fleet_health.hub`
+(uptime, reconcile timing), process gauges on `/metrics`, a transcript's
+first read booked as `backfill` apart from the day's live cost (migration
+071 re-keys `usage_daily` by `(day, host_alias, backfill)`), and
+`deploy/hub/backup.sh` / `upgrade.sh` and the `behind-proxy` compose; see
+`docs/hub.md` → *Backups* / *Upgrade with the script*, plan
+`docs/superpowers/plans/2026-09-27-hub-ops-accounting.md`.
+
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;
 `/clear`, `/resume` and compaction tracked as conversation switches;
@@ -394,9 +438,77 @@ token in Credential Manager. Unix-only code and tests stay `#[cfg(unix)]`
 (for a test module: a `#[cfg(unix)]` line above a bare `#[cfg(test)]`, the
 form `no_eprintln_tests` recognises); `rust-windows` in CI keeps clippy and
 the tests green there. `fleet-agent` and `fleet-hub` stay Unix-only.
+On Windows a WSL distribution is a host (`fleet_core::wsl`, alias
+`wsl-<name>`): `SshClient::remote_command` and the PTY attach run it through
+`wsl.exe … sh -c` instead of `ssh`, and it gets no reverse tunnel. The `ssh`
+program is `ssh::default_ssh_binary()` everywhere (probes, PTY, tunnels):
+`CLAUDE_FLEET_SSH`, else the Windows OpenSSH, else PATH. The Windows
+bundle ships Microsoft's ConPTY (`conpty.dll`/`OpenConsole.exe`, which
+portable-pty prefers to the built-in one) via `scripts/fetch-conpty.sh`
+(pinned version + SHA-256) and `--config src-tauri/tauri.conpty.conf.json`
+in release.yml and ci.yml; plain dev builds use the system ConPTY.
 
 Hub↔hub federation (cycle 3) is landed: two `fleet-hub` daemons link with
 `fleet-hub pair --mode peer` / `peer add|list|remove`, a dialer supervisor
 and a `peer_exchange` listener carry messages both ways by fleet address,
 and `fleet_health.peer_links_down` reports a link in trouble, per
 `docs/superpowers/specs/2026-09-24-hub-federation-design.md`.
+
+Application updates: design
+`docs/superpowers/specs/2026-09-28-update-channel-design.md` (with
+fleet-mobile's `docs/superpowers/specs/2026-09-28-mobile-update-adapter.md`).
+The Hub is the policy authority and the release key (minisign) the content
+authority. The manifest is two signed documents, a per-release manifest plus
+a per-track channel doc on the `update-channels` branch. The `/update` wire is
+frozen and exempt from `E_HUB_CONTRACT`. `fleet-updater` rolls the hub
+container back, including the DB restore. **S1 is landed:**
+`crates/fleet-update` (Tauri-free, no fleet-core dependency; version-exempt
+like fleet-core) holds the manifest / channel types, `verify` (`verify_target`
+is the one check before any install), the pure `decide()` over the shared
+fixture `tests/decide_cases.json`, `UpdatePhase`, and `UpdateChannel` with
+`GitUpdateChannel` / `HubUpdateChannel`. **S5 is landed too:**
+- `fleet-hub backup [--prefix|--to] --json` (`store::backup`, a
+  read-only `VACUUM INTO`, never migrates);
+- `fleet-hub healthcheck --ready --json`, which reads the readiness file
+  `serve` rewrites every 5 s (`fleet-hub/src/ready.rs`, `<data
+  dir>/run/ready.json`), so `/healthz` stays unversioned;
+- the build identity from `crates/fleet-hub/build.rs` (`FLEET_GIT_SHA` /
+  `FLEET_BUILD_ID`, passed by `release.yml` and the `hub-image.yml` build
+  args).
+
+**S4a (the hub side) is landed:**
+- migration 079 (`update_desired`, `update_observed`, `update_events`, and
+  `update_docs`, the signed-document cache, re-verified on every read);
+- `service/update/` (`check` / `report` / `status` / `pin` / `refresh`,
+  plus the refresh tick in `fleet-hub serve`, which records `hub:self`);
+- `POST /update/check` and `POST /update/report` (`mcp/update_route.rs`,
+  behind `authorize`; the caller's identity comes from its token);
+- `TokenMode::Updater` (`fleet-hub pair --mode updater`): `/update/*` only,
+  refused by every tool, `/events` and `/report`;
+- the tools `update_status` (client, read-only; a scoped caller sees only
+  itself) and `update_admin` (master only);
+- the `update.*` settings, with their Settings → Updates rows, and the user
+  guide `docs/updates.md` (every `update.*` setting must be in its table).
+
+**S2 (publishing) is landed:** release.yml's `manifest` job signs
+`release-manifest.json` from 0.4.1 (`scripts/release-manifest.sh`, the
+windows from the shipped `fleet-hub compat`; `verify-release` requires it
+through the `manifest` leg of `release-assets.sh`), its `channel` job and
+`update-channels.yml` write the signed `stable` / `beta` channels on the
+orphan branch `update-channels` (`scripts/update-channels.sh`, the
+`fleet-release` bin of fleet-update), and every document is checked
+against `keys.rs` before it leaves the runner
+(`scripts/release-update-scripts-test.sh`, CI hub-headless). See
+`docs/RELEASING.md` → *Update manifest and channels*.
+
+**S3 is landed:** `service::update::git_check` (Git mode: a `GitCheck`
+from the hub's own settings, pin and last-seen sequence) and `fleet-hub
+update check [--track] [--json]`, which reads the published channel and
+prints what this build should run, verified; it installs nothing.
+
+Trusted keys are `fleet_update::keys::RELEASE_KEYS`: the owner's release
+key since #384 (made on the owner's machine by `scripts/release-key.sh`;
+the secret half is only the `RELEASE_SIGNING_KEY` secret and the owner's
+backup). Nothing is offered until 0.4.1 publishes the first channel; an
+`e2e` build also reads `FLEET_UPDATE_E2E_KEYS`. S2b (nightly), S4b and
+S6–S9 are not built; the other §13 questions wait on the owner.

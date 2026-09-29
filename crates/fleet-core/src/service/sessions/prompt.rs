@@ -159,7 +159,7 @@ async fn run_tmux_script(
 ) -> Result<(), IpcError> {
     let out = if host_alias == "local" {
         crate::service::hub::ensure_local_allowed(host_alias)?;
-        tokio::process::Command::new("bash")
+        crate::proc::command("bash")
             .args(["-c", script])
             .output()
             .await
@@ -503,6 +503,36 @@ fn stamp_last_prompt_ahead(
     }
 }
 
+/// A sent line that switches the session's model or effort. `None` inside
+/// means back to the host's default (`/model default`, `/effort auto`).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum LaunchSwitch<'a> {
+    Model(Option<&'a str>),
+    Effort(Option<&'a str>),
+}
+
+/// Read `/model <x>` / `/effort <x>` off a sent prompt: exactly the command
+/// and one valid argument (`validate::claude_model` / `effort_level`), so a
+/// bare `/model` (the REPL's picker), a typo or prose is never recorded.
+pub(super) fn launch_switch(prompt: &str) -> Option<LaunchSwitch<'_>> {
+    let mut words = prompt.trim().split_ascii_whitespace();
+    let (cmd, arg) = (words.next()?, words.next()?);
+    if words.next().is_some() {
+        return None;
+    }
+    match cmd {
+        "/model" if arg == "default" => Some(LaunchSwitch::Model(None)),
+        "/model" => crate::validate::claude_model(arg)
+            .is_ok()
+            .then_some(LaunchSwitch::Model(Some(arg))),
+        "/effort" if arg == "auto" => Some(LaunchSwitch::Effort(None)),
+        "/effort" => crate::validate::effort_level(arg)
+            .is_ok()
+            .then_some(LaunchSwitch::Effort(Some(arg))),
+        _ => None,
+    }
+}
+
 /// Post-send bookkeeping (PROD-4 / PROD-5): stamp `last_prompt`, and give a
 /// still-unnamed session a default friendly name derived from the prompt.
 /// Best-effort: every failure is logged and swallowed — the prompt already
@@ -548,6 +578,23 @@ pub(super) fn record_prompt_outcome(
             error = %e,
             "[prompt] set_last_prompt failed"
         );
+    }
+    // A `/model <x>` or `/effort <x>` becomes the session's own, so a later
+    // recreate / restart launches with it (`recreate_pane_command`).
+    if !crate::store::has_no_pane(&row.kind) && row.kind != "shell" {
+        let stored = match launch_switch(prompt) {
+            Some(LaunchSwitch::Model(m)) => s.set_session_launch_model(row.id, m),
+            Some(LaunchSwitch::Effort(e)) => s.set_session_effort(row.id, e),
+            None => Ok(()),
+        };
+        if let Err(e) = stored {
+            tracing::warn!(
+                host = %host_alias,
+                session = %tmux_name,
+                error = %e,
+                "[prompt] storing the launch option failed"
+            );
+        }
     }
     // The prompt-derived label replaces NO name, the deterministic
     // branch-derived default every fleet-created session starts with, or a

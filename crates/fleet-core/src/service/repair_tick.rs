@@ -404,13 +404,15 @@ pub async fn run_with(
         };
         let rows = s.list_all_sessions().unwrap_or_default();
         let controller = s.get_controller().ok().flatten();
-        let usable: HashSet<String> = s
-            .list_hosts()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|h| h.reachable && !h.hidden)
-            .map(|h| h.alias)
-            .collect();
+        // One hidden/local rule for every host loop (hub-ops F6).
+        let usable: HashSet<String> = crate::service::hosts::active_hosts(
+            s.list_hosts().unwrap_or_default(),
+            crate::service::hub::local_host_enabled(),
+        )
+        .into_iter()
+        .filter(|h| h.reachable)
+        .map(|h| h.alias)
+        .collect();
         (rows, controller, usable, load_backoffs(&s))
     };
     let mut by_host: BTreeMap<String, Vec<SessionRow>> = BTreeMap::new();

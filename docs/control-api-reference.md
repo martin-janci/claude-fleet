@@ -17,7 +17,7 @@ Parameters: `alias`, `ssh_alias`, `transport`
 
 Add a project on a host: clone a GitHub URL, adopt a folder (the hub's local host only) or create a new repository (create_remote is refused once with a confirm token to send back). git and gh run on the host with its own credentials. Returns the project row.
 
-Parameters: `host_alias`, `source`
+Parameters: `confirm_nonce`, `host_alias`, `source`
 
 ### `agent_status`
 
@@ -46,6 +46,12 @@ Parameters: `confirm_nonce`, `task_id`
 Capture a session's terminal: the visible tmux pane, plus scrollback_lines of history. Use after send_prompt to read the reply. Returns plain text, not JSON.
 
 Parameters: `max_lines`, `scrollback_lines`, `session_id`
+
+### `catalog_admin`
+
+The Assets tab's catalog operations as one tool. Master or a client granted `assets`.
+
+Parameters: `action`, `args`, `confirm_nonce`
 
 ### `decide_setting_proposals`
 
@@ -87,7 +93,13 @@ Ensure the UX agent's operator session exists; returns its row.
 
 ### `fleet_health`
 
-Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers. hub: uptime and last reconcile pass; tunnels_mode none|reverse; peer_links_total.
+Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers. hub: uptime and last reconcile pass; tunnels_mode none|reverse; peer_links_total. hosts[]: per host disk_home_pct/disk_low, claude_behind, agent_behind, hooks_silent.
+
+### `forget_project`
+
+Drop a project row and its worktrees (ghost sessions go with it); E_INVALID_STATE while a live session references it. Master only.
+
+Parameters: `project_id`
 
 ### `get_clipboard`
 
@@ -131,7 +143,7 @@ The cached Claude accounts seen across hosts.
 
 ### `list_assets`
 
-The asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each asset's per-host drift state from the last scan, plus unmanaged assets on hosts and catalog parse problems. Requires catalog_configure + catalog_load in the app.
+The asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each asset's per-host drift state from the last scan, plus unmanaged assets on hosts and catalog parse problems. E_CATALOG_NOT_CONFIGURED until a catalog is set (in the app, or `fleet-hub catalog set` on a hub).
 
 ### `list_clients`
 
@@ -191,6 +203,12 @@ Git worktrees fleet knows about, with their alive-session occupants (0 = free to
 
 Parameters: `host_alias`, `limit`, `project_id`, `summary`
 
+### `merge_host`
+
+Fold host `from` into `into` in one transaction: worktrees, fingerprints, dismissals, layers and daily usage move (usage sums), sessions move unless `into` already has the same claude_session_id or tmux_name (those are dropped), then `from` is deleted. For a renamed host (`local` -> `mac`). Master only; may return E_CONFIRM_REQUIRED.
+
+Parameters: `confirm_nonce`, `from`, `into`
+
 ### `move_session`
 
 Move a work session to another host, carrying its work as it is: the transcript, unpushed commits, staged/modified/untracked and small git-ignored files (.env), plus the session's Claude directory and the project's Claude memory (added without replacing anything; these two only warn). Nothing is pushed, committed or stashed and the source worktree is never modified; the target resumes the conversation and the source is killed only once the target runs. strict refuses instead of carrying. Errors: E_MOVE_MIDOP, E_MOVE_TARGET_DIRTY, E_MOVE_TOO_LARGE, E_MOVE_CARRY, E_MOVE_PARTIAL (target started, both sessions left), E_CONFIRM_REQUIRED, E_FORBIDDEN (cross-org; see force_cross_org). Needs a token allowed on BOTH hosts (in practice the master). Returns a moved report, a preview or a wait.
@@ -207,7 +225,7 @@ Parameters: `confirm_nonce`, `host_alias`, `name`, `prompt`, `requester_session_
 
 Create a Claude Code tmux session on a host, in a project (and optional worktree, or a fresh one with new_worktree). Auto-clones the repo on remote hosts.
 
-Parameters: `base_branch`, `confirm_nonce`, `friendly_name`, `host_alias`, `kind`, `name`, `new_worktree`, `project_id`, `resume_claude_session_id`, `start_command`, `worktree_id`
+Parameters: `base_branch`, `confirm_nonce`, `effort`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `project_id`, `resume_claude_session_id`, `start_command`, `worktree_id`
 
 ### `new_shell_session`
 
@@ -221,7 +239,7 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 ### `pair_client`
 
-Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.
+Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange), updater is fleet-updater's (/update only); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.
 
 Parameters: `mode`, `name`, `org_id`, `trusted`, `ttl_s`
 
@@ -255,15 +273,15 @@ Propose a layer split from the last scan, grouping assets by the exact set of ho
 
 ### `provision_hosts`
 
-Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it.
+Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and this fleet's MCP server entry (per-host bearer token) into every reachable host's ~/.claude.json (a reverse SSH tunnel when the hub is loopback-only). Returns per-host status; each host must restart Claude to load it. host: one alias; content_only: skills, CLAUDE.md and hooks only, no token.
 
-Parameters: `rotate`
+Parameters: `content_only`, `host`, `rotate`
 
 ### `quick_replies`
 
-Read or replace the fleet's quick replies: the chip row the desktop and phone composers draw above the prompt box, as [{label, text}]. No arguments reads; `set` replaces the whole list (max 24, [] restores the defaults). Errors: E_INVALID.
+Read or replace the fleet's quick replies: the chip row the desktop and phone composers draw above the prompt box, as [{label, text, auto_send}] in order. No arguments reads; `set` replaces the whole list (max 24, [] restores the defaults; not a host token or the operator). Errors: E_INVALID, E_CONFLICT, E_FORBIDDEN.
 
-Parameters: `set`
+Parameters: `expected`, `set`
 
 ### `recreate_session`
 
@@ -385,7 +403,7 @@ Parameters: `name`
 
 ### `rewind_conversation`
 
-Truncate a session's transcript into a new conversation: "fork" starts a new session there, "rewind" restarts this one. The original is unchanged. Returns the updated row.
+Truncate a session's transcript into a new conversation: "fork" starts a new session there, "rewind" restarts this one. The original is unchanged. Returns the row (a fork's is the new session).
 
 Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
 
@@ -469,7 +487,7 @@ Parameters: `friendly_name`, `host_alias`, `session_id`, `tmux_name`
 
 ### `set_host_layers`
 
-Replace a host's layer assignment: one optional role plus context layers. Edits fleet state only, never catalog files. Requires catalog_configure + catalog_load in the app. Master token only.
+Replace a host's layer assignment: one optional role plus context layers. Edits fleet state only, never catalog files. Requires a configured catalog (in the app, or `fleet-hub catalog set` on a hub). Master token only.
 
 Parameters: `contexts`, `host_alias`, `role`
 
@@ -507,6 +525,16 @@ Spawn a review session: a new Claude session in the source session's worktree, s
 
 Parameters: `confirm_nonce`, `prompt`, `source_session_id`
 
+### `update_admin`
+
+Update admin, master only: pin a version for a component or target (below installed = rollback), unpin, or refresh the signed channel. E_INVALID, E_UPDATE_UNVERIFIED.
+
+Parameters: `action`, `component`, `mandatory`, `reason`, `target`, `version`
+
+### `update_status`
+
+Fleet updates: the verified release channel, each target's version, phase and what the hub would tell it now, per-component counts, pins. A per-host or org-bound token sees itself only.
+
 ### `usage_report`
 
 ESTIMATED token usage and cost per session, host and UTC day, from each session's transcript (collected every usage.interval_secs). Costs are micro-USD from a built-in price table (usage.prices_json), not a bill. total and by_host sum live rows over their lifetime; by_day is the durable daily roll-up (killed sessions included). Sessions sorted by cost, at most 200. A per-host token only sees its own host. by_day.backfill_cost_micros: history a first read booked, apart from live cost.
@@ -539,7 +567,7 @@ Parameters: `tmux_name`
 
 ### `work`
 
-Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; tidy; reopened. Work view: tree {filters, cursor}; task {task_id}; session_tasks; review; rules; rule_preview {rule}; views; org_impact.
+Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; describe {key} (the tracker's whole description, cached); tidy; reopened. Work view: tree {filters, cursor} (archived: false hides archived tasks); task {task_id}; session_tasks; review; rules; rule_preview {rule}; views; org_impact.
 
 Parameters: `action`, `cursor`, `filters`, `host_alias`, `host_aliases`, `key`, `limit`, `link_id`, `org_id`, `per_task`, `project_id`, `query`, `rule`, `session_id`, `since`, `task_id`, `tracker_id`, `url`, `view`, `with_brief`
 
@@ -711,6 +739,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::probe_host`
 - `commands::hosts::probe_ssh_alias`
 - `commands::hosts::remove_host`
+- `commands::hosts::merge_host`
 - `commands::hosts::hide_host`
 - `commands::hosts::set_account_nickname`
 - `commands::account_usage::list_account_usage`

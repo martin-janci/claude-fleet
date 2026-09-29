@@ -14,13 +14,44 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+/// The hosts this machine can add: every `~/.ssh/config` alias, then, on
+/// Windows, each WSL distribution [`crate::wsl::refresh`] found at startup
+/// (an alias the config already has stays the SSH host). A distribution
+/// installed since then shows up at the next launch.
 pub fn discover_hosts() -> Result<Vec<SshHost>, IpcError> {
-    Ok(ssh_config::load_user_config())
+    let mut hosts = ssh_config::load_user_config();
+    for (alias, distro) in crate::wsl::hosts() {
+        if hosts.iter().any(|h| h.alias == alias) {
+            continue;
+        }
+        hosts.push(SshHost {
+            alias,
+            hostname: Some(format!("WSL: {distro}")),
+            user: None,
+            port: None,
+        });
+    }
+    Ok(hosts)
 }
 
 pub fn list_hosts(store: &Mutex<Store>) -> Result<Vec<HostRow>, IpcError> {
     let s = lock(store)?;
     s.list_hosts().map_err(IpcError::from)
+}
+
+/// The hosts a fleet-wide loop may touch: every non-hidden row, and `local`
+/// only when this process has a local host (`hub.local_host`). ONE rule for
+/// reconcile, usage collection, the account-usage poll, GC, the worktree
+/// prune and the repair tick (hub-ops F6): before this each loop carried
+/// its own filter, and the copied `local` row on the hub was hidden for
+/// reconcile, skipped by a different gate for usage, and still collected
+/// by GC. Reachability stays with the caller — a probe loop must see an
+/// unreachable host to re-probe it, a kill loop must not.
+pub fn active_hosts(rows: Vec<HostRow>, local_enabled: bool) -> Vec<HostRow> {
+    rows.into_iter()
+        .filter(|h| !h.hidden)
+        .filter(|h| local_enabled || h.alias != crate::service::projects::LOCAL_HOST)
+        .collect()
 }
 
 /// One agent host, as `agent_status` reports it.
@@ -179,6 +210,11 @@ pub async fn add_host(
             tmux_ver.as_deref(),
             now_unix(),
         )?;
+        // Task 1: a version read from the host is stamped as such, so the
+        // desktop's badge and the reconcile cadence trust it.
+        if claude_ver.is_some() {
+            s.set_host_versions_at(&args.alias, now_unix())?;
+        }
     }
     list_one(store, &args.alias)
 }
@@ -289,6 +325,11 @@ pub async fn probe_host(
             tmux_ver.as_deref(),
             now_unix(),
         )?;
+        // Task 1: an explicit re-probe that read a version from the host
+        // stamps it like the reconcile pass does.
+        if claude_ver.is_some() {
+            s.set_host_versions_at(&args.alias, now_unix())?;
+        }
     }
     list_one(store, &args.alias)
 }
@@ -298,6 +339,38 @@ pub fn remove_host(args: HostAliasArgs, store: &Mutex<Store>) -> Result<HostRow,
     let s = lock(store)?;
     s.delete_host(&args.alias)?;
     Ok(row)
+}
+
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "MergeHostParams")]
+pub struct MergeHostArgs {
+    /// The alias to retire (its rows move).
+    pub from: String,
+    /// The alias that keeps them.
+    pub into: String,
+    /// Nonce from an approved `E_CONFIRM_REQUIRED`.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
+}
+
+/// Fold `from` into `into` (see `Store::merge_host_alias`). `local` may be
+/// the source only on a hub that disabled it — on the desktop `local` is
+/// this machine and `delete_host` refuses it anyway.
+pub fn merge_host(
+    args: MergeHostArgs,
+    store: &Mutex<Store>,
+) -> Result<crate::store::MergeReport, IpcError> {
+    crate::validate::host_alias_syntax(&args.into)?;
+    if args.from == crate::service::projects::LOCAL_HOST
+        && crate::service::hub::local_host_enabled()
+    {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "local is this machine; merge it only on a hub with hub.local_host=false",
+        ));
+    }
+    let s = lock(store)?;
+    s.merge_host_alias(&args.from, &args.into)
 }
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
@@ -477,7 +550,7 @@ fn probe_local() -> (bool, Option<String>, Option<String>, Option<OauthAccount>)
 pub(crate) fn probe_local_in(
     home: &std::path::Path,
 ) -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {
-    let tmux = std::process::Command::new("tmux")
+    let tmux = crate::proc::std_command("tmux")
         .arg("-V")
         .output()
         .ok()
@@ -488,7 +561,7 @@ pub(crate) fn probe_local_in(
                 None
             }
         });
-    let claude = std::process::Command::new("claude")
+    let claude = crate::proc::std_command("claude")
         .arg("--version")
         .output()
         .ok()
@@ -637,14 +710,14 @@ pub(crate) fn sync_host_account(
     Ok(Some(row.uuid))
 }
 
-fn parse_tmux_version(line: &str) -> Option<String> {
+pub(crate) fn parse_tmux_version(line: &str) -> Option<String> {
     // `tmux 3.6a` → "3.6a"
     line.strip_prefix("tmux ")
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
 }
 
-fn parse_claude_version(line: &str) -> Option<String> {
+pub(crate) fn parse_claude_version(line: &str) -> Option<String> {
     // `2.1.144 (Claude Code)` → "2.1.144"
     line.split_whitespace()
         .next()
@@ -716,6 +789,54 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A visible, reachable ssh host row with nothing else set.
+    fn bare_host(alias: &str) -> HostRow {
+        HostRow {
+            alias: alias.to_string(),
+            ssh_alias: None,
+            reachable: true,
+            claude_version: None,
+            tmux_version: None,
+            hidden: false,
+            last_pinged_at: None,
+            account_uuid: None,
+            provisioned: false,
+            transport: "ssh".to_string(),
+            org_id: None,
+            claude_version_at: None,
+            disk_home_free_kb: None,
+            disk_home_total_kb: None,
+            disk_tmp_free_kb: None,
+            load_1m: None,
+            mem_avail_kb: None,
+            uptime_secs: None,
+            health_at: None,
+            last_hook_at: None,
+            agent_version: None,
+            provisioned_at: None,
+            provision_stale: false,
+        }
+    }
+
+    #[test]
+    fn active_hosts_drops_hidden_rows_and_local_when_the_hub_disabled_it() {
+        let mut rows = vec![
+            bare_host("local"),
+            bare_host("mac"),
+            bare_host("stale"),
+            bare_host("trn"),
+        ];
+        rows[2].hidden = true;
+        rows[3].reachable = false;
+        let names = |v: Vec<HostRow>| v.into_iter().map(|h| h.alias).collect::<Vec<_>>();
+        assert_eq!(
+            names(active_hosts(rows.clone(), true)),
+            vec!["local", "mac", "trn"],
+            "reachability is the caller's business, hidden is not"
+        );
+        assert_eq!(names(active_hosts(rows, false)), vec!["mac", "trn"]);
+    }
 
     #[tokio::test]
     async fn agent_status_lists_every_agent_host_connected_or_not() {

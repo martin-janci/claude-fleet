@@ -15,6 +15,9 @@ import {
   addPreset,
   updatePreset,
   removePreset,
+  movePreset,
+  presetSendsNow,
+  presetsConflict,
   PRESETS_PREF,
 } from './composer_presets';
 
@@ -75,6 +78,7 @@ describe('composer presets', () => {
     await flushComposerPresets();
     expect(invoked()).toHaveBeenCalledWith('set_quick_replies', {
       entries: [SERVED[0], { label: 'Ship', text: 'ship it' }],
+      expected: SERVED,
     });
     expect(get(composerPresets)[1]).toEqual({ label: 'Ship', text: 'ship it' });
   });
@@ -103,10 +107,49 @@ describe('composer presets', () => {
     updatePreset(2, { label: 'Ship' }); // a label typed before the prompt
     await flushComposerPresets();
     // The backend refuses a chip with no text, so it is not sent…
-    expect(invoked()).toHaveBeenCalledWith('set_quick_replies', { entries: SERVED });
+    expect(invoked()).toHaveBeenCalledWith('set_quick_replies', { entries: SERVED, expected: SERVED });
     // …and the row being typed into is still there.
     expect(get(composerPresets)).toHaveLength(SERVED.length + 1);
-    expect(get(composerPresets)[2]).toEqual({ label: 'Ship', text: '' });
+    expect(get(composerPresets)[2]).toEqual({ label: 'Ship', text: '', auto_send: false });
+  });
+
+  it('moves a chip and saves the list in its new order', async () => {
+    await loadComposerPresets();
+    invoked().mockClear();
+    movePreset(1, -1);
+    await flushComposerPresets();
+    const swapped = [SERVED[1], SERVED[0]];
+    expect(invoked()).toHaveBeenCalledWith('set_quick_replies', { entries: swapped, expected: SERVED });
+    expect(get(composerPresets)).toEqual(swapped);
+  });
+
+  it('does not move a chip past either end', async () => {
+    await loadComposerPresets();
+    invoked().mockClear();
+    movePreset(0, -1);
+    movePreset(SERVED.length - 1, 1);
+    await flushComposerPresets();
+    expect(invoked()).not.toHaveBeenCalled();
+    expect(get(composerPresets)).toEqual(SERVED);
+  });
+
+  it('saves the auto-send flag with the chip', async () => {
+    await loadComposerPresets();
+    invoked().mockClear();
+    updatePreset(0, { auto_send: true });
+    await flushComposerPresets();
+    expect(invoked()).toHaveBeenCalledWith('set_quick_replies', {
+      entries: [{ ...SERVED[0], auto_send: true }, SERVED[1]],
+      expected: SERVED,
+    });
+  });
+
+  it('an auto-send chip sends on a click and fills on Shift+click; the rest the other way', () => {
+    expect(presetSendsNow({ label: 'a', text: 'b', auto_send: true }, false)).toBe(true);
+    expect(presetSendsNow({ label: 'a', text: 'b', auto_send: true }, true)).toBe(false);
+    expect(presetSendsNow({ label: 'a', text: 'b', auto_send: false }, false)).toBe(false);
+    expect(presetSendsNow({ label: 'a', text: 'b' }, true)).toBe(true);
+    expect(isPresetArray([{ label: 'a', text: 'b', auto_send: 'yes' }])).toBe(false);
   });
 
   it('removes a chip and saves the shortened list', async () => {
@@ -114,7 +157,59 @@ describe('composer presets', () => {
     invoked().mockClear();
     removePreset(0);
     await flushComposerPresets();
-    expect(invoked()).toHaveBeenCalledWith('set_quick_replies', { entries: [SERVED[1]] });
+    expect(invoked()).toHaveBeenCalledWith('set_quick_replies', { entries: [SERVED[1]], expected: SERVED });
+  });
+
+  it('names the list it last saw, so a save after another device’s is a conflict it shows', async () => {
+    await loadComposerPresets();
+    const theirs = [{ label: 'Theirs', text: 'their prompt', auto_send: false }];
+    invoked().mockImplementation((cmd: string) => {
+      if (cmd === 'quick_replies') return Promise.resolve(theirs);
+      if (cmd === 'set_quick_replies') return Promise.reject({ code: 'E_CONFLICT', message: 'changed elsewhere' });
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    updatePreset(0, { label: 'Mine' });
+    await flushComposerPresets();
+    expect(invoked()).toHaveBeenCalledWith('set_quick_replies', {
+      entries: [{ ...SERVED[0], label: 'Mine' }, SERVED[1]],
+      expected: SERVED,
+    });
+    // The other device's list is what the editor now shows, and it says why.
+    expect(get(composerPresets)).toEqual(theirs);
+    expect(get(presetsConflict)).toBe(true);
+    // The next save names that list, and landing clears the note.
+    backendHolds(theirs);
+    updatePreset(0, { label: 'Mine again' });
+    await flushComposerPresets();
+    expect(invoked()).toHaveBeenLastCalledWith('set_quick_replies', {
+      entries: [{ ...theirs[0], label: 'Mine again' }],
+      expected: theirs,
+    });
+    expect(get(presetsConflict)).toBe(false);
+  });
+
+  it('a save waits for the one on the wire, so it names that one’s answer', async () => {
+    await loadComposerPresets();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const calls: unknown[] = [];
+    invoked().mockImplementation(async (cmd: string, args?: { entries?: unknown }) => {
+      if (cmd !== 'set_quick_replies') throw new Error(cmd);
+      calls.push(args);
+      if (calls.length === 1) await gate;
+      return args?.entries;
+    });
+    updatePreset(0, { label: 'One' });
+    const first = flushComposerPresets();
+    updatePreset(0, { label: 'Two' });
+    const second = flushComposerPresets();
+    await Promise.resolve();
+    expect(calls).toHaveLength(1);
+    release();
+    await first;
+    await second;
+    expect(calls).toHaveLength(2);
+    expect((calls[1] as { expected: unknown }).expected).toEqual([{ ...SERVED[0], label: 'One' }, SERVED[1]]);
   });
 
   it('reset asks the backend for the built-ins by storing nothing', async () => {
@@ -126,7 +221,7 @@ describe('composer presets', () => {
     });
     resetComposerPresets();
     await flushComposerPresets();
-    expect(invoked()).toHaveBeenCalledWith('set_quick_replies', { entries: [] });
+    expect(invoked()).toHaveBeenCalledWith('set_quick_replies', { entries: [], expected: SERVED });
     expect(get(composerPresets)).toEqual(SERVED);
   });
 });

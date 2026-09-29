@@ -252,6 +252,9 @@ pub const RECONCILE_INTERVAL_SECS: &str = "reconcile.interval_secs";
 /// output for this long is demoted to `idle` by the tick (lifecycle F2).
 /// `0` turns the rule off.
 pub const RECONCILE_STALE_WORKING_SECS: &str = "reconcile.stale_working_secs";
+/// How long a `stale_working` stamp asks for a look before the tick lifts
+/// it on its own. An attach or any hook lifts it sooner. `0` = never by age.
+pub const RECONCILE_STALE_WORKING_TTL_SECS: &str = "reconcile.stale_working_ttl_secs";
 /// How long a resumable mass-loss row (`lost_reason` `host_reboot` /
 /// `tmux_server_gone`, with a `claude_session_id`, any kind but `external`)
 /// is kept before Phase 2
@@ -260,6 +263,25 @@ pub const RECONCILE_STALE_WORKING_SECS: &str = "reconcile.stale_working_secs";
 /// through to `HostReconcile::lost_ttl_cutoff` / `ghost_and_clean_bg_sessions`
 /// by Task 6.
 pub const SESSIONS_LOST_TTL_SECS: &str = "sessions.lost_ttl_secs";
+/// How old `hosts.claude_version_at` may be for the desktop's "Claude older
+/// than the newest in the fleet" badge to trust the stored version. Older
+/// than this (or never stamped) shows no badge at all: a stale number was
+/// the wrong badge on 3 of 4 hosts (ux F-13). Default 24 h.
+pub const HEALTH_VERSION_MAX_AGE_SECS: &str = "health.version_max_age_secs";
+/// Used percent of `$HOME`'s filesystem at or past which a host reads as
+/// `disk_low` in `fleet_health.hosts[]` and on the desktop (hosts F4: two
+/// hosts sat at 98 % with no signal). Default 90.
+pub const HEALTH_DISK_LOW_PCT: &str = "health.disk_low_pct";
+/// Patch releases a host's Claude may trail the fleet's newest fresh
+/// version before it reads as `claude_behind` (hosts F3). Default 30.
+pub const HEALTH_CLAUDE_MAX_BEHIND: &str = "health.claude_max_behind";
+/// Seconds without an accepted hook from a reachable host that has a live
+/// session before it reads as `hooks_silent` (hosts F9). Default 1 h.
+pub const HEALTH_HOOKS_SILENT_SECS: &str = "health.hooks_silent_secs";
+/// Write fleet's two skill dirs even when `~/.claude/skills` is inside a
+/// git work tree (a dotfiles checkout, hosts F2). Off: provisioning
+/// refuses such a host with `E_INVALID` (decision B-2).
+pub const PROVISION_FORCE_GIT_TREE: &str = "provision.force_git_tree";
 /// How many resumable lost sessions a batch restore resumes in parallel.
 /// Read by Task 3's restore path via `get_setting` + `settings::resolve`.
 pub const RESTORE_BATCH_SIZE: &str = "restore.batch_size";
@@ -388,6 +410,11 @@ pub const WORK_RECENT_DAYS: &str = "work.recent_days";
 /// Seconds between tracker sync passes (work graph M3); `0` turns the sync
 /// off. Values under a minute are raised to one.
 pub const WORK_SYNC_INTERVAL_SECS: &str = "work.sync_interval_secs";
+/// How long `work { action: describe }` serves a description it already
+/// fetched. `0` turns the cache off — every ask is one tracker call. Swept
+/// with the tracker items (`service::work::retention`), at a fixed 30-day
+/// floor when `work.retention.tracker_items_days` is `0`.
+pub const WORK_DESCRIBE_CACHE_SECS: &str = "work.describe_cache_secs";
 
 /// Project ids whose branch keys are trusted (work graph M4, rule R3): a
 /// sole branch key there links automatically, with Undo; elsewhere it is a
@@ -447,6 +474,23 @@ pub const DECIDE_JEV_WORK_LINK: &str = "decide.jev.work_link";
 /// What a feature's mode may be. `auto` is not offered: no feature has
 /// passed acceptance (D36).
 pub const DECIDE_MODES: &[&str] = &["off", "shadow", "assist"];
+
+// ── update.* (application updates, update-channel design §7.3) ──
+/// The release track the hub follows for its fleet.
+pub const UPDATE_TRACK: &str = "update.track";
+pub const UPDATE_TRACKS: &[&str] = &["stable", "beta", "nightly"];
+/// Per component: `manual` (only pins), `notify` (offer), `automatic`
+/// (install at the next quiet point).
+pub const UPDATE_HUB_MODE: &str = "update.hub.mode";
+pub const UPDATE_AGENT_MODE: &str = "update.agent.mode";
+pub const UPDATE_DESKTOP_MODE: &str = "update.desktop.mode";
+/// A phone never installs silently, so it has no `automatic`.
+pub const UPDATE_MOBILE_MODE: &str = "update.mobile.mode";
+pub const UPDATE_MODES: &[&str] = &["manual", "notify", "automatic"];
+pub const UPDATE_MOBILE_MODES: &[&str] = &["manual", "notify"];
+/// How often the hub re-reads the channel, and clients re-check.
+pub const UPDATE_CHECK_INTERVAL_SECS: &str = "update.check_interval_secs";
+pub const UPDATE_CHECK_INTERVAL_MIN_SECS: u64 = 900;
 /// Sessions and items with no org may be sent too (D31). Off by default.
 pub const DECIDE_JEV_UNASSIGNED: &str = "decide.jev.unassigned";
 /// One call's whole budget, in milliseconds.
@@ -490,6 +534,16 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Seconds)
     .zero("never")
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        RECONCILE_STALE_WORKING_TTL_SECS,
+        "86400",
+        Kind::Secs,
+        "Stale mark lifts after",
+        "How long a session marked stale asks for a look before the tick lifts the mark on its own. An attach or any hook lifts it sooner.",
+    )
+    .unit(Unit::Hours)
+    .zero("never by age")
     .tags(&[Tag::Advanced]),
     Spec::new(
         SESSIONS_LOST_TTL_SECS,
@@ -762,6 +816,50 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Percent),
     Spec::new(
+        HEALTH_VERSION_MAX_AGE_SECS,
+        "86400",
+        Kind::Secs,
+        "Trust a host's Claude version for",
+        "How old a host's recorded Claude version may be before the \"older than the fleet\" badge stops trusting it and shows nothing.",
+    )
+    .unit(Unit::Hours)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        HEALTH_DISK_LOW_PCT,
+        "90",
+        Kind::Int { min: 50, max: 100 },
+        "Disk low at",
+        "Used share of a host's home filesystem at which the host reads as disk low.",
+    )
+    .unit(Unit::Percent),
+    Spec::new(
+        HEALTH_CLAUDE_MAX_BEHIND,
+        "30",
+        Kind::Int { min: 0, max: 1000 },
+        "Claude behind after",
+        "Patch releases a host's Claude may trail the fleet's newest before the host reads as behind.",
+    )
+    .unit(Unit::Count)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        HEALTH_HOOKS_SILENT_SECS,
+        "3600",
+        Kind::Secs,
+        "Hooks silent after",
+        "How long a reachable host with a live session may send no hook before it reads as hooks silent.",
+    )
+    .unit(Unit::Minutes)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        PROVISION_FORCE_GIT_TREE,
+        "false",
+        Kind::Bool,
+        "Provision into git-tracked skills",
+        "Write fleet's skills even when a host's ~/.claude/skills is inside a git work tree, such as a dotfiles checkout. Off: provisioning refuses such a host.",
+    )
+    .danger("Fleet will write its skills into a folder another git repository tracks.")
+    .tags(&[Tag::Advanced]),
+    Spec::new(
         WORK_RETENTION_JOURNAL_DAYS,
         "365",
         Kind::Int { min: 0, max: 3650 },
@@ -806,6 +904,16 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Seconds)
     .zero("off")
     .restart(Restart::App),
+    Spec::new(
+        WORK_DESCRIBE_CACHE_SECS,
+        "300",
+        Kind::Secs,
+        "Ticket description cache",
+        "How long a fetched ticket description is reused before the tracker is asked again; never longer than the done-tickets retention window.",
+    )
+    .unit(Unit::Minutes)
+    .zero("off")
+    .tags(&[Tag::Advanced]),
     Spec::new(
         WORK_TRUSTED_BRANCH_PROJECTS,
         "[]",
@@ -885,6 +993,49 @@ pub const SPECS: &[Spec] = &[
         "The tidy reasons auto-tidy may act on.",
     )
     .labels(&[("done_idle", "Done and idle"), ("pr_merged_idle", "PR merged, idle"), ("not_planned", "Won't do / duplicate")]),
+    Spec::new(
+        UPDATE_TRACK,
+        "stable",
+        Kind::Choice(UPDATE_TRACKS),
+        "Release track",
+        "Which releases the hub follows for its fleet.",
+    ),
+    Spec::new(
+        UPDATE_HUB_MODE,
+        "notify",
+        Kind::Choice(UPDATE_MODES),
+        "Hub updates",
+        "manual: only a pinned version; notify: offer the update; automatic: install it at the next quiet point.",
+    ),
+    Spec::new(
+        UPDATE_AGENT_MODE,
+        "notify",
+        Kind::Choice(UPDATE_MODES),
+        "Agent updates",
+        "The same choice for fleet-agent on hosts the hub cannot reach.",
+    ),
+    Spec::new(
+        UPDATE_DESKTOP_MODE,
+        "notify",
+        Kind::Choice(UPDATE_MODES),
+        "Desktop updates",
+        "The same choice for the desktop app.",
+    ),
+    Spec::new(
+        UPDATE_MOBILE_MODE,
+        "notify",
+        Kind::Choice(UPDATE_MOBILE_MODES),
+        "Phone updates",
+        "manual or notify: a phone never installs an update silently.",
+    ),
+    Spec::new(
+        UPDATE_CHECK_INTERVAL_SECS,
+        "21600",
+        Kind::SecsMin(UPDATE_CHECK_INTERVAL_MIN_SECS),
+        "Update check interval",
+        "How often the hub re-reads the release channel, and clients check again.",
+    )
+    .unit(Unit::Hours),
     Spec::new(
         DECIDE_JEV_ENABLED,
         "false",
@@ -2012,6 +2163,46 @@ mod tests {
                     "{k}: an agent never makes a confirmed change"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn update_settings_are_in_the_user_guide() {
+        const GUIDE: &str = include_str!("../../../../docs/updates.md");
+        let rows: BTreeMap<&str, &str> = GUIDE
+            .lines()
+            .filter_map(|l| {
+                let rest = l.strip_prefix("| `update.")?;
+                let key_len = rest.find('`')?;
+                Some((&l[3..3 + "update.".len() + key_len], l))
+            })
+            .collect();
+        let specs: Vec<&Spec> = SPECS
+            .iter()
+            .filter(|s| s.key.starts_with("update."))
+            .collect();
+        assert!(!specs.is_empty(), "no update.* settings registered");
+        for spec in &specs {
+            let row = rows.get(spec.key).unwrap_or_else(|| {
+                panic!(
+                    "docs/updates.md → Settings has no row for `{}` (default `{}`); add one",
+                    spec.key, spec.default
+                )
+            });
+            let cells: Vec<&str> = row.split('|').map(str::trim).collect();
+            assert_eq!(
+                cells.get(2).copied(),
+                Some(format!("`{}`", spec.default).as_str()),
+                "docs/updates.md: the default of `{}` is `{}` in code",
+                spec.key,
+                spec.default
+            );
+        }
+        for key in rows.keys() {
+            assert!(
+                specs.iter().any(|s| s.key == *key),
+                "docs/updates.md lists `{key}`, which is not a registered setting"
+            );
         }
     }
 

@@ -719,7 +719,7 @@ has a name; resume says before it runs that a transcript is gone.
 - **M11.5** (#286): 71,590 B → 54,646 B (16,944 B paid back); no tool,
   action or parameter renamed.
 - **M11.6**: never ran as its own pass; M13.0 did it. D17 decided against,
-  D18 accept, D19 never, D20 waits on the user (after M10.3).
+  D18 accept, D19 never, D20 decided yes and built (M13.4a, fleet-mobile#51).
 
 ### M12: ship and operate
 
@@ -824,23 +824,31 @@ built on `claude/fleet-dynamic-work-view-kwc3r9`, cut into reviewable PRs
 and rebased on `main`; it does not redesign it.
 
 - **M14.0** the plan, the spec on `main`, the M13 truth pass (docs).
-- **M14.1a–d** the backend: the `start` race fix; migration `0NN_work_view`
-  (numbered at merge time) + reads + org-bound clients (D31); mutations with
+- **M14.1a–d** the backend: the `start` race fix; migrations `066_work_view`
+  and `067_org_bound_sees_unassigned` + reads + org-bound clients (D31); mutations with
   compare-and-set; the desktop commands and `work:changed`.
 - **M14.2 / M14.3** the desktop Work view, read, then edits and Review.
 - **M14.4** the phone's *My work* tab (fleet-mobile), read, then edits.
 - **M14.5** acceptance (Part R), the user guide, close-out.
 
-**Status (2026-09-27): M14.0–M14.4 built.** M14.1a–d are on `main`
-(#341, #342, #345, #347); M14.2 / M14.3 (the desktop Work view, its edits
-and Review) and M14.4 (fleet-mobile's *My work*) came from
-`claude/fleet-dynamic-work-view-kwc3r9`, merged over that backend, with
-`scripts/hub-e2e.sh` hub W section 10 running the contract on a real hub
-(tree, session tasks, the primary's compare-and-set, placement,
-`work:changed`, Acme- and Beta-bound and readonly clients) (#349,
-fleet-mobile#54). D31's per-org switch is in Settings → Work →
-Organisations and `fleet-hub org set --bound-sees-unassigned`. Open:
-M14.5, the acceptance run (Part R), waits on the owner. D31–D36 are
+**Status (2026-09-28): M14.0–M14.4 built; M14.5 waits only on the owner's
+Part R run.** M14.0 is #340; M14.1a–d are on `main` (#341, #342, #345,
+#347). M14.2 / M14.3 (the desktop Work view, its edits and Review) landed
+in #349 from the Work view branch session
+(`claude/fleet-dynamic-work-view-kwc3r9`), merged over that backend;
+fixes followed in #357, #359, #361 (one filter model for Sessions and
+Work) and #365. D31's per-org switch (Settings → Work → Organisations,
+`fleet-hub org set --bound-sees-unassigned`) is #350. M14.4 (fleet-mobile's
+*My work*, read and edits) landed as **one** PR, fleet-mobile#54, not the
+planned two; fleet-mobile#53, #55 and #56 are related, and a bound-phone
+test is being added there as a follow-up. M14.5's docs are on `main` from
+#349: acceptance Part R (steps 60–72), the guide's *The Work view*,
+`scripts/hub-e2e.sh` hub W section 10 (`work { tree }`, `set_primary`
+with its compare-and-set, org-bound trees, readonly) and the CLAUDE.md
+paragraph. Open: only the owner's Part R run. **Owner's decision
+(2026-09-28):** *Assign org…* and *Make a rule…* stay desktop-only; the
+phone does not get them, although M14-D33 would let a full, unbound phone
+change a local task's org. M14-D31–D36 are
 answered (the table below). M14 is the one milestone after M13's close-out, by the
 owner's choice (D36); D26's "operating" applies again once it is done. The
 two open items carried from M13 (the acceptance run, D5) stay where
@@ -909,13 +917,13 @@ user writes an answer here; each "yes" becomes an M13.4 item.
 | D28 | Which providers get webhook nudges (M13.4f)? | GitHub, Jira Cloud, Linear · also Asana, Jira DC | **Moot**: D13 is no, and M13.4f was removed |
 | D29 | Which write-back operations (M13.4e)? | PR remote link · also transition on start · also worklog | The PR remote link only |
 | D30 | Summarise automatically at session end (M13.4c)? | off · on | Off: on demand only |
-| D31 | May an org-bound client see *unassigned* work and sessions? (M14) | yes (as a host does) · by setting | **Answered 2026-09-27: by setting.** A per-org flag `orgs.bound_sees_unassigned` (M14.1b's migration; `work_admin` org edit; Settings → Work → Organisations), **default on**. Off: the org's bound clients see only rows assigned to their org. An isolation row covers both values |
+| D31 | May an org-bound client see *unassigned* work and sessions? (M14) | yes (as a host does) · by setting | **Answered 2026-09-27: by setting; built (migration 067, #342; switch #350).** A per-org flag `orgs.bound_sees_unassigned` (M14.1b's migration; `work_admin` org edit; Settings → Work → Organisations), **default on**. Off: the org's bound clients see only rows assigned to their org. An isolation row covers both values |
 | D32 | Does a forced cross-org link raise a review item until it is acknowledged? (M14) | yes · no | **Answered 2026-09-27: the default, yes** (`cross_org` review kind, cleared by `ack`) |
 | D33 | May a full, unbound phone change a local task's org? (M14) | yes, with the impact preview · no | **Answered 2026-09-27: the default, yes**, with the impact preview. Bound clients and hosts may not |
 | D34 | Placement rules only, or also link rules? (M14) | placement only · also link rules | **Answered 2026-09-27: the default, placement only.** Link rules would bypass detection's evidence and R9 |
 | D35 | Saved views: shared on the hub, or per device? (M14) | shared on the hub · per device | **Answered 2026-09-27: the default, shared on the hub.** A bound client's views are its org's |
 | D36 | M14 as a milestone, despite D26? Who drives it? (M14 plan) | yes · issues only | **Answered 2026-09-27: yes, M14 is the last work-graph milestone** (D26 applies after it); one driver session. The backend branch's session does not continue it |
-| D31–D47 (Jev) | The Jev (decision model) evaluation, fleet-wide rather than work graph only | — | Its own numbering in `specs/2026-09-27-jev-language-census-design.md`; it collides with M14's D31–D36 above (both were numbered after D30 on the same day), so a bare `D3x` in code or docs must say which table it means |
+| D31–D47 (Jev) | The Jev (decision model) evaluation, fleet-wide rather than work graph only | — | Its own numbering in `specs/2026-09-27-jev-language-census-design.md`; it collides with M14's D31–D36 above (both were numbered after D30 on the same day), so a bare `D3x` in code or docs must say which table it means. From 2026-09-28, write **M14-D34** or **Jev-D34** wherever a bare number is ambiguous; existing rows are not renumbered |
 
 ## Risks to watch
 
@@ -1081,6 +1089,23 @@ user writes an answer here; each "yes" becomes an M13.4 item.
   section naming what M13 changed for users, and `scripts/release.sh` now
   turns that section into the release's own instead of stacking the
   release above it.
+- 2026-09-28: **M14 truth pass** (docs only; facts from `main` `378b6a9f`
+  and its merge history). M14's status names its PRs: M14.2 / M14.3 in
+  #349 (the Work view branch session) with fixes #357, #359, #361, #365;
+  D31's switch #350; M14.4 as one PR, fleet-mobile#54 (related #53, #55,
+  #56). M14.5's docs are on `main` from #349, so M14.5 waits only on the
+  owner's Part R run. The owner's decision that *Assign org…* and *Make a
+  rule…* stay desktop-only is recorded. M14's D31–D36 and the Jev
+  evaluation's D31–D47 share numbers: "M14-D3x" / "Jev-D3x" from now on
+  where ambiguous, no rows renumbered.
+- 2026-09-28: **D15 narrowed** by the owner, after a phone link across orgs
+  ended in the hub's bare refusal: a session's *Tasks* on the phone may now
+  link another org's task when the person picks **Link anyway** in a
+  cross-org choice (`work_link link` with `force_cross_org`, a full token
+  only); the same choice shows the `fleet-hub org rule add` that moves the
+  session into the task's org, to copy (org rules stay master-only). A
+  start, multi-start or resume still never forces from the phone
+  (fleet-mobile branch `ccr-a2e40ea2-eciucy`). No hub change.
 - 2026-09-27: **M14.2–M14.4.** The desktop Work view (tree, task detail,
   Review, placement and rules, saved views, the org dialog) and the phone's
   *My work* merged over M14.1's backend from

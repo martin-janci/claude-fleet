@@ -289,6 +289,14 @@ jobs:
           workspaces: .
           key: ${{ matrix.os }}-${{ matrix.target || 'native' }}
       - run: pnpm install --frozen-lockfile
+      # The Windows leg bundles Microsoft's ConPTY (the leg's args carry
+      # --config src-tauri/tauri.conpty.conf.json; scripts/fetch-conpty.sh
+      # says why). Pinned by version and SHA-256, so a changed package stops
+      # the release instead of shipping.
+      - name: Fetch ConPTY for the Windows bundle
+        if: runner.os == 'Windows'
+        shell: bash
+        run: bash scripts/fetch-conpty.sh
       # A macOS bundle must come out signed with the Team ID (see the header);
       # without these tauri silently falls back to ad-hoc, which is exactly
       # the per-update keychain prompt this signing exists to stop. Names
@@ -336,6 +344,37 @@ jobs:
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
+      - name: Verify ConPTY is in the Windows build
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          # tauri-action has uploaded the installer to the draft already, and
+          # verify-release runs even when a build leg fails. So a failure here
+          # also takes the installer off the draft: verify-release then finds
+          # the release incomplete, and it is never published without ConPTY.
+          fail() {
+            echo "::error::$1"
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" \
+              --jq '.[] | select(.name | endswith("-setup.exe")) | .id' \
+              | while read -r id; do
+                  gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$id"
+                done || true
+            exit 1
+          }
+          for f in conpty.dll OpenConsole.exe licenses/ConPTY-LICENSE.txt; do
+            test -s "target/release/$f" || fail "target/release/$f missing: the installer would ship without ConPTY"
+          done
+          # The installer itself, which is what users get: files in target/
+          # prove the copy, not the NSIS payload. 7-Zip reads NSIS.
+          setup=$(ls target/release/bundle/nsis/*-setup.exe)
+          listing=$(7z l "$setup") || fail "7z could not read $setup"
+          for f in conpty.dll OpenConsole.exe ConPTY-LICENSE.txt; do
+            grep -q "$f" <<<"$listing" || fail "$f missing from $setup: the installer ships without ConPTY"
+          done
       # The signing config can fail to apply without failing the build (tauri
       # falls back to ad-hoc). This turns that into a red leg: the bundle must
       # name the expected identity and carry a Team ID.
@@ -428,7 +467,12 @@ jobs:
           key: agent-hub-binaries-${{ matrix.target }}
       # Both crates build with no Tauri system libraries and no fleet-core
       # (see ci.yml's hub-headless job) — nothing to install first.
+      # FLEET_GIT_SHA / FLEET_BUILD_ID: the build identity fleet-hub's
+      # build.rs compiles in (`healthcheck --ready`, update design U11).
       - run: cargo build -p fleet-agent -p fleet-hub --release --locked --target ${{ matrix.target }}
+        env:
+          FLEET_GIT_SHA: ${{ github.sha }}
+          FLEET_BUILD_ID: gh-run-${{ github.run_id }}-${{ github.run_attempt }}
       # A checked-in script rather than an inline heredoc: no ${{ }}
       # expression carrying tag/ref text is interpolated inside a `run:`
       # body — tag, target and repository all arrive through `env:` instead,
@@ -475,6 +519,52 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # The signed update manifest (update-channel design §4, slice S2):
+  # release-manifest.json + .minisig, written from the assets the legs above
+  # uploaded and the protocol windows the RELEASED fleet-hub states itself
+  # (`fleet-hub compat`), signed with RELEASE_SIGNING_KEY and checked
+  # against the public key compiled into fleet-update before it is uploaded.
+  # Before `checksums`, so SHA256SUMS covers it; `verify-release` requires
+  # it from the version scripts/release-assets.sh names for the `manifest`
+  # leg, so a release without a verifiable manifest stays a draft.
+  # `continue-on-error` and `!cancelled()` as on `checksums`: this reports
+  # its own failure (a missing key names scripts/release-key.sh) and leaves
+  # the verdict to verify-release. It waits for hub-image.yml's digest on
+  # the release body, up to 30 minutes.
+  manifest:
+    if: github.ref_type == 'tag' && !cancelled() && needs['version-consistency'].result == 'success'
+    needs: [version-consistency, create-release, build, agent-hub-binaries]
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: release-manifest
+      - run: sudo apt-get update && sudo apt-get install -y minisign
+      - run: cargo build -p fleet-update --bin fleet-release --release --locked
+      - name: Download every asset currently on the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        run: scripts/download-release-assets.sh assets
+      - name: Write, sign and upload the update manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+          TAG: ${{ github.ref_name }}
+          GIT_SHA: ${{ github.sha }}
+          BUILD_ID: gh-run-${{ github.run_id }}-${{ github.run_attempt }}
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          ASSETS_DIR: assets
+          FLEET_RELEASE: target/release/fleet-release
+        run: scripts/release-manifest.sh
+
   # Publishes the one `SHA256SUMS` asset, covering EVERY asset on the release
   # — desktop bundles included. It therefore `needs: build` as well as
   # `agent-hub-binaries`: it can only checksum what has already been
@@ -498,7 +588,7 @@ jobs:
   # which is a different thing).
   checksums:
     if: github.ref_type == 'tag' && !cancelled() && needs['version-consistency'].result == 'success'
-    needs: [version-consistency, create-release, build, agent-hub-binaries]
+    needs: [version-consistency, create-release, build, agent-hub-binaries, manifest]
     continue-on-error: true
     runs-on: ubuntu-24.04
     steps:
@@ -554,7 +644,7 @@ jobs:
   # gate. The version-consistency result is therefore re-stated by hand.
   verify-release:
     if: github.ref_type == 'tag' && !cancelled() && needs['version-consistency'].result == 'success'
-    needs: [version-consistency, create-release, build, agent-hub-binaries, checksums]
+    needs: [version-consistency, create-release, build, agent-hub-binaries, manifest, checksums]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -675,3 +765,57 @@ jobs:
           else
             echo "::warning title=docs.yml was not dispatched::Could not start docs.yml for $REF_NAME. The release is published; rustdoc is not. Run it by hand from the Actions tab if you want it."
           fi
+
+  # Lists the PUBLISHED release on its update tracks (stable → stable and
+  # beta, -rc.N → beta), as signed channel documents on the orphan branch
+  # `update-channels` (update-channel design §5; scripts/update-channels.sh).
+  # After `publish`, never before: a channel must never offer a draft. The
+  # concurrency group is shared with update-channels.yml, so a listing and a
+  # publisher's edit never race for the branch. A failure here leaves the
+  # release published but not offered; re-run this job, or dispatch
+  # update-channels.yml.
+  channel:
+    if: github.ref_type == 'tag'
+    needs: [create-release, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: update-channels
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Does this version carry an update manifest?
+        id: leg
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "$(scripts/release-assets.sh assets "${TAG#v}" manifest)" ]; then
+            echo "has=1" >>"$GITHUB_OUTPUT"
+          else
+            echo "$TAG predates the update manifest; no channel to write."
+            echo "has=0" >>"$GITHUB_OUTPUT"
+          fi
+      - if: steps.leg.outputs.has == '1'
+        uses: dtolnay/rust-toolchain@stable
+      - if: steps.leg.outputs.has == '1'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: release-manifest
+      - if: steps.leg.outputs.has == '1'
+        run: sudo apt-get update && sudo apt-get install -y minisign
+      - if: steps.leg.outputs.has == '1'
+        run: cargo build -p fleet-update --bin fleet-release --release --locked
+      - if: steps.leg.outputs.has == '1'
+        name: List the release on its tracks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          FLEET_RELEASE: target/release/fleet-release
+        run: scripts/update-channels.sh add "$TAG"

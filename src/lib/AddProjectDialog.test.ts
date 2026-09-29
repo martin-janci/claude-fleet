@@ -718,4 +718,55 @@ describe('on a hub client', () => {
       'local may still finish the clone after you stop waiting.',
     );
   });
+
+  it('shows no destination preview: the hub, not this machine, owns the roots', async () => {
+    hubStatus.set(remote);
+    mount();
+    await tick();
+    await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'o/r' } });
+    await flush();
+    expect(screen.queryByTestId('add-path-preview')).toBeNull();
+    // get_fleet_settings is local-only on a hub client; it is not even asked.
+    expect(calls('get_fleet_settings')).toHaveLength(0);
+  });
+
+  it('shows the destination preview standalone', async () => {
+    mount();
+    await tick();
+    await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'o/r' } });
+    await flush();
+    expect(screen.getByTestId('add-path-preview').textContent).toContain('o/r');
+  });
+
+  it('Stop waiting returns the dialog to idle, with the backend\'s hub hedge', async () => {
+    hubStatus.set(remote);
+    const inflight = deferred();
+    route({
+      add_project: () => inflight.promise,
+      // The backend's cancel registry ends the routed call (#352).
+      cancel_command: () =>
+        inflight.reject({
+          code: 'E_CANCELLED',
+          message: 'Stopped waiting — the hub may still finish adding the project on mefistos.',
+        }),
+    });
+    const { onCancel } = mount();
+    await tick();
+    await fireEvent.click(chip('mefistos'));
+    await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'o/r' } });
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('cancel-create'));
+    await flush();
+    expect(calls('cancel_command')).toHaveLength(1);
+    expect(screen.queryByTestId('cancel-create')).toBeNull();
+    expect(screen.getByTestId('add-error').textContent).toBe('Stopped waiting — mefistos may still finish.');
+    expect((screen.getByTestId('clone-url') as HTMLInputElement).disabled).toBe(false);
+    // Idle again, so a native close (Escape) closes the dialog.
+    const dlg = screen.getByTestId('add-project-dialog') as HTMLDialogElement;
+    dlg.removeAttribute('open');
+    dlg.dispatchEvent(new Event('close'));
+    await flush();
+    expect(onCancel).toHaveBeenCalled();
+  });
 });

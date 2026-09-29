@@ -217,7 +217,7 @@ and *Sweep now*, where a hand-written component was before.
 
 An agent proposes a settings change with `set_setting { propose: true,
 why }` (control API); nothing is written until a person decides
-(`service/settings_review.rs`, migration 072). A `review_apply` page names
+(`service/settings_review.rs`, migration 082). A `review_apply` page names
 what it reviews — `"review": "settings"` is the one source — and lists the
 pending proposals grouped by the page each setting lives on, as now →
 proposed with who and why. A row whose value moved since it was proposed,

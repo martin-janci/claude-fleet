@@ -8,8 +8,8 @@
 //! Four of them said the same thing in four vocabularies and the fifth said
 //! it in English. This is the one that the rest are checked against.
 //!
-//! The rows are in `generate_handler!` order, so [`VERDICTS`] and `lib.rs`
-//! read side by side. `every_command_has_a_verdict` (in
+//! The rows are grouped as in `generate_handler!` (near enough its order),
+//! so [`VERDICTS`] and `lib.rs` read side by side. `every_command_has_a_verdict` (in
 //! [`tests_routing`](super::tests_routing)) holds the two to exactly the same
 //! set of names, and `every_commands_body_does_what_its_row_says` holds each
 //! body to its row.
@@ -69,8 +69,6 @@ impl Verdict {
     }
 }
 
-/// The verdict of `command`, or `None` when the table has no row for it —
-/// which the tests make unshippable.
 /// Why the whole attachment family is the same in both modes: the composer
 /// reads, measures and previews files on THIS machine's disk and copies them
 /// over THIS machine's ssh, exactly as `upload_to_session` does behind the
@@ -79,6 +77,8 @@ impl Verdict {
 /// to the hub is the fleet's database and hosts, not this machine.
 const WHY_ATTACH: &str = "the same story as `upload_to_session`: this machine has the disk, the file dialog and the `ssh` that carries the bytes, and the session is addressed by the alias passed in, reading no state.db. Being a window onto a hub does not take this machine away";
 
+/// The verdict of `command`, or `None` when the table has no row for it —
+/// which the tests make unshippable.
 pub fn verdict(command: &str) -> Option<&'static Verdict> {
     VERDICTS
         .iter()
@@ -86,7 +86,6 @@ pub fn verdict(command: &str) -> Option<&'static Verdict> {
         .map(|(_, v)| v)
 }
 
-/// The Assets commands that all refuse for the same reason.
 /// Organisations (work graph M5.2): the hub's `work_admin` is master-only.
 const ORGS_ARE_ADMIN: &str = "organisations, their rules and which org a host or tracker belongs \
      to are the hosts' security boundary and fleet administration: the hub's work_admin is \
@@ -115,16 +114,12 @@ const USAGE_IS_ADMIN: &str = "the work graph's usage counts are the hub's work_a
      master-only, and a paired client is never the fleet's administrator; read them on the hub \
      with fleet-hub work usage";
 
-const CATALOG_IS_A_CHECKOUT: &str =
-    "the asset catalog is a git checkout on the machine that owns the fleet, and the hub has \
-     no tool for this; work on the catalog there";
-
 /// The ten git-write commands of the Files tab, likewise.
 const NO_GIT_WRITE_TOOL: &str =
     "the hub exposes no git-write tool — a remote client must not stage or commit under a \
      running agent; do it in the session, or from a standalone app";
 
-/// Every command in `generate_handler!`, in that order, with its verdict.
+/// Every command in `generate_handler!`, grouped as there, with its verdict.
 pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── health and this app's own logs ──────────────────────────────────────
     (
@@ -832,6 +827,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       its own operator — remove it there with `fleet-hub`",
         },
     ),
+    // Host identity & health, task 5. LocalOnly, not Routed: the hub tool
+    // is `Access::Master` and a paired desktop holds a client token, so
+    // routing would be a guaranteed `E_FORBIDDEN` — the same reasoning as
+    // `remove_host` (`commands/hosts.rs`).
+    (
+        "merge_host",
+        Verdict::LocalOnly {
+            instead: "merging one host's rows into another is fleet administration, which the \
+                      hub reserves for its own operator — run it there with `fleet-hub host merge \
+                      <from> <into>`",
+        },
+    ),
     (
         "hide_host",
         Verdict::LocalOnly {
@@ -887,7 +894,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "provision_hosts",
         Verdict::LocalOnly {
             instead: "it rewrites every host's hook block to report to this app; provision \
-                      from the hub with `fleet-hub`",
+                      from the hub with `fleet-hub provision [--host <alias>] [--content-only]`",
         },
     ),
     (
@@ -1007,30 +1014,36 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       the hub",
         },
     ),
-    // ── the asset catalog — a git checkout the hub client does not have ─────
+    // ── the asset catalog — on a hub, the hub's checkout ─────────────────────
+    //
+    // Everything but the overview's list and scan routes to `catalog_admin`
+    // with the command's own arguments (`catalog::admin::AdminCall`, one
+    // variant per command), which answers the master and a paired client the
+    // operator granted (`fleet-hub client grant <name> assets`) and refuses
+    // anyone else with E_FORBIDDEN — the panel then shows its read-only
+    // overview. Parity by construction: the variant carries the command's
+    // argument struct, and the answer is the same type the local call returns.
     (
         "catalog_config",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_configure",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_load",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
-    // The one catalog READ with parity: the hub's `list_assets` answers
-    // `catalog::list_assets` over its own catalog and inventory — the same
-    // `AssetListing` — so a hub-client desktop gets the Assets overview (what
-    // is installed where, what drifted) of the fleet it is a window onto.
-    // Authoring, sync and secrets stay on the machine that owns the checkout.
+    // The overview's read, open to every paired client: the hub's
+    // `list_assets` answers `catalog::list_assets` over its own catalog and
+    // inventory — the same `AssetListing`.
     (
         "catalog_list_assets",
         Verdict::Routed {
@@ -1039,82 +1052,62 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "catalog_get_asset",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_list_layers",
-        Verdict::LocalOnly {
-            instead: "the hub does serve this (its read-only list_layers tool), but the \
-                      layer definitions live in the catalog's git checkout, which only the \
-                      machine that owns the fleet has; call list_layers on the hub, or work \
-                      on the catalog there",
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_resolve_preview",
-        Verdict::LocalOnly {
-            instead: "the hub has a resolve_preview tool, but it answers a summary — kind, \
-                      name and version per asset — while this command returns the full \
-                      Resolution the UI renders, so routing it would silently drop every \
-                      asset body; call resolve_preview on the hub for the summary, or \
-                      resolve on the machine that owns the fleet",
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_propose_layers",
-        Verdict::LocalOnly {
-            instead: "the hub does serve this (its read-only propose_layers tool), but a \
-                      proposal is only useful where the layers can then be written — the \
-                      catalog's git checkout, which only the machine that owns the fleet \
-                      has; call propose_layers on the hub, or propose on that machine",
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_set_host_layers",
-        Verdict::LocalOnly {
-            instead: "the hub has a set_host_layers tool, but it is master-only — a host's \
-                      layer assignment decides what the next apply_sync writes to its \
-                      filesystem — and a paired client is never the master; set layers on \
-                      the machine that owns the fleet",
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_layer_template",
-        Verdict::LocalOnly {
-            instead: "a template is the first step of authoring a layer into the catalog's \
-                      git checkout, and catalog_write_layer refuses here for want of that \
-                      checkout; the hub exposes no layer-authoring tool, so author on the \
-                      machine that owns the fleet",
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_write_layer",
-        Verdict::LocalOnly {
-            instead: "writing a layer edits a file in the catalog's git checkout, which only \
-                      the machine that owns the fleet has, and the hub exposes no \
-                      layer-authoring tool; author on that machine",
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_delete_layer",
-        Verdict::LocalOnly {
-            instead: "deleting a layer removes a file from the catalog's git checkout, which \
-                      only the machine that owns the fleet has, and the hub exposes no \
-                      layer-authoring tool; author on that machine",
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_import_host",
         Verdict::LocalOnly {
-            instead: "the hub has this as its import_assets tool, but the import lands in \
-                      the catalog's git checkout, which only the machine that owns the fleet \
-                      has; call import_assets on the hub, or import on that machine",
+            instead: "an import reads the Claude config of host `local`, which on a hub is \
+                      the hub's own machine, not this one; call import_assets on the hub, or \
+                      import on the machine whose ~/.claude you mean",
         },
     ),
     // Read-only on the hosts, open to a paired client: it refreshes the
-    // inventory the overview above reads, and returns the same per-host
+    // inventory the overview reads, and returns the same per-host
     // `HostScanResult`s.
     (
         "assets_scan_hosts",
@@ -1124,122 +1117,124 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "assets_inventory",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_plan_sync",
-        Verdict::LocalOnly {
-            instead: "the hub has this as its plan_sync tool, but the plan is shown in a \
-                      sync panel built on the catalog checkout, which only the machine that \
-                      owns the fleet has; call plan_sync on the hub, or plan on that machine",
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
+    // The hub's plan (`catalog_plan_sync` above parked it there); the hub
+    // runs its `apply_sync` confirm gate on it, and drops `call_id`.
     (
         "catalog_apply_sync",
-        Verdict::LocalOnly {
-            instead: "the hub's apply_sync is master-only: a paired client is never the \
-                      fleet's administrator, and a sync writes to every host over SSH; run \
-                      the sync on the hub",
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_last_sync",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_list_secrets",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_set_secret",
-        Verdict::LocalOnly {
-            instead: "the hub's set_secret is master-only: a paired client is never the \
-                      fleet's administrator, and the sync secrets belong to the machine that \
-                      runs the sync; set it on the hub",
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_delete_secret",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_create_asset",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_update_asset",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_delete_asset",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
+    // The file is on this machine: the routed function reads it here, with
+    // the local path's checks and size limit, and sends its bytes
+    // (`AdminCall::AddResourceBytes`).
     (
         "catalog_add_resource",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_remove_resource",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_lint_asset",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_lint_all",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_commit_pending",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_push",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_repo_status",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_template",
-        Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     (
         "catalog_spawn_author_session",
         Verdict::LocalOnly {
-            instead: CATALOG_IS_A_CHECKOUT,
+            instead: "an author session is a Claude session started in the catalog's \
+                      checkout on the machine that owns it, and the hub has no tool that \
+                      starts one; edit the assets from this panel, or start a session in the \
+                      checkout on the hub's machine",
         },
     ),
     // ── the terminal, and this process's cancellation registry ──────────────

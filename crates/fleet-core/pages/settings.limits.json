@@ -24,6 +24,28 @@
       ]
     },
     {
+      "title": "Host health",
+      "intro": "When a host reads as needing a look on the Hosts view and in fleet_health.",
+      "items": [
+        {
+          "type": "field",
+          "key": "health.disk_low_pct"
+        },
+        {
+          "type": "field",
+          "key": "health.hooks_silent_secs"
+        },
+        {
+          "type": "field",
+          "key": "health.claude_max_behind"
+        },
+        {
+          "type": "field",
+          "key": "health.version_max_age_secs"
+        }
+      ]
+    },
+    {
       "title": "Restoring lost sessions",
       "items": [
         {

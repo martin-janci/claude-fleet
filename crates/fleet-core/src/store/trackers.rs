@@ -793,7 +793,12 @@ pub fn validate_credential_ref(r: &str) -> Result<(), IpcError> {
     }
     if let Some(path) = r.strip_prefix("file:") {
         let p = std::path::Path::new(path);
-        if !p.is_absolute()
+        // A Windows UNC path (`\\server\share`) is absolute too, but
+        // reading it opens an SMB session that hands the server the user's
+        // NTLM credentials. A credential file is local.
+        let unc = cfg!(windows) && (path.starts_with("\\\\") || path.starts_with("//"));
+        if unc
+            || !p.is_absolute()
             || p.components().any(|c| c == std::path::Component::ParentDir)
             || path.chars().any(char::is_control)
         {
@@ -1034,6 +1039,20 @@ impl Store {
             )?;
             tx.execute(
                 "DELETE FROM tracker_writes WHERE tracker_id = ?1",
+                rusqlite::params![id],
+            )?;
+            // The describe cache (migration 073) of this tracker's items: its
+            // items are deliberately KEPT below (marked unavailable), so no FK
+            // cascade reaches their cached full descriptions. Without this a
+            // disconnected tracker's whole ticket text — up to
+            // DESCRIBE_MAX_CHARS per item — stays readable through
+            // `work { action: describe }` for as long as the TTL allows, and
+            // at rest until the retention floor reaches it. Disconnecting a
+            // tracker is the gesture by which a person revokes fleet's access
+            // to its text; it has to take the copy with it.
+            tx.execute(
+                "DELETE FROM work_item_descriptions WHERE item_id IN \
+                 (SELECT id FROM work_items WHERE tracker_id = ?1)",
                 rusqlite::params![id],
             )?;
             tx.execute(
@@ -1917,6 +1936,19 @@ mod tests {
                 rusqlite::params![id],
             )
             .unwrap();
+        // The describe cache of one of its items: kept items mean no FK
+        // cascade reaches it, so `remove_tracker` must clear it itself —
+        // disconnecting a tracker is how a person revokes fleet's access to
+        // its text, and the full description is the most of that text fleet
+        // ever holds.
+        let item_id: i64 = s
+            .conn
+            .query_row("SELECT id FROM work_items WHERE key = 'ABC-1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        s.put_description(item_id, "the whole requirement", 21)
+            .unwrap();
         assert!(s.remove_tracker(id).unwrap());
         assert!(!s.remove_tracker(id).unwrap());
         let n: i64 = s
@@ -1924,6 +1956,11 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM tracker_secrets", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+        assert_eq!(
+            s.cached_description(item_id, 10_000, now_unix()).unwrap(),
+            None,
+            "a removed tracker's items keep no cached full description"
+        );
         let reason: Option<String> = s
             .conn
             .query_row(

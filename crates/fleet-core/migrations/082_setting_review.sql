@@ -42,4 +42,4 @@ CREATE TABLE IF NOT EXISTS setting_audit (
 );
 CREATE INDEX IF NOT EXISTS idx_setting_audit_key ON setting_audit(key, id);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (72);
+INSERT OR IGNORE INTO schema_version (version) VALUES (82);

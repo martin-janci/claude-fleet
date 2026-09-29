@@ -55,6 +55,14 @@ jobs:
           v="$(node -p 'require("./package.json").version')"
           scripts/changelog-section.sh "$v" >/dev/null
           echo "CHANGELOG.md has a section for $v"
+      # deploy/hub/backup.sh and upgrade.sh against a fake docker and curl.
+      # It ran only from ci-local.sh, so when upgrade.sh started passing
+      # --env-file the fake stopped matching and 8 checks failed on main
+      # with CI green. bash + sqlite3, a few seconds.
+      - name: Hub deploy scripts
+        run: |
+          command -v sqlite3 >/dev/null || { sudo apt-get update -q && sudo apt-get install -yq sqlite3; }
+          bash scripts/hub-deploy-scripts-test.sh
 
   rust:
     strategy:
@@ -129,7 +137,25 @@ jobs:
           node-version: '20'
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
-      - run: pnpm tauri build --debug --bundles nsis
+      # Microsoft's ConPTY beside the exe, as the release ships it
+      # (scripts/fetch-conpty.sh says why), and proof that it landed there.
+      - run: bash scripts/fetch-conpty.sh
+        shell: bash
+      - run: pnpm tauri build --debug --bundles nsis --config src-tauri/tauri.conpty.conf.json
+      - name: ConPTY sits next to the exe
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in claude-fleet.exe conpty.dll OpenConsole.exe licenses/ConPTY-LICENSE.txt; do
+            test -s "target/debug/$f" || { echo "::error::target/debug/$f missing"; exit 1; }
+          done
+          # ...and in the installer itself, which is what users get: files
+          # in target/ prove the copy, not the NSIS payload. 7-Zip reads NSIS.
+          setup=$(ls target/debug/bundle/nsis/*-setup.exe)
+          listing=$(7z l "$setup")
+          for f in conpty.dll OpenConsole.exe ConPTY-LICENSE.txt; do
+            grep -q "$f" <<<"$listing" || { echo "::error::$f missing from $setup"; exit 1; }
+          done
 
   # The regression guard for the crate split: fleet-hub must build on a box
   # with none of the Tauri system libraries. If this job fails with a
@@ -138,6 +164,8 @@ jobs:
   # fleet-agent rides along for the same reason, one step stricter: it installs
   # on an arbitrary host, so it must build with neither the Tauri libraries nor
   # fleet-core. If it starts pulling either, this is where you find out.
+  # fleet-update (the update engine) is held to the same rule: fleet-updater
+  # and, later, fleet-agent depend on it.
   hub-headless:
     runs-on: ubuntu-24.04
     steps:
@@ -150,7 +178,18 @@ jobs:
       - run: cargo build -p fleet-hub --locked
       - run: cargo test -p fleet-core -p fleet-hub --locked
       - run: cargo build -p fleet-agent --locked
-      - run: cargo test -p fleet-proto -p fleet-agent --locked
+      - run: cargo test -p fleet-proto -p fleet-agent -p fleet-update --locked
+      # The update-publishing scripts (slice S2) end to end: a throwaway
+      # minisign key, a fake `gh` and a local bare remote, the real fleet-hub
+      # (for `fleet-hub compat`) in a release tarball, and every document
+      # checked by fleet-update's own verifier. Nothing leaves the runner.
+      - run: sudo apt-get update && sudo apt-get install -y minisign
+      - run: cargo build -p fleet-update --bin fleet-release --locked
+      - name: Test the update-publishing scripts
+        env:
+          FLEET_RELEASE: target/debug/fleet-release
+          FLEET_HUB: target/debug/fleet-hub
+        run: bash scripts/release-update-scripts-test.sh
       # The work-graph leg (hub W, M10.2) needs a hub built with the test-only
       # `e2e` feature (the loopback fake-tracker override). Its own target dir,
       # so the plain target/debug/fleet-hub the rest of the script tests (and

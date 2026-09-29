@@ -8,6 +8,201 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.4.1] - 2026-09-29
+
+### Added
+- **update:** sign the release manifest and publish the update channels (S2)
+- **diagnostics:** hub state, earlier errors and UTC times in the bundle
+- **update:** the hub side of the update wire — /update routes, updater token, desired/observed (S4a)
+
+### Changed
+- **update:** trust the release key
+- **trackers:** conformance scenario 12 asks the real adapter
+
+### Fixed
+- **attention:** an attach or the TTL ends the stale_working reason, not the demotion (sessions.stale_demoted_at)
+- **nl:** the census and J1 bench read person_text's Cow
+- **work:** a key two orgs' trackers share resolves to the caller's item
+- **work:** one harness-tag list for the hook and the transcript
+- **mcp:** fence_ticket counts what it shows on the tracker's own text
+- **work:** the task detail says when it cut the description
+- **windows:** Disconnect removes the legacy token file even if CredDeleteW fails
+- **windows:** keep the app data in the Local profile, moved once
+- **provision:** say when a WSL distribution's hooks cannot reach the desktop
+- **ssh:** cap concurrent connections per host when there is no mux
+- **ssh:** toolchain probe finds the login shell when $SHELL is unset
+- **wsl:** detect again when a wsl- alias is missing; start in $HOME
+- **sidebar:** migrate saved work filters field by field
+- **filters:** announce clearing the last filter; keep focus when a chip goes
+- **sidebar:** the "N archived hidden" count matches a search as the list does
+- **work:** the tree hides archived tasks only when asked, judged over every link
+- **attention:** the tick lifts a resumed or expired stale_working stamp (reconcile.stale_working_ttl_secs)
+- **test:** hub-deploy-scripts-test follows upgrade.sh — compose --env-file, compose pull, the token on curl's stdin
+- **work:** describe says when its own 32,000-char cap cut the text
+- **work:** a tail edit past the excerpt drops the stale describe cache
+- **settings:** stale_working_secs says what it watches, not pane output
+- **settings:** chip editor saves against the list it read; rows keyed by chip
+- **mcp:** quick_replies set is a person's; compare-and-set and no control bytes
+- **sessions:** a stale-demoted idle is not a finished turn until the pane says so
+- **reconcile:** a pane showing the spinner is never demoted as stale working
+- **mcp:** add_project never binds an MCP caller's call_id
+- **usage:** date a line by its top-level timestamp, not the last match
+- **decide:** one daily token budget for live and benchmark runs
+- **rewind:** pass awk values through the environment, read an escaped cwd, refuse names git would
+- **deploy:** private backups, offline pre-upgrade copy, safer prune and rollback
+- **conversation:** a quick-reply chip never sends into a session waiting on an answer
+- **attention:** an attach acknowledges a stale_working stamp
+
+### Documentation
+- **roadmap:** record D15 narrowed for cross-org links on the phone
+- stale_working ends on a hook, an attach, a resumed row or reconcile.stale_working_ttl_secs; hub-deploy-scripts-test asserts the token rides curl's stdin only
+- **windows:** WSL hosts are standalone-only; Cygwin config, dev ConPTY, data dir
+- session state machine — plan ticked, OOM window, status vocabulary
+- **plans:** stale_working acknowledgement — an attach, a resumed row or a TTL lifts the stamp
+## [0.4.0] - 2026-09-28
+
+### Added
+- **hub:** healthcheck --ready --json, fleet-hub backup, build identity (update S5)
+- **sessions:** carry model and effort through recreate and restart
+- **update:** fleet-update crate — manifest, signatures, decide(), UpdateChannel (S1)
+- **hub:** fleet-hub decide enable|disable|mode|unassigned|set
+- **hub:** manage the asset catalog from a paired desktop
+- **decide:** --split and --question for the status_map bench
+- **ui:** Fork sheet defaults to a new worktree
+- **rewind:** fork into a new worktree
+- **work:** the Work tree hides archived tasks unless asked, and counts them
+- **sidebar:** hide archived work by default, one recency rule, selection follows filters
+- **sessions:** pick model and effort when creating a Claude session
+- **quick-replies:** chip order and per-chip auto-send
+- **sidebar:** one filter model for Sessions and Work, and fix filters that did nothing
+- **windows:** ship Microsoft's ConPTY with the Windows build
+- **work:** a confirm / reject by link id answers the link's new version
+- **work:** SessionRow.work_rev, so a secondary link change reaches the UI
+- **windows:** WSL distributions as hosts; one ssh program; Cygwin/MSYS configs
+- **conversation:** model and effort pickers in the composer
+- **work:** register work.describe_cache_secs with the frontend too
+- **work:** sweep the describe cache with retention, floored at 30 days
+- **work:** add the describe action, its setting and dispatch
+- **store:** describe cache table, TTL read/write and sweep
+- **work:** a describe capability on the tracker providers
+- **work:** lookup, brief and card say when a description was cut
+- **work:** fence_ticket names what it cut
+- **projects:** forget_project and worktree path dedupe for a store nothing rescans
+- **provision:** per-host content fingerprint, stale re-provision on hub start, skill-dir ownership
+- **work:** carry a tracker description's true length
+- **hosts:** merge_host folds a renamed alias in one transaction; unprobed hosts are reaped
+- **release:** ship a Windows NSIS installer from 0.3.3
+- **windows:** keep the hub client token in Credential Manager
+- **windows:** home dir, no ssh multiplexing, no local host
+- **ui:** the Add-project dialog on a hub client hides the folder source
+- **contract:** revision 5 — add_project routes, GithubRepo on the wire
+- **desktop:** route add_project and list_github_repos to the hub
+- **ui:** host Health block, disk/agent attention marks and a sidebar disk dot
+- **hosts:** sample disk, load, memory and uptime each pass; fleet_health.hosts[]; move target-space preflight
+- **mcp:** add_project and list_github_repos as hub tools
+- **core:** AddProjectArgs and AddProjectSource carry a served schema
+- **hosts:** read claude/tmux versions in the reconcile probe and stamp claude_version_at
+
+### Changed
+- **hub-deploy:** name a missing call in the order checks; run the suite in CI
+- **windows:** the fake-ssh add_project tests and the awk usage tests are Unix only
+- **work:** the describe cache is a retention table like the others
+- **windows:** answer ConPTY's startup cursor query in the child-exit test
+- **mcp:** restore the field-name loop beside the wire-exclusion greps
+- **hub:** the desktop's hub.remote_url key is fleet-core's constant
+- **windows:** drain the pseudo console in the child-exit test
+- **mcp:** the ungated-rewind test passes an anchor, now that a rewind needs one
+- **mcp:** restore the wire-exclusion test's substance
+- **contract:** the session row's pinned wire names include work_rev
+- **work:** cargo fmt and a clippy single-match fix
+- **mcp:** wire-exclusion proof for the describe cache; regen reference
+- **work:** cover describe in the org isolation matrix
+- one "turn is over" set, one fp-key reader; docs point at what landed
+- review rounds 1-5 follow-ups (docs, offline gating, one debounce helper)
+- **windows:** main's new usage tests run the awk reader under bash — Unix only
+- **windows:** build main's new haiku and bench fakes' status portably
+- **windows:** check PTY children through sysinfo; run every crate's tests
+- add Windows legs for the desktop crates and the frontend
+- **hosts:** one active_hosts() for every fleet-wide host loop
+
+### Fixed
+- **store:** open the backup copy for write before sync_all (Windows)
+- renumber host-identity migrations to 74-76 and re-measure the tool budget
+- **hub:** give `tracker test` a 120 s CLI limit instead of 10 s
+- **test:** the fake docker in hub-deploy-scripts-test speaks upgrade.sh's compose calls
+- **work:** leave prompts Claude Code submits itself out of first prompts, detection, census and J1
+- **decide:** 30% dev boards so the test side can judge the haiku line
+- **windows:** edge cases in WSL detection, ssh selection, ssh config, drops, tokens and ConPTY
+- **rewind:** a fork's cleanup leaves a tree a live pane is working in
+- **work:** finish the describe cache's wiring, docs and pinning test
+- **mcp:** create_remote needs a person from any caller but a paired client
+- **work:** the task detail says when it cut, and the describe cache dies with its tracker
+- **work:** a complete Jira description reports the length it returns
+- **decide:** the work_link bench reads a hand label's org from the database
+- **windows:** read wsl.exe's UTF-16 without chunks_exact
+- **store:** repair main's 064-068 on a database a branch-numbered usage migration skipped
+- **usage:** every chunk of a first read, a rewrite and yesterday's lines book history right
+- **decide:** a shadow answer nobody saw is never a person's follow-up
+- **work:** report the describe cache's EFFECTIVE retention window
+- **decide:** the status_map benchmark takes each row's org from the database
+- **decide:** deciding a proposal reads and writes the tracker under one lock
+- **settings:** work link's Jev mode is read-only; how a desktop sets its Jev key
+- **decide:** a proposal a newer one superseded undecided is marked ignored
+- **decide:** retention keeps a run a person confirmed, corrected or rejected
+- **decide:** the offline benchmark needs no live mode and never counts as live
+- **windows:** findings of a review of the Windows client
+- **reply-actions:** Retry waits for two idle probes, not one quiet frame
+- **rewind:** quiet-or-refused guard, anchor required to rewind, clean undo on a failed restart
+- **decide:** a tracker due while a status_map run is going stays due
+- **projects:** Stop waiting ends a hub client's add_project; no local destination preview there
+- **ui:** reword the describe-cache settings hint
+- **work:** batch the describe-cache sweep; add its dry-run status
+- **work:** fence describe's body for a per-host token (CRITICAL)
+- **conversation:** mark a cut or image-bearing prompt partial; Retry refuses to resend it
+- **windows:** a BOM'd ssh config and a stuck token file
+- **windows:** reap orphaned ssh -R tunnels on Windows too
+- **mcp:** fence add_project / list_github_repos, confirm the operator's fork and create_remote
+- **hub:** let a hub be pointed at its asset catalog
+- **work-view:** keep loaded data on a failed refresh; page sections past 200; max-wait refresh
+- **work-view:** Review's Undo and Change… name the versions they decide on
+- **work-view:** show a conflict's current value with Reload; view delete is a compare-and-set
+- **windows:** no console window for any child process
+- **work:** shrink the brief retry's shown count, not its budget
+- **work:** correct the brief retry's overhead math, unify describe_offer
+- round 15 — never upgrade without a backup; tighter guards
+- **release:** the Windows installer ships from 0.3.4
+- **move:** carried memory files stay private when fleet runs as root
+- **release:** the macOS signature check searches only target dirs that exist
+- **mcp:** a repeated bad bearer is still 401; only its log line is throttled
+- **rewind:** whole lines only, a fork carries its work, no shell rows
+- **decide:** D34 holds through unlink; the status_map trigger keeps due trackers
+- **sessions:** #343's states meet the paths written beside it
+- **hub:** fence usage_report for org-bound clients; safer upgrade and backup
+- migration 071 records 71; D34 holds through decide_batch and reconsider
+- **store:** migration 071 records version 71, not 68
+- **store:** migration 071 records version 71, not 68
+- **work:** restore SessionRow.work_rev lost in the #343 merge
+- **windows:** catalog paths and credential files; Unix-only tests declared
+- **work:** count a Jira description's true length past the excerpt cap
+- **windows:** keep the unix-only test modules visible to the print guard
+- **windows:** cfg-guard the unix-only calls so the desktop compiles on Windows
+
+### Documentation
+- **claude-md:** 205 commands, not 204 — merge_host is the 205th
+- **work-graph:** M14 truth pass — name the PRs, M14.5 waits on Part R only
+- **spec:** application update architecture — UpdateChannel, manifest, desired state
+- **decide:** the status_map bench's --split and --question
+- **filters:** fleet-mobile follows the filter model (its branch claude/serene-faraday-7loasz)
+- **usage:** backfill caveats, usage_daily retention, §6d left out
+- **work:** warn against a lock or await inside describe's cache-hit block
+- **claude-md:** reply actions in Status & known issues
+- **reply-actions:** spec status, refusals and Retry gating as built; rewind_conversation in revision 5's note
+- **windows:** plan status, hub and index links, CLAUDE.md orientation
+- **work:** four plans from the work-graph re-examination
+- **plan:** Windows desktop client plan
+- **hub:** a hub client adds projects through the hub
+- **projects:** implementation plan for adding a project from a hub client
+- **projects:** design for adding a project from a hub client
 ## [0.3.3] - 2026-09-28
 
 ### Added
@@ -2023,6 +2218,8 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.4.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.1
+[0.4.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.0
 [0.3.3]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.3
 [0.3.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.2
 [0.3.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.1

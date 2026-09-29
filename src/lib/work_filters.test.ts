@@ -16,6 +16,8 @@ import {
   bothPredicates,
   effectiveWorkFilters,
   isWorkFilters,
+  migrateWorkFilters,
+  readWorkFilters,
   loadMine,
   mineItemIds,
   pastWorkFields,
@@ -64,16 +66,22 @@ const rows = [
 ];
 const ctx = { trackers: TRACKERS, mine: new Set([11]) };
 
+// Archived rows are hidden by default; most cases below read against the
+// filters with them shown, so each clause is seen on its own.
+const SHOWN: WorkFilters = { ...DEFAULT_WORK_FILTERS, archived: true };
+
 function visible(f: Partial<WorkFilters>, extra: Parameters<typeof rowMatches>[1] = {}): string[] {
-  const rf = { ...toRowFilters({ ...DEFAULT_WORK_FILTERS, ...f }), ...extra };
+  const rf = { ...toRowFilters({ ...SHOWN, ...f }), ...extra };
   return rows.filter((r) => rowMatches(sessionWorkRow(r, ctx), rf)).map((r) => r.tmux_name);
 }
 
 describe('work filters over rowMatches (M10.4)', () => {
-  it('the defaults filter nothing', () => {
+  it('the defaults hide only archived rows, and count no filter', () => {
     expect(visible({})).toEqual(['pay1', 'pay2', 'ops3', 'bare', 'bg']);
+    expect(visible({ archived: false })).toEqual(['pay1', 'ops3', 'bare', 'bg']);
     expect(activeWorkFilterCount(DEFAULT_WORK_FILTERS)).toBe(0);
-    expect(workFilterPredicate(DEFAULT_WORK_FILTERS, ctx)).toBeNull();
+    expect(workFilterPredicate(SHOWN, ctx)).toBeNull();
+    expect(workFilterPredicate(DEFAULT_WORK_FILTERS, ctx)).not.toBeNull();
   });
 
   it('each filter alone', () => {
@@ -111,7 +119,7 @@ describe('work filters over rowMatches (M10.4)', () => {
     const past = (f: Partial<WorkFilters>) =>
       rowMatches(
         { host: 'h', scope: 'all', ...pastWorkFields('PAY-9', 11, ctx) },
-        toRowFilters({ ...DEFAULT_WORK_FILTERS, ...f }),
+        toRowFilters({ ...SHOWN, ...f }),
       );
     expect(past({})).toBe(true);
     expect(past({ hasSession: 'no' })).toBe(true);
@@ -125,7 +133,8 @@ describe('work filters over rowMatches (M10.4)', () => {
   it('a removed tracker and has-session outside work mode do not filter', () => {
     const f: WorkFilters = { ...DEFAULT_WORK_FILTERS, tracker: 7, hasSession: 'no' };
     expect(effectiveWorkFilters(f, TRACKERS, false)).toEqual(DEFAULT_WORK_FILTERS);
-    expect(effectiveWorkFilters(f, [...TRACKERS, tracker(7, [])], true)).toEqual(f);
+    // "Past only" asks for past work, which is archived: it shows it.
+    expect(effectiveWorkFilters(f, [...TRACKERS, tracker(7, [])], true)).toEqual({ ...f, archived: true });
     expect(activeWorkFilterCount(f)).toBe(2);
   });
 
@@ -158,7 +167,7 @@ describe('work filter state', () => {
 
   it('persists like the host and scope filters', async () => {
     workFilters.set({ ...DEFAULT_WORK_FILTERS, status: 'todo', archived: false });
-    expect(JSON.parse(localStorage.getItem('cf:pref:sidebar.work-filters') ?? 'null')).toMatchObject({
+    expect(JSON.parse(localStorage.getItem('cf:pref:sidebar.work-filters.v2') ?? 'null')).toMatchObject({
       status: 'todo',
       archived: false,
     });
@@ -169,10 +178,38 @@ describe('work filter state', () => {
   });
 
   it('a corrupt pref falls back to the defaults', async () => {
-    localStorage.setItem('cf:pref:sidebar.work-filters', JSON.stringify({ status: 'nope' }));
+    localStorage.setItem('cf:pref:sidebar.work-filters.v2', JSON.stringify({ status: 'nope' }));
     vi.resetModules();
     const fresh = await import('./work_filters');
     expect(get(fresh.workFilters)).toEqual(DEFAULT_WORK_FILTERS);
+  });
+
+  it('a v1 pref missing a newer field keeps its other choices (field by field)', async () => {
+    // Saved before `archived` (and has-session) existed: every other
+    // choice carries over, the missing fields take their defaults.
+    localStorage.setItem('cf:pref:sidebar.work-filters', JSON.stringify({ tracker: 4, status: 'name:QA Review', assignee: 'mine' }));
+    vi.resetModules();
+    const fresh = await import('./work_filters');
+    expect(get(fresh.workFilters)).toEqual({
+      tracker: 4,
+      status: 'name:QA Review',
+      assignee: 'mine',
+      hasSession: 'any',
+      archived: false,
+    });
+  });
+
+  it('v1\'s archived: true (the old default) does not carry over; a bad field alone is reset', () => {
+    expect(migrateWorkFilters({ ...DEFAULT_WORK_FILTERS, status: 'todo', archived: true })).toMatchObject({ status: 'todo', archived: true });
+    localStorage.setItem('cf:pref:sidebar.work-filters', JSON.stringify({ ...DEFAULT_WORK_FILTERS, status: 'todo', archived: true }));
+    expect(readWorkFilters()).toEqual({ ...DEFAULT_WORK_FILTERS, status: 'todo', archived: false });
+    expect(migrateWorkFilters({ tracker: '3', status: 'done', hasSession: 'no' })).toEqual({
+      ...DEFAULT_WORK_FILTERS,
+      status: 'done',
+      hasSession: 'no',
+    });
+    expect(migrateWorkFilters(null)).toBeNull();
+    expect(migrateWorkFilters([1])).toBeNull();
   });
 
   it('"mine" is the hub\'s mine view', async () => {

@@ -110,7 +110,11 @@ fn map_conversation(r: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationRow> 
         start_source: r.get(6)?,
         end_reason: r.get(7)?,
         model: r.get(8)?,
-        first_prompt: r.get(9)?,
+        // Rows stored before the hook took Claude Code's blocks off (#370)
+        // hold a `<task-notification>` or a reminder: cleaned on the way
+        // out, so the conversation list, its header and the handover brief
+        // never show the harness's words as what the person asked.
+        first_prompt: crate::service::prompt_origin::clean_first_prompt(r.get(9)?),
         turns: r.get(10)?,
         compactions: r.get(11)?,
         current: r.get::<_, i64>(12)? != 0,
@@ -278,6 +282,51 @@ impl Store {
         Ok(self.emit_session(session_id)?)
     }
 
+    /// Undo a [`Self::rebind_conversation`] to `new_id` whose follow-up never
+    /// ran — a rewind whose pane restart failed — and put the session back on
+    /// `prior_id` as if the rebind had not happened.
+    ///
+    /// Not a second rebind: rebinding back (with `Resume`) would leave
+    /// `new_id`'s row listed as a conversation that never ran, and mark the
+    /// context stale. Here `new_id`'s row is deleted, `prior_id`'s row is
+    /// reopened (the rebind closed it as `replaced`), and the session row
+    /// gets `prior_id` and `prior_path` back — only while it still names
+    /// `new_id`, so a hook that rebound it meanwhile is not overwritten.
+    /// Returns the session row, `None` when it no longer names `new_id`.
+    pub fn revert_rebind(
+        &self,
+        session_id: i64,
+        new_id: &str,
+        prior_id: &str,
+        prior_path: Option<&str>,
+    ) -> Result<Option<SessionRow>, IpcError> {
+        let reverted = self.in_savepoint("revert_rebind", |_| -> Result<bool, IpcError> {
+            let n = self.conn.execute(
+                "UPDATE sessions SET claude_session_id = ?3, transcript_path = ?4 \
+                 WHERE id = ?1 AND claude_session_id = ?2",
+                rusqlite::params![session_id, new_id, prior_id, prior_path],
+            )?;
+            if n == 0 {
+                return Ok(false);
+            }
+            self.conn.execute(
+                "DELETE FROM conversations WHERE session_id = ?1 AND claude_session_id = ?2",
+                rusqlite::params![session_id, new_id],
+            )?;
+            self.conn.execute(
+                "UPDATE conversations SET ended_at = NULL, end_reason = NULL \
+                 WHERE session_id = ?1 AND claude_session_id = ?2",
+                rusqlite::params![session_id, prior_id],
+            )?;
+            Ok(true)
+        })?;
+        if !reverted {
+            return Ok(None);
+        }
+        self.bus.conversations_changed(session_id);
+        Ok(self.emit_session(session_id)?)
+    }
+
     /// Relabel a just-recorded conversation's origin, for a start whose real
     /// source only the caller knows and only AFTER the start has run.
     ///
@@ -367,6 +416,44 @@ impl Store {
             "UPDATE sessions SET last_hook_at = ?2 WHERE id = ?1",
             rusqlite::params![session_id, now_unix()],
         )?;
+        Ok(())
+    }
+
+    /// A genuine SessionStart: the turn state the previous process left ends
+    /// with it — `failed` reads `idle`, the stale-working stamp and its
+    /// veto (`stale_demoted_at`) go — and
+    /// `last_hook_at` is stamped, so a reconcile pass already in flight keeps
+    /// this (the MCP-1 guard) and the StopFailure guard (`last_hook_at =
+    /// last_stop_at`) no longer holds. Any other status is left as it is; a
+    /// row with nothing to end is not written.
+    pub fn clear_ended_turn_state(&self, session_id: i64) -> Result<(), IpcError> {
+        let was_failed: Option<bool> = self
+            .conn
+            .query_row(
+                "SELECT claude_status = 'failed' FROM sessions \
+                 WHERE id = ?1 AND (claude_status = 'failed' OR stale_working_at IS NOT NULL \
+                                    OR stale_demoted_at IS NOT NULL)",
+                [session_id],
+                |r| r.get::<_, Option<bool>>(0).map(|b| b.unwrap_or(false)),
+            )
+            .optional()?;
+        let Some(was_failed) = was_failed else {
+            return Ok(());
+        };
+        self.conn.execute(
+            "UPDATE sessions SET last_hook_at = ?2, stale_working_at = NULL, \
+                 stale_demoted_at = NULL, \
+                 claude_status = CASE WHEN claude_status = 'failed' THEN 'idle' \
+                                      ELSE claude_status END \
+             WHERE id = ?1",
+            rusqlite::params![session_id, now_unix()],
+        )?;
+        if was_failed {
+            if let Err(e) = self.insert_session_event(session_id, "status_change", Some("idle")) {
+                tracing::warn!(session_id, error = %e, "[hook] status_change not recorded");
+            }
+        }
+        self.emit_session(session_id)?;
         Ok(())
     }
 
@@ -513,7 +600,10 @@ impl Store {
         Ok(())
     }
 
-    /// First 200 chars of the conversation's first prompt; later calls no-op.
+    /// First 200 chars of the conversation's first prompt; later calls no-op
+    /// — except over a stored value that is only Claude Code's blocks (a row
+    /// written before #370), which reads back as no prompt at all and so is
+    /// replaced by the person's first real one.
     pub fn conversation_set_first_prompt(
         &self,
         session_id: i64,
@@ -521,10 +611,24 @@ impl Store {
         prompt: &str,
     ) -> Result<(), IpcError> {
         let p: String = prompt.chars().take(200).collect();
+        let stored: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT first_prompt FROM conversations \
+                 WHERE session_id = ?1 AND claude_session_id = ?2",
+                rusqlite::params![session_id, claude_session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let replace = stored
+            .as_deref()
+            .is_some_and(crate::service::prompt_origin::is_harness);
         self.conn.execute(
             "UPDATE conversations SET first_prompt = ?3 \
-             WHERE session_id = ?1 AND claude_session_id = ?2 AND first_prompt IS NULL",
-            rusqlite::params![session_id, claude_session_id, p],
+             WHERE session_id = ?1 AND claude_session_id = ?2 \
+               AND (first_prompt IS NULL OR ?4)",
+            rusqlite::params![session_id, claude_session_id, p, replace],
         )?;
         Ok(())
     }
@@ -614,15 +718,6 @@ impl Store {
         if n == 0 {
             return Ok(None);
         }
-        Ok(self.emit_session(session_id)?)
-    }
-
-    /// Flag the session's context size as out of date (compaction, resume).
-    pub fn mark_context_stale(&self, session_id: i64) -> Result<Option<SessionRow>, IpcError> {
-        self.conn.execute(
-            "UPDATE sessions SET context_stale = 1 WHERE id = ?1",
-            [session_id],
-        )?;
         Ok(self.emit_session(session_id)?)
     }
 
@@ -761,6 +856,58 @@ mod tests {
             "a new conversation starts un-nudged"
         );
         assert!(s.conversation_nudged(id, "unknown-conversation").unwrap());
+    }
+
+    /// A first prompt stored before #370 (a task notification, a reminder
+    /// ahead of the person's words) reads back cleaned, and a harness-only
+    /// one gives way to the person's first real prompt.
+    #[test]
+    fn an_old_harness_first_prompt_reads_cleaned_and_gives_way() {
+        let (s, _bus) = store_with_recorder();
+        let id = session(&s);
+        s.rebind_conversation(id, A, StartSource::Fleet, None, None)
+            .unwrap();
+        s.rebind_conversation(id, B, StartSource::Clear, None, None)
+            .unwrap();
+        let raw = |c: &str, p: &str| {
+            s.conn
+                .execute(
+                    "UPDATE conversations SET first_prompt = ?2 WHERE claude_session_id = ?1",
+                    rusqlite::params![c, p],
+                )
+                .unwrap();
+        };
+        raw(
+            A,
+            "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n\
+             <summary>Agent \"Fix PAY-7\" completed</summary>",
+        );
+        raw(
+            B,
+            "<system-reminder>Plan mode.</system-reminder>\nfix the login bug",
+        );
+        let get = |c: &str| s.get_conversation(id, c).unwrap().unwrap().first_prompt;
+        assert_eq!(get(A), None);
+        assert_eq!(get(B).as_deref(), Some("fix the login bug"));
+        let listed: Vec<_> = s
+            .list_conversations(id, 10)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.first_prompt)
+            .collect();
+        assert!(listed.contains(&None));
+        assert!(listed.contains(&Some("fix the login bug".into())));
+
+        s.conversation_set_first_prompt(id, A, "refund retries")
+            .unwrap();
+        s.conversation_set_first_prompt(id, B, "something later")
+            .unwrap();
+        assert_eq!(get(A).as_deref(), Some("refund retries"));
+        assert_eq!(
+            get(B).as_deref(),
+            Some("fix the login bug"),
+            "a stored prompt with a person's words in it stays"
+        );
     }
 
     #[test]

@@ -28,15 +28,25 @@
   import AddProjectDialog from './AddProjectDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
   import OnboardingCard from './OnboardingCard.svelte';
-  import { hostFilter } from './hosts';
-  import { effectiveScope, scopeOf, orgColorById, orgColorOf, projectOwners } from './orgs';
+  import { hostFilter, effectiveHostFilter } from './hosts';
+  import {
+    effectiveScope,
+    scopeFilter,
+    scopeOf,
+    scopes,
+    scopeSelectorShown,
+    orgColorById,
+    orgColorOf,
+    projectOwners,
+    UNASSIGNED,
+  } from './orgs';
+  import { facetSentence, sessionFacets } from './filter_facets';
   import { onboardingDismissed } from './onboarding';
   import {
     hostsViewOpen,
     newSessionHostRequest,
     requestHostsView,
     settingsOpen,
-    workViewChordLabel,
   } from './app_views';
   import { hintAnchor } from './hints';
   import {
@@ -59,10 +69,14 @@
     effectiveWorkFilters,
     loadMine,
     mineItemIds,
+    mineLoaded,
+    withMineReady,
+    DEFAULT_WORK_FILTERS,
     pastWorkFields,
     statusNamesOf,
     toRowFilters,
     workFilterPredicate,
+    type WorkFilters,
     workFilters,
   } from './work_filters';
   import {
@@ -104,11 +118,9 @@
   import NewBgSessionDialog from './NewBgSessionDialog.svelte';
   import WorkTree from './WorkTree.svelte';
   import { sidebarView } from './work_view';
-  import { detectMac } from './terminal_keys';
-  import { isRecency, matchesRecency, type Recency } from './session_status';
+  import { isRecency, withinRecency, type Recency } from './session_status';
 
   let showTasks = $state(false);
-  const workViewChord = workViewChordLabel(detectMac(typeof navigator === 'undefined' ? undefined : navigator));
 
   // Optional collapse handler injected by the parent (App.svelte). When
   // present, a ‹ button appears in the sidebar header so the user can
@@ -207,7 +219,12 @@
   // by the host, bg-agent, scope, recency or search filters it arrived under
   // — nor by a work group's collapsed Done section when its link is archived.
   const focus = $derived($sessionFocus);
-  const viewHost = $derived(focus ? 'all' : $hostFilter);
+  // A focus asks for one session in the Sessions list: from the Work view
+  // (LinkReview / TidyReview render in both), go there to show it.
+  $effect(() => {
+    if (focus) untrack(() => sidebarView.set('sessions'));
+  });
+  const viewHost = $derived(focus ? 'all' : $effectiveHostFilter);
   const viewBg = $derived(focus ? true : $showBgAgents);
   const viewScope = $derived(focus ? null : scopeSel);
   const viewSearch = $derived(focus ? '' : searchQuery);
@@ -215,7 +232,10 @@
   // — persisted chips in SidebarFilters, applied through `rowMatches` and
   // composed with needs-you. A focused suggestion is past them too.
   const workFilterView = $derived(
-    effectiveWorkFilters($workFilters, $trackers, $sidebarGroupBy === 'work', statusNamesOf($sessions)),
+    withMineReady(
+      effectiveWorkFilters($workFilters, $trackers, $sidebarGroupBy === 'work', statusNamesOf($sessions)),
+      $mineLoaded,
+    ),
   );
   const workFilterCtx = $derived({ trackers: $trackers, mine: $mineItemIds });
   const workPredicate = $derived(workFilterPredicate(workFilterView, workFilterCtx));
@@ -235,14 +255,135 @@
       toRowFilters(workFilterView),
     );
   }
+  /** A past link shows: its host and scope are in view, and it passes the
+   *  work filters. One rule for a past-only group and a live group's Done,
+   *  which used to disagree on host and scope. */
+  function pastVisible(key: string, l: WorkLink): boolean {
+    return (
+      withinRecency(l.ended_at, recency, nowSec) &&
+      rowMatches(pastFilterRow(l), { host: $effectiveHostFilter, scope: $effectiveScope }) &&
+      pastPassesWorkFilters(key, l)
+    );
+  }
   const rowPredicate = $derived.by((): SessionPredicate => {
     if (focus) {
       const id = focus.id;
       return (s) => s.id === id;
     }
     const opts = attentionOpts;
-    return bothPredicates(needsYouOnly ? (s) => needsYou(s, opts) : null, workPredicate);
+    // Last active: by each session's own activity, in every section (it
+    // used to weigh only a project's newest session, and only in the tree).
+    const r = recency;
+    const recent: SessionPredicate = r === 'all' ? null : (s) => withinRecency(s.last_activity_at, r, opts.now);
+    return bothPredicates(bothPredicates(needsYouOnly ? (s) => needsYou(s, opts) : null, recent), workPredicate);
   });
+
+  // What narrows the list, for the empty state (the chrome shows the same
+  // facets as chips).
+  // ── Archived (hidden by default) ──
+  // Archived live sessions and past work stay out of the list until asked
+  // for; the list says how many it holds back under the other filters, and
+  // brings them all back in one click.
+  // Counted the way the list matches a search: a work group by its key, a
+  // project by owner / repo, a past-only group by its key or a link's name
+  // (any of which then shows every row in it), else the session itself.
+  // Matching each archived row on its own used to disagree with the list.
+  const archivedHidden = $derived.by((): number => {
+    if (focus || workFilterView.archived) return 0;
+    const shown: WorkFilters = { ...workFilterView, archived: true };
+    const opts = attentionOpts;
+    const r = recency;
+    const shownPred = bothPredicates(
+      bothPredicates(
+        needsYouOnly ? (s) => needsYou(s, opts) : null,
+        r === 'all' ? null : (s) => withinRecency(s.last_activity_at, r, opts.now),
+      ),
+      workFilterPredicate(shown, workFilterCtx),
+    );
+    const q = searchQuery.toLowerCase();
+    const isArchived = (s: SessionRow) => s.work?.archived_at != null;
+    const byWork =
+      $sidebarGroupBy === 'work'
+        ? buildSessionsByWork($sessions, viewHost, viewBg, shownPred, (s) => workKeyFor(s, branchById), viewScope)
+        : null;
+    let n = 0;
+    const liveKeys = new Set<string>();
+    const matchedKeys = new Set<string>();
+    for (const g of byWork?.groups ?? []) {
+      liveKeys.add(g.key);
+      if (!workGroupMatchesSearch(g, q)) continue;
+      matchedKeys.add(g.key);
+      n += g.sessions.filter(isArchived).length;
+    }
+    const keyed = byWork?.keyed;
+    const rest: SessionPredicate = (s) => !keyed?.has(s.id) && (!shownPred || shownPred(s));
+    const byProject = buildSessionsByProject($sessions, viewHost, viewBg, rest, viewScope);
+    for (const p of $projects) {
+      const rows = byProject.get(p.project.id) ?? [];
+      const archived = rows.filter(isArchived).length;
+      if (archived === 0) continue;
+      const hit =
+        !q ||
+        p.project.owner.toLowerCase().includes(q) ||
+        p.project.repo.toLowerCase().includes(q) ||
+        rows.some((s) => sessionMatchesSearch(s, q));
+      if (hit) n += archived;
+    }
+    for (const s of $sessions) {
+      if (s.project_id !== null || s.kind === 'external' || !isArchived(s)) continue;
+      if (!sessionVisible(s, viewHost, viewBg, rest, viewScope)) continue;
+      if (sessionMatchesSearch(s, q)) n++;
+    }
+    if (byWork && !needsYouOnly) {
+      const rf = toRowFilters(shown);
+      for (const [key, links] of $pastWork) {
+        const past = links.filter(
+          (l) =>
+            withinRecency(l.ended_at, r, nowSec) &&
+            rowMatches(pastFilterRow(l), { host: $effectiveHostFilter, scope: $effectiveScope }) &&
+            rowMatches({ ...pastFilterRow(l), ...pastWorkFields(key, l.item_id, workFilterCtx) }, rf),
+        );
+        if (past.length === 0) continue;
+        // A live group's past work sits in its Done row; a past-only group
+        // matches by its key or a link's name.
+        const hit = liveKeys.has(key)
+          ? matchedKeys.has(key)
+          : !q || key.toLowerCase().includes(q) || past.some((l) => (l.snap_name ?? '').toLowerCase().includes(q));
+        if (hit) n += past.length;
+      }
+    }
+    return n;
+  });
+  function setShowArchived(on: boolean) {
+    workFilters.update((f) => ({ ...f, archived: on }));
+  }
+
+  const listFacets = $derived(
+    focus
+      ? []
+      : sessionFacets({
+          scope: $scopeSelectorShown ? $effectiveScope : 'all',
+          scopeLabel:
+            $effectiveScope === UNASSIGNED ? 'Unassigned' : $scopes.find((x) => x.id === $effectiveScope)?.label,
+          host: $effectiveHostFilter,
+          recency,
+          search: searchQuery,
+          needsYou: needsYouOnly,
+          showBgAgents: $showBgAgents,
+          work: workFilterView,
+          trackerName: (id) => $trackers.find((t) => t.id === id)?.name,
+        }),
+  );
+  function clearListFilters() {
+    hostFilter.set('all');
+    scopeFilter.set('all');
+    recency = 'all';
+    search = '';
+    searchQuery = '';
+    needsYouOnly = false;
+    showBgAgents.set(true);
+    workFilters.set({ ...DEFAULT_WORK_FILTERS });
+  }
 
   // Multi-select for bulk Kill / Send prompt. Rows are toggled with
   // shift/cmd/ctrl-click, or with the checkboxes once select mode is on.
@@ -267,6 +408,20 @@
     selectMode = !selectMode;
     if (!selectMode) clearSelected();
   }
+  // Drop ids a filter now hides: a bulk Kill / Send must act only on rows
+  // the user can see (it used to reach rows a later filter had hidden).
+  const visibleIds = $derived.by(() => {
+    const ids = new Set<number>();
+    for (const list of filteredSessionsByProject.values()) for (const s of list) ids.add(s.id);
+    for (const g of workGroups) for (const s of g.sessions) ids.add(s.id);
+    for (const s of orphanSessions) ids.add(s.id);
+    return ids;
+  });
+  $effect(() => {
+    const vis = visibleIds;
+    const cur = untrack(() => selectedIds);
+    if ([...cur].some((id) => !vis.has(id))) selectedIds = new Set([...cur].filter((id) => vis.has(id)));
+  });
   // Drop ids whose rows left the store (killed / reaped) so the bulk bar
   // never counts phantoms.
   $effect(() => {
@@ -383,7 +538,7 @@
       const sess = $selectedSession;
       if (!sess) return;
       revealedId = sess.id;
-      if ($hostFilter !== 'all' && $hostFilter !== sess.host_alias) hostFilter.set('all');
+      if ($effectiveHostFilter !== 'all' && $effectiveHostFilter !== sess.host_alias) hostFilter.set('all');
       expandAndScrollTo(sess);
     });
   });
@@ -419,7 +574,7 @@
   // counters must keep reporting while a triage filter is active, and the
   // project sort must weigh every visible session, not just the filtered ones.
   const hostVisibleSessions = $derived(
-    $sessions.filter((s) => sessionVisible(s, $hostFilter, $showBgAgents, null, scopeSel)),
+    $sessions.filter((s) => sessionVisible(s, $effectiveHostFilter, $showBgAgents, null, scopeSel)),
   );
   // countNeedsYou() classifies each row, and classify() files an external
   // (Outside fleet) row as working/idle, so a read-only row never inflates
@@ -434,7 +589,6 @@
     sortProjectsBySeverity(
       $projects.filter(
         (p) =>
-          (focus !== null || matchesRecency(p, recency)) &&
           matchesSearch(p, viewSearch) &&
           sessionsForProject(p.project.id).length > 0,
       ),
@@ -510,18 +664,15 @@
     untrack(() => void loadPastWork(keys ? keys.split('\n') : []));
   });
   const pastOnlyGroups = $derived.by((): { key: string; links: WorkLink[] }[] => {
-    if ($sidebarGroupBy !== 'work' || focus) return [];
+    // Needs you lists live sessions only: past work never waits on you.
+    if ($sidebarGroupBy !== 'work' || focus || needsYouOnly) return [];
     const live = new Set(workGroups.map((g) => g.key));
     const q = searchQuery.toLowerCase();
     const out: { key: string; links: WorkLink[] }[] = [];
     for (const [key, links] of $pastWork) {
       if (live.has(key) || links.length === 0) continue;
       // Hosts (and scopes) outside the filter hide their past work too.
-      const shown = links.filter(
-        (l) =>
-          rowMatches(pastFilterRow(l), { host: $hostFilter, scope: $effectiveScope }) &&
-          pastPassesWorkFilters(key, l),
-      );
+      const shown = links.filter((l) => pastVisible(key, l));
       if (shown.length === 0) continue;
       if (
         q &&
@@ -599,7 +750,8 @@
       (s) =>
         s.project_id === null &&
         s.kind !== 'external' &&
-        sessionVisible(s, viewHost, viewBg, treePredicate, viewScope),
+        sessionVisible(s, viewHost, viewBg, treePredicate, viewScope) &&
+        sessionMatchesSearch(s, viewSearch.toLowerCase()),
     ),
   );
 
@@ -609,7 +761,9 @@
   const outsideFleet = $derived(
     focus
       ? []
-      : buildOutsideFleet($sessions, $hostFilter, scopeSel).filter((s) => !workPredicate || workPredicate(s)),
+      : buildOutsideFleet($sessions, $effectiveHostFilter, scopeSel).filter(
+          (s) => (!rowPredicate || rowPredicate(s)) && sessionMatchesSearch(s, viewSearch.toLowerCase()),
+        ),
   );
 
   // Picker for the footer "+ New session" — shows ALL projects regardless
@@ -1005,30 +1159,6 @@
     />
   {/snippet}
 
-  <!-- Work graph M14: two projections of one graph — Sessions (host /
-       project → session → its tasks) and Work (org → group → task → its
-       sessions). ⌘⇧W / Ctrl+Shift+W flips them. -->
-  <div class="view-switch" role="tablist" aria-label="Sidebar view" data-testid="sidebar-view-switch">
-    <button
-      class="btn btn--chip btn--toggle"
-      role="tab"
-      aria-selected={$sidebarView === 'sessions'}
-      class:is-active={$sidebarView === 'sessions'}
-      data-testid="sidebar-view-sessions"
-      title={`Sessions (${workViewChord})`}
-      onclick={() => sidebarView.set('sessions')}>Sessions</button
-    >
-    <button
-      class="btn btn--chip btn--toggle"
-      role="tab"
-      aria-selected={$sidebarView === 'work'}
-      class:is-active={$sidebarView === 'work'}
-      data-testid="sidebar-view-work"
-      title={`Work: organisation → group → task → its sessions (${workViewChord})`}
-      onclick={() => sidebarView.set('work')}>Work</button
-    >
-  </div>
-
   <!-- The shared chrome (Refresh, Needs you, bulk actions, Tasks, Settings,
        Attention) stays in both views; only the list below swaps. -->
   <SidebarFilters
@@ -1144,7 +1274,7 @@
               {#each split.live as sess (sess.id)}
                 {@render sessionRow(sess, false, true)}
               {/each}
-              {@const past = ($pastWork.get(g.key) ?? []).filter((l) => pastPassesWorkFilters(g.key, l))}
+              {@const past = needsYouOnly || focus ? [] : ($pastWork.get(g.key) ?? []).filter((l) => pastVisible(g.key, l))}
               {#if past.length + split.archived.length > 0}
                 <div
                   class="done-row"
@@ -1271,12 +1401,23 @@
         {/each}
       </ul>
     {:else if !loadError && orphanSessions.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
-      <p class="empty" data-testid="sidebar-empty">
-        {hubSkewEmptyMessage ??
-          ($projects.length === 0
-            ? 'No projects yet. Set a projects base in Settings → Projects, or click ↻ to scan.'
-            : 'No active sessions. Click + below to start one.')}
-      </p>
+      {#if !hubSkewEmptyMessage && listFacets.length > 0 && $projects.length > 0}
+        <!-- Filters hide every row: say which, and offer the way back,
+             instead of "no sessions" over a fleet that has some. -->
+        <div class="empty filtered-empty" data-testid="sidebar-empty">
+          <p>No sessions match <strong>{facetSentence(listFacets)}</strong>.</p>
+          <button type="button" class="btn btn--quiet is-bounded" data-testid="sidebar-empty-clear" onclick={clearListFilters}
+            >Clear filters</button
+          >
+        </div>
+      {:else}
+        <p class="empty" data-testid="sidebar-empty">
+          {hubSkewEmptyMessage ??
+            ($projects.length === 0
+              ? 'No projects yet. Set a projects base in Settings → Projects, or click ↻ to scan.'
+              : 'No active sessions. Click + below to start one.')}
+        </p>
+      {/if}
     {/if}
 
     {#if orphanSessions.length > 0}
@@ -1285,6 +1426,22 @@
         {#each orphanSessions as sess (sess.id)}
           {@render sessionRow(sess)}
         {/each}
+      </div>
+    {/if}
+
+    {#if archivedHidden > 0 || ($workFilters.archived && !focus)}
+      <div class="archived-row" data-testid="archived-row">
+        {#if $workFilters.archived}
+          <span>Showing archived work</span>
+          <button class="btn btn--quiet" type="button" data-testid="archived-toggle" onclick={() => setShowArchived(false)}
+            >Hide archived</button
+          >
+        {:else}
+          <span>{archivedHidden} archived hidden</span>
+          <button class="btn btn--quiet" type="button" data-testid="archived-toggle" onclick={() => setShowArchived(true)}
+            >Show archived</button
+          >
+        {/if}
       </div>
     {/if}
 
@@ -1484,13 +1641,6 @@
 {/if}
 
 <style>
-  .view-switch {
-    flex: 0 0 auto;
-    display: flex;
-    gap: 0.25rem;
-    padding: 0.4rem 0.6rem 0;
-    background: var(--bg-pane);
-  }
   .sidebar {
     display: flex;
     flex-direction: column;
@@ -1690,6 +1840,20 @@
   }
 
   .empty { color: var(--fg-muted); font-size: 0.85rem; padding: 0.5rem 0.4rem; }
+  .archived-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 6px 0.4rem 4px;
+    padding: 4px 2px;
+    border-top: 1px dashed var(--border);
+    color: var(--fg-muted);
+    font-size: var(--control-font);
+  }
+  .archived-row span { flex: 1; }
+  .filtered-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+  .filtered-empty p { margin: 0; }
+  .filtered-empty strong { color: var(--fg); font-weight: 500; }
   .pad { padding: 0.5rem 0.6rem; }
 
   .orphan-section {

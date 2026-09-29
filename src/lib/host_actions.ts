@@ -7,6 +7,7 @@
 import { writable } from 'svelte/store';
 import { requestCloseHosts } from './app_views';
 import { hideHost, hostFilter, probeHost, type HostRow } from './hosts';
+import { sidebarView } from './work_view';
 import {
   listHostTokens,
   rotateHostToken,
@@ -88,5 +89,7 @@ export async function hideHostWithUndo(alias: string): Promise<Result<HostRow>> 
  */
 export function viewHostSessions(alias: string): void {
   hostFilter.set(alias);
+  // The host filter narrows the Sessions list, not the Work view.
+  sidebarView.set('sessions');
   requestCloseHosts();
 }

@@ -29,7 +29,9 @@
       "items": [
         {
           "type": "field",
-          "key": "decide.jev.work_link"
+          "key": "decide.jev.work_link",
+          "widget": "readonly",
+          "hint": "An offline benchmark only until J1 passes its acceptance lines (D32)."
         },
         {
           "type": "field",

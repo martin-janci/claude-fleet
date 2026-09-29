@@ -21,6 +21,7 @@
 //! | 9 | errors | 401, 403 on one view, 429 + Retry-After, offline, garbage |
 //! | 10 | no secret | in any `Debug`, request line, snapshot or error |
 //! | 11 | write | only a `caps.write` provider writes: one idempotent PR remote link, 429 / 403 mapped, a bad key sends nothing |
+//! | 12 | describe | `caps.describe` is what `Expect::describe` declares; such a provider answers the full text (capped at DESCRIBE_MAX_CHARS, with its true length), any other answers `None` without a request |
 //!
 //! **Snapshot golden.** Scenario 2 compares the normalised listing with
 //! `testdata/<provider>/golden_list.json`, so a provider API change shows
@@ -81,6 +82,11 @@ pub struct Expect {
     /// The credential's secret literal; `None` for a provider that holds
     /// none (GitHub through `gh`).
     pub secret: Option<&'static str>,
+    /// Whether the adapter serves `describe` (scenario 12). Declared here,
+    /// not read off the adapter, so flipping `caps.describe` either way is a
+    /// visible change to its conformance: a `true` must script a real
+    /// answer ([`Harness::script_describe`]), a `false` must answer `None`.
+    pub describe: bool,
 }
 
 /// One adapter's side of the suite.
@@ -110,6 +116,20 @@ pub trait Harness: Send + Sync {
     /// (`probe` for Unauthorized and Offline, `list` of `expect().view` for
     /// the rest).
     fn script_error(&self, f: &FakeTransport, case: ErrorCase);
+    /// Scenario 12: script `f` so the adapter's `describe` of
+    /// [`Harness::describe_ref`] answers a description past
+    /// [`super::DESCRIPTION_MAX_CHARS`]. The default scripts nothing, which
+    /// is right only for an adapter with `Expect::describe == false` — the
+    /// real adapter is always the one asked, so a `describe: true` adapter
+    /// that forgot to script fails the scenario instead of passing it
+    /// against a stand-in.
+    fn script_describe(&self, _f: &FakeTransport) {}
+    /// The reference `describe` is asked about in scenario 12, parsed by
+    /// [`ItemRef::parse`]. For a `describe: false` adapter any reference will
+    /// do: it must answer `None` without sending anything.
+    fn describe_ref(&self) -> &'static str {
+        "NONE-0"
+    }
 }
 
 fn fixture_dir(name: &str) -> String {
@@ -230,6 +250,38 @@ pub async fn list<H: Harness>(h: &H) {
             h.name(),
             i.external_id
         );
+        // The excerpt and its true length: what `lookup`'s "shown N of M"
+        // notice is computed from. Reported whenever there is an excerpt,
+        // never below it, and above it only when the excerpt was really cut
+        // (else the notice would claim a cut nothing made).
+        if let Some(d) = &i.description {
+            let shown = d.chars().count();
+            assert!(
+                shown <= super::DESCRIPTION_MAX_CHARS,
+                "{}: {} excerpt of {shown} chars",
+                h.name(),
+                i.external_id
+            );
+            let full = i.description_chars.unwrap_or_else(|| {
+                panic!(
+                    "{}: {} has an excerpt but no length",
+                    h.name(),
+                    i.external_id
+                )
+            });
+            assert!(
+                full >= shown as i64,
+                "{}: {} reports {full} chars for a {shown}-char excerpt",
+                h.name(),
+                i.external_id
+            );
+            assert!(
+                full == shown as i64 || shown == super::DESCRIPTION_MAX_CHARS,
+                "{}: {} claims {full} chars but its {shown}-char excerpt was not cut",
+                h.name(),
+                i.external_id
+            );
+        }
     }
     let got = Value::Array(items.iter().map(snapshot_json).collect());
     let path = format!("{}/golden_list.json", fixture_dir(h.name()));
@@ -618,6 +670,59 @@ pub async fn write<H: Harness>(h: &H) {
     );
 }
 
+/// Scenario 12 (work graph M6.0's describe capability): the REAL adapter's
+/// `caps.describe` is what [`Expect::describe`] declares. A describe adapter
+/// answers the full text — cut nowhere near [`DESCRIPTION_MAX_CHARS`],
+/// capped only at [`super::DESCRIBE_MAX_CHARS`], with a true length at least
+/// that long. Any other must answer `None` (so `work { describe }` refuses
+/// and the notice says *open the ticket*) without sending a request.
+pub async fn describe<H: Harness>(h: &H) {
+    let f = FakeTransport::new();
+    h.script_describe(&f);
+    let p = h.provider(&f);
+    assert_eq!(
+        p.caps().describe,
+        h.expect().describe,
+        "{}: caps.describe is not what the harness declares",
+        h.name()
+    );
+    let out = p
+        .describe(&ItemRef::parse(h.describe_ref()))
+        .await
+        .unwrap_or_else(|e| panic!("{}: describe failed: {e:?}", h.name()));
+    if p.caps().describe {
+        let full = out.unwrap_or_else(|| panic!("{}: a describe provider answers", h.name()));
+        let n = full.text.chars().count();
+        assert!(
+            full.chars >= n as i64,
+            "{}: true length {} below the {n} chars served",
+            h.name(),
+            full.chars
+        );
+        assert!(
+            n > super::DESCRIPTION_MAX_CHARS,
+            "{}: only {n} chars, not past the excerpt cap",
+            h.name()
+        );
+        assert!(
+            n <= super::DESCRIBE_MAX_CHARS,
+            "{}: {n} chars exceeds DESCRIBE_MAX_CHARS",
+            h.name()
+        );
+    } else {
+        assert!(
+            out.is_none(),
+            "{}: a provider without the cap must answer None",
+            h.name()
+        );
+        assert!(
+            f.requests().is_empty(),
+            "{}: a provider without the cap sends nothing",
+            h.name()
+        );
+    }
+}
+
 /// Expand to one `#[tokio::test]` per scenario for `$harness` (an
 /// expression of a type implementing [`Harness`]).
 #[macro_export]
@@ -669,6 +774,10 @@ macro_rules! conformance_suite {
             #[tokio::test]
             async fn c11_write() {
                 c::write(&$harness).await
+            }
+            #[tokio::test]
+            async fn c12_describe() {
+                c::describe(&$harness).await
             }
         }
     };

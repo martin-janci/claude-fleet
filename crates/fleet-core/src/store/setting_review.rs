@@ -1,5 +1,5 @@
 //! Settings proposals and the settings audit trail (declarative pages P5,
-//! migration 072). The rules live in `service::settings::review`; this is
+//! migration 082). The rules live in `service::settings::review`; this is
 //! the rows.
 
 use super::{now_unix, Store};

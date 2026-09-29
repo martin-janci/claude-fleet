@@ -123,7 +123,7 @@ describe('WorkTree', () => {
     render(WorkTree);
     await flush();
     const first = treeCalls()[0];
-    expect(first).toEqual({ filters: {}, limit: 50 });
+    expect(first).toEqual({ filters: { archived: false }, limit: 50 });
     const orgs = screen.getAllByTestId('work-org');
     expect(orgs.map((o) => within(o).getByTestId('work-org-head').textContent?.replace(/\s+/g, ' ').trim())).toEqual([
       '▸ Acme 5',
@@ -157,12 +157,12 @@ describe('WorkTree', () => {
     await fireEvent.click(heads[1]);
     await flush();
     const sec = treeCalls().at(-1)!;
-    expect(sec).toEqual({ filters: { org: 1, group: 'label:Payments' }, limit: 50 });
+    expect(sec).toEqual({ filters: { org: 1, group: 'label:Payments', archived: false }, limit: 50 });
     const group = screen.getAllByTestId('work-group')[1];
     expect(within(group).getAllByTestId('work-task').map((t) => t.getAttribute('data-task-id'))).toEqual(['item:30', 'item:31']);
     await fireEvent.click(within(group).getByTestId('work-load-more'));
     await flush();
-    expect(treeCalls().at(-1)).toEqual({ filters: { org: 1, group: 'label:Payments' }, cursor: 'pay2', limit: 50 });
+    expect(treeCalls().at(-1)).toEqual({ filters: { org: 1, group: 'label:Payments', archived: false }, cursor: 'pay2', limit: 50 });
     expect(within(group).getAllByTestId('work-task').map((t) => t.getAttribute('data-task-id'))).toEqual([
       'item:30',
       'item:31',
@@ -233,13 +233,39 @@ describe('WorkTree', () => {
     expect(screen.getByTestId('work-tree-error').textContent).toContain(NEWER_HUB);
   });
 
+  it('archived tasks: hidden by default with a count, one click shows them, and back', async () => {
+    treeImpl = (a) => ({ ...firstPage, archived_hidden: a.filters?.archived ? 0 : 5 });
+    render(WorkTree);
+    await flush();
+    expect(treeCalls().at(-1)?.filters).toEqual({ archived: false });
+    expect(screen.getByTestId('work-archived-row').textContent).toContain('5 archived tasks hidden');
+    await fireEvent.click(screen.getByTestId('work-archived-toggle'));
+    await flush();
+    expect(get(workViewFilters)).toEqual({ archived: true });
+    expect(treeCalls().at(-1)?.filters).toEqual({ archived: true });
+    expect(screen.getByTestId('work-archived-row').textContent).toContain('Showing archived tasks');
+    await fireEvent.click(screen.getByTestId('work-archived-toggle'));
+    await flush();
+    expect(get(workViewFilters)).toEqual({});
+  });
+
+  it('when every match is archived, the empty state offers them', async () => {
+    treeImpl = (a) => (a.filters?.archived ? firstPage : { ...firstPage, tasks: [], groups: [], total: 0, archived_hidden: 2 });
+    render(WorkTree);
+    await flush();
+    expect(screen.getByTestId('work-tree-empty').textContent).not.toContain('No work yet');
+    await fireEvent.click(screen.getByTestId('work-archived-toggle'));
+    await flush();
+    expect(screen.getAllByTestId('work-task')).toHaveLength(2);
+  });
+
   it('filters reload the view; work:changed re-reads it once, debounced', async () => {
     render(WorkTree, { debounceMs: 5 });
     await flush();
     const n = treeCalls().length;
     workViewFilters.set({ status: 'open' });
     await flush();
-    expect(treeCalls().at(-1)).toEqual({ filters: { status: 'open' }, limit: 50 });
+    expect(treeCalls().at(-1)).toEqual({ filters: { status: 'open', archived: false }, limit: 50 });
     const m = treeCalls().length;
     expect(m).toBe(n + 1);
     bumpWorkChanged();
@@ -265,7 +291,7 @@ describe('WorkTree', () => {
     showTaskInWorkView('item:31');
     await flush();
     await flush();
-    expect(treeCalls().at(-1)).toEqual({ filters: { org: 1, group: 'label:Payments' }, limit: 50 });
+    expect(treeCalls().at(-1)).toEqual({ filters: { org: 1, group: 'label:Payments', archived: false }, limit: 50 });
     expect(screen.getByText('Receipts')).toBeTruthy();
     expect(get(workExpanded).custom?.['1|label:Payments']).toBe(true);
     expect(get(selectedTaskId)).toBe('item:31');
@@ -285,7 +311,7 @@ describe('WorkTree', () => {
     render(WorkTree);
     await flush();
     await flush();
-    expect(treeCalls().at(-1)).toEqual({ filters: { org: 1, group: 'label:Payments' }, limit: 50 });
+    expect(treeCalls().at(-1)).toEqual({ filters: { org: 1, group: 'label:Payments', archived: false }, limit: 50 });
     expect(screen.getByText('Receipts')).toBeTruthy();
     expect(get(workExpanded).custom?.['1|label:Payments']).toBe(true);
     // Consumed: a later mount does not reveal it again.
@@ -325,5 +351,84 @@ describe('WorkTree', () => {
     expect(screen.queryByTestId('work-section-loading')).toBeNull();
     expect(ids()).toEqual(['item:30', 'item:31']);
     expect(within(group()).getByTestId('work-load-more')).toBeTruthy();
+  });
+  it('a failed refresh keeps the tree shown, with a line to retry; new filters that fail show the error', async () => {
+    render(WorkTree, { debounceMs: 5 });
+    await flush();
+    const ids = () => screen.getAllByTestId('work-task').map((t) => t.getAttribute('data-task-id'));
+    expect(ids()).toEqual(['item:12', 'item:13']);
+    treeImpl = () => {
+      throw { code: 'E_HUB_DOWN', message: 'hub unreachable' };
+    };
+    bumpWorkChanged();
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    expect(ids()).toEqual(['item:12', 'item:13']);
+    expect(screen.queryByTestId('work-tree-error')).toBeNull();
+    expect(screen.getByTestId('work-tree-refresh-error').textContent).toContain('hub unreachable');
+    // Other filters: what is shown is not theirs, so the error replaces it.
+    workViewFilters.set({ mine: true });
+    await flush();
+    expect(screen.getByTestId('work-tree-error').textContent).toContain('hub unreachable');
+  });
+
+  it('a refresh re-reads a section in pages up to what was loaded, past one page', async () => {
+    const PAY_BIG = { ...firstPage.groups[1], count: 300 };
+    const payTasks = Array.from({ length: 300 }, (_, i) =>
+      task({ task_id: `item:${1000 + i}`, key: `PAY-${i}`, title: `t${i}`, group: PAY, sessions: [] }),
+    );
+    treeImpl = (a) => {
+      const page = { ...firstPage, groups: [firstPage.groups[0], PAY_BIG, firstPage.groups[2]] };
+      if (a.filters?.group !== 'label:Payments') return page;
+      const from = a.cursor ? Number(a.cursor) : 0;
+      const to = Math.min(payTasks.length, from + (a.limit ?? 50));
+      return { ...page, tasks: payTasks.slice(from, to), next_cursor: to < payTasks.length ? String(to) : null };
+    };
+    render(WorkTree, { debounceMs: 5, pageSize: 200 });
+    await flush();
+    await fireEvent.click(screen.getAllByTestId('work-group-head')[1]);
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-load-more'));
+    await flush();
+    const payGroup = () => screen.getAllByTestId('work-group')[1];
+    expect(within(payGroup()).getAllByTestId('work-task')).toHaveLength(300);
+    const before = treeCalls().length;
+    bumpWorkChanged();
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    const reads = treeCalls().slice(before).filter((a) => a.filters?.group === 'label:Payments');
+    expect(reads.map((a) => [a.cursor ?? null, a.limit])).toEqual([
+      [null, 200],
+      ['200', 100],
+    ]);
+    expect(within(payGroup()).getAllByTestId('work-task')).toHaveLength(300);
+  });
+
+  it('a steady stream of changes still refreshes within the max wait', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      render(WorkTree, { debounceMs: 500, maxWaitMs: 3000 });
+      await flush();
+      const reads = () => treeCalls().filter((a) => !a.filters?.group).length;
+      expect(reads()).toBe(1);
+      // A change every 200 ms: a trailing-only debounce would never fire.
+      for (let i = 0; i < 14; i++) {
+        bumpWorkChanged();
+        vi.advanceTimersByTime(200);
+        await flush();
+      }
+      expect(reads()).toBe(1);
+      bumpWorkChanged();
+      vi.advanceTimersByTime(200);
+      await flush();
+      expect(reads()).toBe(2);
+      // And once quiet, one trailing read.
+      bumpWorkChanged();
+      vi.advanceTimersByTime(500);
+      await flush();
+      expect(reads()).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

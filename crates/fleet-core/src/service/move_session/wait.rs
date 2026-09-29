@@ -21,7 +21,7 @@ use super::{
 };
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::settings;
-use crate::service::tasks::{wait_for_session_with, WaitCond};
+use crate::service::tasks::{wait_for_session_probed, WaitCond, STALE_PANE_PROBE_EVERY};
 use crate::ssh::SshExec;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -338,9 +338,18 @@ pub(super) async fn run_wait_with(
             break WaitEnd::TimedOut;
         }
         let left = Duration::from_secs((deadline_unix - now) as u64).min(slice);
+        let probe = super::HooksPaneProbe { hooks, store };
         let idle = tokio::select! {
             _ = token.cancelled() => break WaitEnd::Cancelled,
-            r = wait_for_session_with(store, args.session_id, WaitCond::Idle, left, poll) => r,
+            r = wait_for_session_probed(
+                store,
+                args.session_id,
+                WaitCond::Idle,
+                left,
+                poll,
+                &probe,
+                STALE_PANE_PROBE_EVERY,
+            ) => r,
         };
         match idle {
             Err(e) if e.code == codes::E_NOTFOUND => break WaitEnd::SessionGone,

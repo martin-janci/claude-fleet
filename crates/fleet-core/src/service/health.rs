@@ -89,6 +89,11 @@ pub struct Health {
     /// can be told from "nothing configured".
     #[serde(default)]
     pub peer_links_total: u32,
+    /// Per-host health (host identity & health, task 2): disk, versions,
+    /// agent and hook liveness, judged against `health.*` settings.
+    /// Per-field default: an older hub omits it.
+    #[serde(default)]
+    pub hosts: Vec<HostHealthRow>,
 }
 
 /// `fleet_health.hub`: this process's uptime and its last reconcile pass.
@@ -131,6 +136,152 @@ fn hub_health() -> HubHealth {
         started_at: t.started_at(),
         uptime_secs: t.uptime_secs(),
         reconcile: t.reconcile(),
+    }
+}
+
+/// One host in [`Health::hosts`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct HostHealthRow {
+    pub alias: String,
+    pub reachable: bool,
+    pub transport: String,
+    pub claude_version: Option<String>,
+    pub claude_version_at: Option<i64>,
+    /// From the live registry when connected, else the stored hello.
+    pub agent_version: Option<String>,
+    /// Used percent of `$HOME`'s filesystem, when sampled.
+    pub disk_home_pct: Option<u8>,
+    pub disk_low: bool,
+    /// More than `health.claude_max_behind` patch releases behind the
+    /// fleet's newest FRESH version.
+    pub claude_behind: bool,
+    /// An agent host whose agent is not the hub's version.
+    pub agent_behind: bool,
+    /// Reachable, has a live non-external session, and no hook from its
+    /// token within `hooks_silent_secs`.
+    pub hooks_silent: bool,
+}
+
+/// The `health.*` thresholds [`hosts_health`] judges against.
+pub struct HostHealthThresholds {
+    pub disk_low_pct: u8,
+    pub claude_max_behind: i64,
+    pub hooks_silent_secs: i64,
+}
+
+/// A version stamp young enough to compare: the same 24 h the desktop's
+/// `health.version_max_age_secs` defaults to.
+const VERSION_FRESH_SECS: i64 = 86_400;
+
+/// `2.1.282` → `[2, 1, 282]`; `None` when not a dotted number.
+fn version_parts(v: &str) -> Option<Vec<i64>> {
+    let first = v.split_whitespace().next()?;
+    first.split('.').map(|p| p.parse::<i64>().ok()).collect()
+}
+
+/// Patch releases `older` is behind `newest`, when both share major.minor;
+/// a different major.minor is "very far" behind (or not behind at all).
+fn patch_behind(older: &str, newest: &str) -> Option<i64> {
+    let (o, n) = (version_parts(older)?, version_parts(newest)?);
+    if o.len() < 3 || n.len() < 3 || o[0] != n[0] || o[1] != n[1] {
+        return Some(if o < n { i64::MAX } else { 0 });
+    }
+    Some((n[2] - o[2]).max(0))
+}
+
+/// Pure: the per-host roll-up. `agents` are `(alias, agent_version)` for
+/// the agents connected right now; `hub_version` is this build's.
+pub fn hosts_health(
+    hosts: &[HostRow],
+    sessions: &[SessionRow],
+    t: &HostHealthThresholds,
+    agents: &[(String, String)],
+    hub_version: &str,
+    now: i64,
+) -> Vec<HostHealthRow> {
+    let fresh = |h: &HostRow| {
+        h.claude_version_at
+            .is_some_and(|at| now - at <= VERSION_FRESH_SECS)
+    };
+    let newest = hosts
+        .iter()
+        .filter(|h| fresh(h))
+        .filter_map(|h| h.claude_version.clone())
+        .filter(|v| version_parts(v).is_some())
+        .max_by(|a, b| version_parts(a).cmp(&version_parts(b)));
+    hosts
+        .iter()
+        .filter(|h| !h.hidden)
+        .map(|h| {
+            let disk_home_pct = match (h.disk_home_free_kb, h.disk_home_total_kb) {
+                (Some(free), Some(total)) if total > 0 => {
+                    // Rounded, like the desktop meter: 97.6 % reads as 98.
+                    Some((((total - free).max(0) * 100 + total / 2) / total).min(100) as u8)
+                }
+                _ => None,
+            };
+            let live = agents
+                .iter()
+                .find(|(a, _)| a == &h.alias)
+                .map(|(_, v)| v.clone());
+            let agent_version = live.or_else(|| h.agent_version.clone());
+            let has_live_session = sessions
+                .iter()
+                .any(|s| s.host_alias == h.alias && s.status != "ghost" && s.kind != "external");
+            HostHealthRow {
+                alias: h.alias.clone(),
+                reachable: h.reachable,
+                transport: h.transport.clone(),
+                claude_version: h.claude_version.clone(),
+                claude_version_at: h.claude_version_at,
+                agent_version: agent_version.clone(),
+                disk_home_pct,
+                disk_low: disk_home_pct.is_some_and(|p| p >= t.disk_low_pct),
+                claude_behind: match (&newest, &h.claude_version) {
+                    (Some(n), Some(v)) if fresh(h) => {
+                        patch_behind(v, n).is_some_and(|b| b > t.claude_max_behind)
+                    }
+                    _ => false,
+                },
+                agent_behind: agent_behind(&h.transport, agent_version.as_deref(), hub_version),
+                hooks_silent: h.reachable
+                    && has_live_session
+                    && h.last_hook_at
+                        .is_none_or(|at| now - at > t.hooks_silent_secs),
+            }
+        })
+        .collect()
+}
+
+fn agent_behind(transport: &str, agent_version: Option<&str>, hub_version: &str) -> bool {
+    transport == "agent" && agent_version.is_some_and(|v| v != hub_version)
+}
+
+/// Overlay the agents connected right now onto [`Health::hosts`]: the live
+/// registry's version outranks the stored hello, and `agent_behind` is
+/// judged again against `hub_version`.
+pub fn overlay_agents(rows: &mut [HostHealthRow], agents: &[(String, String)], hub_version: &str) {
+    for row in rows.iter_mut() {
+        if let Some((_, v)) = agents.iter().find(|(a, _)| a == &row.alias) {
+            row.agent_version = Some(v.clone());
+            row.agent_behind = agent_behind(&row.transport, Some(v), hub_version);
+        }
+    }
+}
+
+/// The `health.*` host thresholds in force.
+pub fn host_thresholds(s: &Store) -> HostHealthThresholds {
+    use crate::service::settings::{
+        get_string, HEALTH_CLAUDE_MAX_BEHIND, HEALTH_DISK_LOW_PCT, HEALTH_HOOKS_SILENT_SECS,
+    };
+    HostHealthThresholds {
+        disk_low_pct: get_string(s, HEALTH_DISK_LOW_PCT).parse().unwrap_or(90),
+        claude_max_behind: get_string(s, HEALTH_CLAUDE_MAX_BEHIND)
+            .parse()
+            .unwrap_or(30),
+        hooks_silent_secs: get_string(s, HEALTH_HOOKS_SILENT_SECS)
+            .parse()
+            .unwrap_or(3600),
     }
 }
 
@@ -520,6 +671,16 @@ pub fn health_from_store(s: &Store) -> Health {
         hub: Some(hub_health()),
         tunnels_mode: Some(tunnels_mode(s)),
         peer_links_total: s.peer_links_total().unwrap_or_default(),
+        // The live agents are overlaid by `fleet_health`, which holds the
+        // registry; from the store alone the stored hello is what there is.
+        hosts: hosts_health(
+            &hosts,
+            &sessions,
+            &host_thresholds(s),
+            &[],
+            crate::app_version::get(),
+            now_unix(),
+        ),
     }
 }
 
@@ -639,6 +800,7 @@ pub fn health_check(store: &Mutex<Store>) -> Health {
             hub: None,
             tunnels_mode: None,
             peer_links_total: 0,
+            hosts: Vec::new(),
         },
     }
 }
@@ -695,6 +857,7 @@ mod tests {
             turn_seq: 0,
             last_stop_at: None,
             stale_working_at: None,
+            work_rev: 0,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),
@@ -725,7 +888,89 @@ mod tests {
             provisioned: false,
             transport: "ssh".to_string(),
             org_id: None,
+            claude_version_at: None,
+            disk_home_free_kb: None,
+            disk_home_total_kb: None,
+            disk_tmp_free_kb: None,
+            load_1m: None,
+            mem_avail_kb: None,
+            uptime_secs: None,
+            health_at: None,
+            last_hook_at: None,
+            agent_version: None,
+            provisioned_at: None,
+            provision_stale: false,
         }
+    }
+
+    fn session_on(host: &str, status: Option<&str>) -> SessionRow {
+        let mut s = session(status, None, None);
+        s.host_alias = host.to_string();
+        s
+    }
+
+    #[test]
+    fn hosts_health_flags_disk_claude_agent_and_silent_hooks() {
+        let now = 1_700_000_000;
+        let mut full = host("full", true);
+        full.disk_home_free_kb = Some(3_600_000);
+        full.disk_home_total_kb = Some(150_000_000);
+        full.claude_version = Some("2.1.214".into());
+        full.claude_version_at = Some(now - 60);
+        full.transport = "agent".into();
+        full.agent_version = Some("0.2.26".into());
+        full.last_hook_at = Some(now - 7200);
+        let mut fine = host("fine", true);
+        fine.disk_home_free_kb = Some(72_000_000);
+        fine.disk_home_total_kb = Some(96_000_000);
+        fine.claude_version = Some("2.1.282".into());
+        fine.claude_version_at = Some(now - 60);
+        fine.last_hook_at = Some(now - 60);
+        let sessions = vec![
+            session_on("full", Some("working")),
+            session_on("fine", Some("idle")),
+        ];
+        let rows = hosts_health(
+            &[full, fine],
+            &sessions,
+            &HostHealthThresholds {
+                disk_low_pct: 90,
+                claude_max_behind: 30,
+                hooks_silent_secs: 3600,
+            },
+            &[("full".to_string(), "0.2.26".to_string())],
+            "0.3.1",
+            now,
+        );
+        let full = rows.iter().find(|r| r.alias == "full").unwrap();
+        assert_eq!(full.disk_home_pct, Some(98));
+        assert!(full.disk_low);
+        assert!(
+            full.claude_behind,
+            "2.1.214 is 68 patch releases behind 2.1.282"
+        );
+        assert!(full.agent_behind, "0.2.26 on a 0.3.1 hub");
+        assert!(full.hooks_silent, "a working session and no hook for 2 h");
+        assert_eq!(full.agent_version.as_deref(), Some("0.2.26"));
+        let fine = rows.iter().find(|r| r.alias == "fine").unwrap();
+        assert_eq!(fine.disk_home_pct, Some(25));
+        assert!(!fine.disk_low && !fine.claude_behind && !fine.agent_behind && !fine.hooks_silent);
+    }
+
+    /// The live registry outranks the stored hello: an agent that
+    /// reconnected on the hub's version is no longer behind.
+    #[test]
+    fn overlay_agents_takes_the_live_version_over_the_stored_hello() {
+        let mut rows = vec![HostHealthRow {
+            alias: "trn".into(),
+            transport: "agent".into(),
+            agent_version: Some("0.2.26".into()),
+            agent_behind: true,
+            ..Default::default()
+        }];
+        overlay_agents(&mut rows, &[("trn".into(), "0.3.1".into())], "0.3.1");
+        assert_eq!(rows[0].agent_version.as_deref(), Some("0.3.1"));
+        assert!(!rows[0].agent_behind);
     }
 
     /// F8: two `-term` shells were `by_status.unknown = 2`, a third said
@@ -904,6 +1149,9 @@ mod tests {
         let id = store
             .upsert_session("t", "alpha", None, None, 1, 1, "running", None)
             .unwrap();
+        // One clock read: a UTC midnight between seeding and asserting
+        // must not move the expected day.
+        let now = now_unix();
         store
             .apply_usage(
                 id,
@@ -920,8 +1168,9 @@ mod tests {
                     source: "x.jsonl".into(),
                     last_msg_id: None,
                     last_msg_usage: None,
-                    now: now_unix(),
+                    now,
                     by_day: Vec::new(),
+                    backfill_until: None,
                 },
             )
             .unwrap();
@@ -931,7 +1180,7 @@ mod tests {
         assert_eq!(h.usage_by_day[0].totals.input_tokens, 7);
         assert_eq!(
             h.usage_by_day[0].day,
-            usage::day_string(now_unix().div_euclid(86_400))
+            usage::day_string(now.div_euclid(86_400))
         );
         let v = serde_json::to_value(&h).unwrap();
         assert_eq!(v["usage_by_day"][0]["cost_micros"], 35);
@@ -1016,6 +1265,7 @@ mod tests {
             hub: None,
             tunnels_mode: None,
             peer_links_total: 0,
+            hosts: Vec::new(),
         })
         .expect("Health serialises");
         let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");

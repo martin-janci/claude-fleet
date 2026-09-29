@@ -241,3 +241,10 @@ M14.0 ──► M14.1a ──► M14.1b ──► M14.1c ──► M14.1d
 - 2026-09-27 (M14.0): *Facts* corrected. The branch holds four commits, not one: after `defe19c3` came `fc61943` (the `fleet_health` fence for org-bound clients), `11606ea` (a WIP desktop Work view UI, +7,225) and `5988203` (its review fixes), so "the desktop Work view does not exist yet" was wrong; it exists on the branch, unfinished. The header now says M14.0 (not M14.1) brings the spec to `main`, and M14.0's task list says D31–D36 are answered, not proposed. Everything else in *Facts* re-checked at `f10d0b92` and true: 36 commits behind, based on `be0e2bc5`; migrations 061–064 taken, 065 next; `BUDGET_BYTES` 59,114 on the branch vs 57,050; `CONTRACT_REVISION` 4 on both; Part R is steps 60–72 on the branch; 0 of 59 acceptance results filled.
 - 2026-09-27: the owner answered D31 (per-org setting, default on), D32–D35 (defaults) and D36 (yes; this session drives M14).
 - 2026-09-27: written at `main` `f10d0b92`, from the spec and the backend commit on `claude/fleet-dynamic-work-view-kwc3r9` (`defe19c3`).
+- 2026-09-28 (truth pass, `main` `378b6a9f`): what each task landed as.
+  - M14.0: #340.
+  - M14.1a–d: #341, #342, #345, #347, in that order.
+  - M14.2 and M14.3: together in #349, from the Work view branch session (`claude/fleet-dynamic-work-view-kwc3r9`), not from separate read / edit PRs; fixes in #357, #359, #361 (one filter model) and #365. D31's switch on the desktop and in `fleet-hub org set` is #350, from the same branch.
+  - M14.4: **one** PR, fleet-mobile#54, not the planned two (read, then edits); fleet-mobile#53, #55 and #56 are related. The bound-phone test named above is being added as a fleet-mobile follow-up.
+  - M14.5: its docs (Part R steps 60–72, *The Work view* in the guide, hub-e2e W section 10, the CLAUDE.md paragraph) came with #349; only the owner's Part R run is open.
+  - The owner decided (2026-09-28) that *Assign org…* and *Make a rule…* stay desktop-only; the phone does not get them, although M14-D33 would allow an unbound phone to change a local task's org.

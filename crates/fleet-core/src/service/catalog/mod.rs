@@ -3,6 +3,7 @@
 //! what each host actually has installed.
 //! Spec: docs/superpowers/specs/2026-09-14-asset-catalog-design.md
 
+pub mod admin;
 pub mod author;
 pub mod author_session;
 pub mod harness;
@@ -49,14 +50,18 @@ use model::{Asset, Kind, Problem};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigureArgs {
     pub repo_path: String,
     pub remote_url: Option<String>,
 }
 
 fn expand_home(p: &str) -> String {
-    match (p.strip_prefix("~/"), crate::home::home_dir()) {
+    // `~\` too on Windows, where that is how a user types it.
+    let rest = p
+        .strip_prefix("~/")
+        .or_else(|| p.strip_prefix("~\\").filter(|_| cfg!(windows)));
+    match (rest, crate::home::home_dir()) {
         (Some(rest), Some(home)) => format!("{}/{rest}", home.display()),
         _ => p.to_string(),
     }
@@ -114,6 +119,36 @@ pub fn load(pull: bool, store: &Mutex<Store>) -> Result<CatalogSummary, IpcError
         s.bus_catalog_loaded(&summary);
     }
     Ok(summary)
+}
+
+/// Load the configured catalog into `CATALOG` unless what is there is
+/// already the load the store last recorded. A no-op when nothing is
+/// configured (the caller's own `require_config` reports that).
+///
+/// `CATALOG` lives in one process's memory, but the configuration and the
+/// record of the last load (`head_commit`, `last_loaded_at`) are in the
+/// store. On a hub nothing else ever calls `load`: the catalog is pointed at
+/// with `fleet-hub catalog set` and refreshed with `fleet-hub catalog reload`,
+/// both separate processes that load and write that record. Comparing it
+/// with the in-memory copy is how the running hub notices: a re-point clears
+/// the record (`set_catalog_config`) and every load stamps a new one, so a
+/// mismatch — or no catalog at all — means reload.
+pub fn ensure_fresh(store: &Mutex<Store>) -> Result<(), IpcError> {
+    let Some(cfg) = config(store)? else {
+        return Ok(());
+    };
+    let current = {
+        let guard = CATALOG
+            .read()
+            .map_err(|_| IpcError::new(codes::E_LOCK, "catalog lock poisoned"))?;
+        guard.as_ref().is_some_and(|c| {
+            cfg.last_loaded_at == Some(c.loaded_at) && cfg.head_commit.as_deref() == Some(&*c.head)
+        })
+    };
+    if !current {
+        load(false, store)?;
+    }
+    Ok(())
 }
 
 fn with_catalog<T>(f: impl FnOnce(&repo::Catalog) -> Result<T, IpcError>) -> Result<T, IpcError> {
@@ -222,14 +257,14 @@ pub fn list_assets(store: &Mutex<Store>) -> Result<AssetListing, IpcError> {
     })
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Preview {
     pub harness: String,
     pub plan: Option<RenderPlan>,
     pub unsupported: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetDetail {
     pub asset: Asset,
     pub previews: Vec<Preview>,
@@ -304,7 +339,7 @@ pub fn get_asset(kind: Kind, name: &str, store: &Mutex<Store>) -> Result<AssetDe
 }
 
 /// The catalog's layer definitions plus every host's stored assignment.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerListing {
     pub layers: Vec<layer::Layer>,
     pub hosts: Vec<crate::store::HostLayerRow>,
@@ -529,6 +564,56 @@ mod tests {
         .unwrap();
         load(false, &store).unwrap();
         store
+    }
+
+    /// A hub never calls `load` itself: `fleet-hub catalog set|reload` do,
+    /// in another process. `ensure_fresh` is how the running hub catches up
+    /// — loading when it has nothing, reloading after a re-point, and
+    /// leaving a copy that matches the store's record alone.
+    #[test]
+    fn ensure_fresh_follows_the_stores_record() {
+        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        // Nothing configured: a no-op, and the listing still says why.
+        ensure_fresh(&store).unwrap();
+        assert_eq!(
+            list_assets(&store).unwrap_err().code,
+            E_CATALOG_NOT_CONFIGURED
+        );
+
+        // Configured and loaded by another process, never in this one.
+        let one = repo_with_one_skill("fresh1");
+        configure(
+            ConfigureArgs {
+                repo_path: one.to_string_lossy().into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        load(false, &store).unwrap();
+        *CATALOG.write().unwrap() = None;
+        ensure_fresh(&store).unwrap();
+        assert_eq!(list_assets(&store).unwrap().assets.len(), 1);
+
+        // Matches the record: left alone (the emptied copy stays empty).
+        CATALOG.write().unwrap().as_mut().unwrap().assets.clear();
+        ensure_fresh(&store).unwrap();
+        assert!(list_assets(&store).unwrap().assets.is_empty());
+
+        // Re-pointed elsewhere: reloaded from the new path.
+        let two = repo_with_layers("fresh2");
+        configure(
+            ConfigureArgs {
+                repo_path: two.to_string_lossy().into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        ensure_fresh(&store).unwrap();
+        assert_eq!(list_assets(&store).unwrap().assets.len(), 2);
+        *CATALOG.write().unwrap() = None;
     }
 
     #[test]

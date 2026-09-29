@@ -74,6 +74,11 @@ pub struct Caps {
     /// Always false in M3–M6: read-only.
     #[serde(default)]
     pub write: bool,
+    /// The provider can serve one item's WHOLE description on demand
+    /// (`work { action: describe }`). Without it the UI and an agent are
+    /// pointed at the ticket instead.
+    #[serde(default)]
+    pub describe: bool,
 }
 
 /// What a probe learned: the site's instance id and the config to store.
@@ -135,10 +140,54 @@ pub struct WorkItemSnapshot {
     /// Third-party text: anything that reaches an agent goes through
     /// `mark_untrusted`.
     pub description: Option<String>,
+    /// How many characters the description has AT THE TRACKER, before
+    /// [`DESCRIPTION_MAX_CHARS`]. `None` when the adapter does not report it.
+    /// Read only to say that text was cut — never to widen a cap.
+    pub description_chars: Option<i64>,
 }
 
 /// Longest description excerpt kept (plan: the first 2k chars).
 pub const DESCRIPTION_MAX_CHARS: usize = 2000;
+
+/// Longest full description `describe` returns. Deliberately far above
+/// [`DESCRIPTION_MAX_CHARS`]: this text never enters a sync frame, a session
+/// row or the phone projection, so it costs no replay-ring pressure.
+pub const DESCRIBE_MAX_CHARS: usize = 32_000;
+
+/// `describe`'s answer: the whole description, capped at
+/// [`DESCRIBE_MAX_CHARS`], with its length AT THE TRACKER. `chars` is at
+/// least `text`'s own length; above it exactly when fleet's cap cut the
+/// text, which is what lets a reader say "shown N of M" rather than serve a
+/// cut body as the whole requirement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FullDescription {
+    pub text: String,
+    pub chars: i64,
+}
+
+impl FullDescription {
+    /// A plain-text body cut at [`DESCRIBE_MAX_CHARS`], its true length kept.
+    pub fn capped(text: &str) -> FullDescription {
+        FullDescription {
+            text: text.chars().take(DESCRIBE_MAX_CHARS).collect(),
+            chars: text.chars().count() as i64,
+        }
+    }
+}
+
+/// The description as plain text, capped at [`DESCRIPTION_MAX_CHARS`], with
+/// its length AT THE TRACKER — what a later reader needs to say that text
+/// was cut.
+pub(super) fn description_and_len(text: &str) -> (Option<String>, Option<i64>) {
+    let full = text.chars().count() as i64;
+    if full == 0 {
+        return (None, None);
+    }
+    (
+        Some(text.chars().take(DESCRIPTION_MAX_CHARS).collect()),
+        Some(full),
+    )
+}
 
 /// A by-id fetch's answer for one item.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,6 +397,13 @@ pub trait TrackerProvider: Send + Sync {
             "this tracker does not accept writes".into(),
         ))
     }
+    /// One item's full description, uncapped by [`DESCRIPTION_MAX_CHARS`]
+    /// and capped by [`DESCRIBE_MAX_CHARS`], with its true length (see
+    /// [`FullDescription`]). `None` means this provider does not serve one;
+    /// the default says so for every adapter that has not implemented it.
+    async fn describe(&self, _r: &ItemRef) -> Result<Option<FullDescription>, TrackerError> {
+        Ok(None)
+    }
 }
 
 /// A write fleet may make to a tracker (work graph M13.4e). Only one today.
@@ -411,6 +467,76 @@ pub fn provider_for(
             )))
         }
     })
+}
+
+/// A tracker row's caps without building a transport: the caps of its
+/// provider kind, mirrored literally from each adapter's own `caps()`.
+/// `provider_for` may need SSH (`via_host` / `via_cli`) to even construct a
+/// provider, and a credential to answer most of its other calls — a
+/// capability question must never depend on either, so this never goes
+/// through it. `tests::provider_caps_pins_to_each_adapters_own_caps` keeps
+/// the two literals from drifting apart, over every provider in
+/// [`crate::store::TRACKER_PROVIDERS`] — so a new provider with no arm here
+/// (which would silently degrade to `Caps::default()`) fails that test.
+pub fn provider_caps(row: &TrackerRow) -> Caps {
+    match row.provider.as_str() {
+        "jira" => Caps {
+            query_lang: Some("jql".into()),
+            hierarchy: true,
+            iterations: true,
+            human_keys: true,
+            repo_relative: false,
+            multi_container: false,
+            incremental: Incremental::Watermark,
+            write: true,
+            describe: true,
+        },
+        "jira_dc" => Caps {
+            query_lang: Some("jql".into()),
+            hierarchy: true,
+            iterations: true,
+            human_keys: true,
+            repo_relative: false,
+            multi_container: false,
+            incremental: Incremental::Watermark,
+            write: true,
+            describe: true,
+        },
+        "asana" => Caps {
+            query_lang: None,
+            hierarchy: true,
+            iterations: false,
+            human_keys: false,
+            repo_relative: false,
+            multi_container: true,
+            incremental: Incremental::SyncToken,
+            write: false,
+            describe: false,
+        },
+        "linear" => Caps {
+            query_lang: Some("gql".into()),
+            hierarchy: true,
+            iterations: true,
+            human_keys: true,
+            repo_relative: false,
+            multi_container: false,
+            incremental: Incremental::Watermark,
+            write: false,
+            describe: false,
+        },
+        "github" => Caps {
+            query_lang: Some("gql".into()),
+            hierarchy: true,
+            iterations: false,
+            human_keys: false,
+            repo_relative: true,
+            multi_container: false,
+            incremental: Incremental::Watermark,
+            write: false,
+            describe: true,
+        },
+        _ => Caps::default(),
+    }
 }
 
 /// Whether a provider needs a credential stored in fleet. GitHub through
@@ -911,5 +1037,61 @@ mod tests {
         assert_eq!(e.code, crate::ipc_error::codes::E_TRACKER);
         assert!(!e.message.contains("bWVAeD"), "{}", e.message);
         assert!(TrackerError::Auth("x".into()).explain().contains("expire"));
+    }
+
+    /// [`provider_caps`] must answer exactly what each adapter's own
+    /// `caps()` answers, without a credential — or a transport at all — ever
+    /// being built. If the two literals ever drift apart, this catches it.
+    ///
+    /// Driven by [`crate::store::TRACKER_PROVIDERS`], the one list of
+    /// providers this build accepts, and each provider's own caps are read
+    /// through `provider_for` rather than restated here: a sixth provider
+    /// added to that list and forgotten in `provider_caps` would fall through
+    /// to `Caps::default()` — `describe: false`, `write: false` — which is the
+    /// quietest possible failure (honest degradation, no error), so it must
+    /// fail here or it ships.
+    #[test]
+    fn provider_caps_pins_to_each_adapters_own_caps() {
+        use crate::net::https::{FakeTransport, HttpTransport};
+        use crate::store::{TrackerSettings, TRACKER_PROVIDERS};
+
+        let fake: Arc<dyn HttpTransport> = Arc::new(FakeTransport::new());
+        let row = |provider: &str| TrackerRow {
+            id: 1,
+            provider: provider.into(),
+            name: "t".into(),
+            instance_id: None,
+            site_url: "https://example.com".into(),
+            transport: String::new(),
+            config: TrackerConfig::default(),
+            state: "unconfigured".into(),
+            last_sync_at: None,
+            last_error: None,
+            created_at: 1,
+            has_credential: false,
+            credential_hint: None,
+            auth_kind: None,
+            username: None,
+            org_id: None,
+            settings: TrackerSettings::default(),
+        };
+        let net = TrackerNet::fake(Arc::clone(&fake));
+        assert!(!TRACKER_PROVIDERS.is_empty());
+        for provider in TRACKER_PROVIDERS {
+            let r = row(provider);
+            // The adapter itself, over a fake transport: its `caps()` is the
+            // authority, and no arm of this test restates it.
+            let want = provider_for(&r, None, &net)
+                .unwrap_or_else(|e| panic!("{provider}: {e:?}"))
+                .caps();
+            assert_eq!(
+                provider_caps(&r),
+                want,
+                "{provider}: provider_caps has no arm for it, or its literal drifted"
+            );
+        }
+        // A row whose provider this build has none for: no capability is
+        // claimed on a guess.
+        assert_eq!(provider_caps(&row("bogus")), Caps::default());
     }
 }

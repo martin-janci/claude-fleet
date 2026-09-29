@@ -106,6 +106,20 @@
         {
           "type": "field",
           "key": "reconcile.stale_working_secs"
+        },
+        {
+          "type": "field",
+          "key": "reconcile.stale_working_ttl_secs"
+        }
+      ]
+    },
+    {
+      "title": "Provisioning",
+      "advanced": true,
+      "items": [
+        {
+          "type": "field",
+          "key": "provision.force_git_tree"
         }
       ]
     }

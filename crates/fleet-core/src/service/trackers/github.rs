@@ -24,9 +24,9 @@
 //! * **Hierarchy**: sub-issues' `parent`.
 
 use super::{
-    check_http, map_transport, retry_after, CallKind, Caps, Fetched, Incremental, ItemRef, Page,
-    RefCtx, StatusSnapshot, TrackerError, TrackerInfo, TrackerProvider, ViewDef, WorkItemSnapshot,
-    DESCRIPTION_MAX_CHARS, NOT_FOUND_OR_NO_PERMISSION,
+    check_http, description_and_len, map_transport, retry_after, CallKind, Caps, Fetched,
+    FullDescription, Incremental, ItemRef, Page, RefCtx, StatusSnapshot, TrackerError, TrackerInfo,
+    TrackerProvider, ViewDef, WorkItemSnapshot, NOT_FOUND_OR_NO_PERMISSION,
 };
 use crate::net::https::{HttpTransport, Request};
 use crate::store::{TrackerConfig, TrackerSettings};
@@ -246,6 +246,8 @@ impl GitHub {
             .or(assignees.first())
             .cloned();
         let parent = &n["parent"];
+        let (description, description_chars) =
+            description_and_len(n["body"].as_str().map(str::trim).unwrap_or_default());
         Some(WorkItemSnapshot {
             external_id: id,
             key: Some(self.key(&repo, number)),
@@ -281,11 +283,8 @@ impl GitHub {
             iteration: None,
             iteration_active: false,
             updated: n["updatedAt"].as_str().and_then(super::parse_timestamp),
-            description: n["body"]
-                .as_str()
-                .map(str::trim)
-                .filter(|b| !b.is_empty())
-                .map(|b| b.chars().take(DESCRIPTION_MAX_CHARS).collect()),
+            description,
+            description_chars,
         })
     }
 
@@ -352,6 +351,7 @@ impl TrackerProvider for GitHub {
             multi_container: false,
             incremental: Incremental::Watermark,
             write: false,
+            describe: true,
         }
     }
 
@@ -574,6 +574,40 @@ impl TrackerProvider for GitHub {
             }
         }
         out
+    }
+
+    async fn describe(&self, r: &ItemRef) -> Result<Option<FullDescription>, TrackerError> {
+        // The same node fetched by `fetch` — by node id, or by repository and
+        // number — but its `body` read straight off the GraphQL answer,
+        // never through `snapshot` (which cuts it at DESCRIPTION_MAX_CHARS).
+        let node = if let ItemRef::Id(id) = r {
+            let query =
+                format!("query($ids: [ID!]!) {{ nodes(ids: $ids) {{ ...I }} }} {ISSUE_FIELDS}");
+            let data = self
+                .gql(&query, json!({ "ids": [id] }), CallKind::Other)
+                .await?;
+            data["nodes"].get(0).cloned().unwrap_or(Value::Null)
+        } else if let Some((o, name, n)) = self.repo_number(r) {
+            let query = format!(
+                "query($o: String!, $r: String!, $n: Int!) {{ repository(owner: $o, name: $r) \
+                 {{ issue(number: $n) {{ ...I }} }} }} {ISSUE_FIELDS}"
+            );
+            let data = self
+                .gql(
+                    &query,
+                    json!({ "o": o, "r": name, "n": n }),
+                    CallKind::Other,
+                )
+                .await?;
+            data["repository"]["issue"].clone()
+        } else {
+            return Ok(None);
+        };
+        Ok(node["body"]
+            .as_str()
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .map(FullDescription::capped))
     }
 }
 

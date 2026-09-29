@@ -19,6 +19,10 @@
             {
               "type": "field",
               "key": "work.recent_days"
+            },
+            {
+              "type": "field",
+              "key": "work.describe_cache_secs"
             }
           ]
         },

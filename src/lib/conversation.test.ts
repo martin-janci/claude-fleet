@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import quietStatuses from '../../crates/fleet-core/src/service/testdata/quiet_statuses.json';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
@@ -21,6 +22,8 @@ import {
   carriedCount,
   composerStatus,
   matchSlashCommands,
+  pickerCommand,
+  modelShortLabel,
   completeSlashCommand,
   SLASH_COMMANDS,
   isQuietStatus,
@@ -385,6 +388,24 @@ describe('composerStatus', () => {
   });
 });
 
+describe('pickerCommand / modelShortLabel', () => {
+  it('builds one-argument slash lines only', () => {
+    expect(pickerCommand('model', 'opus[1m]')).toBe('/model opus[1m]');
+    expect(pickerCommand('effort', ' high ')).toBe('/effort high');
+    expect(pickerCommand('effort', '')).toBeNull();
+    expect(pickerCommand('model', 'a b')).toBeNull();
+  });
+
+  it('shortens claude model ids and passes anything else through', () => {
+    expect(modelShortLabel('claude-opus-5-5')).toBe('opus 5.5');
+    expect(modelShortLabel('claude-sonnet-5')).toBe('sonnet 5');
+    expect(modelShortLabel('claude-haiku-4-5-20251001')).toBe('haiku 4.5');
+    expect(modelShortLabel('claude-sonnet-5[1m]')).toBe('sonnet 5 [1m]');
+    expect(modelShortLabel('gpt-x')).toBe('gpt-x');
+    expect(modelShortLabel(null)).toBeNull();
+  });
+});
+
 describe('matchSlashCommands', () => {
   it('is empty unless the draft is a single slash token', () => {
     expect(matchSlashCommands('')).toEqual([]);
@@ -430,6 +451,17 @@ describe('isQuietStatus / shouldFetchTranscript', () => {
     expect(isQuietStatus('working')).toBe(false);
     expect(isQuietStatus('blocked')).toBe(false);
     expect(isQuietStatus(null)).toBe(false);
+  });
+
+  // The shared fixture the backend's `ClaudeStatus::is_quiet` /
+  // `store::turn_over` test reads too (`pane_intel.rs`): one answer to
+  // "is this turn over?" on both sides, an unknown value included.
+  it('agrees with the backend on every status (shared fixture)', () => {
+    const cases = quietStatuses as { status: string | null; quiet: boolean }[];
+    expect(cases.length).toBeGreaterThanOrEqual(7);
+    for (const c of cases) {
+      expect(isQuietStatus(c.status as Parameters<typeof isQuietStatus>[0]), String(c.status)).toBe(c.quiet);
+    }
   });
 
   it('a quiet session is re-read only on a turn change or after the quiet cadence', () => {

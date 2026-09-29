@@ -41,6 +41,7 @@ pub mod pane_intel;
 pub mod peer;
 pub mod playbooks;
 pub mod projects;
+pub mod prompt_origin;
 pub mod provision;
 pub mod quick_replies;
 #[cfg(test)]
@@ -63,6 +64,7 @@ pub mod tick;
 pub mod trackers;
 pub mod transcript;
 pub mod tunnel;
+pub mod update;
 pub mod usage;
 pub mod work;
 pub mod worktree_prune;

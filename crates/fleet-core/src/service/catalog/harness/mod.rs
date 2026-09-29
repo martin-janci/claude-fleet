@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 pub const HARNESS_IDS: &[&str] = &["claude", "codex"];
 
 /// A file the harness would write on the host. `path` uses `~/` for the home dir.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileWrite {
     pub path: String,
     #[serde(serialize_with = "ser_utf8_or_b64")]
@@ -48,7 +48,7 @@ pub enum MergeMode {
 }
 
 /// A structured edit of a JSON config file on the host.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfigMerge {
     pub file: String,
     pub json_path: Vec<String>,
@@ -83,7 +83,7 @@ pub fn value_hash(v: &Value) -> String {
 }
 
 /// Everything a harness would do to install one asset.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RenderPlan {
     pub files: Vec<FileWrite>,
     pub merges: Vec<ConfigMerge>,

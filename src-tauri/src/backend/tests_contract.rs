@@ -79,6 +79,7 @@ pub(crate) fn sample_session() -> SessionRow {
         turn_seq: 7,
         last_stop_at: Some(1_725_000_900),
         stale_working_at: Some(1_790_500_000),
+        work_rev: 17,
         parent_session_id: Some(5),
         tags: vec!["tag-a".into(), "tag-b".into()],
         row_version: 12,
@@ -142,6 +143,18 @@ pub(crate) fn sample_host() -> HostRow {
         // `transport` is not an `Option`, so either value pins the same key.
         transport: "ssh".into(),
         org_id: Some(2),
+        claude_version_at: Some(1_725_000_000),
+        disk_home_free_kb: Some(3_600_000),
+        disk_home_total_kb: Some(150_000_000),
+        disk_tmp_free_kb: Some(5_900_000),
+        load_1m: Some(1.5),
+        mem_avail_kb: Some(2_000_000),
+        uptime_secs: Some(86_400),
+        health_at: Some(1_725_000_000),
+        last_hook_at: Some(1_725_000_000),
+        agent_version: Some("0.3.1".into()),
+        provisioned_at: Some(1_725_000_000),
+        provision_stale: true,
     }
 }
 
@@ -292,6 +305,20 @@ fn sample_health() -> Health {
         tunnels_flapping: 1,
         peer_links_down: 1,
         trackers: sample_trackers_health(),
+        // Every judgement true, so a renamed flag is a golden diff.
+        hosts: vec![fleet_core::service::health::HostHealthRow {
+            alias: "trn".into(),
+            reachable: true,
+            transport: "agent".into(),
+            claude_version: Some("2.0.0".into()),
+            claude_version_at: Some(1_725_000_000),
+            agent_version: Some("0.2.26".into()),
+            disk_home_pct: Some(98),
+            disk_low: true,
+            claude_behind: true,
+            agent_behind: true,
+            hooks_silent: true,
+        }],
         hub: Some(sample_hub_health()),
         tunnels_mode: Some("none".into()),
         peer_links_total: 2,
@@ -372,6 +399,7 @@ fn sample_conversation() -> Conversation {
             ended_at: Some("2026-09-18T10:00:05Z".into()),
             reminders: vec!["the harness stapled this on".into()],
             prompt_uuid: None,
+            prompt_partial: true,
             items: vec![
                 ConvItem::Text {
                     text: "hi back".into(),
@@ -514,6 +542,15 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     };
     put("SessionRow", wire_keys(&sample_session()));
     put("WorkLinkRow", wire_keys(&sample_work_link()));
+    // `confirm_session_work` / `reject_session_work`: the row plus the
+    // decided link's version.
+    put(
+        "DecidedRow",
+        wire_keys(&fleet_core::service::work::DecidedRow {
+            row: sample_session(),
+            link_version: Some(4),
+        }),
+    );
     let plan = sample_resume_plan();
     put("ResumePlan", wire_keys(&plan));
     put("ResumePlan.live", wire_keys(&plan.live[0]));
@@ -833,11 +870,11 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 }
 
 /// `SessionRow` is the type the whole sidebar is made of, and the one whose
-/// sixty keys nothing else would notice losing. Its list is a literal here,
+/// sixty-one keys nothing else would notice losing. Its list is a literal here,
 /// not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_sixty() {
+fn a_session_rows_wire_names_are_these_exact_sixty_one() {
     let expected = [
         "account_uuid",
         "ci_status",
@@ -896,12 +933,13 @@ fn a_session_rows_wire_names_are_these_exact_sixty() {
         "usage_updated_at",
         "work",
         "work_rejected",
+        "work_rev",
         "work_suggested",
         "worktree_id",
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 60, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 61, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

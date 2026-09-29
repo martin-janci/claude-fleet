@@ -16,7 +16,7 @@ use crate::store::{
     AccountRow, AssetInventoryRow, HostRow, ProjectRow, SessionEvent, SessionRow, TaskRow,
     WorktreeRow,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -54,6 +54,13 @@ pub enum RowChange {
         alias: String,
         last_pinged_at: i64,
         reachable: bool,
+        /// Host identity & health, task 1: the versions stamp, so a
+        /// stamp-only refresh needs no full-row event. `to_value` writes it
+        /// as a nullable field; a client that predates it ignores it.
+        claude_version_at: Option<i64>,
+        /// Task 2: the health sample of this pass, for the same reason —
+        /// disk and load move every pass and must not cost a full row.
+        health: Option<crate::store::HostHealth>,
     },
     HostRemoved(String),
     AccountUpserted(AccountRow),
@@ -138,7 +145,7 @@ pub struct AssetInventoryClearedPayload {
     pub harness: String,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct CatalogSummary {
     pub head: String,
     pub loaded_at: i64,
@@ -305,10 +312,14 @@ impl RowChange {
                 alias,
                 last_pinged_at,
                 reachable,
+                claude_version_at,
+                health,
             } => serde_json::json!({
                 "alias": alias,
                 "last_pinged_at": last_pinged_at,
                 "reachable": reachable,
+                "claude_version_at": claude_version_at,
+                "health": health,
             }),
             RowChange::HostRemoved(alias) => to_value(&HostRemovedPayload {
                 alias: alias.clone(),
@@ -709,11 +720,14 @@ impl EventBus for BroadcastEventBus {
         // clearing is untouched.
         let mut payload = e.payload();
         crate::json::strip_nulls(&mut payload);
-        // The same derived `needs_attention` `list_sessions` stamps, so a
-        // phone that listed once and then follows this stream keeps the
-        // hub's answer instead of losing it on the row's first change. Here
-        // and not in `payload()`: the desktop's Tauri bus shares that, and
-        // deserialises the payload straight back into `SessionRow`.
+        // The derived `needs_attention` `list_sessions` stamps, so a phone
+        // that listed once and then follows this stream keeps the hub's
+        // answer instead of losing it on the row's first change. Here and
+        // not in `payload()`: the desktop's Tauri bus shares that, and
+        // deserialises the payload straight back into `SessionRow`. The bus
+        // holds no store, so `context_full` is judged at the default
+        // threshold, not `health.context_red_pct` — the one reader that
+        // still can differ from `list_sessions` when the setting moves.
         if let RowChange::SessionCreated(row) | RowChange::SessionUpdated(row) = e {
             if let (Some(att), serde_json::Value::Object(map)) = (
                 crate::service::attention::needs_attention(row),

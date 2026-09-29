@@ -20,7 +20,7 @@
   import AnswerPrompt from './AnswerPrompt.svelte';
   import { pendingInputFor } from './pending_input';
   import { hintAnchor } from './hints';
-  import { composerPresets, type ComposerPreset } from './composer_presets';
+  import { composerPresets, presetSendsNow, type ComposerPreset } from './composer_presets';
   import { needsMore, wrapsPastOneLine } from './composer_overflow';
   import { contextLevel } from './attention';
   import { timeAgo } from './session_status';
@@ -75,6 +75,10 @@
     carriedCount,
     matchSlashCommands,
     completeSlashCommand,
+    MODEL_OPTIONS,
+    EFFORT_OPTIONS,
+    pickerCommand,
+    modelShortLabel,
     sessionActivity,
     indicatorFor,
     doingNow,
@@ -103,7 +107,7 @@
   import { invokeCmd } from './result';
   import { addFiles, pastedName, fmtBytes, clearSent, type Attachment, type PickedFile } from './attachments';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
-  import { pointInRect } from './geometry';
+  import { pointInRect, dropPoint } from './geometry';
   import Markdown from './MarkdownView.svelte';
   import BackgroundDetail from './BackgroundDetail.svelte';
   import SpiralLoader from './SpiralLoader.svelte';
@@ -1094,8 +1098,40 @@
   const outboxBusy = $derived(outgoing.some((m) => m.state === 'waiting' || m.state === 'sending' || m.state === 'sent'));
   const busyBlocked = $derived(blockWhileBusy && (busyNote !== null || outboxBusy));
   const canSend = $derived(draft.trim().length > 0 && viewing === null && !busyBlocked);
+  // A one-gesture chip send is held while the session is waiting on an
+  // answer: a permission or choice prompt (`blocked`) or any stuck screen.
+  // What a chip types there lands in the prompt's menu, not in the REPL, and
+  // its Enter can pick an option nobody chose. The typed composer is not held
+  // (typing ahead is that surface's deliberate workflow); a chip is one click
+  // with no chance to look first, so it only fills the box and says why.
+  const chipHold = $derived(liveStatus === 'blocked' || !!liveStuck);
+  let chipHeld = $state(false);
+  $effect(() => {
+    if (!chipHold) chipHeld = false;
+  });
+
+  // Model / effort pickers: each sends `/model <v>` or `/effort <v>` through
+  // the same outbox as a typed slash command. The model shows from the row
+  // (the transcript's); effort is in no transcript, so the picker remembers
+  // what it last sent to each session and otherwise shows the row's, if any.
+  let effortSent = $state<Record<number, string>>({});
+  const currentModel = $derived(modelShortLabel(session.model));
+  const currentEffort = $derived(effortSent[session.id] ?? session.effort_level ?? '');
+  const pickersDisabled = $derived(viewing !== null || busyBlocked);
+  function pickSetting(cmd: 'model' | 'effort', e: Event) {
+    const el = e.currentTarget as HTMLSelectElement;
+    const line = pickerCommand(cmd, el.value);
+    if (cmd === 'model') el.value = '';
+    if (!line) return;
+    if (cmd === 'effort') effortSent = { ...effortSent, [session.id]: el.value };
+    void sendText(line);
+  }
   const statusNote = $derived(
-    viewing !== null ? 'Viewing an earlier conversation — go back to current to send.' : busyNote,
+    viewing !== null
+      ? 'Viewing an earlier conversation — go back to current to send.'
+      : chipHeld && chipHold
+        ? 'The session is waiting on an answer, so the chip filled the box instead of sending. Answer it in the terminal, then press Send.'
+        : busyNote,
   );
   // The context meter lives in the header; at warn/crit the Compact chip is
   // suggested, since that is the one-click remedy.
@@ -1151,18 +1187,24 @@
     if (slashIndex >= slashMatches.length) slashIndex = 0;
   });
 
-  /** A chip fills the box (Shift+click sends at once). A filled command does
-   *  not pop the slash menu: the user picked it already. */
+  /** A chip fills the box, or sends at once when it is an auto-send chip;
+   *  Shift+click does the other one. A filled command does not pop the slash
+   *  menu: the user picked it already. */
   function usePreset(p: ComposerPreset, sendNow: boolean) {
     // A gated composer (see `blockWhileBusy`) degrades Shift+click to a
     // plain click rather than swallowing it: the chip still fills the box,
     // the note under the box says why it did not go, and one press of Send
     // finishes the job once the turn ends. A disabled chip would take the
     // fill away too, and a silent no-op would say nothing at all.
-    if (sendNow && !busyBlocked) {
+    //
+    // The same degrade applies while the session waits on an answer (see
+    // `chipHold`), on every composer: an auto-send chip must not type into a
+    // permission prompt.
+    if (sendNow && !busyBlocked && !chipHold) {
       void sendText(p.text.trim() || p.text);
       return;
     }
+    chipHeld = sendNow && chipHold;
     draft = p.text;
     slashDismissedFor = draft;
     histIndex = null;
@@ -1216,6 +1258,7 @@
       return;
     }
     if (busyBlocked) return;
+    chipHeld = false;
     // A pasted tile has an empty `path` (see attachments.ts): nothing ever
     // authorised it for the Rust allow-list, so it is never uploaded. It
     // stays in the tray with its own honest error rather than being spent
@@ -1549,16 +1592,17 @@
     dragDepth = 0;
   }
 
-  function pointInShell(px: number, py: number): boolean {
+  function pointInShell(position: { x: number; y: number }): boolean {
     // `.view-slot` is `position: absolute; inset: 0`, so App.svelte's Hosts
     // and Assets overlays cover a panel that is still mounted and still laid
     // out at these very coordinates. Without this, a drop while one of them
     // is open attaches a file under an opaque overlay — the veil drawn
     // beneath it, the user seeing nothing happen.
     if (!visible || !shellEl) return false;
-    // NOT divided by devicePixelRatio: the event's position is already in
-    // logical points (see the contract on `pointInRect` in geometry.ts).
-    return pointInRect(px, py, shellEl.getBoundingClientRect());
+    // In logical pixels through `dropPoint`: as delivered on macOS and Linux,
+    // divided by the scale factor on Windows (see geometry.ts).
+    const { x, y } = dropPoint(position);
+    return pointInRect(x, y, shellEl.getBoundingClientRect());
   }
 
   /**
@@ -1597,11 +1641,11 @@
       .onDragDropEvent((event) => {
         const p = event.payload;
         if (p.type === 'enter' || p.type === 'over') {
-          dragOverShell = pointInShell(p.position.x, p.position.y);
+          dragOverShell = pointInShell(p.position);
         } else if (p.type === 'leave') {
           dragOverShell = false;
         } else if (p.type === 'drop') {
-          const over = pointInShell(p.position.x, p.position.y);
+          const over = pointInShell(p.position);
           dragOverShell = false;
           dragDepth = 0;
           if (over) onDroppedPaths(p.paths ?? []);
@@ -2169,11 +2213,16 @@
               class:btn--warn={suggested}
               data-testid="conv-chip"
               data-suggested={suggested || undefined}
-              title={suggested
-                ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.\n\nClick fills the box; Shift+click sends now.`
-                : `${p.text}\n\nClick fills the box; Shift+click sends now.`}
+              data-auto-send={p.auto_send || undefined}
+              title={`${suggested
+                ? `Context window is ${Math.round(session.context_pct ?? 0)}% used. Compacting frees space.`
+                : p.text}\n\n${p.auto_send
+                ? 'Click sends now; Shift+click fills the box.'
+                : 'Click fills the box; Shift+click sends now.'}`}
+              aria-label={p.auto_send ? `${p.label}, sends immediately` : undefined}
               disabled={viewing !== null}
-              onclick={(e) => usePreset(p, e.shiftKey)}>{p.label}</button
+              onclick={(e) => usePreset(p, presetSendsNow(p, e.shiftKey))}
+              >{p.label}{#if p.auto_send}<span class="chip-send" aria-hidden="true">&nbsp;↵</span>{/if}</button
             >
           {/if}
         {/each}
@@ -2254,6 +2303,34 @@
             aria-label="Attach files"
             title="Attach files"
             onclick={pickFiles}>⌾</button>
+          <select
+            class="composer-pick"
+            data-testid="conv-model-pick"
+            aria-label="Model"
+            title={currentModel ? `Model: ${currentModel}. Pick one to send /model.` : 'Pick a model to send /model.'}
+            value=""
+            disabled={pickersDisabled}
+            onchange={(e) => pickSetting('model', e)}>
+            <option value="" disabled>{currentModel ?? 'Model'}</option>
+            {#each MODEL_OPTIONS as o (o.value)}
+              <option value={o.value}>{o.label}</option>
+            {/each}
+          </select>
+          <select
+            class="composer-pick"
+            data-testid="conv-effort-pick"
+            aria-label="Effort"
+            title={currentEffort ? `Effort: ${currentEffort}. Pick one to send /effort.` : 'Pick an effort level to send /effort.'}
+            value={currentEffort}
+            disabled={pickersDisabled}
+            onchange={(e) => pickSetting('effort', e)}>
+            {#if !EFFORT_OPTIONS.some((o) => o.value === currentEffort)}
+              <option value={currentEffort} disabled>{currentEffort || 'Effort'}</option>
+            {/if}
+            {#each EFFORT_OPTIONS as o (o.value)}
+              <option value={o.value}>{o.label}</option>
+            {/each}
+          </select>
           <span class="composer-hint" id={COMPOSER_HINT_ID}>↵ send · ⇧↵ newline · ↑ history</span>
           <button
             type="submit"
@@ -2380,6 +2457,10 @@
     /* One row by default; growth is a deliberate toggle, not a reflow. */
     flex-wrap: nowrap;
     overflow: hidden;
+  }
+  /* Marks an auto-send chip: a click sends rather than fills. */
+  .chip-send {
+    opacity: 0.6;
   }
   .chips[data-expanded='true'] {
     flex-wrap: wrap;
@@ -2512,6 +2593,21 @@
      sheet, a phone) Send slid left beside the attach button. */
   .composer-send {
     margin-left: auto;
+  }
+  .composer-pick {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 9rem;
+    height: var(--control-h);
+    padding: 0 0.3rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--control-fg-quiet);
+    font-size: var(--control-font-sm);
+  }
+  .composer-pick:disabled {
+    opacity: 0.5;
   }
   .composer-hint {
     flex: 1 1 auto;

@@ -206,6 +206,12 @@ pub fn spawn_reconcile_tick(
                 if stale > 0 {
                     tracing::info!("reconcile tick: {stale} stale working row(s) demoted");
                 }
+                // …and its stamp lifts once it asks nothing: working or
+                // blocked again, or older than `reconcile.stale_working_ttl_secs`.
+                let lifted = service::sessions::expire_stale_working(store);
+                if lifted > 0 {
+                    tracing::debug!("reconcile tick: {lifted} stale working stamp(s) lifted");
+                }
                 // Wave 2 Track D: lifecycle automation rides the same tick, after
                 // the pass so it sees fresh `stuck_kind` / `idle_since` stamps.
                 // Both are opt-in through settings and cheap when off. Their
@@ -291,7 +297,11 @@ pub fn spawn_account_usage_tick(
             async move {
                 let hosts: Vec<HostRow> = match store.lock() {
                     Ok(s) => match s.list_hosts() {
-                        Ok(h) => h,
+                        // One hidden/local rule for every host loop (hub-ops F6).
+                        Ok(h) => crate::service::hosts::active_hosts(
+                            h,
+                            crate::service::hub::local_host_enabled(),
+                        ),
                         Err(e) => {
                             tracing::warn!("account usage tick: list_hosts failed: {e}");
                             return;

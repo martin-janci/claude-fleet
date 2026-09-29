@@ -17,6 +17,10 @@ pub struct LocalPrereqs {
     /// Count of top-level entries under the projects base. Note these are the
     /// org/owner subdirectories, not individual repos — purely informational.
     pub projects_count: u32,
+    /// Whether this machine is a fleet host at all. `false` on a Windows
+    /// desktop (a client only): nothing above was probed, and the checklist
+    /// treats the step as not applicable rather than forever missing.
+    pub local_host: bool,
 }
 
 /// Tunnel liveness as surfaced to the onboarding UI.
@@ -90,7 +94,7 @@ pub fn map_tunnel_states(
 /// can't stall onboarding; a timeout, spawn error, or non-zero exit all yield
 /// `None`.
 async fn tool_version(bin: &str, arg: &str) -> Option<String> {
-    let fut = tokio::process::Command::new(bin).arg(arg).output();
+    let fut = crate::proc::command(bin).arg(arg).output();
     let out = tokio::time::timeout(std::time::Duration::from_secs(3), fut)
         .await
         .ok()? // timed out
@@ -105,6 +109,18 @@ async fn tool_version(bin: &str, arg: &str) -> Option<String> {
 /// Detect local prerequisites: the `claude` CLI, `tmux`, and the projects scan
 /// directory. Never errors — a missing tool is reported as `*_ok = false`.
 pub async fn local_prereqs(store: &std::sync::Mutex<crate::store::Store>) -> LocalPrereqs {
+    if !crate::service::hub::local_host_enabled() {
+        return LocalPrereqs {
+            claude_ok: false,
+            claude_version: None,
+            tmux_ok: false,
+            tmux_version: None,
+            projects_path: String::new(),
+            projects_readable: false,
+            projects_count: 0,
+            local_host: false,
+        };
+    }
     let (claude_version, tmux_version) = tokio::join!(
         tool_version("claude", "--version"),
         tool_version("tmux", "-V"),
@@ -115,12 +131,10 @@ pub async fn local_prereqs(store: &std::sync::Mutex<crate::store::Store>) -> Loc
     // failing the whole checklist.
     let base = match store.lock() {
         Ok(s) => crate::service::projects::local_projects_root(&s),
-        Err(_) => {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-            std::path::PathBuf::from(home)
-                .join("projects")
-                .join("github.com")
-        }
+        Err(_) => crate::home::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/"))
+            .join("projects")
+            .join("github.com"),
     };
     let projects_path = base.to_string_lossy().to_string();
     let (projects_readable, projects_count) = match std::fs::read_dir(&base) {
@@ -136,6 +150,7 @@ pub async fn local_prereqs(store: &std::sync::Mutex<crate::store::Store>) -> Loc
         projects_path,
         projects_readable,
         projects_count,
+        local_host: true,
     }
 }
 
@@ -157,6 +172,18 @@ mod tests {
             provisioned: true,
             transport: "ssh".to_string(),
             org_id: None,
+            claude_version_at: None,
+            disk_home_free_kb: None,
+            disk_home_total_kb: None,
+            disk_tmp_free_kb: None,
+            load_1m: None,
+            mem_avail_kb: None,
+            uptime_secs: None,
+            health_at: None,
+            last_hook_at: None,
+            agent_version: None,
+            provisioned_at: None,
+            provision_stale: false,
         }
     }
 

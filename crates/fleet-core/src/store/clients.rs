@@ -10,12 +10,13 @@ use crate::ipc_error::codes;
 /// short enough that a name cannot be used to pad a log line or a prompt.
 pub const MAX_CLIENT_NAME_LEN: usize = 64;
 
-/// The three modes a client token may carry. Anything else is refused at the
+/// The modes a client token may carry. Anything else is refused at the
 /// insert: `TokenMode::parse_client` reads an unknown string as `readonly`,
 /// so a typo would silently downgrade a client rather than fail. `peer`
 /// identifies a linked hub (federation) rather than an operator's own
-/// device — see `TokenMode::Peer` and `set_client_trust`.
-pub const CLIENT_MODES: &[&str] = &["full", "readonly", "peer"];
+/// device — see `TokenMode::Peer` and `set_client_trust`. `updater` is
+/// `fleet-updater` acting for this hub, `/update/*` only (`TokenMode::Updater`).
+pub const CLIENT_MODES: &[&str] = &["full", "readonly", "peer", "updater"];
 
 /// The three line separators [`char::is_control`] does NOT cover. A renderer,
 /// a terminal, a JSON log viewer or an LLM reading a transcript may all treat
@@ -132,10 +133,10 @@ impl Store {
         include_revoked: bool,
     ) -> Result<Vec<ClientTokenRow>, crate::ipc_error::IpcError> {
         let sql = if include_revoked {
-            "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id \
+            "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at \
              FROM client_tokens ORDER BY id DESC"
         } else {
-            "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id \
+            "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at \
              FROM client_tokens WHERE revoked_at IS NULL ORDER BY id DESC"
         };
         let mut stmt = self.conn.prepare(sql)?;
@@ -273,7 +274,7 @@ impl Store {
         }
         self.conn
             .query_row(
-                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id \
+                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at \
                  FROM client_tokens WHERE name = ?1 AND revoked_at IS NULL",
                 rusqlite::params![name],
                 map_client_token_row,
@@ -283,6 +284,78 @@ impl Store {
 }
 
 impl Store {
+    /// Let the live client named `name` manage the asset catalog through the
+    /// hub's `catalog_admin` tool, or take that back: `assets_admin_at`
+    /// becomes now (kept if already set), or NULL. Refused for a peer hub
+    /// link, a `readonly` client (it could not write anyway) and a client
+    /// bound to an org (the catalog is synced to every host, across orgs).
+    /// `E_NOTFOUND` when no live client holds the name.
+    pub fn set_client_assets_admin(
+        &self,
+        name: &str,
+        on: bool,
+    ) -> Result<ClientTokenRow, crate::ipc_error::IpcError> {
+        let name = name.trim();
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at \
+                 FROM client_tokens WHERE name = ?1 AND revoked_at IS NULL",
+                rusqlite::params![name],
+                map_client_token_row,
+            )
+            .optional()?
+            .ok_or_else(|| {
+                crate::ipc_error::IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("no active client token named '{name}'"),
+                )
+            })?;
+        if on {
+            let refuse = |why: &str| {
+                Err(crate::ipc_error::IpcError::new(
+                    codes::E_VALIDATE,
+                    format!("'{name}' {why}; it cannot manage the asset catalog"),
+                ))
+            };
+            match row.mode.as_str() {
+                "full" => {}
+                "peer" => return refuse("is a peer hub link"),
+                _ => return refuse("is a readonly client"),
+            }
+            if row.org_id.is_some() {
+                return refuse("is bound to one org, and a catalog sync writes to every host");
+            }
+        }
+        self.conn.execute(
+            if on {
+                "UPDATE client_tokens SET assets_admin_at = COALESCE(assets_admin_at, ?2) \
+                 WHERE id = ?1"
+            } else {
+                "UPDATE client_tokens SET assets_admin_at = NULL WHERE id = ?1 AND ?2 IS NOT NULL"
+            },
+            rusqlite::params![row.id, now_unix()],
+        )?;
+        get_client_token_by_id(&self.conn, row.id)?.ok_or_else(|| {
+            crate::ipc_error::IpcError::new(
+                codes::E_NOTFOUND,
+                format!("no active client token named '{name}'"),
+            )
+        })
+    }
+
+    /// True when the live client `id` may manage the asset catalog: granted
+    /// (`set_client_assets_admin`), `full`, not revoked and bound to no org.
+    /// Read on every `catalog_admin` call, so a revoke or an un-grant holds
+    /// from the next call on, whatever any cache says.
+    pub fn client_is_assets_admin(&self, id: i64) -> Result<bool, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM client_tokens WHERE id = ?1 AND revoked_at IS NULL \
+                 AND mode = 'full' AND org_id IS NULL AND assets_admin_at IS NOT NULL)",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+    }
     /// Bind the live client named `name` to `org` (work graph M14), or
     /// unbind it (`None`). A bound client reads only that org's and
     /// unassigned work and sessions (`OrgScope::Org`). The auth epoch
@@ -328,7 +401,7 @@ impl Store {
         }
         self.conn
             .query_row(
-                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id \
+                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at \
                  FROM client_tokens WHERE name = ?1 AND revoked_at IS NULL",
                 rusqlite::params![name],
                 map_client_token_row,
@@ -379,6 +452,7 @@ fn map_client_token_row(row: &rusqlite::Row) -> rusqlite::Result<ClientTokenRow>
         revoked_at: row.get(6)?,
         trusted_at: row.get(7)?,
         org_id: row.get(8)?,
+        assets_admin_at: row.get(9)?,
     })
 }
 
@@ -387,7 +461,7 @@ fn get_client_token_by_id(
     id: i64,
 ) -> rusqlite::Result<Option<ClientTokenRow>> {
     conn.query_row(
-        "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id \
+        "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at \
          FROM client_tokens WHERE id = ?1",
         rusqlite::params![id],
         map_client_token_row,
@@ -600,6 +674,63 @@ mod tests {
         assert_eq!(e.code, crate::ipc_error::codes::E_NOTFOUND);
         // The revoked row keeps its grant for the audit trail.
         assert!(s.list_client_tokens(true).unwrap()[0].trusted_at.is_some());
+    }
+
+    /// The assets grant (migration 074): only a live, `full`, unbound client
+    /// can hold it, `client_is_assets_admin` reads it live, and a revoke
+    /// ends it whatever the column still says.
+    #[test]
+    fn the_assets_grant_is_for_a_live_full_unbound_client_only() {
+        let s = store();
+        let desk = s.insert_client_token("desk", "aa11", "full").unwrap();
+        assert!(!s.client_is_assets_admin(desk.id).unwrap(), "opt-in");
+        let e0 = s.auth_epoch().unwrap();
+        let granted = s.set_client_assets_admin(" desk ", true).unwrap();
+        let first = granted.assets_admin_at;
+        assert!(first.is_some());
+        assert!(s.auth_epoch().unwrap() > e0, "a grant bumps the epoch");
+        assert!(s.client_is_assets_admin(desk.id).unwrap());
+        // Granting again keeps the first grant's time.
+        assert_eq!(
+            s.set_client_assets_admin("desk", true)
+                .unwrap()
+                .assets_admin_at,
+            first
+        );
+        assert!(s
+            .set_client_assets_admin("desk", false)
+            .unwrap()
+            .assets_admin_at
+            .is_none());
+        assert!(!s.client_is_assets_admin(desk.id).unwrap());
+
+        let code = |r: Result<_, crate::ipc_error::IpcError>| r.map(|_| ()).unwrap_err().code;
+        assert_eq!(
+            code(s.set_client_assets_admin("nobody", true)),
+            crate::ipc_error::codes::E_NOTFOUND
+        );
+        s.insert_client_token("kiosk", "bb22", "readonly").unwrap();
+        assert_eq!(
+            code(s.set_client_assets_admin("kiosk", true)),
+            crate::ipc_error::codes::E_VALIDATE
+        );
+        s.insert_client_token("other-hub", "cc33", "peer").unwrap();
+        assert_eq!(
+            code(s.set_client_assets_admin("other-hub", true)),
+            crate::ipc_error::codes::E_VALIDATE
+        );
+        let org = s.add_org("A", None, false).unwrap();
+        s.insert_client_token("contractor", "dd44", "full").unwrap();
+        s.set_client_org("contractor", Some(org.id)).unwrap();
+        assert_eq!(
+            code(s.set_client_assets_admin("contractor", true)),
+            crate::ipc_error::codes::E_VALIDATE
+        );
+
+        // Revoked: the live check says no even though the column is set.
+        s.set_client_assets_admin("desk", true).unwrap();
+        s.revoke_client_token("desk").unwrap();
+        assert!(!s.client_is_assets_admin(desk.id).unwrap());
     }
 
     #[test]

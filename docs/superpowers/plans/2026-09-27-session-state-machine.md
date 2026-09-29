@@ -1,5 +1,9 @@
 # Session State Machine Hardening Implementation Plan
 
+**Status:** landed (#343). Its migration shipped as **065**, not the 061 below. Every step below is checked against `main` and ticked.
+
+**Follow-up (2026-09-28):** Task 5's sweep read tmux `#{session_activity}` as "pane output", but it moves only on client input and attach, so one tool call longer than `reconcile.stale_working_secs` was demoted, and every agents pass that saw the spinner lifted it again (a `status_change` pair per tick). A pass whose pane shows the spinner now stamps `sessions.pane_working_at` (migration **081**), which the sweep respects. A demoted row's `idle` is a guess while its `stale_demoted_at` (migration 080, which an attach or the TTL does not clear) is set: `store::trusted_status` makes `run_prompt`, a move's source check and `wait_for_session { until: idle }` ask the pane (`session_activity`) before believing it. `store::turn_over` is defined through `ClaudeStatus::is_quiet`, held to the frontend's `isQuietStatus` by the shared fixture `crates/fleet-core/src/service/testdata/quiet_statuses.json`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (or superpowers:executing-plans) to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `claude_status` / `stuck_kind` trustworthy on the live fleet: the `oom` playbook can no longer kill a working session, the `oom` detector needs a dead process, ghosts and shells stop carrying pane-derived state, a `StopFailure` reads as `failed`, a `working` row ages out, the attention model names the five things a person can act on, and the timeline records one event per transition.
@@ -66,7 +70,7 @@ Repo gotchas that apply to this plan:
 - Consumes: `SessionRow.{claude_status, last_turn_at, stuck_since, last_playbook_at}`, `Store::mark_playbook_applied`, `settings::get_string`.
 - Produces: `PlaybookConfig.oom_max_attempts: u32`, `PlaybookAction::Skipped { action: &'static str, why: &'static str }`, `pub fn plan_with_attempts(rows, cfg, controller, now, oom_attempts: &HashMap<i64, u32>) -> Vec<Planned>`, `pub fn oom_recreate_refusal(row: &SessionRow, since: i64, attempts: u32, max_attempts: u32) -> Option<&'static str>`, `pub const OOM_ATTEMPT_WINDOW_SECS: i64 = 86_400`, `Store::count_oom_recreates_since(id: i64, since: i64) -> rusqlite::Result<u32>`, setting `playbooks.oom_max_attempts` (`Kind::Int { min: 0, max: 20 }`, default `"2"`), timeline detail `oom:recreate:skipped:<working|turn_after_stuck|attempts>`.
 
-- [ ] **Step 1: Write the failing planner tests** — append to `mod tests` in `crates/fleet-core/src/service/playbooks.rs` (after `oom_recreate_is_rate_limited_to_once_per_hour`, `:447`), and add `use std::collections::HashMap;` to the test module's imports:
+- [x] **Step 1: Write the failing planner tests** — append to `mod tests` in `crates/fleet-core/src/service/playbooks.rs` (after `oom_recreate_is_rate_limited_to_once_per_hour`, `:447`), and add `use std::collections::HashMap;` to the test module's imports:
 
 ```rust
     fn oom_row(id: i64, since: i64) -> SessionRow {
@@ -154,9 +158,9 @@ Change `ALL_ON` (`:372-375`) to include the budget:
     };
 ```
 
-- [ ] **Step 2: Run them, expect compile failures** — `cargo test -p fleet-core playbooks::tests` → `error[E0560]: struct PlaybookConfig has no field named oom_max_attempts`, `no variant named Skipped`, `cannot find function plan_with_attempts`.
+- [x] **Step 2: Run them, expect compile failures** — `cargo test -p fleet-core playbooks::tests` → `error[E0560]: struct PlaybookConfig has no field named oom_max_attempts`, `no variant named Skipped`, `cannot find function plan_with_attempts`.
 
-- [ ] **Step 3: Implement the planner** — in `crates/fleet-core/src/service/playbooks.rs`:
+- [x] **Step 3: Implement the planner** — in `crates/fleet-core/src/service/playbooks.rs`:
 
 Replace the config (`:26-39`):
 
@@ -376,7 +380,7 @@ In `run_with` (`:227-285`) read the counts under the same lock and record refusa
 
 (the rest of the loop — the `warn!` on `Err`, `mark_playbook_applied`, `applied += 1` — is unchanged). Update the module doc table row (`:7`) to `| oom | recreate (resume by claude_session_id) | playbooks.oom_recreate, ≤1/h, ≤playbooks.oom_max_attempts per 24 h, never while working |`.
 
-- [ ] **Step 4: Add the store counter** — in `crates/fleet-core/src/store/sessions.rs`, right after `mark_playbook_applied` (`:999`):
+- [x] **Step 4: Add the store counter** — in `crates/fleet-core/src/store/sessions.rs`, right after `mark_playbook_applied` (`:999`):
 
 ```rust
     /// How many times the `oom` playbook recreated session `id` — or tried
@@ -419,7 +423,7 @@ and its test in the same file's `mod tests` (next to the `mark_playbook_applied`
     }
 ```
 
-- [ ] **Step 5: Register the setting** — `crates/fleet-core/src/service/settings.rs`: after `:77` add
+- [x] **Step 5: Register the setting** — `crates/fleet-core/src/service/settings.rs`: after `:77` add
 
 ```rust
 /// Recreates the `oom` playbook may run on one session per 24 h
@@ -455,9 +459,9 @@ and after the `PLAYBOOK_OOM_RECREATE` spec (`:257`):
       </div>
 ```
 
-- [ ] **Step 6: Run** — `cargo test -p fleet-core playbooks::tests` → all PASS (`oom_recreate_is_rate_limited_to_once_per_hour` still passes: `last_turn_at` is `None` and the map is empty). `cargo test -p fleet-core count_oom_recreates_since` → PASS. `cargo test -p fleet-core every_spec_has_a_settings_dialog_row` → PASS. `npx vitest run src/lib/fleet_settings.test.ts` → PASS. `npx svelte-check` → 0 errors.
+- [x] **Step 6: Run** — `cargo test -p fleet-core playbooks::tests` → all PASS (`oom_recreate_is_rate_limited_to_once_per_hour` still passes: `last_turn_at` is `None` and the map is empty). `cargo test -p fleet-core count_oom_recreates_since` → PASS. `cargo test -p fleet-core every_spec_has_a_settings_dialog_row` → PASS. `npx vitest run src/lib/fleet_settings.test.ts` → PASS. `npx svelte-check` → 0 errors.
 
-- [ ] **Step 7: Failing test for the episode pin** — in `crates/fleet-core/src/store/reconcile.rs` `mod tests`, after `reconcile_tracks_stuck_since_per_episode` (`:1926`):
+- [x] **Step 7: Failing test for the episode pin** — in `crates/fleet-core/src/store/reconcile.rs` `mod tests`, after `reconcile_tracks_stuck_since_per_episode` (`:1926`):
 
 ```rust
     /// F1: `claude --resume` re-renders the last messages, so the `oom`
@@ -496,7 +500,7 @@ and after the `PLAYBOOK_OOM_RECREATE` spec (`:257`):
 
 `cargo test -p fleet-core an_oom_refire_within_the_recreate_spacing` → FAILS: `assertion left: Some(<now>) right: Some(<now-100>)`.
 
-- [ ] **Step 8: Pin the episode in the upsert** — `crates/fleet-core/src/store/reconcile.rs:448-453`, replace the `stuck_since=` clause:
+- [x] **Step 8: Pin the episode in the upsert** — `crates/fleet-core/src/store/reconcile.rs:448-453`, replace the `stuck_since=` clause:
 
 ```sql
                -- stuck_since: keep the episode start while the kind is
@@ -519,9 +523,9 @@ and append the bind after `reconciled_at` in the `params!` list (`:498`):
                 crate::service::playbooks::OOM_RECREATE_MIN_SPACING_SECS
 ```
 
-- [ ] **Step 9: Run** — `cargo test -p fleet-core an_oom_refire_within_the_recreate_spacing` → PASS; `cargo test -p fleet-core reconcile_tracks_stuck_since_per_episode` → PASS; `cargo test -p fleet-core store::reconcile` → PASS.
+- [x] **Step 9: Run** — `cargo test -p fleet-core an_oom_refire_within_the_recreate_spacing` → PASS; `cargo test -p fleet-core reconcile_tracks_stuck_since_per_episode` → PASS; `cargo test -p fleet-core store::reconcile` → PASS.
 
-- [ ] **Step 10: Full suite and commit** — `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check`, then:
+- [x] **Step 10: Full suite and commit** — `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --check`, then:
 
 ```bash
 git add crates/fleet-core/src/service/playbooks.rs crates/fleet-core/src/store/sessions.rs crates/fleet-core/src/store/reconcile.rs crates/fleet-core/src/service/settings.rs src/lib/fleet_settings.ts src/lib/SettingsDialog.svelte
@@ -549,7 +553,7 @@ The exact regexes (all run on the lower-cased tail):
 | `OOM_KILLED` | `oomkilled\|out of memory: killed process \d+\|killed process \d+.*\b(oom\|out of memory)\b\|^\s*(zsh: )?killed\b\|\bsigkill\b` | the kernel / container / shell kill verdict |
 | `SHELL_PROMPT` | `^(?:[\w.-]+@[\w.-]+[: ].*)?[$#%]\s*$` | `me@host:~/proj$ `, `$ `, `% `: the shell is back, the foreground process is gone |
 
-- [ ] **Step 1: Add the fixtures** (exact contents; each file ends with a newline):
+- [x] **Step 1: Add the fixtures** (exact contents; each file ends with a newline):
 
 `crates/fleet-core/src/service/testdata/pane_intel/oom_vocabulary_prose_idle.txt` — session 21480's shape, the fleet's own vocabulary in an idle REPL:
 
@@ -604,7 +608,7 @@ Killed
 martin@htz:~/projects/claude-fleet$ 
 ```
 
-- [ ] **Step 2: Write the failing tests** — in `pane_intel.rs` `mod tests`, replace `oom_matches_real_signals_not_innocent_words` (`:977-991`) and add three tests:
+- [x] **Step 2: Write the failing tests** — in `pane_intel.rs` `mod tests`, replace `oom_matches_real_signals_not_innocent_words` (`:977-991`) and add three tests:
 
 ```rust
     #[test]
@@ -671,9 +675,9 @@ martin@htz:~/projects/claude-fleet$
     }
 ```
 
-- [ ] **Step 3: Run** — `cargo test -p fleet-core pane_intel::tests::oom` → `oom_needs_a_kill_verdict_and_a_dead_process` FAILS on `analyze("Killed process 123 (OOM)").stuck` (`left: Some(Oom), right: None`), `oom_never_fires_on_the_fleets_own_vocabulary` FAILS on the working fixture (no REPL chrome below `contains_word(…, "oom")` at line 5 → `Some(Oom)`), `oom_looks_only_at_the_last_twelve_lines` FAILS.
+- [x] **Step 3: Run** — `cargo test -p fleet-core pane_intel::tests::oom` → `oom_needs_a_kill_verdict_and_a_dead_process` FAILS on `analyze("Killed process 123 (OOM)").stuck` (`left: Some(Oom), right: None`), `oom_never_fires_on_the_fleets_own_vocabulary` FAILS on the working fixture (no REPL chrome below `contains_word(…, "oom")` at line 5 → `Some(Oom)`), `oom_looks_only_at_the_last_twelve_lines` FAILS.
 
-- [ ] **Step 4: Implement** — in `pane_intel.rs` delete `contains_word` (`:352-369`) and `is_oom_line` (`:371-380`) and put in their place:
+- [x] **Step 4: Implement** — in `pane_intel.rs` delete `contains_word` (`:352-369`) and `is_oom_line` (`:371-380`) and put in their place:
 
 ```rust
 /// How far up the tail the OOM rule looks. The reconcile capture is 8 lines
@@ -737,9 +741,9 @@ and replace the OOM block at the top of `detect_stuck` (`:400-409`) with:
 
 Update the doc comment on `is_live_repl_line` (`:382-385`) to say "below a crash signal", unchanged otherwise. `oom_text_above_a_live_repl_is_scrollback_not_a_crash` (`:994-1022`) still holds: the `cc1: out of memory` tool line is no longer a signal at all, and the crashed screen has the heap block.
 
-- [ ] **Step 5: Run** — `cargo test -p fleet-core pane_intel` → all PASS (including `oom_detected`, `oom_text_above_a_live_repl_is_scrollback_not_a_crash`, `stuck_kind_vocabulary…`). `cargo clippy -p fleet-core --all-targets -- -D warnings` → clean (no dead `contains_word`).
+- [x] **Step 5: Run** — `cargo test -p fleet-core pane_intel` → all PASS (including `oom_detected`, `oom_text_above_a_live_repl_is_scrollback_not_a_crash`, `stuck_kind_vocabulary…`). `cargo clippy -p fleet-core --all-targets -- -D warnings` → clean (no dead `contains_word`).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/fleet-core/src/service/pane_intel.rs crates/fleet-core/src/service/testdata/pane_intel/oom_vocabulary_prose_idle.txt crates/fleet-core/src/service/testdata/pane_intel/oom_vocabulary_prose_working.txt crates/fleet-core/src/service/testdata/pane_intel/oom_heap_crash_to_shell.txt crates/fleet-core/src/service/testdata/pane_intel/oom_killed_to_shell.txt
@@ -762,7 +766,7 @@ git commit -m "fix(pane-intel): oom needs a dead process (heap block, or a kill 
 - Consumes: `Store::ghost_and_clean(tx, host, keep, now, kind_filter, cutoff, lost_ttl_cutoff, out)`, `KIND_PANE_LESS`, `settings::resolve`.
 - Produces: loss (`mark_host_sessions_lost`, Phase 1, `mark_session_killed`) also sets `claude_status=NULL, stuck_kind=NULL, stuck_since=NULL, current_activity=NULL, pending_input=NULL`; `Store::ghost_and_clean_bg_sessions(host, keep, now, lost_ttl_cutoff, external_grace_cutoff: Option<i64>)`; `pub(super) fn read_external_grace_cutoff(raw: Option<String>, now: i64) -> Option<i64>`; setting `gc.external_lost_ttl_secs` (`Kind::Secs`, default `"3600"`, `0` = reap on the next pass); the tmux upsert never writes `claude_status` / `stuck_kind` / `pending_input` on a `kind = 'shell'` row; `health::summarize` skips `kind = shell` like `external`.
 
-- [ ] **Step 1: Failing store tests** — `crates/fleet-core/src/store/sessions.rs` `mod tests` (add `use crate::store::test_support::reconcile_one;` to the test module imports):
+- [x] **Step 1: Failing store tests** — `crates/fleet-core/src/store/sessions.rs` `mod tests` (add `use crate::store::test_support::reconcile_one;` to the test module imports):
 
 ```rust
     /// F4: `local` ghosts said `working` a day after loss and a `mac` ghost
@@ -894,9 +898,9 @@ git commit -m "fix(pane-intel): oom needs a dead process (heap block, or a kill 
     }
 ```
 
-- [ ] **Step 2: Run** — `cargo test -p fleet-core mark_host_sessions_lost_clears` → FAILS (`left: Some("blocked"), right: None`); `cargo test -p fleet-core a_lost_external_row_is_kept` → compile error (5 args, 4 expected); `cargo test -p fleet-core phase_one_ghosting_clears` → FAILS; `cargo test -p fleet-core a_shell_row_never_gets` → FAILS (`left: Some("idle")`); `cargo test -p fleet-core summarize_skips_shell_rows` → FAILS (`sessions_total 3`).
+- [x] **Step 2: Run** — `cargo test -p fleet-core mark_host_sessions_lost_clears` → FAILS (`left: Some("blocked"), right: None`); `cargo test -p fleet-core a_lost_external_row_is_kept` → compile error (5 args, 4 expected); `cargo test -p fleet-core phase_one_ghosting_clears` → FAILS; `cargo test -p fleet-core a_shell_row_never_gets` → FAILS (`left: Some("idle")`); `cargo test -p fleet-core summarize_skips_shell_rows` → FAILS (`sessions_total 3`).
 
-- [ ] **Step 3: Clear on loss** — `store/sessions.rs:338-343`:
+- [x] **Step 3: Clear on loss** — `store/sessions.rs:338-343`:
 
 ```rust
             let sql = format!(
@@ -932,7 +936,7 @@ git commit -m "fix(pane-intel): oom needs a dead process (heap block, or a kill 
 
 Update the doc comment of `mark_host_sessions_lost` (`:250-290`) and of `ghost_and_clean` (`:544-549`) with one sentence: "Loss also clears `claude_status`, `stuck_kind`/`stuck_since`, `current_activity` and `pending_input`: a ghost has no pane to vouch for them (F4)."
 
-- [ ] **Step 4: The external grace** — `store/reconcile.rs`, `ghost_and_clean` signature (`:580-589`) gains `external_grace_cutoff: Option<i64>` after `lost_ttl_cutoff`, and the Phase 2 prep (`:596-635`) becomes:
+- [x] **Step 4: The external grace** — `store/reconcile.rs`, `ghost_and_clean` signature (`:580-589`) gains `external_grace_cutoff: Option<i64>` after `lost_ttl_cutoff`, and the Phase 2 prep (`:596-635`) becomes:
 
 ```rust
         let pre_ghost_ids: Vec<i64> = {
@@ -1085,7 +1089,7 @@ spec after the `GC_SWEEP_INTERVAL_SECS` spec (`:282`):
       </div>
 ```
 
-- [ ] **Step 5: Shells never get pane state** — `store/reconcile.rs`, the three SET-clause constants:
+- [x] **Step 5: Shells never get pane state** — `store/reconcile.rs`, the three SET-clause constants:
 
 ```rust
         const NEW_STUCK: &str = "CASE WHEN kind = 'shell' THEN NULL \
@@ -1111,9 +1115,9 @@ spec after the `GC_SWEEP_INTERVAL_SECS` spec (`:282`):
 
 with the doc (`:359-363`) extended: "`kind='shell'` rows (a plain shell in tmux) are left out the same way: they have no Claude status, and a pane heuristic that reads their prompt as `idle` would count them (F8)."
 
-- [ ] **Step 6: Run** — `cargo test -p fleet-core mark_host_sessions_lost` → PASS (all, including `…keeps_every_identity_field`); `cargo test -p fleet-core a_lost_external_row` → PASS; `cargo test -p fleet-core a_rebooted_external_row_is_reaped_inside_the_lost_ttl` → PASS (grace `None` keeps today's next-pass reap); `cargo test -p fleet-core phase_one_ghosting_clears` → PASS; `cargo test -p fleet-core a_shell_row_never_gets` → PASS; `cargo test -p fleet-core health::` → PASS; `cargo test -p fleet-core reconcile_tests` → PASS; `cargo test -p fleet-core every_spec_has_a_settings_dialog_row` → PASS; `npx vitest run src/lib/fleet_settings.test.ts`; `npx svelte-check`.
+- [x] **Step 6: Run** — `cargo test -p fleet-core mark_host_sessions_lost` → PASS (all, including `…keeps_every_identity_field`); `cargo test -p fleet-core a_lost_external_row` → PASS; `cargo test -p fleet-core a_rebooted_external_row_is_reaped_inside_the_lost_ttl` → PASS (grace `None` keeps today's next-pass reap); `cargo test -p fleet-core phase_one_ghosting_clears` → PASS; `cargo test -p fleet-core a_shell_row_never_gets` → PASS; `cargo test -p fleet-core health::` → PASS; `cargo test -p fleet-core reconcile_tests` → PASS; `cargo test -p fleet-core every_spec_has_a_settings_dialog_row` → PASS; `npx vitest run src/lib/fleet_settings.test.ts`; `npx svelte-check`.
 
-- [ ] **Step 7: Full suite and commit**
+- [x] **Step 7: Full suite and commit**
 
 ```bash
 git add crates/fleet-core/src/store/sessions.rs crates/fleet-core/src/store/reconcile.rs crates/fleet-core/src/service/sessions/reconcile.rs crates/fleet-core/src/service/health.rs crates/fleet-core/src/service/settings.rs src/lib/fleet_settings.ts src/lib/SettingsDialog.svelte
@@ -1134,7 +1138,7 @@ git commit -m "fix(sessions): loss clears pane-derived state, external ghosts ge
 - Consumes: `HookPayload.{error, error_details}` (`crates/fleet-core/src/mcp/hooks.rs:42`), `END_COMPACTING`, `emit_session`.
 - Produces: `claude_status = 'failed'` on a `StopFailure` (plus the Stop stamps: `turn_seq + 1`, `last_stop_at`, `last_turn_at`, `last_hook_at`, `idle_since`, `pending_input = NULL`); `pub(crate) fn stop_failure_class(error: &str) -> &'static str` (`rate_limit` | `auth` | `other`); the `stop_failure` event detail `<class> (<cli error>)[: <details>]` (unchanged `<error>[: <details>]` when the CLI's name already is the class); the tmux upsert keeps a hook-stamped `failed` until a hook moves the row or the pane shows a turn (`working`) or a dialog (`blocked`). The attention reason `stop_failed` lands in Task 6.
 
-- [ ] **Step 1: Failing hook tests** — in `hooks.rs` `mod tests`, change `stop_failure_ends_the_turn_and_records_the_error` (`:2623`) to `assert_eq!(row.claude_status.as_deref(), Some("failed"));` and add:
+- [x] **Step 1: Failing hook tests** — in `hooks.rs` `mod tests`, change `stop_failure_ends_the_turn_and_records_the_error` (`:2623`) to `assert_eq!(row.claude_status.as_deref(), Some("failed"));` and add:
 
 ```rust
     /// F3: 20773's 429 was recorded as plain `idle`; the user re-prompted
@@ -1171,9 +1175,9 @@ git commit -m "fix(sessions): loss clears pane-derived state, external ghosts ge
     }
 ```
 
-- [ ] **Step 2: Run** — `cargo test -p fleet-core hooks::tests::stop_failure` and `cargo test -p fleet-core a_failed_turn_stays_failed` → `stop_failure_class` compile error; after stubbing, `left: Some("idle"), right: Some("failed")`.
+- [x] **Step 2: Run** — `cargo test -p fleet-core hooks::tests::stop_failure` and `cargo test -p fleet-core a_failed_turn_stays_failed` → `stop_failure_class` compile error; after stubbing, `left: Some("idle"), right: Some("failed")`.
 
-- [ ] **Step 3: Implement** — `store/sessions.rs:1302-1311`:
+- [x] **Step 3: Implement** — `store/sessions.rs:1302-1311`:
 
 ```rust
     /// The StopFailure hook's write: the turn ended in an API error (F3).
@@ -1244,7 +1248,7 @@ and the detail at `:1219-1224`:
             }
 ```
 
-- [ ] **Step 4: Failing store test for the sticky failure** — `store/reconcile.rs` `mod tests`:
+- [x] **Step 4: Failing store test for the sticky failure** — `store/reconcile.rs` `mod tests`:
 
 ```rust
     /// A failed turn leaves the input box on screen, which the pane
@@ -1291,7 +1295,7 @@ and the detail at `:1219-1224`:
 
 `cargo test -p fleet-core a_hook_stamped_failure_survives` → FAILS on the first assertion (`Some("idle")`).
 
-- [ ] **Step 5: The sticky arm** — `store/reconcile.rs` `NEW_STATUS` (as left by Task 3):
+- [x] **Step 5: The sticky arm** — `store/reconcile.rs` `NEW_STATUS` (as left by Task 3):
 
 ```rust
         // A StopFailure's `failed` is recognisable without a column: the
@@ -1310,9 +1314,9 @@ and the detail at `:1219-1224`:
                                        ELSE COALESCE(excluded.claude_status, claude_status) END";
 ```
 
-- [ ] **Step 6: Run** — `cargo test -p fleet-core a_hook_stamped_failure_survives` → PASS; `cargo test -p fleet-core hooks::` → PASS (`stop_failure_ends_the_turn_and_records_the_error` with `failed`); `cargo test -p fleet-core store::reconcile` → PASS; `cargo test -p fleet-core reconcile_tests` → PASS.
+- [x] **Step 6: Run** — `cargo test -p fleet-core a_hook_stamped_failure_survives` → PASS; `cargo test -p fleet-core hooks::` → PASS (`stop_failure_ends_the_turn_and_records_the_error` with `failed`); `cargo test -p fleet-core store::reconcile` → PASS; `cargo test -p fleet-core reconcile_tests` → PASS.
 
-- [ ] **Step 7: Full suite and commit**
+- [x] **Step 7: Full suite and commit**
 
 ```bash
 git add crates/fleet-core/src/store/sessions.rs crates/fleet-core/src/store/reconcile.rs crates/fleet-core/src/service/hooks.rs
@@ -1340,7 +1344,7 @@ git commit -m "fix(hooks): a StopFailure marks the turn failed, classed rate_lim
 - Consumes: `sessions.{last_hook_at, last_turn_at, context_at, usage_updated_at, last_activity_at, created_at}`, `status_candidate`, `settings::get_secs`.
 - Produces: column + `SessionRow.stale_working_at: Option<i64>` (`#[serde(default)]`, wire-additive); `Store::age_out_stale_working(now: i64, stale_secs: i64) -> rusqlite::Result<Vec<SessionRow>>`; `pub(super) fn stale_working_veto(stale: bool, candidate: Option<ClaudeStatus>, pane: Option<ClaudeStatus>) -> Option<ClaudeStatus>`; `pub fn age_out_stale_working(store: &Mutex<Store>) -> usize` on the tick; setting `reconcile.stale_working_secs` (`Kind::Secs`, default `"1800"`, `0` = off); timeline events `status_change idle` and `stale_working`.
 
-- [ ] **Step 1: Migration** — `crates/fleet-core/migrations/061_stale_working.sql`:
+- [x] **Step 1: Migration** — `crates/fleet-core/migrations/061_stale_working.sql`:
 
 ```sql
 -- Live-instance analysis 2026-09-27, lifecycle F2: two `working` rows had
@@ -1417,7 +1421,7 @@ Test, after `migration_060_on_a_populated_v59_database_is_safe_to_rerun` (`:2960
 
 `cargo test -p fleet-core migration_061` → PASS.
 
-- [ ] **Step 2: The row field** — `store/rows.rs` after `last_stop_at` (`:209`):
+- [x] **Step 2: The row field** — `store/rows.rs` after `last_stop_at` (`:209`):
 
 ```rust
     /// When the tick demoted this row from a stale `working` to `idle`
@@ -1437,7 +1441,7 @@ Test, after `migration_060_on_a_populated_v59_database_is_safe_to_rerun` (`:2960
 
 `cargo build -p fleet-core --tests` and `cargo build -p claude-fleet --tests` → clean.
 
-- [ ] **Step 3: Failing store test** — `store/sessions.rs` `mod tests`:
+- [x] **Step 3: Failing store test** — `store/sessions.rs` `mod tests`:
 
 ```rust
     /// F2: two `working` rows on trn had not moved for ~40 h.
@@ -1498,7 +1502,7 @@ Test, after `migration_060_on_a_populated_v59_database_is_safe_to_rerun` (`:2960
 
 `cargo test -p fleet-core age_out_stale_working_demotes` → compile error (no method).
 
-- [ ] **Step 4: Store implementation** — `store/sessions.rs`, after `record_stop_failure_hook_for_row`:
+- [x] **Step 4: Store implementation** — `store/sessions.rs`, after `record_stop_failure_hook_for_row`:
 
 ```rust
     /// The tick's stale-`working` rule (lifecycle F2): a live tmux row that
@@ -1561,7 +1565,7 @@ In the tmux upsert (`store/reconcile.rs`, the `ON CONFLICT … SET` list, after 
 
 `cargo test -p fleet-core age_out_stale_working_demotes` → PASS.
 
-- [ ] **Step 5: Failing veto test** — `service/sessions/tests.rs`, after `skipped_agents_pass_only_lets_the_pane_report_blocked` (`:64`):
+- [x] **Step 5: Failing veto test** — `service/sessions/tests.rs`, after `skipped_agents_pass_only_lets_the_pane_report_blocked` (`:64`):
 
 ```rust
 /// F2: the cached `claude agents` status reports a session with live
@@ -1593,7 +1597,7 @@ fn a_stale_working_demotion_is_not_undone_by_the_cached_agents_status() {
 
 `cargo test -p fleet-core a_stale_working_demotion_is_not_undone` → compile error.
 
-- [ ] **Step 6: Service implementation** — `service/sessions/reconcile.rs`, after `status_candidate` (`:1933`):
+- [x] **Step 6: Service implementation** — `service/sessions/reconcile.rs`, after `status_candidate` (`:1933`):
 
 ```rust
 /// A row the tick demoted for staleness (`stale_working_at` set) is not
@@ -1740,11 +1744,11 @@ spec after the `RECONCILE_INTERVAL_SECS` spec (`:232`):
       </div>
 ```
 
-- [ ] **Step 7: Run** — `cargo test -p fleet-core a_stale_working_demotion_is_not_undone` → PASS; `cargo test -p fleet-core skipped_agents_pass_only_lets_the_pane_report_blocked` → PASS; `cargo test -p fleet-core reconcile_tests` → PASS; `cargo test -p fleet-core every_spec_has_a_settings_dialog_row` → PASS; `npx vitest run src/lib/fleet_settings.test.ts`; `npx svelte-check`.
+- [x] **Step 7: Run** — `cargo test -p fleet-core a_stale_working_demotion_is_not_undone` → PASS; `cargo test -p fleet-core skipped_agents_pass_only_lets_the_pane_report_blocked` → PASS; `cargo test -p fleet-core reconcile_tests` → PASS; `cargo test -p fleet-core every_spec_has_a_settings_dialog_row` → PASS; `npx vitest run src/lib/fleet_settings.test.ts`; `npx svelte-check`.
 
-- [ ] **Step 8: Hub contract golden** — `cargo test -p claude-fleet --lib contract` → FAILS (`SessionRow: gained ["stale_working_at"]`). Then `REGEN_HUB_CONTRACT=1 cargo test -p claude-fleet --lib contract` (reports FAILED once, writes the golden — `RegenVerdict::Write`, nothing lost), then `cargo test -p claude-fleet --lib contract` → PASS. `git diff src-tauri/src/backend/hub_contract.golden.json` shows exactly one added key under `SessionRow`; `CONTRACT_REVISION` unchanged.
+- [x] **Step 8: Hub contract golden** — `cargo test -p claude-fleet --lib contract` → FAILS (`SessionRow: gained ["stale_working_at"]`). Then `REGEN_HUB_CONTRACT=1 cargo test -p claude-fleet --lib contract` (reports FAILED once, writes the golden — `RegenVerdict::Write`, nothing lost), then `cargo test -p claude-fleet --lib contract` → PASS. `git diff src-tauri/src/backend/hub_contract.golden.json` shows exactly one added key under `SessionRow`; `CONTRACT_REVISION` unchanged.
 
-- [ ] **Step 9: Full suite and commit**
+- [x] **Step 9: Full suite and commit**
 
 ```bash
 git add crates/fleet-core/migrations/061_stale_working.sql crates/fleet-core/src/store/schema.rs crates/fleet-core/src/store/rows.rs crates/fleet-core/src/store/sessions.rs crates/fleet-core/src/store/reconcile.rs crates/fleet-core/src/service/sessions/reconcile.rs crates/fleet-core/src/service/sessions/tests.rs crates/fleet-core/src/service/tick.rs crates/fleet-core/src/service/settings.rs crates/fleet-core/src/service/health.rs crates/fleet-core/src/service/playbooks.rs crates/fleet-core/src/service/gc.rs crates/fleet-core/src/service/attention.rs src-tauri/src/backend/tests_remote.rs src-tauri/src/backend/tests_contract.rs src-tauri/src/backend/hub_contract.golden.json src/lib/sessions.ts src/lib/fleet_settings.ts src/lib/SettingsDialog.svelte
@@ -1768,7 +1772,7 @@ git commit -m "feat(reconcile): a stale working row ages out to idle (stale_work
 - Consumes: `SessionRow.{claude_status, stuck_kind, context_pct, stale_working_at, ci_status, kind, idle_since, last_stop_at, context.context_at}`, `store::has_no_pane`.
 - Produces: `Reason::{Waiting, Stuck, StopFailed, Failed, ContextFull, StaleWorking, CiFailing, Lifecycle}` (wire `stop_failed`, `context_full`, `stale_working`, `ci_failing`); `pub const DEFAULT_CONTEXT_RED_PCT: f64 = 85.0`; `pub fn needs_attention_with(row, context_red_pct: f64) -> Option<Attention>` (`needs_attention(row)` keeps its signature, using the default); `pub fn health::context_red_pct(s: &Store) -> f64`; `summarize(sessions, hosts, context_red_pct: f64)`; `Health.context_red_pct: u32` (`#[serde(default)]`); `SessionWithController::with_threshold(is_controller, row, context_red_pct)`; setting `health.context_red_pct` (`Kind::Int { min: 1, max: 100 }`, default `"85"`); desktop `TRIAGE_BUCKETS` = `waiting, stuck, stop_failed, failed, context_full, stale_working, ci_failing, done_unread, lifecycle, idle_long, working, idle`.
 
-- [ ] **Step 1: Failing Rust tests** — `attention.rs` `mod tests`: extend `the_wire_spellings_match_the_desktop_buckets` (`:263-277`) to iterate all eight variants (`Reason::Waiting, Reason::Stuck, Reason::StopFailed, Reason::Failed, Reason::ContextFull, Reason::StaleWorking, Reason::CiFailing, Reason::Lifecycle`) and add:
+- [x] **Step 1: Failing Rust tests** — `attention.rs` `mod tests`: extend `the_wire_spellings_match_the_desktop_buckets` (`:263-277`) to iterate all eight variants (`Reason::Waiting, Reason::Stuck, Reason::StopFailed, Reason::Failed, Reason::ContextFull, Reason::StaleWorking, Reason::CiFailing, Reason::Lifecycle`) and add:
 
 ```rust
     /// F7: the model flagged three ghosts a person can do nothing about and
@@ -1856,9 +1860,9 @@ Add to `an_older_healths_json_without_peer_links_down_still_parses_as_zero` (`:8
 
 (`Store::set_setting(key, value)` is `crates/fleet-core/src/store/mod.rs:497`.)
 
-- [ ] **Step 2: Run** — `cargo test -p fleet-core attention::` → compile errors (`StopFailed`, `needs_attention_with`); `cargo test -p fleet-core health::` → compile errors (arity, `context_red_pct`).
+- [x] **Step 2: Run** — `cargo test -p fleet-core attention::` → compile errors (`StopFailed`, `needs_attention_with`); `cargo test -p fleet-core health::` → compile errors (arity, `context_red_pct`).
 
-- [ ] **Step 3: Implement `attention.rs`** — replace `Reason` (`:38-64`):
+- [x] **Step 3: Implement `attention.rs`** — replace `Reason` (`:38-64`):
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1980,7 +1984,7 @@ fn since_for(row: &SessionRow, reason: Reason) -> i64 {
 }
 ```
 
-- [ ] **Step 4: Implement `health.rs`** — delete `CONTEXT_RED_THRESHOLD` (`:354-356`); add after `Health` (`:75`):
+- [x] **Step 4: Implement `health.rs`** — delete `CONTEXT_RED_THRESHOLD` (`:354-356`); add after `Health` (`:75`):
 
 ```rust
 /// The context threshold in force (`health.context_red_pct`; the
@@ -2041,7 +2045,7 @@ spec after the `REPORTS_MAX_AGE_SECS` spec (`:383`):
       </div>
 ```
 
-- [ ] **Step 5: MCP callers read the setting** — `support.rs:908-935`:
+- [x] **Step 5: MCP callers read the setting** — `support.rs:908-935`:
 
 ```rust
 impl SessionWithController {
@@ -2073,9 +2077,9 @@ impl SessionWithController {
 
 `session_ops.rs:55-59`: the lock block returns the threshold too — `(controller, caller.org_scope(&s).map_err(to_mcp_err)?, crate::service::health::context_red_pct(&s))` bound as `let (controller, scope, context_red_pct) = { … };`; `:101` becomes `if crate::service::attention::needs_attention_with(row, context_red_pct).is_some() != want`; `:111` becomes `SessionWithController::with_threshold(is_controller, row, context_red_pct)`. In the single-session path (`:270-289`), read `let context_red_pct = crate::service::health::context_red_pct(&s);` inside the same lock block that computes `is_controller` and return it alongside, then `SessionWithController::with_threshold(is_controller, row, context_red_pct)` at `:288`.
 
-- [ ] **Step 6: Run the Rust side** — `cargo test -p fleet-core attention::` → PASS; `cargo test -p fleet-core health::` → PASS; `cargo test -p fleet-core mcp::tools::tests` → PASS (`:135` still expects `{"reason":"waiting","since":1}`); `cargo test -p fleet-core every_spec_has_a_settings_dialog_row` → PASS. `the_wire_spellings_match_the_desktop_buckets` FAILS until Step 7 (`src/lib/attention.ts does not name the bucket stop_failed`).
+- [x] **Step 6: Run the Rust side** — `cargo test -p fleet-core attention::` → PASS; `cargo test -p fleet-core health::` → PASS; `cargo test -p fleet-core mcp::tools::tests` → PASS (`:135` still expects `{"reason":"waiting","since":1}`); `cargo test -p fleet-core every_spec_has_a_settings_dialog_row` → PASS. `the_wire_spellings_match_the_desktop_buckets` FAILS until Step 7 (`src/lib/attention.ts does not name the bucket stop_failed`).
 
-- [ ] **Step 7: Desktop buckets** — `src/lib/attention.ts:123-149`:
+- [x] **Step 7: Desktop buckets** — `src/lib/attention.ts:123-149`:
 
 ```ts
 export const TRIAGE_BUCKETS = [
@@ -2161,11 +2165,11 @@ and add next to the `lifecycle` classify assertions (`:224-227`):
 
 Note `contextLevel` still uses `CONTEXT_CRIT_PCT = 90` until Task 8; the `context_pct: 85` assertions above pass only after Task 8 — write them as `context_pct: 90` / `89.9` here and change them to `85` / `84.9` in Task 8.
 
-- [ ] **Step 8: Run** — `npx vitest run src/lib/attention.test.ts` → PASS; `npx svelte-check` → 0 errors; `cargo test -p fleet-core the_wire_spellings_match_the_desktop_buckets` → PASS.
+- [x] **Step 8: Run** — `npx vitest run src/lib/attention.test.ts` → PASS; `npx svelte-check` → 0 errors; `cargo test -p fleet-core the_wire_spellings_match_the_desktop_buckets` → PASS.
 
-- [ ] **Step 9: Hub contract golden** — `cargo test -p claude-fleet --lib contract` → FAILS (`Health: gained ["context_red_pct"]`); `REGEN_HUB_CONTRACT=1 cargo test -p claude-fleet --lib contract`; re-run → PASS; the golden diff is one added key under `Health`.
+- [x] **Step 9: Hub contract golden** — `cargo test -p claude-fleet --lib contract` → FAILS (`Health: gained ["context_red_pct"]`); `REGEN_HUB_CONTRACT=1 cargo test -p claude-fleet --lib contract`; re-run → PASS; the golden diff is one added key under `Health`.
 
-- [ ] **Step 10: Full suite and commit**
+- [x] **Step 10: Full suite and commit**
 
 ```bash
 git add crates/fleet-core/src/service/attention.rs crates/fleet-core/src/service/health.rs crates/fleet-core/src/service/settings.rs crates/fleet-core/src/mcp/tools/session_ops.rs crates/fleet-core/src/mcp/tools/support.rs src-tauri/src/backend/tests_contract.rs src-tauri/src/backend/hub_contract.golden.json src/lib/attention.ts src/lib/attention.test.ts src/lib/fleet_settings.ts src/lib/SettingsDialog.svelte
@@ -2185,7 +2189,7 @@ git commit -m "feat(attention): stop_failed, context_full, stale_working and ci_
 - Consumes: `session_events(session_id, at, kind, detail)`, `in_savepoint`.
 - Produces: `insert_session_event*` skips a `status_change` whose detail equals the session's newest `status_change`, and a `stuck` whose detail equals a `stuck` written within `STUCK_EVENT_WINDOW_SECS = 3600`; `Store::record_{stop, prompt_submit, session_end, stop_failure, notification}_hook_for_row` write `status_change <new status>`.
 
-- [ ] **Step 1: Failing tests** — `timeline.rs` `mod tests`:
+- [x] **Step 1: Failing tests** — `timeline.rs` `mod tests`:
 
 ```rust
     /// F10: 2674 of 2948 events were `status_change`, hundreds of them
@@ -2263,7 +2267,7 @@ git commit -m "feat(attention): stop_failed, context_full, stale_working and ci_
 
 `cargo test -p fleet-core a_status_change_that_repeats` → FAILS (4 rows); `a_stuck_event_repeats_only_after_its_window` → FAILS (2 rows); `hook_transitions_land_on_the_timeline_once` → FAILS (empty).
 
-- [ ] **Step 2: Dedupe in the store** — `timeline.rs`, above `write_session_event`:
+- [x] **Step 2: Dedupe in the store** — `timeline.rs`, above `write_session_event`:
 
 ```rust
 /// A `stuck` event that repeats one written within this window is the same
@@ -2316,7 +2320,7 @@ and at the top of `write_session_event`, before the savepoint (`:113`):
 
 Add to the kind vocabulary doc (`:48`): "- hooks (`service::hooks` via the `record_*_hook_for_row` writers): `notification`, `status_change`, `stop_failure`." and "- the tick (`Store::age_out_stale_working`): `stale_working`."
 
-- [ ] **Step 3: Hooks record their transitions** — `store/sessions.rs`: in each recorder, after `if changed == 0 { return Ok(None); }` and before `emit_session`, add a best-effort insert:
+- [x] **Step 3: Hooks record their transitions** — `store/sessions.rs`: in each recorder, after `if changed == 0 { return Ok(None); }` and before `emit_session`, add a best-effort insert:
 
 ```rust
         if let Err(e) = self.insert_session_event(row_id, "status_change", Some("idle")) {
@@ -2326,9 +2330,9 @@ Add to the kind vocabulary doc (`:48`): "- hooks (`service::hooks` via the `reco
 
 with `"idle"` in `record_stop_hook_for_row`, `"working"` in `record_prompt_submit_hook_for_row_with`, `"stopped"` in `record_session_end_hook_for_row`, `"failed"` in `record_stop_failure_hook_for_row`, and `Some(status)` (the already-bound `&str`) in `record_notification_hook_for_row`.
 
-- [ ] **Step 4: Run** — `cargo test -p fleet-core timeline::` → PASS; `cargo test -p fleet-core hooks::` → PASS (`a_nested_claude_in_the_pane_never_touches_the_parent_row`'s `events_before == events` still holds: the child's hooks never reach the parent's recorders); `cargo test -p fleet-core reconcile_tests` → PASS (`status_transitions_emit_session_events_and_stamp_lifecycle_columns` asserts distinct transitions); `cargo test -p fleet-core store::` → PASS (`insert_session_event_caps_timeline_per_session` uses distinct details).
+- [x] **Step 4: Run** — `cargo test -p fleet-core timeline::` → PASS; `cargo test -p fleet-core hooks::` → PASS (`a_nested_claude_in_the_pane_never_touches_the_parent_row`'s `events_before == events` still holds: the child's hooks never reach the parent's recorders); `cargo test -p fleet-core reconcile_tests` → PASS (`status_transitions_emit_session_events_and_stamp_lifecycle_columns` asserts distinct transitions); `cargo test -p fleet-core store::` → PASS (`insert_session_event_caps_timeline_per_session` uses distinct details).
 
-- [ ] **Step 5: Full suite and commit**
+- [x] **Step 5: Full suite and commit**
 
 ```bash
 git add crates/fleet-core/src/store/timeline.rs crates/fleet-core/src/store/sessions.rs crates/fleet-core/src/service/hooks.rs
@@ -2347,7 +2351,7 @@ git commit -m "fix(timeline): one status_change per transition from either write
 - Consumes: `Health.context_red_pct` (Task 6).
 - Produces: `setContextRedPct(pct: number | undefined): void`, `contextRedThreshold(): number`; `contextLevel(pct)` reads `crit` at the hub's threshold and `warn` 15 points below (`CONTEXT_WARN_MARGIN`); `CONTEXT_WARN_PCT` / `CONTEXT_CRIT_PCT` are removed (nothing outside `attention.ts` imports them — `grep -rn "CONTEXT_WARN_PCT\|CONTEXT_CRIT_PCT" src` is empty after the change).
 
-- [ ] **Step 1: Failing tests** — `src/lib/attention.test.ts`: add `afterEach` to the vitest import and `setContextRedPct` to the `./attention` import; replace the `contextLevel` block (`:94-104`):
+- [x] **Step 1: Failing tests** — `src/lib/attention.test.ts`: add `afterEach` to the vitest import and `setContextRedPct` to the `./attention` import; replace the `contextLevel` block (`:94-104`):
 
 ```ts
 describe('contextLevel', () => {
@@ -2378,7 +2382,7 @@ describe('contextLevel', () => {
 
 and change Task 6's classify assertions to `context_pct: 85` → `'context_full'` and `context_pct: 84.9` → `'idle'`. `npx vitest run src/lib/attention.test.ts` → FAILS (`setContextRedPct` is not exported; `contextLevel(85)` is `'warn'`).
 
-- [ ] **Step 2: Implement** — `src/lib/attention.ts:71-83`:
+- [x] **Step 2: Implement** — `src/lib/attention.ts:71-83`:
 
 ```ts
 // ── context pressure ──
@@ -2422,9 +2426,9 @@ export async function refreshTrackersHealth(): Promise<void> {
 
 with `import { setContextRedPct } from './attention';`.
 
-- [ ] **Step 3: Run** — `npx vitest run src/lib/attention.test.ts src/lib/ipc.test.ts src/lib/tracker_health.test.ts` → PASS; `npx vitest run` → PASS; `npx svelte-check` → 0 errors.
+- [x] **Step 3: Run** — `npx vitest run src/lib/attention.test.ts src/lib/ipc.test.ts src/lib/tracker_health.test.ts` → PASS; `npx vitest run` → PASS; `npx svelte-check` → 0 errors.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/lib/attention.ts src/lib/attention.test.ts src/lib/ipc.ts src/App.svelte src/lib/tracker_health.ts

@@ -45,26 +45,31 @@ export interface WorkTreeFilters {
   query?: string;
   /** One group only (a section being expanded). */
   group?: string;
+  /** Include archived tasks (done, or every session link archived, with no
+   *  active session). `false` hides them, and the page says how many
+   *  (`archived_hidden`); absent shows them (a client from before the
+   *  archive). `workTree` always sends it. An older hub ignores it. */
+  archived?: boolean;
 }
 
 export const STATUS_FILTERS = ['any', 'open', 'todo', 'in_progress', 'done'] as const;
 export type WorkStatusFilter = (typeof STATUS_FILTERS)[number];
 export const STATUS_FILTER_LABELS: Record<WorkStatusFilter, string> = {
-  any: 'any status',
-  open: 'open',
-  todo: 'to do',
-  in_progress: 'in progress',
-  done: 'done',
+  any: 'Any',
+  open: 'Open',
+  todo: 'To do',
+  in_progress: 'In progress',
+  done: 'Done',
 };
 
 export const HAS_FILTERS = ['any', 'active', 'past_only', 'none', 'suggested'] as const;
 export type WorkHasFilter = (typeof HAS_FILTERS)[number];
 export const HAS_FILTER_LABELS: Record<WorkHasFilter, string> = {
-  any: 'any sessions',
-  active: 'active session',
-  past_only: 'past sessions only',
-  none: 'no session',
-  suggested: 'suggested',
+  any: 'Any',
+  active: 'Active session',
+  past_only: 'Past only',
+  none: 'No session',
+  suggested: 'Suggested',
 };
 
 /** `manual` | `rule` | `tracker` | `repo` | `key` | `none`. */
@@ -152,6 +157,9 @@ export interface WorkTask {
   counts?: { active?: number; ended?: number; suggested?: number };
   needs_you?: boolean;
   review?: boolean;
+  /** Done, or every session link archived, with nothing running: hidden
+   *  from the tree unless `filters.archived` (or `status: done`). */
+  archived?: boolean;
   last_activity_at?: number | null;
   repos?: string[];
   /** 0 = no placement. */
@@ -189,6 +197,9 @@ export interface WorkTreePage {
   orgs: WorkTreeOrg[];
   trackers: WorkTreeTracker[];
   total: number;
+  /** Tasks that passed every other filter but were hidden as archived
+   *  (absent from an older hub, which hides none). */
+  archived_hidden?: number;
   next_cursor?: string | null;
   generated_at?: number;
 }
@@ -218,6 +229,12 @@ export interface TaskDetail {
   aliases?: string[];
   /** Tracker text (plain, fenced for an agent, ≤ 600 chars). */
   description?: string | null;
+  /** The description's full length the hub knows (the tracker's count, else
+   *  the cached excerpt's), in characters. Absent from an older hub. */
+  description_chars?: number | null;
+  /** `description` shows less than `description_chars`. Absent means whole
+   *  (or an older hub, which never said). */
+  description_truncated?: boolean;
   last_outcome?: LastOutcome | null;
   placement?: Placement | null;
   /** Ids of the rules that match. */
@@ -388,8 +405,12 @@ export interface WorkTreeQuery {
   per_task?: number;
 }
 
+/** `archived` always goes on the wire: the hub hides archived tasks only
+ *  when asked (`archived: false`), so a phone from before the archive, which
+ *  never sends it, keeps seeing them. */
 export function workTree(q: WorkTreeQuery = {}): Promise<Result<WorkTreePage>> {
-  const filters = q.filters ? normalizeFilters(q.filters) : undefined;
+  const n = normalizeFilters(q.filters);
+  const filters: WorkTreeFilters = { ...n, archived: n.archived === true };
   return invokeCmd<WorkTreePage>('work_tree', {
     args: clean({ filters, cursor: q.cursor ?? undefined, limit: q.limit, per_task: q.per_task }),
   });
@@ -543,19 +564,27 @@ export function saveWorkView(view: {
   });
 }
 
-export function deleteWorkView(viewId: number): Promise<Result<{ deleted: boolean }>> {
-  return write<{ deleted: boolean }>('delete_work_view', { view_id: viewId });
+/** Delete a saved view if it is still at `expectedVersion` (the version the
+ *  person saw; absent: any). */
+export function deleteWorkView(viewId: number, expectedVersion?: number): Promise<Result<{ deleted: boolean }>> {
+  return write<{ deleted: boolean }>('delete_work_view', clean({ view_id: viewId, expected_version: expectedVersion }));
 }
 
 // ---------------------------------------------------------------------------
 // Errors
 
-/** What an `E_CONFLICT` carries: the current value. */
+/** What an `E_CONFLICT` carries: the current value. A link's (`link_id`,
+ *  `version`, `state`, `primary`, `ended`), a session's primary
+ *  (`session_id`, `primary_link_id`), a placement's (`task_id`, `version`,
+ *  `group`), a rule's or a view's (`rule_id` / `view_id`, `version`). */
 export interface Conflict {
-  link_id?: number;
+  link_id?: number | null;
   version?: number;
   state?: string;
   primary?: number | boolean | null;
+  ended?: boolean;
+  primary_link_id?: number | null;
+  group?: string | null;
   [k: string]: unknown;
 }
 
@@ -569,6 +598,54 @@ export function conflictOf(e: IpcError | null | undefined): Conflict | null {
 /** The sentence a conflict shows before the reload. */
 export function conflictSentence(what: string): string {
   return `${what} changed elsewhere (another window or device) — reloaded, so check it and try again.`;
+}
+
+/** The current value a conflict names, as one line ("Now: rejected ·
+ *  version 4"), or null when it names none. `linkName` names a link id (a
+ *  session's primary) when the caller knows it. */
+export function conflictCurrent(
+  c: Conflict | null | undefined,
+  linkName?: (linkId: number) => string | null | undefined,
+): string | null {
+  if (!c) return null;
+  const parts: string[] = [];
+  if (typeof c.state === 'string' && c.state) {
+    parts.push(c.ended ? 'ended' : c.primary === true ? `${c.state} · primary` : c.state);
+  }
+  if ('link_id' in c && c.link_id == null) parts.push('no link');
+  if ('primary_link_id' in c) {
+    const id = c.primary_link_id;
+    parts.push(typeof id === 'number' ? `primary is ${linkName?.(id) ?? `link ${id}`}` : 'no primary');
+  }
+  if ('group' in c) parts.push(typeof c.group === 'string' && c.group ? `placed in “${c.group}”` : 'not placed');
+  if (typeof c.version === 'number' && c.version > 0) parts.push(`version ${c.version}`);
+  return parts.length > 0 ? `Now: ${parts.join(' · ')}` : null;
+}
+
+/** A conflict as a notice shows it: the sentence, the current value, and
+ *  (`WorkConflictNotice`) a Reload action. */
+export interface ConflictNotice {
+  conflict: true;
+  text: string;
+  current: string | null;
+}
+
+/** The notice for an error when it is a conflict (null otherwise). */
+export function conflictNotice(
+  e: IpcError | null | undefined,
+  what: string,
+  linkName?: (linkId: number) => string | null | undefined,
+): ConflictNotice | null {
+  const c = conflictOf(e);
+  if (!c) return null;
+  return { conflict: true, text: conflictSentence(what), current: conflictCurrent(c, linkName) };
+}
+
+/** A notice that may be a conflict, as plain text (tests, titles). */
+export function noticeText(n: string | ConflictNotice | null | undefined): string {
+  if (!n) return '';
+  if (typeof n === 'string') return n;
+  return n.current ? `${n.text} ${n.current}` : n.text;
 }
 
 /** "Needs a newer hub": the hub (or this build's backend) has no Work view. */
@@ -619,10 +696,11 @@ export function normalizeFilters(v: unknown): WorkTreeFilters {
   if (v.review === true) out.review = true;
   if (typeof v.query === 'string' && v.query.trim() !== '') out.query = v.query.trim();
   if (typeof v.group === 'string' && v.group !== '') out.group = v.group;
+  if (v.archived === true) out.archived = true;
   return out;
 }
 
-const FILTER_ORDER: (keyof WorkTreeFilters)[] = ['org', 'tracker', 'status', 'mine', 'has', 'review', 'query', 'group'];
+const FILTER_ORDER: (keyof WorkTreeFilters)[] = ['org', 'tracker', 'status', 'mine', 'has', 'review', 'query', 'group', 'archived'];
 
 /** A stable string for a filters object (equal filters, equal keys). */
 export function filtersKey(f: WorkTreeFilters): string {
@@ -659,13 +737,15 @@ export function filtersFromQuery(s: string): WorkTreeFilters {
     review: p.get('review') === '1',
     query: p.get('q') ?? undefined,
     group: p.get('group') ?? undefined,
+    archived: p.get('archived') === '1',
   });
 }
 
-/** How many filters are on (the chip's count); `group` is navigation. */
+/** How many filters are on (the chip's count); `group` is navigation, and
+ *  showing archived tasks widens the view rather than narrowing it. */
 export function activeFilterCount(f: WorkTreeFilters): number {
   const n = normalizeFilters(f);
-  return FILTER_ORDER.filter((k) => k !== 'group' && n[k] !== undefined).length;
+  return FILTER_ORDER.filter((k) => k !== 'group' && k !== 'archived' && n[k] !== undefined).length;
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,6 +1143,21 @@ export const workTreeMeta = writable<{ orgs: WorkTreeOrg[]; trackers: WorkTreeTr
   trackers: [],
   groups: [],
 });
+
+/** ⌘⇧O in the Work view: the next organisation in the Work view's own org
+ *  filter (any → each org → unassigned → any), as the chord cycles the
+ *  Sessions list's scope there. */
+export function cycleWorkOrg(): void {
+  const orgs = get(workTreeMeta).orgs;
+  const ids: (number | 'none' | undefined)[] = [undefined, ...orgs.map((o) => o.id), 'none'];
+  const cur = normalizeFilters(get(workViewFilters)).org;
+  const i = ids.indexOf(cur);
+  const next = ids[(i + 1) % ids.length];
+  workViewFilters.update((f) => {
+    const { group: _g, org: _o, ...rest } = normalizeFilters(f);
+    return next === undefined ? rest : { ...rest, org: next };
+  });
+}
 
 /** Bumped by every work write (`work.ts`), by `work:changed` and by session
  *  events that touch work; the Work view re-reads what it shows (debounced)

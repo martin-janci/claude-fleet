@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onWorkChangedDebounced } from './work';
   // The Work view's tree (work graph M14), shown in the sidebar in place of
   // the Sessions tree: organisation → group → task → every session of the
   // task (primary ★, secondary, suggested, past). A session under several
@@ -22,6 +23,7 @@
   import { workViewChordLabel } from './app_views';
   import { detectMac } from './terminal_keys';
   import WorkFiltersBar from './WorkFiltersBar.svelte';
+  import { facetSentence, workFacets } from './filter_facets';
   import WorkReview from './WorkReview.svelte';
   import WorkRules from './WorkRules.svelte';
   import {
@@ -43,7 +45,6 @@
     taskStatus,
     trackerDown,
     trackerDownLabel,
-    workChanged,
     workExpanded,
     workReview,
     workTask,
@@ -52,6 +53,8 @@
     workTreeSessionIds,
     workViewFilters,
     workViewKey,
+    activeWorkViewId,
+    normalizeFilters,
     type GroupSection,
     type OrgSection,
     type SectionState,
@@ -63,20 +66,33 @@
   import type { IpcError } from './result';
 
   let {
-    onCollapse,
     /** Tasks per page; injectable for tests. */
     pageSize = 50,
     /** The refetch debounce, ms; injectable for tests. */
     debounceMs = 500,
-  }: { onCollapse?: () => void; pageSize?: number; debounceMs?: number } = $props();
+    /** The longest a steady stream of changes may hold a refetch back, ms. */
+    maxWaitMs = 3000,
+  }: { pageSize?: number; debounceMs?: number; maxWaitMs?: number } = $props();
 
   const chord = workViewChordLabel(detectMac(typeof navigator === 'undefined' ? undefined : navigator));
 
   let tab = $state<'tasks' | 'review'>('tasks');
   let page = $state.raw<WorkTreePage | null>(null);
+  const archivedHidden = $derived(page?.archived_hidden ?? 0);
+  function setArchived(on: boolean) {
+    workViewFilters.update((f) => {
+      const { group: _g, archived: _a, ...rest } = normalizeFilters(f);
+      return on ? { ...rest, archived: true } : rest;
+    });
+  }
   let states = $state.raw<Map<string, SectionState>>(new Map());
   let loading = $state(false);
   let error = $state<IpcError | null>(null);
+  // A re-read of the view already shown that failed: the tree stays, with a
+  // line to retry (the full error is for a first load, or new filters).
+  let refreshError = $state<IpcError | null>(null);
+  // The filters the page shown was read with.
+  let pageFiltersKey: string | null = null;
   let sectionBusy = $state.raw<Set<string>>(new Set());
   let sectionErrors = $state.raw<Map<string, string>>(new Map());
   let reviewTotal = $state<number | null>(null);
@@ -104,10 +120,14 @@
       orgs: Array.isArray(v?.orgs) ? v.orgs : [],
       trackers: Array.isArray(v?.trackers) ? v.trackers : [],
       total: typeof v?.total === 'number' ? v.total : 0,
+      archived_hidden: typeof v?.archived_hidden === 'number' ? v.archived_hidden : 0,
       next_cursor: v?.next_cursor ?? null,
       generated_at: v?.generated_at,
     };
   }
+
+  /** The most tasks one `work_tree` read returns. */
+  const PAGE_MAX = 200;
 
   let loadSeq = 0;
   async function load() {
@@ -122,14 +142,28 @@
     if (mine !== loadSeq) return;
     loading = false;
     if (!r.ok) {
-      error = r.error;
+      if (page && pageFiltersKey === fk) {
+        refreshError = r.error;
+      } else {
+        error = r.error;
+        refreshError = null;
+      }
       return;
     }
     error = null;
+    refreshError = null;
+    // A refresh of the view shown (same filters) keeps each open section it
+    // re-reads below until that read answers, so a failed or slow re-read
+    // never blanks what was loaded.
+    const sameView = pageFiltersKey === fk && fk === lastFiltersKey;
+    pageFiltersKey = fk;
     const p = pageOf(r.value);
-    const keptFilters = fk === lastFiltersKey;
     page = p;
-    states = distributeTasks(p);
+    const fresh = distributeTasks(p);
+    const openNow = get(workExpanded)[get(workViewKey)] ?? {};
+    const keep = new Map<string, SectionState>();
+    if (sameView) for (const [k, st] of states) if (st.own && openNow[k]) keep.set(k, st);
+    states = distributeTasks(p, keep);
     sectionErrors = new Map();
     // A section read still in flight answers for the view before this one:
     // cancel it (its answer is dropped), and re-issue it below when the
@@ -139,12 +173,16 @@
     // Open sections the first page did not cover load by themselves.
     for (const g of p.groups) {
       const k = sectionKey(g.org_id, g.group.id);
-      const open = (get(workExpanded)[get(workViewKey)] ?? {})[k] ?? states.has(k);
+      const open = openNow[k] ?? fresh.has(k);
       if (!open) continue;
-      const shown = states.get(k)?.tasks.length ?? 0;
-      if (shown >= g.count) continue;
-      const want = keptFilters ? Math.max(pageSize, had.get(k) ?? 0) : pageSize;
-      void loadSection(g, false, Math.min(200, want));
+      const shown = fresh.get(k)?.tasks.length ?? 0;
+      if (shown >= g.count) {
+        // The first page covers it all now: what was kept is stale.
+        if (states.get(k)?.own) states = new Map(states).set(k, fresh.get(k)!);
+        continue;
+      }
+      const want = sameView ? Math.max(pageSize, had.get(k) ?? 0) : pageSize;
+      void loadSection(g, false, want);
     }
     loadedOnce = true;
     flushReveal();
@@ -172,6 +210,9 @@
     return p;
   }
 
+  /** Read one section: `limit` tasks from its cursor (`more`) or from its
+   *  start, in pages of at most `PAGE_MAX` (a refresh re-reads as many as
+   *  were shown, so a section paged past one page does not shrink back). */
   async function readSection(g: WorkTreeGroup, k: string, more: boolean, limit: number) {
     const gen = (sectionGen.get(k) ?? 0) + 1;
     sectionGen.set(k, gen);
@@ -179,11 +220,25 @@
     const st = states.get(k);
     const cursor = more && st?.own ? st.cursor : null;
     sectionBusy = new Set(sectionBusy).add(k);
-    const r = await workTree({
-      filters: sectionFilters(get(workViewFilters), g.org_id ?? null, g.group.id),
-      cursor,
-      limit,
-    });
+    const filters = sectionFilters(get(workViewFilters), g.org_id ?? null, g.group.id);
+    let asked = Math.min(PAGE_MAX, limit);
+    let r = await workTree({ filters, cursor, limit: asked });
+    if (r.ok && !more) {
+      let got = pageOf(r.value);
+      let tasks = got.tasks;
+      // Only past a full page: a short page is all the hub had to give.
+      while (sectionGen.get(k) === gen && got.next_cursor && got.tasks.length >= asked && tasks.length < limit) {
+        asked = Math.min(PAGE_MAX, limit - tasks.length);
+        const next = await workTree({ filters, cursor: got.next_cursor, limit: asked });
+        if (!next.ok) {
+          r = next;
+          break;
+        }
+        got = pageOf(next.value);
+        tasks = mergeTasks(tasks, got.tasks);
+      }
+      if (r.ok) r = { ok: true, value: { ...got, tasks } };
+    }
     if (sectionGen.get(k) !== gen) return;
     sectionReq.delete(k);
     const busy = new Set(sectionBusy);
@@ -202,7 +257,9 @@
     sectionErrors = errs;
     const p = pageOf(r.value);
     const cur = states.get(k);
-    const tasks = more || cur ? mergeTasks(cur?.tasks ?? [], p.tasks) : p.tasks;
+    // A re-read from the start replaces what the section had loaded by
+    // itself (a task that left it goes); the first page's share is merged.
+    const tasks = more || (cur && !cur.own) ? mergeTasks(cur?.tasks ?? [], p.tasks) : p.tasks;
     states = new Map(states).set(k, { tasks, cursor: p.next_cursor ?? null, own: true });
   }
 
@@ -221,20 +278,17 @@
     void load();
   });
 
-  // `work:changed` / session events: one debounced re-read.
-  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
-  let firstTick = true;
-  const offChanged = workChanged.subscribe(() => {
-    if (firstTick) {
-      firstTick = false;
-      return;
-    }
-    clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(() => {
+  // `work:changed` / session events: one debounced re-read — at most
+  // `maxWaitMs` after the first change it waits for, so a steady stream of
+  // changes (a busy fleet) cannot hold the view back forever.
+  const offChanged = onWorkChangedDebounced(
+    () => {
       void load();
       void loadReviewCount();
-    }, debounceMs);
-  });
+    },
+    () => debounceMs,
+    () => maxWaitMs,
+  );
 
   onMount(() => {
     void load();
@@ -244,7 +298,6 @@
     offFilters();
     offChanged();
     offReveal();
-    clearTimeout(refreshTimer);
     workTreeSessionIds.set(new Set());
   });
 
@@ -355,7 +408,7 @@
   }
 </script>
 
-<div class="work-tree" data-testid="work-tree" bind:this={root}>
+<div class="work-tree" data-testid="work-tree" aria-busy={loading} bind:this={root}>
   <header class="work-header">
     <div class="row">
       <div class="tabs" role="tablist" aria-label="Work view">
@@ -384,28 +437,8 @@
         data-testid="work-rules-open"
         onclick={() => (rulesOpen = true)}>⚙</button
       >
-      <button
-        class="btn btn--quiet btn--icon"
-        type="button"
-        title="Refresh"
-        aria-label="Refresh the Work view"
-        data-testid="work-refresh"
-        disabled={loading}
-        onclick={() => {
-          void load();
-          void loadReviewCount();
-        }}>{loading ? '…' : '↻'}</button
-      >
-      {#if onCollapse}
-        <button
-          class="btn btn--quiet btn--icon"
-          type="button"
-          title="Hide sidebar (more room for terminal)"
-          aria-label="Hide sidebar"
-          data-testid="work-collapse"
-          onclick={onCollapse}>‹</button
-        >
-      {/if}
+      <!-- Refresh is the sidebar's ↻ (it re-reads this view too), and
+           collapse is the sidebar's ‹: one of each. -->
     </div>
     {#if tab === 'tasks'}
       <WorkFiltersBar orgs={page?.orgs ?? []} trackers={page?.trackers ?? []} />
@@ -413,6 +446,12 @@
   </header>
 
   <div class="scroller">
+    {#if tab === 'tasks' && refreshError && page && !error}
+      <p class="refresh-error" role="status" data-testid="work-tree-refresh-error">
+        Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
+        <button class="btn btn--quiet" type="button" data-testid="work-tree-refresh-retry" onclick={() => void load()}>Retry</button>
+      </p>
+    {/if}
     {#if tab === 'review'}
       <WorkReview onchanged={() => void loadReviewCount()} />
     {:else if error}
@@ -423,9 +462,29 @@
     {:else if !page}
       <p class="state muted" data-testid="work-tree-loading">Loading work…</p>
     {:else if sections.length === 0}
-      <p class="state muted" data-testid="work-tree-empty">
-        No tasks match. Clear a filter, or switch back to Sessions ({chord}).
-      </p>
+      {@const facets = workFacets($workViewFilters, {
+        orgName: (id) => page?.orgs.find((o) => o.id === id)?.name,
+        trackerName: (id) => page?.trackers.find((t) => t.id === id)?.name,
+      })}
+      <div class="state muted empty" data-testid="work-tree-empty">
+        {#if facets.length > 0}
+          <p>No tasks match <strong>{facetSentence(facets)}</strong>.</p>
+          <button
+            class="btn btn--quiet is-bounded"
+            type="button"
+            data-testid="work-tree-empty-clear"
+            onclick={() => {
+              activeWorkViewId.set(null);
+              workViewFilters.set({});
+            }}>Clear filters</button
+          >
+        {:else if archivedHidden === 0}
+          <p>No work yet. Tasks appear here once a session is linked to a ticket, or you name its work. Back to Sessions: {chord}.</p>
+        {/if}
+        {#if archivedHidden > 0}
+          {@render archivedRow()}
+        {/if}
+      </div>
     {:else}
       <ul class="orgs" aria-label="Work">
         {#each sections as o (o.key)}
@@ -542,9 +601,30 @@
           </li>
         {/each}
       </ul>
+      {#if archivedHidden > 0 || $workViewFilters.archived}
+        {@render archivedRow()}
+      {/if}
     {/if}
   </div>
 </div>
+
+{#snippet archivedRow()}
+  <!-- Archived tasks (done, or every session archived, and nothing
+       running) stay out of the way; one click brings them all back. -->
+  <div class="archived-row" data-testid="work-archived-row">
+    {#if $workViewFilters.archived}
+      <span>Showing archived tasks</span>
+      <button class="btn btn--quiet" type="button" data-testid="work-archived-toggle" onclick={() => setArchived(false)}
+        >Hide archived</button
+      >
+    {:else}
+      <span>{archivedHidden} archived task{archivedHidden === 1 ? '' : 's'} hidden</span>
+      <button class="btn btn--quiet" type="button" data-testid="work-archived-toggle" onclick={() => setArchived(true)}
+        >Show archived</button
+      >
+    {/if}
+  </div>
+{/snippet}
 
 {#if rulesOpen}
   <WorkRules onclose={() => (rulesOpen = false)} />
@@ -766,8 +846,39 @@
   .state {
     padding: 0.4rem 0.2rem;
   }
+  .archived-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 6px 0 4px;
+    padding: 4px 6px;
+    border-top: 1px dashed var(--border);
+    color: var(--fg-muted);
+    font-size: var(--control-font);
+  }
+  .archived-row span {
+    flex: 1;
+  }
+  .empty {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .empty p {
+    margin: 0;
+  }
+  .empty strong {
+    color: var(--fg);
+    font-weight: 500;
+  }
   .muted {
     color: var(--fg-muted);
+  }
+  .refresh-error {
+    margin: 0.2rem 0.4rem;
+    font-size: 0.75rem;
+    color: var(--usage-warn, #b45309);
   }
   .error {
     color: var(--usage-crit, #c62828);

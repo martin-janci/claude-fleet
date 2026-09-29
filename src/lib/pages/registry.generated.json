@@ -60,6 +60,29 @@
       "danger": {
         "level": "none"
       },
+      "default": "86400",
+      "help": "How long a session marked stale asks for a look before the tick lifts the mark on its own. An attach or any hook lifts it sooner.",
+      "key": "reconcile.stale_working_ttl_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Stale mark lifts after",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "hours",
+      "value": "86400",
+      "zero": "never by age"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "1209600",
       "help": "How long a resumable session lost to a host reboot or the tmux server exiting is kept before it is deleted, counted from when it was lost.",
       "key": "sessions.lost_ttl_secs",
@@ -675,6 +698,113 @@
       "danger": {
         "level": "none"
       },
+      "default": "86400",
+      "help": "How old a host's recorded Claude version may be before the \"older than the fleet\" badge stops trusting it and shows nothing.",
+      "key": "health.version_max_age_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Trust a host's Claude version for",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "hours",
+      "value": "86400"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "90",
+      "help": "Used share of a host's home filesystem at which the host reads as disk low.",
+      "key": "health.disk_low_pct",
+      "kind": {
+        "max": 100,
+        "min": 50,
+        "type": "int"
+      },
+      "label": "Disk low at",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "percent",
+      "value": "90"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "30",
+      "help": "Patch releases a host's Claude may trail the fleet's newest before the host reads as behind.",
+      "key": "health.claude_max_behind",
+      "kind": {
+        "max": 1000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Claude behind after",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "count",
+      "value": "30"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "3600",
+      "help": "How long a reachable host with a live session may send no hook before it reads as hooks silent.",
+      "key": "health.hooks_silent_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Hooks silent after",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "minutes",
+      "value": "3600"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "confirm",
+        "message": "Fleet will write its skills into a folder another git repository tracks."
+      },
+      "default": "false",
+      "help": "Write fleet's skills even when a host's ~/.claude/skills is inside a git work tree, such as a dotfiles checkout. Off: provisioning refuses such a host.",
+      "key": "provision.force_git_tree",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Provision into git-tracked skills",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "365",
       "help": "Days a work journal row is kept once its conversation ended and its work is done or unlinked.",
       "key": "work.retention.journal_days",
@@ -771,6 +901,29 @@
       "restart": "app",
       "tags": [],
       "unit": "seconds",
+      "value": "300",
+      "zero": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "300",
+      "help": "How long a fetched ticket description is reused before the tracker is asked again; never longer than the done-tickets retention window.",
+      "key": "work.describe_cache_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Ticket description cache",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "minutes",
       "value": "300",
       "zero": "off"
     },
@@ -991,6 +1144,140 @@
       "tags": [],
       "unit": "none",
       "value": "done_idle,pr_merged_idle"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "stable",
+      "help": "Which releases the hub follows for its fleet.",
+      "key": "update.track",
+      "kind": {
+        "options": [
+          "stable",
+          "beta",
+          "nightly"
+        ],
+        "type": "choice"
+      },
+      "label": "Release track",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "stable"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "notify",
+      "help": "manual: only a pinned version; notify: offer the update; automatic: install it at the next quiet point.",
+      "key": "update.hub.mode",
+      "kind": {
+        "options": [
+          "manual",
+          "notify",
+          "automatic"
+        ],
+        "type": "choice"
+      },
+      "label": "Hub updates",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "notify"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "notify",
+      "help": "The same choice for fleet-agent on hosts the hub cannot reach.",
+      "key": "update.agent.mode",
+      "kind": {
+        "options": [
+          "manual",
+          "notify",
+          "automatic"
+        ],
+        "type": "choice"
+      },
+      "label": "Agent updates",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "notify"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "notify",
+      "help": "The same choice for the desktop app.",
+      "key": "update.desktop.mode",
+      "kind": {
+        "options": [
+          "manual",
+          "notify",
+          "automatic"
+        ],
+        "type": "choice"
+      },
+      "label": "Desktop updates",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "notify"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "notify",
+      "help": "manual or notify: a phone never installs an update silently.",
+      "key": "update.mobile.mode",
+      "kind": {
+        "options": [
+          "manual",
+          "notify"
+        ],
+        "type": "choice"
+      },
+      "label": "Phone updates",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "notify"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "21600",
+      "help": "How often the hub re-reads the release channel, and clients check again.",
+      "key": "update.check_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 900,
+        "type": "secs"
+      },
+      "label": "Update check interval",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "hours",
+      "value": "21600"
     },
     {
       "ai": "never",
@@ -1507,6 +1794,10 @@
             {
               "page": "settings.review",
               "type": "link"
+            },
+            {
+              "page": "settings.updates",
+              "type": "link"
             }
           ],
           "title": "Running the fleet"
@@ -1659,9 +1950,23 @@
             {
               "key": "reconcile.stale_working_secs",
               "type": "field"
+            },
+            {
+              "key": "reconcile.stale_working_ttl_secs",
+              "type": "field"
             }
           ],
           "title": "Reconcile tick"
+        },
+        {
+          "advanced": true,
+          "items": [
+            {
+              "key": "provision.force_git_tree",
+              "type": "field"
+            }
+          ],
+          "title": "Provisioning"
         }
       ],
       "spec": "fleet.page/1",
@@ -1689,6 +1994,28 @@
             }
           ],
           "title": "Sessions and tasks"
+        },
+        {
+          "intro": "When a host reads as needing a look on the Hosts view and in fleet_health.",
+          "items": [
+            {
+              "key": "health.disk_low_pct",
+              "type": "field"
+            },
+            {
+              "key": "health.hooks_silent_secs",
+              "type": "field"
+            },
+            {
+              "key": "health.claude_max_behind",
+              "type": "field"
+            },
+            {
+              "key": "health.version_max_age_secs",
+              "type": "field"
+            }
+          ],
+          "title": "Host health"
         },
         {
           "items": [
@@ -1823,6 +2150,10 @@
                 },
                 {
                   "key": "work.recent_days",
+                  "type": "field"
+                },
+                {
+                  "key": "work.describe_cache_secs",
                   "type": "field"
                 }
               ],
@@ -1974,8 +2305,10 @@
         {
           "items": [
             {
+              "hint": "An offline benchmark only until J1 passes its acceptance lines (D32).",
               "key": "decide.jev.work_link",
-              "type": "field"
+              "type": "field",
+              "widget": "readonly"
             },
             {
               "key": "decide.jev.status_map",
@@ -2334,6 +2667,50 @@
       ],
       "spec": "fleet.page/1",
       "title": "Organisations"
+    },
+    {
+      "id": "settings.updates",
+      "intro": "Which releases the fleet follows, and whether each part updates itself, offers an update or waits for a pinned version. See docs/updates.md.",
+      "layout": "category",
+      "parent": "settings",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "update.track",
+              "type": "field"
+            },
+            {
+              "key": "update.check_interval_secs",
+              "type": "field"
+            }
+          ],
+          "title": "Release track"
+        },
+        {
+          "items": [
+            {
+              "key": "update.hub.mode",
+              "type": "field"
+            },
+            {
+              "key": "update.agent.mode",
+              "type": "field"
+            },
+            {
+              "key": "update.desktop.mode",
+              "type": "field"
+            },
+            {
+              "key": "update.mobile.mode",
+              "type": "field"
+            }
+          ],
+          "title": "Per component"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Updates"
     },
     {
       "id": "settings.review",
@@ -3371,6 +3748,11 @@
         {
           "id": "tracker_writes",
           "label": "PR links",
+          "ty": "int"
+        },
+        {
+          "id": "describe_cache",
+          "label": "Full descriptions",
           "ty": "int"
         }
       ],

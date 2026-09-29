@@ -531,7 +531,15 @@ async fn the_breaker_opens_after_consecutive_failures_and_half_opens() {
     // Open: refused without a call.
     assert_eq!(ask().await.fallback, Some(Fallback::BreakerOpen));
     assert_eq!(fake.calls(), 2);
-    let b = breaker_state(&w.store.lock().unwrap(), PROVIDER_JEV, 2, 300, NOON).unwrap();
+    let b = breaker_state(
+        &w.store.lock().unwrap(),
+        PROVIDER_JEV,
+        2,
+        300,
+        NOON,
+        RunScope::Live,
+    )
+    .unwrap();
     assert!(b.open);
     assert_eq!(b.open_until, Some(NOON + 300));
     // Half-open after the window: one call; a failure (529) opens it again.
@@ -545,9 +553,16 @@ async fn the_breaker_opens_after_consecutive_failures_and_half_opens() {
     assert_eq!(ok.usable().unwrap().value, "ACME-1");
     // A success closes it.
     assert!(
-        !breaker_state(&w.store.lock().unwrap(), PROVIDER_JEV, 2, 300, NOON + 602)
-            .unwrap()
-            .open
+        !breaker_state(
+            &w.store.lock().unwrap(),
+            PROVIDER_JEV,
+            2,
+            300,
+            NOON + 602,
+            RunScope::Live
+        )
+        .unwrap()
+        .open
     );
 }
 
@@ -962,4 +977,119 @@ fn status_reads_without_writing() {
     assert!(lines.contains("decisions (Jev): on"), "{lines}");
     assert!(lines.contains("no runs in the last 7 days"), "{lines}");
     assert_eq!(fmt_usd(51), "$0.000051");
+}
+
+// --- the offline benchmark's calls ---------------------------------------------------
+
+fn bench_request(feature: Feature, org_id: Option<i64>) -> DecideRequest {
+    DecideRequest {
+        subject_kind: DECISION_BENCH_SUBJECT.into(),
+        subject_id: "s1".into(),
+        ..request(feature, org_id)
+    }
+}
+
+#[test]
+fn the_benchmark_needs_no_live_mode_but_every_other_check() {
+    let w = world();
+    let bench = |f: Feature, org: Option<i64>| {
+        gate_bench_at(
+            &w.store.lock().unwrap(),
+            f,
+            org,
+            w.clock.load(Ordering::SeqCst),
+        )
+    };
+    let f = Feature::StatusMap;
+    assert_eq!(bench(f, Some(w.org)), Err(Fallback::FlagOff));
+    w.set(settings::DECIDE_JEV_ENABLED, "true");
+    // The live mode stays off: the live gate refuses, the benchmark's does
+    // not stop there.
+    assert_eq!(w.gate(f, Some(w.org)), Err(Fallback::ModeOff));
+    assert_eq!(bench(f, Some(w.org)), Err(Fallback::OrgOff));
+    w.store
+        .lock()
+        .unwrap()
+        .set_org_jev_allowed(w.org, true)
+        .unwrap();
+    assert_eq!(bench(f, Some(w.org)), Err(Fallback::NoKey));
+    w.store
+        .lock()
+        .unwrap()
+        .set_decision_credential(Some(&Secret::new(KEY)), None)
+        .unwrap();
+    // Always shadow: a benchmark never proposes, even with assist on.
+    assert_eq!(bench(f, Some(w.org)), Ok(Mode::Shadow));
+    w.set(settings::DECIDE_JEV_STATUS_MAP, "assist");
+    assert_eq!(bench(f, Some(w.org)), Ok(Mode::Shadow));
+    w.set(settings::DECIDE_JEV_STATUS_MAP, "off");
+    assert_eq!(w.gate(f, Some(w.org)), Err(Fallback::ModeOff));
+    // A window onto a hub never calls out, benchmark or not.
+    w.store
+        .lock()
+        .unwrap()
+        .set_setting(HUB_REMOTE_URL_KEY, "https://hub.example.com")
+        .unwrap();
+    assert_eq!(bench(f, Some(w.org)), Err(Fallback::NotOwner));
+}
+
+#[tokio::test]
+async fn a_benchmarks_failures_never_stop_the_live_calls_but_its_spend_does() {
+    let w = world();
+    w.all_on();
+    w.set(settings::DECIDE_JEV_DAILY_TOKEN_BUDGET, "1000");
+    w.set(settings::DECIDE_JEV_BREAKER_FAILURES, "2");
+    let fake = Fake::answering(vec![
+        Ok(choice_response("ACME-1", 0.9, 1_200)),
+        Err(BackendError::Http { status: 500 }),
+        Err(BackendError::Http { status: 500 }),
+        Ok(choice_response("ACME-1", 0.9, 10)),
+    ]);
+    let ctx = w.ctx(fake.clone());
+    // The benchmark spends the day's budget, then fails twice...
+    let spent = decide(&ctx, bench_request(Feature::WorkLink, Some(w.org))).await;
+    assert_eq!((spent.fallback, spent.mode), (None, Some(Mode::Shadow)));
+    // ...its own calls see the spend (over every run): refused.
+    let refused = decide(&ctx, bench_request(Feature::WorkLink, Some(w.org))).await;
+    assert_eq!(refused.fallback, Some(Fallback::Budget));
+    w.set(settings::DECIDE_JEV_DAILY_TOKEN_BUDGET, "1000000");
+    for _ in 0..2 {
+        let r = decide(&ctx, bench_request(Feature::WorkLink, Some(w.org))).await;
+        assert_eq!(r.fallback, Some(Fallback::HttpError));
+    }
+    assert_eq!(
+        decide(&ctx, bench_request(Feature::WorkLink, Some(w.org)))
+            .await
+            .fallback,
+        Some(Fallback::BreakerOpen)
+    );
+    w.set(settings::DECIDE_JEV_DAILY_TOKEN_BUDGET, "1000");
+    // One budget: the benchmark's spend is the day's spend, so the live
+    // path is refused too — the setting is never spent twice a day.
+    let live = decide(&ctx, request(Feature::WorkLink, Some(w.org))).await;
+    assert_eq!(live.fallback, Some(Fallback::Budget));
+    // With room left, the live path goes: its breaker is closed.
+    w.set(settings::DECIDE_JEV_DAILY_TOKEN_BUDGET, "1300");
+    let live = decide(&ctx, request(Feature::WorkLink, Some(w.org))).await;
+    assert_eq!(live.fallback, None);
+    assert_eq!(fake.calls(), 4);
+    // Every benchmark run records shadow, whatever the live mode.
+    let runs = w.runs();
+    assert!(runs
+        .iter()
+        .filter(|r| r.subject_kind == DECISION_BENCH_SUBJECT)
+        .all(|r| r.mode == "shadow"));
+    // `decide status` keeps them apart.
+    let st = status(&w.store.lock().unwrap(), NOON, 1).unwrap();
+    assert_eq!(st.today.input_tokens, 10);
+    assert_eq!(st.today.bench_input_tokens, 1_200);
+    assert!(!st.breaker.open);
+    let live_rows: i64 = st.stats.iter().filter(|r| !r.bench).map(|r| r.runs).sum();
+    assert_eq!(live_rows, 2, "the budget refusal and the call");
+    assert!(st.lines().iter().any(|l| l.contains("bench")));
+    assert!(
+        st.lines().iter().any(|l| l.contains("1210 of 1300")),
+        "the day's spend is both: {:?}",
+        st.lines()
+    );
 }

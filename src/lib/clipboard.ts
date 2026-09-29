@@ -18,9 +18,11 @@ export function trimSelectionText(raw: string): string {
 }
 
 /** Remove any embedded paste-end marker from text about to be pasted, so a
- *  malicious/odd clipboard payload can't prematurely close the bracket. */
+ *  malicious/odd clipboard payload can't prematurely close the bracket, and
+ *  turn Windows CRLF line ends into the LF every other clipboard carries — a
+ *  CRLF paste reached the pane as Enter followed by Ctrl-J. */
 export function sanitizePaste(text: string): string {
-  return text.split(PASTE_END).join('');
+  return text.split(PASTE_END).join('').replace(/\r\n/g, '\n');
 }
 
 /** Wrap text in bracketed-paste markers when the remote app requested mode
