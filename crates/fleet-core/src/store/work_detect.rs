@@ -76,8 +76,10 @@ impl Store {
     /// stamp that lived only in `Store::tidy_sessions` was a promise kept
     /// only if a person opened Tidy-up before the session was reaped.
     ///
-    /// Only when the stored value CHANGED (`n > 0`), which is the same
-    /// condition this method reports by returning the session id. An earlier
+    /// Only when the PR BECAME merged with this write
+    /// ([`Self::record_pr_signals`]): not on every change of the stored
+    /// value, which also moves when a merged PR's title or body is edited
+    /// later. An earlier
     /// round ran it on every merged probe, to cover a link confirmed after
     /// the merge was first seen — and that made a STALE merged signal stamp
     /// whatever work the session was pointed at NEXT: pick different work on
@@ -87,8 +89,8 @@ impl Store {
     /// field this feature exists to make trustworthy. The late-confirmed
     /// link is covered instead by the caller's second call, made after
     /// `service::work::detect::resolve_session` has settled the links
-    /// (`service::sessions::reconcile`), which is a signal that just changed
-    /// rather than an old one being re-read.
+    /// (`service::sessions::reconcile`), made only on the same transition
+    /// rather than on an old merge being re-read.
     ///
     /// A failed stamp is logged, never returned: the `UPDATE` above has
     /// already committed, and the caller re-resolves the session's links and
@@ -100,25 +102,80 @@ impl Store {
         tmux_name: &str,
         signals: Option<&str>,
     ) -> Result<Option<i64>, IpcError> {
-        let id: Option<i64> = self
+        Ok(self
+            .record_pr_signals(host, tmux_name, signals)?
+            .map(|(id, _)| id))
+    }
+
+    /// [`Self::set_pr_signals`], also saying whether the PR BECAME merged
+    /// with this write: `Some((session_id, became_merged))` when the stored
+    /// value changed. The stamp is made only on that transition, and a
+    /// caller that stamps again after resolving the links
+    /// (`service::sessions::reconcile`) keys its second call off the same
+    /// flag.
+    ///
+    /// "Became merged" compares the new value with the one it replaces, not
+    /// the JSON text: a merged PR whose title or body is edited afterwards
+    /// rewrites `text` (and `closing` / `trailers`), which changes the
+    /// stored value but is no new merge, so it must not stamp the work the
+    /// session was pointed at since. A value the probe never recorded
+    /// (`pr_signals_at` NULL) counts as no previous value. A previous `NULL`
+    /// the probe did record (it once found no PR) is a transition only
+    /// while no item this session was linked to carries a derived stamp
+    /// yet: a probe that briefly found no PR and then reads the same merged
+    /// PR again must not deliver newly named work. The price is that a
+    /// session that really moved on to a second PR which the probe first
+    /// sees already merged is not stamped (a person sets it); a PR seen
+    /// open first stamps as usual.
+    pub fn record_pr_signals(
+        &self,
+        host: &str,
+        tmux_name: &str,
+        signals: Option<&str>,
+    ) -> Result<Option<(i64, bool)>, IpcError> {
+        let row: Option<(i64, Option<String>, bool)> = self
             .conn
             .query_row(
-                "SELECT id FROM sessions WHERE host_alias = ?1 AND tmux_name = ?2",
+                "SELECT id, pr_signals, pr_signals_at IS NOT NULL FROM sessions \
+                 WHERE host_alias = ?1 AND tmux_name = ?2",
                 rusqlite::params![host, tmux_name],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let Some(id) = id else { return Ok(None) };
+        let Some((id, prior, probed)) = row else {
+            return Ok(None);
+        };
         let n = self.conn.execute(
             "UPDATE sessions SET pr_signals = ?1, pr_signals_at = ?2 \
              WHERE id = ?3 AND (pr_signals IS NOT ?1 OR pr_signals_at IS NULL)",
             rusqlite::params![signals, now_unix(), id],
         )?;
-        let merged = signals
-            .and_then(|s| serde_json::from_str::<crate::service::work::detect::PrSignals>(s).ok())
-            .is_some_and(|s| s.is_merged());
-        let changed = n > 0;
-        if merged && changed {
+        if n == 0 {
+            return Ok(None);
+        }
+        let is_merged = |v: &str| {
+            serde_json::from_str::<crate::service::work::detect::PrSignals>(v)
+                .is_ok_and(|s| s.is_merged())
+        };
+        let was_merged = match prior.as_deref() {
+            // Never recorded by the probe (`pr_signals_at` NULL): whatever
+            // sits there, this is the first read, as the UPDATE above says.
+            _ if !probed => false,
+            Some(p) => is_merged(p),
+            // A NULL the probe wrote (no PR found) after a merge it already
+            // stamped: the same merge read again is not a new one. Unknown
+            // (a failed read) errs toward no stamp.
+            None => self.session_has_derived_stamp(id).unwrap_or_else(|e| {
+                tracing::warn!(
+                    session_id = id,
+                    error = %e.message,
+                    "[work] could not tell whether the merge was stamped"
+                );
+                true
+            }),
+        };
+        let became_merged = signals.is_some_and(is_merged) && !was_merged;
+        if became_merged {
             if let Err(e) = self.stamp_derived_done_for_session(id) {
                 tracing::warn!(
                     session_id = id,
@@ -127,7 +184,20 @@ impl Store {
                 );
             }
         }
-        Ok(changed.then_some(id))
+        Ok(Some((id, became_merged)))
+    }
+
+    /// Any item a link of `session_id` points at (live or demoted, primary
+    /// or not) carries the merged-PR stamp (`status_set_by = 'derived'`).
+    fn session_has_derived_stamp(&self, session_id: i64) -> Result<bool, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM work_links l \
+               JOIN participants p ON p.id = l.participant_id \
+               JOIN work_items i ON i.id = l.item_id \
+             WHERE p.session_id = ?1 AND i.status_set_by = 'derived')",
+            rusqlite::params![session_id],
+            |r| r.get(0),
+        )?)
     }
 
     /// The resolver's view of `session_id`, `None` for a missing row.

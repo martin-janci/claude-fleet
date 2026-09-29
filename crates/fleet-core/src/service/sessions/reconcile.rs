@@ -965,8 +965,8 @@ fn write_reachable_host(
             // Basic fields only (an older `gh`): nothing to say.
             (Some(_), None) => continue,
         };
-        match s.set_pr_signals(&host.alias, tmux_name, signals.as_deref()) {
-            Ok(Some(sid)) => {
+        match s.record_pr_signals(&host.alias, tmux_name, signals.as_deref()) {
+            Ok(Some((sid, became_merged))) => {
                 if let Err(e) = crate::service::work::detect::resolve_session(s, sid) {
                     tracing::debug!(error = %e.message, "[work] PR resolve failed");
                     s.ensure_in_tx()?;
@@ -978,8 +978,10 @@ fn write_reachable_host(
                 // calls are on a signal that CHANGED this pass — a stale
                 // merged signal must never stamp work the session was
                 // pointed at later — and both are idempotent, so the second
-                // writes only what the first could not see yet.
-                if info.signals.as_ref().is_some_and(|sg| sg.is_merged()) {
+                // writes only what the first could not see yet. Keyed off
+                // the PR BECOMING merged, not off a merged signal whose
+                // title or body merely changed.
+                if became_merged {
                     if let Err(e) = s.stamp_derived_done_for_session(sid) {
                         tracing::debug!(error = %e.message, "[work] merged PR did not stamp");
                         s.ensure_in_tx()?;
