@@ -219,7 +219,7 @@ elsewhere, or ask.
 the views (*My work*, *Current sprint* where there is one, *Recent*,
 favourite filters). `fleet-hub tracker list` shows it `ok`. The token never
 appeared on a command line or in the output (only a `…abcd` hint).
-On the desktop, Settings → Work lists the tracker **read-only** and says
+On the desktop, Settings → Trackers lists the tracker **read-only** and says
 it is configured on the hub.
 
 Result: [ ] pass / [ ] fail

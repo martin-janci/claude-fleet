@@ -889,6 +889,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/082_result_evidence.sql"),
         already_applied: Some(sessions_has_pr_evidence),
     },
+    // Declarative pages P5: `setting_proposals` and `setting_audit`. New
+    // tables and indexes, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(83, include_str!("../../migrations/083_setting_review.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

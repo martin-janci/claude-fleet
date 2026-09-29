@@ -1,0 +1,78 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings.decisions",
+  "title": "Decisions (Jev)",
+  "parent": "settings",
+  "layout": "category",
+  "intro": "Lets fleet ask TypeSafe's decision model closed-set questions. Experimental and off.",
+  "sections": [
+    {
+      "title": "Decision model",
+      "items": [
+        {
+          "type": "field",
+          "key": "decide.jev.enabled"
+        },
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "Data goes only for organisations that opted in, redacted, and a model answer only ever pre-selects a suggestion you confirm. Set the key with fleet-hub decide set-key."
+        }
+      ]
+    },
+    {
+      "title": "Features",
+      "when": {
+        "key": "decide.jev.enabled",
+        "truthy": true
+      },
+      "items": [
+        {
+          "type": "field",
+          "key": "decide.jev.work_link",
+          "widget": "readonly",
+          "hint": "An offline benchmark only until J1 passes its acceptance lines (D32)."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.status_map"
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.unassigned"
+        }
+      ]
+    },
+    {
+      "title": "Limits",
+      "advanced": true,
+      "collapsible": true,
+      "items": [
+        {
+          "type": "field",
+          "key": "decide.jev.model"
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.timeout_ms"
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.breaker_failures"
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.breaker_open_secs"
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.daily_token_budget"
+        },
+        {
+          "type": "field",
+          "key": "decide.retention_days"
+        }
+      ]
+    }
+  ]
+}

@@ -132,8 +132,9 @@ export function plainUntrusted(e: string | null | undefined): string {
   return e;
 }
 
-/** The Settings section an Attention item links to. */
-export const RECONNECT_SECTION = 'work';
+/** The Settings page an Attention item links to (the generated Trackers
+ *  page, declarative pages P4b). */
+export const RECONNECT_SECTION = 'settings.trackers';
 
 export interface TrackerAttentionItem {
   /** `tracker-<id>`: one item per tracker, whatever the roll-up repeats. */

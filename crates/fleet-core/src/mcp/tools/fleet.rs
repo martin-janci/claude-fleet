@@ -498,21 +498,29 @@ impl FleetTools {
 
     #[tool(description = "Operator settings (ticks, GC, playbooks, projects \
         roots, move, usage, reports, work graph), each key's effective value. \
-        Read-only but master token only (it names hosts and their paths).")]
-    pub(super) async fn get_settings(&self) -> Result<CallToolResult, McpError> {
+        Master token or a paired device bound to no org.")]
+    pub(super) async fn get_settings(
+        &self,
+        Parameters(p): Parameters<GetSettingsParams>,
+    ) -> Result<CallToolResult, McpError> {
         audit("get_settings", "");
-        let all = {
-            let s = lock(&self.store).map_err(to_mcp_err)?;
-            crate::service::settings::read_all(&s)
-        };
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        if p.describe == Some(true) {
+            let described = crate::service::settings::describe(&s);
+            drop(s);
+            return ok_json_compact(&described);
+        }
+        let all = crate::service::settings::read_all(&s);
+        drop(s);
         ok_json_compact(&all)
     }
 
     #[tool(description = "Change one get_settings key, validated; E_INVALID \
-        otherwise. mcp.*, hub.* and controller.* are refused. Master token \
-        only. Returns the settings.")]
+        otherwise. mcp.*, hub.* and controller.* are refused. Master, or a \
+        trusted device. Returns the settings, or with propose the proposal.")]
     pub(super) async fn set_setting(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<SetSettingParams>,
     ) -> Result<CallToolResult, McpError> {
         // The key only: a value is not a secret here, but the audit trail
@@ -527,16 +535,159 @@ impl FleetTools {
             )),
             other => other.to_string(),
         };
+        let who = settings_actor(&caller);
+        let actor = who.actor();
+        if p.propose {
+            let row = {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                crate::service::settings_review::propose(
+                    &s,
+                    &p.key,
+                    &value,
+                    p.why.as_deref(),
+                    actor,
+                )
+                .map_err(to_mcp_err)?
+            };
+            tracing::info!(key = %p.key.escape_debug(), id = row.id, "[mcp] proposed a setting");
+            return ok_json_compact(&row);
+        }
+        settings_writer(&caller, &who)?;
         let all = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            crate::service::settings::set(&s, &p.key, &value).map_err(to_mcp_err)?;
+            crate::service::settings::set_by(&s, &p.key, &value, actor, None)
+                .map_err(to_mcp_err)?;
             crate::service::settings::read_all(&s)
         };
         tracing::info!(key = %p.key.escape_debug(), "[mcp] changed a setting");
         ok_json_compact(&all)
     }
 
+    // ---- settings review on a paired device (declarative pages P6) ----
+
+    #[tool(description = "Settings proposals waiting for review, each with \
+        the key's value now, and can_write: whether this device may decide.")]
+    pub(super) async fn setting_proposals(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("setting_proposals", "");
+        let who = settings_actor(&caller);
+        let proposals = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            crate::service::settings_review::pending(&s).map_err(to_mcp_err)?
+        };
+        ok_json_compact(&crate::service::settings_review::Pending {
+            can_write: settings_writer(&caller, &who).is_ok(),
+            proposals,
+        })
+    }
+
+    #[tool(description = "One setting's writes, newest first: who, before \
+        and after, the proposal applied.")]
+    pub(super) async fn setting_history(
+        &self,
+        Parameters(p): Parameters<SettingHistoryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("setting_history", &format!("key={}", p.key.escape_debug()));
+        let rows = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            crate::service::settings_review::history(&s, &p.key, p.limit).map_err(to_mcp_err)?
+        };
+        ok_json_compact(&rows)
+    }
+
+    #[tool(description = "Apply or reject settings proposals by id, each on \
+        its own; a trusted device only.")]
+    pub(super) async fn decide_setting_proposals(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<DecideSettingProposalsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "decide_setting_proposals",
+            &format!("accept={:?} reject={:?}", p.accept, p.reject),
+        );
+        let who = settings_actor(&caller);
+        settings_writer(&caller, &who)?;
+        let out = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            crate::service::settings_review::decide_as(&s, &p.accept, &p.reject, who.actor())
+                .map_err(to_mcp_err)?
+        };
+        ok_json_compact(&out)
+    }
+
+    #[tool(description = "The settings page specs, data source shapes, \
+        resources and page actions a device renders.")]
+    pub(super) async fn list_pages(&self) -> Result<CallToolResult, McpError> {
+        audit("list_pages", "");
+        ok_json_compact(&crate::pages::bundle())
+    }
+
     // ---- workspace repair ----
+}
+
+/// Who a settings write or proposal is, as the audit trail records it: the
+/// master is an agent over the control API; a paired device is the person
+/// holding it — unless it is the UX agent's operator client, an agent.
+pub(super) enum SettingsWho {
+    ControlApi,
+    /// An agent on a paired client (the operator) or a host's own token:
+    /// it proposes, never writes. `Access::Person` keeps a host's token away
+    /// from these tools; this is the second line.
+    Agent(String),
+    Device(String),
+}
+
+impl SettingsWho {
+    pub(super) fn actor(&self) -> crate::service::settings::Actor<'_> {
+        use crate::service::settings::Actor;
+        match self {
+            SettingsWho::ControlApi => Actor::Agent("control API"),
+            SettingsWho::Agent(name) => Actor::Agent(name),
+            SettingsWho::Device(name) => Actor::PersonVia(name),
+        }
+    }
+}
+
+pub(super) fn settings_actor(caller: &Caller) -> SettingsWho {
+    if caller.is_master() {
+        return SettingsWho::ControlApi;
+    }
+    match (&caller.host_alias, &caller.client) {
+        (None, Some(c)) if !caller.is_operator() => {
+            SettingsWho::Device(format!("client {}", c.name))
+        }
+        _ => SettingsWho::Agent(caller.label()),
+    }
+}
+
+/// A write of the fleet's settings (a direct `set_setting`, or deciding a
+/// proposal) is the master's, or a trusted device's (declarative pages P6):
+/// trust is the operator vouching that the device is a person's own
+/// (`fleet-hub client trust`). An agent's client proposes instead.
+pub(super) fn settings_writer(caller: &Caller, who: &SettingsWho) -> Result<(), McpError> {
+    match who {
+        SettingsWho::ControlApi => Ok(()),
+        SettingsWho::Agent(_) => Err(mcp_err(
+            "E_FORBIDDEN",
+            "an agent proposes a settings change (set_setting with propose: true); a person applies it",
+            None,
+        )),
+        SettingsWho::Device(_) if caller.is_trusted_client() && caller.mode == TokenMode::Full => {
+            Ok(())
+        }
+        SettingsWho::Device(_) => Err(mcp_err(
+            "E_FORBIDDEN",
+            format!(
+                "this device may read the fleet's settings and propose a change; to change them, \
+                 the hub's operator trusts it: fleet-hub client trust {}",
+                caller.client.as_ref().map_or("<name>", |c| c.name.as_str())
+            ),
+            None,
+        )),
+    }
 }
 
 /// How long a pairing code stays valid: the caller's `ttl_s` clamped to

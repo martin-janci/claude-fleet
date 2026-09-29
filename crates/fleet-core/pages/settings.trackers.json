@@ -1,0 +1,155 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings.trackers",
+  "title": "Trackers",
+  "parent": "settings",
+  "layout": "master_detail",
+  "resource": "tracker",
+  "intro": "Trackers add a ticket's title and status to the sessions working on it, and list your tickets in ⌘K. Nothing needs one: keys in branch names group sessions without any tracker.",
+  "sections": [
+    {
+      "title": "Tracker",
+      "items": [
+        {
+          "type": "field",
+          "key": "name"
+        },
+        {
+          "type": "field",
+          "key": "provider"
+        },
+        {
+          "type": "field",
+          "key": "site_url"
+        },
+        {
+          "type": "field",
+          "key": "transport"
+        }
+      ]
+    },
+    {
+      "title": "Connection",
+      "items": [
+        {
+          "type": "field",
+          "key": "state"
+        },
+        {
+          "type": "field",
+          "key": "last_sync_at"
+        },
+        {
+          "type": "field",
+          "key": "last_error",
+          "when": {
+            "key": "state",
+            "in": [
+              "auth_failed",
+              "captcha",
+              "rate_limited",
+              "unreachable"
+            ]
+          }
+        },
+        {
+          "type": "field",
+          "key": "username",
+          "when": {
+            "key": "provider",
+            "eq": "jira"
+          }
+        },
+        {
+          "type": "field",
+          "key": "credential_hint"
+        }
+      ]
+    },
+    {
+      "title": "Token expired",
+      "when": {
+        "all": [
+          {
+            "key": "state",
+            "eq": "auth_failed"
+          },
+          {
+            "key": "provider",
+            "eq": "jira"
+          }
+        ]
+      },
+      "items": [
+        {
+          "type": "notice",
+          "tone": "warn",
+          "text": "Atlassian API tokens expire within a year. Create a new one and replace the credential here."
+        }
+      ]
+    },
+    {
+      "title": "Credential refused",
+      "when": {
+        "all": [
+          {
+            "key": "state",
+            "eq": "auth_failed"
+          },
+          {
+            "not": {
+              "key": "provider",
+              "eq": "jira"
+            }
+          }
+        ]
+      },
+      "items": [
+        {
+          "type": "notice",
+          "tone": "warn",
+          "text": "The tracker refused the credential. Create a new one and replace it here."
+        }
+      ]
+    },
+    {
+      "title": "Log in first",
+      "when": {
+        "key": "state",
+        "eq": "captcha"
+      },
+      "items": [
+        {
+          "type": "notice",
+          "tone": "warn",
+          "text": "Log in to the site in a browser once, then Test."
+        }
+      ]
+    },
+    {
+      "title": "Write-back",
+      "when": {
+        "key": "provider",
+        "in": [
+          "jira",
+          "jira_dc"
+        ]
+      },
+      "items": [
+        {
+          "type": "field",
+          "key": "pr_remote_link"
+        }
+      ]
+    },
+    {
+      "title": "Sync and sections",
+      "items": [
+        {
+          "type": "custom",
+          "component": "tracker_extras"
+        }
+      ]
+    }
+  ]
+}

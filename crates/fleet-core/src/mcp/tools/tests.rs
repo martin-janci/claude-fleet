@@ -2170,7 +2170,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 97);
+    assert_eq!(served, 101);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -2312,9 +2312,13 @@ fn readonly_tools_are_client_tools_or_the_documented_list_clients_exception() {
             guard::CLIENT_TOOLS.contains(name)
                 || *name == "list_clients"
                 || *name == "list_peer_links"
-                || *name == "get_settings",
+                || matches!(
+                    guard::policy(name).map(|p| p.access),
+                    Some(guard::Access::Person | guard::Access::PersonDevice)
+                ),
             "{name} is in READONLY_TOOLS but is neither in CLIENT_TOOLS nor the \
-             documented list_clients/list_peer_links/get_settings special case"
+             documented list_clients/list_peer_links special case or a person's \
+             device tool (the fleet's settings, declarative pages P6)"
         );
     }
 }
@@ -3048,10 +3052,15 @@ fn a_readonly_token_is_served_no_mutating_tools_and_a_client_no_admin_tools() {
             .collect()
     };
     let master = served(&Caller::master());
+    let device_only = guard::TOOL_POLICIES
+        .iter()
+        .filter(|p| p.access == guard::Access::PersonDevice)
+        .count();
     assert_eq!(
         master.len(),
-        all.len() - 1,
-        "the master token sees everything but peer_exchange"
+        all.len() - 1 - device_only,
+        "the master token sees everything but peer_exchange and a person's \
+         device's own settings review (it has fleet-hub settings)"
     );
     assert!(!master.iter().any(|n| n == crate::mcp::auth::PEER_TOOL));
 
@@ -3394,10 +3403,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// measured apart never cover the merged surface, so a merge that trips
     /// this re-measures. The why of each raise belongs in its commit
     /// message (`git log -L` on this constant), not here: a log in this
-    /// comment conflicted on every merge. Measured at 66,115 on 2026-09-28
-    /// (the second gap review's `quick_replies` `expected` and the `work`
-    /// tree's `archived` over update S4a and plan B's host identity).
-    const BUDGET_BYTES: usize = 66_215;
+    /// comment conflicted on every merge. Measured at 66,486 on 2026-09-28
+    /// (main at 8ea95c8 merged with declarative pages P5–P6).
+    const BUDGET_BYTES: usize = 66_586;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -7825,22 +7833,23 @@ async fn the_new_operator_gates_change_nothing_for_anyone_else() {
 // ---- operator settings ----
 
 /// The settings name hosts and their projects roots, and a write retunes the
-/// GC sweeper and auto-tidy for the whole fleet: only the master token may
-/// read or change them, whatever a client's or per-host token's mode.
+/// GC sweeper and auto-tidy for the whole fleet: the master token, or a
+/// person's own paired device (bound to no org), reaches them; a host's token
+/// never does, whatever its mode.
 #[test]
-fn the_settings_tools_are_master_only() {
+fn the_settings_tools_reach_the_master_and_a_persons_device_only() {
+    // Declarative pages P6: the master and a paired device bound to no org;
+    // a host's token (either mode) and a hub link never. A readonly device
+    // reads but does not write (`settings_reach_a_persons_device_…`).
     for t in ["get_settings", "set_setting"] {
         assert!(enforce_admin(&Caller::master(), t).is_ok(), "{t}");
         for (label, c) in every_caller_kind() {
-            if c.is_master() {
-                continue;
-            }
-            assert!(
-                enforce_mode(&c, t)
-                    .and_then(|()| enforce_admin(&c, t))
-                    .is_err(),
-                "{t}: {label}"
-            );
+            let reached = enforce_mode(&c, t)
+                .and_then(|()| enforce_admin(&c, t))
+                .is_ok();
+            let expected = c.is_master()
+                || (c.is_person_device() && (t == "get_settings" || c.mode == TokenMode::Full));
+            assert_eq!(reached, expected, "{t}: {label}");
         }
     }
     assert!(guard::is_readonly_tool("get_settings"));
@@ -7848,15 +7857,65 @@ fn the_settings_tools_are_master_only() {
 }
 
 #[tokio::test]
+async fn get_settings_describe_returns_the_registry_with_values() {
+    let (tools, _guards, _store) = client_tools();
+    tools
+        .set_setting(
+            Extension(Caller::master()),
+            Parameters(SetSettingParams {
+                key: "work.recent_days".into(),
+                value: serde_json::json!(30),
+                propose: false,
+                why: None,
+            }),
+        )
+        .await
+        .expect("set");
+    let v = result_json(
+        &tools
+            .get_settings(Parameters(GetSettingsParams {
+                describe: Some(true),
+            }))
+            .await
+            .expect("describe"),
+    );
+    let all = v.as_array().expect("an array, in display order");
+    assert_eq!(all.len(), crate::service::settings::SPECS.len());
+    let recent = all
+        .iter()
+        .find(|d| d["key"] == "work.recent_days")
+        .expect("work.recent_days");
+    assert_eq!(recent["value"], "30");
+    assert_eq!(recent["modified"], true);
+    assert_eq!(recent["label"], "Recent work");
+    assert_eq!(
+        recent["kind"],
+        serde_json::json!({"type": "int", "min": 1, "max": 365})
+    );
+    // The derived previews are not settings.
+    assert!(all.iter().all(|d| d["key"] != "projects.resolved_base"));
+}
+
+#[tokio::test]
 async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
     let (tools, _guards, store) = client_tools();
     let set = |key: &str, value: serde_json::Value| {
-        tools.set_setting(Parameters(SetSettingParams {
-            key: key.into(),
-            value,
-        }))
+        tools.set_setting(
+            Extension(Caller::master()),
+            Parameters(SetSettingParams {
+                key: key.into(),
+                value,
+                propose: false,
+                why: None,
+            }),
+        )
     };
-    let v = result_json(&tools.get_settings().await.expect("get_settings"));
+    let v = result_json(
+        &tools
+            .get_settings(Parameters(GetSettingsParams { describe: None }))
+            .await
+            .expect("get_settings"),
+    );
     assert_eq!(
         v["work.retention.journal_days"], "365",
         "the default when unset: {v}"
@@ -7898,7 +7957,12 @@ async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
             Some("[3,7]")
         );
     }
-    let v = result_json(&tools.get_settings().await.expect("get_settings"));
+    let v = result_json(
+        &tools
+            .get_settings(Parameters(GetSettingsParams { describe: None }))
+            .await
+            .expect("get_settings"),
+    );
     assert_eq!(v["work.retention.journal_days"], "30");
 
     // Refused: a bad value, an unknown key, a derived key, keys other
@@ -7933,6 +7997,69 @@ async fn set_setting_validates_stores_and_returns_what_get_settings_reads() {
     );
     assert_eq!(s.get_setting("mcp.confirm_destructive").unwrap(), None);
     assert_eq!(s.get_setting("hub.allow_plaintext").unwrap(), None);
+}
+
+/// Declarative pages P5: `set_setting { propose: true }` writes nothing; it
+/// leaves a proposal a person applies in Settings. A direct write is audited
+/// as the agent.
+#[tokio::test]
+async fn set_setting_propose_leaves_a_proposal_and_writes_are_audited() {
+    let (tools, _guards, store) = client_tools();
+    let v = result_json(
+        &tools
+            .set_setting(
+                Extension(Caller::master()),
+                Parameters(SetSettingParams {
+                    key: "work.recent_days".into(),
+                    value: serde_json::json!(3),
+                    propose: true,
+                    why: Some("a shorter Recent list".into()),
+                }),
+            )
+            .await
+            .expect("propose"),
+    );
+    assert_eq!(v["state"], "pending");
+    assert_eq!(v["value"], "3");
+    assert_eq!(v["why"], "a shorter Recent list");
+    {
+        let s = store.lock().unwrap();
+        assert_eq!(s.get_setting("work.recent_days").unwrap(), None);
+    }
+    // A confirmed change cannot even be proposed.
+    let err = tools
+        .set_setting(
+            Extension(Caller::master()),
+            Parameters(SetSettingParams {
+                key: "work.auto_tidy".into(),
+                value: serde_json::json!(true),
+                propose: true,
+                why: None,
+            }),
+        )
+        .await
+        .expect_err("confirmed");
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+
+    tools
+        .set_setting(
+            Extension(Caller::master()),
+            Parameters(SetSettingParams {
+                key: "work.recent_days".into(),
+                value: serde_json::json!(5),
+                propose: false,
+                why: None,
+            }),
+        )
+        .await
+        .expect("write");
+    let s = store.lock().unwrap();
+    let h = crate::service::settings_review::history(&s, "work.recent_days", None).unwrap();
+    assert_eq!(h.len(), 1);
+    assert_eq!(
+        (h[0].actor.as_str(), h[0].actor_detail.as_deref()),
+        ("agent", Some("control API"))
+    );
 }
 
 // ---- add_project / list_github_repos (a hub client adds a project) --------
@@ -8014,6 +8141,177 @@ fn add_project_serves_the_source_variants_and_no_call_id() {
             "source kind {kind} missing: {text}"
         );
     }
+}
+
+// ---- declarative pages P6: the fleet's settings on a person's device ----
+
+fn trusted(mut c: Caller) -> Caller {
+    if let Some(cl) = c.client.as_mut() {
+        cl.trusted = true;
+    }
+    c
+}
+
+fn org_bound(mut c: Caller) -> Caller {
+    if let Some(cl) = c.client.as_mut() {
+        cl.org_id = Some(1);
+    }
+    c
+}
+
+/// Who reaches the settings tools: the master and a person's own paired
+/// device (any mode for the reads); never a host's token or an org-bound
+/// device. The review tools are not served to the master, who has
+/// `fleet-hub settings`.
+#[test]
+fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
+    let master = Caller::master();
+    let laptop = client_caller("laptop", TokenMode::Full);
+    let phone_ro = client_caller("phone", TokenMode::Readonly);
+    let host = host_caller("hosta", TokenMode::Full);
+    let bound = org_bound(client_caller("acme-phone", TokenMode::Full));
+    let can = |c: &Caller, t: &str| {
+        enforce_mode(c, t)
+            .and_then(|()| enforce_admin(c, t))
+            .is_ok()
+            && present::visible_to(c, t)
+    };
+    for t in [
+        "get_settings",
+        "setting_proposals",
+        "setting_history",
+        "list_pages",
+    ] {
+        assert!(can(&laptop, t), "{t}: a paired device reads");
+        assert!(can(&phone_ro, t), "{t}: a readonly device reads");
+        assert!(!can(&host, t), "{t}: never a host's token");
+        assert!(!can(&bound, t), "{t}: never an org-bound device");
+    }
+    for t in ["set_setting", "decide_setting_proposals"] {
+        assert!(can(&laptop, t), "{t}: reached, then trust decides");
+        assert!(!can(&phone_ro, t), "{t}: a write");
+        assert!(!can(&host, t) && !can(&bound, t), "{t}");
+    }
+    assert!(can(&master, "get_settings") && can(&master, "set_setting"));
+    for t in [
+        "setting_proposals",
+        "setting_history",
+        "decide_setting_proposals",
+        "list_pages",
+    ] {
+        assert!(!can(&master, t), "{t}: not served to the master");
+    }
+}
+
+/// An untrusted device proposes; a trusted one writes and decides, and the
+/// audit names it as a person on that device. The operator's client is an
+/// agent: it proposes only.
+#[tokio::test]
+async fn a_device_writes_settings_only_when_trusted_and_is_audited_as_the_person() {
+    let (tools, _guards, store) = client_tools();
+    let set = |c: Caller, value: i64, propose: bool| {
+        tools.set_setting(
+            Extension(c),
+            Parameters(SetSettingParams {
+                key: "work.recent_days".into(),
+                value: serde_json::json!(value),
+                propose,
+                why: None,
+            }),
+        )
+    };
+    let laptop = client_caller("laptop", TokenMode::Full);
+    let err = set(laptop.clone(), 5, false).await.expect_err("untrusted");
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    assert!(
+        err.message.contains("fleet-hub client trust laptop"),
+        "{}",
+        err.message
+    );
+    let p = result_json(
+        &set(laptop.clone(), 5, true)
+            .await
+            .expect("an untrusted device proposes"),
+    );
+    assert_eq!(
+        (p["source"].as_str(), p["source_detail"].as_str()),
+        (Some("person"), Some("client laptop"))
+    );
+
+    let v = result_json(
+        &tools
+            .setting_proposals(Extension(laptop.clone()))
+            .await
+            .expect("pending"),
+    );
+    assert_eq!(v["can_write"], false);
+    assert_eq!(v["proposals"].as_array().unwrap().len(), 1);
+    let id = v["proposals"][0]["id"].as_i64().unwrap();
+    let decide = |c: Caller| {
+        tools.decide_setting_proposals(
+            Extension(c),
+            Parameters(DecideSettingProposalsParams {
+                accept: vec![id],
+                reject: vec![],
+            }),
+        )
+    };
+    assert!(
+        decide(laptop.clone()).await.is_err(),
+        "untrusted cannot decide"
+    );
+
+    let me = trusted(laptop);
+    let v = result_json(
+        &tools
+            .setting_proposals(Extension(me.clone()))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(v["can_write"], true);
+    let d = result_json(&decide(me.clone()).await.expect("trusted decides"));
+    assert_eq!(d["applied"], serde_json::json!([id]));
+    set(me, 6, false).await.expect("trusted writes");
+
+    let mut operator = trusted(client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    ));
+    operator.mode = TokenMode::Full;
+    let err = set(operator.clone(), 7, false)
+        .await
+        .expect_err("an agent proposes");
+    assert!(err.message.contains("propose"), "{}", err.message);
+    set(operator, 7, true).await.expect("the operator proposes");
+
+    let h = result_json(
+        &tools
+            .setting_history(Parameters(SettingHistoryParams {
+                key: "work.recent_days".into(),
+                limit: None,
+            }))
+            .await
+            .unwrap(),
+    );
+    let h = h.as_array().unwrap();
+    assert_eq!(h.len(), 2);
+    assert_eq!(
+        (h[0]["after"].as_str(), h[0]["actor_detail"].as_str()),
+        (Some("6"), Some("client laptop"))
+    );
+    assert_eq!(h[1]["proposal_id"].as_i64(), Some(id));
+    let s = store.lock().unwrap();
+    let pending = crate::service::settings_review::pending(&s).unwrap();
+    assert_eq!(
+        pending[0].row.source_detail.as_deref(),
+        Some(
+            crate::mcp::auth::Caller::label(&client_caller(
+                crate::service::operator::OPERATOR_CLIENT_NAME,
+                TokenMode::Full
+            ))
+            .as_str()
+        )
+    );
 }
 
 // ---- add_project / list_github_repos: fences, confirmation, audit ---------
@@ -8398,6 +8696,18 @@ async fn without_an_approver_only_a_paired_client_creates_a_remote() {
         "a paired phone is not gated: {:?}",
         r.err().map(|e| e.message)
     );
+}
+
+#[tokio::test]
+async fn list_pages_serves_the_compiled_page_bundle() {
+    let (tools, _guards, _store) = client_tools();
+    let v = result_json(&tools.list_pages().await.unwrap());
+    assert_eq!(
+        v["pages"].as_array().unwrap().len(),
+        crate::pages::all().len()
+    );
+    assert!(v["actions"].as_array().is_some());
+    assert!(v["resources"].as_array().is_some());
 }
 
 #[tokio::test]

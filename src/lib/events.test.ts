@@ -88,6 +88,16 @@ describe('subscribeToRowEvents', () => {
     expect(seen).toEqual([[{ what: 'placement', task_id: 'item:3' }, { what: 'resync' }]]);
   });
 
+  it('delivers settings:changed keys to onSettingsChanged as one batch, dropping malformed frames', async () => {
+    const seen: string[][] = [];
+    await subscribeToRowEvents({ onSettingsChanged: (keys) => seen.push(keys) });
+    fire('settings:changed', { key: 'gc.enabled' });
+    fire('settings:changed', { key: 7 });
+    fire('settings:changed', { key: 'work.recent_days' });
+    await flush();
+    expect(seen).toEqual([['gc.enabled', 'work.recent_days']]);
+  });
+
   it('listens for work:changed only when asked', async () => {
     vi.mocked(listen).mockClear();
     await subscribeToRowEvents({ onWorkEvents: () => {} });
