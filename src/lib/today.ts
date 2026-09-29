@@ -153,9 +153,28 @@ export function groupLabel(g: Pick<TodayGroup, 'key' | 'title'>): string {
   return title ? `${g.key} ${title}` : g.key;
 }
 
+/** What a group's status reads as: the tracker's own name when it has one,
+ *  else the effective status (`status_category` — for a local item that is
+ *  the live-lifted answer, including the working-session lift, which is the
+ *  only status it ever has). Empty when neither is known. */
+export function groupStatusLabel(g: Pick<TodayGroup, 'status_name' | 'status_category'>): string {
+  if (g.status_name) return g.status_name;
+  switch (g.status_category) {
+    case 'in_progress':
+      return 'in progress';
+    case 'done':
+      return 'done';
+    case 'todo':
+      return 'to do';
+    default:
+      return '';
+  }
+}
+
 function groupLine(g: TodayGroup, bucket: TodayBucket): string[] {
   const extras: string[] = [];
-  if (g.status_name) extras.push(g.status_name);
+  const status = groupStatusLabel(g);
+  if (status) extras.push(status);
   const pr = g.sessions.find((s) => s.pr_url);
   if (pr?.pr_url) extras.push(pr.ci_status ? `PR ${pr.pr_url} (CI ${pr.ci_status})` : `PR ${pr.pr_url}`);
   const names = g.sessions.map((s) => sessionPhrase(s, bucket)).join(', ');
