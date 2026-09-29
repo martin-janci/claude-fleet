@@ -337,3 +337,107 @@ fn the_stamp_can_be_made_again_once_the_link_is_confirmed() {
     assert_eq!(row.status_category, "done");
     assert_eq!(row.status_set_by.as_deref(), Some("derived"));
 }
+
+/// Finding B (2026-09-29): a merged PR whose title or body is edited later
+/// rewrites `text`, so the stored value CHANGES, but the PR did not become
+/// merged again. Work named after the merge must not be stamped, and
+/// `record_pr_signals` says it was no transition.
+#[test]
+fn an_edit_to_an_already_merged_pr_never_stamps_newly_named_work() {
+    let s = store();
+    s.upsert_host("h").unwrap();
+    let sid = s
+        .upsert_session("dev", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let (a, _) = s.name_session_work(sid, Some("A-1"), "work A").unwrap();
+    let merged =
+        serde_json::json!({ "head": "feat/a", "state": "MERGED", "text": ["A-1"] }).to_string();
+    assert_eq!(
+        s.record_pr_signals("h", "dev", Some(&merged)).unwrap(),
+        Some((sid, true)),
+        "the first merged read is the transition"
+    );
+    assert_eq!(
+        s.get_work_item(a.id).unwrap().unwrap().status_category,
+        "done"
+    );
+    let b = s.create_local_work_item(Some("B-1"), "work B").unwrap();
+    let b_link = s
+        .link_session_work(sid, crate::store::WorkTarget::Item(b.id), "manual")
+        .unwrap();
+    assert!(b_link.is_primary);
+
+    // The PR's body is edited after the merge: a new value, no new merge.
+    let edited = serde_json::json!({
+        "head": "feat/a", "state": "MERGED", "text": ["A-1", "B-1"]
+    })
+    .to_string();
+    assert_eq!(
+        s.record_pr_signals("h", "dev", Some(&edited)).unwrap(),
+        Some((sid, false)),
+        "changed, but not newly merged"
+    );
+    let row = s.get_work_item(b.id).unwrap().unwrap();
+    assert_eq!(row.status_category, "todo");
+    assert_eq!(row.status_set_by, None);
+}
+
+/// A probe that briefly finds no PR (`NULL`) and then reads the same merged
+/// PR again is no new merge either, once the first merge was stamped.
+#[test]
+fn a_merged_signal_read_again_after_a_null_flap_never_stamps_new_work() {
+    let s = store();
+    s.upsert_host("h").unwrap();
+    let sid = s
+        .upsert_session("dev", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.name_session_work(sid, Some("A-1"), "work A").unwrap();
+    let merged = serde_json::json!({ "head": "feat/a", "state": "MERGED" }).to_string();
+    assert_eq!(
+        s.record_pr_signals("h", "dev", Some(&merged)).unwrap(),
+        Some((sid, true))
+    );
+    let b = s.create_local_work_item(Some("B-1"), "work B").unwrap();
+    s.link_session_work(sid, crate::store::WorkTarget::Item(b.id), "manual")
+        .unwrap();
+    assert_eq!(
+        s.record_pr_signals("h", "dev", None).unwrap(),
+        Some((sid, false))
+    );
+    assert_eq!(
+        s.record_pr_signals("h", "dev", Some(&merged)).unwrap(),
+        Some((sid, false))
+    );
+    let row = s.get_work_item(b.id).unwrap().unwrap();
+    assert_eq!(row.status_category, "todo");
+    assert_eq!(row.status_set_by, None);
+}
+
+/// An open PR that is then merged is the transition, whatever came first.
+#[test]
+fn an_open_pr_becoming_merged_is_the_transition() {
+    let s = store();
+    s.upsert_host("h").unwrap();
+    let sid = s
+        .upsert_session("dev", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let (item, _) = s.name_session_work(sid, None, "the work").unwrap();
+    let open = serde_json::json!({ "state": "OPEN" }).to_string();
+    assert_eq!(
+        s.record_pr_signals("h", "dev", Some(&open)).unwrap(),
+        Some((sid, false))
+    );
+    let merged = serde_json::json!({ "state": "MERGED" }).to_string();
+    assert_eq!(
+        s.record_pr_signals("h", "dev", Some(&merged)).unwrap(),
+        Some((sid, true))
+    );
+    assert_eq!(
+        s.get_work_item(item.id)
+            .unwrap()
+            .unwrap()
+            .status_set_by
+            .as_deref(),
+        Some("derived")
+    );
+}

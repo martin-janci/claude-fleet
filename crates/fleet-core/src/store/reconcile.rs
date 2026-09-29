@@ -199,6 +199,9 @@ impl Store {
     /// row saying `working` kept being counted (data-sync F2). Returns the
     /// number of rows hard-deleted.
     pub fn reap_host_ghosts(&self, host_alias: &str, now: i64) -> Result<usize, rusqlite::Error> {
+        let working_before = self.working_links(super::work_status::WorkingScope::Host(
+            host_alias.to_string(),
+        ))?;
         let (changes, deleted) = self.in_savepoint("reap_host_ghosts", |tx| {
             let mut out: Vec<RowChange> = Vec::new();
             let before: i64 = tx.query_row(
@@ -223,6 +226,9 @@ impl Store {
         })?;
         for c in &changes {
             self.bus.emit_change(c);
+        }
+        if !changes.is_empty() {
+            self.fan_out_working_change(working_before);
         }
         Ok(deleted)
     }
@@ -834,6 +840,12 @@ impl Store {
         // this map — needs that same lock. No kill can slip in between the
         // read and the inserts.
         let kills = self.recent_kills(spec.alias);
+        // What of this host lifts a local item now (gap B): a pass that moves
+        // a row into or out of `working` re-announces the OTHER sessions on
+        // that item after its own events, since their rows read the lift.
+        let working_before = self.working_links(super::work_status::WorkingScope::Host(
+            spec.alias.to_string(),
+        ))?;
         // Phase 1: run all SQL inside one savepoint, collecting RowChanges.
         let changes = self.in_savepoint("apply_host_reconcile", |tx| {
             let mut out: Vec<RowChange> = Vec::new();
@@ -950,6 +962,14 @@ impl Store {
                 }
             }
             self.bus.emit_change(change);
+        }
+        if changes.iter().any(|c| {
+            matches!(
+                c,
+                RowChange::SessionUpdated(_) | RowChange::SessionKilled(_)
+            )
+        }) {
+            self.fan_out_working_change(working_before);
         }
         Ok(())
     }

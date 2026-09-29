@@ -10,6 +10,8 @@
 //! `done_long` (`service/gc/tidy.rs`) can never see a local item as long
 //! done, whoever set it.
 
+use std::collections::BTreeSet;
+
 use super::{now_unix, Store, WorkItemRow};
 use crate::ipc_error::{codes, IpcError};
 
@@ -292,5 +294,102 @@ impl Store {
     }
 }
 
+/// Which sessions a [`WorkingLinks`] snapshot covers: one row (a hook's
+/// write), one host's rows (a reconcile pass), or every row (the tick's
+/// stale-working sweep).
+#[derive(Debug, Clone)]
+pub(crate) enum WorkingScope {
+    Session(i64),
+    Host(String),
+    All,
+}
+
+/// The `(session, item)` pairs of [`Store::working_links`]: a confirmed,
+/// unended link of a presently `working` session to a LOCAL item whose
+/// status no person or stamp has fixed — exactly the links that lift an
+/// item in [`crate::effective_status_sql!`]. Taken before a write that can
+/// move `claude_status` into or out of `working`, and handed to
+/// [`Store::fan_out_working_change`] after it.
+#[derive(Debug, Clone)]
+pub(crate) struct WorkingLinks {
+    scope: WorkingScope,
+    pairs: BTreeSet<(i64, i64)>,
+}
+
+impl Store {
+    /// The working links in `scope` (see [`WorkingLinks`]). Shares
+    /// [`crate::working_link_sql!`] with `effective_status_sql!`, so what
+    /// counts as "lifting" here is what lifts there.
+    pub(crate) fn working_links(&self, scope: WorkingScope) -> rusqlite::Result<WorkingLinks> {
+        let sql = concat!(
+            "SELECT DISTINCT es_s.id, es_l.item_id ",
+            crate::working_link_sql!(),
+            " AND es_l.item_id IS NOT NULL \
+              AND EXISTS (SELECT 1 FROM work_items i WHERE i.id = es_l.item_id \
+                            AND i.source = 'local' \
+                            AND COALESCE(i.status_set_by, '') NOT IN ('person', 'derived')) \
+              AND (?1 = 'all' OR (?1 = 'session' AND es_s.id = ?2) \
+                   OR (?1 = 'host' AND es_s.host_alias = ?3))"
+        );
+        let (which, id, host) = match &scope {
+            WorkingScope::Session(id) => ("session", *id, ""),
+            WorkingScope::Host(h) => ("host", 0, h.as_str()),
+            WorkingScope::All => ("all", 0, ""),
+        };
+        let pairs = self
+            .conn
+            .prepare_cached(sql)?
+            .query_map(rusqlite::params![which, id, host], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        Ok(WorkingLinks { scope, pairs })
+    }
+
+    /// Re-announce the other sessions on a local item whose lift moved
+    /// because a session started or stopped working (gap B, 2026-09-29).
+    /// `effective_status_sql!` makes session A's `work.effective_status`
+    /// depend on session B's `claude_status`, but a status writer emits
+    /// only its own row — so A's row read `todo` while B worked, or kept
+    /// `in_progress` after B stopped, until something else touched A.
+    ///
+    /// `before` is [`Self::working_links`] taken before the write; the same
+    /// scope is read again now, and every item whose pairs changed gets
+    /// `emit_work_item` (it bumps `row_version` and emits each session
+    /// showing the item, and `work:item`). Nothing on no transition, so a
+    /// hook or a pass that leaves `working` as it was costs one read and no
+    /// frame. Best effort: the status write has already happened, so a
+    /// failure here is logged, never returned.
+    pub(crate) fn fan_out_working_change(&self, before: WorkingLinks) {
+        let after = match self.working_links(before.scope.clone()) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(error = %e, "[work] working fan-out not read");
+                return;
+            }
+        };
+        let items: BTreeSet<i64> = before
+            .pairs
+            .symmetric_difference(&after.pairs)
+            .map(|&(_, item)| item)
+            .collect();
+        for item_id in items {
+            if let Err(e) = self.emit_work_item(
+                item_id,
+                super::tracker_items::SessionChange {
+                    primary: true,
+                    suggested: true,
+                    rejected: false,
+                },
+            ) {
+                tracing::warn!(item_id, error = %e.message, "[work] working fan-out not emitted");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod fan_out_tests;

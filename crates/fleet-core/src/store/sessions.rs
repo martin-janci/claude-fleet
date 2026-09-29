@@ -152,6 +152,11 @@ impl Store {
              RETURNING id",
             idle = idle_since_sql("COALESCE(excluded.claude_status, claude_status)", "?7"),
         );
+        // A new row has no links yet: nothing of anyone else's to re-announce.
+        let before = match existing_id {
+            Some(id) => Some(self.working_links(super::work_status::WorkingScope::Session(id))?),
+            None => None,
+        };
         // A lost row (ghosted by `ghost_and_clean_bg_sessions` after an empty
         // `claude agents` list, or marked by a `host_reboot` verdict) is
         // rewritten only by an observation NEWER than the loss — the same
@@ -191,6 +196,9 @@ impl Store {
                 self.bus.session_updated(&row);
             }
         }
+        if let Some(before) = before {
+            self.fan_out_working_change(before);
+        }
         Ok(id)
     }
 
@@ -220,6 +228,9 @@ impl Store {
         lost_ttl_cutoff: Option<i64>,
         external_grace_cutoff: Option<i64>,
     ) -> Result<(), rusqlite::Error> {
+        let working_before = self.working_links(super::work_status::WorkingScope::Host(
+            host_alias.to_string(),
+        ))?;
         let changes = self.in_savepoint("ghost_and_clean_bg_sessions", |tx| {
             let mut changes: Vec<RowChange> = Vec::new();
             Self::ghost_and_clean(
@@ -239,6 +250,9 @@ impl Store {
         // write (nested, `atomically` holds them until its own commit).
         for change in &changes {
             self.bus.emit_change(change);
+        }
+        if !changes.is_empty() {
+            self.fan_out_working_change(working_before);
         }
         Ok(())
     }
@@ -313,6 +327,9 @@ impl Store {
             format!(" AND tmux_name NOT IN ({})", in_clause(keep_names.len()))
         };
         let cutoff = super::reconcile::ghost_cutoff(probe_started_at);
+        let working_before = self.working_links(super::work_status::WorkingScope::Host(
+            host_alias.to_string(),
+        ))?;
         let out = self.in_savepoint("mark_host_sessions_lost", |tx| {
             let fetch_all = |ids: &[i64]| -> Result<Vec<SessionRow>, rusqlite::Error> {
                 let mut rows = Vec::new();
@@ -392,6 +409,9 @@ impl Store {
             }
             self.bus.emit_change(&change);
         }
+        if !out.marked.is_empty() {
+            self.fan_out_working_change(working_before);
+        }
         Ok(out)
     }
 
@@ -411,6 +431,7 @@ impl Store {
         id: i64,
         now: i64,
     ) -> Result<Option<SessionRow>, rusqlite::Error> {
+        let before = self.working_links(super::work_status::WorkingScope::Session(id))?;
         let changed = self.conn.execute(
             &format!(
                 "UPDATE sessions SET status='ghost', lost_at=?1, lost_reason='killed', \
@@ -452,6 +473,9 @@ impl Store {
             self.bus
                 .emit_change(&RowChange::SessionUpdated(row.clone()));
         }
+        // A killed row loses `claude_status`: a `working` one no longer
+        // lifts its local item for the other sessions on it (gap B).
+        self.fan_out_working_change(before);
         Ok(row)
     }
 
@@ -1282,6 +1306,7 @@ impl Store {
         row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         let now = now_unix();
+        let before = self.working_links(super::work_status::WorkingScope::Session(row_id))?;
         let changed = self.conn.execute(
             &format!(
                 "UPDATE sessions SET claude_status = 'idle', turn_seq = turn_seq + 1, \
@@ -1298,7 +1323,9 @@ impl Store {
         if let Err(e) = self.insert_session_event(row_id, "status_change", Some("idle")) {
             tracing::warn!(session_id = row_id, error = %e, "[hook] status_change not recorded");
         }
-        Ok(self.emit_session(row_id)?)
+        let row = self.emit_session(row_id)?;
+        self.fan_out_working_change(before);
+        Ok(row)
     }
 
     /// The UserPromptSubmit hook's write: a turn is starting. Sets
@@ -1325,6 +1352,7 @@ impl Store {
         row_id: i64,
         touch: bool,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
+        let before = self.working_links(super::work_status::WorkingScope::Session(row_id))?;
         let changed = self.conn.execute(
             &format!(
                 "UPDATE sessions SET claude_status = 'working', idle_since = NULL, \
@@ -1344,7 +1372,9 @@ impl Store {
         if touch {
             self.touch_for_prompt(row_id)?;
         }
-        Ok(self.emit_session(row_id)?)
+        let row = self.emit_session(row_id)?;
+        self.fan_out_working_change(before);
+        Ok(row)
     }
 
     /// Read [`PromptAckState`] for a row: `prompt_submit_seq` to watch, and
@@ -1377,6 +1407,7 @@ impl Store {
         row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         let now = now_unix();
+        let before = self.working_links(super::work_status::WorkingScope::Session(row_id))?;
         let changed = self.conn.execute(
             "UPDATE sessions SET claude_status = 'stopped', last_turn_at = ?2, \
                  last_hook_at = ?2, idle_since = COALESCE(idle_since, ?2), \
@@ -1391,7 +1422,9 @@ impl Store {
         if let Err(e) = self.insert_session_event(row_id, "status_change", Some("stopped")) {
             tracing::warn!(session_id = row_id, error = %e, "[hook] status_change not recorded");
         }
-        Ok(self.emit_session(row_id)?)
+        let row = self.emit_session(row_id)?;
+        self.fan_out_working_change(before);
+        Ok(row)
     }
 
     /// The StopFailure hook's write: the turn ended in an API error (F3).
@@ -1407,6 +1440,7 @@ impl Store {
         row_id: i64,
     ) -> Result<Option<SessionRow>, crate::ipc_error::IpcError> {
         let now = now_unix();
+        let before = self.working_links(super::work_status::WorkingScope::Session(row_id))?;
         let changed = self.conn.execute(
             &format!(
                 "UPDATE sessions SET claude_status = 'failed', turn_seq = turn_seq + 1, \
@@ -1423,7 +1457,9 @@ impl Store {
         if let Err(e) = self.insert_session_event(row_id, "status_change", Some("failed")) {
             tracing::warn!(session_id = row_id, error = %e, "[hook] status_change not recorded");
         }
-        Ok(self.emit_session(row_id)?)
+        let row = self.emit_session(row_id)?;
+        self.fan_out_working_change(before);
+        Ok(row)
     }
 
     /// The tick's stale-`working` rule (lifecycle F2): a live tmux row that
@@ -1461,6 +1497,7 @@ impl Store {
             return Ok(Vec::new());
         }
         let cutoff = now - stale_secs;
+        let before = self.working_links(super::work_status::WorkingScope::All)?;
         let ids: Vec<i64> = self
             .conn
             .prepare(
@@ -1493,6 +1530,9 @@ impl Store {
             if let Some(row) = self.emit_session(id)? {
                 out.push(row);
             }
+        }
+        if !out.is_empty() {
+            self.fan_out_working_change(before);
         }
         Ok(out)
     }
@@ -1583,6 +1623,7 @@ impl Store {
             Some(Some(k)) => Some(k.as_str()),
             _ => None,
         };
+        let before = self.working_links(super::work_status::WorkingScope::Session(row_id))?;
         let changed = self
             .conn
             .execute(&sql, rusqlite::params![row_id, now, kind, status])?;
@@ -1592,7 +1633,11 @@ impl Store {
         if let Err(e) = self.insert_session_event(row_id, "status_change", Some(status)) {
             tracing::warn!(session_id = row_id, error = %e, "[hook] status_change not recorded");
         }
-        Ok(self.emit_session(row_id)?)
+        let row = self.emit_session(row_id)?;
+        // Another session on the same local item reads its lift from this
+        // row's status: re-announce it on a transition (gap B).
+        self.fan_out_working_change(before);
+        Ok(row)
     }
 
     /// Test shorthand: [`Self::record_stop_hook_for_row`] on the row bound
