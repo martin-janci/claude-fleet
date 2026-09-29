@@ -1762,6 +1762,22 @@ mod tests {
                     "derived stamp, working session",
                 );
             }
+            // a job's status ('task'), with a working session: final.
+            {
+                let s = Store::open_in_memory().unwrap();
+                let sid = seed(&s, "task");
+                let item = s.create_local_work_item(Some("X-6"), "t").unwrap();
+                s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+                    .unwrap();
+                s.conn_ref()
+                    .execute(
+                        "UPDATE work_items SET status_category = 'todo', status_set_by = 'task' WHERE id = ?1",
+                        rusqlite::params![item.id],
+                    )
+                    .unwrap();
+                mark_working(&s, sid, "c-x-6");
+                agree(&s, "task", item.id, true, "job status, working session");
+            }
             // live-lift on a local item
             {
                 let s = Store::open_in_memory().unwrap();

@@ -22,7 +22,9 @@ pub const STATUS_CATEGORIES: [&str; 3] = ["todo", "in_progress", "done"];
 /// stored `status_category` is itself empty (the schema never produces
 /// this, but the expression must not manufacture a `todo` nobody said —
 /// matching `effective_status`'s own `None` for the same input); a
-/// person's setting or a stamped `done` (`status_set_by`) is final;
+/// person's setting or a stamped `done` (`status_set_by`) is final; a
+/// job's status (`'task'`, an agent subtask mirroring its dispatched job)
+/// is final like a stamped `done`;
 /// otherwise a confirmed link whose session is presently working lifts a
 /// LOCAL item (`source = 'local'`) to `in_progress`; otherwise the stored
 /// value, normalised to one of the three categories.
@@ -104,7 +106,7 @@ macro_rules! effective_status_sql {
     () => {
         "CASE WHEN i.id IS NULL THEN NULL \
               WHEN i.status_category = '' THEN NULL \
-              WHEN i.status_set_by IN ('person', 'derived') THEN \
+              WHEN i.status_set_by IN ('person', 'derived', 'task') THEN \
                 CASE i.status_category WHEN 'done' THEN 'done' \
                                         WHEN 'in_progress' THEN 'in_progress' \
                                         ELSE 'todo' END \
