@@ -165,6 +165,29 @@ mkfake claude
 expect "install prints the official command" "npm install -g @openai/codex   # or: brew install --cask codex" install codex
 expect_rc "install: unknown harness exits 2" 2 install nope
 
+# --- installer -----------------------------------------------------------------------
+inst() { # inst HOME ARGS… — run install.sh as a fresh user with HOME=$1
+  local h=$1; shift
+  env -u AG_CONFIG -u AG_BIN_DIR -u AG_HOME -u AG_CODEX_FALLBACKS HOME="$h" XDG_CONFIG_HOME= \
+    PATH="$FAKE:/usr/bin:/bin" bash "$REPO/tools/ag/install.sh" --from "$REPO/tools/ag" "$@" >"$ROOT/inst.log" 2>&1
+}
+H1="$ROOT/home1"; mkdir -p "$H1"
+inst "$H1"; rc=$?
+if [ $rc = 0 ]; then pass "install: exits 0"; else fail "install: exit $rc: $(cat "$ROOT/inst.log")"; fi
+if [ -L "$H1/.local/bin/ag" ] && [ -x "$H1/.local/share/ag/ag" ]; then pass "install: code in ~/.local/share/ag, link in ~/.local/bin"; else fail "install: layout"; fi
+v=$(env -u AG_CONFIG -u AG_BIN_DIR HOME="$H1" PATH="$H1/.local/bin:$FAKE:/usr/bin:/bin" ag version 2>&1)
+if [ "$v" = "ag 0.1.0" ]; then pass "install: ag runs through the symlink"; else fail "install: ag version gave [$v]"; fi
+if grep -q '^default = claude$' "$H1/.config/ag/config"; then pass "install: starter config defaults to the first installed harness"; else fail "install: config: $(cat "$H1/.config/ag/config")"; fi
+echo 'yolo = true' >>"$H1/.config/ag/config"
+inst "$H1"
+if grep -q '^yolo = true$' "$H1/.config/ag/config"; then pass "install: re-run keeps an existing config"; else fail "install: config overwritten"; fi
+H2="$ROOT/home2"; mkdir -p "$H2"
+inst "$H2" --default codex
+if grep -q '^default = codex$' "$H2/.config/ag/config"; then pass "install: --default sets the default"; else fail "install: --default ignored"; fi
+H3="$ROOT/home3"; mkdir -p "$H3/.local/share/ag"; echo keep >"$H3/.local/share/ag/data"
+inst "$H3"; rc=$?
+if [ $rc = 5 ] && [ -f "$H3/.local/share/ag/data" ]; then pass "install: refuses to replace a non-ag directory"; else fail "install: non-ag dir: exit $rc"; fi
+
 # --- summary ----------------------------------------------------------------
 echo "ag-test: $PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
