@@ -120,6 +120,80 @@ pub fn steps_from_claude_tool(
     }
 }
 
+/// The transcript backstop: every task-tool call in a transcript tail, as
+/// step events in order, pairing each `TaskCreate` with its result's
+/// `toolUseResult.task.id`. Used when a host's hooks predate the matcher.
+pub fn steps_from_transcript(jsonl: &str) -> Vec<StepEvent> {
+    let mut pending: std::collections::HashMap<String, (String, Value)> =
+        std::collections::HashMap::new();
+    let mut out = Vec::new();
+    for line in jsonl.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(content) = v.pointer("/message/content").and_then(Value::as_array) else {
+            continue;
+        };
+        for b in content {
+            match b.get("type").and_then(Value::as_str) {
+                Some("tool_use") => {
+                    let (Some(id), Some(name)) = (
+                        b.get("id").and_then(Value::as_str),
+                        b.get("name").and_then(Value::as_str),
+                    ) else {
+                        continue;
+                    };
+                    if !CLAUDE_STEP_TOOLS.contains(&name) {
+                        continue;
+                    }
+                    let input = b.get("input").cloned().unwrap_or(Value::Null);
+                    if name == "TaskCreate" {
+                        pending.insert(id.to_string(), (name.to_string(), input));
+                    } else {
+                        out.extend(steps_from_claude_tool(name, &input, None));
+                    }
+                }
+                Some("tool_result") => {
+                    let Some(id) = b.get("tool_use_id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    if let Some((name, input)) = pending.remove(id) {
+                        out.extend(steps_from_claude_tool(
+                            &name,
+                            &input,
+                            v.get("toolUseResult"),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Fold events to one per step — its newest text and state — in order of
+/// first appearance. The backstop re-reads the same tail on every Stop;
+/// replaying each step's whole history would re-append transitions that
+/// are already journaled, so it records only where each step ended up.
+pub fn net_steps(events: Vec<StepEvent>) -> Vec<StepEvent> {
+    let mut out: Vec<StepEvent> = Vec::new();
+    for e in events {
+        match out.iter_mut().find(|o| o.native_id == e.native_id) {
+            Some(o) => {
+                if e.text.is_some() {
+                    o.text = e.text;
+                }
+                if e.state.is_some() {
+                    o.state = e.state;
+                }
+            }
+            None => out.push(e),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +264,30 @@ mod tests {
         let t = e[0].text.clone().unwrap();
         assert_eq!(t.chars().count(), STEP_TEXT_MAX_CHARS);
         assert!(!t.contains('\u{7}'));
+    }
+
+    #[test]
+    fn the_transcript_backstop_reads_task_tools_and_their_results() {
+        let jsonl = [
+            serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"TaskCreate","input":{"subject":"Read OM-110","description":"d"}}]}}),
+            serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"Task #1 created successfully: Read OM-110"}]},"toolUseResult":{"task":{"id":"1","subject":"Read OM-110"}}}),
+            serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu2","name":"TaskUpdate","input":{"taskId":"1","status":"completed"}}]}}),
+        ]
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let e = steps_from_transcript(&jsonl);
+        assert_eq!(e.len(), 2);
+        assert_eq!(
+            (e[0].native_id.as_str(), e[1].state),
+            ("task:1", Some(StepState::Completed))
+        );
+        let net = net_steps(e);
+        assert_eq!(net.len(), 1);
+        assert_eq!(
+            (net[0].text.as_deref(), net[0].state),
+            (Some("Read OM-110"), Some(StepState::Completed))
+        );
     }
 }
