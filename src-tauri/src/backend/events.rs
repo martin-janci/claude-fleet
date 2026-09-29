@@ -30,7 +30,9 @@
 //!   struct and re-serialising would look stricter and be worse: every
 //!   optional field carries `#[serde(default)]` (the hub's list tools strip
 //!   nulls), so a field this build does not know about would be silently
-//!   dropped on the way through.
+//!   dropped on the way through. The one thing added is what the hub took
+//!   out: it strips null keys before broadcasting, and the frontend tells
+//!   `null` from absent, so the nulls go back in (`restore_stripped_nulls`).
 //!
 //! # Gaps in the stream
 //!
@@ -554,7 +556,7 @@ impl EventBridge {
                     return Delivery::KeepReading;
                 };
                 match serde_json::from_str::<Value>(data) {
-                    Ok(payload) => {
+                    Ok(mut payload) => {
                         if let Err(why) = payload_fits(known, &payload) {
                             tracing::warn!(
                                 event = %known,
@@ -563,6 +565,7 @@ impl EventBridge {
                             );
                             return Delivery::KeepReading;
                         }
+                        restore_stripped_nulls(known, &mut payload);
                         self.resync.observe(known, &payload);
                         self.sink.emit_remote(known, payload);
                         Delivery::Row
@@ -578,6 +581,66 @@ impl EventBridge {
                 }
             }
         }
+    }
+}
+
+/// `host:pinged`'s payload, which has no row type of its own: `RowChange`
+/// writes it with `json!`, `claude_version_at` and `health` included even
+/// when `None`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct HostPingedPayload {
+    alias: String,
+    last_pinged_at: i64,
+    reachable: bool,
+    claude_version_at: Option<i64>,
+    health: Option<fleet_core::store::HostHealth>,
+}
+
+/// The null-free `payload` the hub sent, as the local bus would have sent it.
+///
+/// The hub strips every null key before it broadcasts
+/// (`fleet_core::json::strip_nulls`), and a Rust client reads an absent key
+/// and a null one as the same `None`. The frontend does not: it clears a
+/// field with a null and guards a missing one with `=== null`, which an
+/// absent key (`undefined`) slips past — an unused five-hour window's
+/// `resets_at` reached `Intl.DateTimeFormat` that way and took the Hosts view
+/// down. So the payload is round-tripped through its row type for a template
+/// (every field the type knows, `None` as null) and gets back only the nulls
+/// the template has and it lacks ([`fleet_core::json::restore_nulls`]). It is
+/// not rebuilt: a field this build does not know still crosses, and a
+/// payload that does not parse as its type (a newer hub's, a partial one)
+/// crosses exactly as it came. `work:changed` and `update:changed` omit their
+/// `None`s locally too (`skip_serializing_if`), so they need no template.
+fn restore_stripped_nulls(name: &str, payload: &mut Value) {
+    use fleet_core::events::{CatalogSummary, MoveProgress};
+    use fleet_core::service::account_usage::AccountUsageSnapshot;
+    use fleet_core::store::{
+        AccountRow, AssetInventoryRow, HostRow, ProjectRow, SessionEvent, SessionRow, TaskRow,
+        TrackerRow, WorkItemRow, WorktreeRow,
+    };
+    fn template<T: serde::Serialize + serde::de::DeserializeOwned>(p: &Value) -> Option<Value> {
+        let row: T = serde_json::from_value(p.clone()).ok()?;
+        serde_json::to_value(row).ok()
+    }
+    let template = match name {
+        "session:created" | "session:updated" => template::<SessionRow>(payload),
+        "session:event" => template::<SessionEvent>(payload),
+        "host:added" | "host:probed" => template::<HostRow>(payload),
+        "host:pinged" => template::<HostPingedPayload>(payload),
+        "account:upserted" => template::<AccountRow>(payload),
+        "project:updated" => template::<ProjectRow>(payload),
+        "worktree:updated" => template::<WorktreeRow>(payload),
+        "task:updated" => template::<TaskRow>(payload),
+        "account_usage:updated" => template::<AccountUsageSnapshot>(payload),
+        "asset_inventory:updated" => template::<AssetInventoryRow>(payload),
+        "catalog:loaded" => template::<CatalogSummary>(payload),
+        "move:progress" => template::<MoveProgress>(payload),
+        "work:item" => template::<WorkItemRow>(payload),
+        "work:tracker" => template::<TrackerRow>(payload),
+        _ => None,
+    };
+    if let Some(t) = template {
+        fleet_core::json::restore_nulls(payload, &t);
     }
 }
 
