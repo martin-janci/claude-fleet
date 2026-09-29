@@ -2405,6 +2405,7 @@ fn a_subtask_starts_in_its_project_with_the_ticket_brief_then_its_own() {
             item_id: Some(sub.id),
             ..Default::default()
         },
+        &OrgScope::All,
     )
     .unwrap();
     assert_eq!(got.project_id, Some(pid));
@@ -2423,6 +2424,7 @@ fn a_subtask_starts_in_its_project_with_the_ticket_brief_then_its_own() {
             brief: Some("mine".into()),
             ..Default::default()
         },
+        &OrgScope::All,
     )
     .unwrap();
     assert_eq!(
@@ -2457,4 +2459,36 @@ async fn an_unaccepted_proposal_cannot_be_started() {
     .await
     .unwrap_err();
     assert_eq!(e.code, codes::E_INVALID);
+}
+
+#[test]
+fn a_subtask_start_never_carries_a_parent_the_caller_cannot_see() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let ticket = s
+        .create_local_work_item(Some("SECRET-1"), "Other org's ticket")
+        .unwrap();
+    let sub = s
+        .create_native_item(&crate::store::NativeItem {
+            title: "Mine",
+            parent_id: Some(ticket.id),
+            project_id: None,
+            notes: None,
+        })
+        .unwrap();
+    let scope = OrgScope::for_host(&s, "h").unwrap();
+    let store = Mutex::new(s);
+    let got = with_native_defaults(
+        &store,
+        &StartArgs {
+            item_id: Some(sub.id),
+            ..Default::default()
+        },
+        &scope,
+    )
+    .unwrap();
+    let brief = got.brief.unwrap();
+    assert!(!brief.contains("SECRET-1"), "{brief}");
+    assert!(!brief.contains("Other org"), "{brief}");
+    assert_eq!(brief, "Mine");
 }

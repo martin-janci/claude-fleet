@@ -1262,7 +1262,11 @@ fn link_started(
 /// an unset brief is the parent's (a ticket's own description, fenced as
 /// every start brief is) followed by the item's title and notes. Anything
 /// else starts exactly as asked.
-fn with_native_defaults(store: &Mutex<Store>, args: &StartArgs) -> Result<StartArgs, IpcError> {
+fn with_native_defaults(
+    store: &Mutex<Store>,
+    args: &StartArgs,
+    scope: &OrgScope,
+) -> Result<StartArgs, IpcError> {
     let Some(id) = args.item_id else {
         return Ok(args.clone());
     };
@@ -1276,11 +1280,18 @@ fn with_native_defaults(store: &Mutex<Store>, args: &StartArgs) -> Result<StartA
     ) {
         return Ok(args.clone());
     }
-    let parent = item
+    // The parent's title, brief and project reach the new session only when
+    // this caller may see the parent (another org's ticket text must not
+    // ride a subtask's start brief across the org fence).
+    let parent = match item
         .parent_id
         .map(|p| s.get_work_item(p))
         .transpose()?
-        .flatten();
+        .flatten()
+    {
+        Some(p) if item_visible(scope, &s, &p)? => Some(p),
+        _ => None,
+    };
     let mut out = args.clone();
     if out.project_id.is_none() {
         out.project_id = item
@@ -1337,7 +1348,7 @@ pub async fn start_work(
     scope: &OrgScope,
     net: &TrackerNet,
 ) -> Result<SessionRow, IpcError> {
-    let args = &with_native_defaults(store, args)?;
+    let args = &with_native_defaults(store, args, scope)?;
     let plan = plan_start(store, args, scope, net).await?;
     let brief = match (&args.brief, args.with_brief) {
         (Some(b), _) => Some(b.clone()),
