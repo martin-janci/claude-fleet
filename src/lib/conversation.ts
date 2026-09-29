@@ -1012,6 +1012,10 @@ export interface ContextMeter {
   pct: number;
   level: ContextLevel;
   label: string;
+  /** "21%" — the part the header always shows. */
+  pctLabel: string;
+  /** "42k / 200k" — the part a narrow header drops; null when unknown. */
+  tokensLabel: string | null;
   title: string;
   stale: boolean;
 }
@@ -1025,14 +1029,18 @@ export function contextMeter(
   const level = contextLevel(pct);
   if (pct === null || level === null) return null;
   const rounded = Math.round(pct);
-  const label =
+  const pctLabel = `${rounded}%`;
+  const tokensLabel =
     s.context_tokens != null && s.context_window
-      ? `${formatTokens(s.context_tokens)} / ${formatTokens(s.context_window)} · ${rounded}%`
-      : `ctx ${rounded}%`;
+      ? `${formatTokens(s.context_tokens)} / ${formatTokens(s.context_window)}`
+      : null;
+  const label = tokensLabel ? `${tokensLabel} · ${pctLabel}` : `ctx ${pctLabel}`;
+  // The tooltip carries the token counts too: a narrow header hides them.
+  const used = `Context window ${rounded}% used${tokensLabel ? ` (${tokensLabel} tokens)` : ''}`;
   const title = s.context_stale
-    ? 'Context size from before the last compaction or resume — it updates with the next reply'
-    : `Context window ${rounded}% used`;
-  return { pct, level, label, title, stale: !!s.context_stale };
+    ? `${used} — from before the last compaction or resume; it updates with the next reply`
+    : used;
+  return { pct, level, label, pctLabel, tokensLabel, title, stale: !!s.context_stale };
 }
 
 export const SOURCE_LABELS: Record<ConversationSummary['start_source'], string> = {
@@ -1054,6 +1062,14 @@ export function switcherEntries(list: ConversationSummary[]): ConversationSummar
 function clock(unixSecs: number): string {
   const d = new Date(unixSecs * 1000);
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+/** The switcher button's two parts: when (always shown) and how it started
+ *  (dropped first on a narrow header). No turn count — the header's turn
+ *  index already states it, and two counts side by side read as a
+ *  contradiction whenever they disagree. The menu keeps the full title. */
+export function switcherLabel(c: ConversationSummary): { when: string; source: string } {
+  return { when: c.current ? 'Current' : clock(c.started_at), source: SOURCE_LABELS[c.start_source] };
 }
 
 export function conversationTitle(c: ConversationSummary): string {

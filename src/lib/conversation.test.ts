@@ -42,6 +42,7 @@ import {
   contextMeter,
   switcherEntries,
   conversationTitle,
+  switcherLabel,
   statusChip,
   inlineEventFor,
   buildThread,
@@ -570,6 +571,14 @@ describe('contextMeter', () => {
     expect(contextMeter(s({ context_pct: 0, context_tokens: 0, context_window: 200_000 }))?.label)
       .toBe('0 / 200k · 0%');
   });
+  it('splits the label for a header that drops the token counts', () => {
+    const m = contextMeter(s({ context_pct: 21, context_tokens: 42_000, context_window: 200_000 }))!;
+    expect(m.pctLabel).toBe('21%');
+    expect(m.tokensLabel).toBe('42k / 200k');
+    // Hidden on a narrow header, so the tooltip still has to carry them.
+    expect(m.title).toContain('42k / 200k');
+    expect(contextMeter(s({ context_pct: 55 }))?.tokensLabel).toBeNull();
+  });
   it('marks a stale value', () => {
     const m = contextMeter(s({ context_pct: 80, context_stale: true }))!;
     expect(m.stale).toBe(true);
@@ -592,6 +601,9 @@ describe('switcherEntries / conversationTitle', () => {
   });
   it('titles', () => {
     expect(conversationTitle(c({ current: true, turns: 1 }))).toBe('Current · /clear · 1 turn');
+  });
+  it('labels the switcher button without a turn count', () => {
+    expect(switcherLabel(c({ current: true, turns: 1 }))).toEqual({ when: 'Current', source: '/clear' });
   });
 });
 
