@@ -16,9 +16,8 @@ use fleet_core::ipc_error::IpcError;
 use fleet_core::service::catalog::{
     self,
     admin::{
-        check_layer_name, check_name, check_resource_path, check_secret_name, AdminCall,
-        DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs, LoadArgs, ResolvePreviewArgs,
-        SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
+        AdminCall, DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs, LoadArgs,
+        ResolvePreviewArgs, SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
     },
     author::{
         self, AddResourceArgs, AddResourceBytesArgs, AssetRef, CommitPendingArgs, CreateArgs,
@@ -30,6 +29,7 @@ use fleet_core::service::catalog::{
     model::Asset,
     repo::RepoStatus,
     sync::{self, plan::SyncPlan, ApplyArgs, PlanArgs, SyncRunSummary},
+    validate::{check_layer_name, check_name, check_resource_path, check_secret_name},
     AssetDetail, AssetListing, ConfigureArgs, ImportArgs,
 };
 use fleet_core::ssh::SshClient;

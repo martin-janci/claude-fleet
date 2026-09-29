@@ -149,12 +149,12 @@ impl WaitCond {
     }
 }
 
-/// PURE: does `row` satisfy `cond`? A stale-demoted row (`demoted`, its
-/// `stale_demoted_at` — `Store::stale_demoted_by_id`) never satisfies
-/// `Idle` here — see [`WaitCond::Idle`].
-pub fn session_satisfies(row: &SessionRow, demoted: bool, cond: WaitCond) -> bool {
+/// PURE: does `row` satisfy `cond`? A stale-demoted row (its
+/// `stale_demoted_at`) never satisfies `Idle` here — see
+/// [`WaitCond::Idle`].
+pub fn session_satisfies(row: &SessionRow, cond: WaitCond) -> bool {
     match cond {
-        WaitCond::Idle => crate::store::turn_over_row(row, demoted),
+        WaitCond::Idle => crate::store::turn_over_row(row),
         WaitCond::TurnGt(t) => row.turn_seq > t,
     }
 }
@@ -250,28 +250,22 @@ pub async fn wait_for_session_probed(
     let mut last_probe: Option<tokio::time::Instant> = None;
     loop {
         // Lock, read one row, unlock — never across the sleep or the probe.
-        let (row, demoted) = {
-            let s = lock(store)?;
-            let row = s.get_session_by_id(session_id)?.ok_or_else(|| {
-                IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
-            })?;
-            let demoted = s.stale_demoted_by_id(session_id)?;
-            (row, demoted)
-        };
-        if session_satisfies(&row, demoted, cond) {
+        let row = lock(store)?.get_session_by_id(session_id)?.ok_or_else(|| {
+            IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
+        })?;
+        if session_satisfies(&row, cond) {
             return Ok(WaitOutcome {
                 satisfied: true,
                 row,
             });
         }
         if cond == WaitCond::Idle
-            && crate::store::needs_pane_confirmation(&row, demoted)
+            && crate::store::needs_pane_confirmation(&row)
             && last_probe.is_none_or(|t| t.elapsed() >= probe_every)
         {
             last_probe = Some(tokio::time::Instant::now());
             let live = probe.pane_status(row.id).await;
-            if crate::store::turn_over(crate::store::trusted_status(&row, demoted, live.as_deref()))
-            {
+            if crate::store::turn_over(crate::store::trusted_status(&row, live.as_deref())) {
                 return Ok(WaitOutcome {
                     satisfied: true,
                     row,
@@ -915,18 +909,18 @@ mod tests {
         s.set_claude_session_id(id, "uuid-w").unwrap();
         let row = s.get_session_by_id(id).unwrap().unwrap();
         assert!(
-            !session_satisfies(&row, false, WaitCond::Idle),
+            !session_satisfies(&row, WaitCond::Idle),
             "unknown status is not idle"
         );
-        assert!(!session_satisfies(&row, false, WaitCond::TurnGt(0)));
+        assert!(!session_satisfies(&row, WaitCond::TurnGt(0)));
         s.record_prompt_submit_hook("uuid-w").unwrap();
         let row = s.get_session_by_id(id).unwrap().unwrap();
-        assert!(!session_satisfies(&row, false, WaitCond::Idle));
+        assert!(!session_satisfies(&row, WaitCond::Idle));
         s.record_stop_hook("uuid-w").unwrap();
         let row = s.get_session_by_id(id).unwrap().unwrap();
-        assert!(session_satisfies(&row, false, WaitCond::Idle));
-        assert!(session_satisfies(&row, false, WaitCond::TurnGt(0)));
-        assert!(!session_satisfies(&row, false, WaitCond::TurnGt(1)));
+        assert!(session_satisfies(&row, WaitCond::Idle));
+        assert!(session_satisfies(&row, WaitCond::TurnGt(0)));
+        assert!(!session_satisfies(&row, WaitCond::TurnGt(1)));
     }
 
     #[tokio::test]
@@ -1024,6 +1018,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.row.stale_working_at, None, "the attach acknowledged it");
+        assert_eq!(out.row.stale_demoted_at, Some(5), "the demotion stands");
         assert!(
             !out.satisfied,
             "an acknowledged demotion's stored idle is still not believed"
@@ -1073,7 +1068,10 @@ mod tests {
         stopper.await.unwrap();
         assert!(out.satisfied);
         assert_eq!(out.row.stale_working_at, None);
-        assert!(!store.lock().unwrap().stale_demoted_by_id(id).unwrap());
+        assert_eq!(
+            out.row.stale_demoted_at, None,
+            "the hook lifted the demotion"
+        );
     }
 
     /// Final review, Important 2. `complete_task` posts the result to the

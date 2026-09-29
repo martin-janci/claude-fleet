@@ -143,7 +143,8 @@ curl -s https://fleet.example.com/mcp \
 A healthy hub answers with `db_ready: true` and the running version.
 
 `hub` is this process: `started_at`, `uptime_secs` and `reconcile`
-(`last_started_at`, `last_finished_at`, `last_duration_ms`,
+(`last_started_at`, `last_finished_at`, `last_duration_ms`, `last_ok_at`
+(when the last clean pass finished; a later failure leaves it set),
 `consecutive_failures`, `failures_total`, `last_error`) — alert on
 `consecutive_failures >= 3`. `tunnels_mode` is `none` on a public hub (hooks
 post directly; the `tunnels` map is empty because nothing applies) and
@@ -1566,8 +1567,10 @@ fleet-hub decide proposals reject 814                    # "not this": stays unm
 
 `enable`, `disable`, `mode`, `unassigned` and `set` change the `decide.*`
 settings over the running hub's `set_setting` (loopback, master token),
-like `org set`: the hub checks the value and audits the change. `set-key` and `clear-key` write `state.db` directly, like
-`fleet-hub tracker webhook`; `status`, `runs` and `proposals` open it
+like `org set`: the hub checks the value and audits the change. `set-key`
+and `clear-key` write `state.db` directly (the key is read like
+`fleet-hub tracker set-credential`'s secret: stdin, `--from-env` or
+`--ref`, never argv); `status`, `runs` and `proposals` open it
 read-only and print ids, words and numbers — never the key; the section
 names `proposals` shows come from the trackers' stored config, never from
 the record. `tracker section-map` is a `work_admin update` over loopback
@@ -1741,7 +1744,8 @@ Besides the per-caller counters the exposition carries four process gauges:
 `fleet_reconcile_duration_ms` (the last pass's wall time),
 `fleet_reconcile_failures_total`, `fleet_sessions{status="…"}` (by
 `claude_status`, external rows excluded, the same roll-up
-`fleet_health.by_status` uses) and `fleet_hosts_reachable`.
+`fleet_health.by_status` uses) and `fleet_hosts_reachable`. They are two SQL
+counts on the hub's read pool, so a scrape never waits on the writer.
 
 Prometheus text format, **master token only** — a per-host token and a paired
 phone are both callers this reports on, and letting one read the others'
@@ -2249,8 +2253,10 @@ sessions that were live on it are ghosted with `lost_reason =
 local_disabled` on every start (nothing probes `local` on such a hub, so
 they would otherwise stay live and refuse every action); they are ghosted
 on the start that finds them and reaped on the next
-(`retire_local_sessions`); any host nothing probes is reaped the same way
-each reconcile pass. `refresh_projects` has no
+(`retire_local_sessions`), and each reconcile pass reaps that `local` the
+same way. A host you hide yourself is different: Hide is reversible, so its
+sessions are only frozen at their last-known state, and Unhide finds them
+again. `refresh_projects` has no
 local projects directory to scan there and returns the stored list, after
 folding duplicate worktree rows; `forget_project {project_id}` (master) drops
 a row the scan can never revisit. And the

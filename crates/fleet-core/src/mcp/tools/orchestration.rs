@@ -316,13 +316,9 @@ impl FleetTools {
         )?;
         // A stale-demoted row reads `idle` only because nothing moved; a
         // long tool call looks exactly like that. Ask the pane (S5 + F2).
-        // The demotion's memory, not the attention stamp: an attach or the
-        // TTL ends the reason, not the guess.
-        let demoted = lock(&self.store)
-            .map_err(to_mcp_err)?
-            .stale_demoted_by_id(row.id)
-            .map_err(|e| to_mcp_err(e.into()))?;
-        let live = if crate::store::needs_pane_confirmation(&row, demoted) {
+        // The demotion's memory (`stale_demoted_at`), not the attention
+        // stamp: an attach or the TTL ends the reason, not the guess.
+        let live = if crate::store::needs_pane_confirmation(&row) {
             tasks::LivePaneProbe {
                 store: &self.store,
                 ssh: &self.ssh,
@@ -332,7 +328,7 @@ impl FleetTools {
         } else {
             None
         };
-        run_prompt_ready(&row, demoted, live.as_deref())?;
+        run_prompt_ready(&row, live.as_deref())?;
         let _permit = self.long_poll_permit(&caller, "run_prompt")?;
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
         let before = row.turn_seq;
@@ -731,6 +727,8 @@ impl FleetTools {
                         cursor: args.cursor.clone(),
                         limit: args.limit,
                         per_task: args.per_task,
+                        sections: args.sections.clone().unwrap_or_default(),
+                        with_review_total: args.with_review_total == Some(true),
                     },
                 )
                 .map_err(to_mcp_err)?,
@@ -756,7 +754,7 @@ impl FleetTools {
                     .map_err(to_mcp_err)?,
             ),
             WorkAction::Rules => {
-                ok_json_compact(&w::structure::rules(&self.store, &scope).map_err(to_mcp_err)?)
+                ok_json_compact(&w::structure::rules(self.reader(), &scope).map_err(to_mcp_err)?)
             }
             WorkAction::RulePreview => {
                 let rule = args
@@ -768,7 +766,7 @@ impl FleetTools {
                 )
             }
             WorkAction::Views => {
-                ok_json_compact(&w::structure::views(&self.store, &scope).map_err(to_mcp_err)?)
+                ok_json_compact(&w::structure::views(self.reader(), &scope).map_err(to_mcp_err)?)
             }
             WorkAction::OrgImpact => {
                 let task_id = args
@@ -776,7 +774,7 @@ impl FleetTools {
                     .as_deref()
                     .ok_or_else(|| mcp_err("E_INVALID", "org_impact needs task_id", None))?;
                 ok_json_compact(
-                    &w::structure::org_impact(&self.store, &scope, task_id, args.org_id)
+                    &w::structure::org_impact(self.reader(), &scope, task_id, args.org_id)
                         .map_err(to_mcp_err)?,
                 )
             }

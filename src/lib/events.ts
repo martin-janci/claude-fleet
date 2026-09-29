@@ -72,8 +72,9 @@ export type RowEventHandlers = {
   /** One call per flush with every `work:*` frame (work graph M3), in order. */
   onWorkEvents?: (events: WorkEvent[]) => void;
   /** One call per flush with every well-formed `work:changed` (work graph
-   *  M14.1d: ids only), in order. A `resync` among them means reload the
-   *  whole Work view (`needsFullReload`); anything else, re-read what shows. */
+   *  M14.1d: ids only), in order. Each `what` reaches the Work view's
+   *  readers as a change kind (`noteWorkChanged`): a `resync` reloads the
+   *  whole view, anything else re-reads what shows. */
   onWorkChanged?: (changes: WorkChanged[]) => void;
   /** One call per flush with the key of every `settings:changed`
    *  (declarative pages P3: the key only), in order, duplicates kept. */

@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { get } from 'svelte/store';
-import { createOutbox, isHeld, receipt, SLOW_SEND_MS, type OutboxDeps, type OutboxRow } from './outbox';
+import { createOutbox, isHeld, outboxBody, receipt, SLOW_SEND_MS, type OutboxDeps, type OutboxRow } from './outbox';
 import type { Result } from './result';
+import { withAttachments } from './attach_prompt';
 import type { Attachment } from './attachments';
 import type { Conversation } from './conversation';
 
@@ -351,6 +352,44 @@ describe('outbox: settling into the transcript', () => {
     expect(h.msgs()).toEqual([]);
   });
 
+  it('an identical prompt already in line raises the seen baseline', async () => {
+    const h = harness({ 1: idle() });
+    h.box.enqueue(A, { kind: 'prompt', text: 'continue', seen: 0 });
+    h.box.enqueue(A, { kind: 'prompt', text: 'continue', seen: 0 });
+    expect(h.msgs().map((m) => m.seen)).toEqual([0, 1]);
+    await flush();
+    h.sends[0].done(ok(undefined));
+    await flush();
+    h.sends[1].done(ok(undefined));
+    await flush();
+    // The transcript carries the first "continue" only: its bubble goes,
+    // the second stays until a turn beyond it carries the text.
+    h.box.settle(A.id, conv('continue'), { quiet: false, turnSeq: 0 });
+    expect(h.msgs()).toHaveLength(1);
+    expect(h.msgs()[0].seen).toBe(1);
+    h.box.settle(A.id, conv('continue', 'continue'), { quiet: false, turnSeq: 0 });
+    expect(h.msgs()).toEqual([]);
+  });
+
+  it('messages with files neither carry nor raise the seen baseline', async () => {
+    const h = harness({ 1: idle() });
+    h.box.enqueue(A, { kind: 'prompt', text: 'go', attachments: [tile('t1', '/tmp/x.txt')] });
+    h.box.enqueue(A, { kind: 'prompt', text: 'go', attachments: [tile('t2', '/tmp/y.txt')], seen: 3 });
+    h.box.enqueue(A, { kind: 'prompt', text: 'go', seen: 0 });
+    expect(h.msgs().map((m) => m.seen)).toEqual([0, 0, 0]);
+  });
+
+  it('a failed duplicate does not raise the baseline', async () => {
+    const h = harness({ 1: idle() });
+    h.box.enqueue(A, { kind: 'prompt', text: 'go', seen: 0 });
+    await flush();
+    h.sends[0].done({ ok: false, error: { code: 'E_PTY_BUSY', message: 'busy' } });
+    await flush();
+    expect(h.msgs()[0].state).toBe('failed');
+    h.box.enqueue(A, { kind: 'prompt', text: 'go' });
+    expect(h.msgs().map((m) => m.seen)).toEqual([0, 0]);
+  });
+
   it('never settles a message that has not gone out', async () => {
     const h = harness({ 1: idle() });
     h.box.enqueue(A, { kind: 'prompt', text: 'run tests' });
@@ -412,5 +451,20 @@ describe('receipt', () => {
   it('owns up to a slow send instead of looking frozen', () => {
     expect(receipt({ ...base, state: 'sending' }, false, 1_000 + SLOW_SEND_MS - 1).label).toBe('Sending…');
     expect(receipt({ ...base, state: 'sending' }, false, 1_000 + SLOW_SEND_MS).label).toBe('Still sending…');
+  });
+});
+
+describe('outboxBody', () => {
+  it('puts the prefix in front of a prompt only', () => {
+    expect(outboxBody({ kind: 'prompt', text: 'hi', prefix: 'ctx' })).toBe('ctx\n\nhi');
+    expect(outboxBody({ kind: 'command', text: '/clear', prefix: 'ctx' })).toBe('/clear');
+    expect(outboxBody({ kind: 'prompt', text: 'hi', prefix: null })).toBe('hi');
+  });
+
+  it('appends the attachments block', () => {
+    const body = outboxBody({ kind: 'prompt', text: 'hi', prefix: 'ctx', paths: ['/r/a.txt'] });
+    expect(body.startsWith('ctx\n\nhi')).toBe(true);
+    expect(body).toContain('/r/a.txt');
+    expect(body).toBe(withAttachments('ctx\n\nhi', ['/r/a.txt']));
   });
 });

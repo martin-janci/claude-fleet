@@ -191,6 +191,12 @@ pub struct JournalUsage {
     pub briefs_delivered: u64,
     #[serde(default)]
     pub compact_summaries: u64,
+    /// Session summaries (`work_link { summarize }`).
+    #[serde(default)]
+    pub summaries: u64,
+    /// PR links written back to a tracker.
+    #[serde(default)]
+    pub write_backs: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +293,8 @@ pub fn usage(
         briefs_queued: j.briefs_queued,
         briefs_delivered: j.briefs_delivered,
         compact_summaries: j.compact_summaries,
+        summaries: j.summaries,
+        write_backs: j.write_backs,
     };
 
     let mut tidy = TidyUsage {
@@ -396,10 +404,13 @@ impl UsageSummary {
                 self.resume.resumed, self.resume.with_brief, self.resume.without_brief
             ),
             format!(
-                "journal: {} briefs queued, {} delivered; {} compaction summaries",
+                "journal: {} briefs queued, {} delivered; {} compaction summaries, \
+                 {} session summaries, {} PR links written",
                 self.journal.briefs_queued,
                 self.journal.briefs_delivered,
-                self.journal.compact_summaries
+                self.journal.compact_summaries,
+                self.journal.summaries,
+                self.journal.write_backs
             ),
             format!(
                 "tidy: {} applied, {} kept, {} auto-tidied ({})",
@@ -562,7 +573,8 @@ mod tests {
             );
         }
         // Journal: a start brief delivered, a resume brief undelivered, two
-        // compaction summaries (one outside).
+        // compaction summaries (one outside), a session summary and a
+        // write-back in the window and one of each outside.
         for (kind, meta, at, delivered) in [
             (
                 "handover",
@@ -579,6 +591,10 @@ mod tests {
             ("handover", "not json", in_window, None),
             ("compact_summary", "{}", in_window, None),
             ("compact_summary", "{}", old, None),
+            ("summary", "{}", in_window, None),
+            ("summary", "{}", old, None),
+            ("write_back", r#"{"key":"SECRET-1"}"#, in_window, None),
+            ("write_back", r#"{"key":"SECRET-1"}"#, old, None),
         ] {
             set(
                 &s,
@@ -651,7 +667,9 @@ mod tests {
             JournalUsage {
                 briefs_queued: 3,
                 briefs_delivered: 1,
-                compact_summaries: 1
+                compact_summaries: 1,
+                summaries: 1,
+                write_backs: 1
             }
         );
         assert_eq!(
@@ -680,6 +698,16 @@ mod tests {
         );
         assert_eq!(u.unrecorded.len(), UNRECORDED.len());
 
+        assert!(
+            u.lines().contains(
+                &"journal: 3 briefs queued, 1 delivered; 1 compaction summaries, \
+                  1 session summaries, 1 PR links written"
+                    .to_string()
+            ),
+            "{:?}",
+            u.lines()
+        );
+
         // Counts and ids only: no title, key, name, detail, body or error.
         let json = serde_json::to_string(&u).unwrap();
         let text = u.lines().join("\n");
@@ -692,6 +720,7 @@ mod tests {
         assert_eq!(year.links.by_source.get("resumed"), Some(&1));
         assert_eq!(year.handover.requested, 3);
         assert_eq!(year.journal.compact_summaries, 2);
+        assert_eq!((year.journal.summaries, year.journal.write_backs), (2, 2));
     }
 
     #[test]

@@ -93,6 +93,25 @@ fn event(s: &Store, sid: i64, kind: &str, at: i64) -> i64 {
     s.conn.last_insert_rowid()
 }
 
+/// One write-back outbox row in `state`, last touched at `at`.
+fn outbox(s: &Store, tracker: i64, url: &str, state: &str, at: i64) -> i64 {
+    s.conn
+        .execute(
+            "INSERT INTO tracker_writes (tracker_id, item_key, op, url, title, state, next_at, \
+                                         created_at, updated_at) \
+             VALUES (?1, 'ABC-1', 'pr_remote_link', ?2, 'PR', ?3, ?4, ?4, ?4)",
+            rusqlite::params![tracker, url, state, at],
+        )
+        .unwrap();
+    s.conn.last_insert_rowid()
+}
+
+fn tracker(s: &Store) -> i64 {
+    s.add_tracker("jira", "J", "https://acme.atlassian.net")
+        .unwrap()
+        .id
+}
+
 fn ids(s: &Store, table: &str) -> BTreeSet<i64> {
     let mut stmt = s.conn.prepare(&format!("SELECT id FROM {table}")).unwrap();
     let rows = stmt.query_map([], |r| r.get(0)).unwrap();
@@ -436,6 +455,8 @@ fn zero_days_keeps_every_table_forever() {
             rusqlite::params![OLD],
         )
         .unwrap();
+    let tr = tracker(&s);
+    outbox(&s, tr, "https://github.com/o/r/pull/1", "done", OLD);
     for t in RetentionTable::ALL {
         assert!(s.retention_eligible(t, NOW, 1).unwrap() > 0, "{t:?}");
         assert_eq!(s.retention_eligible(t, NOW, 0).unwrap(), 0, "{t:?}");
@@ -467,6 +488,32 @@ fn a_batch_deletes_at_most_its_limit() {
     assert_eq!(s.retention_delete_batch(t, NOW, 1, 3).unwrap(), 3);
     assert_eq!(s.retention_delete_batch(t, NOW, 1, 3).unwrap(), 1);
     assert_eq!(s.retention_delete_batch(t, NOW, 1, 3).unwrap(), 0);
+}
+
+/// The write-back outbox (M13.4e): a pending write is never eligible,
+/// however old; a done and a failed one past the cutoff are; a settled one
+/// inside the window stays.
+#[test]
+fn the_outbox_sweeps_settled_rows_only() {
+    let s = Store::open_in_memory().unwrap();
+    let tr = tracker(&s);
+    let pending = outbox(&s, tr, "https://github.com/o/r/pull/1", "pending", OLD);
+    let done = outbox(&s, tr, "https://github.com/o/r/pull/2", "done", OLD);
+    let failed = outbox(&s, tr, "https://github.com/o/r/pull/3", "failed", OLD);
+    let young = outbox(&s, tr, "https://github.com/o/r/pull/4", "done", YOUNG);
+    let t = RetentionTable::TrackerWrites;
+    assert_eq!(
+        s.retention_rows(t).unwrap(),
+        4,
+        "every row, pending included"
+    );
+    sweep_exactly(&s, t, 365, &[done, failed]);
+    let left = ids(&s, "tracker_writes");
+    assert!(left.contains(&pending), "a pending write is never swept");
+    assert!(
+        left.contains(&young),
+        "a settled write inside the window stays"
+    );
 }
 
 /// A LOCAL item's journal and handover history survive its `done` (final

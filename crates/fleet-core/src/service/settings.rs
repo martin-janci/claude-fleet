@@ -471,14 +471,18 @@ pub const DECIDE_JEV_ENABLED: &str = "decide.jev.enabled";
 pub const DECIDE_JEV_STATUS_MAP: &str = "decide.jev.status_map";
 /// `work_link`'s mode (choosing a work item for an unlinked session).
 pub const DECIDE_JEV_WORK_LINK: &str = "decide.jev.work_link";
-/// What a feature's mode may be. `auto` is not offered: no feature has
-/// passed acceptance (D36).
-pub const DECIDE_MODES: &[&str] = &["off", "shadow", "assist"];
+/// What a feature's mode may be: the store's `decision_runs.mode` words
+/// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
+/// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
+/// has passed acceptance (D36).
+pub const DECIDE_MODES: &[&str] = crate::store::DECISION_MODES;
 
 // ── update.* (application updates, update-channel design §7.3) ──
 /// The release track the hub follows for its fleet.
 pub const UPDATE_TRACK: &str = "update.track";
-pub const UPDATE_TRACKS: &[&str] = &["stable", "beta", "nightly"];
+/// `nightly` joins when S2b publishes it (`src/lib/fleet_settings.ts` keeps
+/// the same list).
+pub const UPDATE_TRACKS: &[&str] = &["stable", "beta"];
 /// Per component: `manual` (only pins), `notify` (offer), `automatic`
 /// (install at the next quiet point).
 pub const UPDATE_HUB_MODE: &str = "update.hub.mode";
@@ -1639,6 +1643,15 @@ pub fn set_by(
         }
     }
     s.emit_settings_changed(key);
+    if key == HEALTH_CONTEXT_RED_PCT {
+        // The hub's `/events` stamps `needs_attention` without a store; keep
+        // its threshold equal to the one `list_sessions` now reads.
+        s.context_red_pct_changed(crate::service::health::context_red_pct(s));
+    }
+    if key.starts_with("update.") {
+        // A new track or check interval wakes the hub's channel refresh.
+        crate::service::update::settings_changed(key);
+    }
     Ok(())
 }
 

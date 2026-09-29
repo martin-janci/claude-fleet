@@ -48,8 +48,9 @@ pub const MANIFESTS_KEPT: usize = 10;
 const LAST_REFRESH_KEY: &str = "update.last_refresh";
 
 /// The release keys this hub verifies with: the compiled-in ones, plus — in
-/// an `e2e` test build only — `FLEET_UPDATE_E2E_KEYS` (comma-separated), so
-/// `scripts/hub-e2e.sh` can publish a channel signed by a throwaway key. A
+/// an `e2e` test build only — `FLEET_UPDATE_E2E_KEYS` (comma-separated),
+/// reserved for S4b's planned `scripts/hub-e2e.sh` section U, which will
+/// publish a channel signed by a throwaway key (nothing sets it yet). A
 /// release build never reads that variable.
 pub fn trusted_keys() -> TrustedKeys {
     #[allow(unused_mut)]
@@ -82,17 +83,13 @@ pub fn channel_base_url() -> String {
 
 // ── policy ──
 
+/// The track the hub follows. `nightly` is not offered until S2b publishes
+/// it, so a stored `nightly` resolves to the default, `stable`.
 pub fn track(store: &Store) -> Track {
-    match setting(store, settings::UPDATE_TRACK).as_str() {
+    match settings::get_string(store, settings::UPDATE_TRACK).as_str() {
         "beta" => Track::Beta,
-        "nightly" => Track::Nightly,
         _ => Track::Stable,
     }
-}
-
-fn setting(store: &Store, key: &str) -> String {
-    let raw = store.get_setting(key).ok().flatten();
-    settings::resolve(key, raw.as_deref()).to_string()
 }
 
 pub fn mode(store: &Store, c: Component) -> Mode {
@@ -102,7 +99,7 @@ pub fn mode(store: &Store, c: Component) -> Mode {
         Component::Desktop => settings::UPDATE_DESKTOP_MODE,
         Component::Android | Component::Ios => settings::UPDATE_MOBILE_MODE,
     };
-    match setting(store, key).as_str() {
+    match settings::get_string(store, key).as_str() {
         "manual" => Mode::Manual,
         "automatic" => Mode::Automatic,
         _ => Mode::Notify,
@@ -110,9 +107,20 @@ pub fn mode(store: &Store, c: Component) -> Mode {
 }
 
 pub fn check_interval_secs(store: &Store) -> u64 {
-    setting(store, settings::UPDATE_CHECK_INTERVAL_SECS)
-        .parse()
-        .unwrap_or(21_600)
+    // Resolved against its spec, so never below the minimum and never 0.
+    settings::get_secs(store, settings::UPDATE_CHECK_INTERVAL_SECS)
+}
+
+/// Wakes the refresh tick early: a new track has no cached channel (every
+/// target would read `unknown` until the next tick), and a new interval
+/// should not wait out the old one's sleep.
+static REFRESH_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// `settings::set` calls this for every `update.*` key it stores.
+pub fn settings_changed(key: &str) {
+    if key == settings::UPDATE_TRACK || key == settings::UPDATE_CHECK_INTERVAL_SECS {
+        REFRESH_WAKE.notify_one();
+    }
 }
 
 /// The policy for one target: the fleet's mode for its component, and the
@@ -318,8 +326,9 @@ pub fn check(
     keys: &TrustedKeys,
     now: i64,
 ) -> Result<Decision, IpcError> {
-    check_proto(req.update_proto)?;
+    // The token before the body: a hub link is refused whatever it sends.
     let id = identity(caller)?;
+    check_proto(req.update_proto)?;
     require_component(&id, req.component)?;
     let s = lock(store)?;
     if id.may_report {
@@ -333,10 +342,7 @@ pub fn check(
             build_id: req.installed.build_id.clone(),
             digest: req.installed.digest.clone(),
             speaks: json(&req.speaks),
-            phase: serde_json::to_value(req.phase)
-                .ok()
-                .and_then(|v| v.as_str().map(String::from))
-                .unwrap_or_else(|| "idle".into()),
+            phase: req.phase.as_str().into(),
             attempt: req.attempt.clone(),
             last_error: prev.and_then(|p| p.last_error),
             reported_at: now,
@@ -429,15 +435,21 @@ pub fn record_client_header(
 }
 
 /// `POST /update/report`: one state-machine transition and the observed
-/// state that comes with it. Idempotent on `(target, attempt, phase)`.
+/// state that comes with it. Idempotent on `(target, attempt, phase)` for a
+/// report that carries an attempt: a replayed report adds nothing and returns
+/// `false`, and a late report of an older attempt is logged but never
+/// overwrites the newer attempt's observed state. A report without an attempt
+/// always becomes the observed state; the return says whether its event was
+/// newly recorded.
 pub fn report(
     store: &Mutex<Store>,
     caller: &Caller,
     r: &Report,
     now: i64,
 ) -> Result<bool, IpcError> {
-    check_proto(r.update_proto)?;
+    // The token before the body: a hub link is refused whatever it sends.
     let id = identity(caller)?;
+    check_proto(r.update_proto)?;
     if !id.may_report {
         return Err(IpcError::new(
             codes::E_FORBIDDEN,
@@ -445,38 +457,59 @@ pub fn report(
         ));
     }
     require_component(&id, r.component)?;
-    let phase = serde_json::to_value(r.phase)
-        .ok()
-        .and_then(|v| v.as_str().map(String::from))
-        .unwrap_or_else(|| "unknown".into());
+    let phase = r.phase.as_str();
     let detail = (!r.detail.is_null()).then(|| r.detail.to_string());
     let s = lock(store)?;
-    let prev = s.update_observed(&id.target)?;
-    s.upsert_update_observed(&UpdateObservedRow {
-        target: id.target.clone(),
-        component: r.component.as_str().into(),
-        platform: prev.as_ref().and_then(|p| p.platform.clone()),
-        version: r.installed.version.to_string(),
-        commit_sha: r.installed.commit.clone(),
-        build_id: r.installed.build_id.clone(),
-        digest: r.installed.digest.clone(),
-        speaks: prev.as_ref().and_then(|p| p.speaks.clone()),
-        phase: phase.clone(),
-        attempt: r.attempt.clone(),
-        last_error: r.error.clone(),
-        reported_at: now,
-        last_checked_at: None,
-    })?;
-    s.insert_update_event(
-        &id.target,
-        r.attempt.as_deref(),
-        &phase,
-        r.from.as_ref().map(|v| v.to_string()).as_deref(),
-        r.to.as_ref().map(|v| v.to_string()).as_deref(),
-        detail.as_deref(),
-        r.error.as_deref(),
-        now,
-    )
+    s.atomically(|s| {
+        let recorded = s.insert_update_event(
+            &id.target,
+            r.attempt.as_deref(),
+            phase,
+            r.from.as_ref().map(|v| v.to_string()).as_deref(),
+            r.to.as_ref().map(|v| v.to_string()).as_deref(),
+            detail.as_deref(),
+            r.error.as_deref(),
+            now,
+        )?;
+        // Only a report that carries an attempt is de-duplicated and
+        // ordered: an attempt is made at `downloading`, so an attempt-less
+        // report (checking / available / idle) is always the latest state.
+        let this_attempt = r.attempt.as_deref().unwrap_or("");
+        if !recorded && !this_attempt.is_empty() {
+            return Ok(false);
+        }
+        let prev = s.update_observed(&id.target)?;
+        if let Some(p) = &prev {
+            let prev_attempt = p.attempt.as_deref().unwrap_or("");
+            if prev_attempt != this_attempt && !prev_attempt.is_empty() && !this_attempt.is_empty()
+            {
+                // Attempts are ordered by when the hub first heard of them:
+                // a late report of an older attempt is history, not state.
+                let first = |a: &str| s.update_attempt_first_seen(&id.target, a);
+                if let (Some(this), Some(newer)) = (first(this_attempt)?, first(prev_attempt)?) {
+                    if this < newer {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        s.upsert_update_observed(&UpdateObservedRow {
+            target: id.target.clone(),
+            component: r.component.as_str().into(),
+            platform: prev.as_ref().and_then(|p| p.platform.clone()),
+            version: r.installed.version.to_string(),
+            commit_sha: r.installed.commit.clone(),
+            build_id: r.installed.build_id.clone(),
+            digest: r.installed.digest.clone(),
+            speaks: prev.as_ref().and_then(|p| p.speaks.clone()),
+            phase: phase.into(),
+            attempt: r.attempt.clone(),
+            last_error: r.error.clone(),
+            reported_at: now,
+            last_checked_at: None,
+        })?;
+        Ok(recorded)
+    })
 }
 
 // ── status ──
@@ -543,9 +576,7 @@ fn target_rows(
         if own.is_some_and(|t| t != o.target) {
             continue;
         }
-        let Ok(component) =
-            serde_json::from_value::<Component>(serde_json::Value::String(o.component.clone()))
-        else {
+        let Ok(component) = o.component.parse::<Component>() else {
             continue;
         };
         let platform: Platform = o
@@ -814,7 +845,7 @@ pub fn health(
 // ── admin ──
 
 fn parse_component(s: &str) -> Result<Component, IpcError> {
-    serde_json::from_value(serde_json::Value::String(s.to_string())).map_err(|_| {
+    s.parse().map_err(|_| {
         IpcError::new(
             codes::E_INVALID,
             format!("component must be hub | agent | desktop | android | ios, got {s:?}"),
@@ -822,21 +853,52 @@ fn parse_component(s: &str) -> Result<Component, IpcError> {
     })
 }
 
-fn validate_target(component: Component, target: &str) -> Result<(), IpcError> {
-    let ok = target.is_empty()
-        || match component {
-            Component::Hub => target == "hub:self",
-            Component::Agent => target.strip_prefix("agent:").is_some_and(|a| !a.is_empty()),
+/// What a pin's target names: `Any` is every target of the component, or
+/// `hub:self`.
+enum TargetRef<'a> {
+    Any,
+    Agent(&'a str),
+    Client(i64),
+}
+
+fn validate_target(component: Component, target: &str) -> Result<TargetRef<'_>, IpcError> {
+    let parsed = if target.is_empty() {
+        Some(TargetRef::Any)
+    } else {
+        match component {
+            Component::Hub => (target == "hub:self").then_some(TargetRef::Any),
+            Component::Agent => target
+                .strip_prefix("agent:")
+                .filter(|a| !a.is_empty())
+                .map(TargetRef::Agent),
             Component::Desktop | Component::Android | Component::Ios => target
                 .strip_prefix("client:")
-                .is_some_and(|id| id.parse::<i64>().is_ok()),
-        };
-    if ok {
+                .and_then(|id| id.parse::<i64>().ok())
+                .map(TargetRef::Client),
+        }
+    };
+    parsed.ok_or_else(|| {
+        IpcError::new(
+            codes::E_INVALID,
+            format!("target {target:?} is not a {} target", component.as_str()),
+        )
+    })
+}
+
+/// A pin names a target that exists: an unrevoked client, a known host.
+/// (Unpinning stays lenient, so a pin on a target since removed can go.)
+fn require_target_exists(store: &Store, t: &TargetRef, target: &str) -> Result<(), IpcError> {
+    let exists = match t {
+        TargetRef::Any => true,
+        TargetRef::Agent(alias) => store.get_host_row(alias)?.is_some(),
+        TargetRef::Client(id) => store.client_token_is_live(*id)?,
+    };
+    if exists {
         Ok(())
     } else {
         Err(IpcError::new(
-            codes::E_INVALID,
-            format!("target {target:?} is not a {} target", component.as_str()),
+            codes::E_NOTFOUND,
+            format!("no such target {target:?}"),
         ))
     }
 }
@@ -852,7 +914,7 @@ pub fn pin(
     now: i64,
 ) -> Result<UpdateDesiredRow, IpcError> {
     let c = parse_component(component)?;
-    validate_target(c, target)?;
+    let t = validate_target(c, target)?;
     let v = Version::parse(version)
         .map_err(|e| IpcError::new(codes::E_INVALID, format!("version {version:?}: {e}")))?;
     let row = UpdateDesiredRow {
@@ -864,7 +926,9 @@ pub fn pin(
         set_by: "operator".into(),
         set_at: now,
     };
-    lock(store)?.set_update_desired(&row)?;
+    let s = lock(store)?;
+    require_target_exists(&s, &t, target)?;
+    s.set_update_desired(&row)?;
     Ok(row)
 }
 
@@ -1117,8 +1181,14 @@ pub fn hub_platform() -> Platform {
     Platform::new(std::env::consts::OS, std::env::consts::ARCH, variant)
 }
 
-fn record_hub_self(store: &Store, me: &HubSelf, now: i64) -> Result<(), IpcError> {
-    let prev = store.update_observed("hub:self")?;
+/// Record `hub:self` at start. The same version keeps the phase, attempt
+/// and error the updater last reported; a new version clears them — a new
+/// binary is running, and the old attempt's outcome no longer describes it
+/// (the updater's own queued reports, if any, follow and set them again).
+pub(crate) fn record_hub_self(store: &Store, me: &HubSelf, now: i64) -> Result<(), IpcError> {
+    let prev = store
+        .update_observed("hub:self")?
+        .filter(|p| p.version == me.version);
     store.upsert_update_observed(&UpdateObservedRow {
         target: "hub:self".into(),
         component: "hub".into(),
@@ -1126,7 +1196,8 @@ fn record_hub_self(store: &Store, me: &HubSelf, now: i64) -> Result<(), IpcError
         version: me.version.clone(),
         commit_sha: Some(me.commit.clone()),
         build_id: Some(me.build_id.clone()),
-        // The running image digest is the updater's to report.
+        // The running image digest is the updater's to report (and a new
+        // version's is not the old one's).
         digest: prev.as_ref().and_then(|p| p.digest.clone()),
         speaks: None,
         phase: prev
@@ -1154,20 +1225,33 @@ pub fn spawn_refresh_tick(
             }
         }
         let keys = trusted_keys();
+        // The last failure's code: a failure warns once, and again only when
+        // the reason changes, so a hub offline for a week does not warn every
+        // tick.
+        let mut last_code: Option<String> = None;
         loop {
             let base = channel_base_url();
             let fetch = HttpsFetch::new(Some(&base));
             match refresh(&store, &fetch, &base, &keys, crate::store::now_unix()).await {
-                Ok(o) => tracing::info!(
-                    track = o.track.as_str(),
-                    sequence = o.sequence,
-                    fetched = o.fetched,
-                    "update channel refreshed"
-                ),
-                // Debug, not warn: until a release publishes the track's
-                // channel every refresh fails, and that is the expected state.
+                Ok(o) => {
+                    last_code = None;
+                    tracing::info!(
+                        track = o.track.as_str(),
+                        sequence = o.sequence,
+                        fetched = o.fetched,
+                        "update channel refreshed"
+                    )
+                }
+                // A signature, rollback or transport failure is the operator's
+                // to see; repeats of the same one are not. (Until a release
+                // publishes the track's channel every refresh fails, so the
+                // repeats below stay at debug.)
+                Err(e) if last_code.as_deref() != Some(e.code.as_str()) => {
+                    tracing::warn!(code = %e.code, error = %e.message, "update channel refresh failed");
+                    last_code = Some(e.code.clone());
+                }
                 Err(e) => {
-                    tracing::debug!(code = %e.code, error = %e.message, "update channel refresh failed")
+                    tracing::debug!(code = %e.code, error = %e.message, "update channel refresh failed again")
                 }
             }
             let interval = lock(&store)
@@ -1176,6 +1260,8 @@ pub fn spawn_refresh_tick(
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => break,
+                // A new track or interval: refresh now, then re-arm.
+                _ = REFRESH_WAKE.notified() => {}
                 _ = tokio::time::sleep(std::time::Duration::from_secs(interval)) => {}
             }
         }

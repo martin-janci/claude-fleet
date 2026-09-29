@@ -32,6 +32,26 @@ impl Component {
     pub fn can_downgrade(self) -> bool {
         matches!(self, Component::Hub | Component::Agent)
     }
+
+    pub const ALL: [Component; 5] = [
+        Component::Hub,
+        Component::Agent,
+        Component::Desktop,
+        Component::Android,
+        Component::Ios,
+    ];
+}
+
+impl std::str::FromStr for Component {
+    type Err = String;
+
+    /// The inverse of [`Component::as_str`] (and of the serde name).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Component::ALL
+            .into_iter()
+            .find(|c| c.as_str() == s)
+            .ok_or_else(|| format!("unknown component {s:?}"))
+    }
 }
 
 /// Where a decision came from (F7: the source, not the track).
@@ -143,5 +163,22 @@ impl From<[u32; 2]> for Window {
 impl From<Window> for [u32; 2] {
     fn from(w: Window) -> Self {
         [w.min, w.max]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Component;
+
+    #[test]
+    fn component_parses_what_it_prints_and_what_serde_prints() {
+        for c in Component::ALL {
+            assert_eq!(c.as_str().parse::<Component>(), Ok(c));
+            assert_eq!(
+                serde_json::to_value(c).unwrap(),
+                serde_json::Value::String(c.as_str().into())
+            );
+        }
+        assert!("fridge".parse::<Component>().is_err());
     }
 }

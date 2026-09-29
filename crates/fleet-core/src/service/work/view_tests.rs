@@ -226,6 +226,95 @@ fn a_task_shows_active_and_past_sessions_apart() {
     assert_eq!(task_of(&past_only, "TK-1").counts.active, 0);
 }
 
+/// A task counts sessions, not links: a session whose link to the task
+/// ended on a branch change and was made and ended again is one past
+/// session — while it lives and after it is gone.
+#[test]
+fn a_session_with_two_past_links_is_one_past_session() {
+    let w = world();
+    link(&w, w.s1, w.t1, true);
+    link(&w, w.s2, w.t1, true);
+    let first = links_of(&w, w.s1).links[0].link.link_id;
+    {
+        let s = w.st.lock().unwrap();
+        s.seed_end_link(first, "branch_changed");
+        s.seed_duplicate_link(first);
+    }
+    let one_past = TaskCounts {
+        active: 1,
+        ended: 1,
+        suggested: 0,
+    };
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let t = task_of(&p, "TK-1");
+    assert_eq!(t.counts, one_past, "a live session's two past links");
+    assert_eq!(
+        t.sessions.iter().filter(|l| l.state == "ended").count(),
+        2,
+        "both links are still listed"
+    );
+    w.st.lock().unwrap().delete_session(w.s1).unwrap();
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(
+        task_of(&p, "TK-1").counts,
+        one_past,
+        "a gone session's two past links"
+    );
+}
+
+/// Two suggestions of one session for one task are one suggested session.
+#[test]
+fn two_suggestions_of_one_session_count_once() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        crate::service::work::detect::on_prompt(&s, w.s1, "please look at TK-3", false).unwrap();
+    }
+    let sug = links_of(&w, w.s1)
+        .links
+        .iter()
+        .find(|l| l.link.state == "suggested" && l.task.key.as_deref() == Some("TK-3"))
+        .expect("a suggestion for TK-3")
+        .link
+        .link_id;
+    w.st.lock().unwrap().seed_duplicate_link(sug);
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let t3 = task_of(&p, "TK-3");
+    assert_eq!(t3.counts.suggested, 1);
+    assert_eq!(t3.sessions.len(), 2, "both links are listed");
+}
+
+/// The Sessions view lists a live session's link that ended on a branch
+/// change (history) beside its live one, and only that session's links.
+#[test]
+fn session_tasks_lists_a_live_sessions_past_link_beside_its_live_one() {
+    let w = world();
+    link(&w, w.s1, w.t1, true);
+    let first = links_of(&w, w.s1).links[0].link.link_id;
+    w.st.lock().unwrap().seed_end_link(first, "branch_changed");
+    link(&w, w.s1, w.t2, true);
+    link(&w, w.s2, w.t3, true);
+    let st = links_of(&w, w.s1);
+    let rows: Vec<(&str, Option<&str>, bool)> = st
+        .links
+        .iter()
+        .map(|l| (l.link.state.as_str(), l.task.key.as_deref(), l.link.primary))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("active", Some("TK-2"), true),
+            ("ended", Some("TK-1"), false)
+        ]
+    );
+    assert_eq!(st.primary_link_id, Some(st.links[0].link.link_id));
+    assert_eq!(st.links[1].link.link_id, first);
+    assert_eq!(
+        st.links[1].link.end_reason.as_deref(),
+        Some("branch_changed")
+    );
+}
+
 /// UC4: a synced ticket with no session is a task, found by `has: none`,
 /// and it is not the same as a tracker that is down.
 #[test]
@@ -1347,6 +1436,119 @@ fn archived_hidden_counts_the_whole_result() {
         },
     );
     assert_eq!(open.archived_hidden, 0, "open already excludes done");
+}
+
+/// One refresh is one read: the sections a client has open are paged from
+/// the same built tasks exactly as their own reads page them (tasks and
+/// cursor), and `review_total` is the inbox's total under the same scope.
+#[test]
+fn a_tree_read_pages_its_sections_and_review_total_as_their_own_reads() {
+    let w = world();
+    link(&w, w.s1, w.t1, true);
+    {
+        let s = w.st.lock().unwrap();
+        for i in 0..5 {
+            s.create_local_work_item(Some(&format!("LOC-{i}")), &format!("local {i}"))
+                .unwrap();
+        }
+        crate::service::work::detect::on_prompt(&s, w.s2, "please look at TK-3 and TK-2", false)
+            .unwrap();
+    }
+    let filters = WorkTreeFilters {
+        archived: Some(false),
+        ..Default::default()
+    };
+    for (n, scope) in [OrgScope::All, bound(w.org_a), strict(w.org_a)]
+        .into_iter()
+        .enumerate()
+    {
+        let head = page(&w, &scope, filters.clone());
+        let asks: Vec<SectionAsk> = head
+            .groups
+            .iter()
+            .map(|g| SectionAsk {
+                org_id: g.org_id,
+                group_id: g.group.id.clone(),
+                limit: Some(2),
+            })
+            .collect();
+        assert!(!asks.is_empty(), "scope {n}");
+        let batched = tree(
+            &w.st,
+            &scope,
+            &TreeArgs {
+                filters: filters.clone(),
+                limit: Some(1),
+                sections: asks.clone(),
+                with_review_total: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(batched.sections.len(), asks.len(), "scope {n}");
+        for (ask, got) in asks.iter().zip(&batched.sections) {
+            let own_filters = section_filters(&filters, ask.org_id, &ask.group_id);
+            let own = tree(
+                &w.st,
+                &scope,
+                &TreeArgs {
+                    filters: own_filters.clone(),
+                    limit: ask.limit,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                (got.org_id, got.group_id.as_str()),
+                (ask.org_id, ask.group_id.as_str())
+            );
+            assert_eq!(got.tasks, own.tasks, "scope {n}: {ask:?}");
+            assert_eq!(got.next_cursor, own.next_cursor, "scope {n}: {ask:?}");
+            // The section's cursor pages on in the section's own read.
+            if let Some(c) = &got.next_cursor {
+                let next = tree(
+                    &w.st,
+                    &scope,
+                    &TreeArgs {
+                        filters: own_filters,
+                        cursor: Some(c.clone()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert!(!next.tasks.is_empty(), "scope {n}: {ask:?}");
+            }
+        }
+        let inbox = review(&w.st, &scope, None, Some(1)).unwrap();
+        assert_eq!(batched.review_total, Some(inbox.total), "scope {n}");
+        if n == 0 {
+            assert!(inbox.total > 0, "the suggestions are in the inbox");
+        }
+    }
+    // Asked for neither, a read answers as before.
+    let plain = tree(&w.st, &OrgScope::All, &TreeArgs::default()).unwrap();
+    assert!(plain.sections.is_empty());
+    assert_eq!(plain.review_total, None);
+    let json = serde_json::to_value(&plain).unwrap();
+    assert!(json.get("sections").is_none() && json.get("review_total").is_none());
+    // Too many sections is refused, never cut short.
+    let err = tree(
+        &w.st,
+        &OrgScope::All,
+        &TreeArgs {
+            sections: vec![
+                SectionAsk {
+                    org_id: None,
+                    group_id: "none".into(),
+                    limit: None,
+                };
+                TREE_MAX_SECTIONS + 1
+            ],
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID);
 }
 
 // --- native item status (design 2026-09-28 §2): the live precedence the

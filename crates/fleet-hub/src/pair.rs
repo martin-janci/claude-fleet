@@ -35,17 +35,19 @@ use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::time::Duration;
 
-/// One whole request/response exchange with the local hub. Generous next to
-/// the health probe's 3 s — `pair_client` writes nothing, but `revoke_client`
-/// takes the store lock a busy hub may hold for a moment.
-const CALL_TIMEOUT: Duration = Duration::from_secs(10);
+/// Added to the hub's own per-tool deadline ([`fleet_core::mcp::tool_deadline`])
+/// so the CLI never gives up before the hub does: `provision_hosts` and
+/// `work_admin` run for minutes under the lifecycle cap, and a fixed short
+/// limit reported a failure for a call the hub went on to finish. The same
+/// margin the desktop's hub client adds (`src-tauri/src/backend/remote.rs`).
+const CALL_MARGIN: Duration = Duration::from_secs(10);
 
-/// For a call that waits on the network rather than the store: `tracker
-/// test` probes the provider and lists its views, several HTTPS requests
-/// each allowed `net::https::DEFAULT_TIMEOUT` (20 s) on the hub. An Asana
-/// test at ~5 s a request took 17.5 s, and under [`CALL_TIMEOUT`] the CLI
-/// reported a failure for a test the hub went on to pass.
-pub(crate) const SLOW_CALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long [`call_tool`] waits for `tool`: the hub's deadline for it — which
+/// already includes the confirmation window for a confirm-gated tool — plus
+/// [`CALL_MARGIN`].
+pub(crate) fn call_limit(tool: &str) -> Duration {
+    fleet_core::mcp::tool_deadline(tool) + CALL_MARGIN
+}
 
 /// What a caller sees when nothing is listening. The hub must be RUNNING:
 /// these commands do not (and must not) reach around it into state.db.
@@ -136,17 +138,16 @@ pub(crate) fn hub_conn(
 }
 
 /// Call one MCP tool on the running hub and return its JSON result, within
-/// the fast admin limit ([`CALL_TIMEOUT`]).
+/// the hub's own deadline for that tool plus a margin ([`call_limit`]).
 pub(crate) async fn call_tool(
     conn: &HubConn,
     tool: &str,
     arguments: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    call_tool_within(conn, tool, arguments, CALL_TIMEOUT).await
+    call_tool_within(conn, tool, arguments, call_limit(tool)).await
 }
 
-/// [`call_tool`] with its own limit, for a tool that waits on something
-/// slower than the hub's store ([`SLOW_CALL_TIMEOUT`]).
+/// [`call_tool`] with an explicit limit instead of [`call_limit`].
 ///
 /// Giving up here does not stop the hub: the transport runs the tool in a
 /// task of its own (stateless rmcp), so it finishes and records its outcome
@@ -988,7 +989,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            started.elapsed() < CALL_TIMEOUT,
+            started.elapsed() < Duration::from_secs(10),
             "took {:?}",
             started.elapsed()
         );
@@ -997,17 +998,32 @@ mod tests {
         hold.abort();
     }
 
-    /// `tracker test` makes several provider requests, each allowed the
-    /// hub's own HTTPS timeout; the CLI must outwait a few of them, while
-    /// the fast admin calls keep their short limit.
+    /// The CLI outwaits the hub's own deadline for every tool it calls:
+    /// `provision_hosts` and `work_admin` are lifecycle calls (300 s), and
+    /// `work_admin` / `merge_host` are confirm-gated, so the hub's deadline
+    /// already includes the 600 s confirmation window.
     #[test]
-    fn the_slow_limit_outlasts_several_provider_requests() {
+    fn the_call_limit_outwaits_the_hubs_deadline() {
+        assert_eq!(call_limit("provision_hosts"), Duration::from_secs(310));
+        assert_eq!(call_limit("pair_client"), Duration::from_secs(70));
+        assert_eq!(call_limit("merge_host"), Duration::from_secs(670));
+        assert_eq!(call_limit("work_admin"), Duration::from_secs(910));
+        // `tracker test` (work_admin) makes several provider requests, each
+        // allowed the hub's own HTTPS timeout; the CLI must outwait them.
         let per_request = fleet_core::net::https::DEFAULT_TIMEOUT;
-        assert!(
-            SLOW_CALL_TIMEOUT >= per_request * 5,
-            "{SLOW_CALL_TIMEOUT:?}"
-        );
-        assert!(CALL_TIMEOUT < SLOW_CALL_TIMEOUT);
+        assert!(call_limit("work_admin") >= per_request * 5);
+        assert!(call_limit("work_admin") >= Duration::from_secs(120));
+        for tool in [
+            "provision_hosts",
+            "pair_client",
+            "work_admin",
+            "revoke_client",
+        ] {
+            assert!(
+                call_limit(tool) > fleet_core::mcp::tool_deadline(tool),
+                "{tool}"
+            );
+        }
     }
 
     /// A minimal, real hub: a `state.db` with a master token, and a

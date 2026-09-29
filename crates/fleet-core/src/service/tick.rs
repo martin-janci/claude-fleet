@@ -28,6 +28,11 @@ pub struct ReconcileStats {
     pub last_finished_at: Option<i64>,
     #[serde(default)]
     pub last_duration_ms: Option<i64>,
+    /// When the last CLEAN pass finished; a later failure leaves it alone,
+    /// so it latches "a pass of this process has succeeded" (the readiness
+    /// file's `first_reconcile`, update-channel design §8.4).
+    #[serde(default)]
+    pub last_ok_at: Option<i64>,
     /// Failed passes since the last good one.
     #[serde(default)]
     pub consecutive_failures: u32,
@@ -75,6 +80,7 @@ impl TickStats {
             Ok(false) => {}
             Ok(true) => {
                 r.last_finished_at = Some(now);
+                r.last_ok_at = Some(now);
                 r.last_duration_ms = Some(duration_ms);
                 r.consecutive_failures = 0;
                 r.last_error = None;
@@ -458,5 +464,30 @@ mod tests {
         assert_eq!(t.reconcile().failures_total, 2, "the total never resets");
         assert_eq!(t.started_at(), 1_000);
         assert!(t.uptime_secs() >= 0);
+    }
+
+    /// `last_ok_at` latches the last clean pass: a failure or a skipped
+    /// tick after it leaves it where it was.
+    #[test]
+    fn last_ok_at_moves_only_on_a_clean_pass() {
+        let t = TickStats::new(1_000);
+        let s = t.begin(1_005);
+        t.finish(s, 1_006, Err("E_SSH: boom".into()));
+        assert_eq!(t.reconcile().last_ok_at, None, "a failure is not ok");
+        let s = t.begin(1_010);
+        t.finish(s, 1_011, Ok(true));
+        assert_eq!(t.reconcile().last_ok_at, Some(1_011));
+        let s = t.begin(1_020);
+        t.finish(s, 1_021, Err("E_SSH: boom".into()));
+        let r = t.reconcile();
+        assert_eq!(r.last_ok_at, Some(1_011), "a failure keeps the latch");
+        assert_eq!(r.last_finished_at, Some(1_021));
+        let s = t.begin(1_030);
+        t.finish(s, 1_031, Ok(false));
+        assert_eq!(
+            t.reconcile().last_ok_at,
+            Some(1_011),
+            "a skip is not a pass"
+        );
     }
 }

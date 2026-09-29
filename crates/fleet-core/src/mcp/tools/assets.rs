@@ -163,19 +163,7 @@ impl FleetTools {
                 None,
             )
         })?;
-        match &mut call {
-            AdminCall::ApplySync(a) => {
-                let summary = format!("plan_id={} force_partial={}", a.plan_id, a.force_partial);
-                self.confirm_gate("apply_sync", p.confirm_nonce.as_deref(), &summary, &caller)?;
-                // A cancellation id means something only in the process that
-                // minted it: the caller's, not this one.
-                a.call_id = None;
-            }
-            // Loading and configuring are what `ensure_fresh` would do; every
-            // other call reads the catalog this process last loaded.
-            AdminCall::Config | AdminCall::Configure(_) | AdminCall::Load(_) => {}
-            _ => catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?,
-        }
+        self.prepare_admin_call(&mut call, p.confirm_nonce.as_deref(), &caller)?;
         let value = catalog::admin::run(call, &self.store, &self.ssh, &self.reg)
             .await
             .map_err(to_mcp_err)?;
@@ -313,9 +301,41 @@ impl FleetTools {
     }
 }
 
-/// Parse an MCP `kind` filter string into a `Kind`, using the same
-/// snake_case names the JSON representation already uses elsewhere
-/// (`skill`, `agent`, `hook`, `mcp_server`, `plugin_ref`).
+impl FleetTools {
+    /// What `catalog_admin` does between parsing a call and running it:
+    /// `apply_sync` passes the same confirm gate as the `apply_sync` tool and
+    /// loses the caller's `call_id`; every call but config / configure / load
+    /// and apply_sync reads a fresh catalog. `apply_sync`, like the tool,
+    /// does not refresh: it applies a plan already computed and held in the
+    /// registry, and needs the catalog only for the post-apply re-scan, which
+    /// it skips rather than fail the sync when no catalog is there.
+    pub(super) fn prepare_admin_call(
+        &self,
+        call: &mut catalog::admin::AdminCall,
+        confirm_nonce: Option<&str>,
+        caller: &Caller,
+    ) -> Result<(), McpError> {
+        use catalog::admin::AdminCall;
+        match call {
+            AdminCall::ApplySync(a) => {
+                let summary = format!("plan_id={} force_partial={}", a.plan_id, a.force_partial);
+                self.confirm_gate("apply_sync", confirm_nonce, &summary, caller)?;
+                // A cancellation id means something only in the process that
+                // minted it: the caller's, not this one.
+                a.call_id = None;
+                // No `ensure_fresh`: the plan is already computed, and a
+                // failed reload must not refuse a sync the `apply_sync`
+                // tool would run.
+            }
+            // Loading and configuring are what `ensure_fresh` would do; every
+            // other call reads the catalog this process last loaded.
+            AdminCall::Config | AdminCall::Configure(_) | AdminCall::Load(_) => {}
+            _ => catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?,
+        }
+        Ok(())
+    }
+}
+
 /// True when `caller` may use `catalog_admin`: the master, or a live `full`
 /// paired client, bound to no org, that the operator granted the asset
 /// catalog to. Read from the store on every call, so an un-grant or a revoke
@@ -338,6 +358,9 @@ fn may_admin_catalog(caller: &Caller, store: &std::sync::Mutex<Store>) -> Result
     }
 }
 
+/// Parse an MCP `kind` filter string into a `Kind`, using the same
+/// snake_case names the JSON representation already uses elsewhere
+/// (`skill`, `agent`, `hook`, `mcp_server`, `plugin_ref`).
 fn parse_kind(s: &str) -> Result<catalog::model::Kind, McpError> {
     serde_json::from_value(serde_json::Value::String(s.to_string()))
         .map_err(|_| mcp_err(codes::E_INVALID, format!("unknown asset kind '{s}'"), None))

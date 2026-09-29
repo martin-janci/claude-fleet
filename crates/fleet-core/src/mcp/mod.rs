@@ -528,6 +528,7 @@ pub(crate) fn test_app(
             metrics: Arc::new(metrics::Metrics::new()),
             streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
             store: Arc::clone(&store),
+            read_pool: None,
             stats: crate::service::tick::tick_stats(),
         },
         axum::routing::any(|| async { "MCP_OK" }),
@@ -812,6 +813,7 @@ pub async fn start_with_listener<A: TlsAcceptor>(
         // Same reason, for the `/metrics` process gauges (`HubGauges::read`):
         // the writer `Arc` moves into `FleetTools` just below.
         let store_for_metrics = Arc::clone(&store);
+        let read_pool_for_metrics = read_pool.clone();
         let events_state =
             EventsState::new(events, events_store).with_shutdown(serve_shutdown.child_token());
         let tools = FleetTools::new(store, ssh, reg, tunnels, guards).with_read_pool(read_pool);
@@ -832,6 +834,7 @@ pub async fn start_with_listener<A: TlsAcceptor>(
                 metrics: Arc::clone(&metrics_for_route),
                 streams: events_state.stream_limiter(),
                 store: store_for_metrics,
+                read_pool: read_pool_for_metrics,
                 stats: crate::service::tick::tick_stats(),
             },
             axum::routing::any_service(service),
@@ -969,6 +972,7 @@ mod tests {
                 metrics: Arc::new(metrics::Metrics::new()),
                 streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
                 store: Arc::clone(&store),
+                read_pool: None,
                 stats: crate::service::tick::tick_stats(),
             },
             any(|| async { "MCP_OK" }),
@@ -1365,6 +1369,7 @@ mod tests {
                 metrics: Arc::new(metrics::Metrics::new()),
                 streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
                 store: Arc::clone(&store),
+                read_pool: None,
                 stats: crate::service::tick::tick_stats(),
             },
             any(|| async { "MCP_OK" }),
@@ -1432,6 +1437,7 @@ mod tests {
                 metrics: Arc::new(metrics::Metrics::new()),
                 streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
                 store: Arc::clone(&store),
+                read_pool: None,
                 stats: crate::service::tick::tick_stats(),
             },
             any(|| async { "MCP_OK" }),
@@ -1576,6 +1582,7 @@ mod tests {
                 metrics: Arc::new(metrics::Metrics::new()),
                 streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
                 store: Arc::clone(&store),
+                read_pool: None,
                 stats: crate::service::tick::tick_stats(),
             },
             axum::routing::any_service(service),
@@ -2023,6 +2030,7 @@ mod tests {
                 metrics: Arc::new(metrics::Metrics::new()),
                 streams: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
                 store: Arc::clone(&store),
+                read_pool: None,
                 stats: crate::service::tick::tick_stats(),
             },
             any(|| async { "MCP_OK" }),

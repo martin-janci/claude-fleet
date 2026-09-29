@@ -220,7 +220,14 @@ including tasks with no session at all — as reads of the `work` tool
   tasks as any other. Pages are a keyset: pass
   `next_cursor` back with the same filters (other filters refuse it). No
   task is repeated across pages while the fleet changes; a task that moved
-  meanwhile may be skipped until the next full read.
+  meanwhile may be skipped until the next full read. A client (the desktop's
+  Work view) can also send `sections` (up to 100 of `{ org_id, group_id,
+  limit? }`) and `with_review_total: true`: the same read then answers
+  `sections`, each exactly the first page that section's own read
+  (`filters.org` / `filters.group`) would give, cursor included, and
+  `review_total`, the review inbox's total — so one refresh is one read.
+  Neither is in the tool's schema (an assistant pages a section by its
+  filters), and an older hub answers without them.
 - `work { action: task, task_id }` (`item:<id>` or `ref:<KEY>`): one task
   with every session and why it is linked, its tracker description (at
   most 600 characters, with `description_chars`, the full length fleet
@@ -517,12 +524,16 @@ The full details are in [hub.md → Trackers](hub.md#trackers).
 
 ### Write-back: the PR link (Jira, off by default)
 
-For a Jira tracker (Cloud or Data Center), Settings → Trackers has **Link pull requests**
-(add a session's pull request to its ticket as a link). With it on, when the PR
-probe sees a pull request on a session, fleet adds that PR to the linked
-ticket once, as a Jira remote link titled `PR: owner/repo#n`. Nothing else
-is ever written: no transition, no worklog, no comment (D29), and nothing a
-transcript or a tracker wrote.
+For a Jira tracker (Cloud or Data Center), Settings → Trackers has **Link
+pull requests** (add a session's pull request to its ticket as a link).
+With it on, when a session has a pull request, fleet adds that PR to the
+linked ticket once, as a Jira remote link titled `PR: owner/repo#n`. The
+write is queued when the PR probe sees the PR (or its state change), when a
+person links or confirms work on a session that already has a PR (also when
+the sync binds a key typed before the tracker was connected), and when you
+turn the setting on, for every PR already open on a session linked to one of
+the tracker's tickets. Nothing else is ever written: no transition, no
+worklog, no comment (D29), and nothing a transcript or a tracker wrote.
 
 - **Only work a person linked.** The link must be confirmed and made by
   hand or by *Start* (`manual` / `started`). A detection guess, an agent's
@@ -802,7 +813,8 @@ it. `0` keeps a table forever.
   timeline events. The newest of each kind per session stays.
 - The write-back outbox (see *Write-back*) follows the journal's window:
   a PR link that was sent, or given up on, goes once it is older than
-  `work.retention.journal_days`; one still waiting is never swept.
+  `work.retention.journal_days`; one still waiting is never swept. It has
+  its own row (`tracker_writes`, "PR link outbox") in the retention status.
 
 A sweep deletes at most 2,000 rows per table per tick, 200 per store lock.
 Settings → Limits → Retention (standalone desktop) shows the row counts, a
@@ -924,7 +936,7 @@ title, key, path or error text.
 | detection | suggestions made, confirmed by a person, confirmed by an agent, promoted by detection itself, rejected, withdrawn (detection took it back: withdrawn or decayed), carried (a resume, fork or inherit carried the same work onto the session and settled it), expired (the session ended undecided); the median time from suggestion to a person's decision; classification nudges |
 | handover | handovers requested and written, turns that ended without one, requests that could not be sent |
 | resume | resumes, with and without a brief |
-| journal | briefs queued and delivered, compaction summaries harvested |
+| journal | briefs queued and delivered, compaction summaries harvested, session summaries written (`work_link { summarize }`), PR links written back to a tracker |
 | tidy | sessions tidied from Tidy-up, *Keep* answers, auto-tidies per reason |
 | trackers | per tracker id: passes, failed passes and items skipped since the syncing process started (not windowed, reset on restart) |
 
@@ -953,7 +965,7 @@ links: 41 made (branch 12, manual 20, resumed 3, started 6)
 detection: 18 suggested, 9 confirmed by a person, 1 confirmed by an agent, 4 promoted, 3 rejected, 2 withdrawn, 0 carried, 1 expired; median decision 12 min; 2 nudges
 handover: 5 requested, 4 written, 1 missing, 0 send failed
 resume: 3 (2 with a brief, 1 without)
-journal: 8 briefs queued, 7 delivered; 11 compaction summaries
+journal: 8 briefs queued, 7 delivered; 11 compaction summaries, 2 session summaries, 1 PR links written
 tidy: 6 applied, 2 kept, 0 auto-tidied (none)
 tracker 1: 288 passes, 3 failed, 0 items skipped (since the sync started)
 not recorded: suggestions shown (only made, confirmed, rejected and expired are stored)

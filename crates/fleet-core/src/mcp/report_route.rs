@@ -129,6 +129,7 @@ mod tests {
                     crate::mcp::guard::MAX_LONG_POLLS_PER_CALLER,
                 ),
                 store: Arc::clone(&store),
+                read_pool: None,
                 stats: crate::service::tick::tick_stats(),
             },
             axum::routing::any(|| async { "MCP_OK" }),

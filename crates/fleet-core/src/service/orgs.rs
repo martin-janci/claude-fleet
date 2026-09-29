@@ -23,7 +23,7 @@
 //! key nothing is linked to on the host ([`not_visible_key`]).
 
 use crate::ipc_error::{codes, lock, IpcError};
-use crate::store::{OrgRow, OrgRuleRow, SessionRow, Store, WorkLinkRow};
+use crate::store::{OrgRow, OrgRuleRow, SessionRow, Store, WorkItemRow, WorkLinkRow};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
@@ -356,6 +356,53 @@ pub fn link_session_visible(
     }
     let (host, org) = s.link_snapshot_place(l.id)?;
     Ok(scope.sees_session(host.as_deref().unwrap_or_default(), org))
+}
+
+/// The first item carrying `key` (in [`Store::work_items_by_key`]'s order)
+/// that `scope` may read as a ticket: what `tickets::allowed` lets it read
+/// ([`crate::service::trackers::tickets::item_visible`]), or a local item
+/// (no tracker) whose org it sees. Two trackers can hold the same key (two
+/// Jira sites, one per org, both with `PAY`): the store's single "the item
+/// for this key" is the oldest, and would refuse a caller of the other org
+/// over a ticket that is not theirs when their own is right there. For
+/// [`OrgScope::All`] this is [`Store::work_item_by_key`].
+pub fn visible_item_for_key(
+    s: &Store,
+    scope: &OrgScope,
+    key: &str,
+) -> Result<Option<WorkItemRow>, IpcError> {
+    if scope.is_all() {
+        return s.work_item_by_key(key);
+    }
+    for item in s.work_items_by_key(key)? {
+        let visible = crate::service::trackers::tickets::item_visible(scope, s, &item)?
+            || (item.tracker_id.is_none() && scope.sees_org(s.item_org(item.id)?));
+        if visible {
+            return Ok(Some(item));
+        }
+    }
+    Ok(None)
+}
+
+/// The first item carrying `key` whose ORG `scope` sees, with no host
+/// fence: the item a brief or a resume plan names for a reader (the landing
+/// host of a resume need not have worked on the key before). Same shared-key
+/// walk as [`visible_item_for_key`]; for [`OrgScope::All`] this is
+/// [`Store::work_item_by_key`].
+pub fn org_item_for_key(
+    s: &Store,
+    scope: &OrgScope,
+    key: &str,
+) -> Result<Option<WorkItemRow>, IpcError> {
+    if scope.is_all() {
+        return s.work_item_by_key(key);
+    }
+    for item in s.work_items_by_key(key)? {
+        if scope.sees_org(s.item_org(item.id)?) {
+            return Ok(Some(item));
+        }
+    }
+    Ok(None)
 }
 
 /// May a per-host token read work `key` (its context, resume plan, or

@@ -248,34 +248,48 @@
     const t = setInterval(() => void loadMine(), 120_000);
     return () => clearInterval(t);
   });
-  /** A past link passes the work filters (host and scope are the caller's). */
-  function pastPassesWorkFilters(key: string, l: WorkLink): boolean {
+  /** A past link passes the work filters `wf` (host and scope are the
+   *  caller's). The list passes its own; the archived count, the same with
+   *  archived shown. */
+  function pastPassesWorkFilters(key: string, l: WorkLink, wf: WorkFilters = workFilterView): boolean {
     return rowMatches(
       { ...pastFilterRow(l), ...pastWorkFields(key, l.item_id, workFilterCtx) },
-      toRowFilters(workFilterView),
+      toRowFilters(wf),
     );
   }
   /** A past link shows: its host and scope are in view, and it passes the
    *  work filters. One rule for a past-only group and a live group's Done,
    *  which used to disagree on host and scope. */
-  function pastVisible(key: string, l: WorkLink): boolean {
+  function pastVisible(key: string, l: WorkLink, wf: WorkFilters = workFilterView): boolean {
     return (
       withinRecency(l.ended_at, recency, nowSec) &&
       rowMatches(pastFilterRow(l), { host: $effectiveHostFilter, scope: $effectiveScope }) &&
-      pastPassesWorkFilters(key, l)
+      pastPassesWorkFilters(key, l, wf)
     );
+  }
+  /** A past-only group matches a search by its key or a link's name. */
+  function pastGroupMatchesSearch(key: string, links: WorkLink[], q: string): boolean {
+    if (!q) return true;
+    const needle = q.toLowerCase();
+    return key.toLowerCase().includes(needle) || links.some((l) => (l.snap_name ?? '').toLowerCase().includes(needle));
+  }
+  /** The triage predicate (needs-you, recency, then `work` — the work
+   *  filters), with no focus: the list's own, and the archived count's with
+   *  archived shown. */
+  function triagePredicate(work: SessionPredicate): SessionPredicate {
+    const opts = attentionOpts;
+    // Last active: by each session's own activity, in every section (it
+    // used to weigh only a project's newest session, and only in the tree).
+    const r = recency;
+    const recent: SessionPredicate = r === 'all' ? null : (s) => withinRecency(s.last_activity_at, r, opts.now);
+    return bothPredicates(bothPredicates(needsYouOnly ? (s) => needsYou(s, opts) : null, recent), work);
   }
   const rowPredicate = $derived.by((): SessionPredicate => {
     if (focus) {
       const id = focus.id;
       return (s) => s.id === id;
     }
-    const opts = attentionOpts;
-    // Last active: by each session's own activity, in every section (it
-    // used to weigh only a project's newest session, and only in the tree).
-    const r = recency;
-    const recent: SessionPredicate = r === 'all' ? null : (s) => withinRecency(s.last_activity_at, r, opts.now);
-    return bothPredicates(bothPredicates(needsYouOnly ? (s) => needsYou(s, opts) : null, recent), workPredicate);
+    return triagePredicate(workPredicate);
   });
 
   // What narrows the list, for the empty state (the chrome shows the same
@@ -288,24 +302,23 @@
   // project by owner / repo, a past-only group by its key or a link's name
   // (any of which then shows every row in it), else the session itself.
   // Matching each archived row on its own used to disagree with the list.
+  // Cheap gate: most of the time nothing is archived, and the count below
+  // (a second grouping pass) is skipped.
+  const anyArchivedSession = $derived($sessions.some((s) => s.work?.archived_at != null));
   const archivedHidden = $derived.by((): number => {
     if (focus || workFilterView.archived) return 0;
+    const workMode = $sidebarGroupBy === 'work';
+    // Past links always count as archived (see `pastFilterRow`); needs-you
+    // lists live sessions only.
+    const pastCounts = workMode && !needsYouOnly && [...$pastWork.values()].some((l) => l.length > 0);
+    if (!anyArchivedSession && !pastCounts) return 0;
     const shown: WorkFilters = { ...workFilterView, archived: true };
-    const opts = attentionOpts;
-    const r = recency;
-    const shownPred = bothPredicates(
-      bothPredicates(
-        needsYouOnly ? (s) => needsYou(s, opts) : null,
-        r === 'all' ? null : (s) => withinRecency(s.last_activity_at, r, opts.now),
-      ),
-      workFilterPredicate(shown, workFilterCtx),
-    );
+    const shownPred = triagePredicate(workFilterPredicate(shown, workFilterCtx));
     const q = searchQuery.toLowerCase();
     const isArchived = (s: SessionRow) => s.work?.archived_at != null;
-    const byWork =
-      $sidebarGroupBy === 'work'
-        ? buildSessionsByWork($sessions, viewHost, viewBg, shownPred, (s) => workKeyFor(s, branchById), viewScope)
-        : null;
+    const byWork = workMode
+      ? buildSessionsByWork($sessions, viewHost, viewBg, shownPred, (s) => workKeyFor(s, branchById), viewScope)
+      : null;
     let n = 0;
     const liveKeys = new Set<string>();
     const matchedKeys = new Set<string>();
@@ -315,40 +328,21 @@
       matchedKeys.add(g.key);
       n += g.sessions.filter(isArchived).length;
     }
-    const keyed = byWork?.keyed;
-    const rest: SessionPredicate = (s) => !keyed?.has(s.id) && (!shownPred || shownPred(s));
+    const rest = untakenBy(byWork?.keyed ?? null, shownPred);
     const byProject = buildSessionsByProject($sessions, viewHost, viewBg, rest, viewScope);
     for (const p of $projects) {
       const rows = byProject.get(p.project.id) ?? [];
       const archived = rows.filter(isArchived).length;
-      if (archived === 0) continue;
-      const hit =
-        !q ||
-        p.project.owner.toLowerCase().includes(q) ||
-        p.project.repo.toLowerCase().includes(q) ||
-        rows.some((s) => sessionMatchesSearch(s, q));
-      if (hit) n += archived;
+      if (archived > 0 && matchesSearch(p, q, rows)) n += archived;
     }
-    for (const s of $sessions) {
-      if (s.project_id !== null || s.kind === 'external' || !isArchived(s)) continue;
-      if (!sessionVisible(s, viewHost, viewBg, rest, viewScope)) continue;
-      if (sessionMatchesSearch(s, q)) n++;
-    }
-    if (byWork && !needsYouOnly) {
-      const rf = toRowFilters(shown);
+    n += orphansOf(rest).filter(isArchived).length;
+    if (pastCounts) {
       for (const [key, links] of $pastWork) {
-        const past = links.filter(
-          (l) =>
-            withinRecency(l.ended_at, r, nowSec) &&
-            rowMatches(pastFilterRow(l), { host: $effectiveHostFilter, scope: $effectiveScope }) &&
-            rowMatches({ ...pastFilterRow(l), ...pastWorkFields(key, l.item_id, workFilterCtx) }, rf),
-        );
+        const past = links.filter((l) => pastVisible(key, l, shown));
         if (past.length === 0) continue;
-        // A live group's past work sits in its Done row; a past-only group
-        // matches by its key or a link's name.
-        const hit = liveKeys.has(key)
-          ? matchedKeys.has(key)
-          : !q || key.toLowerCase().includes(q) || past.some((l) => (l.snap_name ?? '').toLowerCase().includes(q));
+        // A live group's past work sits in its Done row, shown when the
+        // group matches; a past-only group matches on its own.
+        const hit = liveKeys.has(key) ? matchedKeys.has(key) : pastGroupMatchesSearch(key, past, q);
         if (hit) n += past.length;
       }
     }
@@ -562,12 +556,14 @@
     }
   }
 
-  function matchesSearch(p: ProjectTreeRow, q: string): boolean {
+  /** A project matches a search by owner / repo, or through one of `rows`
+   *  (its sessions in the list). */
+  function matchesSearch(p: ProjectTreeRow, q: string, rows: SessionRow[]): boolean {
     if (!q) return true;
     const needle = q.toLowerCase();
     if (p.project.owner.toLowerCase().includes(needle)) return true;
     if (p.project.repo.toLowerCase().includes(needle)) return true;
-    return sessionsForProject(p.project.id).some((s) => sessionMatchesSearch(s, needle));
+    return rows.some((s) => sessionMatchesSearch(s, needle));
   }
 
   // Sessions under the host / bg filters only (no triage predicate): the
@@ -589,7 +585,7 @@
     sortProjectsBySeverity(
       $projects.filter(
         (p) =>
-          matchesSearch(p, viewSearch) &&
+          matchesSearch(p, viewSearch, sessionsForProject(p.project.id)) &&
           sessionsForProject(p.project.id).length > 0,
       ),
       severityByProject,
@@ -642,12 +638,11 @@
   // The project tree (and "Other sessions") keep only what no work group
   // took: hybrid grouping, no "Unclassified" bucket. In project mode this is
   // just the triage predicate.
-  const treePredicate = $derived.by((): SessionPredicate => {
-    const keyed = workKeyed;
-    const base = rowPredicate;
+  function untakenBy(keyed: ReadonlyMap<number, unknown> | null, base: SessionPredicate): SessionPredicate {
     if (!keyed || keyed.size === 0) return base;
     return (s) => !keyed.has(s.id) && (base ? base(s) : true);
-  });
+  }
+  const treePredicate = $derived(untakenBy(workKeyed, rowPredicate));
 
   // ── Past work (roadmap M2.5) ──
   // Ended links: a live group's collapsed "Done · n", and a group of its own
@@ -674,12 +669,7 @@
       // Hosts (and scopes) outside the filter hide their past work too.
       const shown = links.filter((l) => pastVisible(key, l));
       if (shown.length === 0) continue;
-      if (
-        q &&
-        !key.toLowerCase().includes(q) &&
-        !shown.some((l) => (l.snap_name ?? '').toLowerCase().includes(q))
-      )
-        continue;
+      if (!pastGroupMatchesSearch(key, shown, q)) continue;
       out.push({ key, links: shown });
     }
     return out.sort((a, b) => (b.links[0].ended_at ?? 0) - (a.links[0].ended_at ?? 0));
@@ -745,15 +735,17 @@
   // Sessions whose tmux working directory didn't map to any known project.
   // `external` rows never land here — they have their own read-only
   // "Outside fleet" section below.
-  const orphanSessions = $derived(
-    $sessions.filter(
+  function orphansOf(pred: SessionPredicate): SessionRow[] {
+    const q = viewSearch.toLowerCase();
+    return $sessions.filter(
       (s) =>
         s.project_id === null &&
         s.kind !== 'external' &&
-        sessionVisible(s, viewHost, viewBg, treePredicate, viewScope) &&
-        sessionMatchesSearch(s, viewSearch.toLowerCase()),
-    ),
-  );
+        sessionVisible(s, viewHost, viewBg, pred, viewScope) &&
+        sessionMatchesSearch(s, q),
+    );
+  }
+  const orphanSessions = $derived(orphansOf(treePredicate));
 
   // Interactive Claude sessions running entirely outside fleet (Claude
   // Desktop, a bare terminal). Read-only; the host filter applies but the

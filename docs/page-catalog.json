@@ -1538,8 +1538,7 @@
       "kind": {
         "options": [
           "stable",
-          "beta",
-          "nightly"
+          "beta"
         ],
         "type": "choice"
       },

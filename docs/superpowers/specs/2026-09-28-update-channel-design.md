@@ -163,7 +163,7 @@ digest `record-digest` already has. It is never written by hand. A new
     "version": "0.3.4",
     "track": "stable",
     "commit": "a83f19d0c2…",
-    "build_id": "gh-run-18231-1",
+    "build_id": "rel-v0.3.4-a83f19d0c2…",
     "published_at": "2026-09-30T10:12:00Z",
     "assets_base": "https://github.com/martin-janci/claude-fleet/releases/download/v0.3.4/",
     "notes_url": "https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.4"
@@ -788,21 +788,30 @@ of these hold within `ready_timeout` (default 90 s), then keep holding for
    ```json
    { "ready": true, "live": true, "fresh": true,
      "hub": { "ready": true, "pid": 7154, "version": "0.3.4", "commit": "a83f19d…",
-              "build_id": "gh-run-18231-1", "contract": 5, "agent_proto": [1, 1],
+              "build_id": "rel-v0.3.4-a83f19d0c2…", "contract": 5, "agent_proto": [1, 1],
               "peer_proto": 1, "schema": 74, "started_at": 1790612008, "heartbeat_at": 1790612013,
-              "checks": { "store": "ok", "listener": "ok", "first_reconcile": "ok" } } }
+              "checks": { "store": "ok", "listener": "ok", "first_reconcile": "ok",
+                          "reconcile_failures": 0 } } }
    ```
 
    `first_reconcile` is one of:
-   - `ok`: the first pass of this process finished clean;
+   - `ok`: a pass of this process has finished clean. It is a latch: a
+     later failed pass does not undo it;
    - `pending`: no pass has finished yet;
-   - `failed`: it finished with failures, which is not ready;
+   - `failed`: passes finished, none of them clean, which is not ready;
    - `disabled`: `reconcile.interval_secs=0`, which counts as ready.
+
+   `reconcile_failures` is the running count of failed passes since the
+   last clean one (`fleet_health.hub.reconcile.consecutive_failures`). It
+   is reported and never part of `ready`.
 
    The commit and build ID come from `crates/fleet-hub/build.rs`:
    `FLEET_GIT_SHA` / `FLEET_BUILD_ID` from CI (`release.yml`, and the
    `hub-image.yml` build args, since the Docker context has no `.git`), else
-   `git rev-parse HEAD`, else `unknown` / `local`.
+   `git rev-parse HEAD`, else `unknown` / `local`. A release's build ID is
+   `rel-<tag>-<commit>` in all three places (the tarballs, the image and the
+   manifest), never a workflow run id: the image is built by another run,
+   and a re-run job is another attempt.
 3. **Identity.** `version`, `commit` and `build_id` equal the manifest's
    `release` (U11), and the container's image ID resolves to the desired
    digest. This is what "the updater verifies it started the right build"

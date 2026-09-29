@@ -6,7 +6,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('./sessions', async (orig) => ({ ...(await orig<typeof import('./sessions')>()), acceptCommandRow: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
-import { needsFullReload, parseWorkChanged } from './work_view';
+import { parseWorkChanged } from './work_view';
 import { confirmSessionWork, linkSessionWork, rejectWorkLink, unlinkSessionWork } from './work';
 
 beforeEach(() => {
@@ -65,11 +65,5 @@ describe('work:changed', () => {
     ]) {
       expect(parseWorkChanged(p)).toBeNull();
     }
-  });
-
-  it('a resync in the batch means a whole reload', () => {
-    expect(needsFullReload([{ what: 'rule', rule_id: 1 }])).toBe(false);
-    expect(needsFullReload([{ what: 'rule', rule_id: 1 }, { what: 'resync' }])).toBe(true);
-    expect(needsFullReload([])).toBe(false);
   });
 });

@@ -176,7 +176,9 @@ category they are. Jira, Linear and GitHub carry exact status categories
 from the tracker itself: `status_map` never looks at them.
 
 **When.** After a clean sync pass of an Asana tracker, at most once a day
-per tracker (sooner when its sections change), in a task of its own — never
+per tracker (sooner when its sections change; a run the gate refused —
+no key yet, the breaker open, the budget spent — does not count, so the
+next clean sync after that clears runs it), in a task of its own — never
 on the sync's path, and a failure never fails the sync. A run asks at most
 40 questions; a section decided in the last 14 days on the same input
 (fingerprint), question version, mode and model is not asked again, and a
@@ -340,9 +342,10 @@ fleet-hub decide bench … --provider haiku --haiku-host ALIAS [--haiku-model ha
 
 The key is never an argument (shell history, `ps`). `set-key` and
 `clear-key` write the hub's database (`--data-dir`, else the hub's default)
-directly, like `fleet-hub tracker
-webhook`; the running hub reads the key at its next call. `status`,
-`runs` and `proposals` (the listing) open the database read-only (no running hub needed; `--db FILE`
+directly (the key is read like `fleet-hub tracker set-credential`'s
+secret: stdin, `--from-env` or `--ref`, never argv); the running hub reads
+the key at its next call. `status`, `runs` and `proposals` (the listing)
+open the database read-only (no running hub needed; `--db FILE`
 reads a desktop's `state.db`) and print ids, words and numbers only:
 the flag, the modes, which orgs consented, whether a key is configured
 (never the key), the live breaker, today's tokens and cost (the live

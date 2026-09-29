@@ -53,7 +53,14 @@ pub struct Checks {
     pub store: String,
     pub listener: String,
     /// `ok`, `pending`, `failed`, or `disabled` (`reconcile.interval_secs=0`).
+    /// A latch: once a pass of this process finished clean it stays `ok`,
+    /// whatever later passes do (those are [`reconcile_failures`](Self::reconcile_failures)).
     pub first_reconcile: String,
+    /// Failed reconcile passes since the last good one. Reported, never part
+    /// of `ready`: a hub that came up healthy is not un-readied by a host
+    /// that stops answering later.
+    #[serde(default)]
+    pub reconcile_failures: u32,
 }
 
 /// What does not change while `serve` runs.
@@ -64,14 +71,20 @@ pub struct Facts {
     pub reconcile_enabled: bool,
 }
 
+/// `ok` once a pass of this process has finished clean (a latch: later
+/// failures do not undo it); `failed` when passes of this process finished
+/// but none clean; `pending` before any finished.
 pub fn first_reconcile(enabled: bool, stats: &ReconcileStats, started_at: i64) -> &'static str {
     if !enabled {
         return "disabled";
     }
-    match stats.last_finished_at {
-        Some(t) if t >= started_at && stats.consecutive_failures == 0 => "ok",
-        Some(t) if t >= started_at => "failed",
-        _ => "pending",
+    let ours = |t: Option<i64>| t.is_some_and(|t| t >= started_at);
+    if ours(stats.last_ok_at) {
+        "ok"
+    } else if ours(stats.last_finished_at) {
+        "failed"
+    } else {
+        "pending"
     }
 }
 
@@ -95,6 +108,7 @@ pub fn snapshot(facts: &Facts, stats: &ReconcileStats, now: i64) -> Readiness {
             store: "ok".into(),
             listener: "ok".into(),
             first_reconcile: first.into(),
+            reconcile_failures: stats.consecutive_failures,
         },
     }
 }
@@ -126,7 +140,10 @@ pub fn spawn_writer(
         let mut warned = false;
         loop {
             let stats = fleet_core::service::tick::tick_stats().reconcile();
-            if let Err(e) = write(&data_dir, &snapshot(&facts, &stats, unix_now())) {
+            if let Err(e) = write(
+                &data_dir,
+                &snapshot(&facts, &stats, fleet_core::store::now_unix()),
+            ) {
                 if !warned {
                     tracing::warn!(error = %e, path = %path(&data_dir).display(), "cannot write the readiness file");
                     warned = true;
@@ -212,13 +229,6 @@ pub fn pid_alive(pid: u32) -> bool {
     !proc_root.is_dir() || proc_root.join(pid.to_string()).exists()
 }
 
-pub fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,9 +241,11 @@ mod tests {
         }
     }
 
+    /// A pass that finished at `finished`: clean when `failures` is 0.
     fn stats(finished: Option<i64>, failures: u32) -> ReconcileStats {
         ReconcileStats {
             last_finished_at: finished,
+            last_ok_at: finished.filter(|_| failures == 0),
             consecutive_failures: failures,
             ..Default::default()
         }
@@ -254,9 +266,58 @@ mod tests {
         assert!(snapshot(&facts(false), &stats(None, 0), 1001).ready);
         let s = snapshot(&facts(true), &stats(Some(1001), 1), 1002);
         assert!(!s.ready);
+        assert_eq!(s.checks.reconcile_failures, 1);
         assert_eq!(s.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(s.commit, COMMIT);
         assert_eq!(s.contract, fleet_core::wire_contract::CONTRACT_REVISION);
+    }
+
+    /// The first clean pass latches: a failure after it is reported, but
+    /// the hub stays ready. And a clean pass after failures readies it.
+    #[test]
+    fn a_later_failure_does_not_undo_readiness() {
+        fleet_core::app_version::set(env!("CARGO_PKG_VERSION"));
+        let ok_then_failed = ReconcileStats {
+            last_ok_at: Some(1001),
+            last_finished_at: Some(1005),
+            consecutive_failures: 1,
+            ..Default::default()
+        };
+        assert_eq!(first_reconcile(true, &ok_then_failed, 1000), "ok");
+        let s = snapshot(&facts(true), &ok_then_failed, 1006);
+        assert!(s.ready);
+        assert_eq!(s.checks.first_reconcile, "ok");
+        assert_eq!(s.checks.reconcile_failures, 1);
+
+        // Failed first, clean later.
+        let failed_then_ok = ReconcileStats {
+            last_ok_at: Some(1005),
+            last_finished_at: Some(1005),
+            consecutive_failures: 0,
+            failures_total: 2,
+            ..Default::default()
+        };
+        assert_eq!(first_reconcile(true, &failed_then_ok, 1000), "ok");
+        assert!(snapshot(&facts(true), &failed_then_ok, 1006).ready);
+
+        // A clean pass from before this process does not count.
+        let old_ok = ReconcileStats {
+            last_ok_at: Some(999),
+            last_finished_at: Some(1005),
+            consecutive_failures: 1,
+            ..Default::default()
+        };
+        assert_eq!(first_reconcile(true, &old_ok, 1000), "failed");
+    }
+
+    /// A readiness file written before `reconcile_failures` existed still
+    /// reads.
+    #[test]
+    fn checks_without_reconcile_failures_still_parse() {
+        let c: Checks =
+            serde_json::from_str(r#"{"store":"ok","listener":"ok","first_reconcile":"ok"}"#)
+                .unwrap();
+        assert_eq!(c.reconcile_failures, 0);
     }
 
     #[test]

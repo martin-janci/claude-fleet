@@ -422,6 +422,21 @@ ages out lost external rows. Attention reasons `stop_failed`,
 `context_full`, `stale_working`, `ci_failing`. Plan
 `docs/superpowers/plans/2026-09-27-session-state-machine.md`.
 
+The stale-working acknowledgement (#381) is landed, per
+`docs/superpowers/plans/2026-09-28-stale-working-acknowledge.md`: the tick
+runs `Store::expire_stale_working`, which lifts the `stale_working_at`
+stamp once the row is working / blocked again or older than
+`reconcile.stale_working_ttl_secs`; an attach (`touch_session`) clears it
+too. Migration 080 adds `stale_demoted_at`, the reconcile veto's own
+memory: cleared by a hook, a pane that shows a live turn, or the row being
+`working` / `blocked` again — never by an attach or the TTL — and while it
+is set a turn-over check asks the pane (`store::trusted_status`). It is a
+`#[serde(skip)]` `SessionRow` field: off the wire, and a change to it alone
+emits nothing. Migration 081 adds `pane_working_at`, so a long tool call
+whose spinner is on screen is not stale. The sweep judges only rows a
+reconcile pass observed within the window (`last_reconciled_at`), so an
+unreachable or unprobed host's `working` rows are never demoted.
+
 Hub ops and accounting (plan D, #344) is landed: `fleet_health.hub`
 (uptime, reconcile timing), process gauges on `/metrics`, a transcript's
 first read booked as `backfill` apart from the day's live cost (migration
@@ -429,6 +444,25 @@ first read booked as `backfill` apart from the day's live cost (migration
 `deploy/hub/backup.sh` / `upgrade.sh` and the `behind-proxy` compose; see
 `docs/hub.md` → *Backups* / *Upgrade with the script*, plan
 `docs/superpowers/plans/2026-09-27-hub-ops-accounting.md`.
+
+Host identity and health (#354) is landed, per
+`docs/superpowers/plans/2026-09-27-host-identity-health.md`: migrations
+076 (`hosts.claude_version_at`), 077 (the health sample — disk / load /
+mem / uptime, `health_at`, `last_hook_at`, `agent_version`) and 078
+(`provision_fingerprint` / `provisioned_at`). The reconcile probe reads
+versions every `VERSIONS_REFRESH_SECS` (6 h) and the health sample every
+pass, which rides `host:pinged`; `fleet_health.hosts[]` (`disk_low` /
+`claude_behind` / `agent_behind` / `hooks_silent`) is judged against
+`health.version_max_age_secs`, `health.disk_low_pct`,
+`health.claude_max_behind` and `health.hooks_silent_secs`. One rule,
+`service::hosts::active_hosts`, picks the hosts of every host loop: a
+hidden host is skipped by reconcile, not reaped. `merge_host` /
+`fleet-hub host merge <from> <into>` retires a renamed alias (its
+worktrees, sessions, usage, asset inventory, org rules and org move to the
+target); a provisioning records its content fingerprint, so an older one
+reads `provision_stale` (`fleet-hub provision --host <alias>
+--content-only` refreshes it); `forget_project` drops a project row, and
+`refresh_projects` drops rows that vanished.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;
@@ -523,8 +557,12 @@ update check [--track] [--json]`, which reads the published channel and
 prints what this build should run, verified; it installs nothing.
 
 Trusted keys are `fleet_update::keys::RELEASE_KEYS`: the owner's release
-key since #384 (made on the owner's machine by `scripts/release-key.sh`;
-the secret half is only the `RELEASE_SIGNING_KEY` secret and the owner's
-backup). Nothing is offered until 0.4.1 publishes the first channel; an
-`e2e` build also reads `FLEET_UPDATE_E2E_KEYS`. S2b (nightly), the rest
-of S4b and S6–S9 are not built; the other §13 questions wait on the owner.
+key (made on the owner's machine only, `scripts/release-key.sh`) is trusted
+since a3033c2 / #384 (v0.4.1); the secret half is only the
+`RELEASE_SIGNING_KEY` repository secret and the owner's backup. Nothing is
+offered until 0.4.1 publishes the first channel. `FLEET_UPDATE_E2E_KEYS`
+(read by `e2e` builds only) is reserved for S4b's hub-e2e section U;
+nothing uses it yet. `update.track` offers `stable` / `beta` only until S2b
+publishes `nightly` (a stored `nightly` resolves to `stable`). S2b
+(nightly), the rest of S4b and S6–S9 are not built; the
+other §13 questions wait on the owner.

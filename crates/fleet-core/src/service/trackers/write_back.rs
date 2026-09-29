@@ -1,8 +1,8 @@
 //! Write-back to trackers (work graph M13.4e, decisions D3 / D29): the PR
 //! remote link, and nothing else.
 //!
-//! When the PR probe sees a pull request on a session, [`on_pr`] queues one
-//! write per item the session is linked to — only where all of these hold:
+//! When a session has a pull request, [`on_pr`] queues one write per item the
+//! session is linked to — only where all of these hold:
 //!
 //! * the link is **confirmed** and a person made it (`manual` / `started`,
 //!   [`PERSON_SOURCES`]), never a detection guess, an agent's inference, or
@@ -20,8 +20,14 @@
 //! Nothing a transcript or a tracker wrote is ever sent: only the URL and
 //! fleet's own title.
 //!
-//! No caller triggers a write: the toggle is `work_admin` (master only), and
-//! the trigger is the PR probe. A per-host token can do neither.
+//! No caller asks for a write directly (the toggle is `work_admin`, master
+//! only, and a per-host token can do neither). A write is queued at three
+//! moments: the PR probe sees the PR's signals change; a person links or
+//! confirms work on a session that already has a PR ([`on_session_pr`],
+//! from `work_link`, and after the sync binds a bare key to its item); and
+//! the admin turns `write_back.pr_remote_link` on ([`on_enabled`], for every
+//! PR already linked to the tracker). Each goes through [`on_pr`]'s checks,
+//! so an agent's link still never writes.
 
 use super::{TrackerError, TrackerProvider, WriteOp};
 use crate::ipc_error::{lock, IpcError};
@@ -109,6 +115,34 @@ pub fn on_pr(s: &Store, session_id: i64, pr_url: &str) -> Result<usize, IpcError
             session_org_id: session_org,
         })? {
             queued += 1;
+        }
+    }
+    Ok(queued)
+}
+
+/// [`on_pr`] for the PR `session_id` already has, if any: a person just
+/// linked or confirmed its work, or the sync bound its bare key.
+pub fn on_session_pr(s: &Store, session_id: i64) -> Result<usize, IpcError> {
+    match s.get_session_by_id(session_id)?.and_then(|r| r.pr_url) {
+        Some(url) => on_pr(s, session_id, &url),
+        None => Ok(0),
+    }
+}
+
+/// `write_back.pr_remote_link` was just turned on for `tracker_id`: queue
+/// the PRs already open on sessions linked to its items. Returns how many
+/// writes were newly queued; one session's failure is logged and skipped.
+pub fn on_enabled(s: &Store, tracker_id: i64) -> Result<usize, IpcError> {
+    let mut queued = 0;
+    for (session_id, url) in s.pr_sessions_linked_to_tracker(tracker_id)? {
+        match on_pr(s, session_id, &url) {
+            Ok(n) => queued += n,
+            Err(e) => tracing::debug!(
+                tracker = tracker_id,
+                session = session_id,
+                error = %e.message,
+                "[write-back] not queued on enable"
+            ),
         }
     }
     Ok(queued)

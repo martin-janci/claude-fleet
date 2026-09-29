@@ -77,15 +77,44 @@ let served: ComposerPreset[] | null = null;
  */
 export const presetsConflict = writable(false);
 
-/** Read the fleet's chips. Called at startup and after a hub reconnect. */
+function take(list: ComposerPreset[]): void {
+  composerPresets.set(list);
+  served = list;
+  cache(list);
+}
+
+/**
+ * Read the fleet's chips. Called at startup (App.svelte) and after a save
+ * refused with `E_CONFLICT`. Nothing announces a chip change made on another
+ * device, so the other re-reads — a hub reconnect the hub could not replay,
+ * and the Settings editor opening — go through
+ * {@link refreshComposerPresetsIfIdle}, which leaves a pending edit alone.
+ */
 export async function loadComposerPresets(): Promise<Result<ComposerPreset[]>> {
   const r = await invokeCmd<ComposerPreset[]>('quick_replies');
-  if (r.ok && isPresetArray(r.value)) {
-    composerPresets.set(r.value);
-    served = r.value;
-    cache(r.value);
-  }
+  if (r.ok && isPresetArray(r.value)) take(r.value);
   return r;
+}
+
+/**
+ * Re-read the chips unless an edit is pending (a debounced save or one on
+ * the wire) — and drop the answer if an edit started while it was on its
+ * way. A reload must never replace what the person is typing; that edit's
+ * own save names the list it knew and is told about a newer one by
+ * `E_CONFLICT`. Used by App's gap handler (a hub reconnect the hub could not
+ * replay, `hub:resynced`) and by the Settings editor when it opens, so an
+ * edit made there starts from what another device (the phone) saved since
+ * launch instead of conflicting on its first keystroke. A reconnect the hub
+ * did replay fires no gap handler, so chips changed on another device during
+ * a replayed outage are picked up only when the editor opens.
+ */
+export async function refreshComposerPresetsIfIdle(): Promise<void> {
+  if (timer !== null || inFlight !== null) return;
+  const before = get(composerPresets);
+  const r = await invokeCmd<ComposerPreset[]>('quick_replies');
+  if (!r.ok || !isPresetArray(r.value)) return;
+  if (timer !== null || inFlight !== null || get(composerPresets) !== before) return;
+  take(r.value);
 }
 
 /**

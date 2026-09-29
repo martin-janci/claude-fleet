@@ -2594,6 +2594,62 @@ mod tests {
         tunnels.stop_all();
     }
 
+    /// A WSL distribution is not dialed over SSH, so neither provisioning
+    /// nor the app-start pass starts an `ssh -R` for it; on a loopback hub
+    /// provisioning reports instead whether its hooks can reach this desktop.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_wsl_host_gets_no_reverse_tunnel() {
+        let _table = crate::wsl::TEST_TABLE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::wsl::set_for_tests(vec![("wsl-x".into(), "X".into())]);
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("wsl-x").unwrap();
+            s.set_host_provisioned("wsl-x", true).unwrap();
+            s.upsert_host("mefistos").unwrap();
+            s.set_host_provisioned("mefistos", true).unwrap();
+        }
+
+        let tunnels = quiet_tunnels();
+        reestablish_tunnels(&store, &tunnels, &HubBase::loopback(4180)).unwrap();
+        assert!(
+            !tunnels.snapshot().contains_key("wsl-x"),
+            "a WSL host has no ssh -R: {:?}",
+            tunnels.snapshot()
+        );
+        assert_eq!(
+            tunnels.snapshot().get("mefistos"),
+            Some(&true),
+            "an ssh host is still tunneled"
+        );
+        tunnels.stop_all();
+
+        let tunnels = quiet_tunnels();
+        let fake = fresh_host();
+        // Nothing answers the healthz probe from inside the distribution
+        // (WSL2 NAT): provisioned, with the warning.
+        fake.on_host("wsl-x", Match::contains("healthz"), Reply::fail(7, ""));
+        let warning = provision_host_with_token(&store, &fake, &tunnels, "wsl-x", &base(), false)
+            .await
+            .unwrap();
+        assert_eq!(warning.as_deref(), Some(WSL_HOOKS_UNREACHABLE));
+        assert!(
+            tunnels.snapshot().is_empty(),
+            "provisioning a WSL host starts no tunnel: {:?}",
+            tunnels.snapshot()
+        );
+        assert!(store
+            .lock()
+            .unwrap()
+            .get_host_token("wsl-x")
+            .unwrap()
+            .is_some());
+        crate::wsl::set_for_tests(Vec::new());
+    }
+
     #[tokio::test]
     async fn provision_host_with_a_public_base_writes_its_urls_and_starts_no_tunnel() {
         let store = Mutex::new(Store::open_in_memory().unwrap());

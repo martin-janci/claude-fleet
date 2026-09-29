@@ -11,8 +11,9 @@
 //! This module's command is `catalog_spawn_author_session` in
 //! `commands/assets.rs`.
 
-use super::model::{is_valid_name, Kind};
+use super::model::Kind;
 use super::require_config;
+use super::validate::check_name;
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
@@ -37,7 +38,7 @@ pub struct SpawnAuthorArgs {
 
 /// The target asset `kind`/`name`, when both are present; `None` means
 /// "create a new asset". A blank `name` is rejected upstream as `E_INVALID`
-/// (both `spawn_author_session` and the command call `is_valid_name`), so
+/// (both `spawn_author_session` and the command call `check_name`), so
 /// callers never reach here with a blank-but-`Some` name.
 fn target_of(kind: Option<Kind>, name: Option<&str>) -> Option<(Kind, &str)> {
     kind.zip(name)
@@ -230,12 +231,7 @@ pub async fn spawn_author_session(
     reg: &Arc<CancellationRegistry>,
 ) -> Result<SessionRow, IpcError> {
     if let Some(name) = args.name.as_deref() {
-        if !is_valid_name(name) {
-            return Err(IpcError::new(
-                codes::E_INVALID,
-                format!("name '{name}' must match [a-z0-9][a-z0-9-]*"),
-            ));
-        }
+        check_name(name)?;
     }
     let repo_path = require_config(store)?.repo_path;
     let project_id = ensure_catalog_project(store, ssh, reg, &repo_path).await?;

@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::process::ExitCode;
 use std::time::Duration;
 
-/// One whole request/response exchange with the local hub, same budget as
-/// `pair.rs`'s calls.
+/// One whole `GET /reports` exchange with the local hub: a plain read, not a
+/// tool call, so a fixed 10 s (`pair.rs`'s tool calls use `call_limit`).
 const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Largest `GET /reports` response this module will read — bigger than

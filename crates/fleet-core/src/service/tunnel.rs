@@ -1088,6 +1088,47 @@ mod tests {
         assert!(sup.snapshot().is_empty());
     }
 
+    /// A WSL distribution is not dialed over SSH: its tunnel task drops the
+    /// stats entry `ensure` made and ends without ever spawning.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn ensure_for_a_wsl_host_spawns_nothing_and_drops_its_stats() {
+        let _table = crate::wsl::TEST_TABLE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::wsl::set_for_tests(vec![("wsl-x".into(), "X".into())]);
+        let log: SpawnLog = Arc::new(Mutex::new(Vec::new()));
+        let sup = supervisor(
+            pending_spawner(Arc::clone(&log)),
+            Duration::from_millis(1),
+            Duration::from_secs(3600),
+            no_processes(),
+            recording_killer(Default::default()),
+        );
+        sup.ensure("wsl-x", 4180, 4180);
+        wait_until(
+            || sup.snapshot().get("wsl-x") == Some(&false),
+            "the wsl-x task to end",
+        )
+        .await;
+        assert!(log.lock().unwrap().is_empty(), "no ssh for a WSL host");
+        assert!(!sup.stats.lock().unwrap().contains_key("wsl-x"));
+        let health = sup.health();
+        assert!(!health
+            .get("wsl-x")
+            .is_some_and(|h| h.supervised || h.connected));
+
+        // An ssh host on the same supervisor still gets its tunnel.
+        sup.ensure("mefistos", 4180, 4180);
+        wait_for_spawns(&log, 1).await;
+        assert_eq!(
+            log.lock().unwrap()[0].0,
+            tunnel_argv("mefistos", 4180, 4180)
+        );
+        sup.stop_all();
+        crate::wsl::set_for_tests(Vec::new());
+    }
+
     // ---- Bug 3: health must distinguish "connected" from "crash-looping" ----
 
     #[tokio::test]

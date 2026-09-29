@@ -23,10 +23,16 @@ fn cred() -> TrackerCredential {
 struct Fx {
     s: Store,
     tracker: i64,
+    item: i64,
     session: i64,
 }
 
 fn fx(source: &str, write_back: bool) -> Fx {
+    fx_with(Some(source), write_back)
+}
+
+/// [`fx`], or with the session not linked at all when `source` is `None`.
+fn fx_with(source: Option<&str>, write_back: bool) -> Fx {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
     let t = s
@@ -62,11 +68,14 @@ fn fx(source: &str, write_back: bool) -> Fx {
         .upsert_session("dev-abc-1", "h", None, None, 1, 1, "running", None)
         .unwrap();
     s.set_claude_session_id(session, CID).unwrap();
-    s.link_session_work(session, WorkTarget::Item(item), source)
-        .unwrap();
+    if let Some(source) = source {
+        s.link_session_work(session, WorkTarget::Item(item), source)
+            .unwrap();
+    }
     Fx {
         s,
         tracker: t.id,
+        item,
         session,
     }
 }
@@ -242,6 +251,141 @@ fn write_back_is_a_jira_setting() {
     // Off serialises to nothing: an older reader sees the same JSON.
     let off = serde_json::to_string(&TrackerSettings::default()).unwrap();
     assert_eq!(off, "{}");
+}
+
+// ── a PR that was there first ───────────────────────────────────────────
+
+/// The PR probe already saw the PR (signals stamped): it will not queue
+/// again until they change.
+fn with_pr(s: &Store, session: i64) {
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET pr_url = ?1, pr_signals = '{}', pr_signals_at = 1 WHERE id = ?2",
+            rusqlite::params![PR, session],
+        )
+        .unwrap();
+}
+
+fn link_through_service(f: Fx, decider: crate::store::Decider, source: &str) -> (Store, i64) {
+    use crate::service::orgs::OrgScope;
+    use crate::service::work::{work_link_as, WorkLinkArgs};
+    let store = std::sync::Mutex::new(f.s);
+    let args = WorkLinkArgs {
+        session_id: Some(f.session),
+        action: "link".into(),
+        item_id: Some(f.item),
+        source: Some(source.into()),
+        ..Default::default()
+    };
+    work_link_as(&args, &store, &OrgScope::All, decider).unwrap();
+    (store.into_inner().unwrap(), f.tracker)
+}
+
+#[test]
+fn a_person_linking_a_session_that_already_has_a_pr_queues_its_write() {
+    use crate::store::Decider;
+    let f = fx_with(None, true);
+    with_pr(&f.s, f.session);
+    let (s, tracker) = link_through_service(f, Decider::Person, "manual");
+    let rows = outbox(&s);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (
+            rows[0].tracker_id,
+            rows[0].item_key.as_str(),
+            rows[0].url.as_str()
+        ),
+        (tracker, "ABC-1", PR)
+    );
+    assert_eq!(rows[0].state, "pending");
+    // An agent's link (whatever source it claims) and a person recording
+    // an agent's source never write.
+    for (decider, source) in [(Decider::Agent, "manual"), (Decider::Person, "agent")] {
+        let g = fx_with(None, true);
+        with_pr(&g.s, g.session);
+        let (s, _) = link_through_service(g, decider, source);
+        assert!(outbox(&s).is_empty(), "{decider:?} {source}");
+    }
+}
+
+#[test]
+fn a_person_confirming_a_suggestion_after_the_pr_queues_its_write() {
+    use crate::service::orgs::OrgScope;
+    use crate::service::work::{work_link_as, WorkLinkArgs};
+    use crate::store::Decider;
+    let f = fx("manual", true);
+    f.s.conn_ref()
+        .execute(
+            "UPDATE work_links SET source = 'branch', state = 'suggested', \
+               is_primary = 0, rule = 'R3b'",
+            [],
+        )
+        .unwrap();
+    with_pr(&f.s, f.session);
+    let link_id = f.s.session_work_links(f.session).unwrap()[0].id;
+    let session = f.session;
+    let store = std::sync::Mutex::new(f.s);
+    let args = WorkLinkArgs {
+        session_id: Some(session),
+        action: "confirm".into(),
+        link_id: Some(link_id),
+        ..Default::default()
+    };
+    work_link_as(&args, &store, &OrgScope::All, Decider::Person).unwrap();
+    let s = store.into_inner().unwrap();
+    let rows = outbox(&s);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].link_id, Some(link_id));
+}
+
+fn turn_write_back_on(s: Store, tracker: i64) -> Store {
+    use crate::service::trackers::admin::{admin_sync, WorkAdminArgs};
+    let store = std::sync::Mutex::new(s);
+    admin_sync(
+        &WorkAdminArgs {
+            action: "update".into(),
+            tracker_id: Some(tracker),
+            settings: Some(serde_json::json!({ "write_back": { "pr_remote_link": true } })),
+            ..Default::default()
+        },
+        &store,
+    )
+    .unwrap();
+    store.into_inner().unwrap()
+}
+
+#[test]
+fn turning_write_back_on_queues_the_prs_already_linked_once() {
+    let f = fx("manual", false);
+    with_pr(&f.s, f.session);
+    assert!(outbox(&f.s).is_empty());
+    let s = turn_write_back_on(f.s, f.tracker);
+    let rows = outbox(&s);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].item_key.as_str(), rows[0].url.as_str()),
+        ("ABC-1", PR)
+    );
+    // Already on: a second update queues nothing more.
+    let s = turn_write_back_on(s, f.tracker);
+    assert_eq!(outbox(&s).len(), 1);
+}
+
+#[test]
+fn turning_write_back_on_skips_an_agent_link_and_another_org() {
+    let agent = fx("agent", false);
+    with_pr(&agent.s, agent.session);
+    let s = turn_write_back_on(agent.s, agent.tracker);
+    assert!(outbox(&s).is_empty());
+
+    let f = fx("manual", false);
+    let a = f.s.add_org("Company A", Some("#f00"), false).unwrap();
+    let b = f.s.add_org("Company B", Some("#00f"), false).unwrap();
+    f.s.set_tracker_org(f.tracker, Some(a.id)).unwrap();
+    f.s.set_host_org("h", Some(b.id)).unwrap();
+    with_pr(&f.s, f.session);
+    let s = turn_write_back_on(f.s, f.tracker);
+    assert!(outbox(&s).is_empty());
 }
 
 // ── the drain ───────────────────────────────────────────────────────────

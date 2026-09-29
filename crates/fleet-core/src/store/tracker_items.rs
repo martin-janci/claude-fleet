@@ -15,6 +15,9 @@
 //!   whose prefix belongs to exactly one tracker, and which that tracker now
 //!   has an item for (by key or alias), gets `item_id`; `ref_key` stays for
 //!   history. A prefix two trackers claim is never bound (C28 / §0.3).
+//!   A person's Work view placement on the bare `ref:<key>` task moves to
+//!   the `item:<id>` it became, and placements whose task is gone are
+//!   swept ([`Store::sweep_orphan_placements`]).
 
 use super::work::{map_item, ITEM_COLUMNS, ITEM_COLUMN_COUNT};
 use super::{now_unix, Store, WorkItemRow};
@@ -839,14 +842,18 @@ impl Store {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         let mut touched = Vec::new();
+        // (raw `ref_key`, item) for every link bound: the Work view's task
+        // id for a bare link is `ref:<raw ref_key>`, so a person's placement
+        // on it follows the bind below.
+        let mut bound: Vec<(String, i64)> = Vec::new();
         let tx = self.conn.unchecked_transaction()?;
-        for (link, key) in candidates {
-            if !may_answer(&trackers, tracker_id, &key)
+        for (link, raw_key) in candidates {
+            if !may_answer(&trackers, tracker_id, &raw_key)
                 || !self.link_bindable_to(link, tracker_id)?
             {
                 continue;
             }
-            let key = super::work::canonical_key(&key);
+            let key = super::work::canonical_key(&raw_key);
             let item: Option<i64> = self
                 .conn
                 .query_row(
@@ -862,6 +869,9 @@ impl Store {
                 "UPDATE work_links SET item_id = ?1 WHERE id = ?2",
                 rusqlite::params![item, link],
             )?;
+            if !bound.contains(&(raw_key.clone(), item)) {
+                bound.push((raw_key, item));
+            }
             let sid: Option<i64> = self
                 .conn
                 .query_row(
@@ -883,11 +893,55 @@ impl Store {
                 }
             }
         }
+        let moved = self.rekey_bound_placements(&bound)?;
+        self.sweep_orphan_placements()?;
         tx.commit()?;
         for sid in &touched {
             self.emit_session(*sid)?;
         }
+        for task_id in moved {
+            self.emit_work_changed(crate::events::WorkChanged {
+                what: "placement".into(),
+                task_id: Some(task_id),
+                rule_id: None,
+                view_id: None,
+            });
+        }
         Ok(touched)
+    }
+
+    /// Move a person's placement on `ref:<raw key>` to `item:<id>` once
+    /// the bind above has turned that bare task into the item (work graph
+    /// M14): otherwise the task's manual group silently disappears. Left
+    /// where it is while a bare link to the same raw key remains (one of
+    /// another org stays bare, M5, and still makes the `ref:` task), and
+    /// when the item has its own placement (the item's wins; the `ref:`
+    /// row is then an orphan for [`Store::sweep_orphan_placements`]).
+    /// Runs inside the caller's transaction; returns the task ids now
+    /// placed, for `work:changed`.
+    fn rekey_bound_placements(&self, bound: &[(String, i64)]) -> Result<Vec<String>, IpcError> {
+        let mut moved = Vec::new();
+        for (raw_key, item) in bound {
+            let still_bare: bool = self.conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM work_links WHERE item_id IS NULL AND ref_key = ?1)",
+                rusqlite::params![raw_key],
+                |r| r.get(0),
+            )?;
+            if still_bare {
+                continue;
+            }
+            let item_task = format!("item:{item}");
+            let n = self.conn.execute(
+                "UPDATE work_placements SET task_id = ?1, version = version + 1, updated_at = ?3 \
+                 WHERE task_id = ?2 \
+                   AND NOT EXISTS (SELECT 1 FROM work_placements WHERE task_id = ?1)",
+                rusqlite::params![item_task, format!("ref:{raw_key}"), now_unix()],
+            )?;
+            if n > 0 && !moved.contains(&item_task) {
+                moved.push(item_task);
+            }
+        }
+        Ok(moved)
     }
 
     /// The one tracker item `key` names (its key or an alias) when exactly
@@ -895,6 +949,21 @@ impl Store {
     /// A removed tracker's rows (kept for the links that point at them) do
     /// not count: they would shadow the same site re-added.
     pub fn tracker_item_for_key(&self, key: &str) -> Result<Option<WorkItemRow>, IpcError> {
+        let rows = self.tracker_items_for_key(key)?;
+        let trackers: BTreeSet<Option<i64>> = rows.iter().map(|r| r.tracker_id).collect();
+        Ok(if trackers.len() == 1 {
+            rows.into_iter().next()
+        } else {
+            None
+        })
+    }
+
+    /// Every tracker item `key` names (its key or an alias), across every
+    /// tracker that still exists: an exact key before an alias, then oldest
+    /// first. [`Store::tracker_item_for_key`] is the first row when all of
+    /// them are one tracker's; a scoped reader walks this list instead, for
+    /// the one IT may see (two sites, one per org, can share a key).
+    pub fn tracker_items_for_key(&self, key: &str) -> Result<Vec<WorkItemRow>, IpcError> {
         let key = super::normalize_work_ref(key)?;
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {ITEM_COLUMNS} FROM work_items \
@@ -903,15 +972,10 @@ impl Store {
                                     WHERE value = ?1)) \
              ORDER BY (key = ?1) DESC, id"
         ))?;
-        let rows: Vec<WorkItemRow> = stmt
+        let rows = stmt
             .query_map(rusqlite::params![key], map_item)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let trackers: BTreeSet<Option<i64>> = rows.iter().map(|r| r.tracker_id).collect();
-        Ok(if trackers.len() == 1 {
-            rows.into_iter().next()
-        } else {
-            None
-        })
+        Ok(rows)
     }
 
     /// The item `key` names (its key or an alias) in ONE tracker's cache:
@@ -1017,6 +1081,21 @@ impl Store {
         )?;
         let rows = stmt.query_map(rusqlite::params![host], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Is item `item_id` one of [`Store::work_item_ids_on_host`]'s? The same
+    /// fence for one item, without listing every item of the host.
+    pub fn work_item_on_host(&self, host: &str, item_id: i64) -> Result<bool, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM work_links l \
+             LEFT JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+             LEFT JOIN sessions s ON s.id = p.session_id \
+             WHERE l.item_id = ?2 AND l.state = 'confirmed' AND \
+               ((l.ended_at IS NULL AND s.host_alias = ?1) OR \
+                (l.ended_at IS NOT NULL AND l.snap_host = ?1)))",
+            rusqlite::params![host, item_id],
+            |r| r.get(0),
+        )?)
     }
 
     /// Where work on `prefix`-keys last ran: `(project_id, host)` of the

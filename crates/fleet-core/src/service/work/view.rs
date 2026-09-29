@@ -115,8 +115,6 @@ pub struct GroupRef {
     /// person or a rule placed the task elsewhere).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracker_value: Option<String>,
-    /// A person may place the task (always: placement is local).
-    pub editable: bool,
 }
 
 /// One session under a task.
@@ -286,6 +284,40 @@ pub struct TreePage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     pub generated_at: i64,
+    /// The sections [`TreeArgs::sections`] asked for, in the order asked,
+    /// each paged from the same read (absent when none was asked, and from
+    /// a hub built before them: the client then reads each by itself).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<TreeSection>,
+    /// `review.total` under the caller's scope, when
+    /// [`TreeArgs::with_review_total`] asked (absent from an older hub).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_total: Option<u32>,
+}
+
+/// One section a tree read pages besides its first page: exactly what a
+/// read with `filters.org` = `org_id` (or `"none"`) and `filters.group` =
+/// `group_id` answers, cursor included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct SectionAsk {
+    #[serde(default)]
+    pub org_id: Option<i64>,
+    pub group_id: String,
+    /// 1–200, default 50.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// A section's page in [`TreePage::sections`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TreeSection {
+    #[serde(default)]
+    pub org_id: Option<i64>,
+    pub group_id: String,
+    pub tasks: Vec<WorkTask>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// A task's last known outcome: its newest past session, visible to the
@@ -535,7 +567,7 @@ impl Graph {
 
     /// The org of the session behind a link: the live row's, or the
     /// snapshot's.
-    fn session_org(&self, l: &ViewLink) -> Option<i64> {
+    pub(crate) fn session_org(&self, l: &ViewLink) -> Option<i64> {
         match self.row_of(l) {
             Some(row) => row.org_id,
             None => l.link.org_id,
@@ -552,7 +584,7 @@ impl Graph {
 
     /// The wire state of a link, or `None` for one no view shows (an ended
     /// suggestion or rejection).
-    fn state_of(&self, l: &ViewLink) -> Option<&'static str> {
+    pub(crate) fn state_of(&self, l: &ViewLink) -> Option<&'static str> {
         let live = l.link.ended_at.is_none() && self.session_of(l).is_some();
         match (l.link.state.as_str(), live) {
             ("confirmed", true) => Some("active"),
@@ -593,7 +625,7 @@ impl Graph {
         let Some(t) = item.item.tracker_id.and_then(|t| self.trackers.get(&t)) else {
             return false;
         };
-        t.config.account_id.is_some() && t.config.account_id == item.meta.assignee_id
+        t.config.account_id.is_some() && t.config.account_id == item.assignee_id
     }
 
     fn repo_of(&self, l: &ViewLink) -> Option<String> {
@@ -729,24 +761,7 @@ pub fn why_line(source: &str, evidence: &[serde_json::Value]) -> String {
         .last()
         .and_then(|e| serde_json::from_value::<Evidence>(e.clone()).ok())
     {
-        let what = match serde_json::to_value(e.signal)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_string))
-            .as_deref()
-        {
-            Some("branch") => "branch",
-            Some("pr_head") => "PR branch",
-            Some("pr_closing") => "PR closes",
-            Some("pr_text") => "PR mentions",
-            Some("trailer") => "commit trailer",
-            Some("prompt_url") => "ticket URL in a prompt",
-            Some("prompt_key") => "mentioned in a prompt",
-            Some("prompt_issue") => "issue number in a prompt",
-            Some("agent_inferred") => "Claude named it",
-            _ => "seen",
-        };
-        let text: String = e.text.chars().take(60).collect();
-        return format!("{what} {text} · {}", e.rule).trim().to_string();
+        return why_of(&e);
     }
     match source {
         "manual" => "linked by a person".into(),
@@ -757,6 +772,28 @@ pub fn why_line(source: &str, evidence: &[serde_json::Value]) -> String {
         "inherited" => "inherited from its parent session".into(),
         other => format!("linked ({other})"),
     }
+}
+
+/// One piece of evidence, in one line.
+fn why_of(e: &Evidence) -> String {
+    let what = match serde_json::to_value(e.signal)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .as_deref()
+    {
+        Some("branch") => "branch",
+        Some("pr_head") => "PR branch",
+        Some("pr_closing") => "PR closes",
+        Some("pr_text") => "PR mentions",
+        Some("trailer") => "commit trailer",
+        Some("prompt_url") => "ticket URL in a prompt",
+        Some("prompt_key") => "mentioned in a prompt",
+        Some("prompt_issue") => "issue number in a prompt",
+        Some("agent_inferred") => "Claude named it",
+        _ => "seen",
+    };
+    let text: String = e.text.chars().take(60).collect();
+    format!("{what} {text} · {}", e.rule).trim().to_string()
 }
 
 fn strength_rank(s: Option<&str>) -> u8 {
@@ -801,7 +838,6 @@ fn group_of(
             source: "manual".into(),
             rule_id: None,
             tracker_value,
-            editable: true,
         };
     }
     if let Some(r) = g
@@ -815,7 +851,6 @@ fn group_of(
             source: "rule".into(),
             rule_id: Some(r.id),
             tracker_value,
-            editable: true,
         };
     }
     if let (Some(i), Some(c)) = (item, tracker_value.clone()) {
@@ -840,7 +875,6 @@ fn group_of(
             source: "tracker".into(),
             rule_id: None,
             tracker_value: Some(c),
-            editable: true,
         };
     }
     if let Some(repo) = repos.first() {
@@ -850,7 +884,6 @@ fn group_of(
             source: "repo".into(),
             rule_id: None,
             tracker_value: None,
-            editable: true,
         };
     }
     if let Some(prefix) = key.and_then(key_prefix) {
@@ -860,7 +893,6 @@ fn group_of(
             source: "key".into(),
             rule_id: None,
             tracker_value: None,
-            editable: true,
         };
     }
     GroupRef {
@@ -869,7 +901,6 @@ fn group_of(
         source: "none".into(),
         rule_id: None,
         tracker_value: None,
-        editable: true,
     }
 }
 
@@ -934,6 +965,50 @@ fn active_tasks_by_session(tasks: &[Built<'_>]) -> HashMap<i64, BTreeSet<String>
     out
 }
 
+/// What a link's session is called: the live row's name, else the
+/// snapshot's (`row` is the live session the caller judges the link by).
+pub(crate) fn link_name(row: Option<&SessionRow>, l: &ViewLink) -> String {
+    match row {
+        Some(r) => r
+            .friendly_name
+            .clone()
+            .unwrap_or_else(|| r.tmux_name.clone()),
+        None => l
+            .link
+            .snap_name
+            .clone()
+            .or_else(|| l.link.snap_tmux.clone())
+            .unwrap_or_else(|| "past session".into()),
+    }
+}
+
+/// A task's kind: `tracker`, `local` or `ref` (a bare key, no item).
+pub(crate) fn task_kind(item: Option<&ViewItem>) -> &'static str {
+    match item {
+        Some(i) if i.item.tracker_id.is_some() => "tracker",
+        Some(_) => "local",
+        None => "ref",
+    }
+}
+
+/// Does this live session need a person (`list_sessions`' judgement)?
+fn needs_you_of(g: &Graph, row: Option<&SessionRow>) -> bool {
+    row.is_some_and(|r| attention::needs_attention_with(r, g.context_red_pct).is_some())
+}
+
+/// One session a task counts: the live session, else the participant it
+/// was (one per session), else the link itself. A session with two past
+/// links to one task is one past session.
+fn session_key(l: &ViewLink) -> (u8, i64) {
+    match (l.session_id, l.link.participant_id) {
+        (Some(sid), _) => (0, sid),
+        (None, Some(pid)) => (1, pid),
+        (None, None) => (2, l.link.id),
+    }
+}
+
+/// `needs_you` is [`needs_you_of`] the link's live session, computed once
+/// by the caller.
 fn task_link(
     g: &Graph,
     l: &ViewLink,
@@ -941,6 +1016,7 @@ fn task_link(
     task_id: &str,
     others: &HashMap<i64, BTreeSet<String>>,
     with_evidence: bool,
+    needs_you: bool,
 ) -> TaskLink {
     let row = g.session_of(l);
     let fence = l
@@ -956,18 +1032,7 @@ fn task_link(
         state: state.to_string(),
         primary: state == "active" && l.link.is_primary,
         session_id: row.map(|r| r.id),
-        name: match row {
-            Some(r) => r
-                .friendly_name
-                .clone()
-                .unwrap_or_else(|| r.tmux_name.clone()),
-            None => l
-                .link
-                .snap_name
-                .clone()
-                .or_else(|| l.link.snap_tmux.clone())
-                .unwrap_or_else(|| "past session".into()),
-        },
+        name: link_name(row, l),
         host: row
             .map(|r| r.host_alias.clone())
             .or_else(|| l.link.snap_host.clone()),
@@ -985,8 +1050,7 @@ fn task_link(
         ended_at: l.link.ended_at,
         end_reason: l.link.end_reason.clone(),
         claude_status: row.and_then(|r| r.claude_status.clone()),
-        needs_you: row
-            .is_some_and(|r| attention::needs_attention_with(r, g.context_red_pct).is_some()),
+        needs_you,
         archived: l.archived_at.is_some(),
         resumable: l.link.resumable,
         branch: l.link.snap_branch.clone().filter(|_| row.is_none()),
@@ -1016,14 +1080,63 @@ fn needs_review(g: &Graph, l: &ViewLink, state: &str) -> bool {
     }
 }
 
-fn to_task(
+/// A task with everything but its `sessions`: what the filters, the order,
+/// the section headers and `archived_hidden` read. Its links are kept in
+/// list order, each with whether its session needs a person, so the
+/// sessions are built ([`TaskSummary::into_task`]) only for the tasks a
+/// page returns.
+struct TaskSummary<'g> {
+    /// `sessions` empty, `sessions_more` every listed link.
+    task: WorkTask,
+    links: Vec<(&'g ViewLink, &'static str, bool)>,
+}
+
+impl TaskSummary<'_> {
+    /// The task with its first `per_task` sessions.
+    fn into_task(
+        self,
+        g: &Graph,
+        per_task: usize,
+        others: &HashMap<i64, BTreeSet<String>>,
+        with_evidence: bool,
+    ) -> WorkTask {
+        let TaskSummary { task, links } = self;
+        with_sessions(task, &links, g, per_task, others, with_evidence)
+    }
+
+    /// [`Self::into_task`] of a summary that answers more than one page
+    /// (the first page and a section of the same read).
+    fn to_page_task(
+        &self,
+        g: &Graph,
+        per_task: usize,
+        others: &HashMap<i64, BTreeSet<String>>,
+    ) -> WorkTask {
+        with_sessions(self.task.clone(), &self.links, g, per_task, others, false)
+    }
+}
+
+fn with_sessions(
+    mut task: WorkTask,
+    links: &[(&ViewLink, &'static str, bool)],
     g: &Graph,
-    b: &Built<'_>,
     per_task: usize,
     others: &HashMap<i64, BTreeSet<String>>,
     with_evidence: bool,
-    with_rejected: bool,
 ) -> WorkTask {
+    let sessions: Vec<TaskLink> = links
+        .iter()
+        .take(per_task)
+        .map(|(l, st, needs_you)| {
+            task_link(g, l, st, &task.task_id, others, with_evidence, *needs_you)
+        })
+        .collect();
+    task.sessions_more = links.len().saturating_sub(sessions.len()) as u32;
+    task.sessions = sessions;
+    task
+}
+
+fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'g> {
     let item = b.item;
     let key = item
         .and_then(|i| i.item.key.clone())
@@ -1032,11 +1145,11 @@ fn to_task(
     let tracker = item
         .and_then(|i| i.item.tracker_id)
         .and_then(|t| g.trackers.get(&t));
-    let mut links: Vec<(&ViewLink, &str)> = b
+    let mut links: Vec<(&'g ViewLink, &'static str)> = b
         .visible
         .iter()
         .filter(|(_, st)| with_rejected || *st != "rejected")
-        .map(|(l, st)| (*l, *st))
+        .copied()
         .collect();
     links.sort_by(|(a, sa), (b, sb)| {
         state_rank(sa)
@@ -1060,31 +1173,37 @@ fn to_task(
             )
             .then(b.link.id.cmp(&a.link.id))
     });
-    let mut counts = TaskCounts::default();
+    // Every count is of sessions, not links: a session with two past
+    // links to the task is one past session.
     let mut active_sessions = BTreeSet::new();
+    let mut ended_sessions = BTreeSet::new();
+    let mut suggested_sessions = BTreeSet::new();
     let mut needs_you = false;
     let mut review = false;
     let mut last: Option<i64> = None;
     let mut repos: Vec<String> = Vec::new();
     let mut link_orgs: BTreeSet<Option<i64>> = BTreeSet::new();
-    for (l, st) in &links {
-        match *st {
+    let mut listed = Vec::with_capacity(links.len());
+    for (l, st) in links {
+        let row = g.session_of(l);
+        let link_needs_you = needs_you_of(g, row);
+        listed.push((l, st, link_needs_you));
+        match st {
             "active" => {
-                if let Some(sid) = l.session_id {
-                    active_sessions.insert(sid);
-                }
+                active_sessions.insert(session_key(l));
             }
-            "ended" => counts.ended += 1,
-            "suggested" => counts.suggested += 1,
+            "ended" => {
+                ended_sessions.insert(session_key(l));
+            }
+            "suggested" => {
+                suggested_sessions.insert(session_key(l));
+            }
             _ => {}
         }
-        if *st == "rejected" {
+        if st == "rejected" {
             continue;
         }
-        let row = g.session_of(l);
-        if *st == "active"
-            && row.is_some_and(|r| attention::needs_attention_with(r, g.context_red_pct).is_some())
-        {
+        if st == "active" && link_needs_you {
             needs_you = true;
         }
         if needs_review(g, l, st) {
@@ -1100,11 +1219,15 @@ fn to_task(
                 repos.push(r);
             }
         }
-        if matches!(*st, "active" | "ended") {
+        if matches!(st, "active" | "ended") {
             link_orgs.insert(g.session_org(l));
         }
     }
-    counts.active = active_sessions.len() as u32;
+    let counts = TaskCounts {
+        active: active_sessions.len() as u32,
+        ended: ended_sessions.len() as u32,
+        suggested: suggested_sessions.len() as u32,
+    };
     // `status_category` here is `item_status`'s live-lifted value (fix
     // round 3 checked this deliberately, not assumed safe): a `done` that
     // the live rule lifts to `in_progress` (a session resumes an
@@ -1145,24 +1268,13 @@ fn to_task(
         }
     };
     let group = group_of(g, &b.task_id, item, key.as_deref(), &title, &repos);
-    let total_links = links.len();
-    let shown: Vec<TaskLink> = links
-        .iter()
-        .take(per_task)
-        .map(|(l, st)| task_link(g, l, st, &b.task_id, others, with_evidence))
-        .collect();
-    WorkTask {
+    let task = WorkTask {
         task_id: b.task_id.clone(),
         item_id: item.map(|i| i.item.id),
         key,
         title,
         url: item.and_then(|i| i.item.url.clone()),
-        kind: match item {
-            Some(i) if i.item.tracker_id.is_some() => "tracker",
-            Some(_) => "local",
-            None => "ref",
-        }
-        .into(),
+        kind: task_kind(item).into(),
         tracker_id: item.and_then(|i| i.item.tracker_id),
         tracker_name: tracker.map(|t| t.name.clone()),
         provider: tracker.map(|t| t.provider.clone()),
@@ -1185,10 +1297,25 @@ fn to_task(
         last_activity_at: last,
         repos,
         placement_version: g.placements.get(&b.task_id).map_or(0, |p| p.version),
-        sessions_more: total_links.saturating_sub(shown.len()) as u32,
-        sessions: shown,
+        sessions_more: listed.len() as u32,
+        sessions: Vec::new(),
         archived,
+    };
+    TaskSummary {
+        task,
+        links: listed,
     }
+}
+
+fn to_task(
+    g: &Graph,
+    b: &Built<'_>,
+    per_task: usize,
+    others: &HashMap<i64, BTreeSet<String>>,
+    with_evidence: bool,
+    with_rejected: bool,
+) -> WorkTask {
+    summarize(g, b, with_rejected).into_task(g, per_task, others, with_evidence)
 }
 
 /// At least one ended link, and every link but a rejected one archived
@@ -1393,7 +1520,15 @@ pub struct TreeArgs {
     pub cursor: Option<String>,
     pub limit: Option<usize>,
     pub per_task: Option<usize>,
+    /// Sections to page from the same read (a client's open sections), so
+    /// one refresh is one graph load. At most [`TREE_MAX_SECTIONS`].
+    pub sections: Vec<SectionAsk>,
+    /// Add `review_total`, from the same read.
+    pub with_review_total: bool,
 }
+
+/// The most sections one tree read pages.
+pub const TREE_MAX_SECTIONS: usize = 100;
 
 fn visible_orgs(g: &Graph, scope: &OrgScope) -> Vec<OrgBrief> {
     g.orgs
@@ -1436,20 +1571,29 @@ pub(crate) fn all_tasks(g: &Graph, scope: &OrgScope, per_task: usize) -> Vec<Wor
     let others = active_tasks_by_session(&built);
     built
         .iter()
-        .map(|b| to_task(g, b, per_task, &others, false, false))
+        .map(|b| summarize(g, b, false).into_task(g, per_task, &others, false))
         .collect()
 }
 
 /// [`tree`] over a graph already loaded (tests and the scale budget).
 pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<TreePage, IpcError> {
     check_filters(&args.filters)?;
+    if args.sections.len() > TREE_MAX_SECTIONS {
+        return Err(bad(format!(
+            "sections asks for {} sections; at most {TREE_MAX_SECTIONS}",
+            args.sections.len()
+        )));
+    }
     let limit = args
         .limit
         .unwrap_or(TREE_DEFAULT_LIMIT)
         .clamp(1, TREE_MAX_LIMIT);
     let per_task = args.per_task.unwrap_or(PER_TASK_DEFAULT).min(PER_TASK_MAX);
     let org_names: HashMap<i64, String> = g.orgs.iter().map(|o| (o.id, o.name.clone())).collect();
-    let all = all_tasks(g, scope, per_task);
+    // Every task summarised; its sessions are built only if the page
+    // returns it.
+    let built = build_tasks(g, scope);
+    let others = active_tasks_by_session(&built);
     // Every filter but the archived one: what it hides is counted, so the
     // view can say how many archived tasks are out of sight.
     let with_archived = WorkTreeFilters {
@@ -1460,12 +1604,14 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
     // Section headers count every task under the filters but the group
     // one, so every section of the view has its header and count.
     let mut groups: BTreeMap<(Option<i64>, String), (GroupRef, u32, SortKey)> = BTreeMap::new();
-    let mut matching: Vec<(SortKey, WorkTask)> = Vec::new();
-    for t in all {
-        if !matches_filters(&t, &with_archived, false) {
+    let summaries: Vec<TaskSummary<'_>> = built.iter().map(|b| summarize(g, b, false)).collect();
+    let mut matching: Vec<(SortKey, usize)> = Vec::new();
+    for (i, summary) in summaries.iter().enumerate() {
+        let t = &summary.task;
+        if !matches_filters(t, &with_archived, false) {
             continue;
         }
-        if hidden_as_archived(&t, &args.filters) {
+        if hidden_as_archived(t, &args.filters) {
             if args
                 .filters
                 .group
@@ -1476,7 +1622,7 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
             }
             continue;
         }
-        let key = sort_key(&t, &org_names);
+        let key = sort_key(t, &org_names);
         let e = groups
             .entry((t.org_id, t.group.id.clone()))
             .or_insert_with(|| (t.group.clone(), 0, key.clone()));
@@ -1490,7 +1636,7 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
             .as_deref()
             .is_none_or(|gid| gid == t.group.id)
         {
-            matching.push((key, t));
+            matching.push((key, i));
         }
     }
     matching.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1503,15 +1649,28 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
         }
     };
     let total = matching.len() as u32;
-    let page: Vec<(SortKey, WorkTask)> = matching.into_iter().skip(start).take(limit + 1).collect();
+    let page: Vec<(SortKey, usize)> = matching.into_iter().skip(start).take(limit + 1).collect();
     let more = page.len() > limit;
-    let page: Vec<(SortKey, WorkTask)> = page.into_iter().take(limit).collect();
+    let page: Vec<(SortKey, usize)> = page.into_iter().take(limit).collect();
     let next_cursor = if more {
         page.last().map(|(k, _)| encode_cursor(hash.clone(), k))
     } else {
         None
     };
-    let tasks: Vec<WorkTask> = page.into_iter().map(|(_, t)| t).collect();
+    let tasks: Vec<WorkTask> = page
+        .into_iter()
+        .map(|(_, i)| summaries[i].to_page_task(g, per_task, &others))
+        .collect();
+    let sections = if args.sections.is_empty() {
+        Vec::new()
+    } else {
+        section_pages(g, &summaries, &others, &org_names, args, per_task)
+    };
+    let review_total = if args.with_review_total {
+        Some(review_of(g, scope, None, Some(1))?.total)
+    } else {
+        None
+    };
     let mut group_list: Vec<(SortKey, TreeGroup)> = groups
         .into_iter()
         .map(|((org, _), (group, count, key))| {
@@ -1537,12 +1696,87 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
         archived_hidden,
         next_cursor,
         generated_at: g.now,
+        sections,
+        review_total,
     })
+}
+
+/// The filters one section's own read is made with: the view's, narrowed
+/// to its org and group (what a client's "Load more" sends, so the cursor
+/// here is valid there).
+fn section_filters(base: &WorkTreeFilters, org_id: Option<i64>, group_id: &str) -> WorkTreeFilters {
+    WorkTreeFilters {
+        org: Some(org_id.map_or_else(|| IdOrWord::Word("none".into()), IdOrWord::Id)),
+        group: Some(group_id.to_string()),
+        ..base.clone()
+    }
+}
+
+/// A section's bucket: its org and its group id.
+type SectionKey<'a> = (Option<i64>, &'a str);
+
+/// [`TreeArgs::sections`], each paged from the summaries already built:
+/// exactly the first page a read with [`section_filters`] answers.
+fn section_pages(
+    g: &Graph,
+    summaries: &[TaskSummary<'_>],
+    others: &HashMap<i64, BTreeSet<String>>,
+    org_names: &HashMap<i64, String>,
+    args: &TreeArgs,
+    per_task: usize,
+) -> Vec<TreeSection> {
+    // A section's filters differ from the view's only in the org and the
+    // group, which bucket the tasks: every other filter is checked once.
+    let rest = WorkTreeFilters {
+        org: None,
+        group: None,
+        ..args.filters.clone()
+    };
+    let mut buckets: HashMap<SectionKey<'_>, Vec<(SortKey, usize)>> = HashMap::new();
+    for (i, s) in summaries.iter().enumerate() {
+        let t = &s.task;
+        if matches_filters(t, &rest, false) {
+            buckets
+                .entry((t.org_id, t.group.id.as_str()))
+                .or_default()
+                .push((sort_key(t, org_names), i));
+        }
+    }
+    for bucket in buckets.values_mut() {
+        bucket.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    args.sections
+        .iter()
+        .map(|ask| {
+            let limit = ask
+                .limit
+                .unwrap_or(TREE_DEFAULT_LIMIT)
+                .clamp(1, TREE_MAX_LIMIT);
+            let hash = filters_hash(&section_filters(&args.filters, ask.org_id, &ask.group_id));
+            let all = buckets
+                .get(&(ask.org_id, ask.group_id.as_str()))
+                .map_or(&[][..], Vec::as_slice);
+            let page = &all[..all.len().min(limit)];
+            let next_cursor = if all.len() > limit {
+                page.last().map(|(k, _)| encode_cursor(hash, k))
+            } else {
+                None
+            };
+            TreeSection {
+                org_id: ask.org_id,
+                group_id: ask.group_id.clone(),
+                tasks: page
+                    .iter()
+                    .map(|(_, i)| summaries[*i].to_page_task(g, per_task, others))
+                    .collect(),
+                next_cursor,
+            }
+        })
+        .collect()
 }
 
 /// `work { action: tree, filters?, cursor?, limit?, per_task? }`.
 pub fn tree(store: &Mutex<Store>, scope: &OrgScope, args: &TreeArgs) -> Result<TreePage, IpcError> {
-    check_filters(&args.filters)?;
     let g = {
         let s = lock(store)?;
         Graph::load(&s, scope)?
@@ -1612,10 +1846,38 @@ pub(crate) fn find_task(
 
 /// `work { action: task, task_id }`.
 pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<TaskDetail, IpcError> {
-    let s = lock(store)?;
-    let g = Graph::load(&s, scope)?;
+    let g = {
+        let s = lock(store)?;
+        Graph::load(&s, scope)?
+    };
     let (task, aliases) = find_task(&g, scope, task_id, true)?;
     let item = task.item_id.and_then(|i| g.items.get(&i));
+    // The newest past session the caller sees, and the conversations it
+    // ran (for its last outcome).
+    let last = task
+        .sessions
+        .iter()
+        .filter(|l| l.state == "ended")
+        .max_by_key(|l| (l.ended_at.unwrap_or(0), l.link_id));
+    let conversations: Vec<String> = last
+        .and_then(|l| g.links.iter().find(|v| v.link.id == l.link_id))
+        .and_then(|v| v.link.snap_claude_ids.as_deref())
+        .and_then(|j| serde_json::from_str(j).ok())
+        .unwrap_or_default();
+    // The one item's description (the graph reads no description), and
+    // that journal: a second, short lock.
+    let (meta, journal) = {
+        let s = lock(store)?;
+        let meta = item
+            .map(|i| s.work_item_meta(i.item.id))
+            .transpose()?
+            .unwrap_or_default();
+        let journal = match last {
+            Some(_) => s.journal_for_conversations(&conversations)?,
+            None => Vec::new(),
+        };
+        (meta, journal)
+    };
     // The tracker that might serve the whole description, and the key to name
     // it by — flattened as every other `fence_ticket` call site flattens it
     // (`defuse` alone does not fold a newline), because it ends up inside
@@ -1626,16 +1888,14 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
     let flat_key = item
         .and_then(|i| i.item.key.as_deref())
         .map(|k| k.split_whitespace().collect::<Vec<_>>().join(" "));
-    let excerpt = item
-        .and_then(|i| i.meta.description.clone())
-        .filter(|d| !d.trim().is_empty());
+    let excerpt = meta.description.clone().filter(|d| !d.trim().is_empty());
     // The full length and whether the answer shows less of it, for every
     // caller: a person's screen has no fence notice to read it from. The
     // larger of the tracker's count and the excerpt's own, so a count that
     // trimmed differently from the excerpt never hides a cut.
     let description_chars = excerpt.as_deref().map(|d| {
         let cached = d.chars().count();
-        item.and_then(|i| i.meta.description_chars)
+        meta.description_chars
             .and_then(|n| usize::try_from(n).ok())
             .map_or(cached, |n| n.max(cached))
     });
@@ -1658,50 +1918,36 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
             &d,
             "a tracker ticket",
             DESCRIPTION_MAX_CHARS,
-            item.and_then(|i| i.meta.description_chars),
+            meta.description_chars,
             crate::service::trackers::tickets::describe_offer(tracker, flat_key.as_deref()),
         ),
         // A person reads it on a phone or the desktop (bound or not): as
         // is, exactly as before.
         _ => d.chars().take(DESCRIPTION_MAX_CHARS).collect(),
     });
-    // The newest past session the caller sees, and its conversation's
-    // newest summary, note or outcome.
-    let last_outcome = task
-        .sessions
-        .iter()
-        .filter(|l| l.state == "ended")
-        .max_by_key(|l| (l.ended_at.unwrap_or(0), l.link_id))
-        .map(|l| -> Result<LastOutcome, IpcError> {
-            let ids: Vec<String> = g
-                .links
-                .iter()
-                .find(|v| v.link.id == l.link_id)
-                .and_then(|v| v.link.snap_claude_ids.as_deref())
-                .and_then(|j| serde_json::from_str(j).ok())
-                .unwrap_or_default();
-            let rows = s.journal_for_conversations(&ids)?;
-            let pick = rows.iter().rev().find(|r| {
-                matches!(r.kind.as_str(), "summary" | "note" | "outcome") && r.body.is_some()
-            });
-            let summary = pick.and_then(|r| r.body.clone()).map(|b| match scope {
-                OrgScope::Host { .. } => {
-                    crate::mcp::guard::fence_untrusted(&b, "a work journal", OUTCOME_MAX_CHARS)
-                }
-                _ => b.chars().take(OUTCOME_MAX_CHARS).collect(),
-            });
-            Ok(LastOutcome {
-                at: l.ended_at.unwrap_or(0),
-                name: l.name.clone(),
-                host: l.host.clone(),
-                branch: l.branch.clone(),
-                pr_url: l.pr_url.clone(),
-                end_reason: l.end_reason.clone(),
-                summary,
-                summary_kind: pick.map(|r| r.kind.clone()),
-            })
-        })
-        .transpose()?;
+    // The newest past session's conversations' newest summary, note or
+    // outcome.
+    let last_outcome = last.map(|l| {
+        let pick = journal.iter().rev().find(|r| {
+            matches!(r.kind.as_str(), "summary" | "note" | "outcome") && r.body.is_some()
+        });
+        let summary = pick.and_then(|r| r.body.clone()).map(|b| match scope {
+            OrgScope::Host { .. } => {
+                crate::mcp::guard::fence_untrusted(&b, "a work journal", OUTCOME_MAX_CHARS)
+            }
+            _ => b.chars().take(OUTCOME_MAX_CHARS).collect(),
+        });
+        LastOutcome {
+            at: l.ended_at.unwrap_or(0),
+            name: l.name.clone(),
+            host: l.host.clone(),
+            branch: l.branch.clone(),
+            pr_url: l.pr_url.clone(),
+            end_reason: l.end_reason.clone(),
+            summary,
+            summary_kind: pick.map(|r| r.kind.clone()),
+        }
+    });
     let rules = g
         .rules
         .iter()
@@ -1741,12 +1987,7 @@ fn brief_of(g: &Graph, task_id: &str, item: Option<&ViewItem>, ref_key: Option<&
             .and_then(|i| i.item.key.clone())
             .or_else(|| ref_key.map(str::to_string)),
         title: item.map(|i| i.item.title.clone()).unwrap_or_default(),
-        kind: match item {
-            Some(i) if i.item.tracker_id.is_some() => "tracker",
-            Some(_) => "local",
-            None => "ref",
-        }
-        .into(),
+        kind: task_kind(item).into(),
         // The same live precedence `to_task` projects (§2, fix round 1):
         // two views of the same item must not disagree about its status.
         // `working_session_items` is the same page-wide one-join set —
@@ -1783,27 +2024,25 @@ pub fn session_tasks(
     scope: &OrgScope,
     session_id: i64,
 ) -> Result<SessionTasks, IpcError> {
-    let s = lock(store)?;
-    let g = Graph::load(&s, scope)?;
+    let g = {
+        let s = lock(store)?;
+        Graph::load(&s, scope)?
+    };
     let row = g
         .sessions
         .get(&session_id)
         .filter(|r| scope.sees_row(r))
         .ok_or_else(|| crate::service::orgs::not_found("session", session_id))?;
-    let mine: Vec<ViewLink> = s.work_view_session_links(session_id)?;
     let built = build_tasks(&g, scope);
     let others = active_tasks_by_session(&built);
     let visible_tasks: HashMap<&str, &Built<'_>> =
         built.iter().map(|b| (b.task_id.as_str(), b)).collect();
     let mut links = Vec::new();
     let mut primary = None;
-    for l in &mine {
-        let Some(tid) = Graph::task_id_of(l) else {
-            continue;
-        };
-        // The link as the graph holds it (its session join), so its state
-        // and visibility are the tree's.
-        let Some(gl) = g.links.iter().find(|x| x.link.id == l.link.id) else {
+    // The links of the session's live participant (the graph's session
+    // join), so their state and visibility are the tree's.
+    for gl in g.links.iter().filter(|l| l.session_id == Some(session_id)) {
+        let Some(tid) = Graph::task_id_of(gl) else {
             continue;
         };
         // A live session's link that ended on a branch change reads
@@ -1821,7 +2060,15 @@ pub fn session_tasks(
             primary = Some(gl.link.id);
         }
         links.push(SessionTaskLink {
-            link: task_link(&g, gl, state, &tid, &others, true),
+            link: task_link(
+                &g,
+                gl,
+                state,
+                &tid,
+                &others,
+                true,
+                needs_you_of(&g, g.session_of(gl)),
+            ),
             task: brief_of(&g, &tid, b.item, b.ref_key.as_deref()),
         });
     }
@@ -1938,17 +2185,13 @@ pub(crate) fn review_of(
             .map(|(l, _)| *l)
             .collect();
         for (l, st) in links {
+            // One line per piece of evidence that reads as evidence.
             let why = || -> Vec<String> {
                 l.link
                     .evidence
                     .iter()
                     .filter_map(|e| serde_json::from_value::<Evidence>(e.clone()).ok())
-                    .map(|e| {
-                        why_line(
-                            &l.link.source,
-                            &[serde_json::to_value(e).unwrap_or_default()],
-                        )
-                    })
+                    .map(|e| why_of(&e))
                     .collect::<Vec<_>>()
             };
             let kind = match *st {

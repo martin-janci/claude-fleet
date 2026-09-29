@@ -53,9 +53,7 @@ mod work_tidy;
 mod work_usage;
 mod work_view;
 
-pub use bench_work_link::{
-    BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow, BENCH_PERSON_SOURCES,
-};
+pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
 };
@@ -250,6 +248,13 @@ impl EventBus for StoreBus {
             return;
         }
         self.deliver(e);
+    }
+
+    /// Straight through, never held: a threshold, not a row change, and a
+    /// setting write does not roll back with an enclosing transaction's
+    /// events.
+    fn context_red_pct_changed(&self, pct: f64) {
+        self.inner.context_red_pct_changed(pct);
     }
 }
 
@@ -542,6 +547,13 @@ impl Store {
             rusqlite::params![key, value],
         )?;
         Ok(())
+    }
+
+    /// Tell the bus the `health.context_red_pct` in force is now `pct`
+    /// ([`EventBus::context_red_pct_changed`]). `service::settings::set`
+    /// calls it on every write of that setting.
+    pub fn context_red_pct_changed(&self, pct: f64) {
+        self.bus.context_red_pct_changed(pct);
     }
 
     /// Emit `settings:changed` for `key` (declarative pages P3). Called by

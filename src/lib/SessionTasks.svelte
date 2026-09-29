@@ -20,7 +20,7 @@
     rejectWorkLink,
     unlinkSessionWork,
     type WorkRef,
-    onWorkChangedDebounced,
+    workChanged,
   } from './work';
   import { workTickets, type TicketRow } from './trackers';
   import { timeAgo } from './session_status';
@@ -68,8 +68,19 @@
     data = r.value && Array.isArray(r.value.links) ? r.value : null;
   }
 
-  // Reload on another session, and when this one's work changed:
-  // `work_rev` moves on any live link's change (a secondary one too).
+  // One trigger for a re-read of this session: its own work moving (the
+  // sig below) and the global tick land in the same debounced `load` — a
+  // `session:updated` that moves `work_rev` does both.
+  let loadTimer: ReturnType<typeof setTimeout> | undefined;
+  function scheduleLoad() {
+    clearTimeout(loadTimer);
+    loadTimer = setTimeout(() => void load(session.id), debounceMs);
+  }
+
+  // Load at once on another session; re-read (debounced) when this one's
+  // work changed: `work_rev` moves on any live link's change (a secondary
+  // one too), and a session whose links are all secondary has no `work`
+  // for the global tick to notice.
   const workSig = $derived(
     `${session.id}|${session.work?.link_id ?? ''}|${session.work_suggested?.link_id ?? ''}|${session.work_suggested?.suggestions ?? ''}|${session.work_rev ?? 0}`,
   );
@@ -85,13 +96,25 @@
       data = null;
       notice = null;
       adding = false;
+      clearTimeout(loadTimer);
+      void load(id);
+      return;
     }
-    void load(id);
+    scheduleLoad();
   });
 
-  const off = onWorkChangedDebounced(() => void load(session.id), () => debounceMs);
+  // The tick itself, not its debounced run: the timer above is the debounce.
+  let firstTick = true;
+  const off = workChanged.subscribe(() => {
+    if (firstTick) {
+      firstTick = false;
+      return;
+    }
+    scheduleLoad();
+  });
   onDestroy(() => {
     off();
+    clearTimeout(loadTimer);
     clearTimeout(searchTimer);
   });
 

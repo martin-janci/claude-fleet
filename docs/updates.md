@@ -15,8 +15,9 @@ and the phones. Design and rationale:
 > from 0.4.1 trusts it; until 0.4.1 is released there is no channel to
 > read, so nothing is offered yet. `fleet-hub update check` asks the
 > channel directly (slice S3). `fleet-updater`, the desktop and the phone
-> install nothing yet (slices S6–S8), and there is no `nightly` channel
-> yet (S2b).
+> install nothing yet (slices S6–S8): on a standalone desktop the Settings
+> → Updates rows have no effect. A hub that cannot verify a channel still
+> offers nothing, and there is no `nightly` channel yet (S2b).
 
 ## Who decides what
 
@@ -41,7 +42,7 @@ A desktop with no hub reads the channel itself (Git mode) and applies its own
 |-------|-----------------|
 | `stable` | `vX.Y.Z` releases |
 | `beta` | `-rc.N` release candidates, and every stable release too |
-| `nightly` | every green `main` commit, as `X.Y.Z-dev.N.g<sha>` (not published yet) |
+| `nightly` | every green `main` commit, as `X.Y.Z-dev.N.g<sha>` (not published yet, and not selectable in `update.track` until S2b) |
 
 ## What the hub answers
 
@@ -80,10 +81,15 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   rollback. A pin the publisher does not permit (withdrawn, below its signed
   minimum) is held, never served.
 - **Re-read the channel now.** `update_admin { action: refresh }`. The hub
-  also re-reads it every `update.check_interval_secs`. A failed read keeps
-  the last good copy, and `update_status.last_refresh` says why it failed.
+  also re-reads it every `update.check_interval_secs`, and at once when
+  `update.track` or `update.check_interval_secs` changes. A failed read
+  keeps the last good copy, is logged at `warn`, and
+  `update_status.last_refresh` says why it failed.
   `FLEET_UPDATE_CHANNEL_URL` points the hub at a mirror. It changes only
   where the documents come from: what is trusted is still the signature.
+- **The transition log.** Every phase a target reports is also kept in
+  `update_events` (90 days, the newest 200 per target) for the rollout
+  view of slice S4b. Nothing reads it out yet: no tool or route exposes it.
 - **Ask the channel from the hub box.** `fleet-hub update check` reads the
   published channel itself (Git mode), verifies it against the release key,
   and says what this hub build should run under its own `update.*`

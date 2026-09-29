@@ -534,7 +534,7 @@ impl Store {
     }
 
     /// What a person's unlinks hold for `participant` (R9u, migration
-    /// 066): `(target, signal, value)`, the target labelled as
+    /// 070): `(target, signal, value)`, the target labelled as
     /// [`Self::detection_links`] labels a link (the item's current key, the
     /// bare key, or `item:<id>`).
     pub fn work_unlink_holds(
@@ -767,17 +767,43 @@ impl Store {
     /// Driven from `sessions`, then each session's participant and its live
     /// links, all by index.
     pub fn detection_backlog(&self, before: i64, host: Option<&str>) -> Result<u32, IpcError> {
-        let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM sessions s \
-             JOIN participants p ON p.session_id = s.id AND p.retired_at IS NULL \
-             JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
-             WHERE l.state = 'suggested' AND l.created_at < ?1 \
-               AND (?2 IS NULL OR s.host_alias = ?2) \
-               AND (l.strength IS NOT 'weak' OR NOT EXISTS \
-                    (SELECT 1 FROM work_links c \
-                      WHERE c.participant_id = p.id AND c.ended_at IS NULL \
-                        AND c.is_primary = 1 AND c.state = 'confirmed'))",
+        self.detection_backlog_where(
+            "(?2 IS NULL OR s.host_alias = ?2)",
             rusqlite::params![before, host],
+        )
+    }
+
+    /// [`Self::detection_backlog`] summed over `hosts` in one query (an
+    /// org-bound client's `fleet_health`, which used to ask once per host).
+    pub fn detection_backlog_on(&self, before: i64, hosts: &[String]) -> Result<u32, IpcError> {
+        let hosts = serde_json::to_string(hosts)
+            .map_err(|e| IpcError::new(codes::E_INTERNAL, e.to_string()))?;
+        self.detection_backlog_where(
+            "s.host_alias IN (SELECT value FROM json_each(?2))",
+            rusqlite::params![before, hosts],
+        )
+    }
+
+    /// The backlog count with `host_filter` (a condition on `s.host_alias`
+    /// over `?2`) in place of the host clause; `?1` is `before`.
+    fn detection_backlog_where(
+        &self,
+        host_filter: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<u32, IpcError> {
+        let n: i64 = self.conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM sessions s \
+                 JOIN participants p ON p.session_id = s.id AND p.retired_at IS NULL \
+                 JOIN work_links l ON l.participant_id = p.id AND l.ended_at IS NULL \
+                 WHERE l.state = 'suggested' AND l.created_at < ?1 \
+                   AND {host_filter} \
+                   AND (l.strength IS NOT 'weak' OR NOT EXISTS \
+                        (SELECT 1 FROM work_links c \
+                          WHERE c.participant_id = p.id AND c.ended_at IS NULL \
+                            AND c.is_primary = 1 AND c.state = 'confirmed'))"
+            ),
+            params,
             |r| r.get(0),
         )?;
         Ok(u32::try_from(n).unwrap_or(u32::MAX))
@@ -908,6 +934,18 @@ mod tests {
             s.detection_backlog(now, None).unwrap(),
             3,
             "the recent one too"
+        );
+    }
+
+    /// Migration 082: deleting a work item finds its unlinks (the cascade)
+    /// by `idx_work_unlinks_item`, not by scanning the table.
+    #[test]
+    fn the_item_cascade_uses_the_work_unlinks_item_index() {
+        let s = Store::open_in_memory().unwrap();
+        let plan = s.query_plan("SELECT id FROM work_unlinks WHERE item_id = 1");
+        assert!(
+            plan.iter().any(|d| d.contains("idx_work_unlinks_item")),
+            "expected idx_work_unlinks_item in the plan: {plan:?}"
         );
     }
 }

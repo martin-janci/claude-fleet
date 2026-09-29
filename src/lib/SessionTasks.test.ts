@@ -13,7 +13,7 @@ import SessionTasks from './SessionTasks.svelte';
 import { sessions } from './sessions';
 import { session } from './hosts_fixture';
 import { link } from './work_view_fixture';
-import { selectedTaskId, sidebarView, taskDetailOpen, type SessionTasks as Tasks } from './work_view';
+import { bumpWorkChanged, selectedTaskId, sidebarView, taskDetailOpen, type SessionTasks as Tasks } from './work_view';
 
 const ref = (task_id: string, key: string, title: string) => ({
   task_id,
@@ -174,7 +174,7 @@ describe('SessionTasks', () => {
   });
 
   it('re-reads when a secondary link changed (work_rev), not on a status tick', async () => {
-    const { rerender } = render(SessionTasks, { session: row });
+    const { rerender } = render(SessionTasks, { session: row, debounceMs: 5 });
     await flush();
     expect(calls('work_session_tasks').length).toBe(1);
     // The primary is the same; only the claude status moved: nothing to read.
@@ -184,8 +184,38 @@ describe('SessionTasks', () => {
     // A secondary link was added / removed elsewhere: the primary did not
     // move, `work_rev` did.
     await rerender({ session: { ...row, work_rev: 17 } });
+    await new Promise((r) => setTimeout(r, 30));
     await flush();
     expect(calls('work_session_tasks').length).toBe(2);
+  });
+
+  it('a work_rev move and the tick it brings are one read; another session loads at once', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const { rerender } = render(SessionTasks, { session: row, debounceMs: 500 });
+      await flush();
+      expect(calls('work_session_tasks')).toHaveLength(1);
+      // A `session:updated` moves `work_rev`: the row changes, and App bumps
+      // the tick for it, within one debounce window.
+      await rerender({ session: { ...row, work_rev: 18 } });
+      bumpWorkChanged('session');
+      vi.advanceTimersByTime(200);
+      await flush();
+      bumpWorkChanged();
+      vi.advanceTimersByTime(600);
+      await flush();
+      expect(calls('work_session_tasks')).toHaveLength(2);
+      // Another session: at once, without waiting for the debounce.
+      await rerender({ session: { ...row, id: 8, work_rev: 18 } });
+      await flush();
+      expect(calls('work_session_tasks')).toHaveLength(3);
+      expect(calls('work_session_tasks').at(-1)).toEqual({ session_id: 8 });
+      vi.advanceTimersByTime(600);
+      await flush();
+      expect(calls('work_session_tasks')).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('stays out of the way on an older hub', async () => {

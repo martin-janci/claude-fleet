@@ -95,18 +95,6 @@ export const HAS_SESSION_LABELS: Record<HasSessionFilter, string> = {
  *  fleet stores. */
 export const ASSIGNEE_MINE = '@me';
 
-export function isWorkFilters(v: unknown): v is WorkFilters {
-  if (typeof v !== 'object' || v === null) return false;
-  const f = v as Record<string, unknown>;
-  return (
-    (f.tracker === 'all' || (typeof f.tracker === 'number' && Number.isInteger(f.tracker))) &&
-    (STATUS_FILTERS.includes(f.status as StatusCategoryFilter) || isStatusNameFilter(f.status)) &&
-    (f.assignee === 'all' || f.assignee === 'mine') &&
-    HAS_SESSION_FILTERS.includes(f.hasSession as HasSessionFilter) &&
-    typeof f.archived === 'boolean'
-  );
-}
-
 const PREF_KEY = 'sidebar.work-filters.v2';
 /** Before archived rows were hidden by default. Every install wrote
  *  `archived: true` there (the old default), so it says nothing about a

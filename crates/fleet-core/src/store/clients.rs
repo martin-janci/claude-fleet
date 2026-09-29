@@ -200,7 +200,8 @@ impl Store {
                     format!("no active client token named '{name}'"),
                 )
             })?;
-        let n = self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
             "UPDATE client_tokens SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL",
             rusqlite::params![id, at],
         )?;
@@ -210,6 +211,19 @@ impl Store {
                 format!("no active client token named '{name}'"),
             ));
         }
+        // The client's update state (migration 079, target `client:<id>`)
+        // goes with it: a revoked id never reports again, so its observed
+        // row would count in `update_status` forever and its pin would
+        // steer nothing. The transition log is left to its retention.
+        tx.execute(
+            "DELETE FROM update_observed WHERE target = 'client:' || ?1",
+            [id],
+        )?;
+        tx.execute(
+            "DELETE FROM update_desired WHERE target = 'client:' || ?1",
+            [id],
+        )?;
+        tx.commit()?;
         get_client_token_by_id(&self.conn, id)?.ok_or_else(|| {
             crate::ipc_error::IpcError::new(
                 codes::E_INTERNAL,
@@ -499,6 +513,57 @@ mod tests {
         assert!(s.active_client_tokens().unwrap().is_empty());
         assert_eq!(s.list_client_tokens(true).unwrap().len(), 1);
         assert!(s.list_client_tokens(false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn revoking_a_client_drops_its_update_state() {
+        let s = store();
+        let keep = s.insert_client_token("tablet", "bb22", "full").unwrap();
+        let row = s.insert_client_token("phone", "aa11", "full").unwrap();
+        for id in [row.id, keep.id] {
+            let target = format!("client:{id}");
+            s.upsert_update_observed(&crate::store::UpdateObservedRow {
+                target: target.clone(),
+                component: "desktop".into(),
+                platform: None,
+                version: "0.3.3".into(),
+                commit_sha: None,
+                build_id: None,
+                digest: None,
+                speaks: None,
+                phase: "idle".into(),
+                attempt: None,
+                last_error: None,
+                reported_at: 1,
+                last_checked_at: None,
+            })
+            .unwrap();
+            s.set_update_desired(&crate::store::UpdateDesiredRow {
+                component: "desktop".into(),
+                target,
+                version: "0.3.4".into(),
+                mandatory: false,
+                reason: None,
+                set_by: "operator".into(),
+                set_at: 1,
+            })
+            .unwrap();
+        }
+
+        s.revoke_client_token("phone").unwrap();
+
+        let gone = format!("client:{}", row.id);
+        assert!(s.update_observed(&gone).unwrap().is_none());
+        assert!(s.update_desired_for("desktop", &gone).unwrap().is_none());
+        let kept = format!("client:{}", keep.id);
+        assert!(s.update_observed(&kept).unwrap().is_some());
+        assert_eq!(
+            s.update_desired_for("desktop", &kept)
+                .unwrap()
+                .unwrap()
+                .target,
+            kept
+        );
     }
 
     #[test]

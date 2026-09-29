@@ -274,6 +274,7 @@ describe('the panels that do not apply to a hub client', () => {
     expect((await screen.findByTestId('mcp-remote')).textContent).toContain('fleet.example.com');
     expect(screen.queryByTestId('mcp-enable')).toBeNull();
   });
+
   it('still renders Diagnostics, which is about THIS process either way', async () => {
     route();
     render(SettingsDialog, { props: { onClose: () => {} } });
@@ -289,6 +290,13 @@ describe('the panels that do not apply to a hub client', () => {
     expect(screen.getByTestId('projects-section')).toBeInTheDocument();
     expect(inv.mock.calls.some((c) => c[0] === 'describe_fleet_settings')).toBe(true);
     expect(screen.queryByTestId('projects-remote')).toBeNull();
+    // Updates are a generated page since declarative pages P3/P6, not a
+    // hand-written panel here: the note that this desktop installs nothing
+    // yet is `crates/fleet-core/pages/settings.updates.json`'s notice, and
+    // that `nightly` is not offered (S2b) is pinned in the settings
+    // registry (`nightly_is_not_offered_until_it_is_published`).
+    expect(screen.queryByTestId('update-section')).toBeNull();
+    expect(screen.queryByTestId('update-remote')).toBeNull();
   });
 });
 

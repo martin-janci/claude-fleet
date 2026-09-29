@@ -151,23 +151,21 @@ pub struct HubGauges {
 }
 
 impl HubGauges {
+    /// `pool` is the hub's read pool: the counts go through it when there is
+    /// one, so a scrape never waits behind (or holds up) the writer. The two
+    /// counts are SQL aggregates with `summarize`'s filters — no row decoded.
     pub fn read(
         store: &Mutex<crate::store::Store>,
+        pool: Option<&crate::store::ReadPool>,
         stats: &crate::service::tick::TickStats,
     ) -> Self {
         let r = stats.reconcile();
-        let (sessions_by_status, hosts_reachable) = match store.lock() {
-            Ok(s) => {
-                // The same threshold `fleet_health` uses, so the gauges and
-                // the roll-up count the same red sessions.
-                let red = crate::service::health::context_red_pct(&s);
-                let summary = crate::service::health::summarize(
-                    &s.list_all_sessions().unwrap_or_default(),
-                    &s.list_hosts().unwrap_or_default(),
-                    red,
-                );
-                (summary.by_status, summary.hosts_reachable)
-            }
+        let (sessions_by_status, hosts_reachable) = match crate::store::read_via(pool, store).lock()
+        {
+            Ok(s) => (
+                s.count_sessions_by_claude_status().unwrap_or_default(),
+                s.count_reachable_hosts().unwrap_or_default(),
+            ),
             Err(_) => (BTreeMap::new(), 0),
         };
         Self {
@@ -206,6 +204,8 @@ pub struct MetricsState {
     pub metrics: std::sync::Arc<Metrics>,
     pub streams: std::sync::Arc<super::guard::LongPollLimiter>,
     pub store: std::sync::Arc<Mutex<crate::store::Store>>,
+    /// The hub's read-only connections; `None` reads through `store`.
+    pub read_pool: Option<std::sync::Arc<crate::store::ReadPool>>,
     pub stats: std::sync::Arc<crate::service::tick::TickStats>,
 }
 
@@ -229,7 +229,15 @@ pub async fn handle_metrics(
             .into_response();
     }
     let streams = state.streams.active_by_key();
-    let hub = HubGauges::read(&state.store, &state.stats);
+    // A blocking SQLite read: off the async worker.
+    let hub = {
+        let state = state.clone();
+        tokio::task::spawn_blocking(move || {
+            HubGauges::read(&state.store, state.read_pool.as_deref(), &state.stats)
+        })
+        .await
+        .unwrap_or_default()
+    };
     (
         [(
             axum::http::header::CONTENT_TYPE,
@@ -323,6 +331,44 @@ mod tests {
             m.expose(&BTreeMap::new(), &none),
             m.expose(&BTreeMap::new(), &none)
         );
+    }
+
+    /// With a read pool, a scrape reads through it: holding the WRITER's
+    /// lock (a reconcile pass mid-transaction) does not stall `/metrics`.
+    #[test]
+    fn hub_gauges_read_through_the_pool_without_the_writer() {
+        use std::sync::Arc;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let store =
+            crate::store::Store::open_with_bus(&path, Arc::new(crate::events::NoopEventBus))
+                .unwrap();
+        store.upsert_host("box").unwrap();
+        store
+            .upsert_session("s", "box", None, None, 0, 0, "running", None)
+            .unwrap();
+        let writer = Arc::new(Mutex::new(store));
+        let pool = Arc::new(
+            crate::store::ReadPool::open(&path, crate::store::READ_POOL_SIZE)
+                .unwrap()
+                .expect("a WAL file opens a pool"),
+        );
+        let stats = crate::service::tick::tick_stats();
+
+        let _held = writer.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let writer = Arc::clone(&writer);
+            let pool = Arc::clone(&pool);
+            std::thread::spawn(move || {
+                let _ = tx.send(HubGauges::read(&writer, Some(&*pool), &stats));
+            });
+        }
+        let hub = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the pooled read must not wait on the writer's lock");
+        assert_eq!(hub.hosts_reachable, 1);
+        assert_eq!(hub.sessions_by_status.get("unknown"), Some(&1));
     }
 
     #[test]
