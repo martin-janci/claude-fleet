@@ -80,6 +80,20 @@ impl Track {
             Track::Nightly => "nightly",
         }
     }
+
+    pub const ALL: [Track; 3] = [Track::Stable, Track::Beta, Track::Nightly];
+}
+
+impl std::str::FromStr for Track {
+    type Err = String;
+
+    /// The inverse of [`Track::as_str`] (and of the serde name).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Track::ALL
+            .into_iter()
+            .find(|t| t.as_str() == s)
+            .ok_or_else(|| format!("unknown track {s:?}: expected stable, beta or nightly"))
+    }
 }
 
 /// The policy mode for one component (design §7.3). "Mandatory" is not a
@@ -168,7 +182,7 @@ impl From<Window> for [u32; 2] {
 
 #[cfg(test)]
 mod tests {
-    use super::Component;
+    use super::{Component, Track};
 
     #[test]
     fn component_parses_what_it_prints_and_what_serde_prints() {
@@ -180,5 +194,18 @@ mod tests {
             );
         }
         assert!("fridge".parse::<Component>().is_err());
+    }
+
+    #[test]
+    fn track_parses_what_it_prints_and_what_serde_prints() {
+        for t in Track::ALL {
+            assert_eq!(t.as_str().parse::<Track>(), Ok(t));
+            assert_eq!(
+                serde_json::to_value(t).unwrap(),
+                serde_json::Value::String(t.as_str().into())
+            );
+        }
+        let err = "edge".parse::<Track>().unwrap_err();
+        assert!(err.contains("stable, beta or nightly"), "{err}");
     }
 }

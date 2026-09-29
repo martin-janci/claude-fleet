@@ -13,7 +13,7 @@ use crate::manifest::{
     AgentProtoCompat, Artifact, Compatibility, ComponentRelease, ContractCompat, PeerProtoCompat,
     ReleaseInfo, ReleaseManifest, StoreCompat, MANIFEST_SCHEMA,
 };
-use crate::model::{Track, Window};
+use crate::model::{Component, Track, Window};
 use crate::time::format_rfc3339;
 use crate::Version;
 
@@ -325,13 +325,7 @@ pub fn channel_edit(
             doc.rollback = v;
         }
         Edit::Minimum { component, version } => {
-            const COMPONENTS: [&str; 5] = ["hub", "agent", "desktop", "android", "ios"];
-            if !COMPONENTS.contains(&component.as_str()) {
-                return Err(format!(
-                    "component must be one of {}",
-                    COMPONENTS.join(" | ")
-                ));
-            }
+            known_component(&component)?;
             match version {
                 Some(v) => {
                     doc.minimum_supported.insert(component, v);
@@ -343,6 +337,11 @@ pub fn channel_edit(
         }
         Edit::Mandatory(m) => {
             listed(&doc, &m.version)?;
+            // A component the channel does not know (`mobile`) would never
+            // match a target, so the mandate would silently apply to none.
+            for c in &m.components {
+                known_component(c)?;
+            }
             if let Some(d) = &m.deadline {
                 crate::time::parse_rfc3339(d)
                     .ok_or_else(|| format!("deadline {d:?} is not RFC 3339"))?;
@@ -353,6 +352,17 @@ pub fn channel_edit(
     }
     stamp(&mut doc, now, expires_days);
     Ok(doc)
+}
+
+/// `Ok` when `c` names a [`Component`], else an error listing the valid ones.
+fn known_component(c: &str) -> Result<(), String> {
+    c.parse::<Component>().map(|_| ()).map_err(|_| {
+        let all: Vec<&str> = Component::ALL.iter().map(|c| c.as_str()).collect();
+        format!(
+            "unknown component {c:?}: must be one of {}",
+            all.join(" | ")
+        )
+    })
 }
 
 /// The exact bytes CI signs and publishes for a document: pretty JSON with a
@@ -619,6 +629,20 @@ mod tests {
             14
         )
         .is_err());
+        let mandatory_for = |component: &str| {
+            Edit::Mandatory(Mandatory {
+                version: v("0.4.1"),
+                components: vec![component.into()],
+                reason: "security".into(),
+                deadline: None,
+            })
+        };
+        let err = channel_edit(d.clone(), mandatory_for("mobile"), now, 14).unwrap_err();
+        assert!(
+            err.contains("\"mobile\"") && err.contains("android"),
+            "{err}"
+        );
+        assert!(channel_edit(d.clone(), mandatory_for("android"), now, 14).is_ok());
         d = channel_edit(
             d,
             Edit::Mandatory(Mandatory {

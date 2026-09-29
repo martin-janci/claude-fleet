@@ -87,14 +87,9 @@ impl Opts {
         Version::parse(s).map_err(|e| format!("--{k} {s:?}: {e}"))
     }
     fn track(&self) -> Result<Track, String> {
-        match self.req("track")? {
-            "stable" => Ok(Track::Stable),
-            "beta" => Ok(Track::Beta),
-            "nightly" => Ok(Track::Nightly),
-            other => Err(format!(
-                "--track must be stable | beta | nightly, got {other:?}"
-            )),
-        }
+        self.req("track")?
+            .parse()
+            .map_err(|e| format!("--track: {e}"))
     }
     fn now(&self) -> Result<i64, String> {
         let wall = std::time::SystemTime::now()

@@ -40,15 +40,9 @@ pub enum UpdateCmd {
     },
 }
 
+/// `--track`, with the flag named in the error.
 fn parse_track(s: &str) -> Result<Track, String> {
-    match s {
-        "stable" => Ok(Track::Stable),
-        "beta" => Ok(Track::Beta),
-        "nightly" => Ok(Track::Nightly),
-        other => Err(format!(
-            "--track {other:?}: expected stable, beta or nightly"
-        )),
-    }
+    s.parse().map_err(|e| format!("--track: {e}"))
 }
 
 /// A closed-set value as it is spelled on the wire.

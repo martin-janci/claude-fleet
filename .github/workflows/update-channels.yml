@@ -34,7 +34,7 @@ on:
         required: false
         default: ''
       component:
-        description: Component (minimum, clear-minimum, mandatory) — hub, agent, desktop, mobile
+        description: Component (minimum, clear-minimum, mandatory) — hub, agent, desktop, android, ios
         required: false
         default: ''
       reason:
