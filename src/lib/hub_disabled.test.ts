@@ -209,7 +209,7 @@ describe('the asset catalog on a hub client', () => {
     expect(row.getAttribute('title')).toContain('mac: drifted');
     expect(screen.getByTestId('assets-head').textContent).toContain('abcdef1');
     // Unmanaged rows are listed, with nothing to import them into.
-    expect(screen.getByTestId('unmanaged-row-nas-claude-skill-extra').textContent).not.toContain('Import');
+    expect(screen.getByTestId('identity-row-skill-extra').textContent).not.toContain('Import');
   });
 
   it('scans the hosts through the hub and re-reads the overview', async () => {

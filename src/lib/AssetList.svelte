@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { groupByKind, stateCounts, type AssetListing, type AssetInventoryRow } from './assets';
+  import { groupByKind, stateCounts, identitiesOf, hostOrder, type AssetListing, type AssetIdentity } from './assets';
+  import HostStrip from './HostStrip.svelte';
 
   let {
     listing,
@@ -13,7 +14,7 @@
     selected: { kind: string; name: string } | null;
     filter: string;
     onselect: (kind: string, name: string) => void;
-    onimport: (row: AssetInventoryRow) => void;
+    onimport: (identity: AssetIdentity) => void;
     /** An overview (a hub-client desktop): no detail to open, nothing to
      *  import — each row says where the asset is and in what state. */
     readonly?: boolean;
@@ -28,7 +29,14 @@
       assets: g.assets.filter((a) => filter === '' || a.name.includes(filter) || a.description.toLowerCase().includes(filter.toLowerCase())),
     })).filter((g) => g.assets.length > 0),
   );
-  const unmanaged = $derived(listing.unmanaged.filter((r) => filter === '' || r.name.includes(filter)));
+  const ids = $derived(identitiesOf(listing).filter((i) => filter === '' || i.name.toLowerCase().includes(filter.toLowerCase())));
+  const order = $derived(hostOrder(identitiesOf(listing)));
+  let showInternals = $state(false);
+  const internal = (i: AssetIdentity) => i.class === 'fleet_internal' || i.class === 'harness_internal';
+  const visible = $derived(ids.filter((i) => showInternals || !internal(i)));
+  const hiddenCount = $derived(ids.filter(internal).length);
+  const orphans = $derived(listing.unmanaged.filter((r) => r.state === 'orphan' && (filter === '' || r.name.includes(filter))));
+  const oddHosts = (i: AssetIdentity) => (i.reason?.startsWith('copies differ on ') ? i.reason.slice(17).split(', ') : []);
   const isSel = (kind: string, name: string) => selected?.kind === kind && selected?.name === name;
 </script>
 
@@ -59,22 +67,32 @@
       {/if}
     {/each}
   {/each}
-  {#if unmanaged.length > 0}
-    <div class="group-header">On hosts, not in catalog <span class="count">{unmanaged.length}</span></div>
-    {#each unmanaged as r (`${r.host_alias}:${r.harness}:${r.kind}:${r.name}`)}
-      <div class="row unmanaged" data-testid={`unmanaged-row-${r.host_alias}-${r.harness}-${r.kind}-${r.name}`}>
-        <span class="name">{r.name}</span>
-        <span class="meta">{r.kind} · {r.host_alias}</span>
-        {#if r.state === 'orphan'}
-          <!-- Fleet installed this and will remove it on the next sync — it
-               is not "yours to import", so no Import button here. -->
-          <span class="badge orphan" data-testid={`orphan-badge-${r.host_alias}-${r.harness}-${r.kind}-${r.name}`}>orphan</span>
-        {:else if !readonly}
-          <button class="link" onclick={() => onimport(r)} title="Import from this host">Import</button>
+  {#if visible.length > 0 || hiddenCount > 0}
+    <div class="group-header">On hosts, not in catalog <span class="count">{visible.length}</span></div>
+    {#each visible as i (`${i.kind}:${i.name}`)}
+      <div class="row unmanaged" data-testid={`identity-row-${i.kind}-${i.name}`}>
+        <span class="name">{i.name}</span>
+        <span class="meta">{i.kind}</span>
+        {#if i.class === 'needs_person'}<span class="badge warn" title={i.reason ?? ''}>{i.reason}</span>{/if}
+        <HostStrip {order} present={[...new Set(i.hosts.map((h) => h.host_alias))]} odd={oddHosts(i)} />
+        {#if !readonly && !internal(i)}
+          <button class="link" onclick={() => onimport(i)} title="Import this asset">Import</button>
         {/if}
       </div>
     {/each}
+    {#if hiddenCount > 0}
+      <button class="link toggle" onclick={() => (showInternals = !showInternals)}>
+        {showInternals ? 'Hide' : 'Show'} {hiddenCount} fleet internal{hiddenCount === 1 ? '' : 's'}
+      </button>
+    {/if}
   {/if}
+  {#each orphans as r (`${r.host_alias}:${r.harness}:${r.kind}:${r.name}`)}
+    <div class="row unmanaged" data-testid={`unmanaged-row-${r.host_alias}-${r.harness}-${r.kind}-${r.name}`}>
+      <span class="name">{r.name}</span>
+      <span class="meta">{r.kind} · {r.host_alias}</span>
+      <span class="badge orphan" data-testid={`orphan-badge-${r.host_alias}-${r.harness}-${r.kind}-${r.name}`}>orphan</span>
+    </div>
+  {/each}
 </div>
 
 <style>
@@ -90,7 +108,9 @@
   .meta { color: var(--fg-muted); font-size: 11px; }
   .chips { display: flex; gap: 4px; }
   .chip { font-size: 10px; padding: 1px 6px; border-radius: 8px; border: 1px solid var(--border); }
-  .chip.ok { color: #16a34a; } .chip.warn { color: #d97706; } .chip.muted { color: var(--fg-muted); }
+  .chip.ok { color: var(--usage-ok); } .chip.warn { color: var(--usage-warn); } .chip.muted { color: var(--fg-muted); }
   .link { background: none; border: 0; color: var(--accent); cursor: pointer; font-size: 12px; }
-  .badge.orphan { font-size: 10px; padding: 1px 6px; border-radius: 8px; border: 1px solid var(--border); color: #d97706; }
+  .link.toggle { display: block; padding: 4px 10px; font-size: 11px; }
+  .badge.orphan { font-size: 10px; padding: 1px 6px; border-radius: 8px; border: 1px solid var(--border); color: var(--usage-warn); }
+  .badge.warn { color: var(--usage-warn); font-size: 10px; padding: 1px 6px; border-radius: 8px; border: 1px solid var(--border); }
 </style>

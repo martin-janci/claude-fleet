@@ -11,6 +11,7 @@ import {
   createAsset, updateAsset, deleteAsset, addResource, removeResource, lintAsset, lintAll,
   commitPending, pushCatalog, repoStatus, assetTemplate, spawnAuthorSession, resourceSize,
   repoStatusStore, KIND_FIELDS, TOOLS, TIERS, EVENTS,
+  identitiesOf, hostOrder,
   type AssetInventoryRow, type AssetListing, type SyncPlan, type HostPlan, type SyncAction,
   type EditableAsset,
 } from './assets';
@@ -102,6 +103,24 @@ describe('assets store', () => {
     expect(groups.map((g) => g.kind)).toEqual(['skill', 'agent']);
     expect(groups[0].assets[0].name).toBe('s');
     expect(stateCounts(listing.assets[0].hosts)).toEqual({ in_sync: 1, drifted: 1, missing: 0, unsupported: 0 });
+  });
+
+  it('identitiesOf prefers the server grouping and falls back to client-side', () => {
+    const rows = [
+      row({ host_alias: 'oci', name: 'w', state: 'unmanaged', managed: false }),
+      row({ host_alias: 'local', name: 'w', state: 'unmanaged', managed: false }),
+      row({ host_alias: 'local', name: 'gone', state: 'orphan' }),
+    ];
+    const fallback = identitiesOf({ ...listing, unmanaged: rows, identities: undefined });
+    expect(fallback.map((i) => [i.name, i.signature])).toEqual([['w', 'local,oci']]);
+    const server = { ...listing, unmanaged: rows, identities: [{ kind: 'skill', name: 'x', hosts: [], signature: 'trn', variants: 1, class: 'normal' as const, reason: null }] };
+    expect(identitiesOf(server)[0].name).toBe('x');
+  });
+
+  it('hostOrder puts local first, then alphabetical', () => {
+    const ids = [{ kind: 'skill', name: 'a', signature: 'oci,local', variants: 1, class: 'normal' as const, reason: null,
+      hosts: [{ host_alias: 'trn', harness: 'claude', host_hash: null }, { host_alias: 'local', harness: 'claude', host_hash: null }, { host_alias: 'htz', harness: 'claude', host_hash: null }] }];
+    expect(hostOrder(ids)).toEqual(['local', 'htz', 'trn']);
   });
 });
 

@@ -4,7 +4,7 @@
     catalog, catalogConfig, loadCatalogConfig, configureCatalog, loadCatalog, loadAssets, loadInventory, scanHosts,
     planSync, lastSync, lastSyncRun,
     commitPending, pushCatalog, repoStatus, repoStatusStore,
-    type HostScanResult, type AssetInventoryRow, type SyncPlan, type SyncRunSummary, type AssetKind,
+    type HostScanResult, type SyncPlan, type SyncRunSummary, type AssetKind, type AssetIdentity,
   } from './assets';
   import { hosts } from './hosts';
   import AssetList from './AssetList.svelte';
@@ -198,7 +198,11 @@
     busy = '';
   }
 
-  function onImportUnmanaged(_row: AssetInventoryRow) {
+  // The identity clicked drives which host/asset the dialog opens preset to
+  // once it accepts that (a later task adds the `host`/`only` props on
+  // `ImportDialog` and reads them off this identity) — for now it just opens
+  // the same dialog `onimport` always has.
+  function onImportUnmanaged(_identity: AssetIdentity) {
     if (importBlocked) { error = importBlocked; return; }
     showImport = true;
   }

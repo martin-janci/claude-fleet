@@ -114,7 +114,7 @@ describe('AssetsPanel', () => {
     expect(screen.getByTestId('asset-row-skill-worktree').textContent).toContain('1 in sync');
     expect(screen.getByTestId('asset-row-skill-worktree').textContent).toContain('1 missing');
     expect(screen.getByText('On hosts, not in catalog')).toBeTruthy();
-    expect(screen.getByTestId('unmanaged-row-local-claude-skill-extra')).toBeTruthy();
+    expect(screen.getByTestId('identity-row-skill-extra')).toBeTruthy();
     expect(screen.getByTestId('assets-problems').textContent).toContain('1');
     expect(screen.getByTestId('assets-head').textContent).toContain('abcdef1');
   });
@@ -218,7 +218,23 @@ describe('AssetsPanel', () => {
     expect(screen.getByTestId('orphan-badge-mefistos-claude-skill-ghost')).toBeTruthy();
     expect(within(row).queryByText('Import')).toBeNull();
     // The plain unmanaged row from `listing` still gets its Import button.
-    expect(screen.getByTestId('unmanaged-row-local-claude-skill-extra').textContent).toContain('Import');
+    expect(screen.getByTestId('identity-row-skill-extra').textContent).toContain('Import');
+  });
+
+  it('hides fleet internals behind a toggle', async () => {
+    const withInternal = {
+      ...listing,
+      identities: [
+        { kind: 'skill', name: 'extra', hosts: [{ host_alias: 'local', harness: 'claude', host_hash: null }], signature: 'local', variants: 0, class: 'normal' as const, reason: null },
+        { kind: 'hook', name: 'stop', hosts: [{ host_alias: 'local', harness: 'claude', host_hash: null }], signature: 'local', variants: 0, class: 'fleet_internal' as const, reason: null },
+      ],
+    };
+    byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: withInternal, assets_inventory: [], catalog_last_sync: null });
+    render(AssetsPanel);
+    expect(await screen.findByTestId('identity-row-skill-extra')).toBeTruthy();
+    expect(screen.queryByTestId('identity-row-hook-stop')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: /Show 1 fleet internal/ }));
+    expect(screen.getByTestId('identity-row-hook-stop')).toBeTruthy();
   });
 
   it('Sync button calls catalog_plan_sync and opens the plan dialog', async () => {
