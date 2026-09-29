@@ -61,13 +61,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: .
-          key: release-manifest
-      - run: sudo apt-get update && sudo apt-get install -y minisign
-      - run: cargo build -p fleet-update --bin fleet-release --release --locked
+      # minisign and target/release/fleet-release.
+      - uses: ./.github/actions/fleet-release
       # Every input arrives through env:, never interpolated into the run:
       # body, so a reason or version string can never be read as shell.
       - name: Write the channel documents
@@ -83,10 +78,11 @@ jobs:
           DEADLINE: ${{ inputs.deadline }}
         run: |
           set -euo pipefail
-          # Until scripts/release-key.sh has run there is nothing to re-sign:
-          # the weekly run says so instead of failing every Monday.
+          # A safety net for a fork whose keys.rs names no release key
+          # (this repository's does): its weekly run has nothing to re-sign
+          # and says so instead of failing every Monday.
           if [ "$EVENT" = schedule ] && [ -z "$(scripts/release-pubkeys.sh)" ]; then
-            echo "::notice::crates/fleet-update/src/keys.rs names no release key yet; nothing to re-sign."
+            echo "::notice::crates/fleet-update/src/keys.rs names no release key; nothing to re-sign."
             exit 0
           fi
           if [ "$EVENT" = schedule ] || [ "${OP:-resign}" = resign ]; then

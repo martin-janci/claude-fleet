@@ -160,10 +160,14 @@ jobs:
           labels: ${{ needs.meta.outputs.labels }}
           # The build context has no .git: fleet-hub's build.rs takes the
           # commit and CI build from these (`healthcheck --ready`, update
-          # design U11).
+          # design U11). The build ID is the expression release.yml gives
+          # its tarballs and signs into the manifest, `rel-<tag>-<commit>`,
+          # never this run's id: the updater requires the image's build_id
+          # to equal the manifest's (design §8.4 step 3). Every job here is
+          # tag-gated, so ref_name is always the tag.
           build-args: |
             FLEET_GIT_SHA=${{ github.sha }}
-            FLEET_BUILD_ID=gh-run-${{ github.run_id }}-${{ github.run_attempt }}
+            FLEET_BUILD_ID=rel-${{ github.ref_name }}-${{ github.sha }}
           outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/fleet-hub,push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
