@@ -154,7 +154,7 @@ A proposed-but-not-accepted item cannot be started (`E_INVALID "accept the propo
 
 ## 4. Desktop UI
 
-**My work (the Work tab's default).** It is built from one `work_tree` read, with archived items included, then grouped in the client.
+**My work (the Work tab's default).** It is built from one `work_tree` read with the current filters (the filter bar and saved views, below). `archived` is forced on, so the Done section can show finished tasks. The result is grouped in the client.
 
 - The list is split into **To do / Doing / Done**. Done is collapsed and limited to the last 7 days.
 - Roots are:
@@ -180,6 +180,32 @@ A proposed-but-not-accepted item cannot be started (`E_INVALID "accept the propo
 6. **Agent steps.** Grouped by session, collapsed, each marked *per the agent*, with the newest state per step.
 
 Tracker text, proposal text, notes, steps and results are rendered as text, never as markup.
+
+**Owner's review of the mockup (2026-09-29):**
+
+- Proposals show in the list only as the "N to review" badge. They are reviewed on the task page.
+- Agent steps stay on the task page, grouped per session and collapsed after the first group.
+- Done is collapsed by default.
+
+### Existing Work functionality: where each piece goes
+
+Nothing the Work tab does today is dropped. The new list is a new default view over the same data and the same filters.
+
+| Existing | In the new design |
+|---|---|
+| **Filters bar** (`WorkFiltersBar`): search, the Filters panel (org, tracker, status, sessions), the *Mine* and *Review* toggles | Stays on top of My work, as the same component and the same `WorkTreeFilters` object, and filters the list. The status filter narrows which sections show. |
+| *Archived* toggle | Replaced in My work by the Done section, which always reads archived tasks. It stays in Grouped view. |
+| **Saved views** (`work_views`, shared with the phone and other desktops) | Stay in the filter bar and apply to My work. A saved view is the same filters object, so existing views keep working. |
+| Org → group tree, placements, placement rules | ⋯ → **Grouped view** (today's `WorkTree`, unchanged) and ⋯ → **Placement rules**. |
+| Review tab (link suggestions) | ⋯ → **Review**. The attention strip's link-suggestion entry is unchanged. |
+| Attention strip (`ScopeAttention`, `TrackerAttention`, `LinkReview`, `TidyReview`) | Unchanged. |
+| **Today view** (the details empty state, ⌘⇧T) | Unchanged. Part 2 may feed it task summaries. |
+| ⌘⇧W (Sessions ↔ Work), ⌘⇧O (cycle org), ⌘K *My work / Current sprint / Recent* | Unchanged. ⌘⇧O cycles the same org filter, so it now filters My work. |
+| Session-row work chip, **Name this work…**, the session details' `SessionTasks` and `TicketCard` | Unchanged. Naming work creates a local item, which then appears in My work as a task. |
+| Start from a ticket (New session dialog, multi-repo start) | Unchanged. The list's **Start** calls the same `start_work`. |
+| Resume past work, handover, summarize past work, tidy-up, reopened tickets | Unchanged. The task page's Sessions section uses the existing Resume dialog. |
+| Task detail's existing sections (description, last outcome, placement, matching rules) | Kept. Description becomes *Brief*, last outcome sits under Sessions, and placement and rules move under the task page's ⋯. |
+| `TasksPanel` in session details | Stays. Only the sidebar's global ☑ popover is removed. |
 
 ## 5. Counter-review countermeasures in this part
 
