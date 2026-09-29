@@ -14,6 +14,10 @@
   // that touch work re-read what is loaded, debounced.
   //
   // Tracker text (titles, keys) is rendered as text, never as markup.
+  //
+  // Layout (design 2026-09-29): **List** (the default) is `TaskList` — every
+  // task by status, To do / Doing / Done, from its own read; **Grouped** is
+  // the org → group tree below, unchanged. The header is the same for both.
   import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { sessions } from './sessions';
@@ -26,6 +30,7 @@
   import { facetSentence, workFacets } from './filter_facets';
   import WorkReview from './WorkReview.svelte';
   import WorkRules from './WorkRules.svelte';
+  import TaskList from './TaskList.svelte';
   import {
     buildSections,
     distributeTasks,
@@ -53,6 +58,7 @@
     workTreeSessionIds,
     workViewFilters,
     workViewKey,
+    workLayout,
     activeWorkViewId,
     normalizeFilters,
     parseSectionKey,
@@ -101,6 +107,14 @@
   let reviewTotal = $state<number | null>(null);
   let rulesOpen = $state(false);
   let root = $state<HTMLDivElement | null>(null);
+  // The List layout's last read: the filter bar's orgs and trackers, and the
+  // sessions it shows.
+  let listPage = $state.raw<WorkTreePage | null>(null);
+  const listMode = $derived($workLayout === 'list');
+  function onListPage(p: WorkTreePage) {
+    listPage = p;
+    workTreeMeta.set({ orgs: p.orgs, trackers: p.trackers, groups: p.groups });
+  }
 
   const sections: OrgSection[] = $derived(page ? buildSections(page.groups, page.orgs, states) : []);
   const selectedSessionId = $derived($selectedSession?.id ?? null);
@@ -173,6 +187,14 @@
    *  section keeps what it showed. `review`: bring the Review tab's count
    *  along (in the same read where the hub can). */
   async function load(opts: { full?: boolean; review?: boolean } = {}) {
+    // List reads its own page (`TaskList`): no tree read, only the Review
+    // count when asked.
+    if (get(workLayout) === 'list') {
+      ++loadSeq;
+      loading = false;
+      if (opts.review) void loadReviewCount();
+      return;
+    }
     const mine = ++loadSeq;
     const filters = get(workViewFilters);
     const fk = filtersKey(filters);
@@ -343,6 +365,14 @@
     void load();
   });
 
+  // List ↔ Grouped: Grouped reads the tree (List reads its own).
+  let lastLayout = get(workLayout);
+  const offLayout = workLayout.subscribe((v) => {
+    if (v === lastLayout) return;
+    lastLayout = v;
+    if (v === 'grouped') void load();
+  });
+
   // `work:changed` / session events: one debounced re-read — at most
   // `maxWaitMs` after the first change it waits for, so a steady stream of
   // changes (a busy fleet) cannot hold the view back forever. While Review
@@ -380,6 +410,7 @@
   });
   onDestroy(() => {
     offFilters();
+    offLayout();
     offChanged();
     offReveal();
     workTreeSessionIds.set(new Set());
@@ -388,8 +419,9 @@
   // The sessions the tree shows: their status changes refresh it too.
   $effect(() => {
     const ids = new Set<number>();
-    for (const s of states.values())
-      for (const t of s.tasks) for (const l of t.sessions ?? []) if (l.session_id != null) ids.add(l.session_id);
+    const shown = listMode ? [listPage?.tasks ?? []] : [...states.values()].map((s) => s.tasks);
+    for (const tasks of shown)
+      for (const t of tasks) for (const l of t.sessions ?? []) if (l.session_id != null) ids.add(l.session_id);
     workTreeSessionIds.set(ids);
   });
 
@@ -476,7 +508,14 @@
   let loadedOnce = false;
   function flushReveal() {
     const req = get(revealTaskRequest);
-    if (!req || !loadedOnce) return;
+    if (!req) return;
+    // The task is revealed in the tree: Grouped reads it, and its load
+    // flushes this again.
+    if (get(workLayout) !== 'grouped') {
+      workLayout.set('grouped');
+      return;
+    }
+    if (!loadedOnce) return;
     revealTaskRequest.set(null);
     showTasks();
     void reveal(req.taskId);
@@ -513,6 +552,28 @@
           onclick={() => (tab = 'review')}>Review{#if reviewTotal}&nbsp;· {reviewTotal}{/if}</button
         >
       </div>
+      {#if tab === 'tasks'}
+        <div class="layout" role="group" aria-label="Layout">
+          <button
+            class="btn btn--chip btn--toggle"
+            type="button"
+            aria-pressed={listMode}
+            class:is-active={listMode}
+            data-testid="work-layout-list"
+            title="By status: To do, Doing, Done"
+            onclick={() => workLayout.set('list')}>List</button
+          >
+          <button
+            class="btn btn--chip btn--toggle"
+            type="button"
+            aria-pressed={!listMode}
+            class:is-active={!listMode}
+            data-testid="work-layout-grouped"
+            title="Organisation → group"
+            onclick={() => workLayout.set('grouped')}>Grouped</button
+          >
+        </div>
+      {/if}
       <button
         class="btn btn--quiet btn--icon"
         type="button"
@@ -525,12 +586,13 @@
            collapse is the sidebar's ‹: one of each. -->
     </div>
     {#if tab === 'tasks'}
-      <WorkFiltersBar orgs={page?.orgs ?? []} trackers={page?.trackers ?? []} />
+      {@const meta = listMode ? listPage : page}
+      <WorkFiltersBar orgs={meta?.orgs ?? []} trackers={meta?.trackers ?? []} listLayout={listMode} />
     {/if}
   </header>
 
   <div class="scroller">
-    {#if tab === 'tasks' && refreshError && page && !error}
+    {#if tab === 'tasks' && !listMode && refreshError && page && !error}
       <p class="refresh-error" role="status" data-testid="work-tree-refresh-error">
         Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
         <button class="btn btn--quiet" type="button" data-testid="work-tree-refresh-retry" onclick={() => void load()}>Retry</button>
@@ -538,6 +600,8 @@
     {/if}
     {#if tab === 'review'}
       <WorkReview onchanged={() => void loadReviewCount()} />
+    {:else if listMode}
+      <TaskList {debounceMs} {maxWaitMs} onpage={onListPage} />
     {:else if error}
       <div class="state error" role="alert" data-testid="work-tree-error">
         <p>{readErrorText(error)}</p>
@@ -740,6 +804,11 @@
     display: flex;
     gap: 0.25rem;
     flex: 1 1 auto;
+  }
+  .layout {
+    display: flex;
+    gap: 0.25rem;
+    flex: 0 0 auto;
   }
   .scroller {
     flex: 1 1 auto;

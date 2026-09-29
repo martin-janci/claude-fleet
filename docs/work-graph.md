@@ -71,6 +71,18 @@ and *Clear all*; an empty list names the filters that hide it.
 > **[Screenshot placeholder]** The sidebar grouped by work, with a Done
 > section open and the Filters panel's Work group showing.
 
+## The task list and the task page (2026-09-29)
+
+The Work tab opens in **List** layout; the header, filters and saved views are unchanged, and **List | Grouped** switches to the organisation → group tree described below.
+
+- **List** sorts every task the filters match into **To do**, **Doing** (a live session, or in progress) and **Done** (the last 7 days, collapsed). A ticket keeps its tracker's own status name in its row; its section follows fleet's effective status and live sessions.
+- **+ New task** writes a task in fleet itself (`TASK-<id>`); ▾ adds a project and notes. **Start** opens a session in that project with the title and notes as its first prompt.
+- **The task page** adds *Brief*, *Subtasks* (+ Add subtask, Start), *Proposals* (an agent's suggested subtasks — Accept / Reject; rejected ones behind a toggle), *Delegated jobs* with their result, and *Agent steps* — the agent's own `TaskCreate` / `TaskUpdate` todos per session, labelled "per the agent", never a status. Placement and rules sit under *Placement & rules*.
+- A subtask started from the list gets the parent ticket's brief (only when you may see that ticket) followed by its own title and notes.
+- Every `dispatch_task` job appears as an agent subtask under the requester's task and follows the job's state. The ☑ Tasks popover is gone; a session's jobs are still in its details.
+- Tracker items stay read-only: nothing here writes to Jira, Asana or GitHub.
+- Hosts pick up step capture after re-provisioning (they read `provision_stale` until then); meanwhile the Stop hook backfills steps from the transcript.
+
 ## The Work view
 
 The sidebar has two ways into the same work: **Sessions** (host / project →

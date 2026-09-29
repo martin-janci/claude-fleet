@@ -4,7 +4,8 @@
 //! rows come from the Stop hook's `turn_done` detail; this module adds the
 //! compaction summary Claude Code itself wrote, read off the transcript tail
 //! the same way `context::refresh_context` reads it — never under the store
-//! lock.
+//! lock — and, for hosts whose hooks predate the step matcher, the agent
+//! steps in that tail (design 2026-09-29 §2).
 
 use crate::ipc_error::lock;
 use crate::service::transcript::{parse_conversation, ConvItem};
@@ -102,6 +103,70 @@ pub fn spawn_harvest_compact_summary(
     let id = claude_session_id.to_string();
     let _ = crate::rt::try_spawn(async move {
         harvest_compact_summary(store, ssh, row_id, id).await;
+    });
+}
+
+/// The step backstop (design 2026-09-29 §2): read `claude_session_id`'s
+/// transcript tail and journal the agent steps in it (`source =
+/// transcript`), for a host whose hooks predate the step matcher. Each
+/// step's net state only; `Store::record_steps` drops what is already
+/// known. Best-effort: every failure is logged at debug.
+pub async fn harvest_steps(
+    store: Arc<Mutex<Store>>,
+    ssh: Arc<SshClient>,
+    row_id: i64,
+    claude_session_id: String,
+) {
+    let row = match lock(&store).and_then(|s| Ok(s.get_session_by_id(row_id)?)) {
+        Ok(Some(r)) => r,
+        _ => return,
+    };
+    let Ok(args) =
+        crate::service::transcript::resolve_args_for(&store, &row, &claude_session_id, 1, 1)
+    else {
+        return;
+    };
+    let text =
+        match crate::service::transcript::read_tail_bytes(&args, COMPACT_READ_BYTES, &ssh).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::debug!(row_id, error = %e.message, "[steps] tail read failed");
+                return;
+            }
+        };
+    let events = crate::service::work::steps::net_steps(
+        crate::service::work::steps::steps_from_transcript(&text),
+    );
+    if events.is_empty() {
+        return;
+    }
+    if let Ok(s) = lock(&store) {
+        let participant = match s.participant_for_session(row_id) {
+            Ok(p) => p.map(|p| p.id),
+            Err(e) => {
+                tracing::debug!(row_id, error = %e.message, "[steps] no participant");
+                None
+            }
+        };
+        if let Err(e) = s.record_steps(&claude_session_id, participant, "transcript", &events) {
+            tracing::debug!(row_id, error = %e.message, "[steps] not recorded");
+        }
+    }
+}
+
+/// Spawn [`harvest_steps`] off the hook's response path. Skipped when no
+/// runtime is reachable (sync tests).
+pub fn spawn_harvest_steps(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<SshClient>,
+    row_id: i64,
+    claude_session_id: &str,
+) {
+    let store = Arc::clone(store);
+    let ssh = Arc::clone(ssh);
+    let id = claude_session_id.to_string();
+    let _ = crate::rt::try_spawn(async move {
+        harvest_steps(store, ssh, row_id, id).await;
     });
 }
 

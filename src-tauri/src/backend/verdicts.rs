@@ -317,6 +317,17 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("list_local_work_items", Verdict::Routed { tool: "work" }),
     ("name_session_work", Verdict::Routed { tool: "work_link" }),
     ("rename_work_item", Verdict::Routed { tool: "work_link" }),
+    // Shared work context (design 2026-09-29): a task or subtask a person
+    // writes, and a person's decision on an agent's proposal.
+    ("create_work_task", Verdict::Routed { tool: "work_link" }),
+    (
+        "accept_work_proposal",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    (
+        "reject_work_proposal",
+        Verdict::Routed { tool: "work_link" },
+    ),
     // Work graph M14: the Work view — eight reads of `work` and ten
     // decisions of `work_link`, every one the same on a paired desktop.
     ("work_tree", Verdict::Routed { tool: "work" }),
