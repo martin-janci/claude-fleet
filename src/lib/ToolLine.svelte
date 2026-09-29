@@ -11,11 +11,12 @@
     shortTarget,
     formatDuration,
     toolDurationMs,
-    editDiffLines,
     type ToolLine,
     type ToolDetail,
   } from './conversation';
   import CopyButton from './CopyButton.svelte';
+  import Icon, { type IconName } from './Icon.svelte';
+  import { lineDiff, splitPath, parseNumbered, parseTodos, parseFileList, inputField, detailKind } from './tool_view';
 
   let {
     line,
@@ -34,8 +35,11 @@
     live: boolean;
   } = $props();
 
-  /** Diff lines shown before "N more lines". */
+  /** Diff rows shown before "N more lines". */
   const DIFF_MAX_LINES = 200;
+  /** Read lines / listed files shown before "Show all". */
+  const READ_MAX_LINES = 40;
+  const FILES_MAX = 20;
   /** Result lines shown before "Show all". */
   const RESULT_MAX_LINES = 20;
 
@@ -121,8 +125,43 @@
     detail?.result != null && detail.result.endsWith('…') && [...detail.result].length === RESULT_CAP_CHARS + 1,
   );
 
-  const diff = $derived(detail?.edit ? editDiffLines(detail.edit.old, detail.edit.new) : []);
+  const kind = $derived(detail ? detailKind(detail.name, detail.edit !== null, detail.command !== null) : 'raw');
+  const diffView = $derived(detail?.edit ? lineDiff(detail.edit.old, detail.edit.new) : null);
+  const diff = $derived(diffView?.rows ?? []);
   const shownDiff = $derived(fullDiff ? diff : diff.slice(0, DIFF_MAX_LINES));
+  const isNewFile = $derived(detail?.name === 'Write' || (detail?.edit != null && detail.edit.old === ''));
+  /** The path a detail's header names: the edit's file, Read's file_path,
+   *  Grep / Glob's search path. */
+  const headPath = $derived(
+    detail?.edit?.file_path ?? (detail && kind === 'read' ? inputField(detail.input, 'file_path') : null),
+  );
+  const numbered = $derived(kind === 'read' && detail?.result != null && !detail.is_error ? parseNumbered(detail.result) : null);
+  const todos = $derived(kind === 'todos' && detail ? parseTodos(detail.input) : null);
+  const files = $derived(kind === 'files' && detail?.result != null && !detail.is_error ? parseFileList(detail.result) : null);
+  const pattern = $derived(kind === 'files' && detail ? inputField(detail.input, 'pattern') : null);
+  /** A structured view stands in for the raw result; the success line an
+   *  edit or TodoWrite answers with ("The file … has been updated") says
+   *  nothing the view does not, so it is shown only when it is an error. */
+  const hideResult = $derived(
+    detail !== null &&
+      !detail.is_error &&
+      ((kind === 'edit' && diffView !== null) || numbered !== null || files !== null || (kind === 'todos' && todos !== null)),
+  );
+
+  const ICONS: Record<string, IconName> = {
+    Edit: 'edit',
+    MultiEdit: 'edit',
+    Write: 'edit',
+    NotebookEdit: 'edit',
+    Bash: 'terminal',
+    Read: 'file',
+    Grep: 'search',
+    Glob: 'search',
+    WebSearch: 'search',
+    TodoWrite: 'list',
+  };
+  const icon = $derived<IconName>(ICONS[line.name || toolName(line.summary)] ?? 'tool');
+  const TODO_ICON: Record<string, IconName> = { completed: 'circle-check', in_progress: 'circle-half', pending: 'circle' };
   const resultLines = $derived(detail?.result != null ? detail.result.split('\n') : []);
   const longResult = $derived(resultLines.length > RESULT_MAX_LINES);
   const shownResult = $derived(
@@ -132,6 +171,7 @@
 
 {#snippet row()}
   <span class="chev" aria-hidden="true"></span>
+  <span class="ticon"><Icon name={icon} size={13} /></span>
   <span class="verb">{verb}</span>
   {#if target}<span class="target" title={line.summary}>{target}</span>{/if}
   {#if duration}<span class="dur" class:muted={noResult}>{duration}</span>{/if}
@@ -170,19 +210,72 @@
         {/if}
       </div>
     {:else if detail}
-      <div class="detail" data-testid="conv-tool-detail">
-        {#if detail.edit}
-          <div class="path">{detail.edit.file_path}</div>
-          <pre class="diff">{#each shownDiff as d, i (i)}<span class={d.kind}>{d.kind === 'del' ? '-' : d.kind === 'add' ? '+' : ' '} {d.text}</span>{/each}</pre>
+      <div class="detail" data-testid="conv-tool-detail" data-kind={kind}>
+        {#if headPath || kind === 'edit' || (kind === 'files' && pattern)}
+          {@const p = splitPath(headPath ?? '')}
+          <div class="head">
+            {#if headPath}
+              <span class="path" title={headPath}><span class="dir">{p.dir}</span><span class="base">{p.base}</span></span>
+            {:else if pattern}
+              <span class="path"><span class="base">{pattern}</span></span>
+            {/if}
+            {#if kind === 'edit' && isNewFile}<span class="tag">new file</span>{/if}
+            <span class="stats">
+              {#if diffView}
+                {#if diffView.added}<span class="plus">+{diffView.added}</span>{/if}
+                {#if diffView.removed}<span class="minus">−{diffView.removed}</span>{/if}
+              {:else if numbered}
+                <span>{numbered.length} lines</span>
+              {:else if files}
+                <span>{files.length} {files.length === 1 ? 'file' : 'files'}</span>
+              {/if}
+            </span>
+          </div>
+        {/if}
+        {#if kind === 'edit' && detail.edit}
+          <div class="code diff" role="table" aria-label="Changes">
+            {#each shownDiff as d, i (i)}
+              {#if d.kind === 'gap'}
+                <div class="row gap"><span class="ln"></span><span class="ln"></span><span class="sign"></span><span class="txt">⋯ {d.hidden} unchanged {d.hidden === 1 ? 'line' : 'lines'}</span></div>
+              {:else}
+                <div class="row {d.kind}"><span class="ln">{d.oldNo ?? ''}</span><span class="ln">{d.newNo ?? ''}</span><span class="sign">{d.kind === 'del' ? '−' : d.kind === 'add' ? '+' : ''}</span><span class="txt">{d.text}</span></div>
+              {/if}
+            {/each}
+          </div>
           {#if diff.length > DIFF_MAX_LINES && !fullDiff}
             <button type="button" class="linkish" onclick={() => (fullDiff = true)}>{diff.length - DIFF_MAX_LINES} more lines</button>
           {/if}
-        {:else if detail.command !== null}
+        {:else if kind === 'bash'}
           <pre class="cmd">$ {detail.command}</pre>
-        {:else}
+        {:else if numbered}
+          <div class="code numbered">
+            {#each fullResult ? numbered : numbered.slice(0, READ_MAX_LINES) as l (l.no)}
+              <div class="row"><span class="ln">{l.no}</span><span class="txt">{l.text}</span></div>
+            {/each}
+          </div>
+          {#if numbered.length > READ_MAX_LINES}
+            <button type="button" class="linkish" onclick={() => (fullResult = !fullResult)}>{fullResult ? 'Show less' : `Show all ${numbered.length} lines`}</button>
+          {/if}
+        {:else if files}
+          <ul class="files">
+            {#each fullResult ? files : files.slice(0, FILES_MAX) as f, k (k)}
+              {@const fp = splitPath(f)}
+              <li title={f}><Icon name="file" size={12} /><span class="fname"><span class="dir">{fp.dir}</span><span class="base">{fp.base}</span></span></li>
+            {/each}
+          </ul>
+          {#if files.length > FILES_MAX}
+            <button type="button" class="linkish" onclick={() => (fullResult = !fullResult)}>{fullResult ? 'Show less' : `+${files.length - FILES_MAX} more`}</button>
+          {/if}
+        {:else if todos}
+          <ul class="todos" data-testid="conv-tool-todos">
+            {#each todos as t, k (k)}
+              <li class={t.status}><Icon name={TODO_ICON[t.status]} size={14} /><span>{t.content}</span></li>
+            {/each}
+          </ul>
+        {:else if kind !== 'read' && kind !== 'files'}
           <pre class="input">{detail.input}</pre>
         {/if}
-        {#if detail.result !== null}
+        {#if detail.result !== null && !hideResult}
           <div class="result-wrap">
             <pre class="result" data-testid="conv-tool-result" data-error={detail.is_error || undefined}>{shownResult}</pre>
             <div class="copy-slot"><CopyButton
@@ -194,7 +287,7 @@
           {#if longResult}
             <button type="button" class="linkish" onclick={() => (fullResult = !fullResult)}>{fullResult ? 'Show less' : 'Show all'}</button>
           {/if}
-        {:else}
+        {:else if detail.result === null}
           <p class="muted">No result yet.</p>
         {/if}
       </div>
@@ -291,38 +384,188 @@
     gap: 0.6rem;
     color: var(--usage-crit);
   }
-  .path {
-    margin-bottom: 0.3rem;
+  .head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin: -0.4rem -0.6rem 0.4rem;
+    padding: 0.3rem 0.6rem;
+    border-bottom: 1px solid var(--border);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    color: var(--fg-muted);
-    overflow-wrap: anywhere;
+    font-size: 0.72rem;
   }
-  pre {
+  .path {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: ltr;
+  }
+  .dir {
+    color: var(--fg-muted);
+  }
+  .base {
+    color: var(--fg);
+    font-weight: 600;
+  }
+  .tag {
+    flex: 0 0 auto;
+    padding: 0 6px;
+    border-radius: 9px;
+    font-size: 0.66rem;
+    color: var(--fg-muted);
+    border: 1px solid var(--border);
+  }
+  .stats {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 0.4rem;
+    margin-left: auto;
+    color: var(--fg-muted);
+  }
+  .plus {
+    color: var(--diff-add-fg);
+  }
+  .minus {
+    color: var(--diff-del-fg);
+  }
+  .detail {
+    --diff-add-fg: #1a7f37;
+    --diff-del-fg: #cf222e;
+    --diff-add-bg: rgba(46, 160, 67, 0.14);
+    --diff-del-bg: rgba(248, 81, 73, 0.14);
+  }
+  :global(:root[data-theme='dark']) .detail {
+    --diff-add-fg: #3fb950;
+    --diff-del-fg: #f85149;
+  }
+  @media (prefers-color-scheme: dark) {
+    :global(:root:not([data-theme='light'])) .detail {
+      --diff-add-fg: #3fb950;
+      --diff-del-fg: #f85149;
+    }
+  }
+  .code {
     margin: 0 0 0.35rem;
     max-height: 32rem;
     overflow: auto;
     overscroll-behavior: contain;
-    padding: 0.35rem 0.5rem;
+    padding: 0.25rem 0;
     border-radius: 4px;
     background: var(--bg);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
     font-size: 0.72rem;
-    line-height: 1.45;
+    line-height: 1.5;
+  }
+  .code .row {
+    display: flex;
+    min-width: max-content;
+  }
+  .code .ln {
+    flex: 0 0 auto;
+    width: 3.2ch;
+    padding-right: 0.5ch;
+    text-align: right;
+    color: var(--fg-muted);
+    opacity: 0.65;
+    user-select: none;
+  }
+  .numbered .ln {
+    width: 4ch;
+    margin-right: 0.8ch;
+    border-right: 1px solid var(--border);
+  }
+  .code .sign {
+    flex: 0 0 auto;
+    width: 2ch;
+    text-align: center;
+    user-select: none;
+    border-left: 1px solid var(--border);
+  }
+  .code .txt {
+    flex: 1 0 auto;
+    padding-right: 0.8ch;
+    white-space: pre;
     color: var(--fg);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-  .diff span {
-    display: block;
-  }
-  .diff .del {
-    background: color-mix(in srgb, var(--usage-crit) 14%, transparent);
   }
   .diff .add {
-    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--diff-add-bg);
   }
-  .diff .ctx {
+  .diff .add .sign {
+    color: var(--diff-add-fg);
+    box-shadow: inset 2px 0 0 var(--diff-add-fg);
+  }
+  .diff .del {
+    background: var(--diff-del-bg);
+  }
+  .diff .del .sign {
+    color: var(--diff-del-fg);
+    box-shadow: inset 2px 0 0 var(--diff-del-fg);
+  }
+  .diff .gap .txt {
     color: var(--fg-muted);
+    font-style: italic;
+    padding: 0.1rem 0;
+  }
+  .diff .gap {
+    background: color-mix(in srgb, var(--fg-muted) 8%, transparent);
+  }
+  .files,
+  .todos {
+    list-style: none;
+    margin: 0 0 0.35rem;
+    padding: 0;
+  }
+  .files li {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.08rem 0;
+    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: 0.72rem;
+    color: var(--fg-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .files .fname {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .files .base {
+    font-weight: 500;
+  }
+  .todos li {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.12rem 0;
+    font-size: 0.76rem;
+  }
+  .todos li.completed {
+    color: var(--fg-muted);
+  }
+  .todos li.completed :global(.icon) {
+    color: var(--diff-add-fg);
+  }
+  .todos li.in_progress {
+    font-weight: 600;
+  }
+  .todos li.in_progress :global(.icon) {
+    color: var(--accent);
+  }
+  .todos li.pending :global(.icon) {
+    color: var(--fg-muted);
+  }
+  .ticon {
+    flex: 0 0 auto;
+    align-self: center;
+    opacity: 0.75;
+  }
+  .tool.err .ticon {
+    color: var(--usage-crit);
+    opacity: 1;
   }
   .dur.muted {
     font-style: italic;

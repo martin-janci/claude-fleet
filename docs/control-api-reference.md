@@ -461,6 +461,12 @@ A session's recorded event timeline, newest first: status changes, prompts, stuc
 
 Parameters: `fresh_for`, `limit`, `session_id`
 
+### `session_tool_detail`
+
+One tool call's input and result (omitted by session_conversation): { id, name, input, edit {file_path, old, new} | null, command | null, result | null, is_error }; texts capped at 8000 chars. Read-only. Errors: as session_conversation, E_NOTFOUND.
+
+Parameters: `claude_session_id`, `session_id`, `tool_use_id`
+
 ### `session_transcript`
 
 Read a session's Claude Code transcript (the JSONL, not the pane): the last assistant turn as plain text, text blocks verbatim, one line per tool call, no thinking. Errors: E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet). Read-only; prefer it over capture_session for the reply. unchanged costs no transcript read.

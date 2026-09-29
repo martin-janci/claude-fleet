@@ -658,6 +658,18 @@ pub struct SessionConversationParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionToolDetailParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// The tool call's id (a tool item's `id` in session_conversation).
+    pub tool_use_id: String,
+    /// An earlier conversation of this session (from session_conversations;
+    /// else E_INVALID).
+    #[serde(default)]
+    pub claude_session_id: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RunPromptParams {
     /// Fleet session id.
     pub session_id: i64,
