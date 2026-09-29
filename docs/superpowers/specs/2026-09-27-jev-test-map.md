@@ -64,8 +64,8 @@ runs. Changing one after seeing results needs a new decision row.
 | Id | What | How the answer is known | Where it lives |
 |---|---|---|---|
 | **A** real, stratified | cases from the owner's hub (first prompts, candidate sets as of the decision time, tracker section names), stratified by org, tracker, language bucket, code bucket | a person's decision recorded after D34: `manual` / `started` links, rejections, corrections; D39 hand labels | the hub machine only; never committed |
-| **B** paired corpus | the same case in en / sk / cs / de, LLM-translated and spot-checked by a person (D43) | inherited from the source case | synthetic part in the repo; translations of real cases stay local |
-| **C** perturbations | no diacritics, typos, slang and abbreviations, Slovak with English terms, mixed sentences, code blocks kept vs replaced by `[code: <lang>, N lines]` (D42) | inherited | same as B |
+| **B** paired corpus | the same case in en / sk / cs / de, LLM-translated and spot-checked by a person (D43) | inherited from the source case | synthetic part in the repo; translations of real cases stay local. **[built for J3]**: rows sharing a `pair` id, compared with the `en` row of the pair (`bench::status_map_robust::language_pairs`); the built-in set `status_map_paired.jsonl` (16 boards × 4 languages, 81 pairs, `--paired-fixture`; LLM-written, not yet spot-checked) |
+| **C** perturbations | no diacritics, typos, slang and abbreviations, Slovak with English terms, mixed sentences, code blocks kept vs replaced by `[code: <lang>, N lines]` (D42) | inherited | same as B. **[built]** (`bench::perturb`, `--perturb`): J3 `fold`, `typo`, `emoji`, `no-board`, `shuffle-board`; J1 `fold`, `typo`, `code` (the D42 A/B), at the provider's raw pick. Slang, abbreviations and mixed sentences are not generated (they need a person or a model to write them) |
 | **H** hand labels (D39) | ~150 sessions with no link, exported with their first prompt and candidates; a person marks the right item or "none" | the person | local file, `0600` |
 | **F** fixtures | synthetic cases per card for CI (`testdata/`) | written with the case | repo |
 
@@ -121,6 +121,10 @@ runs. Changing one after seeing results needs a new decision row.
   baseline).
 - **Statistics:** bootstrap 95% intervals on every gap. A gap whose interval
   crosses 0 is "no difference", and the simpler system wins.
+- **Paired diagnostics (B, C) [built]:** McNemar's exact test on who was
+  right (a lost answer counts as a wrong one) decides `worse` / `better` at
+  p < 0.05, the accuracy-on-answered interval beside it; under 60 pairs not
+  judged. They are evidence, never an acceptance line.
 
 ## 5. Use-case cards
 
@@ -261,7 +265,11 @@ runs. Changing one after seeing results needs a new decision row.
   - correction rate over the card's bound on a rolling window → that cell
     to assist (or shadow);
   - fallback rate > 20% for an hour (breaker, 429, timeouts) → the feature
-    shows "degraded" in `fleet_health`; answers fall back by themselves;
+    shows "degraded" in `fleet_health`; answers fall back by themselves
+    **[built]**: `fleet_health.decide` (`service::decide::health`: over at
+    least 5 live attempts, or the breaker open; master and unbound clients
+    only), the desktop's *Jev degraded* Attention item, `fleet-hub decide
+    status`'s `health` line;
   - `model_version` differs from the one the cell was measured on → the cell
     to shadow;
   - daily token budget reached → fallback until midnight UTC.
@@ -304,6 +312,12 @@ runs. Changing one after seeing results needs a new decision row.
 - **The owner's J1 phase-0 run** on the real hub: recall first, then `bm25`,
   then `jev` for consenting orgs, and `haiku` on a named host
   (`--provider haiku --haiku-host ALIAS`) on the same cases.
+- **Diagnostics built, waiting on the owner's runs:** robustness
+  (`--perturb`, both cards), the paired languages (`--paired-fixture`, and
+  `pair` ids in the owner's own rows), J3's floor sweep (`--floor-sweep`)
+  and wording set (`--question-set`, dev only; three drafts in
+  `service/testdata/decide/questions/`). The order is in `docs/decisions.md`
+  → *How to run phase 0*, step 4.
 - **The owner's J3 phase-0 run:** spot-check the synthetic section labels
   (D43; `service/testdata/decide/status_map_sections.jsonl`), add the real
   boards' sections, then `fleet-hub decide bench status-map --labels FILE

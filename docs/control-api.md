@@ -426,7 +426,7 @@ Index by area (names only; see the reference for details):
   `inferred`) that a person confirms or rejects; a rejected pair stays
   rejected. `source: "agent"` remains a confirmed declaration.
   Trackers (roadmap M3): `work_admin` (master token only — fleet admin, so
-  on a paired desktop the Settings → Work section says "configure on the
+  on a paired desktop the Settings → Trackers page says "configure on the
   hub") manages them: `list`, `add { site_url, provider?, transport?,
   settings? }` (the site, or any ticket / issue URL on it; the provider —
   `jira`, `github`, `asana`, `linear`, `jira_dc` — is inferred from the URL
@@ -485,8 +485,15 @@ Index by area (names only; see the reference for details):
   starts only there (`E_FORBIDDEN` says why); it never receives `work:*`
   frames on `/events`. Events: `work:item`, `work:tracker`,
   `work:tracker_removed` — emitted only when something a reader sees
-  changed; a session's `work` carries its item's `status_category`,
-  `status_name`, `url` and `unavailable`. `work:changed` (work graph M14)
+  changed; a session's `work` carries its item's `kind` (`tracker` | `local`
+  | `ref`), `status_category`, `status_name`, `url` and `unavailable`.
+  `status_category` is the tracker's own status — `null` for a local item or
+  a bare key, by design, since a paired phone tells a local item apart from
+  a ticket by that absence (native item status task 4). `effective_status`
+  is the live answer instead: the stored value with a person's override, a
+  merged-PR's stamped `done`, or a currently-working session's live
+  `in_progress` applied — present for a local item too, and the field a
+  status display should read. `work:changed` (work graph M14)
   carries ids only — `{ what: placement | rule | view | org, task_id?,
   rule_id?, view_id? }` — after a Work view structure write; a client
   re-reads what it shows. Like every `work:*` frame it never reaches a
@@ -608,6 +615,11 @@ Index by area (names only; see the reference for details):
   item). `work_link { action: "name", item_id, title }` renames a local
   item (a ticket is `E_INVALID`) and returns the item; both emit
   `session:updated` for the rows that show it and `work:item`.
+  `work_link { action: "set_status", item_id, status }` sets a local item's
+  status to `todo`, `in_progress` or `done` and returns the item; a ticket is
+  `E_INVALID` too, naming it — its status belongs to its tracker, and the
+  next sync would otherwise overwrite it here. The setting is final: fleet
+  never derives a status back over what a person set.
   `work { action: "local_items" }` lists local items (`id`, `key`, `title`,
   `created_at`, `updated_at`, `live_sessions`), newest change first.
   Readonly tokens cannot name or rename. A per-host token names work only on
@@ -642,19 +654,67 @@ Index by area (names only; see the reference for details):
   pins; a read any client may make, but a per-host or org-bound token sees
   its own row only) and `update_admin` (master token only: `pin` a version
   for a component or one target, where a pin below installed is a rollback;
-  `unpin`; `refresh` to re-read the signed channel now). The update wire
-  itself, `POST /update/check` and `/update/report`, is not a tool: see
-  `docs/updates.md`.
+  `unpin`; `refresh` to re-read the signed channel now). `update_status {
+  target }` answers for one target (`client:<id>`, `agent:<alias>`,
+  `hub:self`) with its whole decision — status, reason code, the release it
+  would be offered and whether it is mandatory — the dashboard's "why"; a
+  scoped token may ask about itself only. `fleet_health.updates` names what
+  needs a person: `update_required`, `update_failed`,
+  `update_rolled_back`, `rollback_failed` per target, and
+  `channel_stale`. Events: `update:changed` carries ids only — `{ what:
+  observed | pin | channel, target? }` — when a target's reported build or
+  phase, a pin or the verified channel changes; a client re-reads
+  `update_status`. It never reaches a per-host token or an org-bound
+  client. The update wire itself, `POST /update/check` and
+  `/update/report`, is not a tool: see `docs/updates.md`.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
   read, but master token only, since the values name hosts and their
   projects roots) and `set_setting` (change one: validated against the
   key's shape, `E_INVALID` for an unknown or derived key or a bad value;
   returns the whole object). They reach the same keys as the desktop's
-  Settings dialog and no others: `mcp.*`, `hub.*` and `controller.*` are
-  set by their own flags and commands. The ticks and sweeps read their
-  settings every pass, so a change takes effect on the next one. On a hub
-  this is how `reports.*` and `work.*`, which have no flag, are set.
+  Settings dialog and no others. `hub.*` and `mcp.*` are registered
+  read-only: `get_settings` shows them, and `set_setting` refuses them,
+  naming the flag or command that changes each one. `controller.*` and the
+  tokens are not registered at all. `get_settings { describe: true }`
+  returns every key's metadata instead of a plain map, in display order:
+  label, help, kind with bounds and options, unit, what `0` means, default,
+  value, `modified`, tags, danger, restart, AI policy, `owned_by` and option
+  labels. This is the list `docs/settings-reference.md` is generated from.
+  A write emits `settings:changed { key }`. Like `work:*`, it never reaches
+  a per-host token or an org-bound client. Every write of a registered key
+  is audited (who: `person`, `agent` for this API, or `system`; before →
+  after; the proposal it applied), and the desktop shows it as each
+  field's **History** (declarative pages P5).
+  `set_setting { propose: true, why? }` writes nothing: it validates the
+  value like a write and leaves a **proposal** a person applies or rejects
+  (Settings → Proposed changes on a standalone desktop, `fleet-hub
+  settings proposals | apply | reject` on a hub). Use it when a person
+  should decide — the work graph's rule R11 applied to settings. A key
+  whose AI policy is `never` (every change that needs confirming, and
+  every read-only key) cannot be proposed: `E_FORBIDDEN`. A value the key
+  already has is `E_INVALID`; a newer proposal for a key replaces its
+  pending one, and at most 50 wait (`E_RATE_LIMITED`). `why` is at most
+  500 characters and shown to the person as written.
+  **Who** (declarative pages P6): the master token, and a person's own
+  paired device — a client bound to no org, such as the desktop paired with
+  a hub or a phone — reach `get_settings` and `set_setting`; a per-host token
+  and an org-bound client never do (the settings are the whole fleet's). A
+  device of either mode reads; a `full` device proposes; only a device the
+  operator **trusts** (`fleet-hub client trust <name>`) writes directly and
+  decides proposals, and its writes are audited as `person` with `client
+  <name>`. The UX agent's operator client is an agent: it proposes only.
+  Four more tools are served to a paired device and not to the master (who
+  has `fleet-hub settings` on the hub machine, and whose tool list is
+  budgeted): `setting_proposals` (pending, each with the key's value now,
+  and `can_write` for this device), `setting_history` (`key`, `limit`),
+  `decide_setting_proposals` (`accept`, `reject`; trusted only) and
+  `list_pages` (the page specs, data source shapes, resources and page
+  actions a device renders).
+
+  The ticks and sweeps read their settings every pass, so a change takes
+  effect on the next one. On a hub, this is how `reports.*` and `work.*`,
+  which have no flag, are set.
 
 A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 `run_prompt` to steer it and get the reply back (or `send_prompt` →

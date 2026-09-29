@@ -1591,6 +1591,20 @@ describe('Sidebar triage (W2 Track D)', () => {
     expect(screen.getByTestId('ci-badge')).toHaveTextContent('CI');
   });
 
+  it('dims the CI badge when the PR reading is old, and says when it was checked', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const fresh = { ...sessionFor(1, 'dev-a'), pr_url: 'https://github.com/o/r/pull/3', ci_status: 'passing' as const, pr_checked_at: now - 60 };
+    const old = { ...sessionFor(2, 'dev-b'), pr_url: 'https://github.com/o/r/pull/4', ci_status: 'passing' as const, pr_checked_at: now - 3600 };
+    mockBackend(fakeProjects, [fresh, old]);
+    render(Sidebar);
+    await tick(); await tick();
+    const [a, b] = screen.getAllByTestId('ci-badge');
+    expect(a).not.toHaveClass('ci-badge--stale');
+    expect(a).toHaveAttribute('title', 'CI checks: passing');
+    expect(b).toHaveClass('ci-badge--stale');
+    expect(b.getAttribute('title')).toBe('CI checks: passing, last checked 1h ago');
+  });
+
   it('line 1 holds the name and one status chip; line 2 holds host, worktree, elapsed and prompt', async () => {
     const now = Math.floor(Date.now() / 1000);
     const s = {

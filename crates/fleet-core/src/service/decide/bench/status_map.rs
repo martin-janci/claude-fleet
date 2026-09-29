@@ -51,10 +51,15 @@
 //!
 //! The report holds counts and rates only: no section name.
 
+use super::status_map_robust::{
+    floor_sweep_lines, language_lines, language_pairs, robustness_lines, FloorSweep, LanguagePairs,
+    Robustness,
+};
 use super::{
     bootstrap_acc_diff, f2, f3, gate_or_skip, pct, percentile, round3, Calibration, Criterion,
     Paired, Split, Verdict,
 };
+use crate::ipc_error::lock;
 use crate::service::decide::haiku::{reason::OTHER_ORG, Haiku};
 use crate::service::decide::status_map::{self as sm, MIN_CONFIDENCE, NO_RULE, UNSURE};
 use crate::service::decide::{
@@ -169,6 +174,11 @@ pub struct SectionLabel {
     /// database, is the case's org (a different `org_id` is refused).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracker_id: Option<i64>,
+    /// Rows with the same `pair` are one section in several languages, each
+    /// with its board translated (dataset B): reported against the English
+    /// row of the pair ([`super::status_map_robust::language_pairs`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pair: Option<String>,
 }
 
 /// Every label's org, from the DATABASE, before any case is sent (Jev's
@@ -289,6 +299,8 @@ pub struct SectionCase {
     pub org_id: Option<i64>,
     /// The keyword rule's category on the original name.
     pub rule: Option<&'static str>,
+    /// The row's `pair` id (dataset B), trimmed; none when empty.
+    pub pair: Option<String>,
 }
 
 /// PURE: the cases of `labels`, and how many rows the probe would not have
@@ -328,6 +340,12 @@ pub fn cases(labels: &[SectionLabel]) -> (Vec<SectionCase>, usize) {
                 .is_some_and(|n| n.to_lowercase().contains("ambiguous")),
             org_id: l.org_id,
             rule: infer_section(&l.section),
+            pair: l
+                .pair
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string),
         });
     }
     (out, dropped)
@@ -958,6 +976,17 @@ pub struct Report {
     pub diffs: Vec<Diff>,
     pub breakdown: Vec<Cell>,
     pub acceptance: Vec<Acceptance>,
+    /// `--perturb`: each perturbation's variants against their originals
+    /// (dataset C; a diagnostic).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub robustness: Vec<Robustness>,
+    /// Rows carrying a `pair`: every language against English on the same
+    /// pairs (dataset B; a diagnostic).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub languages: Option<LanguagePairs>,
+    /// `--floor-sweep`: a model's numbers at every confidence floor.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub floor_sweep: Vec<FloorSweep>,
     pub notes: Vec<String>,
 }
 
@@ -1299,6 +1328,9 @@ pub fn report(
         diffs,
         breakdown,
         acceptance: acceptance_rows,
+        robustness: Vec::new(),
+        languages: language_pairs(cases, outs),
+        floor_sweep: Vec::new(),
         notes,
     }
 }
@@ -1320,6 +1352,18 @@ impl Report {
             self.question_version = q.recorded_version();
             self.question = format!("file {}", q.version);
         }
+        self
+    }
+
+    /// The report with `--perturb`'s comparisons.
+    pub fn with_robustness(mut self, r: Vec<Robustness>) -> Report {
+        self.robustness = r;
+        self
+    }
+
+    /// The report with `--floor-sweep`'s tables.
+    pub fn with_floor_sweep(mut self, s: Vec<FloorSweep>) -> Report {
+        self.floor_sweep = s;
         self
     }
 
@@ -1483,6 +1527,19 @@ impl Report {
                 }
             }
             v.push(line);
+        }
+        for block in [
+            robustness_lines(&self.robustness),
+            self.languages
+                .as_ref()
+                .map(language_lines)
+                .unwrap_or_default(),
+            floor_sweep_lines(&self.floor_sweep),
+        ] {
+            if !block.is_empty() {
+                v.push(String::new());
+                v.extend(block);
+            }
         }
         v.push(String::new());
         v.push("acceptance, card J3 (assist; registered in the test map):".into());

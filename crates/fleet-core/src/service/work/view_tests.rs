@@ -664,7 +664,7 @@ fn the_graph_and_the_store_agree_on_item_orgs() {
         it.id
     };
     let s = w.st.lock().unwrap();
-    let g = Graph::load(&s).unwrap();
+    let g = Graph::load(&s, &OrgScope::All).unwrap();
     for id in [w.t1, w.t2, w.t3, local] {
         assert_eq!(
             g.item_org(&g.items[&id]),
@@ -1549,4 +1549,232 @@ fn a_tree_read_pages_its_sections_and_review_total_as_their_own_reads() {
     )
     .unwrap_err();
     assert_eq!(err.code, codes::E_INVALID);
+}
+
+// --- native item status (design 2026-09-28 §2): the live precedence the
+// tree projects through `service::work::status::effective_status`, given
+// `has_working_session` from one join over the whole page. ---------------
+
+/// Mark `sid`'s session as presently working, the way a live Claude turn
+/// does (`crate::service::work::tidy::tests::seed_session_and_item`'s
+/// pattern): a `claude_session_id`, then its `claude_status`.
+fn mark_working(w: &W, sid: i64, claude_session_id: &str) {
+    let s = w.st.lock().unwrap();
+    s.set_claude_session_id(sid, claude_session_id).unwrap();
+    s.set_claude_status_by_session_id(claude_session_id, "working")
+        .unwrap();
+}
+
+/// A working session lifts a LOCAL item's `todo` to `in_progress` in the
+/// tree — the live signal `effective_status` computes from one join, never
+/// a query per row.
+#[test]
+fn a_working_session_shows_a_local_item_as_in_progress() {
+    let w = world();
+    w.st.lock()
+        .unwrap()
+        .name_session_work(w.s1, Some("LOC-77"), "Refactor billing")
+        .unwrap();
+    mark_working(&w, w.s1, "c-loc-77");
+
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(
+        task_of(&p, "LOC-77").status_category.as_deref(),
+        Some("in_progress")
+    );
+}
+
+/// A person's status is final: a working session does not lift it back to
+/// `in_progress` (§2 rule 1 outranks rule 3).
+#[test]
+fn a_persons_status_is_not_lifted_by_a_working_session() {
+    let w = world();
+    let (item, _) =
+        w.st.lock()
+            .unwrap()
+            .name_session_work(w.s1, Some("LOC-78"), "Something else")
+            .unwrap();
+    w.st.lock()
+        .unwrap()
+        .set_item_status(item.id, "todo")
+        .unwrap();
+    mark_working(&w, w.s1, "c-loc-78");
+
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(
+        task_of(&p, "LOC-78").status_category.as_deref(),
+        Some("todo")
+    );
+}
+
+/// A tracker item's status is its tracker's: a working session must never
+/// move it (§2, "who may be overridden").
+#[test]
+fn a_working_session_never_lifts_a_tracker_item() {
+    let w = world();
+    let t4 =
+        w.st.lock()
+            .unwrap()
+            .upsert_tracker_item(
+                w.tracker,
+                &TrackerItemWrite {
+                    external_id: "4".into(),
+                    key: Some("TK-4".into()),
+                    title: "Not started".into(),
+                    status_name: "To Do".into(),
+                    status_category: "todo".into(),
+                    containers: vec!["TP".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id;
+    link(&w, w.s1, t4, true);
+    mark_working(&w, w.s1, "c-tk-4");
+
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(task_of(&p, "TK-4").status_category.as_deref(), Some("todo"));
+}
+
+/// Fix round 1: the tree (`to_task`) and a session's own task list
+/// (`brief_of`, via `session_tasks`) must not disagree about the same
+/// item's status — both project through `effective_status` with the same
+/// page-wide working set, never a query per caller.
+#[test]
+fn the_tree_and_a_sessions_own_tasks_agree_on_a_working_items_status() {
+    let w = world();
+    w.st.lock()
+        .unwrap()
+        .name_session_work(w.s1, Some("LOC-79"), "Agree with me")
+        .unwrap();
+    mark_working(&w, w.s1, "c-loc-79");
+
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let tree_status = task_of(&p, "LOC-79").status_category.clone();
+    assert_eq!(tree_status.as_deref(), Some("in_progress"));
+
+    let links = links_of(&w, w.s1);
+    assert_eq!(links.links.len(), 1);
+    assert_eq!(
+        links.links[0].task.status_category, tree_status,
+        "the tree and the session's own task list must agree"
+    );
+}
+
+/// Fix round 2 (C2): a working session on a bare `ref_key` link (no item
+/// at all, `l.item_id IS NULL`) must not break `Store::
+/// work_items_with_working_session`'s one-join query. The clause `AND
+/// l.item_id IS NOT NULL` is load-bearing for a stronger reason than "a
+/// NULL would slip into the set": `r.get::<_, i64>` on that NULL column
+/// would **error**, and every reader that loads a `Graph` — `tree`,
+/// `task`, `session_tasks`, `review` — would fail outright, not just admit
+/// a bogus id.
+#[test]
+fn a_working_session_on_a_bare_ref_key_link_does_not_break_the_view() {
+    let w = world();
+    work_link(
+        &WorkLinkArgs {
+            key: Some("BARE-9".into()),
+            ..wl(&w, "link", w.s1)
+        },
+        &w.st,
+        &OrgScope::All,
+    )
+    .unwrap();
+    mark_working(&w, w.s1, "c-bare-9");
+
+    // None of these may error.
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert!(!p.tasks.is_empty());
+    assert!(task(&w.st, &OrgScope::All, "ref:BARE-9").is_ok());
+    assert!(session_tasks(&w.st, &OrgScope::All, w.s1).is_ok());
+    assert!(review(&w.st, &OrgScope::All, None, None).is_ok());
+}
+
+/// Fix round 2 (C3): the live signal must not leak "someone is working on
+/// this" through a session the caller cannot see. A local item owned by
+/// org A, ALSO worked by an org B session, lifts to `in_progress` for
+/// `OrgScope::All` (which sees every session) but stays at its stored
+/// value for org A's own bound scope, which cannot see org B's session.
+#[test]
+fn the_live_lift_is_fenced_by_org_scope() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        s.upsert_host("h2").unwrap();
+        s.set_host_org("h2", Some(w.org_b)).unwrap();
+        let s2b = s
+            .upsert_session("two-b", "h2", None, None, 1, 1, "running", None)
+            .unwrap();
+        let (it, _) = s
+            .name_session_work(w.s1, Some("LOC-90"), "Cross-org watch")
+            .unwrap();
+        s.seed_local_item_org(it.id, Some(w.org_a));
+        s.link_session_work(s2b, WorkTarget::Item(it.id), "manual")
+            .unwrap();
+        s.set_claude_session_id(s2b, "c-loc-90-b").unwrap();
+        s.set_claude_status_by_session_id("c-loc-90-b", "working")
+            .unwrap();
+    }
+
+    let all = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(
+        task_of(&all, "LOC-90").status_category.as_deref(),
+        Some("in_progress"),
+        "All sees org B's session working on it"
+    );
+
+    let a = bound(w.org_a);
+    let pa = page(&w, &a, WorkTreeFilters::default());
+    assert_eq!(
+        task_of(&pa, "LOC-90").status_category.as_deref(),
+        Some("todo"),
+        "org A must not see org B's session lift this to in_progress"
+    );
+}
+
+/// Fix round 3 (item 5): `to_task`'s `archived` now reads `item_status`
+/// (the live-lifted value), not the raw stored `status_category` directly
+/// — checked here rather than assumed safe. A "legacy" done item
+/// (`status_category = 'done'`, `status_set_by` NULL — written before that
+/// column existed, or by hand) that a session resumes work on is lifted to
+/// `in_progress` by the same live rule that protects a tracked done/derived
+/// stamp from a fresh working session; either way `archived` stays false,
+/// because the very link that lifts the status also makes
+/// `counts.active >= 1` for the same task. This pins that interaction.
+#[test]
+fn a_legacy_done_item_a_session_resumes_is_lifted_and_stays_unarchived() {
+    let w = world();
+    let item =
+        w.st.lock()
+            .unwrap()
+            .create_local_work_item(Some("LOC-91"), "Legacy done")
+            .unwrap();
+    // A narrow, deliberate raw UPDATE (not the banned pattern of faking a
+    // person's/tracker's status through one): simulates a `done` stamped
+    // before `status_set_by` existed, which `stamp_derived_done`/
+    // `set_item_status` — the store's only real writers — always pair with
+    // one, so there is no other way to reach this state through the store.
+    w.st.lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE work_items SET status_category = 'done' WHERE id = ?1",
+            rusqlite::params![item.id],
+        )
+        .unwrap();
+    link(&w, w.s1, item.id, true);
+    mark_working(&w, w.s1, "c-loc-91");
+
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let t = task_of(&p, "LOC-91");
+    assert_eq!(
+        t.status_category.as_deref(),
+        Some("in_progress"),
+        "nobody tracked this done, so the live lift applies"
+    );
+    assert!(
+        !t.archived,
+        "a session working it now is not archived, lifted status or not"
+    );
 }

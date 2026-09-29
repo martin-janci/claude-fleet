@@ -1,0 +1,49 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings.updates",
+  "title": "Updates",
+  "parent": "settings",
+  "layout": "category",
+  "intro": "Which releases the fleet follows, and whether each part updates itself, offers an update or waits for a pinned version. See docs/updates.md.",
+  "sections": [
+    {
+      "title": "Release track",
+      "items": [
+        {
+          "type": "field",
+          "key": "update.track"
+        },
+        {
+          "type": "field",
+          "key": "update.check_interval_secs"
+        }
+      ]
+    },
+    {
+      "title": "Per component",
+      "items": [
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "This desktop installs nothing yet: these rows say what the fleet follows, and the desktop updater is slice S6. See docs/updates.md."
+        },
+        {
+          "type": "field",
+          "key": "update.hub.mode"
+        },
+        {
+          "type": "field",
+          "key": "update.agent.mode"
+        },
+        {
+          "type": "field",
+          "key": "update.desktop.mode"
+        },
+        {
+          "type": "field",
+          "key": "update.mobile.mode"
+        }
+      ]
+    }
+  ]
+}

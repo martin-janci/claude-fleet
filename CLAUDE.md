@@ -88,6 +88,51 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 - **Session listing** is cache-first: `service::sessions::list_sessions` serves
   stored rows and only runs a reconcile pass when the last one is stale;
   `refresh_sessions` is the forced path for an explicit user refresh.
+- **Settings metadata** (`service/settings.rs`): every `SPECS` row carries
+  label, help, unit, what `0` means, tags, danger, restart and AI policy
+  next to its kind and default (`every_spec_has_consistent_metadata`).
+  `describe()` serves it to `get_settings { describe: true }` and
+  `describe_fleet_settings`; `docs/settings-reference.md` and the settings
+  tables in `docs/work-graph.md` / `docs/decisions.md` are generated from
+  it — after editing a spec run
+  `REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current`.
+  This is P1 of the declarative pages framework
+  (`docs/superpowers/specs/2026-09-28-declarative-pages-design.md`).
+- **Declarative pages** (`crates/fleet-core/src/pages/`, P2): pages are JSON
+  specs in `crates/fleet-core/pages/<id>.json`, listed in `PAGE_FILES`,
+  that NAME registered settings, data sources (`pages/sources.rs`) and
+  catalog widgets and layouts; `pages::validate` refuses anything else, and
+  every setting has exactly one home (`every_setting_has_one_home`: a new
+  `SPECS` row needs a `field` on a page). Authoring guide `docs/pages.md`;
+  regenerate `docs/page-spec.schema.json` / `docs/page-catalog.json` and
+  the frontend fixture `src/lib/pages/registry.generated.json` with
+  `REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current`.
+  P3's renderer (`src/lib/pages/`) shows them in Settings beside
+  "General" (`list_pages`, `fetch_page_source`); `hub.*` / `mcp.*` are
+  read-only specs (`owned_by`, D-P7), and `settings::set` emits
+  `settings:changed` (kind `settings`, never on host/org-bound streams).
+  P4a: resources (`pages/resources.rs`) back `master_detail` pages — an
+  action names an existing desktop command and binds its args, never code,
+  so verdicts and hub routing are unchanged (`resource_commands_exist`);
+  Settings → Organisations is one (OrgSettings.svelte is gone). P4b:
+  flows (`pages/flows.rs`, `flow_start|submit|back|cancel`, `LocalOnly`)
+  are server-driven wizards — the backend decides each step, a secret is
+  never stored; `tracker.connect` backs Settings → Trackers
+  (`settings.trackers`), which replaced WorkSettings' tracker list.
+  P5: `set_setting { propose: true, why }` leaves a proposal, never a
+  write (`service/settings_review.rs`, migration 083); every registered
+  write is audited through `settings::set_by` with its `Actor`; layout L6
+  `review_apply` (Settings → Proposed changes, `fleet-hub settings`), a
+  field's inline suggestion and History, search as a plain-words command
+  (`settings_nl.ts`), and page actions (`pages/actions.rs`) — custom
+  items are capped at 3.
+  P6: the settings route to the hub. `guard::Access::Person` (the master
+  or a paired client bound to no org) reaches `get_settings` /
+  `set_setting`; writes need a trusted `full` device (`settings_writer` in
+  `mcp/tools/fleet.rs`); `Access::PersonDevice` tools (`setting_proposals`,
+  `setting_history`, `decide_setting_proposals`, `list_pages`) are not
+  served to the master. A paired desktop's pages show the hub's settings
+  (`remote` hides data items, page actions and custom components).
 - **Status vocabulary** (`claude_status`, `stuck_kind`) lives in the enums in
   `service/pane_intel.rs`; the MCP tool descriptions and the generated
   reference derive from them, so add values there, not in prose.
@@ -100,7 +145,9 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (`full`/`readonly`) that is never the master and never reaches fleet admin
   — except the asset catalog, when the operator grants it per client
   (`fleet-hub client grant <name> assets`, migration 074; the hub's
-  `catalog_admin` tool, `service/catalog/admin.rs`, reads the grant live) —
+  `catalog_admin` tool, `service/catalog/admin.rs`, reads the grant live),
+  and the fleet's settings, which a trusted device bound to no org writes
+  (declarative pages P6) —
   and follows `GET /events` instead of polling. Hub-only; `fleet-hub
   pair|client` is the operator's side. See `docs/hub.md` → *Pair a phone*.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
@@ -112,7 +159,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 205
+  verdict is written down once, in `backend/verdicts.rs`, for all 215
   commands; `backend/tests_routing.rs` reads the handler list from `lib.rs`, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
@@ -192,8 +239,8 @@ lookup / start — `service/trackers/`, `store/trackers.rs`,
 `store/tracker_items.rs`); read
 `docs/superpowers/2026-09-24-work-graph-roadmap.md` before touching them.
 The user guide is `docs/work-graph.md`: update it with any change a user
-sees, and add every new `work.*` setting to its table
-(`work_settings_are_in_the_user_guide` fails otherwise).
+sees. Its `work.*` settings table is generated (see *Settings metadata*
+below).
 Tracker secrets are read ONLY by `Store::resolve_tracker_credential`.
 Work graph M4 (detection) is landed: one recogniser in Rust and TS over a
 shared fixture (`service/work/recognize.rs`, `src/lib/work_keys.ts`), the
@@ -318,8 +365,7 @@ envelope is built and OFF (Jev spec D35–D37; the roadmap's D31–D36 are other
 per-org consent `orgs.jev_allowed` (migration 068), the record
 `decision_runs` + key `decision_secrets` (069; the key is read ONLY by
 `Store::resolve_decision_credential`, never raw text in a run), `fleet-hub
-decide`; guide `docs/decisions.md` (every `decide.*` setting must be in its
-table). The first use case, J3 `status_map`, is built (shadow / assist
+decide`; guide `docs/decisions.md` (its `decide.*` settings table is generated). The first use case, J3 `status_map`, is built (shadow / assist
 only, off): the Asana probe keeps `config.unmapped_sections` /
 `project_sections`, `service/decide/status_map.rs` asks one Choice per
 unclassified section after a clean sync (`StatusMapTrigger`, daily), and
@@ -327,7 +373,7 @@ unclassified section after a clean sync (`StatusMapTrigger`, daily), and
 tracker section-map`; follow-ups are recorded in `work_admin update`.
 Assist is usable one proposal at a time (`status_map::decide_proposal`,
 by run id: apply / apply_as through `work_admin update`, reject → the
-follow-up only, hidden until a new answer): Settings → Work on a
+follow-up only, hidden until a new answer): Settings → Trackers on a
 standalone desktop (`status_map_proposals` / `decide_status_map_proposal`,
 `LocalOnly` when paired) and `fleet-hub decide proposals apply|reject`.
 Phase 0 (offline) is built for J1 `work_link` and J3: `fleet-hub decide bench
@@ -335,7 +381,14 @@ work-link | status-map` (`service/decide/bench/`: BM25, leakage guard, time
 split, calibration, the test map's acceptance lines, D39 `--export-unlinked`
 / `--labels`) with the `claude -p haiku` baseline (D33,
 `service/decide/haiku.rs`: a named host of the SAME org only, prompt on
-stdin). J1 has no live adapter: it waits on its acceptance lines. Label
+stdin). J1 has no live adapter: it waits on its acceptance lines.
+Their diagnostics are built too (evidence, never an acceptance line):
+`--perturb` (dataset C, `bench/perturb.rs`; J3 in `status_map_robust.rs`,
+J1 in `work_link_robust.rs`), J3's paired languages (dataset B, `pair` ids,
+`--paired-fixture`), `--floor-sweep` and `--question-set` (drafts in
+`service/testdata/decide/questions/`, dev only), and `fleet_health.decide`
+(`service::decide::health`, *degraded* per test map §7; the desktop's *Jev
+degraded* Attention item). Label
 hygiene (D34) is built: an agent never overturns a person's rejection,
 `store::Decider` records `agent` / `agent_started` vs `manual` / `started`
 (`PERSON_SOURCES` gate write-back, auto-trust and person counts), and a
@@ -489,10 +542,26 @@ against `keys.rs` before it leaves the runner
 (`scripts/release-update-scripts-test.sh`, CI hub-headless). See
 `docs/RELEASING.md` → *Update manifest and channels*.
 
+**Half of S4b is landed:** `X-Fleet-Client` (`fleet_update::client_header`)
+recorded into `update_observed` on `last_seen_at`'s once-a-minute beat in
+`authorize`; the `update:changed` row event (kind `update`, ids only, in
+`HOST_BOUND_HIDDEN_KINDS`); `fleet_health.updates` (`service::update::health`:
+`update_required`, `update_failed`, `update_rolled_back`, `rollback_failed`,
+`channel_stale`); and `update_status { target }`, the design's
+`update_check_for`. Left: the per-target `update:decision` push, hub-e2e
+section U, rollouts (S9).
+
+**S3 is landed:** `service::update::git_check` (Git mode: a `GitCheck`
+from the hub's own settings, pin and last-seen sequence) and `fleet-hub
+update check [--track] [--json]`, which reads the published channel and
+prints what this build should run, verified; it installs nothing.
+
 Trusted keys are `fleet_update::keys::RELEASE_KEYS`: the owner's release
 key (made on the owner's machine only, `scripts/release-key.sh`) is trusted
-since a3033c2 (v0.4.1), so a hub offers what the signed channel lists.
-`FLEET_UPDATE_E2E_KEYS` (read by `e2e` builds only) is reserved for S4b's
-hub-e2e section U; nothing uses it yet. `update.track` offers `stable` /
-`beta` only until S2b publishes `nightly`. S2b (nightly), S3, S4b and S6–S9
-are not built; the other §13 questions wait on the owner.
+since a3033c2 / #384 (v0.4.1); the secret half is only the
+`RELEASE_SIGNING_KEY` repository secret and the owner's backup. Nothing is
+offered until 0.4.1 publishes the first channel. An `e2e` build also reads
+`FLEET_UPDATE_E2E_KEYS`, reserved for S4b's hub-e2e section U; nothing uses
+it yet. `update.track` offers `stable` / `beta` only until S2b publishes
+`nightly`. S2b (nightly), the rest of S4b and S6–S9 are not built; the
+other §13 questions wait on the owner.

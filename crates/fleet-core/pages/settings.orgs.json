@@ -1,0 +1,78 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings.orgs",
+  "title": "Organisations",
+  "parent": "settings",
+  "layout": "master_detail",
+  "resource": "org",
+  "intro": "Optional. Name an org to merge or split GitHub owners, to attach a tracker, or to make it a boundary for its hosts.",
+  "list_items": [
+    {
+      "type": "custom",
+      "component": "org_suggestions"
+    }
+  ],
+  "sections": [
+    {
+      "title": "Organisation",
+      "items": [
+        {
+          "type": "field",
+          "key": "name"
+        },
+        {
+          "type": "field",
+          "key": "color"
+        }
+      ]
+    },
+    {
+      "title": "What belongs to it",
+      "items": [
+        {
+          "type": "field",
+          "key": "rules"
+        },
+        {
+          "type": "field",
+          "key": "hosts"
+        },
+        {
+          "type": "field",
+          "key": "trackers"
+        }
+      ]
+    },
+    {
+      "title": "Boundary",
+      "items": [
+        {
+          "type": "field",
+          "key": "isolate_sessions"
+        },
+        {
+          "type": "notice",
+          "tone": "warn",
+          "text": "Hosts outside this org can no longer list or message its sessions, and its hosts cannot see other orgs' sessions. Work data is fenced either way."
+        },
+        {
+          "type": "field",
+          "key": "bound_sees_unassigned"
+        }
+      ]
+    },
+    {
+      "title": "Automation",
+      "items": [
+        {
+          "type": "field",
+          "key": "auto_tidy"
+        },
+        {
+          "type": "field",
+          "key": "jev_allowed"
+        }
+      ]
+    }
+  ]
+}

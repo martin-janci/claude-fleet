@@ -21,6 +21,7 @@
 
 pub mod channel;
 pub mod channel_doc;
+pub mod client_header;
 pub mod decide;
 pub mod keys;
 pub mod manifest;

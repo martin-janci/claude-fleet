@@ -158,6 +158,37 @@ describe('WorkTaskDetail', () => {
     expect(vi.mocked(openExternal)).toHaveBeenCalledWith(trackerTask.task.url);
   });
 
+  it('a live session with a PR shows its Result; an ended one does not', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const head = '1490bc3a9275fba9c26757c531b7702f5a68df8c';
+    sessions.set([
+      session('mefistos', 'api', {
+        id: 7,
+        pr_url: 'https://github.com/o/r/pull/5',
+        pr_checked_at: now - 60,
+        pr_evidence: {
+          head_oid: head, local_head: head, ahead: 0, dirty: false, draft: false, state: 'OPEN',
+          checks: { total: 2, pending: 0, skipped: 0, failing_total: 1, failing: [{ name: 'rust' }] },
+        },
+      }),
+      session('mefistos', 'web', { id: 9 }),
+    ]);
+    const withPrs: TaskDetail = {
+      ...trackerTask,
+      task: {
+        ...trackerTask.task,
+        sessions: (trackerTask.task.sessions ?? []).map((l) => ({ ...l, pr_url: 'https://github.com/o/r/pull/5' })),
+      },
+    };
+    handlers.work_task = () => withPrs;
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    const chips = screen.getAllByTestId('work-task-link-result');
+    expect(chips).toHaveLength(1);
+    expect(chips[0]).toHaveTextContent('Blocked');
+    expect(chips[0]).toHaveAttribute('data-verdict', 'blocked');
+  });
+
   it('an inferred org says it is not a boundary', async () => {
     render(WorkTaskDetail, { taskId: 'item:77' });
     await flush();

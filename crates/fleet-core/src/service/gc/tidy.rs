@@ -213,6 +213,14 @@ pub struct TidyLink {
     pub never: bool,
     /// The linked item's org (its tracker's, work graph M5).
     pub org_id: Option<i64>,
+    /// Who set the item's status (`work_items.status_set_by`): `None` |
+    /// `person` | `derived`. Decides `DoneIdle` vs `PrMergedIdle` below, and
+    /// is what still says "a PR merged" once `sessions.pr_signals` has gone
+    /// with its session —
+    /// a stamped `done` keeps the reason faithful to its origin (design
+    /// 2026-09-28 §2), never a tracker item's, whose `status_set_by` stays
+    /// `None`.
+    pub status_set_by: Option<String>,
 }
 
 /// One session and everything the planner reads about it.
@@ -481,6 +489,16 @@ pub fn plan_tidy(
         }
         let mut reasons: Vec<(TidyReason, i64)> = Vec::new();
         let mut expires_at = None;
+        // The primary link's item carries a merged-PR stamp
+        // (`status_set_by = 'derived'`, which only ever accompanies `done`).
+        // It is the DURABLE half of the merged signal: `sessions.pr_signals`
+        // is deleted with its session row, so `TidySession::pr_merged` can
+        // go while the stamp it produced stays. Read here rather than inside
+        // the idle arm because both reasons below need it.
+        let stamped = s.link.as_ref().is_some_and(|l| {
+            l.status_set_by.as_deref() == Some("derived")
+                && l.status_category.as_deref() == Some("done")
+        });
         match r.status.as_str() {
             "running" => {
                 if !ctx.reachable.contains(&r.host_alias) {
@@ -493,7 +511,13 @@ pub fn plan_tidy(
                     let done_long = l.status_category.as_deref() == Some("done")
                         && l.status_changed_at
                             .is_some_and(|t| now - t >= cfg.done_secs);
-                    if done_long && !resolved_away {
+                    // A merged-PR stamp (`status_set_by = 'derived'`) keeps
+                    // its reason faithful to its origin: `PrMergedIdle`
+                    // below, not `DoneIdle` here, so a reason allow-list
+                    // keeps the meaning its author chose (design 2026-09-28
+                    // §2). A person's `done` (`'person'`) and a tracker
+                    // item's (`None`) classify as `DoneIdle`, as before.
+                    if done_long && !resolved_away && !stamped {
                         reasons.push((TidyReason::DoneIdle, since));
                     }
                     if resolved_away {
@@ -501,7 +525,14 @@ pub fn plan_tidy(
                     }
                 }
                 if let Some(since) = idle {
-                    if s.pr_merged {
+                    // `stamped` as well as the live signal: the stamp is
+                    // what a merged PR left behind, and `pr_signals` dies
+                    // with its session. Without it a stamped `done` matched
+                    // NO reason at all — `DoneIdle` is gated on `!stamped`
+                    // above and `PrMergedIdle` needed the signal — so such a
+                    // session lingered in tidy-up forever, a hole the
+                    // faithful-reason rule itself opened.
+                    if s.pr_merged || stamped {
                         reasons.push((TidyReason::PrMergedIdle, since));
                     }
                     if duplicate.contains(&i) {

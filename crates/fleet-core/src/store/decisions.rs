@@ -58,6 +58,12 @@ pub const DECISION_PERSON_FOLLOWUPS: &[&str] = &["confirmed", "rejected", "corre
 /// [`Store::decision_stats`] reports it apart.
 pub const DECISION_BENCH_SUBJECT: &str = "bench";
 
+/// `decision_runs.baseline_answer` when the baseline abstained (J3's keyword
+/// rule on a section it cannot classify). Such a run has nothing to agree
+/// with, so [`Store::decision_stats`] leaves it out of `compared` / `agreed`
+/// — the same count the status_map proposals view prints.
+pub const DECISION_NO_BASELINE: &str = "none";
+
 /// Which runs the circuit breaker and the daily budget count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunScope {
@@ -196,8 +202,9 @@ pub struct DecisionStatRow {
     pub rejected: i64,
     pub corrected: i64,
     pub ignored: i64,
-    /// Runs with both an answer and a baseline, and of those, the ones where
-    /// they agree (the shadow comparison).
+    /// Runs with both an answer and a baseline that did not abstain
+    /// ([`DECISION_NO_BASELINE`]), and of those, the ones where they agree
+    /// (the shadow comparison).
     pub compared: i64,
     pub agreed: i64,
 }
@@ -496,31 +503,36 @@ impl Store {
                COALESCE(SUM(cost_microusd), 0), \
                COALESCE(SUM(followup = 'confirmed'), 0), COALESCE(SUM(followup = 'rejected'), 0), \
                COALESCE(SUM(followup = 'corrected'), 0), COALESCE(SUM(followup = 'ignored'), 0), \
-               COALESCE(SUM(answer IS NOT NULL AND baseline_answer IS NOT NULL), 0), \
-               COALESCE(SUM(answer IS NOT NULL AND answer = baseline_answer), 0) \
+               COALESCE(SUM(answer IS NOT NULL AND baseline_answer IS NOT NULL \
+                 AND baseline_answer <> ?3), 0), \
+               COALESCE(SUM(answer IS NOT NULL AND answer = baseline_answer \
+                 AND baseline_answer <> ?3), 0) \
              FROM decision_runs WHERE at >= ?1 \
              GROUP BY feature, bench, provider, fallback, org_id \
              ORDER BY feature, bench, provider, fallback IS NOT NULL, fallback, org_id",
         )?;
-        let rows = stmt.query_map(rusqlite::params![since, DECISION_BENCH_SUBJECT], |r| {
-            Ok(DecisionStatRow {
-                feature: r.get(0)?,
-                bench: r.get::<_, i64>(1)? != 0,
-                provider: r.get(2)?,
-                fallback: r.get(3)?,
-                org_id: r.get(4)?,
-                runs: r.get(5)?,
-                called: r.get(6)?,
-                input_tokens: r.get(7)?,
-                cost_microusd: r.get(8)?,
-                confirmed: r.get(9)?,
-                rejected: r.get(10)?,
-                corrected: r.get(11)?,
-                ignored: r.get(12)?,
-                compared: r.get(13)?,
-                agreed: r.get(14)?,
-            })
-        })?;
+        let rows = stmt.query_map(
+            rusqlite::params![since, DECISION_BENCH_SUBJECT, DECISION_NO_BASELINE],
+            |r| {
+                Ok(DecisionStatRow {
+                    feature: r.get(0)?,
+                    bench: r.get::<_, i64>(1)? != 0,
+                    provider: r.get(2)?,
+                    fallback: r.get(3)?,
+                    org_id: r.get(4)?,
+                    runs: r.get(5)?,
+                    called: r.get(6)?,
+                    input_tokens: r.get(7)?,
+                    cost_microusd: r.get(8)?,
+                    confirmed: r.get(9)?,
+                    rejected: r.get(10)?,
+                    corrected: r.get(11)?,
+                    ignored: r.get(12)?,
+                    compared: r.get(13)?,
+                    agreed: r.get(14)?,
+                })
+            },
+        )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -977,6 +989,24 @@ mod tests {
         assert_eq!(s.sweep_decision_runs(250, 1).unwrap(), 1);
         assert_eq!(s.sweep_decision_runs(250, 10).unwrap(), 1);
         assert_eq!(s.decision_run_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_baseline_that_abstained_is_not_compared() {
+        let s = Store::open_in_memory().unwrap();
+        let shadow = |answer: &str, baseline: &str| NewDecisionRun {
+            answer: Some(answer.into()),
+            baseline_answer: Some(baseline.into()),
+            ..run("status_map")
+        };
+        s.insert_decision_run(&shadow("done", "done")).unwrap();
+        s.insert_decision_run(&shadow("todo", DECISION_NO_BASELINE))
+            .unwrap();
+        s.insert_decision_run(&shadow("todo", DECISION_NO_BASELINE))
+            .unwrap();
+        let stats = s.decision_stats(0).unwrap();
+        let sm = stats.iter().find(|r| r.feature == "status_map").unwrap();
+        assert_eq!((sm.runs, sm.compared, sm.agreed), (3, 1, 1));
     }
 
     #[test]

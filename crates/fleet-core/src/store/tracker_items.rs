@@ -19,7 +19,7 @@
 //!   the `item:<id>` it became, and placements whose task is gone are
 //!   swept ([`Store::sweep_orphan_placements`]).
 
-use super::work::{map_item, ITEM_COLUMNS};
+use super::work::{map_item, ITEM_COLUMNS, ITEM_COLUMN_COUNT};
 use super::{now_unix, Store, WorkItemRow};
 use crate::events::EventBus as _;
 use crate::ipc_error::{codes, IpcError};
@@ -1061,7 +1061,7 @@ impl Store {
              ORDER BY COALESCE(updated_ext, 0) DESC, id DESC"
         ))?;
         let rows = stmt.query_map(rusqlite::params![tracker_id], |r| {
-            let meta: Option<String> = r.get(23)?;
+            let meta: Option<String> = r.get(ITEM_COLUMN_COUNT)?;
             Ok((map_item(r)?, ItemMeta::parse(meta.as_deref())))
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

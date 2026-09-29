@@ -33,6 +33,8 @@
   import ConfirmDialog from './ConfirmDialog.svelte';
   import TasksPanel from './TasksPanel.svelte';
   import TicketCard from './TicketCard.svelte';
+  import PrResult from './PrResult.svelte';
+  import { assessRow, hasReading } from './evidence';
   import SessionTasks from './SessionTasks.svelte';
   import Timeline from './Timeline.svelte';
   import { push, pushError } from './toasts';
@@ -557,6 +559,10 @@
           >{ciStatusLabel(session.ci_status)}</span>
         {/if}
       </dd>
+      {#if hasReading(assessRow(session, nowSec))}
+        <dt>Result</dt>
+        <dd data-testid="details-pr-result"><PrResult {session} {nowSec} /></dd>
+      {/if}
     {/if}
 
     {#if reviewedSource}

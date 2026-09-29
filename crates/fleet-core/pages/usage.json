@@ -1,0 +1,84 @@
+{
+  "spec": "fleet.page/1",
+  "id": "usage",
+  "title": "Usage",
+  "layout": "data_page",
+  "intro": "Token usage and estimated cost, read from each session's Claude transcript.",
+  "sections": [
+    {
+      "title": "Totals",
+      "items": [
+        {
+          "type": "stat",
+          "source": {
+            "id": "usage.total"
+          },
+          "field": "cost_micros",
+          "label": "Estimated cost"
+        },
+        {
+          "type": "stat",
+          "source": {
+            "id": "usage.total"
+          },
+          "field": "input_tokens"
+        },
+        {
+          "type": "stat",
+          "source": {
+            "id": "usage.total"
+          },
+          "field": "output_tokens"
+        }
+      ]
+    },
+    {
+      "title": "Last 30 days",
+      "items": [
+        {
+          "type": "chart",
+          "source": {
+            "id": "usage.by_day",
+            "params": {
+              "days": 30
+            }
+          },
+          "chart": "bar",
+          "title": "Estimated cost per day"
+        }
+      ]
+    },
+    {
+      "title": "By model",
+      "items": [
+        {
+          "type": "table",
+          "source": {
+            "id": "usage.by_model"
+          }
+        }
+      ]
+    },
+    {
+      "title": "By host",
+      "items": [
+        {
+          "type": "table",
+          "source": {
+            "id": "usage.by_host"
+          }
+        }
+      ]
+    },
+    {
+      "title": "Settings",
+      "items": [
+        {
+          "type": "link",
+          "page": "settings.limits",
+          "label": "Usage settings"
+        }
+      ]
+    }
+  ]
+}

@@ -66,6 +66,34 @@ impl Store {
 
     /// Store what the PR probe read for `tmux_name` on `host` (`None`: no
     /// PR). Returns the session id when the value changed.
+    ///
+    /// Merged signals also stamp the session's local work `done`
+    /// ([`Store::stamp_derived_done_for_session`], design 2026-09-28 §2).
+    /// **Here** because this is the moment the merged fact becomes known and
+    /// the only one a later `kill_session` cannot lose: `pr_signals` is
+    /// deleted with its session row, and the background tidy sweep does not
+    /// reach the stamp unless `work.auto_tidy` is on (default off), so a
+    /// stamp that lived only in `Store::tidy_sessions` was a promise kept
+    /// only if a person opened Tidy-up before the session was reaped.
+    ///
+    /// Only when the stored value CHANGED (`n > 0`), which is the same
+    /// condition this method reports by returning the session id. An earlier
+    /// round ran it on every merged probe, to cover a link confirmed after
+    /// the merge was first seen — and that made a STALE merged signal stamp
+    /// whatever work the session was pointed at NEXT: pick different work on
+    /// a session still sitting on its merged branch (`link_session_work` →
+    /// `take_primary` demotes the old link) and the following unchanged
+    /// probe marked the NEW item `derived`/`done`, permanently, on the one
+    /// field this feature exists to make trustworthy. The late-confirmed
+    /// link is covered instead by the caller's second call, made after
+    /// `service::work::detect::resolve_session` has settled the links
+    /// (`service::sessions::reconcile`), which is a signal that just changed
+    /// rather than an old one being re-read.
+    ///
+    /// A failed stamp is logged, never returned: the `UPDATE` above has
+    /// already committed, and the caller re-resolves the session's links and
+    /// queues the PR write-back off this method's answer. A secondary write
+    /// must not be able to cancel the primary path it was bolted onto.
     pub fn set_pr_signals(
         &self,
         host: &str,
@@ -86,7 +114,20 @@ impl Store {
              WHERE id = ?3 AND (pr_signals IS NOT ?1 OR pr_signals_at IS NULL)",
             rusqlite::params![signals, now_unix(), id],
         )?;
-        Ok((n > 0).then_some(id))
+        let merged = signals
+            .and_then(|s| serde_json::from_str::<crate::service::work::detect::PrSignals>(s).ok())
+            .is_some_and(|s| s.is_merged());
+        let changed = n > 0;
+        if merged && changed {
+            if let Err(e) = self.stamp_derived_done_for_session(id) {
+                tracing::warn!(
+                    session_id = id,
+                    error = %e.message,
+                    "[work] merged PR did not stamp its local work done"
+                );
+            }
+        }
+        Ok(changed.then_some(id))
     }
 
     /// The resolver's view of `session_id`, `None` for a missing row.

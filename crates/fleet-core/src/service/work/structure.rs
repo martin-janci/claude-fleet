@@ -203,7 +203,7 @@ pub fn place(
     let group = clean_text(group.unwrap_or_default(), "group", LABEL_MAX_CHARS, true)?;
     let note = clean_text(note.unwrap_or_default(), "note", NOTE_MAX_CHARS, true)?;
     let s = lock(store)?;
-    let mut g = Graph::load(&s)?;
+    let mut g = Graph::load(&s, scope)?;
     // Visibility first: a task out of scope answers as an unknown one, and
     // its placement's version is never compared (no oracle).
     let (task, _) = find_task(&g, scope, task_id, false)?;
@@ -264,7 +264,7 @@ pub fn rules(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<WorkRule>, Ip
         OrgScope::Org { .. } => {
             let g = {
                 let s = lock(store)?;
-                Graph::load(&s)?
+                Graph::load(&s, scope)?
             };
             let tasks = view::all_tasks(&g, scope, 0);
             Ok(g.rules
@@ -322,7 +322,7 @@ pub fn rule_preview(
     let (name, conditions, group) = clean_rule(rule)?;
     let mut g = {
         let s = lock(store)?;
-        Graph::load(&s)?
+        Graph::load(&s, scope)?
     };
     let before = view::all_tasks(&g, scope, 0);
     let draft = WorkRule {
@@ -713,7 +713,7 @@ pub fn org_impact(
     }
     let to = org_arg(org_id)?;
     let s = lock(store)?;
-    let g = Graph::load(&s)?;
+    let g = Graph::load(&s, scope)?;
     impact_of(&s, &g, scope, task_id, to)
 }
 
@@ -737,7 +737,7 @@ pub fn assign_org(
     let token = impact_token
         .ok_or_else(|| invalid("assign_org needs the impact_token of a fresh org_impact"))?;
     let s = lock(store)?;
-    let mut g = Graph::load(&s)?;
+    let mut g = Graph::load(&s, scope)?;
     let impact = impact_of(&s, &g, scope, task_id, to)?;
     if !impact.allowed {
         return Err(match impact.reason.as_deref() {

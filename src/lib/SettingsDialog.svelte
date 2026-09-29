@@ -1,7 +1,17 @@
 <script lang="ts">
   import WorkSettings from './WorkSettings.svelte';
-  import WorkRetention from './WorkRetention.svelte';
-  import { onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
+  import PageView from './pages/PageView.svelte';
+  import SettingsNav from './pages/SettingsNav.svelte';
+  import {
+    descriptors,
+    loadDescriptors,
+    loadPages,
+    pagesBundle,
+    settingValues,
+  } from './pages/pages';
+  import { subscribeToRowEvents } from './events';
+  import { loadProposals, settingProposals, settingsWritable } from './pages/review';
   import { hosts } from './hosts';
   import { mcpStatus } from './mcp';
   import { onboardingDismissed, onboardingWelcomed } from './onboarding';
@@ -31,45 +41,15 @@
     fleetSettings,
     loadFleetSettings,
     setFleetSetting,
-    settingBool,
-    settingSecs,
-    settingInt,
-    parseHoursInput,
-    parseBoundedIntInput,
-    parseIntInput,
-    TIDY_IDLE_UNLINKED_DAYS_MAX,
-    TIDY_IDLE_UNLINKED_DAYS_MIN,
-    parsePricesJsonInput,
-    secsToHours,
-    hoursToSecs,
     SETTING_KEYS,
-    MAX_SECS,
-    MOVE_MAX_TRANSCRIPT_MB_MAX,
-    MOVE_MAX_BUNDLE_MB_MAX,
-    MOVE_IGNORED_ENTRY_KB_MAX,
-    MOVE_IGNORED_TOTAL_MB_MAX,
-    MOVE_MAX_SESSION_STATE_MB_MAX,
-    REPORTS_MAX_ROWS_MIN,
-    REPORTS_MAX_ROWS_MAX,
-    MOVE_WAIT_MAX_MINS_MAX,
     PROJECTS_LOCAL_ENV_KEY,
     settingPathMap,
     settingLayout,
     basePathError,
     projectPathPreview,
     projectsDefaultRoot,
-    AUTO_TIDY_REASONS,
-    parseAutoTidyReasons,
-    toggleAutoTidyReason,
-    DECIDE_MODES,
-    DECIDE_JEV_MODELS,
-    UPDATE_TRACKS,
-    UPDATE_MODES,
-    UPDATE_MOBILE_MODES,
-    type SettingKey,
     type ProjectsLayout,
   } from './fleet_settings';
-  import { TIDY_REASON_LABELS, autoTidyPreview, refreshTidy, tidyReport, tidyReasonLabel, formatIdle, type TidyCandidate } from './tidy';
   import { refreshProjects } from './projects';
   import {
     hubStatus,
@@ -78,6 +58,7 @@
     hubBlock,
     hubStrandedToken,
     ownsTheFleet,
+    type HubAction,
   } from './hub';
   import {
     attentionIdleMinutes,
@@ -230,24 +211,90 @@
     void refreshComposerPresetsIfIdle();
   });
 
+  // --- Pages: General (the hand-written panels below) or a generated page
+  // (declarative pages P3; `crates/fleet-core/pages/`), picked in the nav. ---
+  let view = $state('general');
+  let focusKey = $state<string | null>(null);
+  let settingsLoadError: string | null = $state(null);
+  // Declarative pages P6: on a paired desktop the pages are the hub's
+  // settings, read (and, when the hub's operator trusts this device,
+  // written) through it. `off` until they load; a refusal keeps the reason.
+  let hubPages = $state<'off' | 'loading' | 'ok'>('off');
+  let hubPagesError = $state<string | null>(null);
+  /** The generated pages have the fleet's settings to show here. */
+  const pagesHere = $derived(ownsFleet || hubPages === 'ok');
+  const currentPage = $derived($pagesBundle.pages.find((p) => p.id === view));
+
+  function select(next: string, key?: string) {
+    view = next;
+    focusKey = key ?? null;
+  }
+
+  // Another window, or an agent over the control API, changed a setting:
+  // re-read the values so an open page never shows a stale one.
+  let unlistenSettings: (() => void) | null = null;
+  let destroyed = false;
+  onDestroy(() => {
+    destroyed = true;
+    unlistenSettings?.();
+  });
+
   // Opened at a section (a "Reconnect Jira (acme)" Attention item, work
-  // graph M12.4): scroll it into view once, then forget the request.
+  // graph M12.4): scroll it into view once, then forget the request. A
+  // page id opens that page instead.
   onMount(() => {
     const section = $settingsSection;
     if (!section) return;
     settingsSection.set(null);
+    if (section.includes('.') || section === 'settings' || section === 'usage') {
+      select(section);
+      return;
+    }
     void tick().then(() => {
       const el = document.querySelector<HTMLElement>(`[data-testid="${section}-section"]`);
       el?.scrollIntoView?.({ block: 'start' });
     });
   });
 
+  async function subscribeSettings() {
+    // A write, a proposal or a review: re-read the values and what waits.
+    const off = await subscribeToRowEvents({
+      onSettingsChanged: () => {
+        void loadFleetSettings();
+        void loadProposals();
+      },
+    });
+    if (destroyed) off();
+    else unlistenSettings = off;
+  }
+
+  /** A paired desktop: the hub's settings, proposals and whether this
+   *  device may change them. A hub that refuses (older, or this device is
+   *  bound to one org) leaves the pages on its reason. */
+  async function loadHubPages() {
+    hubPages = 'loading';
+    const [fs, ds] = await Promise.all([loadFleetSettings(), loadDescriptors(), loadProposals()]);
+    const failed = !ds.ok ? ds : !fs.ok ? fs : null;
+    if (failed && !failed.ok) {
+      hubPages = 'off';
+      hubPagesError = failed.error.message;
+      return;
+    }
+    hubPages = 'ok';
+    resetProjectDrafts();
+    await subscribeSettings();
+  }
+
   onMount(async () => {
     hubUrlDraft = $hubStatus.configured_url ?? '';
+    // The page specs are compiled in: the same list whether or not a hub
+    // owns the fleet, so the nav shows it either way.
+    void loadPages();
     if (!ownsTheFleet($hubStatus)) {
-      // Neither of these applies to a hub client, and both are guarded on
-      // the backend. Asking anyway would put two error toasts on the screen
-      // every time Settings is opened.
+      // The control API and the stranded-token check do not apply to a hub
+      // client, and both are guarded on the backend. The settings do: a
+      // connected hub serves them (P6).
+      if ($hubStatus.remote) await loadHubPages();
       return;
     }
     const r = await mcpStatus();
@@ -255,9 +302,11 @@
     // Settings while mcpStatus() is in flight leaves it unset — and a throw
     // here would also skip resetProjectDrafts() below.
     mcpSettings?.applyStatus(r);
-    const fs = await loadFleetSettings();
-    if (!fs.ok) automationError = fs.error.message;
+    const [fs, ds] = await Promise.all([loadFleetSettings(), loadDescriptors(), loadProposals()]);
+    if (!fs.ok) settingsLoadError = fs.error.message;
+    else if (!ds.ok) settingsLoadError = ds.error.message;
     resetProjectDrafts();
+    await subscribeSettings();
     // Last, and only standalone: on macOS this reads the keychain, which is
     // the one call here that can block on a locked one. Nothing else on this
     // screen waits for it, and with a hub configured there is nothing to ask
@@ -343,149 +392,6 @@
     if (permission === 'granted') notifyStuckOs.set(true);
   }
 
-  // --- Automation: playbooks + GC (backend settings table) ---
-  let automationError: string | null = $state(null);
-  let automationBusy = $state(false);
-  async function applySetting(key: SettingKey, value: string) {
-    automationBusy = true;
-    automationError = null;
-    const r = await setFleetSetting(key, value);
-    automationBusy = false;
-    if (!r.ok) automationError = r.error.message;
-  }
-  /** Projects in the `work.trusted_branch_projects` id set. */
-  function trustedProjectCount(raw: string | undefined): number {
-    try {
-      const v: unknown = JSON.parse(raw ?? '[]');
-      return Array.isArray(v) ? v.length : 0;
-    } catch {
-      return 0;
-    }
-  }
-  // Work graph M7.3: "Show what auto-tidy would do" — the current
-  // candidates auto-tidy would act on with the ticked reasons.
-  let dryRun = $state<TidyCandidate[] | null>(null);
-  let dryRunBusy = $state(false);
-  async function showDryRun() {
-    dryRunBusy = true;
-    await refreshTidy();
-    dryRunBusy = false;
-    dryRun = autoTidyPreview(
-      $tidyReport.candidates,
-      parseAutoTidyReasons($fleetSettings[SETTING_KEYS.workAutoTidyReasons]),
-    );
-  }
-  function toggleSetting(key: SettingKey) {
-    void applySetting(key, settingBool($fleetSettings, key) ? 'false' : 'true');
-  }
-  // Hours in the inputs, seconds on the wire. `null` while the field is
-  // cleared; nothing is written until the value parses.
-  function onHoursChange(key: SettingKey, e: Event) {
-    const raw = (e.currentTarget as HTMLInputElement).value;
-    const hours = Number.parseFloat(raw);
-    if (!Number.isFinite(hours) || hours < 0) return;
-    void applySetting(key, String(hoursToSecs(hours)));
-  }
-  function onSecsChange(key: SettingKey, e: Event) {
-    const raw = (e.currentTarget as HTMLInputElement).value;
-    const secs = Number.parseInt(raw, 10);
-    if (!Number.isFinite(secs) || secs < 0) return;
-    void applySetting(key, String(secs));
-  }
-  // --- Limits: task TTL + move transcript cap (backend settings table) ---
-  // Values go to the backend as entered: it owns the range check, and its
-  // E_INVALID message is what the row shows.
-  let limitsError: string | null = $state(null);
-  let limitsBusy = $state(false);
-  async function applyLimit(key: SettingKey, value: string) {
-    limitsBusy = true;
-    limitsError = null;
-    const r = await setFleetSetting(key, value);
-    limitsBusy = false;
-    if (!r.ok) limitsError = r.error.message;
-  }
-  // Nothing is dropped silently: an input that cannot be sent (empty,
-  // negative hours, a value that rounds to 0 s = "never", a non-integer)
-  // gets a message naming the field instead.
-  function onLimitHoursChange(key: SettingKey, label: string, e: Event) {
-    const r = parseHoursInput((e.currentTarget as HTMLInputElement).value);
-    if ('error' in r) {
-      limitsError = `${label}: ${r.error}`;
-      return;
-    }
-    void applyLimit(key, String(r.secs));
-  }
-  function onLimitIntChange(key: SettingKey, label: string, e: Event) {
-    const r = parseIntInput((e.currentTarget as HTMLInputElement).value);
-    if ('error' in r) {
-      limitsError = `${label}: ${r.error}`;
-      return;
-    }
-    void applyLimit(key, r.value);
-  }
-  // --- Decisions (Jev): experimental, off (docs/decisions.md) ---
-  let decideError: string | null = $state(null);
-  let decideBusy = $state(false);
-  // --- Updates (update.*): the hub's policy for the fleet's own software ---
-  let updateError: string | null = $state(null);
-  let updateBusy = $state(false);
-  async function applyUpdate(key: SettingKey, value: string) {
-    updateBusy = true;
-    updateError = null;
-    const r = await setFleetSetting(key, value);
-    updateBusy = false;
-    if (!r.ok) updateError = r.error.message;
-  }
-  function onUpdateIntervalChange(e: Event) {
-    const r = parseIntInput((e.currentTarget as HTMLInputElement).value);
-    if ('error' in r) {
-      updateError = `Check every: ${r.error}`;
-      return;
-    }
-    void applyUpdate(SETTING_KEYS.updateCheckIntervalSecs, r.value);
-  }
-  const UPDATE_MODE_ROWS = [
-    { key: SETTING_KEYS.updateHubMode, label: 'hub', id: 'update-hub-mode', modes: UPDATE_MODES },
-    { key: SETTING_KEYS.updateAgentMode, label: 'agents', id: 'update-agent-mode', modes: UPDATE_MODES },
-    { key: SETTING_KEYS.updateDesktopMode, label: 'desktops', id: 'update-desktop-mode', modes: UPDATE_MODES },
-    { key: SETTING_KEYS.updateMobileMode, label: 'phones', id: 'update-mobile-mode', modes: UPDATE_MOBILE_MODES },
-  ] as const;
-  async function applyDecide(key: SettingKey, value: string) {
-    decideBusy = true;
-    decideError = null;
-    const r = await setFleetSetting(key, value);
-    decideBusy = false;
-    if (!r.ok) decideError = r.error.message;
-  }
-  function onDecideIntChange(key: SettingKey, label: string, e: Event) {
-    const r = parseIntInput((e.currentTarget as HTMLInputElement).value);
-    if ('error' in r) {
-      decideError = `${label}: ${r.error}`;
-      return;
-    }
-    void applyDecide(key, r.value);
-  }
-  function onIdleUnlinkedDaysChange(e: Event) {
-    const r = parseBoundedIntInput(
-      (e.currentTarget as HTMLInputElement).value,
-      TIDY_IDLE_UNLINKED_DAYS_MIN,
-      TIDY_IDLE_UNLINKED_DAYS_MAX,
-    );
-    if ('error' in r) {
-      limitsError = `Tidy: unlinked for: ${r.error}`;
-      return;
-    }
-    void applyLimit(SETTING_KEYS.workTidyIdleUnlinkedDays, r.value);
-  }
-  function onUsagePricesChange(e: Event) {
-    const r = parsePricesJsonInput((e.currentTarget as HTMLTextAreaElement).value);
-    if ('error' in r) {
-      limitsError = `Usage prices: ${r.error}`;
-      return;
-    }
-    void applyLimit(SETTING_KEYS.usagePricesJson, r.value);
-  }
-
   function onIdleMinutesChange(e: Event) {
     const v = Number.parseInt((e.currentTarget as HTMLInputElement).value, 10);
     if (Number.isFinite(v) && v >= 0) attentionIdleMinutes.set(v);
@@ -522,12 +428,23 @@
 </script>
 
 <!-- Escape + backdrop are handled by Modal (native <dialog>). -->
-<Modal label="Settings" onclose={onClose} width="min(640px, 92vw)">
+<Modal label="Settings" onclose={onClose} width="min(1040px, 94vw)" maxWidth="94vw">
   <div class="dialog settings-dialog">
     <header>
       <h3>Settings</h3>
       <button class="close" onclick={onClose} aria-label="Close">×</button>
     </header>
+    <div class="settings-body">
+    <SettingsNav
+      pages={$pagesBundle.pages}
+      descs={$descriptors}
+      values={$settingValues}
+      selected={view}
+      counts={pagesHere ? { 'settings.review': $settingProposals.length } : {}}
+      canWrite={pagesHere && $settingsWritable}
+      onselect={select} />
+    <div class="settings-content">
+    {#if view === 'general'}
 
     <section class="block hosts-line" data-testid="settings-hosts-line">
       <h4>Hosts</h4>
@@ -720,9 +637,17 @@
     {#if !ownsFleet}
       <section class="block" data-testid="projects-remote-section">
         <div class="section-header"><h4>Projects</h4></div>
-        <p class="hook-desc" data-testid="projects-remote">
-          {hubBlock('get_fleet_settings', $hubStatus)}
-        </p>
+        {#if pagesHere}
+          <p class="hook-desc" data-testid="projects-remote">
+            The hub’s projects roots and layout are on the
+            <button type="button" class="link-btn" data-testid="projects-remote-open" onclick={() => select('settings.projects')}>Projects page</button>;
+            a rescan runs on the hub.
+          </p>
+        {:else}
+          <p class="hook-desc" data-testid="projects-remote">
+            {hubBlock('fleet_settings', $hubStatus)}
+          </p>
+        {/if}
       </section>
     {:else}
     <section class="block" data-testid="projects-section">
@@ -940,33 +865,6 @@
     <WorkSettings />
 
     {#if !ownsFleet}
-      <section class="block" data-testid="automation-remote-section">
-        <div class="section-header"><h4>Automation</h4></div>
-        <p class="hook-desc" data-testid="automation-remote">
-          {hubBlock('get_fleet_settings', $hubStatus)}
-        </p>
-      </section>
-      <section class="block" data-testid="limits-remote-section">
-        <div class="section-header"><h4>Limits</h4></div>
-        <p class="hook-desc" data-testid="limits-remote">
-          {hubBlock('get_fleet_settings', $hubStatus)}
-        </p>
-      </section>
-      <section class="block" data-testid="decide-remote-section">
-        <div class="section-header"><h4>Decisions (Jev) — experimental, off</h4></div>
-        <p class="hook-desc" data-testid="decide-remote">
-          {hubBlock('get_fleet_settings', $hubStatus)} On the hub: <code>set_setting</code> with a
-          <code>decide.*</code> key, and <code>fleet-hub decide status</code>.
-        </p>
-      </section>
-      <section class="block" data-testid="update-remote-section">
-        <div class="section-header"><h4>Updates</h4></div>
-        <p class="hook-desc" data-testid="update-remote">
-          {hubBlock('get_fleet_settings', $hubStatus)} On the hub: <code>update_status</code>,
-          <code>update_admin</code> (pin / refresh), and <code>set_setting</code> with an
-          <code>update.*</code> key.
-        </p>
-      </section>
       <section class="block" data-testid="mcp-remote-section">
         <div class="section-header"><h4>Control API (MCP)</h4></div>
         <p class="hook-desc" data-testid="mcp-remote">
@@ -977,754 +875,6 @@
         </p>
       </section>
     {:else}
-    <section class="block" data-testid="automation-section">
-      <div class="section-header">
-        <h4>Automation</h4>
-      </div>
-      <p class="mcp-blurb">
-        Stuck-session playbooks, the idle-session GC and workspace repair run
-        from the background reconcile tick. Everything here is off by default; changes apply on the
-        next tick.
-      </p>
-      <label class="toggle">
-        <input
-          type="checkbox"
-          checked={settingBool($fleetSettings, SETTING_KEYS.playbookPressEnter)}
-          disabled={automationBusy}
-          data-testid="playbook-press-enter"
-          onchange={() => toggleSetting(SETTING_KEYS.playbookPressEnter)} />
-        Press Enter for sessions stuck on a "Press Enter" prompt
-      </label>
-      <label class="toggle">
-        <input
-          type="checkbox"
-          checked={settingBool($fleetSettings, SETTING_KEYS.playbookOomRecreate)}
-          disabled={automationBusy}
-          data-testid="playbook-oom-recreate"
-          onchange={() => toggleSetting(SETTING_KEYS.playbookOomRecreate)} />
-        Recreate sessions that ran out of memory (at most once per hour)
-      </label>
-      <div class="mcp-field">
-        <label class="lbl" for="playbook-oom-max-attempts">oom budget</label>
-        <input class="port" id="playbook-oom-max-attempts" type="number" min="0" max="20" step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.playbookOomMaxAttempts)}
-          disabled={automationBusy}
-          aria-describedby="playbook-oom-max-attempts-desc"
-          data-testid="playbook-oom-max-attempts"
-          onchange={(e) => onSecsChange(SETTING_KEYS.playbookOomMaxAttempts, e)} />
-        <span class="hook-desc" id="playbook-oom-max-attempts-desc">recreates one session may get per 24 h (0 = never); a session that is working, or finished a turn after the flag, is never recreated</span>
-      </div>
-      <p class="hook-desc">Auth menus, trust prompts and reconnects are always notify-only.</p>
-
-      <label class="toggle">
-        <input
-          type="checkbox"
-          checked={settingBool($fleetSettings, SETTING_KEYS.provisionForceGitTree)}
-          disabled={automationBusy}
-          data-testid="provision-force-git-tree"
-          onchange={() => toggleSetting(SETTING_KEYS.provisionForceGitTree)} />
-        Write fleet's two skill dirs even when ~/.claude/skills is a git checkout
-      </label>
-      <label class="toggle gc-toggle">
-        <input
-          type="checkbox"
-          checked={settingBool($fleetSettings, SETTING_KEYS.gcEnabled)}
-          disabled={automationBusy}
-          data-testid="gc-enabled"
-          onchange={() => toggleSetting(SETTING_KEYS.gcEnabled)} />
-        Garbage-collect idle sessions
-      </label>
-      <div class="mcp-field">
-        <span class="lbl">bg</span>
-        <input class="port" type="number" min="0" step="0.5"
-          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.gcBgIdleSecs))}
-          disabled={automationBusy}
-          data-testid="gc-bg-hours"
-          onchange={(e) => onHoursChange(SETTING_KEYS.gcBgIdleSecs, e)} />
-        <span class="hook-desc">hours idle before a background agent is stopped (0 = never)</span>
-      </div>
-      <div class="mcp-field">
-        <span class="lbl">shell</span>
-        <input class="port" type="number" min="0" step="0.5"
-          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.gcShellIdleSecs))}
-          disabled={automationBusy}
-          data-testid="gc-shell-hours"
-          onchange={(e) => onHoursChange(SETTING_KEYS.gcShellIdleSecs, e)} />
-        <span class="hook-desc">hours inactive before a shell session is killed (0 = never)</span>
-      </div>
-      <div class="mcp-field">
-        <span class="lbl">work</span>
-        <input class="port" type="number" min="0" step="0.5"
-          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.gcWorkIdleSecs))}
-          disabled={automationBusy}
-          data-testid="gc-work-hours"
-          onchange={(e) => onHoursChange(SETTING_KEYS.gcWorkIdleSecs, e)} />
-        <span class="hook-desc">hours idle before a work session is removed — dirty worktrees go through safe-remove (0 = never)</span>
-      </div>
-      <div class="mcp-field">
-        <span class="lbl">outside fleet</span>
-        <input class="port" type="number" min="0" step="0.5"
-          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.gcExternalLostTtlSecs))}
-          disabled={automationBusy}
-          data-testid="gc-external-lost-hours"
-          onchange={(e) => onHoursChange(SETTING_KEYS.gcExternalLostTtlSecs, e)} />
-        <span class="hook-desc">hours a lost session from outside fleet is kept before it is removed — it can never be resumed, this only rides out a restart (0 = next pass)</span>
-      </div>
-      <div class="mcp-field">
-        <span class="lbl">sweep</span>
-        <input class="port" type="number" min="0"
-          value={settingSecs($fleetSettings, SETTING_KEYS.gcSweepIntervalSecs)}
-          disabled={automationBusy}
-          data-testid="gc-sweep-secs"
-          onchange={(e) => onSecsChange(SETTING_KEYS.gcSweepIntervalSecs, e)} />
-        <span class="hook-desc">seconds between GC sweeps</span>
-      </div>
-
-      <label class="toggle gc-toggle">
-        <input
-          type="checkbox"
-          checked={settingBool($fleetSettings, SETTING_KEYS.repairAutoOnTick)}
-          disabled={automationBusy}
-          data-testid="repair-auto-on-tick"
-          onchange={() => toggleSetting(SETTING_KEYS.repairAutoOnTick)} />
-        Re-create vanished worktree directories automatically
-      </label>
-      <p class="hook-desc">
-        Re-adds deleted worktrees without anyone opening them. A worktree
-        git still lists is dropped and re-added only when its parent folder
-        is the same one seen while it was healthy (so an unmounted or
-        remounted volume is never touched); otherwise use Repair workspace.
-        Never touches the controller, review sessions or a session being
-        safely removed.
-      </p>
-      <div class="mcp-field">
-        <span class="lbl">repair</span>
-        <input class="port" type="number" min="60"
-          value={settingSecs($fleetSettings, SETTING_KEYS.repairTickIntervalSecs)}
-          disabled={automationBusy}
-          data-testid="repair-tick-secs"
-          onchange={(e) => onSecsChange(SETTING_KEYS.repairTickIntervalSecs, e)} />
-        <span class="hook-desc">seconds between workspace checks (60 or more; at most 5 repairs each)</span>
-      </div>
-      <div class="mcp-field">
-        <span class="lbl">tick</span>
-        <input class="port" type="number" min="0"
-          value={settingSecs($fleetSettings, SETTING_KEYS.reconcileIntervalSecs)}
-          disabled={automationBusy}
-          data-testid="reconcile-secs"
-          onchange={(e) => onSecsChange(SETTING_KEYS.reconcileIntervalSecs, e)} />
-        <span class="hook-desc">seconds between reconcile passes (0 disables; restart to apply)</span>
-      </div>
-      <div class="mcp-field">
-        <span class="lbl">stale working</span>
-        <input class="port" type="number" min="0"
-          value={settingSecs($fleetSettings, SETTING_KEYS.reconcileStaleWorkingSecs)}
-          disabled={automationBusy}
-          data-testid="reconcile-stale-working-secs"
-          onchange={(e) => onSecsChange(SETTING_KEYS.reconcileStaleWorkingSecs, e)} />
-        <span class="hook-desc">seconds a "working" session may go without a hook, a turn, transcript growth, spinner on its pane or tmux session activity before it reads idle (0 = never)</span>
-      </div>
-      <div class="mcp-field">
-        <span class="lbl">stale ttl</span>
-        <input class="port" type="number" min="0"
-          value={settingSecs($fleetSettings, SETTING_KEYS.reconcileStaleWorkingTtlSecs)}
-          disabled={automationBusy}
-          data-testid="reconcile-stale-working-ttl-secs"
-          onchange={(e) => onSecsChange(SETTING_KEYS.reconcileStaleWorkingTtlSecs, e)} />
-        <span class="hook-desc">seconds a demoted session asks for a look before the tick drops the reason; opening its terminal drops it at once (0 = never)</span>
-      </div>
-      {#if automationError}<p class="err">{automationError}</p>{/if}
-    </section>
-
-    <section class="block" data-testid="limits-section">
-      <div class="section-header">
-        <h4>Limits</h4>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="limit-tasks-hours">tasks</label>
-        <input class="port" id="limit-tasks-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
-          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.tasksMaxAgeSecs))}
-          disabled={limitsBusy}
-          aria-describedby="limit-tasks-desc"
-          data-testid="tasks-max-age-hours"
-          onchange={(e) => onLimitHoursChange(SETTING_KEYS.tasksMaxAgeSecs, 'Task timeout', e)} />
-        <span class="hook-desc" id="limit-tasks-desc">hours before an open task (counted from its start, else its creation) is failed by the liveness sweep (0 = never)</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="limit-lost-ttl-hours">lost sessions</label>
-        <input class="port" id="limit-lost-ttl-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
-          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.sessionsLostTtlSecs))}
-          disabled={limitsBusy}
-          aria-describedby="limit-lost-ttl-desc"
-          data-testid="sessions-lost-ttl-hours"
-          onchange={(e) => onLimitHoursChange(SETTING_KEYS.sessionsLostTtlSecs, 'Lost session TTL', e)} />
-        <span class="hook-desc" id="limit-lost-ttl-desc">hours a resumable session lost to a host reboot or the tmux server exiting is kept before it is deleted, counted from when it was lost (0 = off: removed on the next pass like any vanished session)</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="restore-batch-size">restore batch</label>
-        <input class="port" id="restore-batch-size" type="number" min="1" max="16" step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.restoreBatchSize)}
-          disabled={limitsBusy}
-          aria-describedby="restore-batch-size-desc"
-          data-testid="restore-batch-size"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.restoreBatchSize, 'Concurrent restores', e)} />
-        <span class="hook-desc" id="restore-batch-size-desc">Sessions resumed in parallel by Restore lost sessions</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="restore-stagger-ms">restore delay</label>
-        <input class="port" id="restore-stagger-ms" type="number" min="0" max="60000" step="500"
-          value={settingInt($fleetSettings, SETTING_KEYS.restoreStaggerMs)}
-          disabled={limitsBusy}
-          aria-describedby="restore-stagger-ms-desc"
-          data-testid="restore-stagger-ms"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.restoreStaggerMs, 'Delay between restores (ms)', e)} />
-        <span class="hook-desc" id="restore-stagger-ms-desc">Pause between starting each resumed session</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="limit-context-red-pct">context red</label>
-        <input class="port" id="limit-context-red-pct" type="number" min="1" max="100" step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.healthContextRedPct)}
-          disabled={limitsBusy}
-          aria-describedby="limit-context-red-pct-desc"
-          data-testid="health-context-red-pct"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.healthContextRedPct, 'Context red threshold (%)', e)} />
-        <span class="hook-desc" id="limit-context-red-pct-desc">percent of the context window at which a session needs you (the chip turns red here, amber 15 points below)</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="health-version-max-age-hours">version badge</label>
-        <input class="port" id="health-version-max-age-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
-          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.healthVersionMaxAgeSecs))}
-          disabled={limitsBusy}
-          aria-describedby="health-version-max-age-hours-desc"
-          data-testid="health-version-max-age-hours"
-          onchange={(e) => onHoursChange(SETTING_KEYS.healthVersionMaxAgeSecs, e)} />
-        <span class="hook-desc" id="health-version-max-age-hours-desc">hours a probed Claude version stays trusted for the "older than the fleet" mark</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="health-disk-low-pct">disk low</label>
-        <input class="port" id="health-disk-low-pct" type="number" min="50" max="100" step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.healthDiskLowPct)}
-          disabled={limitsBusy}
-          aria-describedby="health-disk-low-pct-desc"
-          data-testid="health-disk-low-pct"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.healthDiskLowPct, 'Disk low threshold (%)', e)} />
-        <span class="hook-desc" id="health-disk-low-pct-desc">percent of a host's home filesystem in use at which it is marked low on disk</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="health-claude-max-behind">claude behind</label>
-        <input class="port" id="health-claude-max-behind" type="number" min="0" max="1000" step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.healthClaudeMaxBehind)}
-          disabled={limitsBusy}
-          aria-describedby="health-claude-max-behind-desc"
-          data-testid="health-claude-max-behind"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.healthClaudeMaxBehind, 'Claude patch releases behind', e)} />
-        <span class="hook-desc" id="health-claude-max-behind-desc">patch releases a host's Claude may trail the fleet's newest before fleet_health flags it</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="health-hooks-silent-hours">hooks silent</label>
-        <input class="port" id="health-hooks-silent-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
-          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.healthHooksSilentSecs))}
-          disabled={limitsBusy}
-          aria-describedby="health-hooks-silent-hours-desc"
-          data-testid="health-hooks-silent-hours"
-          onchange={(e) => onHoursChange(SETTING_KEYS.healthHooksSilentSecs, e)} />
-        <span class="hook-desc" id="health-hooks-silent-hours-desc">hours a reachable host with live sessions may go without an accepted hook before fleet_health flags it</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="limit-move-mb">move</label>
-        <input class="port" id="limit-move-mb" type="number" min="1" max={MOVE_MAX_TRANSCRIPT_MB_MAX} step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.moveMaxTranscriptMb)}
-          disabled={limitsBusy}
-          aria-describedby="limit-move-desc"
-          data-testid="move-max-transcript-mb"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.moveMaxTranscriptMb, 'Move transcript cap', e)} />
-        <span class="hook-desc" id="limit-move-desc">largest transcript (MiB, 1–{MOVE_MAX_TRANSCRIPT_MB_MAX}) Move to host… copies; a bigger one is refused (E_MOVE_TOO_LARGE)</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="limit-move-bundle-mb">carry bundle</label>
-        <input class="port" id="limit-move-bundle-mb" type="number" min="1" max={MOVE_MAX_BUNDLE_MB_MAX} step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.moveMaxBundleMb)}
-          disabled={limitsBusy}
-          aria-describedby="limit-move-bundle-desc"
-          data-testid="move-max-bundle-mb"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.moveMaxBundleMb, 'Move max bundle', e)} />
-        <span class="hook-desc" id="limit-move-bundle-desc">largest git bundle (MiB, 1–{MOVE_MAX_BUNDLE_MB_MAX}) Move to host… relays; a bigger one is refused (E_MOVE_TOO_LARGE)</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="limit-move-ignored-entry-kb">carry entry</label>
-        <input class="port" id="limit-move-ignored-entry-kb" type="number" min="1" max={MOVE_IGNORED_ENTRY_KB_MAX} step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.moveIgnoredEntryKb)}
-          disabled={limitsBusy}
-          aria-describedby="limit-move-ignored-entry-desc"
-          data-testid="move-ignored-entry-kb"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.moveIgnoredEntryKb, 'Move ignored entry', e)} />
-        <span class="hook-desc" id="limit-move-ignored-entry-desc">largest single git-ignored entry (KiB, 1–{MOVE_IGNORED_ENTRY_KB_MAX}) Move to host… carries — a file, or a whole ignored directory measured together; bigger ones are left behind</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="limit-move-ignored-total-mb">carry ignored</label>
-        <input class="port" id="limit-move-ignored-total-mb" type="number" min="1" max={MOVE_IGNORED_TOTAL_MB_MAX} step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.moveIgnoredTotalMb)}
-          disabled={limitsBusy}
-          aria-describedby="limit-move-ignored-total-desc"
-          data-testid="move-ignored-total-mb"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.moveIgnoredTotalMb, 'Move ignored total', e)} />
-        <span class="hook-desc" id="limit-move-ignored-total-desc">total git-ignored payload (MiB, 1–{MOVE_IGNORED_TOTAL_MB_MAX}) Move to host… carries</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="limit-move-session-state-mb">carry session</label>
-        <input class="port" id="limit-move-session-state-mb" type="number" min="1" max={MOVE_MAX_SESSION_STATE_MB_MAX} step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.moveMaxSessionStateMb)}
-          disabled={limitsBusy}
-          aria-describedby="limit-move-session-state-desc"
-          data-testid="move-session-state-mb"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.moveMaxSessionStateMb, 'Move session state', e)} />
-        <span class="hook-desc" id="limit-move-session-state-desc">largest per-session Claude directory (MiB, 1–{MOVE_MAX_SESSION_STATE_MB_MAX}: subagent transcripts, tool results) Move to host… carries; above it the biggest files stay behind</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="limit-move-wait-max-mins">transfer wait</label>
-        <input class="port" id="limit-move-wait-max-mins" type="number" min="1" max={MOVE_WAIT_MAX_MINS_MAX} step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.moveWaitMaxMins)}
-          disabled={limitsBusy}
-          aria-describedby="limit-move-wait-max-mins-desc"
-          data-testid="move-wait-max-mins"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.moveWaitMaxMins, 'Move wait timeout', e)} />
-        <span class="hook-desc" id="limit-move-wait-max-mins-desc">minutes (1–{MOVE_WAIT_MAX_MINS_MAX}) "Transfer when it finishes" waits for the session to go idle before giving up</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="usage-enabled">usage</label>
-        <input id="usage-enabled" type="checkbox"
-          checked={settingBool($fleetSettings, SETTING_KEYS.usageEnabled)}
-          disabled={limitsBusy}
-          aria-describedby="usage-enabled-desc"
-          data-testid="usage-enabled"
-          onchange={(e) => void applyLimit(SETTING_KEYS.usageEnabled, String((e.currentTarget as HTMLInputElement).checked))} />
-        <span class="hook-desc" id="usage-enabled-desc">sum each session's token usage from its Claude transcript and show an estimated cost</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="usage-interval-secs">usage every</label>
-        <input class="port" id="usage-interval-secs" type="number" min="0" max={MAX_SECS} step="1"
-          value={settingSecs($fleetSettings, SETTING_KEYS.usageIntervalSecs)}
-          disabled={limitsBusy}
-          aria-describedby="usage-interval-desc"
-          data-testid="usage-interval-secs"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.usageIntervalSecs, 'Usage interval', e)} />
-        <span class="hook-desc" id="usage-interval-desc">seconds between usage passes (one batched read per host; 0 = off)</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="usage-prices-json">prices</label>
-        <textarea id="usage-prices-json" rows="3" spellcheck="false"
-          value={$fleetSettings[SETTING_KEYS.usagePricesJson] ?? '{}'}
-          disabled={limitsBusy}
-          aria-describedby="usage-prices-desc"
-          data-testid="usage-prices-json"
-          onchange={onUsagePricesChange}></textarea>
-        <span class="hook-desc" id="usage-prices-desc">per-model price overrides for the estimated cost, USD per million tokens, e.g. {'{"opus-4-1":{"input":15,"output":75,"cache_write":30,"cache_read":1.5}}'} ({'{}'} = built-in prices only)</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="reports-max-rows">error reports</label>
-        <input class="port" id="reports-max-rows" type="number" min={REPORTS_MAX_ROWS_MIN} max={REPORTS_MAX_ROWS_MAX} step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.reportsMaxRows)}
-          disabled={limitsBusy}
-          aria-describedby="reports-max-rows-desc"
-          data-testid="reports-max-rows"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.reportsMaxRows, 'Error reports row cap', e)} />
-        <span class="hook-desc" id="reports-max-rows-desc">newest error/warn reports kept ({REPORTS_MAX_ROWS_MIN}–{REPORTS_MAX_ROWS_MAX}); pruned on every insert</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="reports-max-age-hours">error reports age</label>
-        <input class="port" id="reports-max-age-hours" type="number" min="0" max={secsToHours(MAX_SECS)} step="0.5"
-          value={secsToHours(settingSecs($fleetSettings, SETTING_KEYS.reportsMaxAgeSecs))}
-          disabled={limitsBusy}
-          aria-describedby="reports-max-age-desc"
-          data-testid="reports-max-age-hours"
-          onchange={(e) => onLimitHoursChange(SETTING_KEYS.reportsMaxAgeSecs, 'Error reports max age', e)} />
-        <span class="hook-desc" id="reports-max-age-desc">hours an error/warn report is kept before the age sweep deletes it (0 = never)</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="work-recent-days">recent work</label>
-        <input class="port" id="work-recent-days" type="number" min="1" max="365" step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.workRecentDays)}
-          disabled={limitsBusy}
-          aria-describedby="work-recent-days-desc"
-          data-testid="work-recent-days"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.workRecentDays, 'Recent work', e)} />
-        <span class="hook-desc" id="work-recent-days-desc">days ended work with no live session still gets a sidebar group (by work)</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="work-sync-interval">tracker sync</label>
-        <input class="port" id="work-sync-interval" type="number" min="0" max="86400" step="60"
-          value={settingInt($fleetSettings, SETTING_KEYS.workSyncIntervalSecs)}
-          disabled={limitsBusy}
-          aria-describedby="work-sync-interval-desc"
-          data-testid="work-sync-interval"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.workSyncIntervalSecs, 'Tracker sync', e)} />
-        <span class="hook-desc" id="work-sync-interval-desc">seconds between tracker (Jira) sync passes (0 = off; read at launch)</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="work-describe-cache">describe cache</label>
-        <input class="port" id="work-describe-cache" type="number" min="0" max="86400" step="60"
-          value={settingInt($fleetSettings, SETTING_KEYS.workDescribeCacheSecs)}
-          disabled={limitsBusy}
-          aria-describedby="work-describe-cache-desc"
-          data-testid="work-describe-cache"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.workDescribeCacheSecs, 'Describe cache', e)} />
-        <span class="hook-desc" id="work-describe-cache-desc">seconds a ticket's full description, once fetched, is reused before fleet asks the tracker again (0 = off)</span>
-      </div>
-      <label class="toggle">
-        <input
-          type="checkbox"
-          checked={settingBool($fleetSettings, SETTING_KEYS.workEvidenceSnippets)}
-          disabled={automationBusy}
-          data-testid="work-evidence-snippets"
-          onchange={() => toggleSetting(SETTING_KEYS.workEvidenceSnippets)} />
-        Keep a short, redacted prompt snippet as evidence for a detected ticket
-      </label>
-      <label class="toggle">
-        <input
-          type="checkbox"
-          checked={settingBool($fleetSettings, SETTING_KEYS.workSessionStartContext)}
-          disabled={automationBusy}
-          data-testid="work-session-start-context"
-          onchange={() => toggleSetting(SETTING_KEYS.workSessionStartContext)} />
-        Give Claude the linked ticket at session start (makes the start hook wait up to 2 s when the hub is down; applies when hooks are reinstalled)
-      </label>
-      <label class="toggle">
-        <input
-          type="checkbox"
-          checked={settingBool($fleetSettings, SETTING_KEYS.workClassifyNudge)}
-          disabled={automationBusy}
-          data-testid="work-classify-nudge"
-          onchange={() => toggleSetting(SETTING_KEYS.workClassifyNudge)} />
-        After three prompts with no ticket, ask Claude once which of your few open tickets it is on (only ever a suggestion)
-      </label>
-      <div class="mcp-field">
-        <label class="lbl" for="work-summary-model">summary model</label>
-        <select
-          class="layout-select"
-          id="work-summary-model"
-          value={$fleetSettings[SETTING_KEYS.workSummaryModel] ?? 'haiku'}
-          disabled={automationBusy}
-          aria-describedby="work-summary-model-desc"
-          data-testid="work-summary-model"
-          onchange={(e) => void applySetting(SETTING_KEYS.workSummaryModel, (e.currentTarget as HTMLSelectElement).value)}>
-          <option value="haiku">haiku</option>
-          <option value="sonnet">sonnet</option>
-          <option value="opus">opus</option>
-        </select>
-        <span class="hook-desc" id="work-summary-model-desc">the model <em>Summarise</em> runs on for a past session, on that session's own host and account</span>
-      </div>
-      <h5 class="sub" data-testid="work-retention">Retention</h5>
-      <div class="mcp-field">
-        <label class="lbl" for="work-retention-journal-days">journal</label>
-        <input class="port" id="work-retention-journal-days" type="number" min="0" max="3650" step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.workRetentionJournalDays)}
-          disabled={limitsBusy}
-          aria-describedby="work-retention-journal-days-desc"
-          data-testid="work-retention-journal-days"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.workRetentionJournalDays, 'Retention: journal', e)} />
-        <span class="hook-desc" id="work-retention-journal-days-desc">days a work journal row is kept once its conversation ended and its work is done or unlinked (0 = forever)</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="work-retention-tracker-items-days">done tickets</label>
-        <input class="port" id="work-retention-tracker-items-days" type="number" min="0" max="3650" step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.workRetentionTrackerItemsDays)}
-          disabled={limitsBusy}
-          aria-describedby="work-retention-tracker-items-days-desc"
-          data-testid="work-retention-tracker-items-days"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.workRetentionTrackerItemsDays, 'Retention: done tickets', e)} />
-        <span class="hook-desc" id="work-retention-tracker-items-days-desc">days a done ticket no session links to is kept in the cache (0 = forever)</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="work-retention-timeline-days">work timeline</label>
-        <input class="port" id="work-retention-timeline-days" type="number" min="0" max="3650" step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.workRetentionTimelineWorkEventsDays)}
-          disabled={limitsBusy}
-          aria-describedby="work-retention-timeline-days-desc"
-          data-testid="work-retention-timeline-days"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.workRetentionTimelineWorkEventsDays, 'Retention: work timeline', e)} />
-        <span class="hook-desc" id="work-retention-timeline-days-desc">days handover, nudge, tidy and withdrawn-suggestion events are kept; the newest of each per session stays (0 = forever)</span>
-      </div>
-      <WorkRetention />
-      <h5 class="sub" data-testid="work-lifecycle">Lifecycle</h5>
-      <div class="mcp-field">
-        <label class="lbl" for="work-tidy-done-days">tidy: done for</label>
-        <input class="port" id="work-tidy-done-days" type="number" min="1" max="365" step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.workTidyDoneDays)}
-          disabled={limitsBusy}
-          aria-describedby="work-tidy-done-days-desc"
-          data-testid="work-tidy-done-days"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.workTidyDoneDays, 'Tidy: done for', e)} />
-        <span class="hook-desc" id="work-tidy-done-days-desc">days a linked ticket must be done before Tidy up suggests its session</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="work-tidy-idle-hours">tidy: idle for</label>
-        <input class="port" id="work-tidy-idle-hours" type="number" min="1" max="720" step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.workTidyIdleHours)}
-          disabled={limitsBusy}
-          aria-describedby="work-tidy-idle-hours-desc"
-          data-testid="work-tidy-idle-hours"
-          onchange={(e) => onLimitIntChange(SETTING_KEYS.workTidyIdleHours, 'Tidy: idle for', e)} />
-        <span class="hook-desc" id="work-tidy-idle-hours-desc">hours a session must be idle before any reason suggests it</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="work-tidy-idle-unlinked-days">tidy: unlinked for</label>
-        <input class="port" id="work-tidy-idle-unlinked-days" type="number"
-          min={TIDY_IDLE_UNLINKED_DAYS_MIN} max={TIDY_IDLE_UNLINKED_DAYS_MAX} step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.workTidyIdleUnlinkedDays)}
-          disabled={limitsBusy}
-          aria-describedby="work-tidy-idle-unlinked-days-desc"
-          data-testid="work-tidy-idle-unlinked-days"
-          onchange={onIdleUnlinkedDaysChange} />
-        <span class="hook-desc" id="work-tidy-idle-unlinked-days-desc">days a session with no work linked must sit idle and unprompted before Tidy up suggests it (1–90; only ever suggested, never auto-tidied)</span>
-      </div>
-      <label class="toggle">
-        <input
-          type="checkbox"
-          checked={settingBool($fleetSettings, SETTING_KEYS.workAutoTidy)}
-          disabled={automationBusy}
-          data-testid="work-auto-tidy"
-          onchange={() => toggleSetting(SETTING_KEYS.workAutoTidy)} />
-        Auto-tidy: let the sweep act on the reasons below by itself
-      </label>
-      <p class="hook-desc warn" data-testid="work-auto-tidy-warning">
-        Off, Tidy up only suggests. On, the sweep safe-kills finished sessions without asking:
-        Claude is asked to commit and push first, and a session that is working, waiting on you,
-        linked to in-progress work or used in the last hour is never touched.
-        An organisation can turn it on or off for its own sessions (Organisations).
-      </p>
-      <div class="mcp-field" data-testid="work-auto-tidy-reasons">
-        <span class="lbl">auto-tidy reasons</span>
-        {#each AUTO_TIDY_REASONS as reason (reason)}
-          <label class="toggle inline">
-            <input
-              type="checkbox"
-              checked={parseAutoTidyReasons($fleetSettings[SETTING_KEYS.workAutoTidyReasons]).has(reason)}
-              disabled={automationBusy}
-              data-testid={`work-auto-tidy-reason-${reason}`}
-              onchange={() =>
-                void applySetting(
-                  SETTING_KEYS.workAutoTidyReasons,
-                  toggleAutoTidyReason($fleetSettings[SETTING_KEYS.workAutoTidyReasons], reason),
-                )} />
-            {TIDY_REASON_LABELS[reason]}
-          </label>
-        {/each}
-      </div>
-      <div class="mcp-field">
-        <button class="btn" type="button" data-testid="work-auto-tidy-dry-run" disabled={dryRunBusy}
-          onclick={() => void showDryRun()}>Show what auto-tidy would do</button>
-      </div>
-      {#if dryRun !== null}
-        <div class="hook-desc" data-testid="work-auto-tidy-preview">
-          {#if dryRun.length === 0}
-            Nothing right now.
-          {:else}
-            Auto-tidy would {settingBool($fleetSettings, SETTING_KEYS.workAutoTidy) ? '' : '(once turned on) '}safe-kill or archive:
-            <ul>
-              {#each dryRun as c (c.session_id)}
-                <li data-testid="work-auto-tidy-preview-row">
-                  {c.label || c.tmux_name} on {c.host_alias}{c.key ? ` · ${c.key}` : ''} — {tidyReasonLabel(c.reason)}, idle {formatIdle(c.idle_secs)}
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        </div>
-      {/if}
-      <div class="mcp-field">
-        <span class="lbl">trusted branch keys</span>
-        <span class="hook-desc" data-testid="work-trusted-projects">
-          {trustedProjectCount($fleetSettings[SETTING_KEYS.workTrustedBranchProjects])} project(s) link a sole branch key automatically (set per project from a work chip)
-        </span>
-        <button
-          class="btn"
-          type="button"
-          disabled={automationBusy || trustedProjectCount($fleetSettings[SETTING_KEYS.workTrustedBranchProjects]) === 0}
-          data-testid="work-trusted-clear"
-          onclick={() => void applySetting(SETTING_KEYS.workTrustedBranchProjects, '[]')}>Trust none</button>
-      </div>
-      {#if limitsError}<p class="err" role="alert" data-testid="limits-error">{limitsError}</p>{/if}
-    </section>
-
-    <section class="block" data-testid="decide-section">
-      <div class="section-header">
-        <h4>Decisions (Jev) — experimental, off</h4>
-      </div>
-      <p class="hook-desc" data-testid="decide-explainer">
-        Lets fleet ask TypeSafe's decision model (Jev) closed-set questions, like which ticket a
-        session is working on. Data is sent to TypeSafe only for organisations that opted in
-        (Organisations), redacted, and never raw text is recorded. A model answer never grants a
-        permission or runs a risky action: at most it pre-selects a suggestion you confirm.
-        The key is not set here: on this machine, with the app's data folder,
-        <code>fleet-hub decide set-key --data-dir DIR</code>, where DIR is
-        <code>~/Library/Application Support/sk.rlt.claude-fleet</code> on macOS and
-        <code>~/.local/share/claude-fleet</code> on Linux (see <code>docs/decisions.md</code>).
-      </p>
-      <label class="toggle">
-        <input
-          type="checkbox"
-          checked={settingBool($fleetSettings, SETTING_KEYS.decideJevEnabled)}
-          disabled={decideBusy}
-          data-testid="decide-jev-enabled"
-          onchange={() =>
-            void applyDecide(
-              SETTING_KEYS.decideJevEnabled,
-              settingBool($fleetSettings, SETTING_KEYS.decideJevEnabled) ? 'false' : 'true',
-            )} />
-        <strong>Ask the decision model</strong> (off: nothing is ever sent, at once)
-      </label>
-      <div class="mcp-field">
-        <label class="lbl" for="decide-jev-work-link">work link</label>
-        <select
-          class="layout-select"
-          id="decide-jev-work-link"
-          value={$fleetSettings[SETTING_KEYS.decideJevWorkLink] ?? 'off'}
-          disabled
-          aria-describedby="decide-jev-work-link-desc"
-          data-testid="decide-jev-work-link">
-          {#each DECIDE_MODES as m (m)}<option value={m}>{m}</option>{/each}
-        </select>
-        <span class="hook-desc" id="decide-jev-work-link-desc" data-testid="decide-jev-work-link-desc">choosing a ticket for a session no rule could link — offline benchmark only until J1 passes its acceptance lines (<code>fleet-hub decide bench work-link</code>); no live path reads this yet</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="decide-jev-status-map">status map</label>
-        <select
-          class="layout-select"
-          id="decide-jev-status-map"
-          value={$fleetSettings[SETTING_KEYS.decideJevStatusMap] ?? 'off'}
-          disabled={decideBusy}
-          aria-describedby="decide-jev-status-map-desc"
-          data-testid="decide-jev-status-map"
-          onchange={(e) => void applyDecide(SETTING_KEYS.decideJevStatusMap, (e.currentTarget as HTMLSelectElement).value)}>
-          {#each DECIDE_MODES as m (m)}<option value={m}>{m}</option>{/each}
-        </select>
-        <span class="hook-desc" id="decide-jev-status-map-desc">proposing a status category for an Asana section</span>
-      </div>
-      <label class="toggle">
-        <input
-          type="checkbox"
-          checked={settingBool($fleetSettings, SETTING_KEYS.decideJevUnassigned)}
-          disabled={decideBusy}
-          data-testid="decide-jev-unassigned"
-          onchange={() =>
-            void applyDecide(
-              SETTING_KEYS.decideJevUnassigned,
-              settingBool($fleetSettings, SETTING_KEYS.decideJevUnassigned) ? 'false' : 'true',
-            )} />
-        Also send sessions and tickets that belong to no organisation
-      </label>
-      <div class="mcp-field">
-        <label class="lbl" for="decide-jev-model">model</label>
-        <select
-          class="layout-select"
-          id="decide-jev-model"
-          value={$fleetSettings[SETTING_KEYS.decideJevModel] ?? 'jev-1.13.0'}
-          disabled={decideBusy}
-          data-testid="decide-jev-model"
-          onchange={(e) => void applyDecide(SETTING_KEYS.decideJevModel, (e.currentTarget as HTMLSelectElement).value)}>
-          {#each DECIDE_JEV_MODELS as m (m)}<option value={m}>{m}</option>{/each}
-        </select>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="decide-jev-timeout-ms">timeout</label>
-        <input class="port" id="decide-jev-timeout-ms" type="number" min="100" max="30000" step="100"
-          value={settingInt($fleetSettings, SETTING_KEYS.decideJevTimeoutMs)}
-          disabled={decideBusy}
-          aria-describedby="decide-jev-timeout-ms-desc"
-          data-testid="decide-jev-timeout-ms"
-          onchange={(e) => onDecideIntChange(SETTING_KEYS.decideJevTimeoutMs, 'Timeout', e)} />
-        <span class="hook-desc" id="decide-jev-timeout-ms-desc">milliseconds one call may take (never retried)</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="decide-jev-daily-token-budget">daily tokens</label>
-        <input class="port" id="decide-jev-daily-token-budget" type="number" min="0" max="1000000000" step="100000"
-          value={settingInt($fleetSettings, SETTING_KEYS.decideJevDailyTokenBudget)}
-          disabled={decideBusy}
-          aria-describedby="decide-jev-daily-token-budget-desc"
-          data-testid="decide-jev-daily-token-budget"
-          onchange={(e) => onDecideIntChange(SETTING_KEYS.decideJevDailyTokenBudget, 'Daily tokens', e)} />
-        <span class="hook-desc" id="decide-jev-daily-token-budget-desc">input tokens per UTC day ($0.042 per million; 0 = none)</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="decide-jev-breaker-failures">breaker</label>
-        <input class="port" id="decide-jev-breaker-failures" type="number" min="1" max="100" step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.decideJevBreakerFailures)}
-          disabled={decideBusy}
-          data-testid="decide-jev-breaker-failures"
-          onchange={(e) => onDecideIntChange(SETTING_KEYS.decideJevBreakerFailures, 'Breaker failures', e)} />
-        <span class="hook-desc">failed calls in a row, then a pause of</span>
-        <input class="port" id="decide-jev-breaker-open-secs" type="number" min="10" max="86400" step="10"
-          aria-label="breaker pause in seconds"
-          value={settingInt($fleetSettings, SETTING_KEYS.decideJevBreakerOpenSecs)}
-          disabled={decideBusy}
-          data-testid="decide-jev-breaker-open-secs"
-          onchange={(e) => onDecideIntChange(SETTING_KEYS.decideJevBreakerOpenSecs, 'Breaker pause', e)} />
-        <span class="hook-desc">seconds</span>
-      </div>
-      <div class="mcp-field">
-        <label class="lbl" for="decide-retention-days">keep runs</label>
-        <input class="port" id="decide-retention-days" type="number" min="0" max="3650" step="1"
-          value={settingInt($fleetSettings, SETTING_KEYS.decideRetentionDays)}
-          disabled={decideBusy}
-          aria-describedby="decide-retention-days-desc"
-          data-testid="decide-retention-days"
-          onchange={(e) => onDecideIntChange(SETTING_KEYS.decideRetentionDays, 'Keep runs', e)} />
-        <span class="hook-desc" id="decide-retention-days-desc">days a decision record (ids and numbers, never text) is kept (0 = forever)</span>
-      </div>
-      {#if decideError}<p class="err" role="alert" data-testid="decide-error">{decideError}</p>{/if}
-    </section>
-
-    <section class="block" data-testid="update-section">
-      <div class="section-header">
-        <h4>Updates</h4>
-      </div>
-      <p class="hook-desc" data-testid="update-explainer">
-        What the hub offers the fleet's own software: its track, and per component whether a newer
-        release is only pinned by hand (manual), offered (notify) or installed at the next quiet point
-        (automatic). Every release is signed; nothing unsigned is ever offered (see <code>docs/updates.md</code>).
-      </p>
-      <p class="hook-desc" data-testid="update-standalone-note">
-        On a standalone desktop these rows have no effect yet: this desktop installs nothing until
-        slice S3 (the desktop updater).
-      </p>
-      <div class="mcp-field">
-        <label class="lbl" for="update-track">track</label>
-        <select
-          class="layout-select"
-          id="update-track"
-          value={$fleetSettings[SETTING_KEYS.updateTrack] ?? 'stable'}
-          disabled={updateBusy}
-          data-testid="update-track"
-          onchange={(e) => void applyUpdate(SETTING_KEYS.updateTrack, (e.currentTarget as HTMLSelectElement).value)}>
-          {#each UPDATE_TRACKS as t (t)}<option value={t}>{t}</option>{/each}
-        </select>
-      </div>
-      {#each UPDATE_MODE_ROWS as row (row.key)}
-        <div class="mcp-field">
-          <label class="lbl" for={row.id}>{row.label}</label>
-          <select
-            class="layout-select"
-            id={row.id}
-            value={$fleetSettings[row.key] ?? 'notify'}
-            disabled={updateBusy}
-            data-testid={row.id}
-            onchange={(e) => void applyUpdate(row.key, (e.currentTarget as HTMLSelectElement).value)}>
-            {#each row.modes as m (m)}<option value={m}>{m}</option>{/each}
-          </select>
-        </div>
-      {/each}
-      <div class="mcp-field">
-        <label class="lbl" for="update-check-interval">check every</label>
-        <input class="port" id="update-check-interval" type="number" min="900" max="604800" step="900"
-          value={settingInt($fleetSettings, SETTING_KEYS.updateCheckIntervalSecs)}
-          disabled={updateBusy}
-          aria-describedby="update-check-interval-desc"
-          data-testid="update-check-interval"
-          onchange={onUpdateIntervalChange} />
-        <span class="hook-desc" id="update-check-interval-desc">seconds between reading the release channel (at least 900)</span>
-      </div>
-      {#if updateError}<p class="err" role="alert" data-testid="update-error">{updateError}</p>{/if}
-    </section>
-
     <!-- Provisioning mints host tokens: refresh the shared token cache the
          Hosts view reads (host_actions.ts). Module-level, so it is safe even
          when a slow multi-host provision outlives this dialog. -->
@@ -1760,6 +910,66 @@
         </p>
       {/if}
     </section>
+    {:else if currentPage}
+      {#if !ownsFleet && currentPage.layout === 'master_detail'}
+        <!-- A resource's list routes to the hub: shown, read-only, with
+             where to change it instead. -->
+        {@const res = $pagesBundle.resources.find((r) => r.id === currentPage.resource)}
+        {#key currentPage.id}
+          <PageView
+            page={currentPage}
+            pages={$pagesBundle.pages}
+            descs={$descriptors}
+            values={$settingValues}
+            sources={$pagesBundle.sources}
+            resources={$pagesBundle.resources}
+            actions={$pagesBundle.actions}
+            readonly
+            reason={res?.update ? hubBlock(res.update.command as HubAction, $hubStatus) : null}
+            onnavigate={(id) => select(id)} />
+        {/key}
+      {:else if !pagesHere}
+        <section class="block" data-testid="pages-remote">
+          <div class="section-header"><h4>{currentPage.title}</h4></div>
+          {#if hubPages === 'loading'}
+            <p class="hook-desc">Reading the hub’s settings…</p>
+          {:else}
+            <p class="hook-desc">{hubBlock('fleet_settings', $hubStatus)}</p>
+            {#if hubPagesError}<p class="hook-desc" data-testid="pages-remote-error">The hub answered: {hubPagesError}</p>{/if}
+          {/if}
+        </section>
+      {:else}
+        {#if settingsLoadError}<p class="err" role="alert" data-testid="settings-load-error">{settingsLoadError}</p>{/if}
+        {#if !ownsFleet}
+          <!-- P6: one line, not a refusal per section. -->
+          <p class="hook-desc hub-scope" data-testid="hub-scope-note">
+            The fleet’s settings are the hub’s: read from and written to {$hubStatus.url ?? 'the hub'}{#if $hubStatus.client_name} (paired as {$hubStatus.client_name}){/if}.
+            {#if !$settingsWritable}
+              <span data-testid="hub-scope-readonly">This device reads them. To change them here, the hub’s operator trusts it:
+                <code>fleet-hub client trust {$hubStatus.client_name ?? '<name>'}</code>.</span>
+            {/if}
+          </p>
+        {/if}
+        {#key currentPage.id}
+          <PageView
+            readonly={!ownsFleet && !$settingsWritable}
+            remote={!ownsFleet}
+            page={currentPage}
+            pages={$pagesBundle.pages}
+            descs={$descriptors}
+            values={$settingValues}
+            sources={$pagesBundle.sources}
+            resources={$pagesBundle.resources}
+            actions={$pagesBundle.actions}
+            {focusKey}
+            proposals={$settingProposals}
+            onnavigate={(id) => select(id)}
+            onopen={(id, key) => select(id, key)} />
+        {/key}
+      {/if}
+    {/if}
+    </div>
+    </div>
   </div>
 </Modal>
 
@@ -1770,6 +980,27 @@
     gap: 0.8rem;
   }
   header { display: flex; align-items: center; justify-content: space-between; }
+  .settings-body {
+    display: grid;
+    grid-template-columns: 12rem minmax(0, 1fr);
+    gap: 1.25rem;
+    align-items: start;
+  }
+  .settings-body > :global(.settings-nav) {
+    position: sticky;
+    top: 0;
+  }
+  .settings-content {
+    display: flex;
+    flex-direction: column;
+    gap: 0.8rem;
+    min-width: 0;
+  }
+  @media (max-width: 640px) {
+    .settings-body {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
   header h3 { margin: 0; font-size: 1rem; }
   .close {
     border: none;
@@ -1846,5 +1077,16 @@
     color: var(--text-secondary, #888);
   }
 
-  .gc-toggle { margin-top: 0.6rem; }
+  .hub-scope {
+    margin: 0 0 0.6rem;
+  }
+  .link-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+    text-decoration: underline;
+  }
 </style>

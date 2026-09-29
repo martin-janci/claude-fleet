@@ -5,6 +5,7 @@
 //! §7.4.
 
 use super::Store;
+use crate::events::{EventBus as _, RowChange, UpdateChanged};
 use crate::ipc_error::IpcError;
 use rusqlite::OptionalExtension;
 
@@ -102,8 +103,33 @@ fn desired_row(r: &rusqlite::Row) -> rusqlite::Result<UpdateDesiredRow> {
 }
 
 impl Store {
-    /// Insert or replace what `row.target` says about itself.
+    /// Emit `update:changed` (update design §11): ids only, kind `update`,
+    /// so a host-bound or org-bound stream never carries it.
+    pub fn emit_update_changed(&self, what: &str, target: Option<&str>) {
+        self.bus.emit(&RowChange::UpdateChanged(UpdateChanged {
+            what: what.into(),
+            target: target.map(String::from),
+        }));
+    }
+
+    /// Insert or replace what `row.target` says about itself. Emits
+    /// `update:changed` only when something a reader shows moved (version,
+    /// digest, phase, error, platform): a routine check that changes only
+    /// the timestamps is silent.
     pub fn upsert_update_observed(&self, row: &UpdateObservedRow) -> Result<(), IpcError> {
+        let moved = match self.update_observed(&row.target)? {
+            None => true,
+            Some(p) => {
+                (&p.version, &p.digest, &p.phase, &p.last_error, &p.platform)
+                    != (
+                        &row.version,
+                        &row.digest,
+                        &row.phase,
+                        &row.last_error,
+                        &row.platform,
+                    )
+            }
+        };
         self.conn.execute(
             &format!(
                 "INSERT INTO update_observed ({OBSERVED_COLUMNS}) \
@@ -132,6 +158,9 @@ impl Store {
                 row.last_checked_at,
             ],
         )?;
+        if moved {
+            self.emit_update_changed("observed", Some(&row.target));
+        }
         Ok(())
     }
 
@@ -253,6 +282,12 @@ impl Store {
                 row.set_at
             ],
         )?;
+        self.emit_update_changed(
+            "pin",
+            Some(&row.target)
+                .filter(|t| !t.is_empty())
+                .map(|t| t.as_str()),
+        );
         Ok(())
     }
 
@@ -262,6 +297,9 @@ impl Store {
             "DELETE FROM update_desired WHERE kind = 'artifact' AND component = ?1 AND target = ?2",
             [component, target],
         )?;
+        if n > 0 {
+            self.emit_update_changed("pin", Some(target).filter(|t| !t.is_empty()));
+        }
         Ok(n > 0)
     }
 

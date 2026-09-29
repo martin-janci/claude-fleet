@@ -613,7 +613,8 @@ pub fn payload_fits(name: &str, payload: &Value) -> Result<(), String> {
         | "work:tracker"
         | "work:tracker_removed" => integer("id"),
         "host:added" | "host:probed" | "host:removed" => string("alias"),
-        "work:changed" => string("what"),
+        "work:changed" | "update:changed" => string("what"),
+        "settings:changed" => string("key"),
         "session:event" | "session:conversations" => integer("session_id"),
         "account:upserted" => string("uuid"),
         "account_usage:updated" => string("account_uuid"),

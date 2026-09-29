@@ -92,6 +92,7 @@ fn a_label_file_is_checked_row_by_row() {
             note: Some("Ambiguous: a test".into()),
             org_id: None,
             tracker_id: None,
+            pair: None,
         },
         SectionLabel {
             section: "Untitled section".into(),
@@ -101,6 +102,7 @@ fn a_label_file_is_checked_row_by_row() {
             note: None,
             org_id: None,
             tracker_id: None,
+            pair: None,
         },
     ]);
     assert_eq!(dropped, 1);
@@ -673,6 +675,7 @@ fn plain_cases(n: usize) -> Vec<SectionCase> {
             ambiguous: false,
             org_id: None,
             rule: None,
+            pair: None,
         })
         .collect()
 }
@@ -749,6 +752,7 @@ fn label(section: &str, board: &[&str]) -> SectionLabel {
         note: None,
         org_id: None,
         tracker_id: None,
+        pair: None,
     }
 }
 
@@ -1155,6 +1159,7 @@ fn a_labels_org_comes_from_the_database() {
         note: None,
         org_id,
         tracker_id,
+        pair: None,
     };
     // The tracker names the org; a row without org_id takes it.
     let mut rows = vec![label("Parked", None, Some(t)), label("Ideas", None, None)];

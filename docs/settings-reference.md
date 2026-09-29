@@ -1,0 +1,175 @@
+<!-- GENERATED FILE — do not edit by hand.
+     Regenerate with: REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current -->
+
+# Settings reference
+
+Every operator setting fleet stores, generated from the registry in `crates/fleet-core/src/service/settings.rs`. Change one in Settings on the desktop, or over the control API with the master token (`set_setting`); `get_settings { describe: true }` returns this same metadata with each setting's current value.
+
+## Reconcile tick
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `reconcile.interval_secs` | `20` | seconds, `0` = off | Seconds between background reconcile passes, which refresh session state on every host. Applies after a restart. |
+| `reconcile.stale_working_secs` | `1800` | seconds, `0` = never | How long a working session may go without a hook, a turn, transcript growth or pane output before it reads idle. |
+| `reconcile.stale_working_ttl_secs` | `86400` | seconds, shown in hours, `0` = never by age | How long a session marked stale asks for a look before the tick lifts the mark on its own. An attach or any hook lifts it sooner. |
+
+## Sessions
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `sessions.lost_ttl_secs` | `1209600` | seconds, shown in hours, `0` = removed on the next pass | How long a resumable session lost to a host reboot or the tmux server exiting is kept before it is deleted, counted from when it was lost. |
+
+## Restoring lost sessions
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `restore.batch_size` | `4` | 1–16 | Sessions resumed in parallel by Restore lost sessions. |
+| `restore.stagger_ms` | `3000` | 0–60000 ms | Pause between starting each resumed session in a batch restore. |
+
+## Playbooks
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `playbooks.press_enter` | `false` | on / off | Press Enter for sessions stuck on a "Press Enter" prompt. Auth menus, trust prompts and reconnects are always notify-only. |
+| `playbooks.oom_recreate` | `false` | on / off | Recreate a session that ran out of memory, within the budget below. |
+| `playbooks.oom_max_attempts` | `2` | 0–20, `0` = never | Recreates one session may get per 24 hours. A session that is working, or finished a turn after the flag, is never recreated. |
+
+## Garbage collection
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `gc.enabled` | `false` | on / off | Stop or remove sessions that have been idle longer than the limits below. Asks to confirm. |
+| `gc.bg_idle_secs` | `86400` | seconds, shown in hours, `0` = never | How long a background agent may sit idle before it is stopped. |
+| `gc.shell_idle_secs` | `604800` | seconds, shown in hours, `0` = never | How long a shell session may sit inactive before it is killed. |
+| `gc.work_idle_secs` | `0` | seconds, shown in hours, `0` = never | How long a work session may sit idle before it is removed. A dirty worktree goes through safe remove. |
+| `gc.sweep_interval_secs` | `300` | seconds, `0` = off | Seconds between garbage-collection sweeps. |
+| `gc.external_lost_ttl_secs` | `3600` | seconds, shown in hours, `0` = the next pass | How long a lost session from outside fleet is kept before it is removed. It can never be resumed; this only rides out a restart. |
+
+## Projects
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `projects.base_path` | `{}` | JSON map: host alias → path | Per-host folder that holds your repositories. A host with no entry uses $CLAUDE_FLEET_PROJECTS_BASE (local only), then the layout default. |
+| `projects.layout` | `github` | `github` / `flat` | Where a repository sits under the projects root: github puts it at root/owner/repo, flat at root/repo. |
+
+## Tasks
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `tasks.max_age_secs` | `86400` | seconds, shown in hours, `0` = never | How long an open task (counted from its start, else its creation) may run before the liveness sweep fails it. |
+
+## Workspace repair
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `repair.auto_on_tick` | `false` | on / off | Re-add deleted worktree directories without anyone opening them. A stale entry is dropped only when its parent folder is the one seen while it was healthy, so an unmounted volume is never touched. |
+| `repair.tick_interval_secs` | `600` | ≥ 60 seconds | Seconds between automatic workspace checks, each repairing at most five worktrees. |
+
+## Move to host
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `move.max_transcript_mb` | `200` | 1–4096 MiB | Largest transcript Move to host copies; a bigger one is refused. |
+| `move.max_bundle_mb` | `500` | 1–4096 MiB | Largest git bundle of unpushed work Move to host relays; a bigger one is refused. |
+| `move.ignored_entry_kb` | `1024` | 1–1048576 KiB | Largest single git-ignored file or directory Move to host carries; bigger ones are left behind. |
+| `move.ignored_total_mb` | `20` | 1–1024 MiB | Total git-ignored payload Move to host carries. |
+| `move.max_session_state_mb` | `200` | 1–4096 MiB | Largest per-session Claude directory (subagent transcripts, tool results) Move to host carries; above it the biggest files stay behind. |
+| `move.wait_max_mins` | `240` | 1–10080 minutes | How long "Transfer when it finishes" waits for the session to go idle before giving up. |
+
+## Usage
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `usage.enabled` | `true` | on / off | Sum each session's token usage from its Claude transcript and show an estimated cost. |
+| `usage.interval_secs` | `300` | seconds, `0` = off | Seconds between usage passes, one batched read per host. |
+| `usage.prices_json` | `{}` | JSON map: model → USD per million tokens | Per-model prices for the estimated cost, in USD per million tokens (input, output, cache_write, cache_read). {} uses the built-in prices only. |
+
+## Error reports
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `reports.max_rows` | `5000` | 100–100000 | Newest error and warning reports kept; older ones are pruned on every insert. |
+| `reports.max_age_secs` | `604800` | seconds, shown in hours, `0` = never | How long an error or warning report is kept before the age sweep deletes it. |
+
+## Health
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `health.context_red_pct` | `85` | 1–100% | Percent of the context window at which a session needs you. The chip turns red here and amber 15 points below. |
+| `health.version_max_age_secs` | `86400` | seconds, shown in hours | How old a host's recorded Claude version may be before the "older than the fleet" badge stops trusting it and shows nothing. |
+| `health.disk_low_pct` | `90` | 50–100% | Used share of a host's home filesystem at which the host reads as disk low. |
+| `health.claude_max_behind` | `30` | 0–1000 | Patch releases a host's Claude may trail the fleet's newest before the host reads as behind. |
+| `health.hooks_silent_secs` | `3600` | seconds, shown in minutes | How long a reachable host with a live session may send no hook before it reads as hooks silent. |
+
+## provision
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `provision.force_git_tree` | `false` | on / off | Write fleet's skills even when a host's ~/.claude/skills is inside a git work tree, such as a dotfiles checkout. Off: provisioning refuses such a host. Asks to confirm. |
+
+## Work graph
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `work.retention.journal_days` | `365` | 0–3650 days, `0` = forever | Days a work journal row is kept once its conversation ended and its work is done or unlinked. |
+| `work.retention.tracker_items_days` | `180` | 0–3650 days, `0` = forever | Days a done ticket that no session links to is kept in the cache. |
+| `work.retention.timeline_work_events_days` | `180` | 0–3650 days, `0` = forever | Days handover, nudge, tidy and withdrawn-suggestion timeline events are kept; the newest of each kind per session always stays. |
+| `work.recent_days` | `14` | 1–365 days | How long ended work with no live session keeps a sidebar group. |
+| `work.sync_interval_secs` | `300` | seconds, `0` = off | Seconds between tracker sync passes. Under a minute is raised to one. Applies after a restart. |
+| `work.describe_cache_secs` | `300` | seconds, shown in minutes, `0` = off | How long a fetched ticket description is reused before the tracker is asked again; never longer than the done-tickets retention window. |
+| `work.trusted_branch_projects` | `[]` | JSON array of ids | Projects where a sole ticket key in the branch name links automatically; elsewhere it is a suggestion. Set from the work popover. |
+| `work.evidence_snippets` | `true` | on / off | Keep a short, redacted prompt snippet around a detected ticket key as evidence. Off keeps only the matched text. |
+| `work.session_start_context` | `false` | on / off | Give Claude the linked ticket at session start. Makes the start hook synchronous, which can add up to 2 s when the hub is down. Experimental. Applies when the hooks are next installed. |
+| `work.classify_nudge` | `false` | on / off | After three prompts with no ticket, ask Claude once which of your few open tickets it is on. Its answer is only ever a suggestion. Experimental. |
+| `work.summary_model` | `haiku` | `haiku` / `sonnet` / `opus` | The model Summarise runs on for a past session, on that session's own host and account. |
+| `work.tidy_done_days` | `2` | 1–365 days | Days a linked ticket must be done before Tidy up suggests its session. |
+| `work.tidy_idle_hours` | `4` | 1–720 hours | Hours a session must be idle before any tidy reason suggests it. |
+| `work.tidy_idle_unlinked_days` | `7` | 1–90 days | Days a session with no work linked must sit idle and unprompted before Tidy up suggests it. Only ever suggested, never auto-tidied. |
+| `work.auto_tidy` | `false` | on / off | Let the GC sweep act on the allowed tidy reasons by itself, by safe kill or archive only. Off, Tidy up only suggests. An organisation can override it. Asks to confirm. |
+| `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | any of `done_idle`, `pr_merged_idle`, `not_planned` | The tidy reasons auto-tidy may act on. |
+
+## update
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `update.track` | `stable` | `stable` / `beta` | Which releases the hub follows for its fleet. |
+| `update.hub.mode` | `notify` | `manual` / `notify` / `automatic` | manual: only a pinned version; notify: offer the update; automatic: install it at the next quiet point. |
+| `update.agent.mode` | `notify` | `manual` / `notify` / `automatic` | The same choice for fleet-agent on hosts the hub cannot reach. |
+| `update.desktop.mode` | `notify` | `manual` / `notify` / `automatic` | The same choice for the desktop app. |
+| `update.mobile.mode` | `notify` | `manual` / `notify` | manual or notify: a phone never installs an update silently. |
+| `update.check_interval_secs` | `21600` | ≥ 900 seconds | How often the hub re-reads the release channel, and clients check again. |
+
+## Decisions (Jev)
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `decide.jev.enabled` | `false` | on / off | The kill switch for TypeSafe's decision model. Off, nothing is ever sent. On, data goes only for organisations that opted in, redacted. Experimental. Asks to confirm. |
+| `decide.jev.status_map` | `off` | `off` / `shadow` / `assist` | Proposing a status category for an Asana section. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.work_link` | `off` | `off` / `shadow` / `assist` | Choosing a ticket for a session no rule could link. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
+| `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
+| `decide.jev.breaker_failures` | `5` | 1–100 | Failed calls in a row that open the circuit breaker. |
+| `decide.jev.breaker_open_secs` | `300` | 10–86400 seconds | How long an open breaker refuses calls. |
+| `decide.jev.daily_token_budget` | `2000000` | 0–1000000000 tokens, `0` = none | Input tokens the decision model may be sent per UTC day. At $0.042 per million, the default is under $0.09 a day. |
+| `decide.jev.model` | `jev-1.13.0` | `jev-1.13.0` / `jev-latest` | The model version a request names. jev-1.13.0 is pinned; jev-latest follows TypeSafe. |
+| `decide.retention_days` | `90` | 0–3650 days, `0` = forever | Days a decision record (ids and numbers, never text) is kept. |
+
+## Hub daemon (read-only)
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `hub.bind` | `127.0.0.1` | text, up to 255 characters | The address the hub daemon listens on. Loopback unless the daemon was started with a routable bind. Read-only here: change it with fleet-hub serve --bind. |
+| `hub.public_url` | `` | text, up to 2048 characters | The URL hosts and paired clients reach the hub at. Empty means loopback with a reverse tunnel per host. Read-only here: change it with fleet-hub serve --public-url. |
+| `hub.allowed_hosts` | `` | text, up to 4096 characters | Extra Host header values the hub accepts, comma-separated, besides the ones its bind and public URL imply. Read-only here: change it with fleet-hub serve --allowed-host. |
+| `hub.local_host` | `true` | on / off | Whether the hub's own machine is a fleet host. On for the desktop; the daemon turns it off by default. Read-only here: change it with fleet-hub serve --local-host. |
+| `hub.allow_plaintext` | `false` | on / off | Whether the hub daemon may serve a routable bind without TLS. Read-only here: change it with fleet-hub serve --allow-plaintext. |
+| `hub.tls` | `off` | `off` / `cert` | How the hub daemon terminates TLS: off, behind a proxy, or cert, with its own certificate. Read-only here: change it with fleet-hub serve --tls. |
+
+## Control API (read-only)
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `mcp.enabled` | `false` | on / off | Whether the embedded control API (MCP) runs, so an AI assistant can drive the fleet. Read-only here: change it with Settings → Control API. |
+| `mcp.port` | `4180` | 1–65535 | The localhost port the control API listens on. Read-only here: change it with Settings → Control API. |
+| `mcp.confirm_destructive` | `false` | on / off | Every destructive control API call waits for a confirmation on the desktop. Read-only here: change it with Settings → Control API. |
+| `mcp.broadcast_interval_secs` | `30` | seconds | Shortest time between two broadcast prompts from the same caller. Read-only here: change it with the settings table only. |

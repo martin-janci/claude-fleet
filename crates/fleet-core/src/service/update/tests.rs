@@ -697,10 +697,7 @@ fn the_hub_records_itself_and_a_new_version_clears_the_old_attempt() {
     assert_eq!(o.commit_sha.as_deref(), Some("abc123"));
     assert_eq!(o.build_id.as_deref(), Some("b42"));
     let platform: Platform = serde_json::from_str(o.platform.as_deref().unwrap()).unwrap();
-    assert_eq!(
-        platform,
-        Platform::new(std::env::consts::OS, std::env::consts::ARCH, hub_variant())
-    );
+    assert_eq!(platform, hub_platform());
     assert!(o.attempt.is_none() && o.last_error.is_none());
 
     // The updater reports a failed attempt on this version.
@@ -731,4 +728,336 @@ fn the_hub_records_itself_and_a_new_version_clears_the_old_attempt() {
     let o = s.update_observed("hub:self").unwrap().unwrap();
     assert_eq!((o.version.as_str(), o.phase.as_str()), ("0.4.2", "idle"));
     assert!(o.attempt.is_none() && o.last_error.is_none() && o.digest.is_none());
+}
+
+// ── Git mode (S3): a standalone hub reads the channel itself ──
+
+fn git(seen: u64) -> GitCheck {
+    GitCheck {
+        base_url: BASE.into(),
+        track: Track::Stable,
+        policy: Policy::default(),
+        seen,
+    }
+}
+
+#[tokio::test]
+async fn a_standalone_hub_finds_its_update_in_the_channel() {
+    let key = TestKey::new(9);
+    let fetch = MapFetch::default();
+    publish(&fetch, &key, 10);
+    let o = git_check(fetch.clone(), git(0), keys(&key), &hub_req("0.3.3"), NOW)
+        .await
+        .unwrap();
+    assert_eq!(o.decision.status, Status::UpdateAvailable);
+    assert_eq!(o.decision.source, Source::Git);
+    let t = o.decision.target.as_ref().unwrap();
+    assert_eq!(t.version, Version::new(0, 3, 4));
+    assert!(
+        t.evidence.is_some(),
+        "a Git decision carries its own evidence"
+    );
+    let v = o
+        .verified
+        .expect("the target is proven against the signed documents");
+    assert_eq!(v.version, Version::new(0, 3, 4));
+
+    let o = git_check(fetch, git(0), keys(&key), &hub_req("0.3.4"), NOW)
+        .await
+        .unwrap();
+    assert_eq!(o.decision.status, Status::UpToDate);
+    assert!(o.verified.is_none());
+}
+
+#[tokio::test]
+async fn a_standalone_check_trusts_only_the_release_key_and_newer_channels() {
+    let key = TestKey::new(9);
+    let fetch = MapFetch::default();
+    publish(&fetch, &key, 10);
+    let other = keys(&TestKey::new(3));
+    let e = git_check(fetch.clone(), git(0), other, &hub_req("0.3.3"), NOW)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_UPDATE_UNVERIFIED);
+    let e = git_check(fetch, git(11), keys(&key), &hub_req("0.3.3"), NOW)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        e.code,
+        codes::E_UPDATE_UNVERIFIED,
+        "an older channel is a replay"
+    );
+
+    let e = git_check(
+        MapFetch::default(),
+        git(0),
+        keys(&key),
+        &hub_req("0.3.3"),
+        NOW,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_HUB_UNAVAILABLE);
+    assert!(e.message.contains("no stable channel"), "{}", e.message);
+}
+
+#[tokio::test]
+async fn a_standalone_check_takes_the_hubs_own_settings_and_pin() {
+    let key = TestKey::new(9);
+    let (store, fetch) = published_store(&key).await;
+    pin(&store, "hub", "", "0.3.3", false, None, NOW).unwrap();
+    let setup = {
+        let s = lock(&store).unwrap();
+        GitCheck::from_store(Some(&s), Component::Hub, "hub:self", None).unwrap()
+    };
+    assert_eq!((setup.track, setup.seen), (Track::Stable, 10));
+    let mut setup_at_base = setup.clone();
+    setup_at_base.base_url = BASE.into();
+    let o = git_check(fetch, setup_at_base, keys(&key), &hub_req("0.3.4"), NOW)
+        .await
+        .unwrap();
+    assert_eq!(o.decision.status, Status::Rollback);
+
+    let bare = GitCheck::from_store(None, Component::Hub, "hub:self", Some(Track::Beta)).unwrap();
+    assert_eq!((bare.track, bare.seen), (Track::Beta, 0));
+    assert_eq!(bare.policy.mode, Mode::Notify);
+}
+
+#[test]
+fn the_hub_asks_for_itself() {
+    let r = hub_self_request(Installed::version(Version::new(0, 4, 1)));
+    assert_eq!(
+        (r.component, r.update_proto),
+        (Component::Hub, UPDATE_PROTO)
+    );
+    assert_eq!(r.platform.os, std::env::consts::OS);
+}
+
+// ── update:changed (S4b) ──
+
+#[tokio::test]
+async fn the_update_picture_emits_ids_only_when_it_moves() {
+    let bus = Arc::new(crate::events::RecordingEventBus::new());
+    let store = Mutex::new(Store::open_with_bus_in_memory(bus.clone()).unwrap());
+    let key = TestKey::new(9);
+    let fetch = MapFetch::default();
+    publish(&fetch, &key, 10);
+    refresh(&store, &fetch, BASE, &keys(&key), NOW)
+        .await
+        .unwrap();
+    assert_eq!(bus.take(), vec!["update:changed:channel:".to_string()]);
+    refresh(&store, &fetch, BASE, &keys(&key), NOW)
+        .await
+        .unwrap();
+    assert!(bus.take().is_empty(), "an unchanged channel is silent");
+
+    // A real paired token, not a made-up id: `pin` refuses a target that is
+    // not there (`require_target_exists`), so the client this test pins must
+    // exist. Inserting it emits nothing, so the event list below is still
+    // only what the update picture said.
+    let cid = lock(&store)
+        .unwrap()
+        .insert_client_token("phone", "sha-a", "full")
+        .unwrap()
+        .id;
+    let c = client(cid, TokenMode::Full, None);
+    check(&store, &c, &desktop_req("0.3.3"), &keys(&key), NOW).unwrap();
+    assert_eq!(
+        bus.take(),
+        vec![format!("update:changed:observed:client:{cid}")]
+    );
+    check(&store, &c, &desktop_req("0.3.3"), &keys(&key), NOW + 60).unwrap();
+    assert!(bus.take().is_empty(), "a routine re-check is silent");
+    check(&store, &c, &desktop_req("0.3.4"), &keys(&key), NOW + 120).unwrap();
+    assert_eq!(
+        bus.take(),
+        vec![format!("update:changed:observed:client:{cid}")]
+    );
+
+    pin(
+        &store,
+        "desktop",
+        &format!("client:{cid}"),
+        "0.3.3",
+        false,
+        None,
+        NOW,
+    )
+    .unwrap();
+    pin(&store, "hub", "", "0.3.3", false, None, NOW).unwrap();
+    assert!(unpin(&store, "hub", "").unwrap());
+    assert!(!unpin(&store, "hub", "").unwrap());
+    assert_eq!(
+        bus.take(),
+        vec![
+            format!("update:changed:pin:client:{cid}"),
+            "update:changed:pin:".to_string(),
+            "update:changed:pin:".to_string(),
+        ]
+    );
+}
+
+// ── fleet_health.updates (S4b) ──
+
+#[tokio::test]
+async fn fleet_health_names_the_targets_that_need_a_person() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    // A desktop below the signed minimum (0.3.0) is blocked.
+    check(
+        &store,
+        &client(1, TokenMode::Full, None),
+        &desktop_req("0.2.9"),
+        &k,
+        NOW,
+    )
+    .unwrap();
+    // One that is merely behind is not a person's problem.
+    check(
+        &store,
+        &client(2, TokenMode::Full, None),
+        &desktop_req("0.3.3"),
+        &k,
+        NOW,
+    )
+    .unwrap();
+    // The hub's own install failed.
+    let failed = Report {
+        update_proto: 1,
+        component: Component::Hub,
+        installed: Installed::version(Version::new(0, 3, 3)),
+        phase: UpdatePhase::Failed,
+        attempt: Some("01JA".into()),
+        from: Some(Version::new(0, 3, 3)),
+        to: Some(Version::new(0, 3, 4)),
+        detail: serde_json::Value::Null,
+        error: Some("not ready after 120 s".into()),
+    };
+    report(&store, &client(9, TokenMode::Updater, None), &failed, NOW).unwrap();
+
+    let s = lock(&store).unwrap();
+    let h = health(&s, &Caller::master(), &k, NOW).unwrap();
+    assert_eq!(h.channel, "fresh");
+    let got: Vec<(&str, &str)> = h
+        .attention
+        .iter()
+        .map(|a| (a.reason.as_str(), a.target.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (ATTENTION_UPDATE_REQUIRED, "client:1"),
+            (ATTENTION_UPDATE_FAILED, "hub:self"),
+        ]
+    );
+    let hub = h.attention.iter().find(|a| a.target == "hub:self").unwrap();
+    assert_eq!(hub.detail.as_deref(), Some("not ready after 120 s"));
+
+    // An org-bound client sees itself only, never the hub's failure.
+    let bound = health(&s, &client(1, TokenMode::Full, Some(3)), &k, NOW).unwrap();
+    assert_eq!(bound.attention.len(), 1);
+    assert_eq!(bound.attention[0].target, "client:1");
+
+    // Past the channel's signed expiry nothing new is offered: say so.
+    let later = NOW + 30 * 24 * 60 * 60;
+    let stale = health(&s, &Caller::master(), &k, later).unwrap();
+    assert_eq!(stale.channel, "stale");
+    assert_eq!(stale.attention[0].reason, ATTENTION_CHANNEL_STALE);
+    assert_eq!(stale.attention[0].target, "channel:stable");
+
+    // Before any channel: nothing to say, and no attention for it.
+    let empty = Store::open_in_memory().unwrap();
+    let none = health(&empty, &Caller::master(), &k, NOW).unwrap();
+    assert_eq!((none.channel.as_str(), none.attention.len()), ("none", 0));
+}
+
+#[tokio::test]
+async fn why_names_one_targets_whole_decision() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    check(
+        &store,
+        &client(1, TokenMode::Full, None),
+        &desktop_req("0.3.3"),
+        &k,
+        NOW,
+    )
+    .unwrap();
+    check(
+        &store,
+        &client(2, TokenMode::Full, None),
+        &desktop_req("0.3.4"),
+        &k,
+        NOW,
+    )
+    .unwrap();
+
+    let d = check_for(&store, &Caller::master(), "client:1", &k, NOW).unwrap();
+    assert_eq!(d.status, Status::UpdateAvailable);
+    let t = d.target.as_ref().unwrap();
+    assert_eq!(t.version, Version::new(0, 3, 4));
+    assert!(
+        t.evidence.is_none(),
+        "the dashboard's why carries no documents"
+    );
+
+    // A scoped client asks about itself, never about another.
+    let me = client(1, TokenMode::Full, Some(3));
+    assert_eq!(
+        check_for(&store, &me, "client:1", &k, NOW).unwrap().status,
+        Status::UpdateAvailable
+    );
+    assert_eq!(
+        check_for(&store, &me, "client:2", &k, NOW)
+            .unwrap_err()
+            .code,
+        codes::E_FORBIDDEN
+    );
+    assert_eq!(
+        check_for(&store, &Caller::master(), "client:77", &k, NOW)
+            .unwrap_err()
+            .code,
+        codes::E_INVALID
+    );
+}
+
+// ── X-Fleet-Client (S4b) ──
+
+#[tokio::test]
+async fn a_clients_header_records_its_build_and_keeps_its_own_reports() {
+    use fleet_update::client_header::ClientHeader;
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    let c = client(4, TokenMode::Full, None);
+    // Its own check first: the variant, and a phase of its own.
+    check(&store, &c, &desktop_req("0.3.3"), &k, NOW).unwrap();
+    let s = lock(&store).unwrap();
+    let h =
+        ClientHeader::parse("desktop/0.3.4 (macos-aarch64; build 1a2b3c4; contract 6-6)").unwrap();
+    record_client_header(&s, &c, &h, NOW + 60).unwrap();
+    let o = s.update_observed("client:4").unwrap().unwrap();
+    assert_eq!(o.version, "0.3.4");
+    assert_eq!(o.commit_sha.as_deref(), Some("1a2b3c4"));
+    let p: Platform = serde_json::from_str(o.platform.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        p,
+        Platform::new("macos", "aarch64", "tauri"),
+        "the reported variant stays"
+    );
+    assert_eq!(o.last_checked_at, Some(NOW), "a header is not a check");
+
+    // Only a client token, and only for a client component.
+    let agent = ClientHeader::parse("agent/0.3.4").unwrap();
+    record_client_header(&s, &c, &agent, NOW).unwrap();
+    assert_eq!(
+        s.update_observed("client:4").unwrap().unwrap().component,
+        "desktop"
+    );
+    record_client_header(&s, &host("h1"), &h, NOW).unwrap();
+    record_client_header(&s, &Caller::master(), &h, NOW).unwrap();
+    assert!(s.update_observed("agent:h1").unwrap().is_none());
+    assert!(s.update_observed("operator").unwrap().is_none());
 }
