@@ -873,7 +873,7 @@ pub const SPECS: &[Spec] = &[
         "true",
         Kind::Bool,
         "Install the ag launcher",
-        "Provisioning installs fleet's ag launcher (~/.local/share/ag) and a cl command (claude --yolo) in ~/.local/bin on each host; sessions launch through it when the host has no cl of its own. Off: provisioning leaves ag alone.",
+        "Provisioning installs fleet's ag launcher (~/.local/share/ag) and, when the host has no cl command, a cl shim (claude --yolo) in ~/.local/bin; panes use it when the host has no cl of its own. Off: provisioning leaves ag alone.",
     )
     .tags(&[Tag::Advanced]),
     Spec::new(

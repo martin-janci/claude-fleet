@@ -806,7 +806,7 @@
         "level": "none"
       },
       "default": "true",
-      "help": "Provisioning installs fleet's ag launcher (~/.local/share/ag) and a cl command (claude --yolo) in ~/.local/bin on each host; sessions launch through it when the host has no cl of its own. Off: provisioning leaves ag alone.",
+      "help": "Provisioning installs fleet's ag launcher (~/.local/share/ag) and, when the host has no cl command, a cl shim (claude --yolo) in ~/.local/bin; panes use it when the host has no cl of its own. Off: provisioning leaves ag alone.",
       "key": "provision.install_ag",
       "kind": {
         "type": "bool"
