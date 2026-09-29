@@ -1014,16 +1014,19 @@ mod tests {
     /// A checkout that cannot even be probed is reported as that, with its
     /// path — never taken for "no checkout" and cloned over. A file where a
     /// directory should be stands in for an unreadable one, which the root
-    /// test runner could read anyway.
+    /// test runner could read anyway. Unix fails the probe itself
+    /// (`NotADirectory`); Windows reads the path as absent and fails creating
+    /// the clone's parent, so the message names at least that parent.
     #[test]
     fn ensure_repo_names_a_checkout_it_cannot_probe() {
         let base = tmp("ensure-repo-unprobeable");
-        fs::write(base.join("file"), "x").unwrap();
-        let path = base.join("file").join("agent-assets");
+        let file = base.join("file");
+        fs::write(&file, "x").unwrap();
+        let path = file.join("agent-assets");
         let err = ensure_repo(&path, Some("/nonexistent/remote.git")).unwrap_err();
-        assert_eq!(err.code, "E_IO");
+        assert_eq!(err.code, "E_IO", "{}", err.message);
         assert!(
-            err.message.contains(&*path.to_string_lossy()),
+            err.message.contains(&*file.to_string_lossy()),
             "{}",
             err.message
         );
