@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-29-multi-harness-agents-design.md` §5.1 (lives in the owner's dotfiles repo; copy it to `docs/superpowers/specs/` in claude-fleet in Task 7).
 
-**Repo:** `martin-janci/claude-fleet`. Work on a fresh branch from `origin/main` in a new worktree — the primary checkout at `~/projects/github.com/martin-janci/claude-fleet` has someone's staged work; do not touch it.
+**Repo:** `martin-janci/claude-fleet`. Work on a fresh branch from `origin/main` in a new worktree.
 
 ## Global Constraints
 
@@ -1051,7 +1051,7 @@ git commit -m "feat(ag): one-command installer"
 - Modify: `.github/workflows/ci.yml` (new job after `version-consistency`)
 - Modify: `scripts/ci-local.sh:213` (next to `step bash scripts/hub-deploy-scripts-test.sh`)
 - Create: `tools/ag/README.md`
-- Create: `docs/superpowers/specs/2026-09-29-multi-harness-agents-design.md` (copy from the dotfiles repo)
+- Create: `docs/superpowers/specs/2026-09-29-multi-harness-agents-design.md` (copied from the design repo)
 - Create: `docs/superpowers/plans/2026-09-29-f1-ag-launcher.md` (copy of this plan)
 
 **Interfaces:**
@@ -1160,11 +1160,11 @@ and `drv_argv` (fill the `ARGV` array from the `AG_*` globals in
 
 ```bash
 mkdir -p docs/superpowers/specs docs/superpowers/plans
-cp ~/dotfiles/docs/superpowers/specs/2026-09-29-multi-harness-agents-design.md docs/superpowers/specs/
-cp ~/dotfiles/docs/superpowers/plans/2026-09-29-f1-ag-launcher.md docs/superpowers/plans/
+cp <design-repo>/docs/superpowers/specs/2026-09-29-multi-harness-agents-design.md docs/superpowers/specs/
+cp <design-repo>/docs/superpowers/plans/2026-09-29-f1-ag-launcher.md docs/superpowers/plans/
 ```
 
-(If the dotfiles branch holding them is not merged yet, copy from the worktree `~/dotfiles/.claude/worktrees/predpriprava-abstrakcia-b4016d/docs/superpowers/…`.)
+(Copied from the design repo — see the spec header for which repo currently holds the source.)
 
 - [ ] **Step 6: Verify everything**
 
@@ -1190,3 +1190,33 @@ On the Mac and on one Linux fleet host (`ssh <host>`):
 1. `curl -fsSL …/tools/ag/install.sh | bash` (or `--from` a checkout) → `ag doctor` shows claude (and codex where present).
 2. `ag -p "say hi"` answers via Claude; `ag codex -p "say hi"` answers via Codex (Mac: the ChatGPT.app-bundled CLI).
 3. Add `cl = claude --yolo` under `[alias]`, `ag shims`, then `ssh <host> 'cl --version'` prints Claude's version — no interactive shell, no zsh alias.
+
+---
+
+## Deferred follow-ups
+
+Raised during the final whole-branch review of this plan's implementation and deliberately not
+done in this fix wave — tracked here so F2/F3 pick them up instead of re-discovering them:
+
+- `ag doctor --json` (the spec's §5.1 contract lists it; this wave only shipped the plain-text
+  form) and doctor checks for auth presence, instructions wiring, skills visibility, and fleet
+  hooks present/trusted (also spec'd in §5.1, out of scope for F1's claude+codex-only doctor).
+- `install.sh --harness claude,codex` to install/verify specific harnesses instead of probing all
+  known drivers.
+- A pinned installer tarball — `AG_REF` (branch/tag/sha) or a GitHub release asset — instead of
+  always downloading `refs/heads/main.tar.gz`, so a host's `ag` version is reproducible.
+- A symlink-cycle guard in `ag_root()`: a pathological `ag -> ag` (or a longer loop) currently
+  spins the `while [ -L "$p" ]` loop forever instead of failing with a clear error.
+- A starter-config probe for a third driver once one exists (today `install.sh`'s default-harness
+  probe only tries `claude` and `codex`).
+- Glob-expansion noise in unquoted config reads: `ag_config_get`/`ag_config_keys` values pass
+  through several unquoted expansions (e.g. `for h in $order` in `ag_resolve_harness`); a value
+  containing `*`/`?`/`[...]` can glob-expand against the cwd. Low risk (config is user-authored,
+  not attacker-controlled) but worth tightening before the catalog can render `[alias]`/`order`
+  from less-trusted sources (F3's `Alias` kind).
+- From F2/F3, per the spec's risk list: an absolute `ag` path + explicit `--yolo` + `AG_FALLBACK`
+  in fleet's pane command (this plan only builds the standalone launcher, not fleet's call site);
+  a static capability list (`ag caps`) instead of inferring support from a driver's exit-3;
+  Codex hook-learned session ids (no `--new-id` equivalent); and an argument-injection lockdown
+  for `[alias]` values once they can be catalog-rendered from a team/library source rather than
+  hand-typed by the machine's own owner.

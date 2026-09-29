@@ -37,7 +37,7 @@ know" `cl`, `ag`, the installed agent CLIs and the shared content, without hand-
 | D11 | Starter content for newcomers | No fixed starter set: an **AI tutor** (fleet component) interviews the user through dynamic views in chat and generates their personal set |
 | D12 | Where a user's set lives | The user's **own git repo** (local, optionally pushed private via `gh`) + optional **team catalog**; fleet composes sources library → team → personal |
 | D13 | Tutor runtime | Whatever harness the user has (operator pattern via `ag`); v1 ships on Claude, other harnesses once their sessions + transcripts land |
-| D14 | Owner's dotfiles | Remain the owner's personal solution; the tutor + library are the generalised, public equivalent |
+| D14 | Owner's dotfiles | The owner's dotfiles remain a private layer; the tutor + library are the generalised, public equivalent |
 
 ## 3. Current state (findings)
 
@@ -58,21 +58,6 @@ know" `cl`, `ag`, the installed agent CLIs and the shared content, without hand-
   (`tmux.rs:1221-1290`); status via Claude http hooks + `X-Fleet-Pane`; pane-intel parses the
   Claude TUI; transcripts/usage/rewind parse `~/.claude/projects/*.jsonl`; accounts read
   `~/.claude.json`.
-
-### dotfiles
-
-- ~89 skills: ~40 portable, ~38 soft-coupled (AskUserQuestion, Agent/Task, `~/.claude` paths),
-  11 hard-coupled (hooks, `~/.claude` state, claude-fleet MCP). 18 subagents in Claude md format.
-- **`~/.claude` is a whole-directory symlink into the dotfiles working tree** → every runtime
-  write (fleet hook install into `settings.json`, skill sync) lands in git. This is how a fleet
-  hook token ended up committed in `claude/.claude/settings.json`.
-- A one-shot Codex import (2026-07-14) created **diverged copies**: `~/.agents/skills` (81/89),
-  `~/.codex/agents/*.toml` (14/18), `~/.codex/AGENTS.md` (a mechanical Claude→Codex rewrite still
-  referencing Claude-only tools), `~/.codex/hooks.json` (copied token). Not written by fleet.
-- Launch coupling: `bin/cl`, `zsh` `cl` alias (different flag than `bin/cl`), `ai-*` aliases,
-  `bin/dev`, `claude-creds`, `claude-handoff`, fleet-host image (`claude` only unless Paperclip).
-- Existing multi-vendor pieces: Paperclip adapters (`adapterType`), Hermes quota probes
-  (claude/codex/agy), `hermes-nous [agy|codex|claude]`.
 
 ### Harness facts that shape the design (checked against vendor docs 2026-09-29; "unverified" = docs silent)
 
@@ -253,30 +238,15 @@ catalog authoring/lint, layers + `resolve_preview`, onboarding checklist (`deriv
 sources are never written by the tutor; generated skills pass catalog lint + a secret scan before
 they can be proposed.
 
-### 5.6 dotfiles (owner's personal layer)
-
-- Stop the whole-dir `~/.claude` symlink; `~/.claude` becomes a real directory owned by
-  Claude Code + fleet. `settings.json` is **not** stowed (both Claude and fleet write it):
-  dotfiles keep `claude/settings.base.json` (permissions, statusline, plugins — no hooks, no
-  tokens) and a small `bin/claude-settings-merge` that jq-merges it into the live file,
-  preserving fleet-owned hook entries. Skills/agents move into a private `agent-assets` layer
-  and reach hosts via fleet sync.
-- Instructions: split `claude/.claude/CLAUDE.md` into neutral core (→ Instructions asset) and
-  Claude overlay (ScheduleWakeup, AskUserQuestion ≤ 4).
-- Skills hygiene: `name`+`description` on all; `AskUserQuestion`/`Agent` wording made
-  capability-neutral where cheap ("ask the user (AskUserQuestion in Claude Code)"); hard-coupled
-  skills tagged `targets.<non-claude>.enabled: false`.
-- zsh: `ai-*` aliases → `ag -p …`; `cl` alias removed (shim instead); stale `CLAUDE_MODEL` removed.
-
 ## 6. Roadmap
 
 | Phase | Repo | Deliverable | Exit criterion |
 |---|---|---|---|
-| **F0 Hygiene** | dotfiles | fleet token out of git (rotate), `.gitignore` for `.codex/.gemini/.augment`, `cl` flag mismatch, `~/.tmux.conf` symlink off a worktree, frontmatter on 2 skills, delete the fake "Codex-fleet" AGENTS.md block | `git grep token=` empty; doctor-style checklist green |
+| **F0 Hygiene** | dotfiles | F0/F4: the owner's personal-config migration, tracked outside this repo | tracked outside this repo |
 | **F1 `ag` launcher** | claude-fleet `tools/ag` | CLI, drivers claude+codex, config, shims, doctor, standalone installer, shell tests | `ag`, `ag codex -p hi`, `cl` shim work on mac + a Linux fleet host |
 | **F2 Fleet launches via `ag`** | claude-fleet | pane command through `ag claude` with `AG_FALLBACK`; provision installs `ag` + shims | existing Claude sessions unchanged (regression suite); fresh host knows `cl` |
 | **F3 Catalog: Instructions + Codex complete + host harness set** | claude-fleet | §5.2 items 1–4, 6 | one sync gives Claude and Codex identical skills/agents/MCP/instructions on a host |
-| **F4 dotfiles → layer** | dotfiles + private agent-assets | import skills/agents, un-symlink `~/.claude`, split CLAUDE.md | dotfiles tree stays clean after a fleet sync |
+| **F4 dotfiles → layer** | dotfiles + private agent-assets | F0/F4: the owner's personal-config migration, tracked outside this repo | tracked outside this repo |
 | **F5 Codex sessions in fleet** | claude-fleet | harness column, `SessionRuntime`, codex launch, `ag hook-shim`, pane-intel, UI picker | start/observe/stop a Codex session from fleet UI + MCP with live status |
 | **F6 More harnesses** | claude-fleet | drivers + catalog + runtime for `agy`, then `auggie`, then `gemini` (API key) | same exit as F5 per harness |
 | **F7 Hosts & accounts** | claude-fleet + dotfiles docker | image `AGENT_CLIS`, volumes, per-harness accounts, `agent-creds` | new container host with codex+claude from compose alone |
@@ -306,10 +276,6 @@ T3 needs T1; T4 needs T1–T3; T5 needs T4 + F5 + F8.
 - **TUI scraping per harness** is brittle across CLI versions → pin tested CLI versions in the
   image; pane-intel falls back to hook-only status.
 - **Codex TOML merge loses comments** (existing limitation) → prefer `codex mcp add` CLI.
-- **Rotating the leaked hook token** may briefly break fleet hooks on the Mac → rotate via fleet
-  re-provision, not by hand.
-- `~/.claude` un-symlinking on the Mac is a one-way migration of live state → backup first,
-  dry-run listing of what moves.
 
 ## 8. Testing
 
