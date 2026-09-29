@@ -35,7 +35,7 @@
   const internal = (i: AssetIdentity) => i.class === 'fleet_internal' || i.class === 'harness_internal';
   const visible = $derived(ids.filter((i) => showInternals || !internal(i)));
   const hiddenCount = $derived(ids.filter(internal).length);
-  const orphans = $derived(listing.unmanaged.filter((r) => r.state === 'orphan' && (filter === '' || r.name.includes(filter))));
+  const orphans = $derived(listing.unmanaged.filter((r) => r.state === 'orphan' && (filter === '' || r.name.toLowerCase().includes(filter.toLowerCase()))));
   const oddHosts = (i: AssetIdentity) => (i.reason?.startsWith('copies differ on ') ? i.reason.slice(17).split(', ') : []);
   const isSel = (kind: string, name: string) => selected?.kind === kind && selected?.name === name;
 </script>

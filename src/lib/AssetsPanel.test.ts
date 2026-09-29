@@ -221,6 +221,23 @@ describe('AssetsPanel', () => {
     expect(screen.getByTestId('identity-row-skill-extra').textContent).toContain('Import');
   });
 
+  it('the filter matches an orphan row case-insensitively, like it does identity rows', async () => {
+    const withOrphan = {
+      ...listing,
+      unmanaged: [
+        ...listing.unmanaged,
+        { host_alias: 'mefistos', harness: 'claude', kind: 'skill', name: 'ghost', state: 'orphan', catalog_hash: null, host_hash: null, scanned_at: 1, managed: true },
+      ],
+    };
+    byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: withOrphan, assets_inventory: [], catalog_last_sync: null });
+    render(AssetsPanel);
+    await screen.findByTestId('unmanaged-row-mefistos-claude-skill-ghost');
+
+    await fireEvent.input(screen.getByPlaceholderText('filter'), { target: { value: 'GHOST' } });
+
+    expect(screen.getByTestId('unmanaged-row-mefistos-claude-skill-ghost')).toBeTruthy();
+  });
+
   it('hides fleet internals behind a toggle', async () => {
     const withInternal = {
       ...listing,
