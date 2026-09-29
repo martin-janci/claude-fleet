@@ -53,6 +53,12 @@ The Assets tab's catalog operations as one tool. Master or a client granted `ass
 
 Parameters: `action`, `args`, `confirm_nonce`
 
+### `decide_setting_proposals`
+
+Apply or reject settings proposals by id, each on its own; a trusted device only.
+
+Parameters: `accept`, `reject`
+
 ### `delete_worktree`
 
 Delete a git worktree on its host (no --force) and drop fleet's row. Refuses if an alive session points at it, unless force. Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, E_CONFIRM_REQUIRED (desktop confirmation on).
@@ -103,7 +109,9 @@ Parameters: `host_alias`
 
 ### `get_settings`
 
-Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, work graph), each key's effective value. Read-only but master token only (it names hosts and their paths).
+Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, work graph), each key's effective value. Master token or a paired device bound to no org.
+
+Parameters: `describe`
 
 ### `hide_host`
 
@@ -162,6 +170,10 @@ Registered hosts: reachability, claude/tmux versions, linked account.
 ### `list_layers`
 
 The catalog's layer definitions (layers/*.yaml) and each host's role + active contexts. Read-only. Requires catalog_configure + catalog_load in the app.
+
+### `list_pages`
+
+The settings page specs, data source shapes, resources and page actions a device renders.
 
 ### `list_peer_links`
 
@@ -493,9 +505,19 @@ Parameters: `host_alias`, `session_id`, `tags`, `tmux_name`
 
 ### `set_setting`
 
-Change one get_settings key, validated; E_INVALID otherwise. mcp.*, hub.* and controller.* are refused. Master token only. Returns the settings.
+Change one get_settings key, validated; E_INVALID otherwise. mcp.*, hub.* and controller.* are refused. Master, or a trusted device. Returns the settings, or with propose the proposal.
 
-Parameters: `key`, `value`
+Parameters: `key`, `propose`, `value`, `why`
+
+### `setting_history`
+
+One setting's writes, newest first: who, before and after, the proposal applied.
+
+Parameters: `key`, `limit`
+
+### `setting_proposals`
+
+Settings proposals waiting for review, each with the key's value now, and can_write: whether this device may decide.
 
 ### `spawn_review`
 
@@ -675,8 +697,18 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::purge_project`
 - `commands::quick_replies::quick_replies`
 - `commands::quick_replies::set_quick_replies`
-- `commands::sessions::get_fleet_settings`
-- `commands::sessions::set_fleet_setting`
+- `commands::pages::get_fleet_settings`
+- `commands::pages::describe_fleet_settings`
+- `commands::pages::list_pages`
+- `commands::pages::fetch_page_source`
+- `commands::pages::flow_start`
+- `commands::pages::flow_submit`
+- `commands::pages::flow_back`
+- `commands::pages::flow_cancel`
+- `commands::pages::setting_proposals`
+- `commands::pages::decide_setting_proposals`
+- `commands::pages::setting_history`
+- `commands::pages::set_fleet_setting`
 - `commands::tasks::list_tasks`
 - `commands::tasks::cancel_task`
 - `commands::files::repo_changes`

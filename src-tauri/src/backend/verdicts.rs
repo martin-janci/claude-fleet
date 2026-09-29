@@ -593,18 +593,81 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "get_fleet_settings",
+        Verdict::Routed {
+            tool: "get_settings",
+        },
+    ),
+    (
+        "describe_fleet_settings",
+        Verdict::Routed {
+            tool: "get_settings",
+        },
+    ),
+    (
+        "list_pages",
+        Verdict::SameInBoth {
+            why: "the page specs are compiled into this binary: the same pages whichever \
+                  process owns the fleet. What a page shows comes through its own commands, \
+                  each with its own verdict",
+        },
+    ),
+    (
+        "fetch_page_source",
         Verdict::LocalOnly {
-            instead: "these settings drive the reconcile tick, the GC sweeper and the \
-                      playbooks, which the hub runs and this app does not; read them on the \
-                      hub with get_settings (master token)",
+            instead: "a page's data sources read this fleet's store, which the hub owns; \
+                      read the same numbers on the hub with usage_report",
+        },
+    ),
+    (
+        "flow_start",
+        Verdict::LocalOnly {
+            instead: "a flow administers the fleet this app owns, and the hub owns it; connect a \
+                      tracker on the hub with fleet-hub tracker add <ticket-url>",
+        },
+    ),
+    (
+        "flow_submit",
+        Verdict::LocalOnly {
+            instead: "a flow administers the fleet this app owns, and the hub owns it; connect a \
+                      tracker on the hub with fleet-hub tracker add <ticket-url>",
+        },
+    ),
+    (
+        "flow_back",
+        Verdict::LocalOnly {
+            instead: "a flow administers the fleet this app owns, and the hub owns it; connect a \
+                      tracker on the hub with fleet-hub tracker add <ticket-url>",
+        },
+    ),
+    (
+        "flow_cancel",
+        Verdict::LocalOnly {
+            instead: "a flow administers the fleet this app owns, and the hub owns it; connect a \
+                      tracker on the hub with fleet-hub tracker add <ticket-url>",
+        },
+    ),
+    (
+        "setting_proposals",
+        Verdict::Routed {
+            tool: "setting_proposals",
+        },
+    ),
+    (
+        "decide_setting_proposals",
+        Verdict::Routed {
+            tool: "decide_setting_proposals",
+        },
+    ),
+    (
+        "setting_history",
+        Verdict::Routed {
+            tool: "setting_history",
         },
     ),
     (
         "set_fleet_setting",
-        Verdict::LocalOnly {
-            instead: "these settings drive the reconcile tick, the GC sweeper and the \
-                      playbooks, which the hub runs and this app does not; change them on \
-                      the hub with set_setting (master token)",
+        Verdict::Routed {
+            tool: "set_setting",
         },
     ),
     ("list_tasks", Verdict::Routed { tool: "list_tasks" }),

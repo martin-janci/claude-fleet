@@ -337,7 +337,9 @@ fn accepted_list(kinds: Option<&Vec<String>>) -> Vec<String> {
 /// `update` frames name every target of the fleet; a scoped caller reads
 /// its own row through `update_status`.
 /// `session` frames are fenced per frame instead ([`fence_frame`]).
-pub const HOST_BOUND_HIDDEN_KINDS: &[&str] = &["work", "update"];
+/// `settings` frames name operator settings, which only the master token
+/// reads (`get_settings`); nothing on a host or an org-bound phone needs them.
+pub const HOST_BOUND_HIDDEN_KINDS: &[&str] = &["work", "settings", "update"];
 
 /// Narrow the requested kinds for a host-bound caller; everyone else keeps
 /// what they asked for.

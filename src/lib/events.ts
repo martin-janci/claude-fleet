@@ -75,6 +75,9 @@ export type RowEventHandlers = {
    *  M14.1d: ids only), in order. A `resync` among them means reload the
    *  whole Work view (`needsFullReload`); anything else, re-read what shows. */
   onWorkChanged?: (changes: WorkChanged[]) => void;
+  /** One call per flush with the key of every `settings:changed`
+   *  (declarative pages P3: the key only), in order, duplicates kept. */
+  onSettingsChanged?: (keys: string[]) => void;
   /** One call per flush with every `update:changed` (update design §11: ids
    *  only), in order: re-read `update_status`. */
   onUpdateChanged?: (changes: UpdateChanged[]) => void;
@@ -116,6 +119,7 @@ type Queued =
   | { name: 'work:tracker'; payload: TrackerRow }
   | { name: 'work:tracker_removed'; payload: { id: number } }
   | { name: 'work:changed'; payload: unknown }
+  | { name: 'settings:changed'; payload: { key: string } }
   | { name: 'update:changed'; payload: UpdateChanged };
 
 /**
@@ -155,6 +159,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     const conversationsChangedIds: number[] = [];
     const workEvents: WorkEvent[] = [];
     const workChanges: WorkChanged[] = [];
+    const settingsKeys: string[] = [];
     const updateChanges: UpdateChanged[] = [];
     for (const ev of batch) {
       switch (ev.name) {
@@ -245,6 +250,9 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
           if (c) workChanges.push(c);
           break;
         }
+        case 'settings:changed':
+          if (typeof ev.payload?.key === 'string') settingsKeys.push(ev.payload.key);
+          break;
         case 'update:changed': {
           // Ids only, so anything readable is enough: a newer hub's `what`
           // still means "re-read".
@@ -268,6 +276,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     if (conversationsChangedIds.length > 0) handlers.onConversationsChanged?.(conversationsChangedIds);
     if (workEvents.length > 0) handlers.onWorkEvents?.(workEvents);
     if (workChanges.length > 0) handlers.onWorkChanged?.(workChanges);
+    if (settingsKeys.length > 0) handlers.onSettingsChanged?.(settingsKeys);
     if (updateChanges.length > 0) handlers.onUpdateChanged?.(updateChanges);
   };
 
@@ -307,6 +316,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     moveProgress: !!handlers.onMoveProgress,
     work: !!handlers.onWorkEvents,
     workChanged: !!handlers.onWorkChanged,
+    settingsChanged: !!handlers.onSettingsChanged,
     updateChanged: !!handlers.onUpdateChanged,
   };
 
@@ -346,6 +356,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('work:tracker', wanted.work),
     sub('work:tracker_removed', wanted.work),
     sub('work:changed', wanted.workChanged),
+    sub('settings:changed', wanted.settingsChanged),
     sub('update:changed', wanted.updateChanged),
   ]);
   return () => {

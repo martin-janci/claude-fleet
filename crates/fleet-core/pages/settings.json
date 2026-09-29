@@ -1,0 +1,81 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings",
+  "title": "Settings",
+  "layout": "cards",
+  "intro": "How this fleet runs: automation, limits, projects, the work graph and decisions.",
+  "sections": [
+    {
+      "title": "Running the fleet",
+      "items": [
+        {
+          "type": "link",
+          "page": "settings.automation"
+        },
+        {
+          "type": "link",
+          "page": "settings.limits"
+        },
+        {
+          "type": "link",
+          "page": "settings.projects"
+        },
+        {
+          "type": "link",
+          "page": "settings.hub"
+        },
+        {
+          "type": "link",
+          "page": "settings.control_api"
+        },
+        {
+          "type": "link",
+          "page": "settings.review"
+        },
+        {
+          "type": "link",
+          "page": "settings.updates"
+        }
+      ]
+    },
+    {
+      "title": "Work",
+      "items": [
+        {
+          "type": "link",
+          "page": "settings.trackers"
+        },
+        {
+          "type": "link",
+          "page": "settings.work"
+        },
+        {
+          "type": "link",
+          "page": "settings.orgs"
+        },
+        {
+          "type": "link",
+          "page": "settings.decisions"
+        }
+      ]
+    },
+    {
+      "title": "Usage",
+      "items": [
+        {
+          "type": "stat",
+          "source": {
+            "id": "usage.total"
+          },
+          "field": "cost_micros",
+          "label": "Estimated cost"
+        },
+        {
+          "type": "link",
+          "page": "usage",
+          "label": "Usage by day, model and host"
+        }
+      ]
+    }
+  ]
+}

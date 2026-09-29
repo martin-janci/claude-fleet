@@ -164,6 +164,30 @@ pub struct RetentionStatus {
     pub tick_cap: usize,
 }
 
+/// [`status`] on a store the caller has locked (a page's data source, which
+/// runs under the one lock `fetch_page_source` takes).
+pub fn status_locked(s: &Store, now: i64) -> Result<RetentionStatus, IpcError> {
+    let days = RetentionDays::from_store(s);
+    let mut tables = Vec::new();
+    for t in RetentionTable::ALL {
+        tables.push(RetentionTableStatus {
+            table: t.table().into(),
+            setting: setting_of(t).into(),
+            days: days.of(t),
+            rows: s.retention_rows(t)?,
+            would_delete: s.retention_eligible(t, now, days.of(t))?,
+        });
+    }
+    let last_sweep = s
+        .get_setting(LAST_SWEEP_KEY)?
+        .and_then(|v| serde_json::from_str(&v).ok());
+    Ok(RetentionStatus {
+        tables,
+        last_sweep,
+        tick_cap: RETENTION_TICK_CAP,
+    })
+}
+
 /// Row counts, the dry run and the last sweep. One short lock per query.
 pub fn status(store: &Mutex<Store>, now: i64) -> Result<RetentionStatus, IpcError> {
     let days = RetentionDays::from_store(&*lock(store)?);

@@ -105,6 +105,10 @@ pub enum RowChange {
     /// client re-reads what it shows. Kind `work`, so never sent to a
     /// host-bound or org-bound stream.
     WorkChanged(WorkChanged),
+    /// An operator setting was written (declarative pages P3): the key
+    /// only — a client re-reads what it shows. Kind `settings`, so never
+    /// sent to a host-bound or org-bound stream: the values are master-only.
+    SettingsChanged(String),
     /// The fleet's update picture changed (update-channel design §11): a
     /// target's observed version or phase, a pin, or the verified channel.
     /// Ids only — a client re-reads `update_status`. Kind `update`, so never
@@ -303,6 +307,7 @@ impl RowChange {
             RowChange::TrackerUpdated(_) => "work:tracker",
             RowChange::TrackerRemoved(_) => "work:tracker_removed",
             RowChange::WorkChanged(_) => "work:changed",
+            RowChange::SettingsChanged(_) => "settings:changed",
             RowChange::UpdateChanged(_) => "update:changed",
         }
     }
@@ -357,6 +362,7 @@ impl RowChange {
             RowChange::TrackerUpdated(r) => to_value(r),
             RowChange::TrackerRemoved(id) => serde_json::json!({ "id": id }),
             RowChange::WorkChanged(w) => to_value(w),
+            RowChange::SettingsChanged(key) => serde_json::json!({ "key": key }),
             RowChange::UpdateChanged(u) => to_value(u),
         }
     }
@@ -531,7 +537,7 @@ pub struct BroadcastEventBus {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 25] = [
+pub const EVENT_NAMES: [&str; 26] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -556,13 +562,14 @@ pub const EVENT_NAMES: [&str; 25] = [
     "work:tracker",
     "work:tracker_removed",
     "work:changed",
+    "settings:changed",
     "update:changed",
 ];
 
 /// Every event kind — the part of a [`RowChange::name`] before the `:`, which
 /// is what the `/events` route's `?kinds=` filter matches on.
 /// `event_kinds_cover_every_name` keeps it in step with the variants.
-pub const EVENT_KINDS: [&str; 13] = [
+pub const EVENT_KINDS: [&str; 14] = [
     "session",
     "host",
     "account",
@@ -575,6 +582,7 @@ pub const EVENT_KINDS: [&str; 13] = [
     "sync",
     "move",
     "work",
+    "settings",
     "update",
 ];
 
@@ -847,6 +855,7 @@ impl EventBus for RecordingEventBus {
                 w.rule_id,
                 w.view_id
             ),
+            RowChange::SettingsChanged(key) => key.clone(),
             RowChange::UpdateChanged(u) => {
                 format!("{}:{}", u.what, u.target.as_deref().unwrap_or_default())
             }
@@ -925,6 +934,10 @@ mod tests {
             (RowChange::CatalogLoaded(summary), "catalog:loaded"),
             (RowChange::SyncProgress(progress), "sync:progress"),
             (RowChange::MoveProgress(moving), "move:progress"),
+            (
+                RowChange::SettingsChanged("gc.enabled".into()),
+                "settings:changed",
+            ),
         ];
         for (change, expected) in &cases {
             assert_eq!(change.name(), *expected);
@@ -1044,6 +1057,7 @@ mod tests {
                 RowChange::TrackerUpdated(_) => pinned_name!("work:tracker"),
                 RowChange::TrackerRemoved(_) => pinned_name!("work:tracker_removed"),
                 RowChange::WorkChanged(_) => pinned_name!("work:changed"),
+                RowChange::SettingsChanged(_) => pinned_name!("settings:changed"),
                 RowChange::UpdateChanged(_) => pinned_name!("update:changed"),
             }
         }

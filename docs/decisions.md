@@ -224,7 +224,7 @@ the section id), not from the record. A section map takes `todo`,
 `in_progress` or `done`: `not_planned` applies as `done` (the task is not
 live work); `unsure` proposes nothing. The printed command is a
 `work_admin update` (master token) that confirms the section map — the
-inferred one kept under your entries, like Settings → Work's **Confirm** —
+inferred one kept under your entries, like Settings → Trackers' **Confirm** —
 with the proposals you accept; edit it to drop or change any. `--json` also
 carries the same change as `work_admin` arguments. In `shadow` the view
 shows, per section, the rule's and the model's category and how often they
@@ -235,7 +235,7 @@ by its run id (`run 812` above). A person decides it three ways:
 
 | | Hub (operator) | Standalone desktop | What it writes | Follow-up |
 |---|---|---|---|---|
-| **Apply** | `fleet-hub decide proposals apply 812` | Settings → Work → **Apply** | the answer's category into your section map (`not_planned` applies as `done`; `unsure` proposes nothing and cannot be applied as is) | `confirmed` |
+| **Apply** | `fleet-hub decide proposals apply 812` | Settings → Trackers → **Apply** | the answer's category into your section map (`not_planned` applies as `done`; `unsure` proposes nothing and cannot be applied as is) | `confirmed` |
 | **Apply as** | `… apply 812 --as in_progress` | **Apply as…** | the category you chose (`todo`, `in_progress` or `done` only) | `corrected` to yours (`confirmed` if it is what the answer applies as) |
 | **Reject** | `fleet-hub decide proposals reject 814` | **Not this** | nothing but the run's follow-up: the section stays unmapped (it counts as to do) | `rejected` |
 
@@ -291,18 +291,21 @@ are yours).
 
 ## Settings
 
-| Key | Default | What it does |
-|---|---|---|
-| `decide.jev.enabled` | `false` | The kill switch. Off: nothing is ever sent. |
-| `decide.jev.status_map` | `off` | `off` / `shadow` / `assist` for Asana section → status category proposals. |
-| `decide.jev.work_link` | `off` | `off` / `shadow` / `assist` for choosing a work item for an unlinked session. |
-| `decide.jev.unassigned` | `false` | Sessions and items with no org may be sent too. |
-| `decide.jev.timeout_ms` | `1500` | One call's whole budget (100–30000 ms). |
-| `decide.jev.breaker_failures` | `5` | Failed calls in a row that open the breaker (1–100). |
-| `decide.jev.breaker_open_secs` | `300` | How long an open breaker refuses calls (10–86400 s). |
-| `decide.jev.daily_token_budget` | `2000000` | Input tokens per UTC day (`0` = none). At $0.042 per million, the default is under $0.09 a day. |
-| `decide.jev.model` | `jev-1.13.0` | `jev-1.13.0` (pinned) or `jev-latest`. |
-| `decide.retention_days` | `90` | Days a run is kept (`0` = forever). |
+<!-- BEGIN GENERATED: settings decide. -->
+<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current -->
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `decide.jev.enabled` | `false` | on / off | The kill switch for TypeSafe's decision model. Off, nothing is ever sent. On, data goes only for organisations that opted in, redacted. Experimental. Asks to confirm. |
+| `decide.jev.status_map` | `off` | `off` / `shadow` / `assist` | Proposing a status category for an Asana section. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.work_link` | `off` | `off` / `shadow` / `assist` | Choosing a ticket for a session no rule could link. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
+| `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
+| `decide.jev.breaker_failures` | `5` | 1–100 | Failed calls in a row that open the circuit breaker. |
+| `decide.jev.breaker_open_secs` | `300` | 10–86400 seconds | How long an open breaker refuses calls. |
+| `decide.jev.daily_token_budget` | `2000000` | 0–1000000000 tokens, `0` = none | Input tokens the decision model may be sent per UTC day. At $0.042 per million, the default is under $0.09 a day. |
+| `decide.jev.model` | `jev-1.13.0` | `jev-1.13.0` / `jev-latest` | The model version a request names. jev-1.13.0 is pinned; jev-latest follows TypeSafe. |
+| `decide.retention_days` | `90` | 0–3650 days, `0` = forever | Days a decision record (ids and numbers, never text) is kept. |
+<!-- END GENERATED: settings decide. -->
 
 On a standalone desktop they are in Settings → *Decisions (Jev)*. On a hub
 they are set with `fleet-hub decide enable | disable | mode | unassigned |

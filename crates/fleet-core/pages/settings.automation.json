@@ -1,0 +1,127 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings.automation",
+  "title": "Automation",
+  "parent": "settings",
+  "layout": "category",
+  "intro": "Playbooks, the idle-session GC and workspace repair run from the background tick. Everything here is off by default.",
+  "sections": [
+    {
+      "title": "Playbooks",
+      "items": [
+        {
+          "type": "field",
+          "key": "playbooks.press_enter"
+        },
+        {
+          "type": "field",
+          "key": "playbooks.oom_recreate"
+        },
+        {
+          "type": "field",
+          "key": "playbooks.oom_max_attempts",
+          "when": {
+            "key": "playbooks.oom_recreate",
+            "truthy": true
+          }
+        },
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "Auth menus, trust prompts and reconnects are always notify-only."
+        }
+      ]
+    },
+    {
+      "title": "Garbage collection",
+      "items": [
+        {
+          "type": "field",
+          "key": "gc.enabled"
+        },
+        {
+          "type": "field",
+          "key": "gc.bg_idle_secs",
+          "when": {
+            "key": "gc.enabled",
+            "truthy": true
+          }
+        },
+        {
+          "type": "field",
+          "key": "gc.shell_idle_secs",
+          "when": {
+            "key": "gc.enabled",
+            "truthy": true
+          }
+        },
+        {
+          "type": "field",
+          "key": "gc.work_idle_secs",
+          "when": {
+            "key": "gc.enabled",
+            "truthy": true
+          }
+        },
+        {
+          "type": "field",
+          "key": "gc.sweep_interval_secs",
+          "when": {
+            "key": "gc.enabled",
+            "truthy": true
+          }
+        },
+        {
+          "type": "field",
+          "key": "gc.external_lost_ttl_secs"
+        }
+      ]
+    },
+    {
+      "title": "Workspace repair",
+      "items": [
+        {
+          "type": "field",
+          "key": "repair.auto_on_tick"
+        },
+        {
+          "type": "field",
+          "key": "repair.tick_interval_secs",
+          "when": {
+            "key": "repair.auto_on_tick",
+            "truthy": true
+          }
+        }
+      ]
+    },
+    {
+      "title": "Reconcile tick",
+      "advanced": true,
+      "collapsible": true,
+      "items": [
+        {
+          "type": "field",
+          "key": "reconcile.interval_secs"
+        },
+        {
+          "type": "field",
+          "key": "reconcile.stale_working_secs"
+        },
+        {
+          "type": "field",
+          "key": "reconcile.stale_working_ttl_secs"
+        }
+      ]
+    },
+    {
+      "title": "Provisioning",
+      "advanced": true,
+      "items": [
+        {
+          "type": "field",
+          "key": "provision.force_git_tree"
+        }
+      ]
+    }
+  ]
+}
