@@ -110,10 +110,6 @@ const RETENTION_IS_ADMIN: &str = "work retention is the hub's own sweep of its s
      the fleet's administrator; set the windows with set_setting and read the status on the \
      hub";
 
-const USAGE_IS_ADMIN: &str = "the work graph's usage counts are the hub's work_admin, \
-     master-only, and a paired client is never the fleet's administrator; read them on the hub \
-     with fleet-hub work usage";
-
 /// The ten git-write commands of the Files tab, likewise.
 const NO_GIT_WRITE_TOOL: &str =
     "the hub exposes no git-write tool — a remote client must not stage or commit under a \
@@ -412,13 +408,6 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "work_retention_sweep",
         Verdict::LocalOnly {
             instead: RETENTION_IS_ADMIN,
-        },
-    ),
-    // Work graph M13.2: `work_admin { action: usage }`, master-only.
-    (
-        "work_usage",
-        Verdict::LocalOnly {
-            instead: USAGE_IS_ADMIN,
         },
     ),
     // Work graph M3.4: reading tickets and starting work route like every

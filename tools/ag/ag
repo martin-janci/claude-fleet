@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# ag — one launcher for coding-agent CLIs (Claude Code, Codex, …).
+#
+#   ag [<harness>] [-p PROMPT] [-c | -r ID] [--new-id ID] [--name N]
+#      [-m MODEL] [--effort E] [--yolo | --no-yolo] [-- raw args…]
+#   ag help | version | list | which <h> | install <h> | shims | doctor
+#
+# Maps ag's normalised flags onto each CLI's own via drivers/<harness>.sh and
+# execs it. Bash 3.2 compatible (stock macOS): no associative arrays, and a
+# possibly-empty array is always expanded as ${a[@]+"${a[@]}"}.
+set -u
+
+# The directory this script really lives in, following symlinks such as
+# ~/.local/bin/ag → ~/.local/share/ag/ag (no GNU `readlink -f` on macOS).
+ag_root() {
+  local p=$0 t
+  while [ -L "$p" ]; do
+    t=$(readlink "$p")
+    case $t in /*) p=$t ;; *) p=$(dirname "$p")/$t ;; esac
+  done
+  # shellcheck disable=SC1007  # intentional: clear CDPATH for this one `cd`
+  (CDPATH= cd -- "$(dirname "$p")" && pwd)
+}
+AG_ROOT=${AG_ROOT:-$(ag_root)}
+AG_VERSION=0.1.0
+
+for f in "$AG_ROOT"/lib/*.sh; do
+  # shellcheck source=/dev/null
+  . "$f"
+done
+
+case ${1:-} in
+  help | -h | --help) ag_usage; exit 0 ;;
+  version | --version) echo "ag $AG_VERSION"; exit 0 ;;
+esac
+# A subcommand is any function named ag_cmd_<name>.
+if [ $# -gt 0 ] && type "ag_cmd_$1" >/dev/null 2>&1; then
+  cmd=$1; shift
+  "ag_cmd_$cmd" "$@"
+  exit $?
+fi
+type ag_launch >/dev/null 2>&1 || ag_die 2 "launching is not implemented yet"
+ag_launch "$@"

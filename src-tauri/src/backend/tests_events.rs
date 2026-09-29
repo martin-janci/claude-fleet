@@ -488,6 +488,83 @@ async fn every_variant_this_test_can_build_crosses_unchanged() {
     assert_eq!(seen.events(), expected);
 }
 
+/// The hub strips every null key before it broadcasts (`BroadcastEventBus`,
+/// `fleet_core::json::strip_nulls`), but the frontend clears a field and
+/// guards a missing one with `=== null`, which an absent key (`undefined`)
+/// slips past. Seen live: an account whose five-hour window was unused sent
+/// `"five_hour":{"utilization":0.0}`, `compactWindow` handed `undefined` to
+/// `Intl.DateTimeFormat.formatToParts`, and the RangeError took the whole
+/// Hosts view down. So a stripped frame must come out as the local bus would
+/// have sent it — nulls and all.
+#[tokio::test]
+async fn a_frame_the_hub_stripped_of_nulls_crosses_with_its_nulls_back() {
+    use fleet_core::service::account_usage::{
+        AccountUsage, AccountUsageSnapshot, UsageOutcomeKind, Window,
+    };
+    let usage = AccountUsageSnapshot {
+        account_uuid: "u-1".into(),
+        usage: Some(AccountUsage {
+            five_hour: Some(Window {
+                utilization: 0.0,
+                resets_at: None,
+            }),
+            seven_day: Some(Window {
+                utilization: 12.0,
+                resets_at: Some(1_790_726_399),
+            }),
+            seven_day_opus: None,
+            seven_day_sonnet: None,
+        }),
+        subscription: Some("max".into()),
+        fetched_at: Some(1_790_689_779),
+        source_host: None,
+        status: UsageOutcomeKind::Ok,
+        detail: None,
+        next_try_at: 1_790_690_079,
+    };
+    let changes = vec![
+        RowChange::AccountUsageUpdated(usage),
+        RowChange::SessionUpdated(sample_session()),
+        RowChange::HostProbed(sample_host()),
+        RowChange::HostPinged {
+            alias: "trn".into(),
+            last_pinged_at: 1,
+            reachable: true,
+            claude_version_at: None,
+            health: None,
+        },
+        RowChange::AccountUpserted(sample_account()),
+        RowChange::ProjectUpdated(sample_project_row()),
+        RowChange::WorktreeUpdated(sample_worktree_row()),
+        RowChange::TaskUpdated(sample_task()),
+        RowChange::AssetInventoryUpdated(AssetInventoryRow::default()),
+        RowChange::MoveProgress(MoveProgress {
+            session_id: 5,
+            to_host: "trn".into(),
+            step: MoveStep::Git,
+            index: 4,
+            total: 9,
+            state: MoveStepState::Done,
+            detail: None,
+        }),
+    ];
+    let body: Vec<String> = changes
+        .iter()
+        .map(|c| {
+            let mut stripped = c.payload();
+            fleet_core::json::strip_nulls(&mut stripped);
+            frame(c.name(), &stripped)
+        })
+        .collect();
+    let expected: Vec<(&'static str, Value)> =
+        changes.iter().map(|c| (c.name(), c.payload())).collect();
+    let seen = one_connection(body).await;
+    assert_eq!(seen.events(), expected);
+    // The fixture must actually exercise the bug, or this proves nothing.
+    let five_hour = &seen.events()[0].1["usage"]["five_hour"];
+    assert!(five_hour.get("resets_at").is_some_and(Value::is_null));
+}
+
 /// The table above can build 16 of the 19 variants; this closes the last one
 /// and every future one by going at the name list directly.
 ///
@@ -524,7 +601,21 @@ async fn every_event_name_the_frontend_listens_for_crosses_the_bridge() {
          subscribes to — must cross the bridge; one missing is a store that \
          silently stops updating in remote mode"
     );
-    assert!(seen.events().iter().all(|(_, p)| *p == payload));
+    // Every field survives with its value, `probe` included. A payload that
+    // happens to parse as its row type may gain that type's nulls back
+    // (`restore_stripped_nulls`) — nulls, and nothing else.
+    for (name, p) in seen.events() {
+        let (sent, got) = (payload.as_object().unwrap(), p.as_object().unwrap());
+        for (k, v) in sent {
+            assert_eq!(got.get(k), Some(v), "{name}: `{k}` must cross unchanged");
+        }
+        for (k, v) in got {
+            assert!(
+                sent.contains_key(k) || v.is_null(),
+                "{name}: only a null may be added, not `{k}: {v}`"
+            );
+        }
+    }
 }
 
 /// The whole point of resolving against `EVENT_NAMES`: what reaches the

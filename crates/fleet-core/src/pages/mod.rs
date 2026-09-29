@@ -97,6 +97,10 @@ pub const PAGE_FILES: &[(&str, &str)] = &[
         include_str!("../../pages/settings.review.json"),
     ),
     ("usage.json", include_str!("../../pages/usage.json")),
+    (
+        "usage.work.json",
+        include_str!("../../pages/usage.work.json"),
+    ),
 ];
 
 /// Registered settings that deliberately have no page, and why. Empty

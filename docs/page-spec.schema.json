@@ -4,6 +4,13 @@
   "description": "One page: a route (`id`), a layout, and its content as sections or tabs\nof sections.",
   "type": "object",
   "properties": {
+    "filters": {
+      "description": "A `data_page`'s filter bar: each filter sets the parameter of the\nsame name on every data item whose source declares it.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Filter"
+      }
+    },
     "id": {
       "description": "Dotted lowercase route, e.g. \"settings.automation\". Also the deep\nlink: `settings/<id>#<key>`.",
       "type": "string"
@@ -171,6 +178,45 @@
         }
       ]
     },
+    "Filter": {
+      "description": "One control in a `data_page`'s filter bar, bound by name to a source\nparameter (`pages::sources`). Its control follows the parameter's type:\na `days` parameter is a select over `choices`, a `host` parameter a\nselect over the registered hosts with \"All hosts\" first. A data item\nmay not also set a filtered parameter literally.",
+      "type": "object",
+      "properties": {
+        "choices": {
+          "description": "A `days` filter's options, ascending. A `host` filter has none.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "default": {
+          "description": "The option picked when the page opens: one of `choices`; the first\nwhen absent. A `host` filter starts at \"All hosts\".",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "label": {
+          "description": "The control's label; the parameter's own name when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "param": {
+          "description": "The source parameter this filter sets, e.g. \"days\" or \"host\".",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "param"
+      ]
+    },
     "Item": {
       "description": "One thing on a page. Tagged by `type`, one shape per purpose.",
       "oneOf": [
@@ -275,6 +321,10 @@
               "items": {
                 "type": "string"
               }
+            },
+            "copy": {
+              "description": "Offer \"Copy as text\": the source's label with the filters, then\none line per row, `first: rest, …`.",
+              "type": "boolean"
             },
             "source": {
               "$ref": "#/$defs/SourceRef"

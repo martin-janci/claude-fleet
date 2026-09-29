@@ -370,7 +370,7 @@ export function compactWindow(
   const fr = freshness(kind, snapshot.fetched_at, win.resets_at, now);
   if (fr === 'expired') return { left: '? left', reset: null, freshness: fr };
   const left = `${fr === 'stale' ? '~' : ''}${leftPct(win)}% left`;
-  const reset = win.resets_at === null ? null : formatResetShort(kind, win.resets_at, now, locale, timeZone);
+  const reset = win.resets_at == null ? null : formatResetShort(kind, win.resets_at, now, locale, timeZone);
   return { left, reset, freshness: fr };
 }
 

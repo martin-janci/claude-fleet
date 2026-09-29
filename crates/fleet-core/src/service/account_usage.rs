@@ -34,7 +34,7 @@ use crate::ipc_error::{codes, IpcError};
 use crate::shell::quote;
 use crate::ssh::SshExec;
 use crate::store::HostRow;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -208,7 +208,7 @@ pub fn usage_script(user_agent: &str) -> String {
 }
 
 /// One usage window. `utilization` is percent USED, clamped to `0..=100`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Window {
     pub utilization: f64,
     /// Unix seconds; `None` when absent or not RFC 3339.
@@ -216,7 +216,7 @@ pub struct Window {
 }
 
 /// The endpoint's buckets. Any may be absent.
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct AccountUsage {
     pub five_hour: Option<Window>,
     pub seven_day: Option<Window>,
@@ -288,7 +288,7 @@ impl UsageOutcome {
 }
 
 /// The wire status of an account's usage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageOutcomeKind {
     Ok,
@@ -895,7 +895,7 @@ impl UsageCache {
 }
 
 /// One account's usage as the UI sees it.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountUsageSnapshot {
     pub account_uuid: String,
     /// Last-known usage (from the last `ok`), even when `status` is a failure.

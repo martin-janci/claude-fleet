@@ -243,6 +243,83 @@ fn custom_items_are_capped() {
     assert!(messages(&[p]).contains("over the cap of 3"));
 }
 
+fn data_page(filters: Value, items: Value) -> Page {
+    page(json!({
+        "spec": "fleet.page/1", "id": "t", "title": "T", "layout": "data_page",
+        "filters": filters, "sections": [{ "title": "S", "items": items }]
+    }))
+}
+
+#[test]
+fn a_filter_sets_a_parameter_its_sources_declare() {
+    let chart = json!({ "type": "chart", "source": { "id": "usage.by_day" }, "chart": "bar" });
+    let ok = data_page(
+        json!([
+            { "param": "days", "label": "Window", "choices": [7, 30, 90], "default": 30 },
+            { "param": "host" }
+        ]),
+        json!([chart]),
+    );
+    assert_eq!(messages(&[ok]), "");
+
+    let cases = [
+        (
+            json!([{ "param": "limit" }]),
+            json!([chart]),
+            "no data source on this page takes `limit`",
+        ),
+        (
+            json!([{ "param": "days" }]),
+            json!([chart]),
+            "lists its choices",
+        ),
+        (
+            json!([{ "param": "days", "choices": [30, 7] }]),
+            json!([chart]),
+            "choices go up",
+        ),
+        (
+            json!([{ "param": "days", "choices": [7, 999] }]),
+            json!([chart]),
+            "999 days is outside 1–365",
+        ),
+        (
+            json!([{ "param": "days", "choices": [7, 30], "default": 14 }]),
+            json!([chart]),
+            "not one of the choices",
+        ),
+        (
+            json!([{ "param": "host", "choices": [1] }]),
+            json!([chart]),
+            "no choices or default",
+        ),
+        (
+            json!([{ "param": "days", "choices": [7] }, { "param": "days", "choices": [7] }]),
+            json!([chart]),
+            "another filter sets `days`",
+        ),
+        (
+            json!([{ "param": "days", "choices": [7] }]),
+            json!([{ "type": "chart", "source": { "id": "usage.by_day", "params": { "days": 7 } }, "chart": "bar" }]),
+            "set by the page's filter, not here",
+        ),
+    ];
+    for (filters, items, want) in cases {
+        let got = messages(&[data_page(filters.clone(), items)]);
+        assert!(
+            got.contains(want),
+            "{filters}\n  wanted: {want}\n  got: {got}"
+        );
+    }
+
+    let p = page(json!({
+        "spec": "fleet.page/1", "id": "t", "title": "T", "layout": "category",
+        "filters": [{ "param": "host" }],
+        "sections": [{ "title": "S", "items": [{ "type": "stat", "source": { "id": "usage.total" }, "field": "cost_micros" }] }]
+    }));
+    assert!(messages(&[p]).contains("only a data_page has filters"));
+}
+
 #[test]
 fn a_layout_holds_only_its_items() {
     let p = page(json!({

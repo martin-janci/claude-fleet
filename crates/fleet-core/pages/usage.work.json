@@ -1,0 +1,35 @@
+{
+  "spec": "fleet.page/1",
+  "id": "usage.work",
+  "title": "Work graph usage",
+  "parent": "usage",
+  "layout": "data_page",
+  "intro": "How the work graph was used on this fleet, as counts: nothing is sent anywhere. Copy as text for an acceptance run's record.",
+  "filters": [
+    {
+      "param": "days",
+      "label": "Window",
+      "choices": [
+        7,
+        30,
+        90,
+        365
+      ],
+      "default": 30
+    }
+  ],
+  "sections": [
+    {
+      "title": "Counts",
+      "items": [
+        {
+          "type": "table",
+          "source": {
+            "id": "work.usage"
+          },
+          "copy": true
+        }
+      ]
+    }
+  ]
+}

@@ -33,6 +33,7 @@ import {
   outageUsage,
   snapshot,
 } from './hosts_fixture';
+import type { UsageWindow } from './account_usage_store';
 
 const L = 'en-GB';
 const TZ = 'UTC';
@@ -270,6 +271,15 @@ describe('compact usage', () => {
     const s = fleetUsage()[ADMIN.uuid];
     expect(compactWindow('5h', s, NOW, L, TZ)).toEqual({ left: '91% left', reset: 'resets 15:10', freshness: 'fresh' });
     expect(compactWindow('weekly', s, NOW, L, TZ)).toEqual({ left: '58% left', reset: 'resets Thu 09:00', freshness: 'fresh' });
+  });
+
+  // Seen live: a hub sent an unused five-hour window as
+  // `{"utilization":0.0}` (nulls stripped), and the undefined reset took the
+  // Hosts view down.
+  it('treats a reset the wire left out like a null one', () => {
+    const s = fleetUsage()[ADMIN.uuid];
+    const noReset = { ...s, usage: { ...s.usage!, five_hour: { utilization: 0 } as UsageWindow } };
+    expect(compactWindow('5h', noReset, NOW, L, TZ)).toEqual({ left: '100% left', reset: null, freshness: 'fresh' });
   });
 
   it('marks stale with ~, withholds expired, and says checking… before the first fetch', () => {

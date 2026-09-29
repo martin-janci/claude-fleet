@@ -2110,6 +2110,36 @@
       "shape": "rows"
     },
     {
+      "columns": [
+        {
+          "id": "group",
+          "label": "What",
+          "ty": "text"
+        },
+        {
+          "id": "counted",
+          "label": "Counted",
+          "ty": "text"
+        }
+      ],
+      "help": "How the work graph was used over the window: links, detection, handovers, resumes, the journal, tidy-up and each tracker's sync, as counts (`fleet-hub work usage`).",
+      "id": "work.usage",
+      "label": "Work graph usage",
+      "params": [
+        {
+          "default": 30,
+          "help": "How many days back.",
+          "name": "days",
+          "ty": {
+            "max": 365,
+            "min": 1,
+            "type": "days"
+          }
+        }
+      ],
+      "shape": "rows"
+    },
+    {
       "fields": [
         {
           "id": "at",

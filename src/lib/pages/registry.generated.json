@@ -2743,11 +2743,30 @@
       "title": "Proposed changes"
     },
     {
+      "filters": [
+        {
+          "choices": [
+            7,
+            14,
+            30,
+            90,
+            365
+          ],
+          "default": 30,
+          "label": "Window",
+          "param": "days"
+        },
+        {
+          "label": "Host",
+          "param": "host"
+        }
+      ],
       "id": "usage",
       "intro": "Token usage and estimated cost, read from each session's Claude transcript.",
       "layout": "data_page",
       "sections": [
         {
+          "intro": "Every session that still exists, over its whole life: the window does not narrow these.",
           "items": [
             {
               "field": "cost_micros",
@@ -2775,20 +2794,18 @@
           "title": "Totals"
         },
         {
+          "intro": "Per UTC day over the window, killed sessions included.",
           "items": [
             {
               "chart": "bar",
               "source": {
-                "id": "usage.by_day",
-                "params": {
-                  "days": 30
-                }
+                "id": "usage.by_day"
               },
               "title": "Estimated cost per day",
               "type": "chart"
             }
           ],
-          "title": "Last 30 days"
+          "title": "By day"
         },
         {
           "items": [
@@ -2815,16 +2832,56 @@
         {
           "items": [
             {
+              "label": "Work graph usage",
+              "page": "usage.work",
+              "type": "link"
+            },
+            {
               "label": "Usage settings",
               "page": "settings.limits",
               "type": "link"
             }
           ],
-          "title": "Settings"
+          "title": "See also"
         }
       ],
       "spec": "fleet.page/1",
       "title": "Usage"
+    },
+    {
+      "filters": [
+        {
+          "choices": [
+            7,
+            30,
+            90,
+            365
+          ],
+          "default": 30,
+          "label": "Window",
+          "param": "days"
+        }
+      ],
+      "id": "usage.work",
+      "intro": "How the work graph was used on this fleet, as counts: nothing is sent anywhere. Copy as text for an acceptance run's record.",
+      "layout": "data_page",
+      "parent": "usage",
+      "sections": [
+        {
+          "items": [
+            {
+              "copy": true,
+              "source": {
+                "id": "work.usage"
+              },
+              "type": "table"
+            }
+          ],
+          "title": "Counts"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Work graph usage"
     }
   ],
   "resources": [
@@ -3730,6 +3787,36 @@
       "id": "work.retention",
       "label": "Work retention",
       "params": [],
+      "shape": "rows"
+    },
+    {
+      "columns": [
+        {
+          "id": "group",
+          "label": "What",
+          "ty": "text"
+        },
+        {
+          "id": "counted",
+          "label": "Counted",
+          "ty": "text"
+        }
+      ],
+      "help": "How the work graph was used over the window: links, detection, handovers, resumes, the journal, tidy-up and each tracker's sync, as counts (`fleet-hub work usage`).",
+      "id": "work.usage",
+      "label": "Work graph usage",
+      "params": [
+        {
+          "default": 30,
+          "help": "How many days back.",
+          "name": "days",
+          "ty": {
+            "max": 365,
+            "min": 1,
+            "type": "days"
+          }
+        }
+      ],
       "shape": "rows"
     },
     {

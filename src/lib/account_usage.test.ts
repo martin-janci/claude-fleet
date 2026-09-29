@@ -5,6 +5,7 @@ import {
   bindingWindow,
   checkedAgo,
   chipLabel,
+  clock,
   formatDuration,
   formatReset,
   formatResetShort,
@@ -22,6 +23,7 @@ import {
   severityBadge,
   statusMessage,
   usedPct,
+  weekdayClock,
   type UsageStatusMessage,
 } from './account_usage';
 import type { AccountUsage, AccountUsageSnapshot } from './account_usage_store';
@@ -220,6 +222,20 @@ describe('formatReset', () => {
     expect(formatResetShort('5h', RESET_5H, NOW, L, TZ)).toBe('resets 15:10');
     expect(formatResetShort('weekly', RESET_WEEK, NOW, L, TZ)).toBe('resets Thu 09:00');
     expect(formatResetShort('weekly', null, NOW, L, TZ)).toBe('reset time unknown');
+  });
+
+  // A hub strips null keys off the wire, so a reset can arrive `undefined`,
+  // which `=== null` lets through to `Intl.DateTimeFormat` — a RangeError
+  // that took the whole Hosts view down.
+  it('never throws on a reset that is not a number', () => {
+    const missing = undefined as unknown as number | null;
+    for (const bad of [missing, Number.NaN]) {
+      expect(formatReset('5h', bad, NOW, L, TZ)).toBe('reset time unknown');
+      expect(formatResetShort('5h', bad, NOW, L, TZ)).toBe('reset time unknown');
+      expect(formatResetShort('weekly', bad, NOW, L, TZ)).toBe('reset time unknown');
+      expect(clock(bad as number, L, TZ)).toBe('—');
+      expect(weekdayClock(bad as number, L, TZ)).toBe('—');
+    }
   });
 
   it('formats durations and ages', () => {

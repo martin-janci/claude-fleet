@@ -294,7 +294,9 @@ fn check_item(
                 }
             }
         }
-        Item::Table { source, columns } => match check_source(cx, at, source) {
+        Item::Table {
+            source, columns, ..
+        } => match check_source(cx, at, source) {
             Some(Shape::Rows { columns: known }) => {
                 for c in columns {
                     if !known.iter().any(|k| k.id == c) {
@@ -349,6 +351,107 @@ fn check_section(
     }
     for (i, item) in section.items.iter().enumerate() {
         check_item(cx, &format!("{at} › item {}", i + 1), page, item, placed);
+    }
+}
+
+/// The source a data item reads, if it reads one.
+fn source_of(item: &Item) -> Option<&super::model::SourceRef> {
+    match item {
+        Item::Stat { source, .. }
+        | Item::Record { source }
+        | Item::Table { source, .. }
+        | Item::Chart { source, .. } => Some(source),
+        _ => None,
+    }
+}
+
+/// A `data_page`'s filter bar: each filter names a parameter that some
+/// source on the page declares, with one type across them; a `days`
+/// filter's choices fit every such source's bounds; and no data item sets
+/// a filtered parameter itself.
+fn check_filters(cx: &mut Ctx, page: &Page) {
+    use sources::ParamType;
+    if page.filters.is_empty() {
+        return;
+    }
+    if page.layout != super::model::Layout::DataPage {
+        cx.bad("", "only a data_page has filters");
+        return;
+    }
+    let mut refs: Vec<(String, super::model::SourceRef)> = Vec::new();
+    for_each_item(page, |at, item| {
+        if let Some(r) = source_of(item) {
+            refs.push((at, r.clone()));
+        }
+    });
+    let mut seen = BTreeSet::new();
+    for (i, f) in page.filters.iter().enumerate() {
+        let at = format!("filter {}", i + 1);
+        if !seen.insert(f.param.as_str()) {
+            cx.bad(&at, format!("another filter sets `{}`", f.param));
+        }
+        if let Some(l) = &f.label {
+            cx.text(&at, "label", l, MAX_TITLE);
+        }
+        let declared: Vec<&sources::ParamSpec> = refs
+            .iter()
+            .filter_map(|(_, r)| sources::source(&r.id))
+            .flat_map(|spec| spec.params.iter())
+            .filter(|p| p.name == f.param)
+            .collect();
+        let Some(first) = declared.first() else {
+            cx.bad(
+                &at,
+                format!("no data source on this page takes `{}`", f.param),
+            );
+            continue;
+        };
+        let days = |t: ParamType| matches!(t, ParamType::Days { .. });
+        if declared.iter().any(|p| days(p.ty) != days(first.ty)) {
+            cx.bad(
+                &at,
+                format!("the sources here disagree on what `{}` is", f.param),
+            );
+            continue;
+        }
+        match first.ty {
+            ParamType::Days { .. } => {
+                if f.choices.is_empty() {
+                    cx.bad(&at, "a days filter lists its choices");
+                }
+                if !f.choices.windows(2).all(|w| w[0] < w[1]) {
+                    cx.bad(&at, "choices go up, each once");
+                }
+                for p in &declared {
+                    if let ParamType::Days { min, max } = p.ty {
+                        if let Some(c) = f.choices.iter().find(|c| !(min..=max).contains(*c)) {
+                            cx.bad(&at, format!("{c} days is outside {min}–{max}"));
+                        }
+                    }
+                }
+                if let Some(d) = f.default {
+                    if !f.choices.contains(&d) {
+                        cx.bad(&at, format!("the default {d} is not one of the choices"));
+                    }
+                }
+            }
+            ParamType::HostAlias => {
+                if !f.choices.is_empty() || f.default.is_some() {
+                    cx.bad(
+                        &at,
+                        "a host filter's choices are the registered hosts: no choices or default",
+                    );
+                }
+            }
+        }
+        for (item_at, r) in &refs {
+            if r.params.contains_key(&f.param) {
+                cx.bad(
+                    item_at,
+                    format!("`{}` is set by the page's filter, not here", f.param),
+                );
+            }
+        }
     }
 }
 
@@ -447,6 +550,7 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
                 );
             }
         }
+        check_filters(&mut cx, page);
         if !page.list_items.is_empty() && resource.is_none() {
             cx.bad("", "list_items belong to a master_detail page");
         }
