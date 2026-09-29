@@ -453,6 +453,8 @@ impl FleetTools {
                 // The worker does the requester's work (work graph M2.2).
                 let _ = s.inherit_worker_work(worker.id, req);
             }
+            // The job shows as an agent subtask of the requester's work.
+            tasks::mirror_dispatched(&s, &task, p.requester_session_id, worker.id);
             if let Some(cid) = worker.claude_session_id.as_deref() {
                 let _ = s.set_task_worker_claude_id(task.id, cid);
             }
