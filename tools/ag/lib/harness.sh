@@ -10,12 +10,24 @@ ag_harnesses() {
   done
 }
 
-# ag_is_harness NAME — true when NAME has a driver.
+# ag_is_harness NAME — true when NAME has a driver. Exact match against each
+# driver id in turn — not a substring/case-pattern test — so a value with
+# embedded spaces (e.g. "claude codex", two valid ids joined) never matches,
+# and characters in NAME are never interpreted as glob wildcards.
 ag_is_harness() {
-  case " $(ag_harnesses | tr '\n' ' ') " in
-    *" $1 "*) return 0 ;;
-  esac
+  local h
+  for h in $(ag_harnesses); do
+    [ "$h" = "$1" ] && return 0
+  done
   return 1
+}
+
+# ag_is_harness_ci NAME — case-insensitive ag_is_harness, for contexts (alias
+# names) where "Claude" shadowing "claude" is just as unsafe as an exact hit.
+ag_is_harness_ci() {
+  local lc
+  lc=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  ag_is_harness "$lc"
 }
 
 # ag_load_driver H — source drivers/H.sh into this shell (drv_bin,

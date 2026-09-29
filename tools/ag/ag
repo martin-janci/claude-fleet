@@ -18,7 +18,8 @@ ag_root() {
     t=$(readlink "$p")
     case $t in /*) p=$t ;; *) p=$(dirname "$p")/$t ;; esac
   done
-  (cd "$(dirname "$p")" && pwd)
+  # shellcheck disable=SC1007  # intentional: clear CDPATH for this one `cd`
+  (CDPATH= cd -- "$(dirname "$p")" && pwd)
 }
 AG_ROOT=${AG_ROOT:-$(ag_root)}
 AG_VERSION=0.1.0

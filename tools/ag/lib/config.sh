@@ -1,13 +1,17 @@
 # shellcheck shell=bash
-# The INI-style config (~/.config/ag/config):
+# The INI-style config (~/.config/ag/config). Top-level keys: default, order,
+# yolo.
 #
-#   default = claude          # top-level keys: default, order, yolo
+#   default = claude   # which harness `ag` launches with no argument
 #   order = claude codex
 #   yolo = false
 #   [alias]
 #   cl = claude --yolo
 #
-# `#` / `;` start a comment line; keys and values are trimmed; no quoting.
+# `#` / `;` start a comment line; a trailing `  #`/`  ;` after a value is
+# stripped too (`key = value  # note`, the value must be followed by
+# whitespace before the `#`/`;` or it stays part of the value); keys and
+# values are trimmed; no quoting.
 
 # ag_config_file — the config path ag reads.
 ag_config_file() {
@@ -26,7 +30,9 @@ ag_config_get() {
     {
       i = index($0, "="); if (i == 0) next
       k = substr($0, 1, i - 1); v = substr($0, i + 1)
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", k); gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", k)
+      sub(/[[:space:]]+[#;].*$/, "", v)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
       if (sec == want_sec && k == want_key) { print v; found = 1; exit }
     }
     END { exit found ? 0 : 1 }' "$f"

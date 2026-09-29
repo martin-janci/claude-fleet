@@ -11,15 +11,19 @@ ag_bin_dir() {
 }
 
 ag_cmd_shims() {
-  local dir name val f rc=0 made=" "
+  local dir name val f rc=0 made=" " cfg
   dir=$(ag_bin_dir)
   mkdir -p "$dir" || ag_die 5 "cannot create $dir"
   case $AG_ROOT in *"'"*) ag_die 5 "ag's path contains a single quote: $AG_ROOT" ;; esac
+  cfg=$(ag_config_file)
+  # Never treat "no config" as "no aliases": that would delete every shim
+  # ag has ever generated instead of leaving them alone.
+  [ -r "$cfg" ] || ag_die 5 "cannot read $cfg — create a config first (see: ag help)"
   for name in $(ag_config_keys alias); do
     case $name in
       '' | *[!A-Za-z0-9._-]*) echo "ag: alias '$name': invalid name — skipped" >&2; rc=5; continue ;;
     esac
-    if ag_is_harness "$name"; then
+    if ag_is_harness_ci "$name"; then
       echo "ag: alias '$name' would shadow the $name binary — skipped" >&2; rc=5; continue
     fi
     val=$(ag_config_get alias "$name")
