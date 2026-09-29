@@ -162,13 +162,6 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   // AddHostPicker.svelte only mounts inside the Add-host dialog, whose
   // opener (`+ Add host`) is disabled via `hubBlock('add_host', …)`.
   gatedByAddHostDialog: ['probe_ssh_alias'],
-  // Reachable and attempted even on a hub client — ToolLine.svelte fetches
-  // it when a tool row is expanded — but handled per-click with an inline,
-  // non-retryable `E_LOCAL_ONLY` message (`loadRetryable = r.error.code !==
-  // 'E_LOCAL_ONLY'`) rather than a pre-emptive disable. Already a
-  // deliberate, documented choice (see the comment above `loadRetryable` in
-  // ToolLine.svelte), so left as is here.
-  handledInlinePerClickNotPreGated: ['session_tool_detail'],
 } as const;
 
 const ALLOWLISTED_LOCAL_ONLY_COMMANDS: readonly string[] = Object.values(

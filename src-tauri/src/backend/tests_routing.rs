@@ -866,6 +866,25 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "session_tool_detail",
+            "session_tool_detail",
+            json!({ "session_id": 7, "tool_use_id": "toolu_1" }),
+            r#"{"id":"toolu_1","name":"Bash","input":"{}","edit":null,"command":"ls","result":"a","is_error":false}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::session_tool_detail(
+                    b,
+                    commands::sessions::SessionToolDetailArgs {
+                        session_id: 7,
+                        tool_use_id: "toolu_1".into(),
+                        claude_session_id: None,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "session_conversations",
             "session_conversations",
             // Clamped on this side, like session_history: 10_000 -> 500.

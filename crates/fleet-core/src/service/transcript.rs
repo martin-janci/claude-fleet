@@ -1754,7 +1754,7 @@ pub const TOOL_DETAIL_READ_BYTES: usize = 2 * 1_048_576;
 
 /// One tool call's input and result, read on demand (`session_tool_detail`)
 /// so the conversation poll never carries them.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ToolDetail {
     pub id: String,
     pub name: String,
@@ -1771,7 +1771,7 @@ pub struct ToolDetail {
 }
 
 /// The file change of an Edit / MultiEdit / Write call.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct EditDetail {
     pub file_path: String,
     pub old: String,

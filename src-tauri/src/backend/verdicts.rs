@@ -483,9 +483,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "session_tool_detail",
-        Verdict::LocalOnly {
-            instead: "the hub exposes no tool for one tool call's input and result; the \
-                      Conversation tab's tool lines still come from session_conversation",
+        Verdict::Routed {
+            tool: "session_tool_detail",
         },
     ),
     (

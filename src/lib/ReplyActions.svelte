@@ -1,12 +1,17 @@
 <script lang="ts">
-  // The action row under one reply. Always visible, never hover-revealed —
-  // CopyButton's own comment says why: a control you must hover to find is
-  // not a control a keyboard or touch user has.
+  // The action row under one reply: a footer after the turn's last text,
+  // in the flow (it used to float over the text's top-right corner and cover
+  // words). Always visible, never hover-revealed — CopyButton's own comment
+  // says why: a control you must hover to find is not a control a keyboard
+  // or touch user has. It rests dimmed and comes up on hover / focus, and
+  // the clipboard pair (Copy, Quote) is kept apart from the three that
+  // change the session (Retry, Fork, Rewind).
   //
   // Retry is deliberately not a third backend mode. It is a rewind followed
   // by a send, so it inherits every refusal the rewind has (including the
   // mid-turn one) instead of keeping a second copy of them in step.
   import CopyButton from './CopyButton.svelte';
+  import Icon from './Icon.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import { rewindConversation } from './sessions';
   import { insertIntoComposer, promptCount, splitMarker, type ConvTurn } from './conversation';
@@ -130,9 +135,12 @@
     class="btn btn--icon btn--quiet"
     data-testid="reply-quote"
     aria-label="Quote this reply in the composer"
-    title="Quote"
-    onclick={() => insertIntoComposer(sessionId, quoteText(text))}>❝</button
+    title="Quote in the composer"
+    onclick={() => insertIntoComposer(sessionId, quoteText(text))}><Icon name="quote" size={14} /></button
   >
+  {#if view.canRetry || view.retryUnavailable || view.canFork || view.canRewind}
+    <span class="sep" aria-hidden="true"></span>
+  {/if}
   {#if view.canRetry}
     <button
       type="button"
@@ -141,7 +149,7 @@
       aria-label="Retry this turn"
       title={retryBlocked ?? 'Retry — rewind and send the same prompt again'}
       disabled={busy || !!retryBlocked}
-      onclick={() => (confirming = 'retry')}>↻</button
+      onclick={() => (confirming = 'retry')}><Icon name="retry" size={14} /></button
     >
   {:else if view.retryUnavailable}
     <!-- Shown, not dropped: the prompt on screen is not what a re-send would
@@ -152,7 +160,7 @@
       data-testid="reply-retry"
       aria-label="Retry this turn (unavailable)"
       title={view.retryUnavailable}
-      disabled>↻</button
+      disabled><Icon name="retry" size={14} /></button
     >
   {/if}
   {#if view.canFork}
@@ -161,20 +169,20 @@
       class="btn btn--icon btn--quiet"
       data-testid="reply-fork"
       aria-label="Fork a new session from this reply"
-      title={rewindBlocked ?? 'Fork here'}
+      title={rewindBlocked ?? 'Fork here — a new session from this reply'}
       disabled={!!rewindBlocked}
-      onclick={() => onFork(view.forkAnchor)}>⑂</button
+      onclick={() => onFork(view.forkAnchor)}><Icon name="fork" size={14} /></button
     >
   {/if}
   {#if view.canRewind}
     <button
       type="button"
-      class="btn btn--icon btn--quiet"
+      class="btn btn--icon btn--quiet rewind"
       data-testid="reply-rewind"
       aria-label="Rewind this session to before this turn"
-      title={rewindBlocked ?? 'Rewind here'}
+      title={rewindBlocked ?? 'Rewind here — back to before this turn'}
       disabled={busy || !!rewindBlocked}
-      onclick={() => (confirming = 'rewind')}>⏪</button
+      onclick={() => (confirming = 'rewind')}><Icon name="rewind" size={14} /></button
     >
   {/if}
 </div>
@@ -199,5 +207,44 @@
     display: flex;
     gap: 2px;
     align-items: center;
+    opacity: 0.6;
+    transition: opacity 120ms ease;
+  }
+  /* The whole turn wakes the row, not just the row itself: the pointer is
+     on the reply, and a keyboard user tabbing in lands on a button. */
+  :global(.turn:hover) .reply-actions,
+  .reply-actions:focus-within {
+    opacity: 1;
+  }
+  /* Touch has no hover: never leave the row dimmed there. */
+  @media (pointer: coarse) {
+    .reply-actions {
+      opacity: 1;
+    }
+  }
+  .reply-actions :global(.btn--icon) {
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 5px;
+    color: var(--fg-muted);
+  }
+  .reply-actions :global(.btn--icon:hover:not(:disabled)) {
+    color: var(--fg);
+  }
+  .reply-actions :global(.btn--icon:disabled) {
+    opacity: 0.4;
+  }
+  .reply-actions .rewind:hover:not(:disabled) {
+    color: var(--usage-warn, #d29922);
+  }
+  .sep {
+    width: 1px;
+    height: 14px;
+    margin: 0 6px;
+    background: var(--border, currentColor);
+    opacity: 0.6;
   }
 </style>

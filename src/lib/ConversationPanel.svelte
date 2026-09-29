@@ -62,7 +62,7 @@
     emptyStateHint,
     relativeTime,
     groupItems,
-    toolGroupLabel,
+    toolGroupParts,
     notificationTone,
     notificationMark,
     notificationLabel,
@@ -1854,6 +1854,7 @@
             {@const turnRunning = isLast && viewing === null && indicator?.kind === 'working'}
             {@const turnLive = isLast && viewing === null && indicator !== null}
             {@const groups = groupItems(turn.items)}
+            {@const replyText = groups.flatMap((x) => (x.kind === 'text' ? [x.text] : [])).join('\n\n')}
             {@const duration = turnRunning ? null : turnDuration(turn.at, turn.ended_at)}
             <section
               class="turn"
@@ -1904,31 +1905,6 @@
                   {#if g.kind === 'text'}
                     <div class="text" data-testid="conv-text">
                       <Markdown source={g.text} />
-                      <span class="copy-slot text-copy">
-                        <!-- Fork / Rewind / Retry always act on the session's
-                             CURRENT conversation, but `conv` here is the one
-                             being viewed (`viewing ?? session.claude_session_id`).
-                             While an earlier conversation is on screen the
-                             anchors are read off the wrong transcript — Fork
-                             would fork the current one in full, Rewind would
-                             either miss the anchor or find the same uuid in the
-                             current transcript and rewind it at a point read
-                             off another conversation. So the three backend
-                             actions are unsupported here, exactly as the
-                             composer is disabled; `replyActionsFor` leaves Copy
-                             and Quote, which are about the text on screen. -->
-                        <ReplyActions
-                          turns={conv.turns}
-                          index={i}
-                          truncated={conv.truncated}
-                          text={g.text}
-                          sessionId={session.id}
-                          hostAlias={session.host_alias}
-                          tmuxName={session.tmux_name}
-                          supported={viewing === null}
-                          onFork={(anchor) => openForkSheet(anchor)}
-                        />
-                      </span>
                     </div>
                   {:else if g.kind === 'tools'}
                     <!-- One structure for a lone call and a folded group, so a
@@ -1936,6 +1912,7 @@
                          second call joins it. A lone call's group is always
                          open with its summary hidden. -->
                     {@const single = g.tools.length === 1}
+                    {@const parts = toolGroupParts(g.tools)}
                     <details
                       class="tools"
                       class:single
@@ -1943,7 +1920,9 @@
                       use:autoOpen={{ on: turnRunning && j === groups.length - 1, single }}
                       data-testid={single ? undefined : 'conv-tools'}
                     >
-                      <summary aria-hidden={single || undefined} tabindex={single ? -1 : undefined}>{toolGroupLabel(g.tools)}</summary>
+                      <summary aria-hidden={single || undefined} tabindex={single ? -1 : undefined}
+                        >{parts.main}{#if parts.failed}<span class="failed-count"> · <span class="pill">{parts.failed}</span></span>{/if}</summary
+                      >
                       <div class="tools-body">
                         {#each g.tools as line, k (k)}
                           <ToolLine {line} sessionId={session.id} claudeSessionId={detailCid} {nowMs} live={turnLive} />
@@ -2025,8 +2004,42 @@
                     <SubagentBlock item={g} {nowMs} live={turnLive} onOpen={bg ? () => openBackground(bg) : undefined} />
                   {/if}
                 {/each}
-                {#if duration}
-                  <div class="duration" data-testid="conv-duration" title="From the prompt to the reply's last entry">{duration}</div>
+                {#if duration || replyText}
+                  <!-- One footer per turn, in the flow: the duration and the
+                       reply's actions. Copy takes every text block of the
+                       reply, in order. -->
+                  <div class="reply-footer" data-testid="conv-reply-footer">
+                    {#if duration}
+                      <div class="duration" data-testid="conv-duration" title="From the prompt to the reply's last entry">{duration}</div>
+                    {/if}
+                    {#if replyText}
+                      <div class="footer-actions">
+                        <!-- Fork / Rewind / Retry always act on the session's
+                             CURRENT conversation, but `conv` here is the one
+                             being viewed (`viewing ?? session.claude_session_id`).
+                             While an earlier conversation is on screen the
+                             anchors are read off the wrong transcript — Fork
+                             would fork the current one in full, Rewind would
+                             either miss the anchor or find the same uuid in the
+                             current transcript and rewind it at a point read
+                             off another conversation. So the three backend
+                             actions are unsupported here, exactly as the
+                             composer is disabled; `replyActionsFor` leaves Copy
+                             and Quote, which are about the text on screen. -->
+                        <ReplyActions
+                          turns={conv.turns}
+                          index={i}
+                          truncated={conv.truncated}
+                          text={replyText}
+                          sessionId={session.id}
+                          hostAlias={session.host_alias}
+                          tmuxName={session.tmux_name}
+                          supported={viewing === null}
+                          onFork={(anchor) => openForkSheet(anchor)}
+                        />
+                      </div>
+                    {/if}
+                  </div>
                 {/if}
               </div>
             </section>
@@ -2425,11 +2438,6 @@
     display: inline-flex;
     align-items: baseline;
     gap: 0.45rem;
-  }
-  .text-copy {
-    position: absolute;
-    top: 0;
-    right: 0;
   }
   .readonly {
     flex: 0 0 auto;
@@ -2922,16 +2930,28 @@
     overflow-wrap: break-word;
   }
   .text {
-    position: relative;
     margin: 0.35rem 0 0.6rem;
   }
-  .duration {
+  .reply-footer {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 26px;
     margin-top: 0.3rem;
+  }
+  .footer-actions {
+    margin-left: auto;
+  }
+  .duration {
     color: var(--fg-muted);
     font-size: 0.7rem;
   }
-  .tools.has-err summary {
+  .failed-count .pill {
     color: var(--usage-crit);
+    background: color-mix(in srgb, var(--usage-crit) 14%, transparent);
+    border-radius: 9px;
+    padding: 0 6px;
+    font-size: 0.7rem;
   }
   .tools {
     margin: 0.3rem 0 0.5rem;

@@ -262,6 +262,36 @@ impl FleetTools {
         ok_json_compact(&conv)
     }
 
+    #[tool(description = "One tool call's input and result (omitted by \
+        session_conversation): { id, name, input, edit {file_path, old, new} \
+        | null, command | null, result | null, is_error }; texts capped at \
+        8000 chars. Read-only. Errors: as session_conversation, E_NOTFOUND.")]
+    pub(super) async fn session_tool_detail(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SessionToolDetailParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "session_tool_detail",
+            &format!(
+                "session_id={} tool_use_id={} claude_session_id={:?}",
+                p.session_id, p.tool_use_id, p.claude_session_id
+            ),
+        );
+        let row =
+            self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
+        let detail = transcript::fetch_tool_detail(
+            &self.store,
+            &self.ssh,
+            &row,
+            p.claude_session_id.as_deref(),
+            &p.tool_use_id,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json_compact(&detail)
+    }
+
     #[tool(description = "send_prompt + wait_for_session(turn_gt) + \
         session_transcript in one call. Returns { turn_seq, status: \
         satisfied | timeout, transcript } (the reply as plain text; null \
