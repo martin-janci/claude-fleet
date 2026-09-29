@@ -113,7 +113,7 @@
   import SpiralLoader from './SpiralLoader.svelte';
   import { selectSessionExplicitly } from './selection';
   import { tasks } from './tasks';
-  import { outbox, isHeld, receipt } from './outbox';
+  import { outbox, isHeld, receipt, outboxBody } from './outbox';
 
   let {
     session,
@@ -1277,8 +1277,9 @@
         attachments: going,
         // How many turns already carry this exact text, so a repeat of an
         // earlier prompt ("continue") is not mistaken for the transcript
-        // catching up. Uploaded paths make a body with files new anyway.
-        seen: going.length > 0 ? 0 : carriedCount(conv, prefix ? `${prefix}\n\n${text}` : text),
+        // catching up. The outbox adds identical prompts still in line, and
+        // zeroes it for a body with files (uploaded paths make it new).
+        seen: carriedCount(conv, outboxBody({ kind, text, prefix })),
       },
     );
     attachments = clearSent(

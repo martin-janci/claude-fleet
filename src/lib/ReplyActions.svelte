@@ -8,8 +8,9 @@
   // mid-turn one) instead of keeping a second copy of them in step.
   import CopyButton from './CopyButton.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
-  import { rewindConversation, sendPrompt } from './sessions';
-  import { insertIntoComposer, type ConvTurn } from './conversation';
+  import { rewindConversation } from './sessions';
+  import { insertIntoComposer, promptCount, splitMarker, type ConvTurn } from './conversation';
+  import { outbox } from './outbox';
   import { replyActionsFor, quoteText, waitForReplQuiet } from './reply_actions';
   import { pushError } from './toasts';
   import { hubStatus, hubActionBlocked } from './hub';
@@ -40,7 +41,13 @@
   } = $props();
 
   const view = $derived(replyActionsFor(turns, index, truncated, supported));
-  const prompt = $derived(turns[index]?.prompt ?? null);
+  // Without the hub's untrusted-client marker: the transcript keeps the line
+  // `apply_marker` prepended, and a re-send through the hub would mark it
+  // a second time (and put it in the composer, on a rewind).
+  const prompt = $derived.by(() => {
+    const p = turns[index]?.prompt;
+    return p == null ? null : splitMarker(p).text;
+  });
 
   // Both route to the hub: with its link down they would fail with a raw
   // error, so they say why instead (as the composer does for send_prompt).
@@ -103,13 +110,16 @@
       );
       return;
     }
-    // sendPrompt(hostAlias, tmuxName, prompt) — see `src/lib/sessions.ts:598`.
-    // `send_prompt` has no session-id form.
-    const sent = await sendPrompt(hostAlias, tmuxName, prompt);
-    if (!sent.ok) {
-      insertIntoComposer(sessionId, prompt);
-      pushError(sent.error, 'Retry: the session was rewound but the prompt was not resent');
-    }
+    // Through the outbox, the session's one sender: a bubble with receipts,
+    // and a failed send offers Retry / Edit / Discard there. `send_prompt`
+    // has no session-id form, so the target carries host + tmux name.
+    // `seen`: the rewound conversation holds only the turns BEFORE this one,
+    // so only those count — the stale pre-rewind transcript still carries
+    // this prompt, and counting it would settle the bubble at once.
+    outbox.enqueue(
+      { id: sessionId, host_alias: hostAlias, tmux_name: tmuxName },
+      { kind: 'prompt', text: prompt, prefix: null, seen: promptCount(turns.slice(0, index), prompt) },
+    );
   }
 </script>
 

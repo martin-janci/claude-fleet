@@ -734,14 +734,19 @@ export function splitMarker(prompt: string): { from: string | null; text: string
 
 /** A prompt as the composer would have written it: no hub marker, LF line
  *  ends, no surrounding whitespace (the transcript parser trims too). */
-function normalizePrompt(prompt: string): string {
+export function normalizePrompt(prompt: string): string {
   return splitMarker(prompt.replace(/\r\n?/g, '\n')).text.trim();
+}
+
+/** How many of `turns` carry `text` as their prompt. */
+export function promptCount(turns: ConvTurn[], text: string): number {
+  const want = normalizePrompt(text);
+  return turns.filter((t) => t.prompt !== null && normalizePrompt(t.prompt) === want).length;
 }
 
 /** How many of a conversation's turns carry `text` as their prompt. */
 export function carriedCount(conv: Conversation | null, text: string): number {
-  const want = normalizePrompt(text);
-  return (conv?.turns ?? []).filter((t) => t.prompt !== null && normalizePrompt(t.prompt) === want).length;
+  return promptCount(conv?.turns ?? [], text);
 }
 
 /** True once a fetched conversation has more turns with the pending text

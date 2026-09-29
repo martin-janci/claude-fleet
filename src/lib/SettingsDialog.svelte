@@ -14,6 +14,7 @@
     removePreset,
     movePreset,
     flushComposerPresets,
+    refreshComposerPresetsIfIdle,
     presetsConflict,
   } from './composer_presets';
   import { copyOnSelect } from './prefs';
@@ -220,6 +221,14 @@
       hubError = r.error.message;
     }
   }
+
+  // The chip editor starts from the fleet's current list, not the one read
+  // at launch: no event announces a chip saved on the phone, and an edit
+  // made from a stale list would be refused with E_CONFLICT on its first
+  // keystroke. Skipped while an edit of ours is still pending.
+  onMount(() => {
+    void refreshComposerPresetsIfIdle();
+  });
 
   // Opened at a section (a "Reconnect Jira (acme)" Attention item, work
   // graph M12.4): scroll it into view once, then forget the request.

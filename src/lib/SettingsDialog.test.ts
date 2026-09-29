@@ -455,6 +455,20 @@ describe('SettingsDialog projects (W5 G3)', () => {
     expect(screen.getByTestId('projects-preview-mefistos')).toHaveTextContent('~/projects/<repo>');
   });
 
+  it('re-reads the composer presets when it opens, so an edit starts from the fleet list', async () => {
+    composerPresets.set([{ label: 'Stale', text: 'stale' }]);
+    const fresh = [{ label: 'Phone', text: 'from the phone' }];
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    const base = inv.getMockImplementation() as (cmd: string, a?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, a?: unknown) => {
+      if (cmd === 'quick_replies') return fresh;
+      return base(cmd, a);
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('quick_replies', undefined));
+    await waitFor(() => expect(get(composerPresets)).toEqual(fresh));
+  });
+
   it('lists the composer presets and edits them in place, saving through the backend', async () => {
     // The list is fleet state now (`service::quick_replies`), so the editor
     // starts from what the backend served and every edit is a write to it —
