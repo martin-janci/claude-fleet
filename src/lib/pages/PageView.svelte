@@ -15,9 +15,15 @@
   import PageActionButton from './PageActionButton.svelte';
   import type { SettingProposal } from './review';
   import type { ResourceType } from './resources';
+  import { hosts } from '../hosts';
   import {
+    boundRef,
     evalCondition,
+    filterDefaults,
+    filterSummary,
+    isHostFilter,
     sectionsOf,
+    type FilterValues,
     type Descriptor,
     type Page,
     type PageAction,
@@ -93,6 +99,18 @@
   const titleOf = (id: string) => pages.find((p) => p.id === id)?.title ?? id;
   const sourceOf = (id: string) => sources.find((s) => s.id === id);
 
+  // A data page's filter bar: each filter sets its param on every data
+  // item whose source declares it. The owner keys this view by page id, so
+  // the defaults are read once per page.
+  // svelte-ignore state_referenced_locally
+  let filterValues = $state<FilterValues>(filterDefaults(page));
+  const hostAliases = $derived($hosts.map((h) => h.alias).sort());
+  const summary = $derived(filterSummary(page, filterValues));
+  /** Data items read this app's store: a paired desktop shows none. */
+  const showData = $derived(!readonly && !remote);
+  const isData = (i: Section['items'][number]) =>
+    i.type === 'stat' || i.type === 'record' || i.type === 'table' || i.type === 'chart';
+
   let root = $state<HTMLElement>();
 
   // A search hit: open the tab the setting is on, then scroll to it.
@@ -118,6 +136,36 @@
   </header>
   {#if page.intro}<p class="intro">{page.intro}</p>{/if}
 
+  {#if page.layout === 'data_page' && !showData}
+    <p class="notice" data-testid="page-data-remote">
+      This page reads the store of the app that owns the fleet. On a paired desktop that is the hub: read it there.
+    </p>
+  {:else if (page.filters ?? []).length > 0}
+    <div class="filters" data-testid="page-filters">
+      {#each page.filters ?? [] as f (f.param)}
+        <label>
+          <span>{f.label ?? f.param}</span>
+          {#if isHostFilter(f)}
+            <select
+              data-testid={`page-filter-${f.param}`}
+              value={filterValues[f.param] ?? ''}
+              onchange={(e) => (filterValues[f.param] = e.currentTarget.value || null)}>
+              <option value="">All hosts</option>
+              {#each hostAliases as a (a)}<option value={a}>{a}</option>{/each}
+            </select>
+          {:else}
+            <select
+              data-testid={`page-filter-${f.param}`}
+              value={String(filterValues[f.param])}
+              onchange={(e) => (filterValues[f.param] = Number(e.currentTarget.value))}>
+              {#each f.choices ?? [] as c (c)}<option value={String(c)}>last {c} d</option>{/each}
+            </select>
+          {/if}
+        </label>
+      {/each}
+    </div>
+  {/if}
+
   {#if page.layout === 'review_apply'}
     <ReviewApply {proposals} {pages} {descs} {readonly} {onopen} />
   {/if}
@@ -132,7 +180,7 @@
   {/if}
 
   {#if page.layout !== 'master_detail'}
-  {#each visibleSections as section (section.title)}
+  {#each visibleSections.filter((s) => showData || !s.items.every(isData)) as section (section.title)}
     {#if section.collapsible || section.advanced}
       <Disclosure title={section.title} open={!section.advanced} badge={section.advanced ? 'Advanced' : undefined} testid={`section-${section.title}`}>
         {@render sectionBody(section)}
@@ -178,8 +226,14 @@
       {:else if item.type === 'action'}
         {@const action = actions.find((a) => a.id === item.action)}
         {#if action && !readonly && !remote}<PageActionButton {action} onran={() => dataTick++} />{/if}
-      {:else if !readonly && !remote}
-        <DataItem {item} spec={sourceOf(item.source.id)} tick={dataTick} />
+      {:else if showData}
+        {@const spec = sourceOf(item.source.id)}
+        <DataItem
+          {item}
+          {spec}
+          source={boundRef(item.source, spec, filterValues)}
+          copyTitle={spec ? (summary ? `${spec.label}, ${summary}` : spec.label) : undefined}
+          tick={dataTick} />
       {/if}
     {/each}
   </div>
@@ -227,6 +281,22 @@
   .data .items > :global(figure),
   .data .items > :global(.table-wrap) {
     flex: 1 1 100%;
+  }
+  .filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin: 0 0 0.6rem;
+  }
+  .filters label {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.78rem;
+    color: var(--fg-muted);
+  }
+  .filters select {
+    font: inherit;
   }
   .notice {
     font-size: 0.78rem;

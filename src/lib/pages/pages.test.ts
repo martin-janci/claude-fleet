@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import {
+  boundRef,
   evalCondition,
+  filterDefaults,
+  filterSummary,
+  tableText,
   formatCell,
   fromDisplay,
   homeOf,
@@ -123,5 +127,43 @@ describe('resources on a paired desktop', () => {
       const reason = hubBlock(r.update.command as Parameters<typeof hubBlock>[0], remote);
       expect(reason, r.id).toBeTruthy();
     }
+  });
+});
+
+describe('a data page\'s filter bar', () => {
+  const usage = bundle.pages.find((p) => p.id === 'usage')!;
+  const byDay = bundle.sources.find((s) => s.id === 'usage.by_day');
+  const byHost = bundle.sources.find((s) => s.id === 'usage.by_host');
+
+  it('starts at each default; a host filter at every host', () => {
+    expect(filterDefaults(usage)).toEqual({ days: 30, host: null });
+    expect(filterDefaults({ ...usage, filters: [{ param: 'days', choices: [7, 30] }] })).toEqual({ days: 7 });
+    expect(filterDefaults({ ...usage, filters: undefined })).toEqual({});
+  });
+
+  it('binds only the params a source declares, and sends no host for every host', () => {
+    expect(boundRef({ id: 'usage.by_day' }, byDay, { days: 7, host: null })).toEqual({
+      id: 'usage.by_day',
+      params: { days: 7 },
+    });
+    expect(boundRef({ id: 'usage.by_day' }, byDay, { days: 7, host: 'alpha' })).toEqual({
+      id: 'usage.by_day',
+      params: { days: 7, host: 'alpha' },
+    });
+    expect(boundRef({ id: 'usage.by_host' }, byHost, { days: 7, host: 'alpha' })).toEqual({ id: 'usage.by_host' });
+    expect(boundRef({ id: 'nope' }, undefined, { days: 7 })).toEqual({ id: 'nope' });
+  });
+
+  it('says the filters in words, and a table as lines', () => {
+    expect(filterSummary(usage, { days: 7, host: null })).toBe('last 7 d');
+    expect(filterSummary(usage, { days: 7, host: 'alpha' })).toBe('last 7 d, host alpha');
+    const cols = [
+      { id: 'model', label: 'Model', ty: 'text' as const },
+      { id: 'sessions', label: 'Sessions', ty: 'int' as const },
+      { id: 'cost_micros', label: 'Est. cost', ty: 'usd_micros' as const },
+    ];
+    expect(tableText('Usage by model', cols, [{ model: 'opus', sessions: 2, cost_micros: 3_000_000 }])).toBe(
+      'Usage by model\nopus: 2, $3.00',
+    );
   });
 });

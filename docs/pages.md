@@ -76,7 +76,7 @@ page tree. `id` is dotted lowercase and is also the page's deep link.
 |---|---|---|
 | `category` | Settings in sections, saved as you change them | `field`, `stat`, `record`, `table`, `action`, `notice`, `link`, `custom` |
 | `cards` | An overview: numbers and links | `stat`, `record`, `notice`, `link` |
-| `data_page` | Stats, charts and tables | `stat`, `record`, `table`, `chart`, `action`, `notice`, `link` |
+| `data_page` | Stats, charts and tables, with an optional filter bar (see *Data pages and filters*) | `stat`, `record`, `table`, `chart`, `action`, `notice`, `link` |
 | `master_detail` | A list of a resource's records beside one record's editor | `field` (naming a field of the resource), `notice`, `custom`; `list_items` above the list: `notice`, `custom` |
 | `flow` | A server-driven wizard (see *Flows*); not a page of its own yet, launched by a resource's `create_flow` | — |
 | `review_apply` | Reviewing proposed changes (see *Proposals*); names its `review` | `notice`, `link`; sections are optional |
@@ -91,7 +91,7 @@ Every item is an object tagged by `type`:
 | `field` | `key`, optional `widget`, `hint`, `when` | A registered setting. It gets exactly one home across all pages. `widget` must accept the setting's kind (see the catalog). `hint` is one extra line, 120 characters at most |
 | `stat` | `source`, then `field` for a record source, optional `label` | One number |
 | `record` | `source` | A key → value list of a record source |
-| `table` | `source`, optional `columns` | A rows source; `columns` picks and orders columns |
+| `table` | `source`, optional `columns`, `copy` | A rows source; `columns` picks and orders columns. `copy: true` adds *Copy as text*: the source's label with the filters, then one line per row (`first: rest, …`) |
 | `chart` | `source`, `chart` (`line` / `bar` / `stacked_bar` / `sparkline`), optional `title` | A series source |
 | `notice` | `tone` (`info` / `warn` / `danger`), `text` | Plain text, 300 characters at most |
 | `action` | `action` | A button that runs a page action (see *Page actions*), then re-reads the page's data items. Hidden on a read-only page |
@@ -100,6 +100,28 @@ Every item is an object tagged by `type`:
 
 A `source` is `{ "id": "usage.by_day", "params": { "days": 30 } }`. Parameters
 are literals, checked against the source's declared parameters.
+
+### Data pages and filters
+
+A `data_page` may have a filter bar: `filters`, a list of controls, each
+bound by name to a source parameter. A filter sets that parameter on every
+data item whose source declares it, and the items re-read when it changes;
+a source without the parameter ignores the filter.
+
+```json
+"filters": [
+  { "param": "days", "label": "Window", "choices": [7, 30, 90], "default": 30 },
+  { "param": "host", "label": "Host" }
+]
+```
+
+The control follows the parameter's type. A `days` parameter is a select
+over `choices` (ascending, each within every declaring source's bounds;
+`default` is one of them, else the first). A `host` parameter is a select
+over the registered hosts, starting at *All hosts*, which sends no host;
+it takes no `choices` or `default`. A data item may not also set a
+filtered parameter in its own `params`. `usage` and `usage.work` are the
+examples.
 
 ### Conditions (`when`)
 
@@ -279,7 +301,8 @@ of each page says so. A device the hub's operator trusts (`fleet-hub client
 trust <name>`) edits the fields and decides proposals; an untrusted one
 sees them read-only, with that command. Data items, page actions and
 custom components read or run on this app's own store, so a paired desktop
-shows none of them; a resource page (Trackers, Organisations) stays
+shows none of them (a section of data items only is left out, and a
+`data_page` says where its data is instead); a resource page (Trackers, Organisations) stays
 read-only with the hub's reason. A hub that serves no settings to the
 device (an older hub, or a device bound to one org) leaves the page on its
 reason and the hub's answer.
@@ -290,6 +313,9 @@ reason and the hub's answer.
   or it is in `pages::UNLISTED` with a sentence saying why.
 - Keys, sources, source fields and columns, widgets, parents and link targets
   must all exist.
+- Filters are on a `data_page` only, each names a parameter some source on
+  the page declares (with one type across them), and no item sets a
+  filtered parameter itself.
 - Titles are at most 60 characters. Text is plain, with no `<` or `>`.
 - Parents form a tree.
 - Unknown fields and item types are refused when the file is parsed.
