@@ -546,6 +546,80 @@ async fn the_setting_and_the_org_are_checked_again_before_sending() {
     assert!(fake.requests().is_empty());
 }
 
+/// A person who rejects, unlinks or re-points the link after the write was
+/// queued takes the write back: the drain gives it up and sends nothing. A
+/// link left alone still sends.
+type Undo = (&'static str, fn(&Fx));
+
+#[tokio::test]
+async fn a_link_undone_after_queueing_gives_its_write_up() {
+    let undo: [Undo; 4] = [
+        ("reject", |f: &Fx| {
+            f.s.reject_session_work(f.session, WorkTarget::Item(f.item))
+                .unwrap();
+        }),
+        ("unlink", |f: &Fx| {
+            let id = f.s.session_work_links(f.session).unwrap()[0].id;
+            assert!(f.s.unlink_session_work(f.session, id).unwrap());
+        }),
+        ("ended", |f: &Fx| {
+            f.s.conn_ref()
+                .execute("UPDATE work_links SET ended_at = 1", [])
+                .unwrap();
+        }),
+        ("agent source", |f: &Fx| {
+            f.s.conn_ref()
+                .execute("UPDATE work_links SET source = 'agent'", [])
+                .unwrap();
+        }),
+    ];
+    for (what, undo) in undo {
+        let f = fx("manual", true);
+        assert_eq!(on_pr(&f.s, f.session, PR).unwrap(), 1, "{what}");
+        undo(&f);
+        let t = f.s.require_tracker(f.tracker).unwrap();
+        let store = Mutex::new(f.s);
+        let fake = FakeTransport::new();
+        fake.always(
+            Method::Post,
+            "/remotelink",
+            Ok(Response::json(201, &serde_json::json!({ "id": 1 }))),
+        );
+        let r = drain(&t, &cloud(&fake), &store, crate::store::now_unix() + 1).await;
+        assert_eq!(
+            r,
+            DrainReport {
+                given_up: 1,
+                ..Default::default()
+            },
+            "{what}"
+        );
+        assert!(fake.requests().is_empty(), "{what}");
+        let s = store.lock().unwrap();
+        let w = &outbox(&s)[0];
+        assert_eq!(
+            (w.state.as_str(), w.last_error.as_deref()),
+            ("failed", Some("the link was undone")),
+            "{what}"
+        );
+    }
+
+    // Untouched: sent.
+    let f = fx("manual", true);
+    on_pr(&f.s, f.session, PR).unwrap();
+    let t = f.s.require_tracker(f.tracker).unwrap();
+    let store = Mutex::new(f.s);
+    let fake = FakeTransport::new();
+    fake.always(
+        Method::Post,
+        "/remotelink",
+        Ok(Response::json(201, &serde_json::json!({ "id": 1 }))),
+    );
+    let r = drain(&t, &cloud(&fake), &store, crate::store::now_unix() + 1).await;
+    assert_eq!(r.sent, 1);
+    assert_eq!(fake.requests().len(), 1);
+}
+
 #[tokio::test]
 async fn a_read_only_provider_refuses_every_write() {
     struct ReadOnly;

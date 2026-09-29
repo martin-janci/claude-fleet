@@ -123,6 +123,32 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The link a write was queued for still stands as it did then: it
+    /// exists, is live (`ended_at IS NULL`), `confirmed`, made by a person
+    /// ([`PERSON_SOURCES`](super::PERSON_SOURCES)), and still on the item
+    /// `item_key` of `tracker_id`. A person who rejected, unlinked or
+    /// re-pointed the link since takes the write back with it: the drain
+    /// gives such a row up instead of sending it.
+    pub fn tracker_write_link_live(
+        &self,
+        link_id: i64,
+        tracker_id: i64,
+        item_key: &str,
+    ) -> Result<bool, IpcError> {
+        let source: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT l.source FROM work_links l \
+                   JOIN work_items i ON i.id = l.item_id \
+                 WHERE l.id = ?1 AND l.ended_at IS NULL AND l.state = 'confirmed' \
+                   AND i.tracker_id = ?2 AND i.key = ?3",
+                rusqlite::params![link_id, tracker_id, item_key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(source.is_some_and(|s| super::PERSON_SOURCES.contains(&s.as_str())))
+    }
+
     /// One row by id.
     pub fn tracker_write(&self, id: i64) -> Result<Option<TrackerWriteRow>, IpcError> {
         Ok(self

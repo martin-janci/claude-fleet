@@ -364,7 +364,9 @@ Work fleet tracks itself — named work with no ticket — carries one of three
 states: to do, in progress, done. You never have to set it: fleet marks work
 *in progress* while a session is working on it, and *done* once the pull
 request it produced is merged. Setting it yourself overrides that for good; the
-same work will not flip back because a session started again.
+same work will not flip back because a session started again. For now you set
+it only through the control API (`work_link { action: set_status }`); a
+desktop control for it is a follow-up.
 
 A ticket's status is not yours to set here — it belongs to Jira, GitHub, Asana
 or Linear, and fleet would be overwritten on its next sync. Change it there.
@@ -540,7 +542,9 @@ transcript or a tracker wrote.
 - **Only work a person linked.** The link must be confirmed and made by
   hand or by *Start* (`manual` / `started`). A detection guess, an agent's
   suggestion, and a link, confirmation or ticket start an agent made
-  (`agent` / `agent_started`) never write.
+  (`agent` / `agent_started`) never write. The link is checked again just
+  before sending: if a person rejected or removed it (or it moved to
+  another ticket) while the write waited, the write is given up, not sent.
 - **Only your own org's tracker.** A session in one org never writes to
   another org's tracker, even a link made with `force_cross_org`; the org is
   checked again just before sending.

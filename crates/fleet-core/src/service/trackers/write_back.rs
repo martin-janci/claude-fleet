@@ -15,8 +15,10 @@
 //!
 //! The outbox (migration 061) makes a repeat a no-op, and the sync pass
 //! drains it ([`drain`]) with the credential it already holds, re-checking
-//! the setting and the org first. The remote link's global id is the PR's
-//! URL, so Jira upserts it: even a write that is sent twice adds one link.
+//! the setting, the org and the link first (a link a person rejected,
+//! unlinked or re-pointed since gives its write up, never sends it). The
+//! remote link's global id is the PR's URL, so Jira upserts it: even a
+//! write that is sent twice adds one link.
 //! Nothing a transcript or a tracker wrote is ever sent: only the URL and
 //! fleet's own title.
 //!
@@ -174,10 +176,10 @@ pub struct DrainReport {
 }
 
 /// Send `t`'s due writes through `provider` (the sync pass's own). Every
-/// write re-checks the setting and the org; a rate limit stops the drain
-/// and spends no attempt. Errors are per row: nothing here fails the read
-/// pass. Settled rows are dropped by the GC retention sweep (M12.3), which
-/// runs whether or not this tracker's pass succeeds.
+/// write re-checks the setting, the org and its link; a rate limit stops
+/// the drain and spends no attempt. Errors are per row: nothing here fails
+/// the read pass. Settled rows are dropped by the GC retention sweep
+/// (M12.3), which runs whether or not this tracker's pass succeeds.
 pub async fn drain(
     t: &TrackerRow,
     provider: &dyn TrackerProvider,
@@ -209,6 +211,32 @@ pub async fn drain(
             }));
             report.given_up += 1;
             continue;
+        }
+        // The link it was queued for may have been rejected, unlinked or
+        // re-pointed since (a backed-off write waits up to six hours): a
+        // person's correction takes the write back. A row with no link id
+        // (queued before the column was filled) is sent as before.
+        if let Some(link_id) = w.link_id {
+            let live =
+                lock(store).and_then(|s| s.tracker_write_link_live(link_id, t.id, &w.item_key));
+            match live {
+                Ok(true) => {}
+                Ok(false) => {
+                    settle(lock(store).and_then(|s| {
+                        s.retry_tracker_write(w.id, "the link was undone", None, true)
+                    }));
+                    report.given_up += 1;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        write = w.id,
+                        error = %e.message,
+                        "[write-back] link unreadable"
+                    );
+                    continue;
+                }
+            }
         }
         let op = WriteOp::PrRemoteLink {
             key: w.item_key.clone(),
