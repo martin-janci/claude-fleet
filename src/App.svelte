@@ -26,6 +26,7 @@
   import TerminalView from './lib/TerminalView.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
   import HostsView from './lib/HostsView.svelte';
+  import ViewBoundary from './lib/ViewBoundary.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
   import AssetsPanel from './lib/AssetsPanel.svelte';
   import { loadProjects, applyProjectEvents } from './lib/projects';
@@ -939,13 +940,15 @@
       {#if hostsMode}
         <div class="view-slot overlay" data-testid="hosts-overlay">
           {#key hostsViewKey}
-            <HostsView
-              preselect={hostsPreselect}
-              onClose={() => closeHosts()}
-              onFilterSidebar={onHostsFilterSidebar}
-              onNewSession={onHostsNewSession}
-              onSelectionChange={(alias) => (lastViewedHost = alias)}
-            />
+            <ViewBoundary name="Hosts">
+              <HostsView
+                preselect={hostsPreselect}
+                onClose={() => closeHosts()}
+                onFilterSidebar={onHostsFilterSidebar}
+                onNewSession={onHostsNewSession}
+                onSelectionChange={(alias) => (lastViewedHost = alias)}
+              />
+            </ViewBoundary>
           {/key}
         </div>
       {/if}
