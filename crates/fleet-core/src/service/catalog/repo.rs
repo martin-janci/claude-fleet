@@ -1040,6 +1040,28 @@ mod tests {
         assert_eq!(fs::read_to_string(&file).unwrap(), "x");
     }
 
+    /// A checkout that probes as absent but whose directory cannot be made
+    /// names the checkout and the directory that failed. A dangling symlink
+    /// in the way does this on Unix, as a path under a file does on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_repo_names_a_checkout_it_cannot_create() {
+        let base = tmp("ensure-repo-uncreatable");
+        let dangling = base.join("dangling");
+        std::os::unix::fs::symlink(base.join("nowhere"), &dangling).unwrap();
+        let path = dangling.join("agent-assets");
+        let err = ensure_repo(&path, Some("/nonexistent/remote.git")).unwrap_err();
+        assert_eq!(err.code, "E_IO");
+        assert!(
+            err.message.contains(&*path.to_string_lossy())
+                && err
+                    .message
+                    .contains(&format!("creating {}", dangling.display())),
+            "{}",
+            err.message
+        );
+    }
+
     #[test]
     fn a_permission_error_says_whose_permission() {
         let e = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
