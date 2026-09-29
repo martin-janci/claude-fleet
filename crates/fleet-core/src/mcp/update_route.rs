@@ -1,10 +1,11 @@
 //! `POST /update/check` and `POST /update/report` (update-channel design §6):
 //! the frozen update wire, `update_proto: 1`. Behind `authorize` like
 //! `/report`: the credential says who is asking (`service::update::identity`),
-//! never the body. Outside MCP on purpose — the one surface a client whose
+//! never the body; a hub link's token is refused there (`E_FORBIDDEN`, 403),
+//! since its only door is `peer_exchange`. Outside MCP on purpose — the one surface a client whose
 //! contract revision the hub no longer matches can still reach (U4).
 
-use super::auth::{Caller, TokenMode};
+use super::auth::Caller;
 use super::report_route::ReportState;
 use crate::ipc_error::{codes, IpcError};
 use crate::service::update;
@@ -37,23 +38,15 @@ fn parse<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, IpcError> {
         .map_err(|e| IpcError::new(codes::E_INVALID, format!("unreadable update request: {e}")))
 }
 
-fn refuses_peer(caller: &Caller) -> Option<Response> {
-    // A hub link's only door is `peer_exchange`; the updater's is this one.
-    (caller.mode == TokenMode::Peer).then(|| {
-        refusal(IpcError::new(
-            codes::E_FORBIDDEN,
-            "a hub link may call peer_exchange only",
-        ))
-    })
-}
-
 pub async fn handle_check(
     State(state): State<ReportState>,
     Extension(caller): Extension<Caller>,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Some(r) = refuses_peer(&caller) {
-        return r;
+    // Who is asking comes before what it asks: a hub link is refused (403)
+    // whatever its body says.
+    if let Err(e) = update::identity(&caller) {
+        return refusal(e);
     }
     let req = match parse(&body) {
         Ok(r) => r,
@@ -77,8 +70,10 @@ pub async fn handle_report(
     Extension(caller): Extension<Caller>,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Some(r) = refuses_peer(&caller) {
-        return r;
+    // Who is asking comes before what it asks: a hub link is refused (403)
+    // whatever its body says.
+    if let Err(e) = update::identity(&caller) {
+        return refusal(e);
     }
     let report = match parse(&body) {
         Ok(r) => r,
@@ -87,5 +82,47 @@ pub async fn handle_report(
     match update::report(state.store(), &caller, &report, crate::store::now_unix()) {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => refusal(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::auth::{ClientRef, TokenMode};
+
+    #[test]
+    fn a_hub_link_is_refused_with_403() {
+        let e = update::identity(&peer()).unwrap_err();
+        assert_eq!(refusal(e).status(), StatusCode::FORBIDDEN);
+    }
+
+    fn peer() -> Caller {
+        Caller {
+            host_alias: None,
+            client: Some(ClientRef {
+                id: 1,
+                name: "hub-b".into(),
+                trusted: false,
+                org_id: None,
+            }),
+            mode: TokenMode::Peer,
+        }
+    }
+
+    /// The refusal comes before the body is read: a hub link that sends
+    /// garbage or an unsupported `update_proto` is still refused, not
+    /// answered with a parse or proto error.
+    #[tokio::test]
+    async fn a_hub_link_is_refused_before_its_body_is_read() {
+        use std::sync::{Arc, Mutex};
+        let store = Arc::new(Mutex::new(crate::store::Store::open_in_memory().unwrap()));
+        let state = || ReportState::new(Arc::clone(&store));
+        for body in ["{", r#"{"update_proto":0}"#, r#"{"update_proto":99}"#] {
+            let bytes = axum::body::Bytes::from_static(body.as_bytes());
+            let r = handle_check(State(state()), Extension(peer()), bytes.clone()).await;
+            assert_eq!(r.status(), StatusCode::FORBIDDEN, "check {body:?}");
+            let r = handle_report(State(state()), Extension(peer()), bytes).await;
+            assert_eq!(r.status(), StatusCode::FORBIDDEN, "report {body:?}");
+        }
     }
 }

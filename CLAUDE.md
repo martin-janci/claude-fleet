@@ -489,8 +489,10 @@ against `keys.rs` before it leaves the runner
 (`scripts/release-update-scripts-test.sh`, CI hub-headless). See
 `docs/RELEASING.md` → *Update manifest and channels*.
 
-Trusted keys are `fleet_update::keys::RELEASE_KEYS`, which stays empty
-until the owner runs `scripts/release-key.sh` (§13 question 1, answered
-yes; the key is made on the owner's machine only), so nothing is offered
-yet; an `e2e` build also reads `FLEET_UPDATE_E2E_KEYS`. S2b (nightly), S3,
-S4b and S6–S9 are not built; the other §13 questions wait on the owner.
+Trusted keys are `fleet_update::keys::RELEASE_KEYS`: the owner's release
+key (made on the owner's machine only, `scripts/release-key.sh`) is trusted
+since a3033c2 (v0.4.1), so a hub offers what the signed channel lists.
+`FLEET_UPDATE_E2E_KEYS` (read by `e2e` builds only) is reserved for S4b's
+hub-e2e section U; nothing uses it yet. `update.track` offers `stable` /
+`beta` only until S2b publishes `nightly`. S2b (nightly), S3, S4b and S6–S9
+are not built; the other §13 questions wait on the owner.

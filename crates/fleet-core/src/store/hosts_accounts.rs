@@ -604,6 +604,22 @@ impl Store {
             rusqlite::params![from, into],
         )?;
         tx.execute("DELETE FROM asset_inventory WHERE host_alias = ?1", [from])?;
+        // Update state (migration 079) is keyed on `agent:<alias>`: `into`'s
+        // own observed row and pins win a clash; the rest, and the
+        // transition log, move.
+        for table in ["update_observed", "update_desired", "update_events"] {
+            tx.execute(
+                &format!(
+                    "UPDATE OR IGNORE {table} SET target = 'agent:' || ?2 \
+                     WHERE target = 'agent:' || ?1"
+                ),
+                rusqlite::params![from, into],
+            )?;
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE target = 'agent:' || ?1"),
+                [from],
+            )?;
+        }
         // Org rules (migration 050): a `from` rule identical to one `into`
         // already has goes (the same test `add_org_rule` refuses a
         // duplicate by, across orgs); the rest now name `into`.
@@ -718,6 +734,17 @@ impl Store {
         // Its estimated-usage history goes with it (migration 025).
         tx.execute(
             "DELETE FROM usage_daily WHERE host_alias=?1",
+            rusqlite::params![alias],
+        )?;
+        // Its agent's update state (migration 079, target `agent:<alias>`):
+        // an observed row nothing will refresh, and a pin for a target that
+        // is gone. The transition log is left to its retention.
+        tx.execute(
+            "DELETE FROM update_observed WHERE target = 'agent:' || ?1",
+            rusqlite::params![alias],
+        )?;
+        tx.execute(
+            "DELETE FROM update_desired WHERE target = 'agent:' || ?1",
             rusqlite::params![alias],
         )?;
         tx.commit()?;
@@ -1302,6 +1329,120 @@ mod tests {
             s.list_all_host_layers().unwrap().is_empty(),
             "no host_layers row should survive the host it belonged to"
         );
+    }
+
+    fn seed_update_state(s: &Store, alias: &str, version: &str) {
+        s.upsert_update_observed(&crate::store::UpdateObservedRow {
+            target: format!("agent:{alias}"),
+            component: "agent".into(),
+            platform: None,
+            version: version.into(),
+            commit_sha: None,
+            build_id: None,
+            digest: None,
+            speaks: None,
+            phase: "idle".into(),
+            attempt: None,
+            last_error: None,
+            reported_at: 1,
+            last_checked_at: None,
+        })
+        .unwrap();
+        s.set_update_desired(&crate::store::UpdateDesiredRow {
+            component: "agent".into(),
+            target: format!("agent:{alias}"),
+            version: version.into(),
+            mandatory: false,
+            reason: None,
+            set_by: "operator".into(),
+            set_at: 1,
+        })
+        .unwrap();
+    }
+
+    /// A deleted host's `agent:<alias>` observed row and pin went on
+    /// counting in `update_status` forever.
+    #[test]
+    fn delete_host_drops_its_agent_update_state() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        s.insert_host("other", Some("other")).unwrap();
+        seed_update_state(&s, "h", "0.3.3");
+        seed_update_state(&s, "other", "0.3.3");
+
+        s.delete_host("h").unwrap();
+
+        assert!(s.update_observed("agent:h").unwrap().is_none());
+        assert!(s.update_desired_for("agent", "agent:h").unwrap().is_none());
+        assert!(s.update_observed("agent:other").unwrap().is_some());
+        assert!(s
+            .update_desired_for("agent", "agent:other")
+            .unwrap()
+            .is_some());
+    }
+
+    /// The merge re-homes `agent:<from>` under `agent:<into>`; `into`'s own
+    /// observed row and pin win a clash.
+    #[test]
+    fn merge_host_alias_rehomes_agent_update_state() {
+        let s = Store::open_in_memory().unwrap();
+        for h in ["a", "b", "c"] {
+            s.insert_host(h, None).unwrap();
+        }
+        // `a` has state, `b` has none: it moves.
+        seed_update_state(&s, "a", "0.3.3");
+        assert!(s
+            .insert_update_event(
+                "agent:a",
+                Some("att1"),
+                "success",
+                None,
+                None,
+                None,
+                None,
+                1
+            )
+            .unwrap());
+        s.merge_host_alias("a", "b").unwrap();
+        assert!(s.update_observed("agent:a").unwrap().is_none());
+        assert!(s.update_events("agent:a", 10).unwrap().is_empty());
+        assert_eq!(s.update_events("agent:b", 10).unwrap().len(), 1);
+        assert_eq!(
+            s.update_observed("agent:b").unwrap().unwrap().version,
+            "0.3.3"
+        );
+        assert_eq!(
+            s.update_desired_for("agent", "agent:b")
+                .unwrap()
+                .unwrap()
+                .target,
+            "agent:b"
+        );
+
+        // Both have state: `c`'s own is kept, `b`'s is gone.
+        seed_update_state(&s, "c", "0.3.4");
+        s.merge_host_alias("b", "c").unwrap();
+        assert!(s.update_observed("agent:b").unwrap().is_none());
+        assert_eq!(
+            s.update_observed("agent:c").unwrap().unwrap().version,
+            "0.3.4"
+        );
+        assert_eq!(
+            s.update_desired_for("agent", "agent:c")
+                .unwrap()
+                .unwrap()
+                .version,
+            "0.3.4"
+        );
+        let leftover: i64 = s
+            .conn_for_test()
+            .query_row(
+                "SELECT COUNT(*) FROM update_desired WHERE target IN ('agent:a','agent:b')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(leftover, 0);
     }
 
     #[test]

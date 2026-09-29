@@ -36,6 +36,26 @@ pub enum UpdatePhase {
 }
 
 impl UpdatePhase {
+    /// The wire spelling (the serde name), as stored in `update_observed`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UpdatePhase::Idle => "idle",
+            UpdatePhase::Checking => "checking",
+            UpdatePhase::Available => "available",
+            UpdatePhase::Downloading => "downloading",
+            UpdatePhase::Verifying => "verifying",
+            UpdatePhase::Ready => "ready",
+            UpdatePhase::Installing => "installing",
+            UpdatePhase::Validating => "validating",
+            UpdatePhase::Success => "success",
+            UpdatePhase::Failed => "failed",
+            UpdatePhase::RollingBack => "rolling_back",
+            UpdatePhase::Recovered => "recovered",
+            UpdatePhase::RollbackFailed => "rollback_failed",
+            UpdatePhase::Unknown => "unknown",
+        }
+    }
+
     /// Whether `self → to` is a legal transition.
     pub fn can_become(self, to: UpdatePhase) -> bool {
         use UpdatePhase::*;
@@ -197,6 +217,17 @@ mod tests {
                 steps += 1;
                 assert!(steps < 5, "{p:?} loops");
             }
+        }
+    }
+
+    #[test]
+    fn as_str_is_the_serde_name() {
+        for p in ALL.into_iter().chain([Unknown]) {
+            assert_eq!(
+                serde_json::to_value(p).unwrap(),
+                serde_json::Value::String(p.as_str().into()),
+                "{p:?}"
+            );
         }
     }
 

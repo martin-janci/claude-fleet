@@ -289,7 +289,9 @@ pub const DECIDE_MODES: &[&str] = &["off", "shadow", "assist"];
 // ── update.* (application updates, update-channel design §7.3) ──
 /// The release track the hub follows for its fleet.
 pub const UPDATE_TRACK: &str = "update.track";
-pub const UPDATE_TRACKS: &[&str] = &["stable", "beta", "nightly"];
+/// `nightly` joins when S2b publishes it (`src/lib/fleet_settings.ts` keeps
+/// the same list).
+pub const UPDATE_TRACKS: &[&str] = &["stable", "beta"];
 /// Per component: `manual` (only pins), `notify` (offer), `automatic`
 /// (install at the next quiet point).
 pub const UPDATE_HUB_MODE: &str = "update.hub.mode";
@@ -914,6 +916,10 @@ pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
         // The hub's `/events` stamps `needs_attention` without a store; keep
         // its threshold equal to the one `list_sessions` now reads.
         s.context_red_pct_changed(crate::service::health::context_red_pct(s));
+    }
+    if key.starts_with("update.") {
+        // A new track or check interval wakes the hub's channel refresh.
+        crate::service::update::settings_changed(key);
     }
     Ok(())
 }

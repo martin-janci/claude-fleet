@@ -959,6 +959,14 @@
           <code>decide.*</code> key, and <code>fleet-hub decide status</code>.
         </p>
       </section>
+      <section class="block" data-testid="update-remote-section">
+        <div class="section-header"><h4>Updates</h4></div>
+        <p class="hook-desc" data-testid="update-remote">
+          {hubBlock('get_fleet_settings', $hubStatus)} On the hub: <code>update_status</code>,
+          <code>update_admin</code> (pin / refresh), and <code>set_setting</code> with an
+          <code>update.*</code> key.
+        </p>
+      </section>
       <section class="block" data-testid="mcp-remote-section">
         <div class="section-header"><h4>Control API (MCP)</h4></div>
         <p class="hook-desc" data-testid="mcp-remote">
@@ -1673,6 +1681,10 @@
         What the hub offers the fleet's own software: its track, and per component whether a newer
         release is only pinned by hand (manual), offered (notify) or installed at the next quiet point
         (automatic). Every release is signed; nothing unsigned is ever offered (see <code>docs/updates.md</code>).
+      </p>
+      <p class="hook-desc" data-testid="update-standalone-note">
+        On a standalone desktop these rows have no effect yet: this desktop installs nothing until
+        slice S3 (the desktop updater).
       </p>
       <div class="mcp-field">
         <label class="lbl" for="update-track">track</label>

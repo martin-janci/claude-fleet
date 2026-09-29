@@ -267,7 +267,7 @@ describe('the panels that do not apply to a hub client', () => {
   it('replaces each of them with the reason instead of an error', async () => {
     route();
     render(SettingsDialog, { props: { onClose: () => {} } });
-    for (const testid of ['projects-remote', 'automation-remote', 'limits-remote', 'mcp-remote']) {
+    for (const testid of ['projects-remote', 'automation-remote', 'limits-remote', 'update-remote', 'mcp-remote']) {
       const note = await screen.findByTestId(testid);
       expect(note.textContent, testid).toContain('fleet.example.com');
     }
@@ -275,6 +275,7 @@ describe('the panels that do not apply to a hub client', () => {
     expect(screen.queryByTestId('projects-save')).toBeNull();
     expect(screen.queryByTestId('gc-enabled')).toBeNull();
     expect(screen.queryByTestId('mcp-enable')).toBeNull();
+    expect(screen.queryByTestId('update-section')).toBeNull();
   });
 
   it('still renders Diagnostics, which is about THIS process either way', async () => {
@@ -292,6 +293,13 @@ describe('the panels that do not apply to a hub client', () => {
     expect(screen.getByTestId('projects-section')).toBeInTheDocument();
     expect(screen.getByTestId('automation-section')).toBeInTheDocument();
     expect(screen.queryByTestId('projects-remote')).toBeNull();
+    // Updates: the standalone rows, labelled as not acting yet (S3), and no hub note.
+    expect(screen.getByTestId('update-section')).toBeInTheDocument();
+    expect(screen.queryByTestId('update-remote')).toBeNull();
+    expect(screen.getByTestId('update-standalone-note').textContent).toContain('no effect yet');
+    // `nightly` is not published (S2b), so it is not offered.
+    const track = screen.getByTestId('update-track') as HTMLSelectElement;
+    expect(Array.from(track.options).map((o) => o.value)).toEqual(['stable', 'beta']);
   });
 });
 
