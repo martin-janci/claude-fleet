@@ -10,6 +10,11 @@
 #                  seconds and cost nothing, and between them they are what
 #                  keeps a hand-edited carrier or a broken asset manifest
 #                  from reaching a tag.
+#   ag job:        scripts/ag-test.sh — the agent launcher (tools/ag) against
+#                  fake claude/codex binaries. CI also runs this under macOS's
+#                  stock /bin/bash 3.2 and shellchecks it on Linux; this
+#                  script only runs the bash test, on whatever bash is first
+#                  on PATH.
 #   rust job:      cargo fmt --all --check
 #                  cargo clippy --workspace --all-targets -- -D warnings
 #                  cargo test --workspace
@@ -211,6 +216,11 @@ step release_assets_smoke
 # The hub deploy scripts (backup.sh / upgrade.sh) against a fake docker:
 # bash + sqlite3 only, a few seconds.
 step bash scripts/hub-deploy-scripts-test.sh
+
+# tools/ag (the agent launcher) against fake claude/codex binaries. bash +
+# a few seconds; see .github/workflows/ci.yml's ag job for the matching
+# macOS-under-bash-3.2 leg CI runs that this local step doesn't.
+step bash scripts/ag-test.sh
 
 [[ "$RUN_RUST" == 1 ]] && run_rust
 [[ "$RUN_FRONTEND" == 1 ]] && run_frontend
