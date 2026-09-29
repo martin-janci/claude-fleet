@@ -143,7 +143,8 @@ curl -s https://fleet.example.com/mcp \
 A healthy hub answers with `db_ready: true` and the running version.
 
 `hub` is this process: `started_at`, `uptime_secs` and `reconcile`
-(`last_started_at`, `last_finished_at`, `last_duration_ms`,
+(`last_started_at`, `last_finished_at`, `last_duration_ms`, `last_ok_at`
+(when the last clean pass finished; a later failure leaves it set),
 `consecutive_failures`, `failures_total`, `last_error`) — alert on
 `consecutive_failures >= 3`. `tunnels_mode` is `none` on a public hub (hooks
 post directly; the `tunnels` map is empty because nothing applies) and
@@ -1734,7 +1735,8 @@ Besides the per-caller counters the exposition carries four process gauges:
 `fleet_reconcile_duration_ms` (the last pass's wall time),
 `fleet_reconcile_failures_total`, `fleet_sessions{status="…"}` (by
 `claude_status`, external rows excluded, the same roll-up
-`fleet_health.by_status` uses) and `fleet_hosts_reachable`.
+`fleet_health.by_status` uses) and `fleet_hosts_reachable`. They are two SQL
+counts on the hub's read pool, so a scrape never waits on the writer.
 
 Prometheus text format, **master token only** — a per-host token and a paired
 phone are both callers this reports on, and letting one read the others'

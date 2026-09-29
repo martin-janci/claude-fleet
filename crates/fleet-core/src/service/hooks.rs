@@ -3316,6 +3316,56 @@ mod tests {
         assert_eq!(local.last_hook_at, None, "the master token names no host");
     }
 
+    /// Hooks arrive several times per turn; the host stamp is written at
+    /// most once a minute (`HOST_HOOK_STAMP_EVERY_SECS`).
+    #[test]
+    fn two_hooks_within_a_minute_leave_the_host_stamp_at_the_first() {
+        let store = make_store();
+        store.lock().unwrap().upsert_host("h").unwrap();
+        let _id = pane_session(&store, "s", "%3");
+        let bound = host_caller("h");
+        let first = crate::store::now_unix() - 10;
+        store
+            .lock()
+            .unwrap()
+            .set_host_last_hook_at("h", first)
+            .unwrap();
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("Stop", NEW),
+            &ctx(&bound, None),
+        )
+        .unwrap();
+        let stamp = |store: &Arc<Mutex<Store>>| {
+            store
+                .lock()
+                .unwrap()
+                .get_host_row("h")
+                .unwrap()
+                .unwrap()
+                .last_hook_at
+        };
+        assert_eq!(stamp(&store), Some(first), "a hook within the minute");
+
+        // An old stamp is moved by the next hook.
+        let old = crate::store::now_unix() - 3600;
+        store
+            .lock()
+            .unwrap()
+            .conn_for_test()
+            .execute("UPDATE hosts SET last_hook_at=?1 WHERE alias='h'", [old])
+            .unwrap();
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("Stop", NEW),
+            &ctx(&bound, None),
+        )
+        .unwrap();
+        assert!(stamp(&store).is_some_and(|t| t > old + 60));
+    }
+
     #[test]
     fn non_rebinding_events_never_use_the_awaiting_mark() {
         let store = make_store();

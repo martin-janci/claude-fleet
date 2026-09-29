@@ -210,6 +210,22 @@ impl Store {
         )?;
         Ok(n.max(0) as u64)
     }
+
+    /// [`Self::tracker_write_failures`] for every tracker in one query
+    /// (`fleet_health` used to ask once per tracker). A tracker with no
+    /// failed write has no entry.
+    pub fn tracker_write_failures_by_tracker(
+        &self,
+    ) -> Result<std::collections::HashMap<i64, u64>, IpcError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT tracker_id, COUNT(*) FROM tracker_writes WHERE state = 'failed' \
+             GROUP BY tracker_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?.max(0) as u64))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<std::collections::HashMap<i64, u64>>>()?)
+    }
 }
 
 #[cfg(test)]
@@ -288,6 +304,42 @@ mod tests {
         );
         assert_eq!(row.last_error.as_deref(), Some("503 again"));
         assert_eq!(s.tracker_write_failures(t).unwrap(), 1);
+    }
+
+    #[test]
+    fn grouped_failures_equal_the_per_tracker_count() {
+        let (s, t1) = store_with_tracker();
+        let t2 = s
+            .add_tracker("jira", "K", "https://other.atlassian.net")
+            .unwrap()
+            .id;
+        let t3 = s
+            .add_tracker("jira", "L", "https://third.atlassian.net")
+            .unwrap()
+            .id;
+        for (t, n, fail) in [(t1, 1, true), (t1, 2, true), (t1, 3, false), (t2, 4, true)] {
+            s.enqueue_tracker_write(&pr(t, &format!("https://github.com/o/r/pull/{n}")))
+                .unwrap();
+            if fail {
+                let due = s.due_tracker_writes(t, now_unix() + 1, 10).unwrap();
+                let id = due
+                    .iter()
+                    .find(|w| w.url.ends_with(&format!("/{n}")))
+                    .unwrap()
+                    .id;
+                s.retry_tracker_write(id, "no", None, true).unwrap();
+            }
+        }
+        let grouped = s.tracker_write_failures_by_tracker().unwrap();
+        for t in [t1, t2, t3] {
+            assert_eq!(
+                grouped.get(&t).copied().unwrap_or(0),
+                s.tracker_write_failures(t).unwrap(),
+                "tracker {t}"
+            );
+        }
+        assert_eq!(grouped.get(&t1), Some(&2));
+        assert!(!grouped.contains_key(&t3));
     }
 
     #[test]

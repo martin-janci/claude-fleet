@@ -15,9 +15,10 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// The hosts this machine can add: every `~/.ssh/config` alias, then, on
-/// Windows, each WSL distribution [`crate::wsl::refresh`] found at startup
-/// (an alias the config already has stays the SSH host). A distribution
-/// installed since then shows up at the next launch.
+/// Windows, each WSL distribution the last [`crate::wsl::refresh`] found
+/// (an alias the config already has stays the SSH host). This reads the
+/// table as it is; [`discover_hosts_fresh`] (the Add-host dialog) first
+/// detects again when that is due.
 pub fn discover_hosts() -> Result<Vec<SshHost>, IpcError> {
     let mut hosts = ssh_config::load_user_config();
     for (alias, distro) in crate::wsl::hosts() {
@@ -32,6 +33,18 @@ pub fn discover_hosts() -> Result<Vec<SshHost>, IpcError> {
         });
     }
     Ok(hosts)
+}
+
+/// [`discover_hosts`] for the Add-host dialog: waits for a WSL detection
+/// still running (startup's, say), or runs one more when the last is stale
+/// ([`crate::wsl::refresh_if_due`]), so a distribution installed since is
+/// listed without a restart. Everywhere but Windows that is a no-op. The
+/// `~/.ssh/config` read runs on a blocking thread.
+pub async fn discover_hosts_fresh() -> Result<Vec<SshHost>, IpcError> {
+    crate::wsl::refresh_if_due().await;
+    tokio::task::spawn_blocking(discover_hosts)
+        .await
+        .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("discover hosts: {e}")))?
 }
 
 pub fn list_hosts(store: &Mutex<Store>) -> Result<Vec<HostRow>, IpcError> {

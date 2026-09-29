@@ -15,6 +15,7 @@ pub mod propose;
 pub mod repo;
 pub mod resolve;
 pub mod sync;
+pub mod validate;
 
 // The catalog's `IpcError::code` values live with every other code in
 // `ipc_error::codes`; re-exported here so the catalog modules can keep

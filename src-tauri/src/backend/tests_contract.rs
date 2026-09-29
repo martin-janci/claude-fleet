@@ -336,6 +336,7 @@ fn sample_hub_health() -> HubHealth {
             last_started_at: Some(1_790_003_580),
             last_finished_at: Some(1_790_003_581),
             last_duration_ms: Some(812),
+            last_ok_at: Some(1_790_003_581),
             consecutive_failures: 0,
             failures_total: 2,
             last_error: Some("E_SSH: boom".into()),

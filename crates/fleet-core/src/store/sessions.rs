@@ -558,6 +558,20 @@ impl Store {
         rows.collect()
     }
 
+    /// Fleet sessions by `claude_status` (NULL counted as `unknown`), with
+    /// `external` and `shell` rows left out — exactly the `by_status` of
+    /// `health::summarize`, counted in SQL so `/metrics` decodes no row.
+    pub fn count_sessions_by_claude_status(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, u32>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT COALESCE(claude_status, 'unknown'), COUNT(*) FROM sessions \
+             WHERE kind NOT IN ('external', 'shell') GROUP BY 1",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
+        rows.collect()
+    }
+
     /// Every session named `tmux_name` (optionally on just one host), by a
     /// direct `WHERE tmux_name=?` — used by `whoami`'s resolution
     /// (`find_session_by_tmux_name_scoped`), which used to call
@@ -1869,6 +1883,47 @@ mod tests {
             .find_sessions_by_tmux_name("no-such-name", None)
             .unwrap()
             .is_empty());
+    }
+
+    /// `/metrics` counts in SQL what `fleet_health` counts in Rust: the
+    /// GROUP BY and the reachable count must equal `summarize`'s
+    /// `by_status` and `hosts_reachable`, external / shell rows and a NULL
+    /// status included.
+    #[test]
+    fn metrics_counts_equal_the_summarize_roll_up() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("alpha").unwrap(); // reachable
+        s.insert_host("beta", Some("beta")).unwrap(); // never probed
+        let mk = |name: &str, host: &str, kind: &str, status: Option<&str>| {
+            let id = s
+                .upsert_session(name, host, None, None, 0, 0, "running", None)
+                .unwrap();
+            s.conn
+                .execute(
+                    "UPDATE sessions SET kind=?1, claude_status=?2 WHERE id=?3",
+                    rusqlite::params![kind, status, id],
+                )
+                .unwrap();
+        };
+        mk("w1", "alpha", "work", Some("working"));
+        mk("w2", "alpha", "work", Some("idle"));
+        mk("w3", "beta", "work", None);
+        mk("bg", "beta", "bg", Some("working"));
+        mk("ext", "alpha", "external", Some("working"));
+        mk("ext2", "alpha", "external", None);
+        mk("sh", "beta", "shell", Some("idle"));
+
+        let summary = crate::service::health::summarize(
+            &s.list_all_sessions().unwrap(),
+            &s.list_hosts().unwrap(),
+            90.0,
+        );
+        let by_status = s.count_sessions_by_claude_status().unwrap();
+        assert_eq!(by_status, summary.by_status);
+        assert_eq!(by_status.get("working"), Some(&2));
+        assert_eq!(by_status.get("unknown"), Some(&1));
+        assert_eq!(s.count_reachable_hosts().unwrap(), summary.hosts_reachable);
+        assert_eq!(summary.hosts_reachable, 1);
     }
 
     #[test]

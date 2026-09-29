@@ -634,6 +634,27 @@ describe('HostsView: action safety', () => {
     expect(calls('rotate_host_token')[0][1]).toEqual({ hostAlias: 'mefistos' });
   });
 
+  it('Rotate token surfaces the re-provision warning as a sticky warning toast', async () => {
+    const base = inv.getMockImplementation() as (cmd: string, payload?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, payload?: unknown) =>
+      cmd === 'rotate_host_token'
+        ? { host_alias: 'mefistos', mode: 'full', created_at: 2, warning: "hooks can't reach the desktop" }
+        : base(cmd, payload),
+    );
+    mount({ preselect: 'mefistos' });
+    await waitFor(() => expect(screen.getByTestId('detail-rotate')).toBeInTheDocument());
+    await fireEvent.click(screen.getByTestId('detail-rotate'));
+    await tick();
+    await fireEvent.click(screen.getByTestId('confirm-rotate'));
+    await waitFor(() => expect(get(toasts).some((t) => t.kind === 'warning')).toBe(true));
+    const warn = get(toasts).find((t) => t.kind === 'warning')!;
+    expect(warn.message).toBe("mefistos: hooks can't reach the desktop");
+    expect(warn.sticky).toBe(true);
+    expect(get(toasts).some((t) => t.kind === 'success')).toBe(true);
+    // The cached token row stays clean.
+    expect(get(hostTokens).get('mefistos')).toEqual({ host_alias: 'mefistos', mode: 'full', created_at: 2 });
+  });
+
   it('neither Remove nor Rotate has a keyboard shortcut', async () => {
     mount({ preselect: 'mefistos' });
     await waitFor(() => expect(screen.getByTestId('detail-rotate')).toBeInTheDocument());

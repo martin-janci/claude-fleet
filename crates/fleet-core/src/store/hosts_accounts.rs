@@ -8,6 +8,11 @@ use crate::ipc_error::codes;
 /// stored value. See `Store::upsert_account`.
 const LAST_SEEN_MATERIAL_DELTA_SECS: i64 = 600;
 
+/// How often a host's `last_hook_at` is rewritten: a hook within this many
+/// seconds of the stored stamp leaves it alone. Its reader, the health
+/// check's `hooks_silent`, works in hours; minute freshness is plenty.
+pub const HOST_HOOK_STAMP_EVERY_SECS: i64 = 60;
+
 fn last_seen_moved_materially(prior: Option<i64>, incoming: Option<i64>) -> bool {
     match (prior, incoming) {
         (None, None) => false,
@@ -243,13 +248,24 @@ impl Store {
     }
 
     /// Stamp the last hook accepted from this host's own token (hosts F9).
-    /// Silent: hooks arrive several times per turn.
+    /// Silent, and throttled to one write per [`HOST_HOOK_STAMP_EVERY_SECS`]:
+    /// hooks arrive several times per turn, and the only reader (the
+    /// `hooks_silent` health check) compares against hours.
     pub fn set_host_last_hook_at(&self, alias: &str, at: i64) -> Result<(), rusqlite::Error> {
         self.conn.execute(
-            "UPDATE hosts SET last_hook_at = ?1 WHERE alias = ?2",
-            rusqlite::params![at, alias],
+            "UPDATE hosts SET last_hook_at = ?1 WHERE alias = ?2 \
+             AND (last_hook_at IS NULL OR last_hook_at < ?1 - ?3)",
+            rusqlite::params![at, alias, HOST_HOOK_STAMP_EVERY_SECS],
         )?;
         Ok(())
+    }
+
+    /// Hosts whose last probe succeeded — the `fleet_hosts_reachable` gauge,
+    /// counted in SQL (equal to `health::summarize(..).hosts_reachable`).
+    pub fn count_reachable_hosts(&self) -> Result<u32, rusqlite::Error> {
+        self.conn
+            .prepare_cached("SELECT COUNT(*) FROM hosts WHERE reachable != 0")?
+            .query_row([], |r| r.get(0))
     }
 
     /// The fleet-agent version the host's hello reported (hosts F5).
@@ -952,6 +968,27 @@ mod tests {
         let row = s.get_host_row("h").unwrap().unwrap();
         assert_eq!(row.last_hook_at, Some(1_700_000_100));
         assert_eq!(row.agent_version.as_deref(), Some("0.2.26"));
+    }
+
+    #[test]
+    fn set_host_last_hook_at_is_throttled_to_one_write_a_minute() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        let t = 1_700_000_000;
+        let stamp = |s: &Store| s.get_host_row("h").unwrap().unwrap().last_hook_at;
+        assert_eq!(stamp(&s), None);
+        // A NULL row is stamped.
+        s.set_host_last_hook_at("h", t).unwrap();
+        assert_eq!(stamp(&s), Some(t));
+        // Within the window: left at t.
+        s.set_host_last_hook_at("h", t + 30).unwrap();
+        assert_eq!(stamp(&s), Some(t));
+        s.set_host_last_hook_at("h", t + HOST_HOOK_STAMP_EVERY_SECS)
+            .unwrap();
+        assert_eq!(stamp(&s), Some(t));
+        // Past it: moved.
+        s.set_host_last_hook_at("h", t + 61).unwrap();
+        assert_eq!(stamp(&s), Some(t + 61));
     }
 
     /// hosts F1: `provisioned` was a boolean set once; now it carries which

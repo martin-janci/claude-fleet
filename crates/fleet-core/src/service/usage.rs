@@ -1106,9 +1106,9 @@ pub fn report(
 
 /// [`report`] over only what `scope` sees: the sessions it may list and the
 /// daily roll-up of the hosts in its orgs (an org-bound client, work graph
-/// M14 — the same fence as `fleet_health`'s [`health::scope_to_org`]).
+/// M14 — the same fence as `fleet_health`'s [`health::HealthView::Org`]).
 ///
-/// [`health::scope_to_org`]: crate::service::health::scope_to_org
+/// [`health::HealthView::Org`]: crate::service::health::HealthView::Org
 pub fn report_on(
     s: &Store,
     host: Option<&str>,

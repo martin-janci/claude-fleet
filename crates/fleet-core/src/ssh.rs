@@ -78,15 +78,28 @@ struct SshClientInner {
     /// Per-host cap on concurrent children when `mux` is off (see
     /// [`MAX_CONNECTIONS_PER_HOST_NO_MUX`]). Unused with a master.
     conn_limits: DashMap<String, Arc<tokio::sync::Semaphore>>,
+    /// Per-host cap on concurrent LONG children when `mux` is off: one fewer
+    /// than [`MAX_CONNECTIONS_PER_HOST_NO_MUX`], so long calls (see
+    /// [`LONG_CALL_THRESHOLD`]) never hold every slot and a probe always
+    /// finds one. Unused with a master.
+    long_limits: DashMap<String, Arc<tokio::sync::Semaphore>>,
 }
 
 /// Without multiplexing every command is a whole SSH connection (Windows).
 /// The reconcile, usage and repair ticks each fan out over hosts and
 /// sessions, so without a cap one tick could start dozens of `ssh.exe` to the
 /// same host at once, each a full handshake, and trip the server's
-/// `MaxStartups`. At most this many run per host; the rest queue. The
+/// `MaxStartups`. At most this many run per host; the rest queue. One of
+/// them is kept for short calls (the reconcile probe): long ones
+/// ([`LONG_CALL_THRESHOLD`]) take at most one fewer. A WSL host is not
+/// capped: its commands are `wsl.exe`, with no handshake to limit. The
 /// attached terminal and the tunnels are separate processes and never wait.
 pub const MAX_CONNECTIONS_PER_HOST_NO_MUX: usize = 4;
+
+/// A call whose wall clock is above this (an upload, a move, a long script)
+/// is long: without multiplexing it may hold only
+/// `MAX_CONNECTIONS_PER_HOST_NO_MUX - 1` of a host's slots at once.
+pub const LONG_CALL_THRESHOLD: Duration = Duration::from_secs(60);
 
 /// Environment variable naming the `ssh` program to run, overriding the
 /// default below: a Cygwin or MSYS2 `ssh.exe`, or any other build.
@@ -234,6 +247,7 @@ impl SshClient {
                 toolchains: DashMap::new(),
                 mux,
                 conn_limits: DashMap::new(),
+                long_limits: DashMap::new(),
             }),
         }
     }
@@ -285,6 +299,16 @@ impl SshClient {
         // option even if validation upstream were bypassed.
         cmd.arg("--").arg(host).args(args);
         cmd
+    }
+
+    /// What every ssh entry point does before building its command: mark
+    /// `host` seen, wait for a WSL detection it may depend on
+    /// ([`crate::wsl::settled_for`]), and return the mux options for
+    /// [`SshClient::remote_command`].
+    async fn prepare(&self, host: &str, connect_timeout: Duration) -> Vec<String> {
+        self.inner.seen.insert(host.to_string(), ());
+        crate::wsl::settled_for(host).await;
+        self.mux_opts(host, connect_timeout)
     }
 
     /// The `ssh` program this client runs (see [`default_ssh_binary`]).
@@ -482,9 +506,7 @@ impl SshClient {
                 .run_bounded(&alias, args, connect_timeout, wall_clock)
                 .await;
         }
-        self.inner.seen.insert(host.to_string(), ());
-        crate::wsl::settled_for(host).await;
-        let mux_opts = self.mux_opts(host, connect_timeout);
+        let mux_opts = self.prepare(host, connect_timeout).await;
         let build = || self.remote_command(host, &mux_opts, args);
         self.run_with_mux_retry(host, build, wall_clock, None, "E_SSH", None)
             .await
@@ -509,9 +531,7 @@ impl SshClient {
                 .run_bounded_capped(&alias, args, connect_timeout, wall_clock, max_output)
                 .await;
         }
-        self.inner.seen.insert(host.to_string(), ());
-        crate::wsl::settled_for(host).await;
-        let mux_opts = self.mux_opts(host, connect_timeout);
+        let mux_opts = self.prepare(host, connect_timeout).await;
         let build = || self.remote_command(host, &mux_opts, args);
         self.run_with_mux_retry(host, build, wall_clock, None, "E_SSH", Some(max_output))
             .await
@@ -545,9 +565,8 @@ impl SshClient {
                 format!("{host} is reached through fleet-agent, which cannot pipe stdin"),
             ));
         }
-        self.inner.seen.insert(host.to_string(), ());
-        crate::wsl::settled_for(host).await;
-        let cmd = self.remote_command(host, &self.mux_opts(host, connect_timeout), args);
+        let mux_opts = self.prepare(host, connect_timeout).await;
+        let cmd = self.remote_command(host, &mux_opts, args);
         self.run_child_io(
             host,
             cmd,
@@ -582,9 +601,7 @@ impl SshClient {
                 .run_bounded_cancellable(&alias, args, connect_timeout, wall_clock, token)
                 .await;
         }
-        self.inner.seen.insert(host.to_string(), ());
-        crate::wsl::settled_for(host).await;
-        let mux_opts = self.mux_opts(host, connect_timeout);
+        let mux_opts = self.prepare(host, connect_timeout).await;
         let build = || self.remote_command(host, &mux_opts, args);
         self.run_with_mux_retry(host, build, wall_clock, Some(token), "E_SSH", None)
             .await
@@ -613,9 +630,7 @@ impl SshClient {
                 .run_cancellable(&alias, args, timeout, token)
                 .await;
         }
-        self.inner.seen.insert(host.to_string(), ());
-        crate::wsl::settled_for(host).await;
-        let mux_opts = self.mux_opts(host, timeout);
+        let mux_opts = self.prepare(host, timeout).await;
         let build = || self.remote_command(host, &mux_opts, args);
         self.run_with_mux_retry(
             host,
@@ -646,8 +661,7 @@ impl SshClient {
                 .upload_file(&alias, local_path, remote_path, timeout)
                 .await;
         }
-        self.inner.seen.insert(host.to_string(), ());
-        crate::wsl::settled_for(host).await;
+        let mux_opts = self.prepare(host, timeout).await;
         let file = std::fs::File::open(local_path).map_err(|e| {
             IpcError::new(
                 codes::E_UPLOAD,
@@ -657,7 +671,7 @@ impl SshClient {
         // Single remote word: the remote login shell runs `cat > 'path'`,
         // reading the piped file from stdin. Path is single-quoted.
         let remote_cmd = format!("cat > {}", crate::shell::quote(remote_path));
-        let mut cmd = self.remote_command(host, &self.mux_opts(host, timeout), &[&remote_cmd]);
+        let mut cmd = self.remote_command(host, &mux_opts, &[&remote_cmd]);
         cmd.stdin(std::process::Stdio::from(file));
         let out = self
             .run_child(host, cmd, UPLOAD_WALL_CLOCK, None, "E_UPLOAD")
@@ -736,17 +750,20 @@ impl SshClient {
         max_output: Option<usize>,
         stdin: Option<Vec<u8>>,
     ) -> Result<Output, IpcError> {
+        // One deadline for the whole call: the wait for a slot and the child
+        // share `wall_clock`, so a queued call never takes twice as long.
+        let deadline = tokio::time::Instant::now() + wall_clock;
         // Queued behind the host's other connections (no mux only). The wait
-        // is bounded by the same wall clock, and a cancel ends it.
+        // is bounded by the deadline, and a cancel ends it.
         let _slot = match &token {
             Some(t) => tokio::select! {
                 biased;
                 _ = t.cancelled() => {
                     return Err(IpcError::new(codes::E_CANCELLED, format!("ssh {host} cancelled")));
                 }
-                slot = self.connection_slot(host, wall_clock) => slot?,
+                slot = self.connection_slot(host, wall_clock, deadline) => slot?,
             },
-            None => self.connection_slot(host, wall_clock).await?,
+            None => self.connection_slot(host, wall_clock, deadline).await?,
         };
         let in_flight = InFlight::enter(&self.inner, host);
         if stdin.is_some() {
@@ -803,7 +820,7 @@ impl SshClient {
                 stderr_task.abort();
                 Err(IpcError::new(codes::E_CANCELLED, format!("ssh {host} cancelled")))
             }
-            _ = tokio::time::sleep(wall_clock) => {
+            _ = tokio::time::sleep_until(deadline) => {
                 kill_and_reap(child).await;
                 stdout_task.abort();
                 stderr_task.abort();
@@ -823,35 +840,53 @@ impl SshClient {
     }
 
     /// A slot for one more connection to `host` when this client does not
-    /// multiplex: `None` (no limit) with a master, else a permit of the
-    /// host's semaphore, waited for at most `wait`. A wait that runs out is
-    /// `E_SSH_TIMEOUT`, as the command itself would have been.
+    /// multiplex: `None` (no limit) with a master or for a WSL host (its
+    /// commands are `wsl.exe`, no SSH handshake), else a permit of the
+    /// host's semaphore, waited for until `deadline`. A call whose
+    /// `wall_clock` is above [`LONG_CALL_THRESHOLD`] first takes one of the
+    /// host's long permits, so long calls leave a slot for the probes.
+    ///
+    /// A wait that runs out is `E_SSH`, not `E_SSH_TIMEOUT`: nothing was
+    /// spawned, so the command certainly did not run
+    /// ([`codes::may_have_run`] is false).
     async fn connection_slot(
         &self,
         host: &str,
-        wait: Duration,
-    ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, IpcError> {
-        if self.inner.mux {
+        wall_clock: Duration,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<ConnectionSlot>, IpcError> {
+        if self.inner.mux || crate::wsl::is_wsl_host(host) {
             return Ok(None);
         }
-        let sem = self
-            .inner
-            .conn_limits
-            .entry(host.to_string())
-            .or_insert_with(|| {
-                Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS_PER_HOST_NO_MUX))
+        let semaphore = |map: &DashMap<String, Arc<tokio::sync::Semaphore>>, permits: usize| {
+            map.entry(host.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(permits)))
+                .clone()
+        };
+        let conn = semaphore(&self.inner.conn_limits, MAX_CONNECTIONS_PER_HOST_NO_MUX);
+        let long = (wall_clock > LONG_CALL_THRESHOLD)
+            .then(|| semaphore(&self.inner.long_limits, MAX_CONNECTIONS_PER_HOST_NO_MUX - 1));
+        let acquire = async move {
+            // The long permit first: a long call waiting for one holds no
+            // connection slot meanwhile. The semaphores are never closed.
+            let long = match long {
+                Some(sem) => Some(sem.acquire_owned().await.ok()?),
+                None => None,
+            };
+            let conn = conn.acquire_owned().await.ok()?;
+            Some(ConnectionSlot {
+                _long: long,
+                _conn: conn,
             })
-            .clone();
-        match tokio::time::timeout(wait, sem.acquire_owned()).await {
-            Ok(Ok(permit)) => Ok(Some(permit)),
-            // The semaphore is never closed.
-            Ok(Err(_)) => Ok(None),
+        };
+        match tokio::time::timeout_at(deadline, acquire).await {
+            Ok(slot) => Ok(slot),
             Err(_) => Err(IpcError::new(
-                codes::E_SSH_TIMEOUT,
+                codes::E_SSH,
                 format!(
                     "ssh {host}: no free connection within {}s ({MAX_CONNECTIONS_PER_HOST_NO_MUX} \
                      already open to this host)",
-                    wait.as_secs()
+                    wall_clock.as_secs()
                 ),
             )),
         }
@@ -1668,6 +1703,13 @@ pub(crate) fn wall_clock_error(host: &str, wall_clock: Duration, reset: bool) ->
             if reset { "; connection reset" } else { "" }
         ),
     )
+}
+
+/// One held connection slot without multiplexing (see
+/// [`SshClient::connection_slot`]): released when dropped.
+struct ConnectionSlot {
+    _long: Option<tokio::sync::OwnedSemaphorePermit>,
+    _conn: tokio::sync::OwnedSemaphorePermit,
 }
 
 /// `SshExec` over the local machine: the argv is space-joined exactly as ssh
@@ -2635,47 +2677,126 @@ mod tests {
         c.shutdown_all(); // a no-op without mux
     }
 
+    /// A slot for a call of `wall_clock`, waited for at most `wait`.
+    async fn slot_within(
+        c: &SshClient,
+        host: &str,
+        wall_clock: Duration,
+        wait: Duration,
+    ) -> Result<Option<ConnectionSlot>, IpcError> {
+        c.connection_slot(host, wall_clock, tokio::time::Instant::now() + wait)
+            .await
+    }
+
     /// Without a master, at most [`MAX_CONNECTIONS_PER_HOST_NO_MUX`]
     /// connections run per host; the next waits (bounded), another host is
     /// not held up, and a released slot is reused. With a master there is no
-    /// limit at all.
+    /// limit at all. A wait that runs out is `E_SSH`: nothing ran.
     #[tokio::test]
     async fn without_mux_connections_per_host_are_capped() {
+        let ms = Duration::from_millis(50);
         let c = SshClient::new_with_mux(false);
         let mut held = Vec::new();
         for _ in 0..MAX_CONNECTIONS_PER_HOST_NO_MUX {
+            held.push(slot_within(&c, "h", ms, ms).await.unwrap().expect("a slot"));
+        }
+        let err = slot_within(&c, "h", ms, ms).await.err().expect("capped");
+        assert_eq!(err.code, codes::E_SSH, "{err:?}");
+        assert!(!codes::may_have_run(&err.code), "{err:?}");
+        assert!(slot_within(&c, "other", ms, ms).await.unwrap().is_some());
+        held.pop();
+        assert!(slot_within(&c, "h", ms, ms).await.unwrap().is_some());
+
+        let m = SshClient::new_with_mux(true);
+        for _ in 0..(MAX_CONNECTIONS_PER_HOST_NO_MUX * 3) {
+            assert!(slot_within(&m, "h", ms, ms).await.unwrap().is_none());
+        }
+    }
+
+    /// Long calls hold at most one fewer than the cap: with that many
+    /// running, a short call (the probe) still gets a slot, and another long
+    /// call waits.
+    #[tokio::test]
+    async fn without_mux_long_calls_leave_a_slot_for_probes() {
+        let ms = Duration::from_millis(50);
+        let long = LONG_CALL_THRESHOLD + Duration::from_secs(1);
+        let c = SshClient::new_with_mux(false);
+        let mut held = Vec::new();
+        for _ in 0..(MAX_CONNECTIONS_PER_HOST_NO_MUX - 1) {
             held.push(
-                c.connection_slot("h", Duration::from_millis(50))
+                slot_within(&c, "h", long, ms)
                     .await
                     .unwrap()
                     .expect("a slot"),
             );
         }
-        let err = c
-            .connection_slot("h", Duration::from_millis(50))
+        let err = slot_within(&c, "h", long, ms)
             .await
-            .unwrap_err();
-        assert_eq!(err.code, codes::E_SSH_TIMEOUT, "{err:?}");
-        assert!(c
-            .connection_slot("other", Duration::from_millis(50))
-            .await
-            .unwrap()
-            .is_some());
+            .err()
+            .expect("long waits");
+        assert_eq!(err.code, codes::E_SSH, "{err:?}");
+        let probe = slot_within(&c, "h", ms, ms).await.unwrap();
+        assert!(probe.is_some(), "the probe's slot is kept");
+        drop(probe);
         held.pop();
-        assert!(c
-            .connection_slot("h", Duration::from_millis(50))
-            .await
-            .unwrap()
-            .is_some());
+        assert!(slot_within(&c, "h", long, ms).await.unwrap().is_some());
+    }
 
-        let m = SshClient::new_with_mux(true);
-        for _ in 0..(MAX_CONNECTIONS_PER_HOST_NO_MUX * 3) {
-            assert!(m
-                .connection_slot("h", Duration::from_millis(50))
-                .await
-                .unwrap()
-                .is_none());
+    /// The wait for a slot and the child share one wall clock: a call queued
+    /// for most of it gets only the rest, not a fresh budget.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn without_mux_the_slot_wait_counts_against_the_wall_clock() {
+        let c = SshClient::new_with_mux(false);
+        let ms = Duration::from_millis(50);
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONNECTIONS_PER_HOST_NO_MUX {
+            held.push(slot_within(&c, "h", ms, ms).await.unwrap().expect("a slot"));
         }
+        // One slot frees after 150 ms of the 200 ms budget.
+        let freed = held.pop();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            drop(freed);
+        });
+        let mut cmd = crate::proc::command("sh");
+        cmd.args(["-c", "sleep 5"]);
+        let started = std::time::Instant::now();
+        let err = c
+            .run_child("h", cmd, Duration::from_millis(200), None, "E_SSH")
+            .await
+            .expect_err("the wall clock ends it");
+        let took = started.elapsed();
+        release.await.unwrap();
+        assert_eq!(err.code, codes::E_SSH_TIMEOUT, "{err:?}");
+        assert!(took < Duration::from_millis(300), "{took:?}");
+    }
+
+    /// A WSL host runs `wsl.exe`, not an SSH handshake: never capped.
+    #[test]
+    fn without_mux_a_wsl_host_is_not_capped() {
+        let _table = crate::wsl::TEST_TABLE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::wsl::set_for_tests(vec![("wsl-ubuntu".into(), "Ubuntu".into())]);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let uncapped = rt.block_on(async {
+            let c = SshClient::new_with_mux(false);
+            let ms = Duration::from_millis(50);
+            let mut all = true;
+            for _ in 0..(MAX_CONNECTIONS_PER_HOST_NO_MUX * 3) {
+                all &= slot_within(&c, "wsl-ubuntu", ms, ms)
+                    .await
+                    .unwrap()
+                    .is_none();
+            }
+            all
+        });
+        crate::wsl::set_for_tests(Vec::new());
+        assert!(uncapped);
     }
 
     #[test]

@@ -23,7 +23,43 @@ impl FleetTools {
         Extension(caller): Extension<Caller>,
     ) -> Result<CallToolResult, McpError> {
         audit("fleet_health", "");
-        let mut h = health::health_check(self.reader());
+        // One read, one pass: the roll-up is built for the caller's scope
+        // under a single lock, not fleet-wide and then re-derived.
+        let tunnels = self.tunnels.health();
+        let mut h = match self.reader().lock() {
+            Ok(s) => {
+                let view = if let Some(host) = caller.host_alias.as_deref() {
+                    // Its own host's telemetry and spend; the host counts
+                    // stay fleet-wide, as the usage note says. Work graph
+                    // M12.4: its org's trackers, its host's backlog — none
+                    // when the scope cannot be read.
+                    health::HealthView::Host {
+                        alias: host.to_string(),
+                        trackers: caller.org_scope(&s).ok(),
+                    }
+                } else if caller.is_scoped() {
+                    // Work graph M14: a client bound to an org sees its org's
+                    // trackers only, as a host token does, and every roll-up
+                    // that sums across hosts is over the hosts it sees.
+                    match caller.org_scope(&s) {
+                        Ok(scope) => health::HealthView::Org(scope),
+                        Err(_) => health::HealthView::Blank,
+                    }
+                } else {
+                    health::HealthView::Fleet
+                };
+                health::health_for(&s, &view, tunnels)
+            }
+            Err(_) => {
+                let mut h = health::unready_health();
+                // An org-bound client is told nothing of another org's
+                // hosts, tunnels included.
+                if caller.host_alias.is_some() || !caller.is_scoped() {
+                    h.set_tunnels(tunnels);
+                }
+                h
+            }
+        };
         // On the hub the roll-up comes from a pooled connection, which says
         // nothing about the writer. A poisoned writer fails every write tool
         // (E_LOCK), and `db_ready: false` is how health reports that — so
@@ -31,7 +67,6 @@ impl FleetTools {
         if self.store.is_poisoned() {
             h.db_ready = false;
         }
-        h.set_tunnels(self.tunnels.health());
         // Host identity & health, task 2: the agents connected right now
         // outrank the stored hello for `agent_version` / `agent_behind`.
         if let Some(reg) = self.ssh.agent_registry() {
@@ -41,37 +76,6 @@ impl FleetTools {
                 .map(|a| (a.alias, a.agent_version))
                 .collect();
             health::overlay_agents(&mut h.hosts, &live, crate::app_version::get());
-        }
-        if let Some(host) = caller.host_alias.as_deref() {
-            // Its own host's telemetry (disk, load, versions) only; the host
-            // counts stay fleet-wide, as the usage note says.
-            h.hosts.retain(|r| r.alias == host);
-            match self.reader().lock() {
-                Ok(s) => {
-                    health::scope_usage_to_host(&mut h, &s, host);
-                    // Work graph M12.4: its org's trackers, its host's backlog.
-                    // A scope that cannot be read shows no tracker at all.
-                    match caller.org_scope(&s) {
-                        Ok(scope) => health::scope_trackers(&mut h, &s, &scope),
-                        Err(_) => h.trackers = Default::default(),
-                    }
-                }
-                Err(_) => h.trackers = Default::default(),
-            }
-        } else if caller.is_scoped() {
-            // Work graph M14: a client bound to an org sees its org's
-            // trackers only, as a host token does, and every roll-up that
-            // sums across hosts is re-derived over the hosts it sees.
-            match self.reader().lock() {
-                Ok(s) => match caller.org_scope(&s) {
-                    Ok(scope) => {
-                        health::scope_to_org(&mut h, &s, &scope);
-                        health::scope_trackers(&mut h, &s, &scope)
-                    }
-                    Err(_) => health::blank_rollups(&mut h),
-                },
-                Err(_) => health::blank_rollups(&mut h),
-            }
         }
         // The last reconcile error is the hub's own text about any host —
         // another org's too; a scoped caller gets that it failed, not why.

@@ -27,9 +27,9 @@
 //! sent; nothing is recorded in `decision_runs`.
 
 use crate::census::create_private;
-use crate::config::{self, HubOptions};
+use crate::config::HubOptions;
+use crate::dbarg::{db_path, open_read_only};
 use crate::out;
-use crate::serve;
 use clap::Subcommand;
 use fleet_core::service::decide::bench::status_map as sm;
 use fleet_core::service::decide::bench::work_link::{
@@ -38,7 +38,7 @@ use fleet_core::service::decide::bench::work_link::{
 use fleet_core::service::decide::haiku::{self, Haiku, HaikuConfig};
 use fleet_core::service::decide::DecideCtx;
 use fleet_core::service::nl::Detector;
-use fleet_core::store::Store;
+use fleet_core::store::{now_unix, Store};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -226,26 +226,6 @@ fn bind_haiku<'a>(
     Ok(Some(h))
 }
 
-fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-/// `--db`, else the hub's own `state.db` (which must exist).
-fn db_path(
-    db: Option<&Path>,
-    opts: &HubOptions,
-    env: &HashMap<String, String>,
-) -> Result<PathBuf, String> {
-    match db {
-        Some(p) if p.is_file() => Ok(p.to_path_buf()),
-        Some(p) => Err(format!("no database at {}", p.display())),
-        None => serve::existing_db(&config::resolve_data_dir(opts, env)),
-    }
-}
-
 fn parse_providers(v: &[String]) -> Result<Vec<Provider>, String> {
     v.iter()
         .map(|p| Provider::parse(p).ok_or_else(|| format!("unknown provider {p:?}")))
@@ -278,14 +258,21 @@ pub async fn run(
             let shape = Shape::parse(shape.as_deref().unwrap_or("choice"))
                 .ok_or("--shape is choice or choice+noul")?;
             let providers = parse_providers(&providers)?;
-            let o = BenchOptions::new(days, org, max_cases, split, providers, max_calls, now())
-                .map_err(|e| e.message)?
-                .with_shape(shape);
+            let o = BenchOptions::new(
+                days,
+                org,
+                max_cases,
+                split,
+                providers,
+                max_calls,
+                now_unix(),
+            )
+            .map_err(|e| e.message)?
+            .with_shape(shape);
             let path = db_path(db.as_deref(), opts, env)?;
 
             if let (Some(n), Some(file)) = (export_unlinked, out_path) {
-                let store = Store::open_read_only(&path)
-                    .map_err(|e| format!("open {} read-only: {e}", path.display()))?;
+                let store = open_read_only(&path)?;
                 let rows = wl::export_unlinked(&store, &o, n).map_err(|e| e.message)?;
                 let mut f = create_private(&file)?;
                 use std::io::Write;
@@ -339,8 +326,7 @@ pub async fn run(
                 r.notes.extend(note);
                 r
             } else {
-                let store = Store::open_read_only(&path)
-                    .map_err(|e| format!("open {} read-only: {e}", path.display()))?;
+                let store = open_read_only(&path)?;
                 let loaded =
                     wl::load(&store, &detector, &o, labeled.as_deref()).map_err(|e| e.message)?;
                 let haiku = bind_haiku(&ssh, haiku_cfg, &store)?;
@@ -480,8 +466,7 @@ async fn status_map(
     let haiku = match haiku_args.config(providers.contains(&sm::Provider::Haiku))? {
         Some(cfg) => {
             let path = db_path(db, opts, env)?;
-            let s = Store::open_read_only(&path)
-                .map_err(|e| format!("open {} read-only: {e}", path.display()))?;
+            let s = open_read_only(&path)?;
             bind_haiku(ssh, Some(cfg), &s)?
         }
         None => None,
@@ -491,8 +476,7 @@ async fn status_map(
     // file alone.
     if providers.iter().any(|p| p.is_model()) {
         let path = db_path(db, opts, env)?;
-        let s = Store::open_read_only(&path)
-            .map_err(|e| format!("open {} read-only: {e}", path.display()))?;
+        let s = open_read_only(&path)?;
         sm::resolve_label_orgs(&s, &mut rows).map_err(|e| match labels {
             Some(f) => format!("{}: {e}", f.display()),
             None => format!("the built-in set: {e}"),
@@ -1248,7 +1232,7 @@ mod tests {
         s.upsert_host("h1").unwrap();
         let session = |name: &str, cid: &str, prompt: &str| {
             let sid = s
-                .upsert_bg_session("h1", name, None, cid, None, now(), "bg", now())
+                .upsert_bg_session("h1", name, None, cid, None, now_unix(), "bg", now_unix())
                 .unwrap();
             s.rebind_conversation(sid, cid, StartSource::Startup, None, None)
                 .unwrap();

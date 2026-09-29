@@ -33,7 +33,8 @@ export async function loadHostTokens(): Promise<void> {
 
 function patchToken(alias: string, r: Result<HostTokenInfo>): void {
   if (r.ok && r.value) {
-    const info = r.value;
+    // The rotate warning is about this one call, not the token: keep it out of the cache.
+    const { warning: _warning, ...info } = r.value;
     hostTokens.update((m) => new Map(m).set(alias, info));
   }
 }

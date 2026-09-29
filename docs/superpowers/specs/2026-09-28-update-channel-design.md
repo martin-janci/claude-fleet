@@ -788,14 +788,20 @@ of these hold within `ready_timeout` (default 90 s), then keep holding for
      "hub": { "ready": true, "pid": 7154, "version": "0.3.4", "commit": "a83f19d…",
               "build_id": "rel-v0.3.4-a83f19d0c2…", "contract": 5, "agent_proto": [1, 1],
               "peer_proto": 1, "schema": 74, "started_at": 1790612008, "heartbeat_at": 1790612013,
-              "checks": { "store": "ok", "listener": "ok", "first_reconcile": "ok" } } }
+              "checks": { "store": "ok", "listener": "ok", "first_reconcile": "ok",
+                          "reconcile_failures": 0 } } }
    ```
 
    `first_reconcile` is one of:
-   - `ok`: the first pass of this process finished clean;
+   - `ok`: a pass of this process has finished clean. It is a latch: a
+     later failed pass does not undo it;
    - `pending`: no pass has finished yet;
-   - `failed`: it finished with failures, which is not ready;
+   - `failed`: passes finished, none of them clean, which is not ready;
    - `disabled`: `reconcile.interval_secs=0`, which counts as ready.
+
+   `reconcile_failures` is the running count of failed passes since the
+   last clean one (`fleet_health.hub.reconcile.consecutive_failures`). It
+   is reported and never part of `ready`.
 
    The commit and build ID come from `crates/fleet-hub/build.rs`:
    `FLEET_GIT_SHA` / `FLEET_BUILD_ID` from CI (`release.yml`, and the

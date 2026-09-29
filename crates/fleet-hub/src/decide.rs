@@ -25,14 +25,15 @@
 //!   them on a hub (a paired desktop shows them read-only).
 
 use crate::config::{self, HubOptions};
+use crate::dbarg::{db_path, open_read_only};
 use crate::out;
 use crate::serve;
 use clap::{Subcommand, ValueEnum};
 use fleet_core::service::decide;
 use fleet_core::service::decide::status_map::{self, ProposalAction, ProposalOutcome};
-use fleet_core::store::{DecisionRunFilter, DecisionRunRow, Secret, Store};
+use fleet_core::store::{now_unix, DecisionRunFilter, DecisionRunRow, Secret};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Subcommand, Debug)]
@@ -289,7 +290,7 @@ async fn decide_one(
     serve::existing_db(&config::resolve_data_dir(opts, env))?;
     if action == ProposalAction::Reject {
         let store = serve::open_store(opts, env)?;
-        return status_map::reject_proposal(&store, run, now()).map_err(|e| e.message);
+        return status_map::reject_proposal(&store, run, now_unix()).map_err(|e| e.message);
     }
     let (p, category) = {
         let ro = open_read_only(&db_path(None, opts, env)?)?;
@@ -317,7 +318,7 @@ async fn decide_one(
     let args = status_map::apply_one_args(&row, &p.section, &category);
     crate::pair::call_tool(&conn, "work_admin", args).await?;
     let store = serve::open_store(opts, env)?;
-    status_map::record_applied(&store, &p, &action, &category, now()).map_err(|e| e.message)
+    status_map::record_applied(&store, &p, &action, &category, now_unix()).map_err(|e| e.message)
 }
 
 /// Where `set-key` gets the key from.
@@ -367,30 +368,6 @@ fn read_one_line() -> Result<String, String> {
         .read_line(&mut line)
         .map_err(|e| format!("read the key from stdin: {e}"))?;
     Ok(line)
-}
-
-fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-/// `--db`, else the hub's own `state.db` (which must exist).
-fn db_path(
-    db: Option<PathBuf>,
-    opts: &HubOptions,
-    env: &HashMap<String, String>,
-) -> Result<PathBuf, String> {
-    match db {
-        Some(p) if p.is_file() => Ok(p),
-        Some(p) => Err(format!("no database at {}", p.display())),
-        None => serve::existing_db(&config::resolve_data_dir(opts, env)),
-    }
-}
-
-fn open_read_only(path: &Path) -> Result<Store, String> {
-    Store::open_read_only(path).map_err(|e| format!("open {} read-only: {e}", path.display()))
 }
 
 /// One run as a line: ids, words and numbers only.
@@ -456,7 +433,7 @@ pub async fn run(
             store
                 .set_decision_credential(key.as_ref(), reference.as_deref())
                 .map_err(|e| e.message)?;
-            let st = decide::status(&store, now(), 1).map_err(|e| e.message)?;
+            let st = decide::status(&store, now_unix(), 1).map_err(|e| e.message)?;
             out::line(if reference.is_some() {
                 "stored a reference to the Jev key; the hub reads it at each call"
             } else {
@@ -484,8 +461,8 @@ pub async fn run(
             if !(1..=365).contains(&days) {
                 return Err(format!("--days must be between 1 and 365, got {days}"));
             }
-            let store = open_read_only(&db_path(db, opts, env)?)?;
-            let st = decide::status(&store, now(), days).map_err(|e| e.message)?;
+            let store = open_read_only(&db_path(db.as_deref(), opts, env)?)?;
+            let st = decide::status(&store, now_unix(), days).map_err(|e| e.message)?;
             if json {
                 out::line(&serde_json::to_string_pretty(&st).map_err(|e| e.to_string())?);
             } else {
@@ -516,7 +493,7 @@ pub async fn run(
             if !(1..=1000).contains(&limit) {
                 return Err(format!("--limit must be between 1 and 1000, got {limit}"));
             }
-            let store = open_read_only(&db_path(db, opts, env)?)?;
+            let store = open_read_only(&db_path(db.as_deref(), opts, env)?)?;
             let rows = store
                 .list_decision_runs(&DecisionRunFilter {
                     feature,
@@ -552,7 +529,7 @@ pub async fn run(
             db,
             json,
         } => {
-            let store = open_read_only(&db_path(db, opts, env)?)?;
+            let store = open_read_only(&db_path(db.as_deref(), opts, env)?)?;
             let all = decide::status_map::proposals(&store, tracker).map_err(|e| e.message)?;
             if json {
                 out::line(&serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?);
@@ -572,6 +549,8 @@ pub async fn run(
 mod tests {
     use super::*;
     use clap::Parser;
+    use fleet_core::store::Store;
+    use std::path::Path;
 
     #[derive(Parser)]
     struct T {
@@ -710,7 +689,7 @@ mod tests {
             s.set_decision_credential(Some(&Secret::new(KEY)), None)
                 .unwrap();
             s.insert_decision_run(&fleet_core::store::NewDecisionRun {
-                at: now(),
+                at: now_unix(),
                 feature: "work_link".into(),
                 subject_kind: "session".into(),
                 subject_id: "7".into(),
@@ -723,7 +702,7 @@ mod tests {
             .unwrap();
         }
         let ro = open_read_only(&path).unwrap();
-        let st = decide::status(&ro, now(), 7).unwrap();
+        let st = decide::status(&ro, now_unix(), 7).unwrap();
         assert!(st.key.configured);
         let text = format!(
             "{}\n{}",
@@ -745,7 +724,7 @@ mod tests {
         );
         assert!(line.contains("flag_off"), "{line}");
         assert!(db_path(
-            Some(dir.path().join("nope.db")),
+            Some(&dir.path().join("nope.db")),
             &HubOptions::default(),
             &HashMap::new()
         )
@@ -799,7 +778,7 @@ mod tests {
             s.set_tracker_probe(tracker, None, &cfg).unwrap();
             let key = s.decision_fp_key().unwrap();
             s.insert_decision_run(&fleet_core::store::NewDecisionRun {
-                at: now(),
+                at: now_unix(),
                 feature: "status_map".into(),
                 subject_kind: status_map::SUBJECT_KIND.into(),
                 subject_id: status_map::subject_id(
@@ -893,7 +872,7 @@ mod tests {
         for (name, answer) in [("backlog", "todo"), ("ideas", "unsure")] {
             ids.push(
                 s.insert_decision_run(&fleet_core::store::NewDecisionRun {
-                    at: now(),
+                    at: now_unix(),
                     feature: "status_map".into(),
                     subject_kind: status_map::SUBJECT_KIND.into(),
                     subject_id: status_map::subject_id(

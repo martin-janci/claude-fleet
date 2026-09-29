@@ -502,7 +502,8 @@ this design's.
   is closed: for a bound client every roll-up there that sums across hosts
   (spend by day and by host, host / session / status counts, tunnels, the
   detection backlog) is taken over the hosts it sees only, its org's and,
-  under D31, unassigned ones (`health::scope_to_org`). The master, unbound
+  under D31, unassigned ones (`health::health_for` with `HealthView::Org`,
+  built in one pass; `hosts_in_scope` gives the visible hosts). The master, unbound
   clients and host tokens read as before.
 - 2026-09-27 (M14.0, brought to `main`): based on `main` `f10d0b92` instead
   of `be0e2bc`; the acceptance section is Part R (Part P is GHES on `main`);

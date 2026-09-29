@@ -19,8 +19,9 @@ use super::author::{
     UpdateArgs,
 };
 use super::layer::{Axis, Layer};
-use super::model::{is_valid_name, Kind};
-use super::sync::{self, secrets::is_valid_secret_name, ApplyArgs, PlanArgs};
+use super::model::Kind;
+use super::sync::{self, ApplyArgs, PlanArgs};
+use super::validate::{check_layer_name, check_name, check_secret_name};
 use super::ConfigureArgs;
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{codes, lock, IpcError};
@@ -88,83 +89,73 @@ pub struct DeleteSecretArgs {
     pub host_alias: Option<String>,
 }
 
-/// One catalog operation. On the wire: `{"action": "<snake_case>", "args":
-/// {…}}`, `args` absent for the operations that take none.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "action", content = "args", rename_all = "snake_case")]
-pub enum AdminCall {
-    Config,
-    Configure(ConfigureArgs),
-    Load(LoadArgs),
-    GetAsset(GetAssetArgs),
-    ListLayers,
-    ResolvePreview(ResolvePreviewArgs),
-    ProposeLayers,
-    SetHostLayers(SetHostLayersArgs),
-    LayerTemplate(LayerTemplateArgs),
-    WriteLayer(WriteLayerArgs),
-    DeleteLayer(LayerRef),
-    Inventory,
-    PlanSync(PlanArgs),
-    ApplySync(ApplyArgs),
-    LastSync,
-    ListSecrets,
-    SetSecret(SetSecretArgs),
-    DeleteSecret(DeleteSecretArgs),
-    CreateAsset(CreateArgs),
+/// Declares [`AdminCall`] with each variant's wire name written once: the
+/// literal is both the serde tag (`#[serde(rename = ...)]`) and what
+/// [`AdminCall::action`] answers, so the two cannot drift apart.
+macro_rules! admin_calls {
+    (@pat $variant:ident) => { AdminCall::$variant };
+    (@pat $variant:ident $args:ty) => { AdminCall::$variant(_) };
+    ($( $(#[$meta:meta])* $wire:literal => $variant:ident $(($args:ty))? ),* $(,)?) => {
+        /// One catalog operation. On the wire: `{"action": "<snake_case>",
+        /// "args": {…}}`, `args` absent for the operations that take none.
+        #[derive(Clone, Serialize, Deserialize)]
+        #[serde(tag = "action", content = "args")]
+        pub enum AdminCall {
+            $( $(#[$meta])* #[serde(rename = $wire)] $variant $(($args))?, )*
+        }
+
+        impl AdminCall {
+            /// Every action's wire name, in declaration order.
+            pub const ACTIONS: &'static [&'static str] = &[$($wire),*];
+
+            /// The wire name of this call's action, for audit lines and errors.
+            pub fn action(&self) -> &'static str {
+                match self {
+                    $( admin_calls!(@pat $variant $($args)?) => $wire, )*
+                }
+            }
+        }
+    };
+}
+
+admin_calls! {
+    "config" => Config,
+    "configure" => Configure(ConfigureArgs),
+    "load" => Load(LoadArgs),
+    "get_asset" => GetAsset(GetAssetArgs),
+    "list_layers" => ListLayers,
+    "resolve_preview" => ResolvePreview(ResolvePreviewArgs),
+    "propose_layers" => ProposeLayers,
+    "set_host_layers" => SetHostLayers(SetHostLayersArgs),
+    "layer_template" => LayerTemplate(LayerTemplateArgs),
+    "write_layer" => WriteLayer(WriteLayerArgs),
+    "delete_layer" => DeleteLayer(LayerRef),
+    "inventory" => Inventory,
+    "plan_sync" => PlanSync(PlanArgs),
+    "apply_sync" => ApplySync(ApplyArgs),
+    "last_sync" => LastSync,
+    "list_secrets" => ListSecrets,
+    "set_secret" => SetSecret(SetSecretArgs),
+    "delete_secret" => DeleteSecret(DeleteSecretArgs),
+    "create_asset" => CreateAsset(CreateArgs),
     /// Boxed: a whole asset (body and resources) is by far the largest
     /// variant, and every other call would pay for its size.
-    UpdateAsset(Box<UpdateArgs>),
-    DeleteAsset(AssetRef),
+    "update_asset" => UpdateAsset(Box<UpdateArgs>),
+    "delete_asset" => DeleteAsset(AssetRef),
     /// `catalog_add_resource` with the file already read on the caller's
     /// side ([`author::read_resource_file`]): the path names a file on the
     /// desktop, which the hub cannot open.
-    AddResourceBytes(AddResourceBytesArgs),
-    RemoveResource(RemoveResourceArgs),
-    LintAsset(AssetRef),
-    LintAll,
-    CommitPending(CommitPendingArgs),
-    Push,
-    RepoStatus,
-    Template(AssetRef),
+    "add_resource_bytes" => AddResourceBytes(AddResourceBytesArgs),
+    "remove_resource" => RemoveResource(RemoveResourceArgs),
+    "lint_asset" => LintAsset(AssetRef),
+    "lint_all" => LintAll,
+    "commit_pending" => CommitPending(CommitPendingArgs),
+    "push" => Push,
+    "repo_status" => RepoStatus,
+    "template" => Template(AssetRef),
 }
 
 impl AdminCall {
-    /// The wire name of this call's action, for audit lines and errors.
-    pub fn action(&self) -> &'static str {
-        match self {
-            AdminCall::Config => "config",
-            AdminCall::Configure(_) => "configure",
-            AdminCall::Load(_) => "load",
-            AdminCall::GetAsset(_) => "get_asset",
-            AdminCall::ListLayers => "list_layers",
-            AdminCall::ResolvePreview(_) => "resolve_preview",
-            AdminCall::ProposeLayers => "propose_layers",
-            AdminCall::SetHostLayers(_) => "set_host_layers",
-            AdminCall::LayerTemplate(_) => "layer_template",
-            AdminCall::WriteLayer(_) => "write_layer",
-            AdminCall::DeleteLayer(_) => "delete_layer",
-            AdminCall::Inventory => "inventory",
-            AdminCall::PlanSync(_) => "plan_sync",
-            AdminCall::ApplySync(_) => "apply_sync",
-            AdminCall::LastSync => "last_sync",
-            AdminCall::ListSecrets => "list_secrets",
-            AdminCall::SetSecret(_) => "set_secret",
-            AdminCall::DeleteSecret(_) => "delete_secret",
-            AdminCall::CreateAsset(_) => "create_asset",
-            AdminCall::UpdateAsset(_) => "update_asset",
-            AdminCall::DeleteAsset(_) => "delete_asset",
-            AdminCall::AddResourceBytes(_) => "add_resource_bytes",
-            AdminCall::RemoveResource(_) => "remove_resource",
-            AdminCall::LintAsset(_) => "lint_asset",
-            AdminCall::LintAll => "lint_all",
-            AdminCall::CommitPending(_) => "commit_pending",
-            AdminCall::Push => "push",
-            AdminCall::RepoStatus => "repo_status",
-            AdminCall::Template(_) => "template",
-        }
-    }
-
     /// True for the calls that only read: nothing in the checkout, the
     /// store or on a host changes.
     pub fn is_read(&self) -> bool {
@@ -185,50 +176,6 @@ impl AdminCall {
                 | AdminCall::RepoStatus
                 | AdminCall::Template(_)
         )
-    }
-}
-
-pub fn check_name(name: &str) -> Result<(), IpcError> {
-    if is_valid_name(name) {
-        Ok(())
-    } else {
-        Err(IpcError::new(
-            codes::E_INVALID,
-            format!("invalid asset name '{name}'"),
-        ))
-    }
-}
-
-pub fn check_layer_name(name: &str) -> Result<(), IpcError> {
-    if is_valid_name(name) {
-        Ok(())
-    } else {
-        Err(IpcError::new(
-            codes::E_INVALID,
-            format!("invalid layer name '{name}'"),
-        ))
-    }
-}
-
-pub fn check_resource_path(rel_path: &str) -> Result<(), IpcError> {
-    if super::repo::valid_resource_rel_path(rel_path) {
-        Ok(())
-    } else {
-        Err(IpcError::new(
-            codes::E_INVALID,
-            format!("invalid resource path: {rel_path}"),
-        ))
-    }
-}
-
-pub fn check_secret_name(name: &str) -> Result<(), IpcError> {
-    if is_valid_secret_name(name) {
-        Ok(())
-    } else {
-        Err(IpcError::new(
-            codes::E_INVALID,
-            format!("invalid secret name '{name}'; use [A-Z0-9_]+"),
-        ))
     }
 }
 
@@ -268,14 +215,8 @@ pub async fn run(
             check_layer_name(&a.name)?;
             json(author::layer_template(&a.name, a.axis))
         }
-        AdminCall::WriteLayer(a) => {
-            check_layer_name(&a.layer.name)?;
-            json(author::write_layer(&a.layer, store)?)
-        }
-        AdminCall::DeleteLayer(a) => {
-            check_layer_name(&a.name)?;
-            json(author::delete_layer(&a.name, store)?)
-        }
+        AdminCall::WriteLayer(a) => json(author::write_layer(&a.layer, store)?),
+        AdminCall::DeleteLayer(a) => json(author::delete_layer(&a.name, store)?),
         AdminCall::Inventory => json(super::inventory(store)?),
         AdminCall::PlanSync(a) => json(sync::plan_sync(a, store, ssh).await?),
         AdminCall::ApplySync(a) => json(sync::apply_sync(a, store, ssh, reg).await?),
@@ -289,34 +230,14 @@ pub async fn run(
         AdminCall::DeleteSecret(a) => {
             json(lock(store)?.delete_secret(&a.name, a.host_alias.as_deref())?)
         }
-        AdminCall::CreateAsset(a) => {
-            check_name(&a.name)?;
-            if let Some(from) = a.duplicate_from.as_deref() {
-                check_name(from)?;
-            }
-            json(author::create(a, store)?)
-        }
-        AdminCall::UpdateAsset(a) => {
-            check_name(&a.asset.header.name)?;
-            for r in &a.asset.resources {
-                check_resource_path(&r.rel_path)?;
-            }
-            json(author::update(*a, store)?)
-        }
-        AdminCall::DeleteAsset(a) => {
-            check_name(&a.name)?;
-            json(author::delete_asset(a, store)?)
-        }
+        // The authoring calls check their own names and paths, before they
+        // read the config or touch the checkout.
+        AdminCall::CreateAsset(a) => json(author::create(a, store)?),
+        AdminCall::UpdateAsset(a) => json(author::update(*a, store)?),
+        AdminCall::DeleteAsset(a) => json(author::delete_asset(a, store)?),
         AdminCall::AddResourceBytes(a) => json(author::add_resource_bytes(a, store)?),
-        AdminCall::RemoveResource(a) => {
-            check_name(&a.name)?;
-            check_resource_path(&a.rel_path)?;
-            json(author::remove_resource(a, store)?)
-        }
-        AdminCall::LintAsset(a) => {
-            check_name(&a.name)?;
-            json(author::lint_asset(a, store)?)
-        }
+        AdminCall::RemoveResource(a) => json(author::remove_resource(a, store)?),
+        AdminCall::LintAsset(a) => json(author::lint_asset(a, store)?),
         AdminCall::LintAll => json(author::lint_everything(store)?),
         AdminCall::CommitPending(a) => json(author::commit_pending(a, store)?),
         AdminCall::Push => json(author::push(store)?),
@@ -347,26 +268,215 @@ mod tests {
             v,
             serde_json::json!({ "action": "get_asset", "args": { "kind": "skill", "name": "s" } })
         );
-        for call in [
+        let calls = every_call();
+        assert_eq!(calls.len(), AdminCall::ACTIONS.len());
+        let mut seen = std::collections::BTreeSet::new();
+        for (call, wire) in calls.iter().zip(AdminCall::ACTIONS) {
+            assert_eq!(call.action(), *wire);
+            assert!(seen.insert(*wire), "{wire} twice");
+            let v = serde_json::to_value(call).unwrap();
+            assert_eq!(v["action"], *wire);
+            let back: AdminCall = serde_json::from_value(v.clone()).unwrap();
+            assert_eq!(back.action(), call.action());
+            assert_eq!(serde_json::to_value(&back).unwrap(), v, "{wire}");
+        }
+        // The names are the snake_case of the variant, as the desktop and
+        // `docs/hub.md` spell them.
+        for wire in AdminCall::ACTIONS {
+            assert!(
+                wire.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{wire}"
+            );
+        }
+    }
+
+    /// One of every variant, in declaration order.
+    fn every_call() -> Vec<AdminCall> {
+        let skill = |name: &str| AssetRef {
+            kind: Kind::Skill,
+            name: name.into(),
+        };
+        vec![
             AdminCall::Config,
+            AdminCall::Configure(ConfigureArgs {
+                repo_path: "/x".into(),
+                remote_url: Some("git@example.com:c.git".into()),
+            }),
             AdminCall::Load(LoadArgs { pull: true }),
+            AdminCall::GetAsset(GetAssetArgs {
+                kind: Kind::Agent,
+                name: "a".into(),
+            }),
+            AdminCall::ListLayers,
+            AdminCall::ResolvePreview(ResolvePreviewArgs {
+                host_alias: "h".into(),
+            }),
+            AdminCall::ProposeLayers,
+            AdminCall::SetHostLayers(SetHostLayersArgs {
+                host_alias: "h".into(),
+                role: Some("r".into()),
+                contexts: vec!["c".into()],
+            }),
+            AdminCall::LayerTemplate(LayerTemplateArgs {
+                name: "l".into(),
+                axis: Axis::Context,
+            }),
+            AdminCall::WriteLayer(WriteLayerArgs {
+                layer: author::layer_template("l", Axis::Role),
+            }),
+            AdminCall::DeleteLayer(LayerRef { name: "l".into() }),
+            AdminCall::Inventory,
+            AdminCall::PlanSync(PlanArgs {
+                host_alias: Some("h".into()),
+                kind: Some(Kind::Hook),
+                name: None,
+            }),
+            AdminCall::ApplySync(ApplyArgs {
+                plan_id: "p".into(),
+                force_partial: true,
+                call_id: Some(7),
+            }),
+            AdminCall::LastSync,
+            AdminCall::ListSecrets,
             AdminCall::SetSecret(SetSecretArgs {
                 name: "TOKEN".into(),
                 host_alias: None,
                 value: "v".into(),
             }),
+            AdminCall::DeleteSecret(DeleteSecretArgs {
+                name: "TOKEN".into(),
+                host_alias: Some("h".into()),
+            }),
+            AdminCall::CreateAsset(CreateArgs {
+                kind: Kind::Skill,
+                name: "s".into(),
+                duplicate_from: Some("t".into()),
+            }),
+            AdminCall::UpdateAsset(Box::new(UpdateArgs {
+                asset: author::template(Kind::Skill, "s"),
+            })),
+            AdminCall::DeleteAsset(skill("s")),
             AdminCall::AddResourceBytes(AddResourceBytesArgs {
                 kind: Kind::Skill,
                 name: "s".into(),
                 rel_path: "resources/a.sh".into(),
                 bytes: vec![0, 1, 2, 255],
             }),
-        ] {
-            let v = serde_json::to_value(&call).unwrap();
-            assert_eq!(v["action"], call.action());
-            let back: AdminCall = serde_json::from_value(v).unwrap();
-            assert_eq!(back.action(), call.action());
+            AdminCall::RemoveResource(RemoveResourceArgs {
+                kind: Kind::Skill,
+                name: "s".into(),
+                rel_path: "resources/a.sh".into(),
+            }),
+            AdminCall::LintAsset(skill("s")),
+            AdminCall::LintAll,
+            AdminCall::CommitPending(CommitPendingArgs {
+                message: Some("m".into()),
+            }),
+            AdminCall::Push,
+            AdminCall::RepoStatus,
+            AdminCall::Template(skill("s")),
+        ]
+    }
+
+    /// Every call that names an asset, a layer, a resource or a secret
+    /// refuses a hostile one with `E_INVALID` before it reads the catalog
+    /// config (unset here, so any later step would answer
+    /// `E_CATALOG_NOT_CONFIGURED`) or writes the store. `run` keeps a
+    /// pre-check only where the callee has none; this pins that dropping
+    /// the others lost nothing.
+    #[tokio::test]
+    async fn hostile_names_and_paths_are_refused_before_any_effect() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let ssh = Arc::new(SshClient::new());
+        let reg = CancellationRegistry::new();
+        let asset_ref = |name: &str| AssetRef {
+            kind: Kind::Skill,
+            name: name.into(),
+        };
+        let with_resource = |rel_path: &str| {
+            let mut asset = author::template(Kind::Skill, "ok");
+            asset.resources.push(super::super::model::Resource {
+                rel_path: rel_path.into(),
+                bytes: vec![1],
+            });
+            AdminCall::UpdateAsset(Box::new(UpdateArgs { asset }))
+        };
+        let mut calls: Vec<(String, AdminCall)> = Vec::new();
+        for bad in ["../x", "a/b", "", ".hidden"] {
+            let named = |a: AdminCall| (format!("{} {bad:?}", a.action()), a);
+            calls.push(named(AdminCall::GetAsset(GetAssetArgs {
+                kind: Kind::Skill,
+                name: bad.into(),
+            })));
+            calls.push(named(AdminCall::DeleteAsset(asset_ref(bad))));
+            calls.push(named(AdminCall::LintAsset(asset_ref(bad))));
+            calls.push(named(AdminCall::Template(asset_ref(bad))));
+            calls.push(named(AdminCall::CreateAsset(CreateArgs {
+                kind: Kind::Skill,
+                name: bad.into(),
+                duplicate_from: None,
+            })));
+            calls.push(named(AdminCall::CreateAsset(CreateArgs {
+                kind: Kind::Skill,
+                name: "ok".into(),
+                duplicate_from: Some(bad.into()),
+            })));
+            let mut asset = author::template(Kind::Skill, "ok");
+            asset.header.name = bad.into();
+            calls.push(named(AdminCall::UpdateAsset(Box::new(UpdateArgs {
+                asset,
+            }))));
+            calls.push(named(AdminCall::RemoveResource(RemoveResourceArgs {
+                kind: Kind::Skill,
+                name: bad.into(),
+                rel_path: "resources/a.sh".into(),
+            })));
+            calls.push(named(AdminCall::AddResourceBytes(AddResourceBytesArgs {
+                kind: Kind::Skill,
+                name: bad.into(),
+                rel_path: "resources/a.sh".into(),
+                bytes: vec![1],
+            })));
+            let mut layer = author::layer_template("ok", Axis::Role);
+            layer.name = bad.into();
+            calls.push(named(AdminCall::WriteLayer(WriteLayerArgs { layer })));
+            calls.push(named(AdminCall::DeleteLayer(LayerRef { name: bad.into() })));
+            calls.push(named(AdminCall::LayerTemplate(LayerTemplateArgs {
+                name: bad.into(),
+                axis: Axis::Role,
+            })));
         }
+        for bad in ["../x", "/abs", "resources/../../x"] {
+            let named = |a: AdminCall| (format!("{} {bad:?}", a.action()), a);
+            calls.push(named(AdminCall::RemoveResource(RemoveResourceArgs {
+                kind: Kind::Skill,
+                name: "ok".into(),
+                rel_path: bad.into(),
+            })));
+            calls.push(named(AdminCall::AddResourceBytes(AddResourceBytesArgs {
+                kind: Kind::Skill,
+                name: "ok".into(),
+                rel_path: bad.into(),
+                bytes: vec![1],
+            })));
+            calls.push(named(with_resource(bad)));
+        }
+        calls.push((
+            "set_secret \"bad-name\"".into(),
+            AdminCall::SetSecret(SetSecretArgs {
+                name: "bad-name".into(),
+                host_alias: None,
+                value: "v".into(),
+            }),
+        ));
+        for (label, call) in calls {
+            let err = match run(call, &store, &ssh, &reg).await {
+                Ok(v) => panic!("{label}: accepted, answered {v}"),
+                Err(e) => e,
+            };
+            assert_eq!(err.code, codes::E_INVALID, "{label}: {}", err.message);
+        }
+        assert!(store.lock().unwrap().list_secrets().unwrap().is_empty());
     }
 
     #[test]
