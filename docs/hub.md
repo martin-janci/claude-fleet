@@ -2224,7 +2224,10 @@ docker compose exec fleet-hub fleet-hub catalog reload --pull   # after a push t
 - `set <path> [--remote <url>]` records the path and loads it. A path with
   no checkout is cloned from `--remote`, with this machine's git
   credentials: for an SSH remote, allow the key `fleet-hub ssh-key` prints
-  to read the repository.
+  to read the repository. The path must be absolute (or start with `~/`)
+  and neither it nor the remote may start with `-`; a remote in git's
+  `<transport>::<address>` helper form (`ext::…`) is refused too
+  (`E_INVALID`) — the clone runs as the hub's own user.
 - `reload [--pull]` re-reads the checkout (optionally `git pull --ff-only`
   first). Nothing pulls on its own.
 - `show` prints the path, remote and last loaded commit.
@@ -2300,8 +2303,9 @@ usage stay stranded on the hidden row. Fold it in one transaction:
    `sqlite3 /volume1/docker/fleet-hub/data/state.db ".backup /volume1/docker/fleet-hub/backup-$(date +%F).db"`
 2. With the hub running: `fleet-hub host merge local mac` (or the
    `merge_host {from: "local", into: "mac"}` tool with the master token).
-   If `mcp.confirm_destructive` is on, approve the request on the desktop
-   or pass `confirm_nonce` from the `E_CONFIRM_REQUIRED` reply.
+   `merge_host` is confirm-gated and a hub has no approver, so if
+   `mcp.confirm_destructive` is on, turn it off before merging (and back
+   on afterwards if you want it).
 3. Verify: `list_hosts` no longer lists `local`; `list_worktrees
    {host_alias: "mac"}` shows the moved rows; `usage_report {host_alias:
    "mac"}`'s `by_day` includes the old days.

@@ -1642,6 +1642,15 @@ pub fn set_by(
             )?;
         }
     }
+    after_write(s, key);
+    Ok(())
+}
+
+/// What a write of `key` does besides the write: the `settings` frame for
+/// paired devices, `/events`' `context_full` threshold, the update
+/// refresh's wake-up. Run by [`set_by`], and by the hub's settings watch
+/// for a key another process wrote (`fleet-hub settings apply`).
+pub fn after_write(s: &Store, key: &str) {
     s.emit_settings_changed(key);
     if key == HEALTH_CONTEXT_RED_PCT {
         // The hub's `/events` stamps `needs_attention` without a store; keep
@@ -1652,7 +1661,6 @@ pub fn set_by(
         // A new track or check interval wakes the hub's channel refresh.
         crate::service::update::settings_changed(key);
     }
-    Ok(())
 }
 
 #[cfg(test)]

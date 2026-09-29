@@ -1090,10 +1090,10 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
 
     // Settings another process wrote (`fleet-hub settings apply`): the
     // `/events` threshold, the update refresh's wake-up and the `settings`
-    // frame, as `service::settings::set` does in-process. Stopped with the
-    // ticks.
+    // frame, through `service::settings::after_write` as `set` does
+    // in-process. Stopped with the ticks.
     let settings_watch_handle =
-        crate::settings::spawn_watch(Arc::clone(&store), Arc::clone(&bus), ticks_cancel.clone());
+        crate::settings::spawn_watch(Arc::clone(&store), ticks_cancel.clone());
 
     wait_for_signal().await?;
     tracing::info!("fleet-hub stopping");

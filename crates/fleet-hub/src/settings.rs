@@ -11,9 +11,9 @@
 //! `settings` frame for paired devices, `/events`' `context_full`
 //! threshold, the update refresh's wake-up — happens in THIS process,
 //! on a silent bus; the running hub catches up within [`WATCH_EVERY`]
-//! through [`spawn_watch`], which follows the audit trail and the few
-//! values the hub caches. A key marked "applies after a restart" still
-//! needs one.
+//! through [`spawn_watch`], which follows the audit trail and runs
+//! `service::settings::after_write` for each key written. A key marked
+//! "applies after a restart" still needs one.
 
 use crate::config::{self, HubOptions};
 use crate::out;
@@ -157,74 +157,42 @@ fn report(
 /// How often the running hub looks for settings another process wrote.
 pub(crate) const WATCH_EVERY: Duration = Duration::from_secs(5);
 
-/// What the settings watch last saw: the values the running hub keeps
-/// outside the store, and the newest audit row.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Seen {
-    /// `health.context_red_pct` as `/events` uses it.
-    pub red_pct: f64,
-    /// `update.track` and `update.check_interval_secs`, as stored.
-    pub update: (Option<String>, Option<String>),
-    /// The newest `setting_audit` id.
-    pub audit_id: i64,
+/// The keys written since audit row `after` and the newest audit id, or,
+/// with `after: None` (the watch starting), only the newest id.
+fn audit_since(s: &Store, after: Option<i64>) -> Result<(i64, Vec<String>), String> {
+    s.setting_audit_since(after)
+        .map_err(|e| format!("read the settings audit: {e}"))
 }
 
-/// What the running hub has to do after a look.
-#[derive(Debug, Default, PartialEq)]
-pub(crate) struct Effects {
-    /// A new `context_full` threshold for `/events`.
-    pub red_pct: Option<f64>,
-    /// The update channel's track or interval changed: wake its refresh.
-    pub wake_update: bool,
-    /// Registered keys written since the last look: a `settings` frame each.
-    pub keys: Vec<String>,
-}
-
-/// Read what the watch compares. `audit_after: None` starts the watch (no
-/// keys); `Some(id)` also returns the keys written after audit row `id`.
-pub(crate) fn look(s: &Store, audit_after: Option<i64>) -> Result<(Seen, Vec<String>), String> {
-    use fleet_core::service::settings::{UPDATE_CHECK_INTERVAL_SECS, UPDATE_TRACK};
-    let (audit_id, keys) = s
-        .setting_audit_since(audit_after)
-        .map_err(|e| format!("read the settings audit: {e}"))?;
-    let get = |k: &str| s.get_setting(k).map_err(|e| format!("read {k}: {e}"));
-    Ok((
-        Seen {
-            red_pct: fleet_core::service::health::context_red_pct(s),
-            update: (get(UPDATE_TRACK)?, get(UPDATE_CHECK_INTERVAL_SECS)?),
-            audit_id,
-        },
-        keys,
-    ))
-}
-
-/// What changed between two looks. Pure: the watch's whole decision.
+/// One look of the watch: run `service::settings::after_write` for every
+/// key written after audit row `after`, and return the newest audit id.
 ///
 /// A write this process made through `service::settings::set` already did
 /// all of this; doing it again is harmless (the same threshold, one more
 /// channel refresh, a second `settings` frame a device re-reads on).
-pub(crate) fn effects(prev: &Seen, now: &Seen, keys: Vec<String>) -> Effects {
-    Effects {
-        red_pct: (prev.red_pct.to_bits() != now.red_pct.to_bits()).then_some(now.red_pct),
-        wake_update: prev.update != now.update,
-        keys,
+pub(crate) fn catch_up(s: &Store, after: i64) -> Result<i64, String> {
+    let (last, keys) = audit_since(s, Some(after))?;
+    for key in &keys {
+        fleet_core::service::settings::after_write(s, key);
     }
+    Ok(last)
 }
 
 /// Follow settings written behind the running hub's back — `fleet-hub
 /// settings apply`, which writes `state.db` from its own process — and do
-/// what `service::settings::set` would have done in the hub: stamp the new
-/// `context_full` threshold on `bus`, wake the update refresh, and emit a
-/// `settings` frame per key. Stopped with the ticks.
+/// what `service::settings::set` would have done in the hub
+/// (`service::settings::after_write`: the `settings` frame, the
+/// `context_full` threshold on the store's bus, the update refresh's
+/// wake-up) for each key the audit trail shows written. Stopped with the
+/// ticks.
 pub(crate) fn spawn_watch(
     store: Arc<Mutex<Store>>,
-    bus: Arc<fleet_core::events::BroadcastEventBus>,
     cancel: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut seen = match store.lock() {
-            Ok(s) => match look(&s, None) {
-                Ok((seen, _)) => seen,
+        let mut audit_id = match store.lock() {
+            Ok(s) => match audit_since(&s, None) {
+                Ok((id, _)) => id,
                 Err(e) => {
                     tracing::warn!(error = %e, "settings watch not started");
                     return;
@@ -241,30 +209,16 @@ pub(crate) fn spawn_watch(
             }
             // The guard is dropped before the next `.await`.
             let Ok(s) = store.lock() else { break };
-            let (now, keys) = match look(&s, Some(seen.audit_id)) {
-                Ok(v) => v,
+            match catch_up(&s, audit_id) {
+                Ok(id) => audit_id = id,
                 Err(e) => {
                     if !warned {
                         tracing::warn!(error = %e, "settings watch: cannot read settings");
                         warned = true;
                     }
-                    continue;
                 }
-            };
-            let fx = effects(&seen, &now, keys);
-            if let Some(pct) = fx.red_pct {
-                bus.set_context_red_pct(pct);
-            }
-            if fx.wake_update {
-                fleet_core::service::update::settings_changed(
-                    fleet_core::service::settings::UPDATE_TRACK,
-                );
-            }
-            for key in &fx.keys {
-                s.emit_settings_changed(key);
             }
             drop(s);
-            seen = now;
         }
     })
 }
@@ -331,39 +285,27 @@ mod tests {
         use fleet_core::service::settings::{self as reg, Actor};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.db");
-        // The running hub's connection, and the CLI's, on the same file.
-        let hub = Store::open_with_bus(&path, Arc::new(fleet_core::events::NoopEventBus)).unwrap();
-        let (seen, keys) = look(&hub, None).unwrap();
+        // The running hub's connection, on its `/events` bus, and the
+        // CLI's, on a silent one, on the same file.
+        let bus = Arc::new(fleet_core::events::BroadcastEventBus::default());
+        let dyn_bus: Arc<dyn fleet_core::events::EventBus> = bus.clone();
+        let hub = Store::open_with_bus(&path, dyn_bus).unwrap();
+        let (start, keys) = audit_since(&hub, None).unwrap();
         assert!(keys.is_empty());
-        assert_eq!(
-            effects(&seen, &look(&hub, Some(seen.audit_id)).unwrap().0, vec![]),
-            Effects::default()
-        );
+        assert_eq!(catch_up(&hub, start).unwrap(), start, "nothing written");
 
         let cli = Store::open_with_bus(&path, Arc::new(fleet_core::events::NoopEventBus)).unwrap();
         reg::set_by(&cli, reg::HEALTH_CONTEXT_RED_PCT, "70", Actor::Person, None).unwrap();
-        let (now, keys) = look(&hub, Some(seen.audit_id)).unwrap();
-        let fx = effects(&seen, &now, keys);
-        assert_eq!(fx.red_pct, Some(70.0));
-        assert!(!fx.wake_update);
-        assert_eq!(fx.keys, [reg::HEALTH_CONTEXT_RED_PCT]);
+        assert_ne!(bus.context_red_pct().to_bits(), 70.0_f64.to_bits());
+        let (_, keys) = audit_since(&hub, Some(start)).unwrap();
+        assert_eq!(keys, [reg::HEALTH_CONTEXT_RED_PCT]);
+        // The key from the audit runs `after_write` in the hub: the
+        // `/events` threshold follows the CLI's write.
+        let next = catch_up(&hub, start).unwrap();
+        assert!(next > start);
+        assert_eq!(bus.context_red_pct().to_bits(), 70.0_f64.to_bits());
 
-        reg::set_by(
-            &cli,
-            reg::UPDATE_CHECK_INTERVAL_SECS,
-            "7200",
-            Actor::Person,
-            None,
-        )
-        .unwrap();
-        let (later, keys) = look(&hub, Some(now.audit_id)).unwrap();
-        let fx = effects(&now, &later, keys);
-        assert_eq!(fx.red_pct, None, "unchanged since the last look");
-        assert!(fx.wake_update);
-        assert_eq!(fx.keys, [reg::UPDATE_CHECK_INTERVAL_SECS]);
-
-        // Nothing new: nothing to do.
-        let (same, keys) = look(&hub, Some(later.audit_id)).unwrap();
-        assert_eq!(effects(&later, &same, keys), Effects::default());
+        // Nothing new: the same id, nothing to do.
+        assert_eq!(catch_up(&hub, next).unwrap(), next);
     }
 }
