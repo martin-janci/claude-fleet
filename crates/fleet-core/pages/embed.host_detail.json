@@ -1,0 +1,22 @@
+{
+  "spec": "fleet.page/1",
+  "id": "embed.host_detail",
+  "title": "Host detail: usage",
+  "intro": "The host's Claude account: its headroom in full, with a refresh.",
+  "layout": "embed",
+  "slot": "host_detail",
+  "sections": [
+    {
+      "title": "Usage",
+      "items": [
+        {
+          "type": "account_usage",
+          "source": {
+            "id": "accounts.usage"
+          },
+          "view": "block"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "spec": "fleet.page/1",
+  "id": "embed.hosts_group_title",
+  "title": "Hosts list: account title",
+  "intro": "The account group's plan tier and how fresh its numbers are.",
+  "layout": "embed",
+  "slot": "hosts_group_title",
+  "sections": [
+    {
+      "title": "Usage",
+      "items": [
+        {
+          "type": "account_usage",
+          "source": {
+            "id": "accounts.usage"
+          },
+          "view": "freshness"
+        }
+      ]
+    }
+  ]
+}

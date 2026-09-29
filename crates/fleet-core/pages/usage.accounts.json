@@ -1,0 +1,22 @@
+{
+  "spec": "fleet.page/1",
+  "id": "usage.accounts",
+  "title": "Claude accounts",
+  "parent": "usage",
+  "layout": "data_page",
+  "intro": "Each Claude account's plan headroom: the 5-hour and weekly windows and per-model limits, checked from a host logged in to it.",
+  "sections": [
+    {
+      "title": "Accounts",
+      "items": [
+        {
+          "type": "account_usage",
+          "source": {
+            "id": "accounts.usage"
+          },
+          "view": "block"
+        }
+      ]
+    }
+  ]
+}

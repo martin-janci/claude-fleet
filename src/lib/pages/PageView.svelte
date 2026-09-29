@@ -13,6 +13,7 @@
   import ResourcePage from './ResourcePage.svelte';
   import ReviewApply from './ReviewApply.svelte';
   import PageActionButton from './PageActionButton.svelte';
+  import AccountsUsage from './usage/AccountsUsage.svelte';
   import type { SettingProposal } from './review';
   import type { ResourceType } from './resources';
   import { hosts } from '../hosts';
@@ -109,7 +110,11 @@
   /** Data items read this app's store: a paired desktop shows none. */
   const showData = $derived(!readonly && !remote);
   const isData = (i: Section['items'][number]) =>
-    i.type === 'stat' || i.type === 'record' || i.type === 'table' || i.type === 'chart';
+    i.type === 'stat' ||
+    i.type === 'record' ||
+    i.type === 'table' ||
+    i.type === 'chart' ||
+    i.type === 'account_usage';
 
   let root = $state<HTMLElement>();
 
@@ -226,6 +231,8 @@
       {:else if item.type === 'action'}
         {@const action = actions.find((a) => a.id === item.action)}
         {#if action && !readonly && !remote}<PageActionButton {action} onran={() => dataTick++} />{/if}
+      {:else if item.type === 'account_usage'}
+        {#if showData}<AccountsUsage view={item.view} />{/if}
       {:else if showData}
         {@const spec = sourceOf(item.source.id)}
         <DataItem

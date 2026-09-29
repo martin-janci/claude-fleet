@@ -317,6 +317,42 @@ fn check_item(
                 cx.text(at, "title", t, MAX_TITLE);
             }
         }
+        Item::AccountUsage { source, view } => {
+            if let Some(shape) = check_source(cx, at, source) {
+                if shape != Shape::AccountUsage {
+                    cx.bad(
+                        at,
+                        format!("account_usage shows account usage, not {}", shape.name()),
+                    );
+                }
+            }
+            match (page.layout, page.slot) {
+                (super::model::Layout::Embed, Some(slot)) => {
+                    if !catalog::slot_views(slot).contains(view) {
+                        cx.bad(
+                            at,
+                            format!(
+                                "the {slot:?} slot takes {:?}, not the {view:?} view",
+                                catalog::slot_views(slot)
+                            ),
+                        );
+                    }
+                }
+                (super::model::Layout::Embed, None) => {}
+                _ => {
+                    if !catalog::PAGE_USAGE_VIEWS.contains(view) {
+                        cx.bad(
+                            at,
+                            format!(
+                                "on a page, account_usage is one of {:?}: the {view:?} view \
+                                 belongs in a slot",
+                                catalog::PAGE_USAGE_VIEWS
+                            ),
+                        );
+                    }
+                }
+            }
+        }
         Item::Notice { text, .. } => cx.text(at, "text", text, MAX_TEXT),
         Item::Custom { .. } => {}
         Item::Action { action } => {
@@ -354,10 +390,33 @@ fn check_section(
     }
 }
 
+/// An `embed` page names a slot and sits in no page tree; nothing else
+/// names a slot.
+fn check_embed(cx: &mut Ctx, page: &Page) {
+    let embed = page.layout == super::model::Layout::Embed;
+    match (embed, page.slot) {
+        (true, None) => cx.bad("", "an embed page names its slot"),
+        (false, Some(_)) => cx.bad("", "only an embed page names a slot"),
+        _ => {}
+    }
+    if embed {
+        if page.parent.is_some() {
+            cx.bad(
+                "",
+                "an embed page sits in a screen, not the page tree: no parent",
+            );
+        }
+        if !page.tabs.is_empty() {
+            cx.bad("", "an embed page has sections, not tabs");
+        }
+    }
+}
+
 /// The source a data item reads, if it reads one.
 fn source_of(item: &Item) -> Option<&super::model::SourceRef> {
     match item {
         Item::Stat { source, .. }
+        | Item::AccountUsage { source, .. }
         | Item::Record { source }
         | Item::Table { source, .. }
         | Item::Chart { source, .. } => Some(source),
@@ -551,6 +610,7 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
             }
         }
         check_filters(&mut cx, page);
+        check_embed(&mut cx, page);
         if !page.list_items.is_empty() && resource.is_none() {
             cx.bad("", "list_items belong to a master_detail page");
         }
@@ -577,6 +637,43 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
             if let Item::Link { page: target, .. } = item {
                 if !ids.contains(target.as_str()) {
                     cx.bad(&at, format!("links to `{target}`, which is not a page"));
+                }
+            }
+        });
+    }
+
+    let mut slots: BTreeMap<String, &str> = BTreeMap::new();
+    let embeds: BTreeSet<&str> = pages
+        .iter()
+        .filter(|p| p.layout == super::model::Layout::Embed)
+        .map(|p| p.id.as_str())
+        .collect();
+    for page in pages {
+        let mut bad = |at: String, message: String| {
+            problems.push(Problem {
+                page: page.id.clone(),
+                at,
+                message,
+            })
+        };
+        if let Some(slot) = page.slot {
+            if let Some(first) = slots.insert(format!("{slot:?}"), &page.id) {
+                bad(
+                    String::new(),
+                    format!("{first} already fills the {slot:?} slot"),
+                );
+            }
+        }
+        if page.parent.as_deref().is_some_and(|p| embeds.contains(p)) {
+            bad(String::new(), "an embed page is no page's parent".into());
+        }
+        for_each_item(page, |at, item| {
+            if let Item::Link { page: target, .. } = item {
+                if embeds.contains(target.as_str()) {
+                    bad(
+                        at,
+                        format!("`{target}` is an embed page: nothing links to it"),
+                    );
                 }
             }
         });

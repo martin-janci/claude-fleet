@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/svelte';
 import { describe, it, expect } from 'vitest';
 import UsageBar from './UsageBar.svelte';
-import type { UsageWindow } from './account_usage_store';
+import type { UsageWindow } from '../../account_usage_store';
 
 const NOW = 1789396320; // Mon 2026-09-14 14:32 UTC
 const MIN = 60;

@@ -123,6 +123,13 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   item that takes it (Usage's window and host); Usage → Work graph usage
   (`usage.work`, source `work.usage` over `UsageSummary::rows`) replaced
   the hand-built WorkUsage panel and the `work_usage` command.
+  P4d: layout L8 `embed` places catalog items in the desktop's own
+  screens at a closed `Slot`; account usage (`account_usage { view }`,
+  live source `accounts.usage` over `list_account_usage`) is drawn that
+  way in Host detail, the Hosts list, the New-session chips and the
+  footer, and on Usage → Claude accounts. Embed pages are not in
+  `list_pages`: the desktop reads `src/lib/pages/embeds.generated.json`
+  (REGEN_PAGE_DOCS); the views are `src/lib/pages/usage/`.
   P5: `set_setting { propose: true, why }` leaves a proposal, never a
   write (`service/settings_review.rs`, migration 083); every registered
   write is audited through `settings::set_by` with its `Actor`; layout L6
