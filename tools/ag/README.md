@@ -10,8 +10,7 @@ claude-fleet sessions — and tells you what is missing on a machine.
 curl -fsSL https://raw.githubusercontent.com/martin-janci/claude-fleet/main/tools/ag/install.sh | bash
 ```
 
-Then `ag doctor`. claude-fleet will install `ag` on every host it provisions
-(from F2 — see the roadmap in the design spec; nothing does this yet).
+Then `ag doctor`. claude-fleet installs `ag` (and a `cl` command = `claude --yolo`) on every host it provisions, unless the `provision.install_ag` setting is off.
 
 ## Use
 
