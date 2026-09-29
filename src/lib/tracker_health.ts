@@ -86,7 +86,12 @@ const PROVIDER_SHORT: Record<string, string> = {
  *  does not know. */
 export function providerShort(provider: string | undefined): string {
   if (!provider) return 'tracker';
-  return PROVIDER_SHORT[provider] ?? provider;
+  return knownProviderShort(provider) ?? provider;
+}
+
+/** "Jira", "GitHub", … for a provider id this build knows; null otherwise. */
+export function knownProviderShort(provider: string): string | null {
+  return Object.hasOwn(PROVIDER_SHORT, provider) ? PROVIDER_SHORT[provider] : null;
 }
 
 /** "Jira (acme)". A name that already says its provider ("acme (GitHub)")
@@ -132,8 +137,9 @@ export function plainUntrusted(e: string | null | undefined): string {
   return e;
 }
 
-/** The Settings section an Attention item links to. */
-export const RECONNECT_SECTION = 'work';
+/** The Settings page an Attention item links to (the generated Trackers
+ *  page, declarative pages P4b). */
+export const RECONNECT_SECTION = 'settings.trackers';
 
 export interface TrackerAttentionItem {
   /** `tracker-<id>`: one item per tracker, whatever the roll-up repeats. */

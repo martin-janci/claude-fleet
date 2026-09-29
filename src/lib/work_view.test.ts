@@ -1,5 +1,5 @@
 // The Work view's contract layer (work graph M14): the argument shapes of
-// every command, the filters' round trips, sections merged from pages, the
+// every command, the filters' normal form, sections merged from pages, the
 // occurrence rules, conflicts and older hubs, and the undo of a decision.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
@@ -8,7 +8,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import { sessions } from './sessions';
 import { session } from './hosts_fixture';
-import { linkSessionWork, confirmSessionWork, rejectWorkLink, unlinkSessionWork } from './work';
+import { knownProviderShort, providerShort } from './tracker_health';
+import { linkSessionWork, confirmSessionWork, onWorkChangedDebounced, rejectWorkLink, unlinkSessionWork } from './work';
 import {
   ackWorkLink,
   activeFilterCount,
@@ -21,9 +22,7 @@ import {
   deleteWorkRule,
   deleteWorkView,
   distributeTasks,
-  filtersFromQuery,
   filtersKey,
-  filtersToQuery,
   groupSessionLinks,
   groupSourceText,
   isOccurrenceOf,
@@ -37,9 +36,11 @@ import {
   orgSourceText,
   placementNote,
   placeWork,
+  providerName,
+  keyPrefix,
+  ruleDraftFor,
   readErrorText,
   NEWER_HUB,
-  noticeText,
   reconsiderWorkLink,
   sameFilters,
   saveWorkRule,
@@ -52,12 +53,12 @@ import {
   showTaskInWorkView,
   sidebarView,
   taskDetailOpen,
-  tasksShowingSession,
   toggleSidebarView,
   trackerDown,
   trackerDownLabel,
   undoOf,
   workChanged,
+  bumpWorkChanged,
   workOrgImpact,
   workReview,
   workRulePreview,
@@ -236,15 +237,6 @@ describe('filters', () => {
     expect(normalizeFilters(null)).toEqual({});
   });
 
-  it('round-trips through a URL-safe string', () => {
-    const f = { org: 3, tracker: 'local' as const, status: 'in_progress' as const, mine: true, has: 'past_only' as const, review: true, query: 'log in & out', group: 'tracker:1:ABC' };
-    const q = filtersToQuery(f);
-    expect(q).not.toMatch(/[ &]out/);
-    expect(filtersFromQuery(q)).toEqual(f);
-    expect(filtersFromQuery('?org=none&tracker=2')).toEqual({ org: 'none', tracker: 2 });
-    expect(filtersFromQuery('status=bogus&mine=0')).toEqual({});
-  });
-
   it('keys equal filters equally, whatever the field order', () => {
     expect(filtersKey({ query: 'x', org: 1 })).toBe(filtersKey({ org: 1, query: 'x', status: 'any' }));
     expect(sameFilters({ mine: true }, { mine: false })).toBe(false);
@@ -304,20 +296,6 @@ describe('sections', () => {
     expect(m.map((t) => t.task_id)).toEqual(['item:1', 'item:2', 'item:3']);
     expect(m[1].title).toBe('new');
   });
-
-  it('finds every task that shows the selected session', () => {
-    const st = distributeTasks({
-      tasks: [
-        task({ task_id: 'item:1', sessions: [link({ session_id: 7 })] }),
-        task({ task_id: 'item:2', sessions: [link({ session_id: 7, primary: false, link_id: 43 })] }),
-        task({ task_id: 'item:3', sessions: [link({ session_id: 8 })] }),
-        task({ task_id: 'item:4', sessions: [link({ session_id: 7, state: 'ended', link_id: 44 })] }),
-      ],
-    });
-    const s = buildSections([{ org_id: 1, group: task().group, count: 4 }], [], st);
-    expect([...tasksShowingSession(s, 7)].sort()).toEqual(['item:1', 'item:2']);
-    expect(tasksShowingSession(s, null).size).toBe(0);
-  });
 });
 
 describe('occurrences and provenance', () => {
@@ -353,6 +331,65 @@ describe('occurrences and provenance', () => {
     expect(groupSourceText({ id: 'repo:acme/api', label: 'acme/api', source: 'repo' }, t)).toContain('acme/api');
     expect(groupSourceText({ id: 'key:ABC', label: 'ABC', source: 'key' }, t)).toBe('from its key prefix ABC');
     expect(groupSourceText({ id: 'none', label: '', source: 'none' }, t)).toContain('no group');
+  });
+
+  it('names a provider from the one table, "the tracker" for none or unknown', () => {
+    expect(providerName('jira_dc')).toBe('Jira');
+    expect(providerName('github')).toBe('GitHub');
+    expect(providerName('nope')).toBe('the tracker');
+    expect(providerName('constructor')).toBe('the tracker');
+    expect(providerName(null)).toBe('the tracker');
+    expect(knownProviderShort('linear')).toBe('Linear');
+    expect(knownProviderShort('nope')).toBeNull();
+    // The tracker settings' short name is unchanged: the id when unknown.
+    expect(providerShort('jira_dc')).toBe('Jira');
+    expect(providerShort('nope')).toBe('nope');
+    expect(providerShort(undefined)).toBe('tracker');
+  });
+
+  it('reads a key prefix as the hub does', () => {
+    expect(keyPrefix('ABC-12')).toBe('ABC');
+    expect(keyPrefix('abc-12')).toBe('ABC');
+    expect(keyPrefix('ops2.x-12')).toBe('OPS2.X');
+    expect(keyPrefix('1PX-3')).toBe('1PX');
+    expect(keyPrefix('ABC-12a')).toBeNull();
+    expect(keyPrefix('ABC-')).toBeNull();
+    expect(keyPrefix('-12')).toBeNull();
+    expect(keyPrefix('ABC')).toBeNull();
+    expect(keyPrefix(null)).toBeNull();
+  });
+
+  it('drafts a rule from where the task is grouped', () => {
+    const none = { id: 'none', label: '', source: 'none' };
+    // A key group: the group's own label is the prefix.
+    const keyed = ruleDraftFor(task({ kind: 'local', tracker_id: null, key: 'abc-12', group: { id: 'key:ABC', label: 'ABC', source: 'key' } }), 'G');
+    expect(keyed).toEqual({
+      name: '',
+      enabled: true,
+      group: 'G',
+      expected_version: 0,
+      conditions: { tracker_id: null, container: null, key_prefix: 'ABC', repo: null, title_contains: null },
+    });
+    // No group: the key as the hub reads it.
+    expect(ruleDraftFor(task({ kind: 'local', key: 'ops2.x-12', group: none }), '').conditions.key_prefix).toBe('OPS2.X');
+    expect(ruleDraftFor(task({ kind: 'local', key: 'abc-12', group: none }), '').conditions.key_prefix).toBe('ABC');
+    expect(ruleDraftFor(task({ kind: 'local', key: 'ABC-12a', group: none }), '').conditions.key_prefix).toBeNull();
+    // A tracker group: its tracker and container, never a key prefix.
+    const tr = ruleDraftFor(task(), 'Infra', 'Infra');
+    expect(tr.name).toBe('Infra');
+    expect(tr.conditions).toEqual({ tracker_id: 1, container: 'ABC', key_prefix: null, repo: null, title_contains: null });
+    // A repo group: the repository, and a key prefix only when the key parses.
+    const repo = { id: 'repo:acme/api', label: 'acme/api', source: 'repo' };
+    expect(ruleDraftFor(task({ kind: 'local', key: 'API-7', group: repo }), 'x').conditions).toEqual({
+      tracker_id: null,
+      container: null,
+      key_prefix: 'API',
+      repo: 'acme/api',
+      title_contains: null,
+    });
+    expect(ruleDraftFor(task({ kind: 'local', key: null, group: repo }), 'x').conditions.key_prefix).toBeNull();
+    // A tracker task names its tracker whatever the group.
+    expect(ruleDraftFor(task({ tracker_id: 4, group: repo }), 'x').conditions.tracker_id).toBe(4);
   });
 
   it('a failing tracker is "down", not "no sessions"', () => {
@@ -409,7 +446,6 @@ describe('errors and undo', () => {
     expect(conflictCurrent({})).toBeNull();
     const n = conflictNotice({ code: 'E_CONFLICT', message: 'x', details: { view_id: 1, version: 4 } }, 'The view “A”');
     expect(n).toEqual({ conflict: true, text: expect.stringContaining('The view “A” changed elsewhere'), current: 'Now: version 4' });
-    expect(noticeText(n)).toContain('Now: version 4');
     expect(conflictNotice({ code: 'E_INVALID', message: 'x' }, 'it')).toBeNull();
   });
 
@@ -542,6 +578,59 @@ describe('stores', () => {
     expect(sessionEventsTouchWork([{ type: 'killed', id: 7 }], cur, new Set())).toBe(true);
     expect(sessionEventsTouchWork([{ type: 'killed', id: 1 }], cur, new Set())).toBe(false);
   });
+
+  it('every attention reason the hub draws refreshes a shown row; turns and reads do not', () => {
+    const plain = session('mefistos', 'plain', { id: 1, context_pct: 10 });
+    const cur = [plain];
+    const shown = new Set([1]);
+    const touches = (row: typeof plain) => sessionEventsTouchWork([{ type: 'updated', row }], cur, shown);
+    // The reasons the old hand-written check missed.
+    expect(touches({ ...plain, context_pct: 97 })).toBe(true);
+    expect(touches({ ...plain, stale_working_at: 1790000000 })).toBe(true);
+    expect(touches({ ...plain, ci_status: 'failing' })).toBe(true);
+    expect(touches({ ...plain, lost_at: 1790000000 })).toBe(true);
+    // Not a reason: context rising short of red, a turn, a Stop (done /
+    // unread is the sidebar's, never the tree's).
+    expect(touches({ ...plain, context_pct: 40 })).toBe(false);
+    expect(touches({ ...plain, claude_status: 'working' })).toBe(false);
+    expect(touches({ ...plain, last_stop_at: 1790000999, last_turn_at: 1790000999 })).toBe(false);
+    // One reason becoming another is a change too.
+    const waiting = { ...plain, claude_status: 'blocked' as const };
+    expect(
+      sessionEventsTouchWork([{ type: 'updated', row: { ...waiting, claude_status: 'idle', context_pct: 97 } }], [waiting], shown),
+    ).toBe(true);
+  });
+});
+
+describe('work change kinds', () => {
+  it('a work:changed kind reaches a debounced reader; a burst arrives as the union', () => {
+    vi.useFakeTimers();
+    try {
+      const seen: string[][] = [];
+      const off = onWorkChangedDebounced((kinds) => seen.push([...kinds].sort()), () => 100);
+      noteWorkChanged([{ what: 'rule', rule_id: 3 }]);
+      vi.advanceTimersByTime(150);
+      expect(seen).toEqual([['rule']]);
+      noteWorkChanged([{ what: 'placement', task_id: 'item:1' }]);
+      vi.advanceTimersByTime(50);
+      noteWorkChanged([{ what: 'view', view_id: 2 }]);
+      vi.advanceTimersByTime(150);
+      expect(seen).toEqual([['rule'], ['placement', 'view']]);
+      // One frame batch with several kinds is one bump carrying them all.
+      noteWorkChanged([{ what: 'org' }, { what: 'resync' }]);
+      vi.advanceTimersByTime(150);
+      expect(seen.at(-1)).toEqual(['org', 'resync']);
+      // A bump with no kind is a write this window made; an item frame moves
+      // tasks.
+      bumpWorkChanged();
+      noteWorkEvents([{ type: 'item' }]);
+      vi.advanceTimersByTime(150);
+      expect(seen.at(-1)).toEqual(['local', 'placement']);
+      off();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('the Work view org chord and archived tasks', () => {
@@ -560,11 +649,11 @@ describe('the Work view org chord and archived tasks', () => {
     workViewFilters.set({});
   });
 
-  it('archived is kept, round-trips, and is not counted as narrowing', async () => {
-    const { activeFilterCount, filtersFromQuery, filtersToQuery, normalizeFilters } = await import('./work_view');
+  it('archived is kept and is not counted as narrowing', async () => {
+    const { activeFilterCount, filtersKey, normalizeFilters } = await import('./work_view');
     expect(normalizeFilters({ archived: true })).toEqual({ archived: true });
     expect(normalizeFilters({ archived: false })).toEqual({});
-    expect(filtersFromQuery(filtersToQuery({ archived: true, org: 3 }))).toEqual({ org: 3, archived: true });
+    expect(filtersKey({ archived: true, org: 3 })).not.toBe(filtersKey({ org: 3 }));
     expect(activeFilterCount({ archived: true })).toBe(0);
   });
 });

@@ -5,8 +5,18 @@
 //! reader (reconcile tick, playbooks, GC, project discovery) resolves the
 //! same default.
 //!
-//! Keys that other subsystems own (MCP `mcp.*`, `controller.*`) are NOT
-//! listed and cannot be written through this path.
+//! Keys that other subsystems own and write themselves — the hub daemon's
+//! `hub.*` and the control API's `mcp.*` — are registered READ-ONLY
+//! (decision D-P7): they carry metadata and a place on a page, `describe`
+//! shows their stored value, and [`set`] refuses them, naming where they are
+//! changed ([`Spec::owned_by`]). Their owners keep reading them their own
+//! way; nothing here changes what a value means to them.
+//!
+//! Never registered, so never described or shown: secrets and key material
+//! (`mcp.token`, `hub.tls_key`, `hub.tls_cert`, `operator.token_sha`,
+//! `hub.client_plaintext_token`), internal state that is not a setting
+//! (`operator.session`, `operator.host`, `fleet.id`), and `ui.quick_replies`,
+//! a list with its own tool (`never_registered_keys_stay_out`).
 
 use crate::ipc_error::{codes, IpcError};
 use crate::store::Store;
@@ -41,6 +51,8 @@ pub enum Kind {
     /// cache_read} }` in USD per million tokens (`service::usage`). `{}`
     /// means "built-in prices only".
     PriceMap,
+    /// One line of text, at most `max` bytes, no control characters.
+    Text { max: usize },
 }
 
 /// Upper bound for `Kind::Secs` (ten years): keeps every `secs as i64`
@@ -50,11 +62,188 @@ pub const MAX_SECS: u64 = 10 * 365 * 24 * 3600;
 /// Upper bound on one projects-root path.
 pub const MAX_PATH_LEN: usize = 1024;
 
+/// One registered setting: its value shape (what the write gate checks) and
+/// everything a UI, the docs and an agent need to present it (`describe`).
+/// The metadata is the ONE copy: the settings pages, the generated doc
+/// tables (`settings_doc_gen`) and `get_settings { describe: true }` all read
+/// it here. Build one with [`Spec::new`] and the `const` modifiers below.
 #[derive(Debug, Clone, Copy)]
 pub struct Spec {
     pub key: &'static str,
     pub default: &'static str,
     pub kind: Kind,
+    /// Short sentence-case name, e.g. "Reconcile interval".
+    pub label: &'static str,
+    /// One or two plain sentences on what the setting does, for the page,
+    /// the docs and an agent. Plain text: no markup, no internal task ids.
+    pub help: &'static str,
+    /// The unit the value is shown in. A `Secs` / `SecsMin` value is always
+    /// STORED in seconds; `Hours` / `Minutes` / `Days` here only ask the UI
+    /// to convert it.
+    pub unit: Unit,
+    /// What `0` means ("off", "never", "forever"), when it means something
+    /// other than the number. `None` for a kind that cannot be 0 or where 0
+    /// is just a count.
+    pub zero: Option<&'static str>,
+    pub tags: &'static [Tag],
+    pub danger: Danger,
+    pub restart: Restart,
+    pub ai: AiPolicy,
+    /// `Some(how)`: another subsystem owns and writes this key, and `how`
+    /// says where a person changes it. [`set`] refuses it.
+    pub owned_by: Option<&'static str>,
+    /// Display labels for a `Choice` / `ChoiceSet`'s options, `(value,
+    /// label)`, covering every option when set; empty shows the raw values.
+    pub option_labels: &'static [(&'static str, &'static str)],
+}
+
+/// The unit a setting's value is shown in (see [`Spec::unit`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Unit {
+    None,
+    Ms,
+    Seconds,
+    Minutes,
+    Hours,
+    Days,
+    Percent,
+    Kib,
+    Mib,
+    Tokens,
+    Count,
+}
+
+impl Unit {
+    /// The unit as a word for docs and range text ("" for `None`).
+    pub fn word(self) -> &'static str {
+        match self {
+            Unit::None => "",
+            Unit::Ms => "ms",
+            Unit::Seconds => "seconds",
+            Unit::Minutes => "minutes",
+            Unit::Hours => "hours",
+            Unit::Days => "days",
+            Unit::Percent => "%",
+            Unit::Kib => "KiB",
+            Unit::Mib => "MiB",
+            Unit::Tokens => "tokens",
+            Unit::Count => "",
+        }
+    }
+}
+
+/// Where a setting belongs in a UI and what it implies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tag {
+    /// Rarely changed: a page folds it into its "Advanced" section.
+    Advanced,
+    /// A feature that is off by default and still being evaluated.
+    Experimental,
+    /// Turning it on can send data off this machine.
+    Network,
+    /// Spends model calls or tokens.
+    Ai,
+}
+
+/// How much a change needs confirming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case", tag = "level", content = "message")]
+pub enum Danger {
+    None,
+    /// Confirm with this sentence, which names the consequence.
+    Confirm(&'static str),
+}
+
+/// When a changed value takes effect, if not on the next read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Restart {
+    None,
+    /// Read once at launch: applies after the app or hub restarts.
+    App,
+    /// Applies when the Claude Code hooks are next installed on a host.
+    Hooks,
+}
+
+/// What an agent may do with a setting (design D-P4): propose a value for a
+/// person to accept, fill it inside a flow a person started, or nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiPolicy {
+    Suggest,
+    Fill,
+    Never,
+}
+
+impl Spec {
+    /// A setting with no unit, tags, danger or restart, that an agent may
+    /// only suggest.
+    pub const fn new(
+        key: &'static str,
+        default: &'static str,
+        kind: Kind,
+        label: &'static str,
+        help: &'static str,
+    ) -> Self {
+        Spec {
+            key,
+            default,
+            kind,
+            label,
+            help,
+            unit: Unit::None,
+            zero: None,
+            tags: &[],
+            danger: Danger::None,
+            restart: Restart::None,
+            ai: AiPolicy::Suggest,
+            owned_by: None,
+            option_labels: &[],
+        }
+    }
+    pub const fn unit(self, unit: Unit) -> Self {
+        Spec { unit, ..self }
+    }
+    pub const fn zero(self, meaning: &'static str) -> Self {
+        Spec {
+            zero: Some(meaning),
+            ..self
+        }
+    }
+    pub const fn tags(self, tags: &'static [Tag]) -> Self {
+        Spec { tags, ..self }
+    }
+    /// A change needs confirming with `message`; an agent may never make it.
+    pub const fn danger(self, message: &'static str) -> Self {
+        Spec {
+            danger: Danger::Confirm(message),
+            ai: AiPolicy::Never,
+            ..self
+        }
+    }
+    pub const fn restart(self, restart: Restart) -> Self {
+        Spec { restart, ..self }
+    }
+    pub const fn ai(self, ai: AiPolicy) -> Self {
+        Spec { ai, ..self }
+    }
+    pub const fn labels(self, option_labels: &'static [(&'static str, &'static str)]) -> Self {
+        Spec {
+            option_labels,
+            ..self
+        }
+    }
+    /// Read-only here: `how` names where the key is changed. An agent never
+    /// writes it either.
+    pub const fn owned_by(self, how: &'static str) -> Self {
+        Spec {
+            owned_by: Some(how),
+            ai: AiPolicy::Never,
+            ..self
+        }
+    }
 }
 
 // ── keys ──
@@ -282,14 +471,18 @@ pub const DECIDE_JEV_ENABLED: &str = "decide.jev.enabled";
 pub const DECIDE_JEV_STATUS_MAP: &str = "decide.jev.status_map";
 /// `work_link`'s mode (choosing a work item for an unlinked session).
 pub const DECIDE_JEV_WORK_LINK: &str = "decide.jev.work_link";
-/// What a feature's mode may be. `auto` is not offered: no feature has
-/// passed acceptance (D36).
-pub const DECIDE_MODES: &[&str] = &["off", "shadow", "assist"];
+/// What a feature's mode may be: the store's `decision_runs.mode` words
+/// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
+/// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
+/// has passed acceptance (D36).
+pub const DECIDE_MODES: &[&str] = crate::store::DECISION_MODES;
 
 // ── update.* (application updates, update-channel design §7.3) ──
 /// The release track the hub follows for its fleet.
 pub const UPDATE_TRACK: &str = "update.track";
-pub const UPDATE_TRACKS: &[&str] = &["stable", "beta", "nightly"];
+/// `nightly` joins when S2b publishes it (`src/lib/fleet_settings.ts` keeps
+/// the same list).
+pub const UPDATE_TRACKS: &[&str] = &["stable", "beta"];
 /// Per component: `manual` (only pins), `notify` (offer), `automatic`
 /// (install at the next quiet point).
 pub const UPDATE_HUB_MODE: &str = "update.hub.mode";
@@ -320,383 +513,725 @@ pub const DECIDE_JEV_MODELS: &[&str] = &["jev-1.13.0", "jev-latest"];
 /// Days a `decision_runs` row is kept (`0` = forever).
 pub const DECIDE_RETENTION_DAYS: &str = "decide.retention_days";
 
+/// What `hub.tls` holds (`fleet-hub`'s `TlsMode`).
+pub const HUB_TLS_MODES: &[&str] = &["off", "cert"];
+
 /// Every editable setting. Order is the display order.
 pub const SPECS: &[Spec] = &[
-    Spec {
-        key: RECONCILE_INTERVAL_SECS,
-        default: "20",
-        kind: Kind::Secs,
-    },
-    Spec {
-        key: RECONCILE_STALE_WORKING_SECS,
-        default: "1800",
-        kind: Kind::Secs,
-    },
-    Spec {
-        key: RECONCILE_STALE_WORKING_TTL_SECS,
-        default: "86400",
-        kind: Kind::Secs,
-    },
-    Spec {
-        key: SESSIONS_LOST_TTL_SECS,
-        default: "1209600",
-        kind: Kind::Secs,
-    },
-    Spec {
-        key: RESTORE_BATCH_SIZE,
-        default: "4",
-        kind: Kind::Int { min: 1, max: 16 },
-    },
-    Spec {
-        key: RESTORE_STAGGER_MS,
-        default: "3000",
-        kind: Kind::Int { min: 0, max: 60000 },
-    },
-    Spec {
-        key: PLAYBOOK_PRESS_ENTER,
-        default: "false",
-        kind: Kind::Bool,
-    },
-    Spec {
-        key: PLAYBOOK_OOM_RECREATE,
-        default: "false",
-        kind: Kind::Bool,
-    },
-    Spec {
-        key: PLAYBOOK_OOM_MAX_ATTEMPTS,
-        default: "2",
-        kind: Kind::Int { min: 0, max: 20 },
-    },
-    Spec {
-        key: GC_ENABLED,
-        default: "false",
-        kind: Kind::Bool,
-    },
-    Spec {
-        key: GC_BG_IDLE_SECS,
-        default: "86400",
-        kind: Kind::Secs,
-    },
-    Spec {
-        key: GC_SHELL_IDLE_SECS,
-        default: "604800",
-        kind: Kind::Secs,
-    },
-    Spec {
-        key: GC_WORK_IDLE_SECS,
-        default: "0",
-        kind: Kind::Secs,
-    },
-    Spec {
-        key: GC_SWEEP_INTERVAL_SECS,
-        default: "300",
-        kind: Kind::Secs,
-    },
-    Spec {
-        key: GC_EXTERNAL_LOST_TTL_SECS,
-        default: "3600",
-        kind: Kind::Secs,
-    },
-    Spec {
-        key: PROJECTS_BASE_PATH,
-        default: "{}",
-        kind: Kind::PathMap,
-    },
-    Spec {
-        key: PROJECTS_LAYOUT,
-        default: "github",
-        kind: Kind::Choice(LAYOUTS),
-    },
-    Spec {
-        key: TASKS_MAX_AGE_SECS,
-        default: "86400",
-        kind: Kind::Secs,
-    },
-    Spec {
-        key: REPAIR_AUTO_ON_TICK,
-        default: "false",
-        kind: Kind::Bool,
-    },
-    Spec {
-        key: REPAIR_TICK_INTERVAL_SECS,
-        default: "600",
-        kind: Kind::SecsMin(REPAIR_TICK_MIN_SECS),
-    },
-    Spec {
-        key: MOVE_MAX_TRANSCRIPT_MB,
-        default: "200",
-        kind: Kind::Int {
+    Spec::new(
+        RECONCILE_INTERVAL_SECS,
+        "20",
+        Kind::Secs,
+        "Reconcile interval",
+        "Seconds between background reconcile passes, which refresh session state on every host.",
+    )
+    .unit(Unit::Seconds)
+    .zero("off")
+    .restart(Restart::App)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        RECONCILE_STALE_WORKING_SECS,
+        "1800",
+        Kind::Secs,
+        "Stale working timeout",
+        "How long a working session may go without a hook, a turn, transcript growth or pane output before it reads idle.",
+    )
+    .unit(Unit::Seconds)
+    .zero("never")
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        RECONCILE_STALE_WORKING_TTL_SECS,
+        "86400",
+        Kind::Secs,
+        "Stale mark lifts after",
+        "How long a session marked stale asks for a look before the tick lifts the mark on its own. An attach or any hook lifts it sooner.",
+    )
+    .unit(Unit::Hours)
+    .zero("never by age")
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        SESSIONS_LOST_TTL_SECS,
+        "1209600",
+        Kind::Secs,
+        "Keep lost sessions",
+        "How long a resumable session lost to a host reboot or the tmux server exiting is kept before it is deleted, counted from when it was lost.",
+    )
+    .unit(Unit::Hours)
+    .zero("removed on the next pass"),
+    Spec::new(
+        RESTORE_BATCH_SIZE,
+        "4",
+        Kind::Int { min: 1, max: 16 },
+        "Concurrent restores",
+        "Sessions resumed in parallel by Restore lost sessions.",
+    )
+    .unit(Unit::Count),
+    Spec::new(
+        RESTORE_STAGGER_MS,
+        "3000",
+        Kind::Int { min: 0, max: 60000 },
+        "Delay between restores",
+        "Pause between starting each resumed session in a batch restore.",
+    )
+    .unit(Unit::Ms)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        PLAYBOOK_PRESS_ENTER,
+        "false",
+        Kind::Bool,
+        "Press Enter when stuck",
+        "Press Enter for sessions stuck on a \"Press Enter\" prompt. Auth menus, trust prompts and reconnects are always notify-only.",
+    ),
+    Spec::new(
+        PLAYBOOK_OOM_RECREATE,
+        "false",
+        Kind::Bool,
+        "Recreate out-of-memory sessions",
+        "Recreate a session that ran out of memory, within the budget below.",
+    ),
+    Spec::new(
+        PLAYBOOK_OOM_MAX_ATTEMPTS,
+        "2",
+        Kind::Int { min: 0, max: 20 },
+        "Out-of-memory budget",
+        "Recreates one session may get per 24 hours. A session that is working, or finished a turn after the flag, is never recreated.",
+    )
+    .unit(Unit::Count)
+    .zero("never"),
+    Spec::new(
+        GC_ENABLED,
+        "false",
+        Kind::Bool,
+        "Garbage-collect idle sessions",
+        "Stop or remove sessions that have been idle longer than the limits below.",
+    )
+    .danger("Idle sessions past the limits below will be stopped or removed without asking."),
+    Spec::new(
+        GC_BG_IDLE_SECS,
+        "86400",
+        Kind::Secs,
+        "Background agent idle limit",
+        "How long a background agent may sit idle before it is stopped.",
+    )
+    .unit(Unit::Hours)
+    .zero("never"),
+    Spec::new(
+        GC_SHELL_IDLE_SECS,
+        "604800",
+        Kind::Secs,
+        "Shell idle limit",
+        "How long a shell session may sit inactive before it is killed.",
+    )
+    .unit(Unit::Hours)
+    .zero("never"),
+    Spec::new(
+        GC_WORK_IDLE_SECS,
+        "0",
+        Kind::Secs,
+        "Work session idle limit",
+        "How long a work session may sit idle before it is removed. A dirty worktree goes through safe remove.",
+    )
+    .unit(Unit::Hours)
+    .zero("never"),
+    Spec::new(
+        GC_SWEEP_INTERVAL_SECS,
+        "300",
+        Kind::Secs,
+        "GC sweep interval",
+        "Seconds between garbage-collection sweeps.",
+    )
+    .unit(Unit::Seconds)
+    .zero("off")
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        GC_EXTERNAL_LOST_TTL_SECS,
+        "3600",
+        Kind::Secs,
+        "Keep lost outside sessions",
+        "How long a lost session from outside fleet is kept before it is removed. It can never be resumed; this only rides out a restart.",
+    )
+    .unit(Unit::Hours)
+    .zero("the next pass")
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        PROJECTS_BASE_PATH,
+        "{}",
+        Kind::PathMap,
+        "Projects roots",
+        "Per-host folder that holds your repositories. A host with no entry uses $CLAUDE_FLEET_PROJECTS_BASE (local only), then the layout default.",
+    ),
+    Spec::new(
+        PROJECTS_LAYOUT,
+        "github",
+        Kind::Choice(LAYOUTS),
+        "Projects layout",
+        "Where a repository sits under the projects root: github puts it at root/owner/repo, flat at root/repo.",
+    )
+    .labels(&[("github", "github: root/owner/repo"), ("flat", "flat: root/repo")]),
+    Spec::new(
+        TASKS_MAX_AGE_SECS,
+        "86400",
+        Kind::Secs,
+        "Task timeout",
+        "How long an open task (counted from its start, else its creation) may run before the liveness sweep fails it.",
+    )
+    .unit(Unit::Hours)
+    .zero("never"),
+    Spec::new(
+        REPAIR_AUTO_ON_TICK,
+        "false",
+        Kind::Bool,
+        "Re-create vanished worktrees",
+        "Re-add deleted worktree directories without anyone opening them. A stale entry is dropped only when its parent folder is the one seen while it was healthy, so an unmounted volume is never touched.",
+    ),
+    Spec::new(
+        REPAIR_TICK_INTERVAL_SECS,
+        "600",
+        Kind::SecsMin(REPAIR_TICK_MIN_SECS),
+        "Workspace check interval",
+        "Seconds between automatic workspace checks, each repairing at most five worktrees.",
+    )
+    .unit(Unit::Seconds)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        MOVE_MAX_TRANSCRIPT_MB,
+        "200",
+        Kind::Int {
             min: 1,
             max: MOVE_MAX_TRANSCRIPT_MB_MAX,
         },
-    },
-    Spec {
-        key: MOVE_MAX_BUNDLE_MB,
-        default: "500",
-        kind: Kind::Int {
+        "Move: transcript cap",
+        "Largest transcript Move to host copies; a bigger one is refused.",
+    )
+    .unit(Unit::Mib)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        MOVE_MAX_BUNDLE_MB,
+        "500",
+        Kind::Int {
             min: 1,
             max: MOVE_MAX_BUNDLE_MB_MAX,
         },
-    },
-    Spec {
-        key: MOVE_IGNORED_ENTRY_KB,
-        default: "1024",
-        kind: Kind::Int {
+        "Move: git bundle cap",
+        "Largest git bundle of unpushed work Move to host relays; a bigger one is refused.",
+    )
+    .unit(Unit::Mib)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        MOVE_IGNORED_ENTRY_KB,
+        "1024",
+        Kind::Int {
             min: 1,
             max: MOVE_IGNORED_ENTRY_KB_MAX,
         },
-    },
-    Spec {
-        key: MOVE_IGNORED_TOTAL_MB,
-        default: "20",
-        kind: Kind::Int {
+        "Move: ignored entry cap",
+        "Largest single git-ignored file or directory Move to host carries; bigger ones are left behind.",
+    )
+    .unit(Unit::Kib)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        MOVE_IGNORED_TOTAL_MB,
+        "20",
+        Kind::Int {
             min: 1,
             max: MOVE_IGNORED_TOTAL_MB_MAX,
         },
-    },
-    Spec {
-        key: MOVE_MAX_SESSION_STATE_MB,
-        default: "200",
-        kind: Kind::Int {
+        "Move: ignored total cap",
+        "Total git-ignored payload Move to host carries.",
+    )
+    .unit(Unit::Mib)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        MOVE_MAX_SESSION_STATE_MB,
+        "200",
+        Kind::Int {
             min: 1,
             max: MOVE_MAX_SESSION_STATE_MB_MAX,
         },
-    },
-    Spec {
-        key: MOVE_WAIT_MAX_MINS,
-        default: "240",
-        kind: Kind::Int {
+        "Move: session state cap",
+        "Largest per-session Claude directory (subagent transcripts, tool results) Move to host carries; above it the biggest files stay behind.",
+    )
+    .unit(Unit::Mib)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        MOVE_WAIT_MAX_MINS,
+        "240",
+        Kind::Int {
             min: 1,
             max: MOVE_WAIT_MAX_MINS_MAX,
         },
-    },
-    Spec {
-        key: USAGE_ENABLED,
-        default: "true",
-        kind: Kind::Bool,
-    },
-    Spec {
-        key: USAGE_INTERVAL_SECS,
-        default: "300",
-        kind: Kind::Secs,
-    },
-    Spec {
-        key: USAGE_PRICES_JSON,
-        default: "{}",
-        kind: Kind::PriceMap,
-    },
-    Spec {
-        key: REPORTS_MAX_ROWS,
-        default: "5000",
-        kind: Kind::Int {
+        "Move: wait timeout",
+        "How long \"Transfer when it finishes\" waits for the session to go idle before giving up.",
+    )
+    .unit(Unit::Minutes),
+    Spec::new(
+        USAGE_ENABLED,
+        "true",
+        Kind::Bool,
+        "Collect token usage",
+        "Sum each session's token usage from its Claude transcript and show an estimated cost.",
+    ),
+    Spec::new(
+        USAGE_INTERVAL_SECS,
+        "300",
+        Kind::Secs,
+        "Usage interval",
+        "Seconds between usage passes, one batched read per host.",
+    )
+    .unit(Unit::Seconds)
+    .zero("off")
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        USAGE_PRICES_JSON,
+        "{}",
+        Kind::PriceMap,
+        "Price overrides",
+        "Per-model prices for the estimated cost, in USD per million tokens (input, output, cache_write, cache_read). {} uses the built-in prices only.",
+    )
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        REPORTS_MAX_ROWS,
+        "5000",
+        Kind::Int {
             min: 100,
             max: 100_000,
         },
-    },
-    Spec {
-        key: REPORTS_MAX_AGE_SECS,
-        default: "604800",
-        kind: Kind::Secs,
-    },
-    Spec {
-        key: HEALTH_CONTEXT_RED_PCT,
-        default: "85",
-        kind: Kind::Int { min: 1, max: 100 },
-    },
-    Spec {
-        key: HEALTH_VERSION_MAX_AGE_SECS,
-        default: "86400",
-        kind: Kind::Secs,
-    },
-    Spec {
-        key: HEALTH_DISK_LOW_PCT,
-        default: "90",
-        kind: Kind::Int { min: 50, max: 100 },
-    },
-    Spec {
-        key: HEALTH_CLAUDE_MAX_BEHIND,
-        default: "30",
-        kind: Kind::Int { min: 0, max: 1000 },
-    },
-    Spec {
-        key: HEALTH_HOOKS_SILENT_SECS,
-        default: "3600",
-        kind: Kind::Secs,
-    },
-    Spec {
-        key: PROVISION_FORCE_GIT_TREE,
-        default: "false",
-        kind: Kind::Bool,
-    },
-    Spec {
-        key: WORK_RETENTION_JOURNAL_DAYS,
-        default: "365",
-        kind: Kind::Int { min: 0, max: 3650 },
-    },
-    Spec {
-        key: WORK_RETENTION_TRACKER_ITEMS_DAYS,
-        default: "180",
-        kind: Kind::Int { min: 0, max: 3650 },
-    },
-    Spec {
-        key: WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS,
-        default: "180",
-        kind: Kind::Int { min: 0, max: 3650 },
-    },
-    Spec {
-        key: WORK_RECENT_DAYS,
-        default: "14",
-        kind: Kind::Int { min: 1, max: 365 },
-    },
-    Spec {
-        key: WORK_SYNC_INTERVAL_SECS,
-        default: "300",
-        kind: Kind::Secs,
-    },
-    Spec {
-        key: WORK_DESCRIBE_CACHE_SECS,
-        default: "300",
-        kind: Kind::Secs,
-    },
-    Spec {
-        key: WORK_TRUSTED_BRANCH_PROJECTS,
-        default: "[]",
-        kind: Kind::IdSet,
-    },
-    Spec {
-        key: WORK_EVIDENCE_SNIPPETS,
-        default: "true",
-        kind: Kind::Bool,
-    },
-    Spec {
-        key: WORK_SESSION_START_CONTEXT,
-        default: "false",
-        kind: Kind::Bool,
-    },
-    Spec {
-        key: WORK_CLASSIFY_NUDGE,
-        default: "false",
-        kind: Kind::Bool,
-    },
-    Spec {
-        key: WORK_SUMMARY_MODEL,
-        default: "haiku",
-        kind: Kind::Choice(SUMMARY_MODELS),
-    },
-    Spec {
-        key: WORK_TIDY_DONE_DAYS,
-        default: "2",
-        kind: Kind::Int { min: 1, max: 365 },
-    },
-    Spec {
-        key: WORK_TIDY_IDLE_HOURS,
-        default: "4",
-        kind: Kind::Int { min: 1, max: 720 },
-    },
-    Spec {
-        key: WORK_TIDY_IDLE_UNLINKED_DAYS,
-        default: "7",
-        kind: Kind::Int { min: 1, max: 90 },
-    },
-    Spec {
-        key: WORK_AUTO_TIDY,
-        default: "false",
-        kind: Kind::Bool,
-    },
-    Spec {
-        key: WORK_AUTO_TIDY_REASONS,
-        default: "done_idle,pr_merged_idle",
-        kind: Kind::ChoiceSet(AUTO_TIDY_REASONS),
-    },
-    Spec {
-        key: UPDATE_TRACK,
-        default: "stable",
-        kind: Kind::Choice(UPDATE_TRACKS),
-    },
-    Spec {
-        key: UPDATE_HUB_MODE,
-        default: "notify",
-        kind: Kind::Choice(UPDATE_MODES),
-    },
-    Spec {
-        key: UPDATE_AGENT_MODE,
-        default: "notify",
-        kind: Kind::Choice(UPDATE_MODES),
-    },
-    Spec {
-        key: UPDATE_DESKTOP_MODE,
-        default: "notify",
-        kind: Kind::Choice(UPDATE_MODES),
-    },
-    Spec {
-        key: UPDATE_MOBILE_MODE,
-        default: "notify",
-        kind: Kind::Choice(UPDATE_MOBILE_MODES),
-    },
-    Spec {
-        key: UPDATE_CHECK_INTERVAL_SECS,
-        default: "21600",
-        kind: Kind::SecsMin(UPDATE_CHECK_INTERVAL_MIN_SECS),
-    },
-    Spec {
-        key: DECIDE_JEV_ENABLED,
-        default: "false",
-        kind: Kind::Bool,
-    },
-    Spec {
-        key: DECIDE_JEV_STATUS_MAP,
-        default: "off",
-        kind: Kind::Choice(DECIDE_MODES),
-    },
-    Spec {
-        key: DECIDE_JEV_WORK_LINK,
-        default: "off",
-        kind: Kind::Choice(DECIDE_MODES),
-    },
-    Spec {
-        key: DECIDE_JEV_UNASSIGNED,
-        default: "false",
-        kind: Kind::Bool,
-    },
-    Spec {
-        key: DECIDE_JEV_TIMEOUT_MS,
-        default: "1500",
-        kind: Kind::Int {
+        "Error reports kept",
+        "Newest error and warning reports kept; older ones are pruned on every insert.",
+    )
+    .unit(Unit::Count)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        REPORTS_MAX_AGE_SECS,
+        "604800",
+        Kind::Secs,
+        "Error report age",
+        "How long an error or warning report is kept before the age sweep deletes it.",
+    )
+    .unit(Unit::Hours)
+    .zero("never")
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        HEALTH_CONTEXT_RED_PCT,
+        "85",
+        Kind::Int { min: 1, max: 100 },
+        "Context red threshold",
+        "Percent of the context window at which a session needs you. The chip turns red here and amber 15 points below.",
+    )
+    .unit(Unit::Percent),
+    Spec::new(
+        HEALTH_VERSION_MAX_AGE_SECS,
+        "86400",
+        Kind::Secs,
+        "Trust a host's Claude version for",
+        "How old a host's recorded Claude version may be before the \"older than the fleet\" badge stops trusting it and shows nothing.",
+    )
+    .unit(Unit::Hours)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        HEALTH_DISK_LOW_PCT,
+        "90",
+        Kind::Int { min: 50, max: 100 },
+        "Disk low at",
+        "Used share of a host's home filesystem at which the host reads as disk low.",
+    )
+    .unit(Unit::Percent),
+    Spec::new(
+        HEALTH_CLAUDE_MAX_BEHIND,
+        "30",
+        Kind::Int { min: 0, max: 1000 },
+        "Claude behind after",
+        "Patch releases a host's Claude may trail the fleet's newest before the host reads as behind.",
+    )
+    .unit(Unit::Count)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        HEALTH_HOOKS_SILENT_SECS,
+        "3600",
+        Kind::Secs,
+        "Hooks silent after",
+        "How long a reachable host with a live session may send no hook before it reads as hooks silent.",
+    )
+    .unit(Unit::Minutes)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        PROVISION_FORCE_GIT_TREE,
+        "false",
+        Kind::Bool,
+        "Provision into git-tracked skills",
+        "Write fleet's skills even when a host's ~/.claude/skills is inside a git work tree, such as a dotfiles checkout. Off: provisioning refuses such a host.",
+    )
+    .danger("Fleet will write its skills into a folder another git repository tracks.")
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        WORK_RETENTION_JOURNAL_DAYS,
+        "365",
+        Kind::Int { min: 0, max: 3650 },
+        "Retention: work journal",
+        "Days a work journal row is kept once its conversation ended and its work is done or unlinked.",
+    )
+    .unit(Unit::Days)
+    .zero("forever"),
+    Spec::new(
+        WORK_RETENTION_TRACKER_ITEMS_DAYS,
+        "180",
+        Kind::Int { min: 0, max: 3650 },
+        "Retention: done tickets",
+        "Days a done ticket that no session links to is kept in the cache.",
+    )
+    .unit(Unit::Days)
+    .zero("forever"),
+    Spec::new(
+        WORK_RETENTION_TIMELINE_WORK_EVENTS_DAYS,
+        "180",
+        Kind::Int { min: 0, max: 3650 },
+        "Retention: work timeline",
+        "Days handover, nudge, tidy and withdrawn-suggestion timeline events are kept; the newest of each kind per session always stays.",
+    )
+    .unit(Unit::Days)
+    .zero("forever"),
+    Spec::new(
+        WORK_RECENT_DAYS,
+        "14",
+        Kind::Int { min: 1, max: 365 },
+        "Recent work",
+        "How long ended work with no live session keeps a sidebar group.",
+    )
+    .unit(Unit::Days),
+    Spec::new(
+        WORK_SYNC_INTERVAL_SECS,
+        "300",
+        Kind::Secs,
+        "Tracker sync interval",
+        "Seconds between tracker sync passes. Under a minute is raised to one.",
+    )
+    .unit(Unit::Seconds)
+    .zero("off")
+    .restart(Restart::App),
+    Spec::new(
+        WORK_DESCRIBE_CACHE_SECS,
+        "300",
+        Kind::Secs,
+        "Ticket description cache",
+        "How long a fetched ticket description is reused before the tracker is asked again; never longer than the done-tickets retention window.",
+    )
+    .unit(Unit::Minutes)
+    .zero("off")
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        WORK_TRUSTED_BRANCH_PROJECTS,
+        "[]",
+        Kind::IdSet,
+        "Trusted branch projects",
+        "Projects where a sole ticket key in the branch name links automatically; elsewhere it is a suggestion. Set from the work popover.",
+    ),
+    Spec::new(
+        WORK_EVIDENCE_SNIPPETS,
+        "true",
+        Kind::Bool,
+        "Keep evidence snippets",
+        "Keep a short, redacted prompt snippet around a detected ticket key as evidence. Off keeps only the matched text.",
+    ),
+    Spec::new(
+        WORK_SESSION_START_CONTEXT,
+        "false",
+        Kind::Bool,
+        "Ticket context at session start",
+        "Give Claude the linked ticket at session start. Makes the start hook synchronous, which can add up to 2 s when the hub is down.",
+    )
+    .restart(Restart::Hooks)
+    .tags(&[Tag::Experimental]),
+    Spec::new(
+        WORK_CLASSIFY_NUDGE,
+        "false",
+        Kind::Bool,
+        "Classification nudge",
+        "After three prompts with no ticket, ask Claude once which of your few open tickets it is on. Its answer is only ever a suggestion.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai]),
+    Spec::new(
+        WORK_SUMMARY_MODEL,
+        "haiku",
+        Kind::Choice(SUMMARY_MODELS),
+        "Summary model",
+        "The model Summarise runs on for a past session, on that session's own host and account.",
+    )
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        WORK_TIDY_DONE_DAYS,
+        "2",
+        Kind::Int { min: 1, max: 365 },
+        "Tidy: done for",
+        "Days a linked ticket must be done before Tidy up suggests its session.",
+    )
+    .unit(Unit::Days),
+    Spec::new(
+        WORK_TIDY_IDLE_HOURS,
+        "4",
+        Kind::Int { min: 1, max: 720 },
+        "Tidy: idle for",
+        "Hours a session must be idle before any tidy reason suggests it.",
+    )
+    .unit(Unit::Hours),
+    Spec::new(
+        WORK_TIDY_IDLE_UNLINKED_DAYS,
+        "7",
+        Kind::Int { min: 1, max: 90 },
+        "Tidy: unlinked for",
+        "Days a session with no work linked must sit idle and unprompted before Tidy up suggests it. Only ever suggested, never auto-tidied.",
+    )
+    .unit(Unit::Days),
+    Spec::new(
+        WORK_AUTO_TIDY,
+        "false",
+        Kind::Bool,
+        "Auto-tidy",
+        "Let the GC sweep act on the allowed tidy reasons by itself, by safe kill or archive only. Off, Tidy up only suggests. An organisation can override it.",
+    )
+    .danger("The sweep will safe-kill finished sessions without asking."),
+    Spec::new(
+        WORK_AUTO_TIDY_REASONS,
+        "done_idle,pr_merged_idle",
+        Kind::ChoiceSet(AUTO_TIDY_REASONS),
+        "Auto-tidy reasons",
+        "The tidy reasons auto-tidy may act on.",
+    )
+    .labels(&[("done_idle", "Done and idle"), ("pr_merged_idle", "PR merged, idle"), ("not_planned", "Won't do / duplicate")]),
+    Spec::new(
+        UPDATE_TRACK,
+        "stable",
+        Kind::Choice(UPDATE_TRACKS),
+        "Release track",
+        "Which releases the hub follows for its fleet.",
+    ),
+    Spec::new(
+        UPDATE_HUB_MODE,
+        "notify",
+        Kind::Choice(UPDATE_MODES),
+        "Hub updates",
+        "manual: only a pinned version; notify: offer the update; automatic: install it at the next quiet point.",
+    ),
+    Spec::new(
+        UPDATE_AGENT_MODE,
+        "notify",
+        Kind::Choice(UPDATE_MODES),
+        "Agent updates",
+        "The same choice for fleet-agent on hosts the hub cannot reach.",
+    ),
+    Spec::new(
+        UPDATE_DESKTOP_MODE,
+        "notify",
+        Kind::Choice(UPDATE_MODES),
+        "Desktop updates",
+        "The same choice for the desktop app.",
+    ),
+    Spec::new(
+        UPDATE_MOBILE_MODE,
+        "notify",
+        Kind::Choice(UPDATE_MOBILE_MODES),
+        "Phone updates",
+        "manual or notify: a phone never installs an update silently.",
+    ),
+    Spec::new(
+        UPDATE_CHECK_INTERVAL_SECS,
+        "21600",
+        Kind::SecsMin(UPDATE_CHECK_INTERVAL_MIN_SECS),
+        "Update check interval",
+        "How often the hub re-reads the release channel, and clients check again.",
+    )
+    .unit(Unit::Hours),
+    Spec::new(
+        DECIDE_JEV_ENABLED,
+        "false",
+        Kind::Bool,
+        "Decisions (Jev)",
+        "The kill switch for TypeSafe's decision model. Off, nothing is ever sent. On, data goes only for organisations that opted in, redacted.",
+    )
+    .tags(&[Tag::Experimental, Tag::Network, Tag::Ai])
+    .danger("Redacted session and ticket data will be sent to TypeSafe for organisations that opted in."),
+    Spec::new(
+        DECIDE_JEV_STATUS_MAP,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: status map",
+        "Proposing a status category for an Asana section. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_WORK_LINK,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: work link",
+        "Choosing a ticket for a session no rule could link. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_UNASSIGNED,
+        "false",
+        Kind::Bool,
+        "Jev: send unassigned",
+        "Also send sessions and tickets that belong to no organisation.",
+    )
+    .tags(&[Tag::Experimental, Tag::Network])
+    .danger("Sessions and tickets outside every organisation will be sent to TypeSafe too."),
+    Spec::new(
+        DECIDE_JEV_TIMEOUT_MS,
+        "1500",
+        Kind::Int {
             min: 100,
             max: 30_000,
         },
-    },
-    Spec {
-        key: DECIDE_JEV_BREAKER_FAILURES,
-        default: "5",
-        kind: Kind::Int { min: 1, max: 100 },
-    },
-    Spec {
-        key: DECIDE_JEV_BREAKER_OPEN_SECS,
-        default: "300",
-        kind: Kind::Int {
+        "Jev: timeout",
+        "How long one call may take. A call is never retried.",
+    )
+    .unit(Unit::Ms)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        DECIDE_JEV_BREAKER_FAILURES,
+        "5",
+        Kind::Int { min: 1, max: 100 },
+        "Jev: breaker failures",
+        "Failed calls in a row that open the circuit breaker.",
+    )
+    .unit(Unit::Count)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        DECIDE_JEV_BREAKER_OPEN_SECS,
+        "300",
+        Kind::Int {
             min: 10,
             max: 86_400,
         },
-    },
-    Spec {
-        key: DECIDE_JEV_DAILY_TOKEN_BUDGET,
-        default: "2000000",
-        kind: Kind::Int {
+        "Jev: breaker pause",
+        "How long an open breaker refuses calls.",
+    )
+    .unit(Unit::Seconds)
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        DECIDE_JEV_DAILY_TOKEN_BUDGET,
+        "2000000",
+        Kind::Int {
             min: 0,
             max: 1_000_000_000,
         },
-    },
-    Spec {
-        key: DECIDE_JEV_MODEL,
-        default: "jev-1.13.0",
-        kind: Kind::Choice(DECIDE_JEV_MODELS),
-    },
-    Spec {
-        key: DECIDE_RETENTION_DAYS,
-        default: "90",
-        kind: Kind::Int { min: 0, max: 3650 },
-    },
+        "Jev: daily token budget",
+        "Input tokens the decision model may be sent per UTC day. At $0.042 per million, the default is under $0.09 a day.",
+    )
+    .unit(Unit::Tokens)
+    .zero("none"),
+    Spec::new(
+        DECIDE_JEV_MODEL,
+        "jev-1.13.0",
+        Kind::Choice(DECIDE_JEV_MODELS),
+        "Jev: model",
+        "The model version a request names. jev-1.13.0 is pinned; jev-latest follows TypeSafe.",
+    )
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        DECIDE_RETENTION_DAYS,
+        "90",
+        Kind::Int { min: 0, max: 3650 },
+        "Jev: keep runs",
+        "Days a decision record (ids and numbers, never text) is kept.",
+    )
+    .unit(Unit::Days)
+    .zero("forever"),
+    // ── read-only: owned and written elsewhere (D-P7) ──
+    Spec::new(
+        crate::service::hub::SETTING_BIND,
+        "127.0.0.1",
+        Kind::Text { max: 255 },
+        "Hub bind address",
+        "The address the hub daemon listens on. Loopback unless the daemon was started with a routable bind.",
+    )
+    .owned_by("fleet-hub serve --bind")
+    .tags(&[Tag::Network]),
+    Spec::new(
+        crate::service::hub::SETTING_PUBLIC_URL,
+        "",
+        Kind::Text { max: 2048 },
+        "Hub public URL",
+        "The URL hosts and paired clients reach the hub at. Empty means loopback with a reverse tunnel per host.",
+    )
+    .owned_by("fleet-hub serve --public-url")
+    .tags(&[Tag::Network]),
+    Spec::new(
+        crate::service::hub::SETTING_ALLOWED_HOSTS,
+        "",
+        Kind::Text { max: 4096 },
+        "Hub allowed hosts",
+        "Extra Host header values the hub accepts, comma-separated, besides the ones its bind and public URL imply.",
+    )
+    .owned_by("fleet-hub serve --allowed-host")
+    .tags(&[Tag::Network, Tag::Advanced]),
+    Spec::new(
+        crate::service::hub::SETTING_LOCAL_HOST,
+        "true",
+        Kind::Bool,
+        "Hub runs local sessions",
+        "Whether the hub's own machine is a fleet host. On for the desktop; the daemon turns it off by default.",
+    )
+    .owned_by("fleet-hub serve --local-host"),
+    Spec::new(
+        crate::service::hub::SETTING_ALLOW_PLAINTEXT,
+        "false",
+        Kind::Bool,
+        "Hub serves plaintext",
+        "Whether the hub daemon may serve a routable bind without TLS.",
+    )
+    .owned_by("fleet-hub serve --allow-plaintext")
+    .tags(&[Tag::Network]),
+    Spec::new(
+        crate::service::hub::SETTING_TLS,
+        "off",
+        Kind::Choice(HUB_TLS_MODES),
+        "Hub TLS",
+        "How the hub daemon terminates TLS: off, behind a proxy, or cert, with its own certificate.",
+    )
+    .owned_by("fleet-hub serve --tls")
+    .tags(&[Tag::Network])
+    .labels(&[("off", "Off (a proxy in front)"), ("cert", "Own certificate")]),
+    Spec::new(
+        crate::mcp::SETTING_ENABLED,
+        "false",
+        Kind::Bool,
+        "Control API",
+        "Whether the embedded control API (MCP) runs, so an AI assistant can drive the fleet.",
+    )
+    .owned_by("Settings → Control API")
+    .tags(&[Tag::Ai]),
+    Spec::new(
+        crate::mcp::SETTING_PORT,
+        "4180",
+        Kind::Int {
+            min: 1,
+            max: 65_535,
+        },
+        "Control API port",
+        "The localhost port the control API listens on.",
+    )
+    .unit(Unit::Count)
+    .owned_by("Settings → Control API"),
+    Spec::new(
+        crate::mcp::guard::SETTING_CONFIRM_DESTRUCTIVE,
+        "false",
+        Kind::Bool,
+        "Confirm destructive calls",
+        "Every destructive control API call waits for a confirmation on the desktop.",
+    )
+    .owned_by("Settings → Control API"),
+    Spec::new(
+        crate::mcp::guard::SETTING_BROADCAST_INTERVAL,
+        "30",
+        Kind::Secs,
+        "Broadcast interval",
+        "Shortest time between two broadcast prompts from the same caller.",
+    )
+    .unit(Unit::Seconds)
+    .owned_by("the settings table only")
+    .tags(&[Tag::Advanced]),
 ];
 
 /// Parse + validate a `Kind::ChoiceSet` value into the chosen options, in
@@ -839,6 +1374,11 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
             .map(|_| ())
             .map_err(|e| IpcError::new(codes::E_INVALID, format!("{key} {}", e.message))),
         Kind::PriceMap => crate::service::usage::parse_price_overrides(v).map(|_| ()),
+        Kind::Text { max } if v.len() <= max && !v.chars().any(char::is_control) => Ok(()),
+        Kind::Text { max } => Err(IpcError::new(
+            codes::E_INVALID,
+            format!("{key} must be one line of at most {max} characters"),
+        )),
     }
 }
 
@@ -868,6 +1408,21 @@ pub fn get_string(s: &Store, key: &str) -> String {
     resolve(key, raw.as_deref())
 }
 
+/// What a page shows for `spec`: the resolved value of an editable setting,
+/// or, for a key another subsystem owns, its stored text as that owner wrote
+/// it (else the default) — the owner may read spellings `resolve` would not.
+fn effective(s: &Store, spec: &Spec) -> String {
+    if spec.owned_by.is_some() {
+        return s
+            .get_setting(spec.key)
+            .ok()
+            .flatten()
+            .map(|v| v.trim().to_string())
+            .unwrap_or_else(|| spec.default.to_string());
+    }
+    get_string(s, spec.key)
+}
+
 /// The `projects.base_path` map (empty when unset or malformed).
 pub fn base_path_map(s: &Store) -> BTreeMap<String, String> {
     parse_path_map(PROJECTS_BASE_PATH, &get_string(s, PROJECTS_BASE_PATH)).unwrap_or_default()
@@ -878,7 +1433,7 @@ pub fn base_path_map(s: &Store) -> BTreeMap<String, String> {
 pub fn read_all(s: &Store) -> BTreeMap<String, String> {
     let mut all: BTreeMap<String, String> = SPECS
         .iter()
-        .map(|spec| (spec.key.to_string(), get_string(s, spec.key)))
+        .map(|spec| (spec.key.to_string(), effective(s, spec)))
         .collect();
     all.insert(
         PROJECTS_LOCAL_ENV_BASE.to_string(),
@@ -892,12 +1447,147 @@ pub fn read_all(s: &Store) -> BTreeMap<String, String> {
     all
 }
 
-/// Validate then persist one setting. A `PathMap` is stored normalised
-/// (trimmed paths, sorted keys).
-pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
+/// A setting's value shape as `describe` presents it: the bounds and
+/// options a form needs, with `Secs` and `SecsMin` folded into one `secs`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum KindDesc {
+    Bool,
+    Secs { min: u64, max: u64 },
+    Int { min: u64, max: u64 },
+    Choice { options: &'static [&'static str] },
+    ChoiceSet { options: &'static [&'static str] },
+    PathMap,
+    IdSet,
+    PriceMap,
+    Text { max: usize },
+}
+
+impl From<Kind> for KindDesc {
+    fn from(kind: Kind) -> Self {
+        match kind {
+            Kind::Bool => KindDesc::Bool,
+            Kind::Secs => KindDesc::Secs {
+                min: 0,
+                max: MAX_SECS,
+            },
+            Kind::SecsMin(min) => KindDesc::Secs { min, max: MAX_SECS },
+            Kind::Int { min, max } => KindDesc::Int { min, max },
+            Kind::Choice(options) => KindDesc::Choice { options },
+            Kind::ChoiceSet(options) => KindDesc::ChoiceSet { options },
+            Kind::PathMap => KindDesc::PathMap,
+            Kind::IdSet => KindDesc::IdSet,
+            Kind::PriceMap => KindDesc::PriceMap,
+            Kind::Text { max } => KindDesc::Text { max },
+        }
+    }
+}
+
+/// One registered setting with its metadata and effective value: what a
+/// generated settings page renders and what an agent reads before it
+/// proposes a change (`get_settings { describe: true }`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Descriptor {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub help: &'static str,
+    pub kind: KindDesc,
+    pub default: &'static str,
+    /// The effective value (stored, else the default).
+    pub value: String,
+    /// The effective value differs from the default.
+    pub modified: bool,
+    pub unit: Unit,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zero: Option<&'static str>,
+    pub tags: &'static [Tag],
+    pub danger: Danger,
+    pub restart: Restart,
+    pub ai: AiPolicy,
+    /// Set for a key another subsystem owns: where it is changed. A page
+    /// shows it read-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owned_by: Option<&'static str>,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub option_labels: &'static [(&'static str, &'static str)],
+}
+
+impl Spec {
+    /// This spec described with `value` as its effective value.
+    pub fn describe(&self, value: String) -> Descriptor {
+        Descriptor {
+            key: self.key,
+            label: self.label,
+            help: self.help,
+            kind: self.kind.into(),
+            default: self.default,
+            modified: value != self.default,
+            value,
+            unit: self.unit,
+            zero: self.zero,
+            tags: self.tags,
+            danger: self.danger,
+            restart: self.restart,
+            ai: self.ai,
+            owned_by: self.owned_by,
+            option_labels: self.option_labels,
+        }
+    }
+}
+
+/// Every registered setting described, in display order. The derived
+/// read-only `projects.*` previews of [`read_all`] are not settings and are
+/// left out.
+pub fn describe(s: &Store) -> Vec<Descriptor> {
+    SPECS
+        .iter()
+        .map(|spec| spec.describe(effective(s, spec)))
+        .collect()
+}
+
+/// Who wrote a setting, as the audit trail records it (design §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Actor<'a> {
+    /// A person, in a settings page or a review.
+    Person,
+    /// A person on a paired device (declarative pages P6); the detail names
+    /// the device's client.
+    PersonVia(&'a str),
+    /// An agent over the control API (the master token); the detail names it.
+    Agent(&'a str),
+    /// Fleet itself (a migration of a value, a background pass).
+    System,
+}
+
+impl Actor<'_> {
+    pub fn word(&self) -> &'static str {
+        match self {
+            Actor::Person | Actor::PersonVia(_) => "person",
+            Actor::Agent(_) => "agent",
+            Actor::System => "system",
+        }
+    }
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Actor::Agent(d) | Actor::PersonVia(d) => Some(d),
+            _ => None,
+        }
+    }
+}
+
+/// Validate `value` for `key` and return the form it is stored in: a
+/// `PathMap` trimmed with sorted keys, a `ChoiceSet` in option order, an
+/// `IdSet` / `PriceMap` as canonical JSON, anything else trimmed.
+pub fn normalize(key: &str, value: &str) -> Result<String, IpcError> {
+    if let Some(how) = spec(key).and_then(|sp| sp.owned_by) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("{key} is read-only here: change it with {how}"),
+        ));
+    }
     validate(key, value)?;
     let v = value.trim();
-    let stored = match spec(key).map(|sp| sp.kind) {
+    Ok(match spec(key).map(|sp| sp.kind) {
         Some(Kind::PathMap) => serde_json::to_string(&parse_path_map(key, v)?)
             .map_err(|e| IpcError::new(codes::E_INVALID, e.to_string()))?,
         Some(Kind::ChoiceSet(options)) => parse_choice_set(key, options, v)?.join(","),
@@ -908,8 +1598,60 @@ pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
                 .map_err(|e| IpcError::new(codes::E_INVALID, e.to_string()))?
         }
         _ => v.to_string(),
+    })
+}
+
+/// The effective value of a registered key (stored, else its default), as
+/// a page shows it. `None` for a key that is not registered.
+pub fn effective_value(s: &Store, key: &str) -> Option<String> {
+    spec(key).map(|sp| effective(s, sp))
+}
+
+/// Validate then persist one setting, as fleet itself ([`Actor::System`]).
+/// A `PathMap` is stored normalised (trimmed paths, sorted keys).
+pub fn set(s: &Store, key: &str, value: &str) -> Result<(), IpcError> {
+    set_by(s, key, value, Actor::System, None)
+}
+
+/// Validate then persist one setting on behalf of `actor`. A registered
+/// key's write that changes the stored value is recorded in the audit trail
+/// with `proposal`, the proposal it applies, if any.
+pub fn set_by(
+    s: &Store,
+    key: &str,
+    value: &str,
+    actor: Actor<'_>,
+    proposal: Option<i64>,
+) -> Result<(), IpcError> {
+    let stored = normalize(key, value)?;
+    let before = if spec(key).is_some() {
+        Some(s.get_setting(key)?)
+    } else {
+        None
     };
     s.set_setting(key, &stored)?;
+    if let Some(before) = before {
+        if before.as_deref() != Some(stored.as_str()) {
+            s.insert_setting_audit(
+                key,
+                before.as_deref(),
+                &stored,
+                actor.word(),
+                actor.detail(),
+                proposal,
+            )?;
+        }
+    }
+    s.emit_settings_changed(key);
+    if key == HEALTH_CONTEXT_RED_PCT {
+        // The hub's `/events` stamps `needs_attention` without a store; keep
+        // its threshold equal to the one `list_sessions` now reads.
+        s.context_red_pct_changed(crate::service::health::context_red_pct(s));
+    }
+    if key.starts_with("update.") {
+        // A new track or check interval wakes the hub's channel refresh.
+        crate::service::update::settings_changed(key);
+    }
     Ok(())
 }
 
@@ -978,41 +1720,30 @@ mod tests {
         }
     }
 
-    /// Every registered setting has a Settings dialog row: a `SETTING_KEYS`
-    /// entry and a matching `SETTING_DEFAULTS` value in `fleet_settings.ts`,
-    /// and a control in `SettingsDialog.svelte` addressing that key. Fails when
-    /// a new `SPECS` entry ships without its row.
+    /// Every editable setting has a `SETTING_KEYS` entry and a matching
+    /// `SETTING_DEFAULTS` value in `fleet_settings.ts`.
     #[test]
-    fn every_spec_has_a_settings_dialog_row() {
+    fn every_spec_is_mirrored_in_fleet_settings_ts() {
+        // Where a setting is SHOWN is the page specs' business
+        // (`pages::tests::every_setting_has_one_home`); the frontend still
+        // keeps a typed key and a default for every editable setting, for the
+        // components that read one before `get_fleet_settings` answers.
         const TS: &str = include_str!("../../../../src/lib/fleet_settings.ts");
-        const DIALOG: &str = include_str!("../../../../src/lib/SettingsDialog.svelte");
-        // Comments cannot satisfy the check: a key only mentioned in a
-        // `// …`, `/* … */` or `<!-- … -->` does not count as a row.
         let ts = code_only(TS);
-        let dialog = code_only(DIALOG);
-        for spec in SPECS {
+        for spec in SPECS.iter().filter(|s| s.owned_by.is_none()) {
             // `  camelName: 'the.key',` (SETTING_DEFAULTS lines start with a quote).
             let entry = format!(": '{}',", spec.key);
-            let line = ts
-                .lines()
-                .find(|l| l.trim_end().ends_with(&entry) && !l.trim_start().starts_with('\''))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{} has no SETTING_KEYS entry in src/lib/fleet_settings.ts",
-                        spec.key
-                    )
-                });
-            let name = line.trim().split(':').next().unwrap_or_default().trim();
+            assert!(
+                ts.lines()
+                    .any(|l| l.trim_end().ends_with(&entry) && !l.trim_start().starts_with('\'')),
+                "{} has no SETTING_KEYS entry in src/lib/fleet_settings.ts",
+                spec.key
+            );
             assert!(
                 ts.contains(&format!("'{}': '{}',", spec.key, spec.default)),
                 "{}: SETTING_DEFAULTS must mirror the backend default {:?}",
                 spec.key,
                 spec.default
-            );
-            assert!(
-                dialog.contains(&format!("SETTING_KEYS.{name}")),
-                "{} (SETTING_KEYS.{name}) has no row in src/lib/SettingsDialog.svelte",
-                spec.key
             );
         }
     }
@@ -1372,46 +2103,79 @@ mod tests {
         assert!(validate(DECIDE_JEV_DAILY_TOKEN_BUDGET, "0").is_ok());
     }
 
-    /// The decisions guide (`docs/decisions.md`): its settings table names
-    /// every registered `decide.*` setting with its default, and nothing
-    /// else, like [`work_settings_are_in_the_user_guide`].
+    /// The metadata every generated page and doc reads (design
+    /// `2026-09-28-declarative-pages-design.md`): a label and help for every
+    /// setting, a unit that fits its kind, `zero` only where 0 is allowed,
+    /// and no agent write where a change needs confirming.
     #[test]
-    fn decide_settings_are_in_the_user_guide() {
-        const GUIDE: &str = include_str!("../../../../docs/decisions.md");
-        let rows: BTreeMap<&str, &str> = GUIDE
-            .lines()
-            .filter_map(|l| {
-                let rest = l.strip_prefix("| `decide.")?;
-                let key_len = rest.find('`')?;
-                Some((&l[3..3 + "decide.".len() + key_len], l))
-            })
-            .collect();
-        let specs: Vec<&Spec> = SPECS
-            .iter()
-            .filter(|s| s.key.starts_with("decide."))
-            .collect();
-        assert!(!specs.is_empty(), "no decide.* settings registered");
-        for spec in &specs {
-            let row = rows.get(spec.key).unwrap_or_else(|| {
-                panic!(
-                    "docs/decisions.md → Settings has no row for `{}` (default `{}`); add one",
-                    spec.key, spec.default
-                )
-            });
-            let cells: Vec<&str> = row.split('|').map(str::trim).collect();
-            assert_eq!(
-                cells.get(2).copied(),
-                Some(format!("`{}`", spec.default).as_str()),
-                "docs/decisions.md: the default of `{}` is `{}` in code",
-                spec.key,
-                spec.default
-            );
-        }
-        for key in rows.keys() {
+    fn every_spec_has_consistent_metadata() {
+        let mut labels = std::collections::BTreeSet::new();
+        for spec in SPECS {
+            let k = spec.key;
             assert!(
-                specs.iter().any(|s| s.key == *key),
-                "docs/decisions.md lists `{key}`, which is not a registered setting"
+                !spec.label.is_empty() && spec.label.len() <= 40,
+                "{k}: label must be 1-40 chars"
             );
+            assert!(
+                labels.insert(spec.label),
+                "{k}: label {:?} is not unique",
+                spec.label
+            );
+            assert!(
+                spec.help.ends_with('.') && !spec.help.contains('\n') && spec.help.len() <= 300,
+                "{k}: help must be one short paragraph ending in a full stop"
+            );
+            assert!(
+                !spec.help.contains('<') && !spec.help.contains('|'),
+                "{k}: help is plain text (no markup, no table pipes)"
+            );
+            match spec.kind {
+                Kind::Secs | Kind::SecsMin(_) => assert!(
+                    matches!(
+                        spec.unit,
+                        Unit::Seconds | Unit::Minutes | Unit::Hours | Unit::Days
+                    ),
+                    "{k}: a seconds value needs a time unit to be shown in"
+                ),
+                Kind::Int { .. } => assert!(spec.unit != Unit::None, "{k}: an Int needs a unit"),
+                _ => assert_eq!(spec.unit, Unit::None, "{k}: only numbers have a unit"),
+            }
+            let zero_allowed = matches!(spec.kind, Kind::Secs | Kind::Int { min: 0, .. });
+            assert!(
+                spec.zero.is_none() || zero_allowed,
+                "{k}: `zero` names what 0 means, but 0 is not allowed"
+            );
+            if !spec.option_labels.is_empty() {
+                let options: Vec<&str> = match spec.kind {
+                    Kind::Choice(o) | Kind::ChoiceSet(o) => o.to_vec(),
+                    _ => panic!("{k}: option labels on a kind with no options"),
+                };
+                let labelled: Vec<&str> = spec.option_labels.iter().map(|(v, _)| *v).collect();
+                assert_eq!(labelled, options, "{k}: label every option, in order");
+            }
+            if spec.owned_by.is_some() {
+                assert_eq!(
+                    spec.ai,
+                    AiPolicy::Never,
+                    "{k}: an agent never writes a key it does not own"
+                );
+                assert_eq!(
+                    spec.danger,
+                    Danger::None,
+                    "{k}: nothing to confirm on a read-only key"
+                );
+            }
+            if let Danger::Confirm(message) = spec.danger {
+                assert!(
+                    message.ends_with('.'),
+                    "{k}: a confirm message is a sentence"
+                );
+                assert_eq!(
+                    spec.ai,
+                    AiPolicy::Never,
+                    "{k}: an agent never makes a confirmed change"
+                );
+            }
         }
     }
 
@@ -1455,49 +2219,98 @@ mod tests {
         }
     }
 
-    /// The user guide (`docs/work-graph.md`), compiled in like
-    /// `mcp::doc_gen`'s guide so the check runs wherever `cargo test` runs.
-    const WORK_GUIDE: &str = include_str!("../../../../docs/work-graph.md");
-
-    /// Work graph M12.5: the guide's settings table names every registered
-    /// `work.*` setting with its default, and nothing that is not one, so a
-    /// new or renamed setting cannot ship undocumented.
+    /// A validated write emits `settings:changed` with the key; a refused
+    /// one emits nothing.
     #[test]
-    fn work_settings_are_in_the_user_guide() {
-        let rows: BTreeMap<&str, &str> = WORK_GUIDE
-            .lines()
-            .filter_map(|l| {
-                let rest = l.strip_prefix("| `work.")?;
-                let key_len = rest.find('`')?;
-                Some((&l[3..3 + "work.".len() + key_len], l))
-            })
-            .collect();
-        let specs: Vec<&Spec> = SPECS
-            .iter()
-            .filter(|s| s.key.starts_with("work."))
-            .collect();
-        assert!(!specs.is_empty(), "no work.* settings registered");
-        for spec in &specs {
-            let row = rows.get(spec.key).unwrap_or_else(|| {
-                panic!(
-                    "docs/work-graph.md → Settings has no row for `{}` (default `{}`); add one",
-                    spec.key, spec.default
-                )
-            });
-            let cells: Vec<&str> = row.split('|').map(str::trim).collect();
-            assert_eq!(
-                cells.get(2).copied(),
-                Some(format!("`{}`", spec.default).as_str()),
-                "docs/work-graph.md: the default of `{}` is `{}` in code",
-                spec.key,
-                spec.default
-            );
+    fn a_write_emits_settings_changed() {
+        let bus = std::sync::Arc::new(crate::events::RecordingEventBus::new());
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        bus.take();
+        set(&s, WORK_RECENT_DAYS, "30").unwrap();
+        assert!(set(&s, WORK_RECENT_DAYS, "soon").is_err());
+        assert!(set(&s, crate::mcp::SETTING_ENABLED, "true").is_err());
+        assert_eq!(
+            bus.take(),
+            vec![format!("settings:changed:{WORK_RECENT_DAYS}")]
+        );
+    }
+
+    /// Secrets, key material and internal state never enter the registry,
+    /// so `describe`, the docs and every page stay blind to them.
+    #[test]
+    fn never_registered_keys_stay_out() {
+        for key in [
+            crate::mcp::SETTING_TOKEN,
+            crate::service::hub::SETTING_TLS_KEY,
+            crate::service::hub::SETTING_TLS_CERT,
+            crate::service::operator::SETTING_OPERATOR_TOKEN_SHA,
+            crate::service::operator::SETTING_OPERATOR_SESSION,
+            crate::service::operator::SETTING_OPERATOR_HOST,
+            crate::service::address::FLEET_ID_KEY,
+            crate::service::quick_replies::SETTING_KEY,
+            "hub.client_plaintext_token",
+        ] {
+            assert!(spec(key).is_none(), "{key} must never be registered");
         }
-        for key in rows.keys() {
-            assert!(
-                specs.iter().any(|s| s.key == *key),
-                "docs/work-graph.md lists `{key}`, which is not a registered setting"
-            );
-        }
+    }
+
+    /// D-P7: a key another subsystem owns is described as it is stored and
+    /// refused on write, with where it is changed.
+    #[test]
+    fn owned_keys_are_shown_as_stored_and_refused_on_write() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, " no ")
+            .unwrap();
+        let d = describe(&s)
+            .into_iter()
+            .find(|d| d.key == crate::service::hub::SETTING_LOCAL_HOST)
+            .unwrap();
+        assert_eq!(d.value, "no", "the owner's spelling, not the default");
+        assert!(d.owned_by.is_some());
+        let err = set(&s, crate::mcp::guard::SETTING_CONFIRM_DESTRUCTIVE, "true").unwrap_err();
+        assert!(err.message.contains("read-only here"), "{}", err.message);
+        assert_eq!(
+            s.get_setting(crate::mcp::guard::SETTING_CONFIRM_DESTRUCTIVE)
+                .unwrap(),
+            None,
+            "nothing written"
+        );
+    }
+
+    #[test]
+    fn describe_carries_the_value_and_marks_a_changed_one_modified() {
+        let s = Store::open_in_memory().unwrap();
+        let all = describe(&s);
+        assert_eq!(all.len(), SPECS.len());
+        assert!(all.iter().all(|d| !d.modified && d.value == d.default));
+
+        set(&s, WORK_RECENT_DAYS, "30").unwrap();
+        let d = describe(&s)
+            .into_iter()
+            .find(|d| d.key == WORK_RECENT_DAYS)
+            .unwrap();
+        assert!(d.modified);
+        assert_eq!(d.value, "30");
+        assert_eq!(d.kind, KindDesc::Int { min: 1, max: 365 });
+
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["kind"]["type"], "int");
+        assert_eq!(json["unit"], "days");
+        assert_eq!(json["danger"]["level"], "none");
+        assert_eq!(json["ai"], "suggest");
+
+        let gc = serde_json::to_value(spec(GC_ENABLED).unwrap().describe("false".into())).unwrap();
+        assert_eq!(gc["danger"]["level"], "confirm");
+        assert_eq!(gc["ai"], "never");
+        let secs = serde_json::to_value(
+            spec(REPAIR_TICK_INTERVAL_SECS)
+                .unwrap()
+                .describe("600".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            secs["kind"],
+            serde_json::json!({"type": "secs", "min": 60, "max": MAX_SECS})
+        );
     }
 }

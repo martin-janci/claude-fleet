@@ -212,7 +212,9 @@ changes shape. `CONTRACT_REVISION` stays 4.
 
 // GroupRef
 { "id": "tracker:1:ABC", "label": "ABC", "source": "tracker",
-  "rule_id": null, "tracker_value": "ABC", "editable": true }
+  "rule_id": null, "tracker_value": "ABC" }
+// (`editable`, always true, was dropped on 2026-09-29: every task is placeable;
+// fleet-mobile defaults it to true, and an older hub still sending it is read fine.)
 
 // WorkTaskLink — one session under a task
 {
@@ -245,7 +247,7 @@ changes shape. `CONTRACT_REVISION` stays 4.
   "org_fenced": true,                     // the org is a boundary (tracker / item), not inferred
   "org_mixed": false,                     // unfenced task whose sessions span orgs
   "group": { GroupRef },
-  "counts": { "active": 1, "ended": 2, "suggested": 1 },
+  "counts": { "active": 1, "ended": 2, "suggested": 1 },  // distinct SESSIONS, not links
   "needs_you": false, "review": false,
   "last_activity_at": 1790000200,
   "repos": ["acme/api"],
@@ -500,7 +502,8 @@ this design's.
   is closed: for a bound client every roll-up there that sums across hosts
   (spend by day and by host, host / session / status counts, tunnels, the
   detection backlog) is taken over the hosts it sees only, its org's and,
-  under D31, unassigned ones (`health::scope_to_org`). The master, unbound
+  under D31, unassigned ones (`health::health_for` with `HealthView::Org`,
+  built in one pass; `hosts_in_scope` gives the visible hosts). The master, unbound
   clients and host tokens read as before.
 - 2026-09-27 (M14.0, brought to `main`): based on `main` `f10d0b92` instead
   of `be0e2bc`; the acceptance section is Part R (Part P is GHES on `main`);

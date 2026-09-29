@@ -1,0 +1,2232 @@
+{
+  "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
+  "actions": [
+    {
+      "command": "work_retention_sweep",
+      "help": "Delete what is past its window now, as the GC tick would: at most 2,000 rows per table, the rest over later sweeps.",
+      "id": "work.retention_sweep",
+      "label": "Sweep now"
+    }
+  ],
+  "layouts": [
+    {
+      "id": "category",
+      "items": [
+        "field",
+        "stat",
+        "record",
+        "table",
+        "action",
+        "notice",
+        "link",
+        "custom"
+      ],
+      "supported": true
+    },
+    {
+      "id": "master_detail",
+      "items": [
+        "field",
+        "notice",
+        "custom"
+      ],
+      "supported": true
+    },
+    {
+      "id": "flow",
+      "items": [],
+      "supported": false
+    },
+    {
+      "id": "object_editor",
+      "items": [],
+      "supported": false
+    },
+    {
+      "id": "cards",
+      "items": [
+        "stat",
+        "record",
+        "notice",
+        "link"
+      ],
+      "supported": true
+    },
+    {
+      "id": "review_apply",
+      "items": [
+        "notice",
+        "link"
+      ],
+      "supported": true
+    },
+    {
+      "id": "data_page",
+      "items": [
+        "stat",
+        "record",
+        "table",
+        "chart",
+        "action",
+        "notice",
+        "link"
+      ],
+      "supported": true
+    }
+  ],
+  "resources": [
+    {
+      "color_field": "color",
+      "create": {
+        "bind": [
+          [
+            "name",
+            {
+              "from": "param",
+              "name": "name"
+            }
+          ],
+          [
+            "color",
+            {
+              "from": "param",
+              "name": "color"
+            }
+          ]
+        ],
+        "command": "add_org",
+        "envelope": "args",
+        "id": "org.add",
+        "label": "Add organisation",
+        "params": [
+          {
+            "label": "Name",
+            "max": 80,
+            "name": "name",
+            "placeholder": "Company A",
+            "required": true,
+            "type": "text"
+          },
+          {
+            "label": "Colour",
+            "name": "color",
+            "required": false,
+            "type": "color"
+          }
+        ],
+        "report": false
+      },
+      "delete": {
+        "bind": [
+          [
+            "org_id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "remove_org",
+        "confirm": "Its rules go with it, and its hosts and trackers become unassigned. Sessions are not touched.",
+        "envelope": "args",
+        "id": "org.remove",
+        "label": "Remove organisation",
+        "params": [],
+        "report": false
+      },
+      "empty": "No organisations. Without one, scopes come from GitHub owners and nothing is fenced.",
+      "fields": [
+        {
+          "edit": "name",
+          "help": "What the scope selector and the Work view call it.",
+          "id": "name",
+          "label": "Name",
+          "max": 80,
+          "type": "text"
+        },
+        {
+          "edit": "color",
+          "help": "Marks its sessions in the sidebar.",
+          "id": "color",
+          "label": "Colour",
+          "type": "color"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "owner",
+                  {
+                    "from": "param",
+                    "name": "owner"
+                  }
+                ],
+                [
+                  "repo",
+                  {
+                    "from": "param",
+                    "name": "repo"
+                  }
+                ]
+              ],
+              "command": "add_org_rule",
+              "envelope": "args",
+              "id": "org.add_owner_rule",
+              "label": "Add owner rule",
+              "params": [
+                {
+                  "label": "GitHub owner",
+                  "max": 100,
+                  "name": "owner",
+                  "placeholder": "acme",
+                  "required": true,
+                  "type": "text"
+                },
+                {
+                  "label": "Repository (optional)",
+                  "max": 100,
+                  "name": "repo",
+                  "placeholder": "api",
+                  "required": false,
+                  "type": "text"
+                }
+              ],
+              "report": false
+            },
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "path_prefix",
+                  {
+                    "from": "param",
+                    "name": "path_prefix"
+                  }
+                ]
+              ],
+              "command": "add_org_rule",
+              "envelope": "args",
+              "id": "org.add_path_rule",
+              "label": "Add path rule",
+              "params": [
+                {
+                  "label": "Path prefix",
+                  "max": 1024,
+                  "name": "path_prefix",
+                  "placeholder": "/home/me/work/acme",
+                  "required": true,
+                  "type": "text"
+                }
+              ],
+              "report": false
+            },
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "host_alias",
+                  {
+                    "from": "param",
+                    "name": "host_alias"
+                  }
+                ]
+              ],
+              "command": "add_org_rule",
+              "envelope": "args",
+              "id": "org.add_host_rule",
+              "label": "Add host rule",
+              "params": [
+                {
+                  "label": "Host",
+                  "max": 100,
+                  "name": "host_alias",
+                  "placeholder": "hetzner-a",
+                  "required": true,
+                  "type": "text"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "Which sessions belong to it: a GitHub owner (or one repository), a path prefix, or a host.",
+          "id": "rules",
+          "item_label": {
+            "type": "org_rule"
+          },
+          "label": "Rules",
+          "remove": {
+            "bind": [
+              [
+                "rule_id",
+                {
+                  "from": "item_field",
+                  "name": "id"
+                }
+              ]
+            ],
+            "command": "remove_org_rule",
+            "envelope": "args",
+            "id": "org.remove_rule",
+            "label": "Remove rule",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "host_alias",
+                  {
+                    "from": "param",
+                    "name": "host"
+                  }
+                ],
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ]
+              ],
+              "command": "assign_host_org",
+              "envelope": "args",
+              "id": "org.assign_host",
+              "label": "Add host",
+              "params": [
+                {
+                  "label": "Host",
+                  "name": "host",
+                  "required": true,
+                  "source": "hosts",
+                  "type": "options"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "A host in an org: its per-host token reads only this org's (and unassigned) work.",
+          "id": "hosts",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Hosts",
+          "remove": {
+            "bind": [
+              [
+                "host_alias",
+                {
+                  "from": "item"
+                }
+              ],
+              [
+                "org_id",
+                {
+                  "from": "null"
+                }
+              ]
+            ],
+            "command": "assign_host_org",
+            "envelope": "args",
+            "id": "org.unassign_host",
+            "label": "Take the host out",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "tracker_id",
+                  {
+                    "from": "param",
+                    "name": "tracker"
+                  }
+                ],
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ]
+              ],
+              "command": "assign_tracker_org",
+              "envelope": "args",
+              "id": "org.assign_tracker",
+              "label": "Add tracker",
+              "params": [
+                {
+                  "label": "Tracker",
+                  "name": "tracker",
+                  "required": true,
+                  "source": "trackers",
+                  "type": "options"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "Trackers whose tickets belong to this org.",
+          "id": "trackers",
+          "item_label": {
+            "field": "name",
+            "type": "field"
+          },
+          "label": "Trackers",
+          "remove": {
+            "bind": [
+              [
+                "tracker_id",
+                {
+                  "from": "item_field",
+                  "name": "id"
+                }
+              ],
+              [
+                "org_id",
+                {
+                  "from": "null"
+                }
+              ]
+            ],
+            "command": "assign_tracker_org",
+            "envelope": "args",
+            "id": "org.unassign_tracker",
+            "label": "Take the tracker out",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "badge": {
+            "text": "isolates sessions",
+            "when": "true"
+          },
+          "confirm": "Hosts outside this org will no longer list or message its sessions, and its hosts will not see other orgs' sessions. It can break a controller that dispatches across companies.",
+          "default": false,
+          "edit": "isolate_sessions",
+          "help": "Also hide this org's sessions from other orgs' hosts, and theirs from its hosts: list, peer status, messages. Work data is fenced either way.",
+          "id": "isolate_sessions",
+          "label": "Isolate sessions",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "text": "auto-tidy",
+            "when": "set"
+          },
+          "edit": "auto_tidy",
+          "help": "Auto-tidy for this org's sessions: on or off whatever the fleet-wide setting says, or inherit it. Safe kill only, never a session in use.",
+          "id": "auto_tidy",
+          "label": "Auto-tidy",
+          "type": "inherit"
+        },
+        {
+          "badge": {
+            "text": "sends to Jev",
+            "when": "true"
+          },
+          "confirm": "This org's redacted prompts and ticket titles will be sent to TypeSafe when Decisions (Jev) is on.",
+          "default": false,
+          "edit": "jev",
+          "help": "Let this org's redacted prompts and ticket titles go to TypeSafe's decision model when Decisions (Jev) is on. Only ids and numbers are recorded; an answer is at most a suggestion.",
+          "id": "jev_allowed",
+          "label": "Send to Jev",
+          "on_off": true,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "text": "bound devices: own only",
+            "when": "false"
+          },
+          "default": true,
+          "edit": "bound_sees_unassigned",
+          "help": "Devices paired to this org (fleet-hub pair --org) also see work and sessions that belong to no org, as a host does. Off: only this org's own.",
+          "id": "bound_sees_unassigned",
+          "label": "Bound devices see unassigned",
+          "on_off": false,
+          "type": "bool"
+        }
+      ],
+      "help": "Optional. Name an org to merge or split GitHub owners, to attach a tracker, or to make it a boundary: a host in an org lets its Claude read only that org's (and unassigned) work.",
+      "id": "org",
+      "id_field": "id",
+      "label": "Organisation",
+      "list": "list_orgs",
+      "plural": "Organisations",
+      "title_field": "name",
+      "update": {
+        "bind": [
+          [
+            "org_id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "update_org",
+        "envelope": "args",
+        "id": "org.update",
+        "label": "Apply",
+        "params": [],
+        "report": false
+      }
+    },
+    {
+      "actions": [
+        {
+          "bind": [
+            [
+              "tracker_id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "test_tracker",
+          "envelope": "args",
+          "id": "tracker.test",
+          "label": "Test",
+          "params": [],
+          "report": true
+        },
+        {
+          "bind": [
+            [
+              "tracker_id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ],
+            [
+              "username",
+              {
+                "from": "param",
+                "name": "email"
+              }
+            ],
+            [
+              "secret",
+              {
+                "from": "param",
+                "name": "token"
+              }
+            ]
+          ],
+          "command": "set_tracker_credential",
+          "envelope": "args",
+          "id": "tracker.replace_login",
+          "label": "Replace credential",
+          "params": [
+            {
+              "label": "Atlassian account email",
+              "max": 320,
+              "name": "email",
+              "placeholder": "you@example.com",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "label": "API token",
+              "name": "token",
+              "required": true,
+              "type": "secret"
+            }
+          ],
+          "report": false,
+          "variants": [
+            "jira"
+          ]
+        },
+        {
+          "bind": [
+            [
+              "tracker_id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ],
+            [
+              "secret",
+              {
+                "from": "param",
+                "name": "token"
+              }
+            ]
+          ],
+          "command": "set_tracker_credential",
+          "envelope": "args",
+          "id": "tracker.replace_token",
+          "label": "Replace credential",
+          "params": [
+            {
+              "label": "Token",
+              "name": "token",
+              "required": true,
+              "type": "secret"
+            }
+          ],
+          "report": false,
+          "variants": [
+            "jira_dc",
+            "asana",
+            "linear"
+          ]
+        }
+      ],
+      "create_flow": "tracker.connect",
+      "delete": {
+        "bind": [
+          [
+            "tracker_id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "remove_tracker",
+        "confirm": "Its cached tickets go with it; sessions keep their keys and links.",
+        "envelope": "args",
+        "id": "tracker.remove",
+        "label": "Remove tracker",
+        "params": [],
+        "report": false
+      },
+      "empty": "No trackers. Keys in branch names group sessions without one; connect a tracker for titles and statuses.",
+      "fields": [
+        {
+          "edit": "name",
+          "help": "What chips and ⌘K call it.",
+          "id": "name",
+          "label": "Name",
+          "max": 80,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "Which tracker it is.",
+          "id": "provider",
+          "label": "Tracker",
+          "options": [
+            [
+              "jira",
+              "Jira Cloud"
+            ],
+            [
+              "jira_dc",
+              "Jira Data Center"
+            ],
+            [
+              "github",
+              "GitHub"
+            ],
+            [
+              "asana",
+              "Asana"
+            ],
+            [
+              "linear",
+              "Linear"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "The site or workspace it reads.",
+          "id": "site_url",
+          "label": "Site",
+          "max": 2048,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "How the last test or sync went.",
+          "id": "state",
+          "label": "State",
+          "options": [
+            [
+              "ok",
+              "ok"
+            ],
+            [
+              "auth_failed",
+              "token expired or wrong"
+            ],
+            [
+              "captcha",
+              "log in via the browser"
+            ],
+            [
+              "rate_limited",
+              "rate-limited"
+            ],
+            [
+              "unreachable",
+              "unreachable"
+            ],
+            [
+              "unconfigured",
+              "not tested yet"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "When a sync last finished for it.",
+          "id": "last_sync_at",
+          "label": "Last sync",
+          "type": "time"
+        },
+        {
+          "help": "What the tracker said the last time it refused.",
+          "id": "last_error",
+          "label": "Last error",
+          "max": 4096,
+          "type": "text"
+        },
+        {
+          "help": "The account its credential belongs to (Jira Cloud).",
+          "id": "username",
+          "label": "Account",
+          "max": 320,
+          "type": "text"
+        },
+        {
+          "help": "The end of the stored credential; the rest is never shown.",
+          "id": "credential_hint",
+          "label": "Credential",
+          "max": 64,
+          "type": "text"
+        },
+        {
+          "help": "direct, or gh / requests on a named host.",
+          "id": "transport",
+          "label": "Reached through",
+          "max": 200,
+          "type": "text"
+        },
+        {
+          "confirm": "Fleet will write to this tracker: a link on each ticket whose work you linked or started gets a pull request.",
+          "default": false,
+          "edit": "settings",
+          "help": "Add a session's pull request to its ticket as a link, only for work you linked or started. The token needs permission to edit issues.",
+          "id": "pr_remote_link",
+          "label": "Link pull requests",
+          "merge_path": [
+            "write_back",
+            "pr_remote_link"
+          ],
+          "on_off": false,
+          "type": "bool"
+        }
+      ],
+      "help": "Trackers add a ticket's title and status to the sessions working on it, and list your tickets in ⌘K. Nothing needs one: keys in branch names group sessions without any tracker.",
+      "id": "tracker",
+      "id_field": "id",
+      "label": "Tracker",
+      "list": "list_trackers",
+      "plural": "Trackers",
+      "title_field": "name",
+      "update": {
+        "bind": [
+          [
+            "tracker_id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "update_tracker",
+        "envelope": "args",
+        "id": "tracker.update",
+        "label": "Apply",
+        "params": [],
+        "report": false
+      },
+      "variant_by": "provider"
+    }
+  ],
+  "settings": [
+    {
+      "default_widget": "duration",
+      "key": "reconcile.interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Reconcile interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "reconcile.stale_working_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Stale working timeout",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "reconcile.stale_working_ttl_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Stale mark lifts after",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "sessions.lost_ttl_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Keep lost sessions",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "restore.batch_size",
+      "kind": {
+        "max": 16,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Concurrent restores",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "restore.stagger_ms",
+      "kind": {
+        "max": 60000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Delay between restores",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "playbooks.press_enter",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Press Enter when stuck",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "playbooks.oom_recreate",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Recreate out-of-memory sessions",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "playbooks.oom_max_attempts",
+      "kind": {
+        "max": 20,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Out-of-memory budget",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "gc.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Garbage-collect idle sessions",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "gc.bg_idle_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Background agent idle limit",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "gc.shell_idle_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Shell idle limit",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "gc.work_idle_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Work session idle limit",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "gc.sweep_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "GC sweep interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "gc.external_lost_ttl_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Keep lost outside sessions",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "key_value_table",
+      "key": "projects.base_path",
+      "kind": {
+        "type": "path_map"
+      },
+      "label": "Projects roots",
+      "widgets": [
+        "textarea",
+        "key_value_table",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "projects.layout",
+      "kind": {
+        "options": [
+          "github",
+          "flat"
+        ],
+        "type": "choice"
+      },
+      "label": "Projects layout",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "tasks.max_age_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Task timeout",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "repair.auto_on_tick",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Re-create vanished worktrees",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "repair.tick_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 60,
+        "type": "secs"
+      },
+      "label": "Workspace check interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "move.max_transcript_mb",
+      "kind": {
+        "max": 4096,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: transcript cap",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "move.max_bundle_mb",
+      "kind": {
+        "max": 4096,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: git bundle cap",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "move.ignored_entry_kb",
+      "kind": {
+        "max": 1048576,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: ignored entry cap",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "move.ignored_total_mb",
+      "kind": {
+        "max": 1024,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: ignored total cap",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "move.max_session_state_mb",
+      "kind": {
+        "max": 4096,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: session state cap",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "move.wait_max_mins",
+      "kind": {
+        "max": 10080,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: wait timeout",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "usage.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Collect token usage",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "usage.interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Usage interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "textarea",
+      "key": "usage.prices_json",
+      "kind": {
+        "type": "price_map"
+      },
+      "label": "Price overrides",
+      "widgets": [
+        "textarea",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "reports.max_rows",
+      "kind": {
+        "max": 100000,
+        "min": 100,
+        "type": "int"
+      },
+      "label": "Error reports kept",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "reports.max_age_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Error report age",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "health.context_red_pct",
+      "kind": {
+        "max": 100,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Context red threshold",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "health.version_max_age_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Trust a host's Claude version for",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "health.disk_low_pct",
+      "kind": {
+        "max": 100,
+        "min": 50,
+        "type": "int"
+      },
+      "label": "Disk low at",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "health.claude_max_behind",
+      "kind": {
+        "max": 1000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Claude behind after",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "health.hooks_silent_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Hooks silent after",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "provision.force_git_tree",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Provision into git-tracked skills",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "work.retention.journal_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Retention: work journal",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "work.retention.tracker_items_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Retention: done tickets",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "work.retention.timeline_work_events_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Retention: work timeline",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "work.recent_days",
+      "kind": {
+        "max": 365,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Recent work",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "work.sync_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Tracker sync interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "work.describe_cache_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Ticket description cache",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "id_list",
+      "key": "work.trusted_branch_projects",
+      "kind": {
+        "type": "id_set"
+      },
+      "label": "Trusted branch projects",
+      "widgets": [
+        "textarea",
+        "id_list",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "work.evidence_snippets",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Keep evidence snippets",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "work.session_start_context",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Ticket context at session start",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "work.classify_nudge",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Classification nudge",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "work.summary_model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Summary model",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "work.tidy_done_days",
+      "kind": {
+        "max": 365,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Tidy: done for",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "work.tidy_idle_hours",
+      "kind": {
+        "max": 720,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Tidy: idle for",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "work.tidy_idle_unlinked_days",
+      "kind": {
+        "max": 90,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Tidy: unlinked for",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "work.auto_tidy",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Auto-tidy",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "multiselect",
+      "key": "work.auto_tidy_reasons",
+      "kind": {
+        "options": [
+          "done_idle",
+          "pr_merged_idle",
+          "not_planned"
+        ],
+        "type": "choice_set"
+      },
+      "label": "Auto-tidy reasons",
+      "widgets": [
+        "multiselect",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "update.track",
+      "kind": {
+        "options": [
+          "stable",
+          "beta"
+        ],
+        "type": "choice"
+      },
+      "label": "Release track",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "update.hub.mode",
+      "kind": {
+        "options": [
+          "manual",
+          "notify",
+          "automatic"
+        ],
+        "type": "choice"
+      },
+      "label": "Hub updates",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "update.agent.mode",
+      "kind": {
+        "options": [
+          "manual",
+          "notify",
+          "automatic"
+        ],
+        "type": "choice"
+      },
+      "label": "Agent updates",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "update.desktop.mode",
+      "kind": {
+        "options": [
+          "manual",
+          "notify",
+          "automatic"
+        ],
+        "type": "choice"
+      },
+      "label": "Desktop updates",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "update.mobile.mode",
+      "kind": {
+        "options": [
+          "manual",
+          "notify"
+        ],
+        "type": "choice"
+      },
+      "label": "Phone updates",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "update.check_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 900,
+        "type": "secs"
+      },
+      "label": "Update check interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "decide.jev.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Decisions (Jev)",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.status_map",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: status map",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.work_link",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: work link",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "decide.jev.unassigned",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Jev: send unassigned",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "decide.jev.timeout_ms",
+      "kind": {
+        "max": 30000,
+        "min": 100,
+        "type": "int"
+      },
+      "label": "Jev: timeout",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "decide.jev.breaker_failures",
+      "kind": {
+        "max": 100,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Jev: breaker failures",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "decide.jev.breaker_open_secs",
+      "kind": {
+        "max": 86400,
+        "min": 10,
+        "type": "int"
+      },
+      "label": "Jev: breaker pause",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "decide.jev.daily_token_budget",
+      "kind": {
+        "max": 1000000000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Jev: daily token budget",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.model",
+      "kind": {
+        "options": [
+          "jev-1.13.0",
+          "jev-latest"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: model",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "decide.retention_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Jev: keep runs",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "text",
+      "key": "hub.bind",
+      "kind": {
+        "max": 255,
+        "type": "text"
+      },
+      "label": "Hub bind address",
+      "widgets": [
+        "text",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "text",
+      "key": "hub.public_url",
+      "kind": {
+        "max": 2048,
+        "type": "text"
+      },
+      "label": "Hub public URL",
+      "widgets": [
+        "text",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "text",
+      "key": "hub.allowed_hosts",
+      "kind": {
+        "max": 4096,
+        "type": "text"
+      },
+      "label": "Hub allowed hosts",
+      "widgets": [
+        "text",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "hub.local_host",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Hub runs local sessions",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "hub.allow_plaintext",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Hub serves plaintext",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "hub.tls",
+      "kind": {
+        "options": [
+          "off",
+          "cert"
+        ],
+        "type": "choice"
+      },
+      "label": "Hub TLS",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "mcp.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Control API",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "mcp.port",
+      "kind": {
+        "max": 65535,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Control API port",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "mcp.confirm_destructive",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Confirm destructive calls",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "mcp.broadcast_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Broadcast interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "fields": [
+        {
+          "id": "input_tokens",
+          "label": "Input",
+          "ty": "tokens"
+        },
+        {
+          "id": "output_tokens",
+          "label": "Output",
+          "ty": "tokens"
+        },
+        {
+          "id": "cache_write_tokens",
+          "label": "Cache write",
+          "ty": "tokens"
+        },
+        {
+          "id": "cache_read_tokens",
+          "label": "Cache read",
+          "ty": "tokens"
+        },
+        {
+          "id": "cost_micros",
+          "label": "Est. cost",
+          "ty": "usd_micros"
+        }
+      ],
+      "help": "Tokens and estimated cost over every session row that still exists, each over its whole lifetime.",
+      "id": "usage.total",
+      "label": "Token usage",
+      "params": [
+        {
+          "default": null,
+          "help": "Only this host; every host when unset.",
+          "name": "host",
+          "ty": {
+            "type": "host_alias"
+          }
+        }
+      ],
+      "shape": "record"
+    },
+    {
+      "help": "Tokens and estimated cost per UTC day from the durable roll-up, killed sessions included.",
+      "id": "usage.by_day",
+      "label": "Usage by day",
+      "params": [
+        {
+          "default": 14,
+          "help": "How many UTC days back, today included.",
+          "name": "days",
+          "ty": {
+            "max": 365,
+            "min": 1,
+            "type": "days"
+          }
+        },
+        {
+          "default": null,
+          "help": "Only this host; every host when unset.",
+          "name": "host",
+          "ty": {
+            "type": "host_alias"
+          }
+        }
+      ],
+      "shape": "series",
+      "x": {
+        "id": "day",
+        "label": "Day",
+        "ty": "day"
+      },
+      "y": [
+        {
+          "id": "cost_micros",
+          "label": "Est. cost",
+          "ty": "usd_micros"
+        },
+        {
+          "id": "input_tokens",
+          "label": "Input",
+          "ty": "tokens"
+        },
+        {
+          "id": "output_tokens",
+          "label": "Output",
+          "ty": "tokens"
+        }
+      ]
+    },
+    {
+      "columns": [
+        {
+          "id": "host",
+          "label": "Host",
+          "ty": "text"
+        },
+        {
+          "id": "input_tokens",
+          "label": "Input",
+          "ty": "tokens"
+        },
+        {
+          "id": "output_tokens",
+          "label": "Output",
+          "ty": "tokens"
+        },
+        {
+          "id": "cost_micros",
+          "label": "Est. cost",
+          "ty": "usd_micros"
+        }
+      ],
+      "help": "Tokens and estimated cost per host over the session rows that still exist.",
+      "id": "usage.by_host",
+      "label": "Usage by host",
+      "params": [],
+      "shape": "rows"
+    },
+    {
+      "columns": [
+        {
+          "id": "model",
+          "label": "Model",
+          "ty": "text"
+        },
+        {
+          "id": "sessions",
+          "label": "Sessions",
+          "ty": "int"
+        },
+        {
+          "id": "input_tokens",
+          "label": "Input",
+          "ty": "tokens"
+        },
+        {
+          "id": "output_tokens",
+          "label": "Output",
+          "ty": "tokens"
+        },
+        {
+          "id": "cost_micros",
+          "label": "Est. cost",
+          "ty": "usd_micros"
+        }
+      ],
+      "help": "Tokens and estimated cost per model over the session rows that still exist, by each session's latest model.",
+      "id": "usage.by_model",
+      "label": "Usage by model",
+      "params": [
+        {
+          "default": null,
+          "help": "Only this host; every host when unset.",
+          "name": "host",
+          "ty": {
+            "type": "host_alias"
+          }
+        }
+      ],
+      "shape": "rows"
+    },
+    {
+      "columns": [
+        {
+          "id": "kept",
+          "label": "Kept",
+          "ty": "text"
+        },
+        {
+          "id": "days",
+          "label": "Window (days, 0 = forever)",
+          "ty": "int"
+        },
+        {
+          "id": "rows",
+          "label": "Rows",
+          "ty": "int"
+        },
+        {
+          "id": "would_delete",
+          "label": "Would delete now",
+          "ty": "int"
+        }
+      ],
+      "help": "Per swept table: its window, its rows, and what a sweep would delete now (a dry run).",
+      "id": "work.retention",
+      "label": "Work retention",
+      "params": [],
+      "shape": "rows"
+    },
+    {
+      "fields": [
+        {
+          "id": "at",
+          "label": "Last sweep",
+          "ty": "time"
+        },
+        {
+          "id": "journal",
+          "label": "Journal entries",
+          "ty": "int"
+        },
+        {
+          "id": "tracker_items",
+          "label": "Done tickets",
+          "ty": "int"
+        },
+        {
+          "id": "timeline_work_events",
+          "label": "Timeline events",
+          "ty": "int"
+        },
+        {
+          "id": "tracker_writes",
+          "label": "PR links",
+          "ty": "int"
+        },
+        {
+          "id": "describe_cache",
+          "label": "Full descriptions",
+          "ty": "int"
+        }
+      ],
+      "help": "When the last sweep ran and what it deleted.",
+      "id": "work.retention_last",
+      "label": "Last retention sweep",
+      "params": [],
+      "shape": "record"
+    }
+  ],
+  "spec": "fleet.page/1",
+  "widgets": [
+    {
+      "id": "switch",
+      "kinds": [
+        "bool"
+      ]
+    },
+    {
+      "id": "number",
+      "kinds": [
+        "int",
+        "secs"
+      ]
+    },
+    {
+      "id": "duration",
+      "kinds": [
+        "secs"
+      ]
+    },
+    {
+      "id": "select",
+      "kinds": [
+        "choice"
+      ]
+    },
+    {
+      "id": "radio",
+      "kinds": [
+        "choice"
+      ]
+    },
+    {
+      "id": "multiselect",
+      "kinds": [
+        "choice_set"
+      ]
+    },
+    {
+      "id": "text",
+      "kinds": [
+        "text"
+      ]
+    },
+    {
+      "id": "textarea",
+      "kinds": [
+        "id_set",
+        "path_map",
+        "price_map"
+      ]
+    },
+    {
+      "id": "key_value_table",
+      "kinds": [
+        "path_map"
+      ]
+    },
+    {
+      "id": "id_list",
+      "kinds": [
+        "id_set"
+      ]
+    },
+    {
+      "id": "readonly",
+      "kinds": [
+        "bool",
+        "choice",
+        "choice_set",
+        "id_set",
+        "int",
+        "path_map",
+        "price_map",
+        "secs",
+        "text"
+      ]
+    }
+  ]
+}

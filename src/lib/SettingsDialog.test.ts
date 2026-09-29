@@ -12,6 +12,8 @@ import SettingsDialog from './SettingsDialog.svelte';
 import { hosts, type HostRow } from './hosts';
 import { composerPresets, flushComposerPresets } from './composer_presets';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
+import { registryRouter } from './pages/testing';
+import { settingsSection } from './app_views';
 
 const sample: HostRow[] = [
   { alias: 'local', ssh_alias: null, reachable: true, claude_version: '2.1.145', tmux_version: '3.5a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
@@ -141,203 +143,7 @@ describe('SettingsDialog', () => {
   });
 });
 
-describe('SettingsDialog automation + notifications (W2 Track D)', () => {
-  it('renders the playbook and GC controls off by default', async () => {
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick(); await tick();
-    expect(screen.getByTestId('automation-section')).toBeInTheDocument();
-    expect(screen.getByTestId('playbook-press-enter')).not.toBeChecked();
-    expect(screen.getByTestId('playbook-oom-recreate')).not.toBeChecked();
-    expect(screen.getByTestId('gc-enabled')).not.toBeChecked();
-    expect((screen.getByTestId('gc-bg-hours') as HTMLInputElement).value).toBe('24');
-    expect((screen.getByTestId('gc-shell-hours') as HTMLInputElement).value).toBe('168');
-    expect((screen.getByTestId('gc-work-hours') as HTMLInputElement).value).toBe('0');
-    expect(mockedInvoke).toHaveBeenCalledWith('get_fleet_settings', undefined);
-  });
-
-  it('toggling a playbook writes the setting through set_fleet_setting', async () => {
-    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
-    inv.mockImplementation(async (cmd: string, args?: { key?: string; value?: string }) => {
-      if (cmd === 'set_fleet_setting') return { [args!.key!]: args!.value! };
-      if (cmd === 'mcp_status') return mcpStatusObj;
-      return null;
-    });
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('playbook-press-enter'));
-    await tick();
-    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'playbooks.press_enter', value: 'true' });
-    expect(screen.getByTestId('playbook-press-enter')).toBeChecked();
-  });
-
-  it('GC TTL inputs convert hours to seconds on the wire', async () => {
-    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
-    inv.mockImplementation(async (cmd: string, args?: { key?: string; value?: string }) => {
-      if (cmd === 'set_fleet_setting') return { [args!.key!]: args!.value! };
-      if (cmd === 'mcp_status') return mcpStatusObj;
-      return null;
-    });
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick(); await tick();
-    const input = screen.getByTestId('gc-bg-hours') as HTMLInputElement;
-    input.value = '1.5';
-    await fireEvent.change(input);
-    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'gc.bg_idle_secs', value: '5400' });
-  });
-
-  it('renders the task TTL and move cap rows with the backend defaults and bounds', async () => {
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick(); await tick();
-    expect(screen.getByTestId('limits-section')).toBeInTheDocument();
-    const tasks = screen.getByTestId('tasks-max-age-hours') as HTMLInputElement;
-    expect(tasks.value).toBe('24');
-    expect(tasks.min).toBe('0');
-    expect(tasks.max).toBe('87600'); // settings::MAX_SECS in hours
-    const mb = screen.getByTestId('move-max-transcript-mb') as HTMLInputElement;
-    expect(mb.value).toBe('200');
-    expect(mb.min).toBe('1');
-    expect(mb.max).toBe('4096');
-  });
-
-  it('writes the task TTL in seconds and the move cap as typed', async () => {
-    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
-    inv.mockImplementation(async (cmd: string, args?: { key?: string; value?: string }) => {
-      if (cmd === 'set_fleet_setting') return { [args!.key!]: args!.value! };
-      if (cmd === 'mcp_status') return mcpStatusObj;
-      return null;
-    });
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick(); await tick();
-    const tasks = screen.getByTestId('tasks-max-age-hours') as HTMLInputElement;
-    tasks.value = '2';
-    await fireEvent.change(tasks);
-    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'tasks.max_age_secs', value: '7200' });
-    const mb = screen.getByTestId('move-max-transcript-mb') as HTMLInputElement;
-    mb.value = '64';
-    await fireEvent.change(mb);
-    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'move.max_transcript_mb', value: '64' });
-  });
-
-  it('shows the backend validation error for an out-of-range move cap', async () => {
-    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
-    inv.mockImplementation(async (cmd: string) => {
-      if (cmd === 'set_fleet_setting') {
-        throw { code: 'E_INVALID', message: 'move.max_transcript_mb must be an integer between 1 and 4096' };
-      }
-      if (cmd === 'mcp_status') return mcpStatusObj;
-      return null;
-    });
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick(); await tick();
-    const mb = screen.getByTestId('move-max-transcript-mb') as HTMLInputElement;
-    mb.value = '5000';
-    await fireEvent.change(mb);
-    // Sent as typed: the backend is the authority on the range.
-    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'move.max_transcript_mb', value: '5000' });
-    await waitFor(() =>
-      expect(screen.getByTestId('limits-error').textContent).toContain('between 1 and 4096'),
-    );
-  });
-
-  it('never sends a limit it cannot represent, and says why', async () => {
-    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
-    inv.mockImplementation(async (cmd: string, args?: { key?: string; value?: string }) => {
-      if (cmd === 'set_fleet_setting') return { [args!.key!]: args!.value! };
-      if (cmd === 'mcp_status') return mcpStatusObj;
-      return null;
-    });
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick(); await tick();
-    const tasks = screen.getByLabelText('tasks') as HTMLInputElement;
-    const mb = screen.getByLabelText('move') as HTMLInputElement;
-    expect(tasks).toBe(screen.getByTestId('tasks-max-age-hours'));
-    expect(mb).toBe(screen.getByTestId('move-max-transcript-mb'));
-    const cases: [HTMLInputElement, string, RegExp][] = [
-      // -1 h must not be clamped to 0 s ("never").
-      [tasks, '-1', /Task timeout: hours must be 0 or more/],
-      // A positive value that rounds to 0 s would also mean "never".
-      [tasks, '0.00001', /Task timeout: too small/],
-      [tasks, '', /Task timeout: enter a number of hours/],
-      [mb, '', /Move transcript cap: enter a whole number/],
-      [mb, '1.5', /Move transcript cap: "1.5" is not a whole number/],
-    ];
-    for (const [input, value, message] of cases) {
-      input.value = value;
-      await fireEvent.change(input);
-      await tick();
-      expect(screen.getByRole('alert').textContent).toMatch(message);
-    }
-    expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.anything());
-  });
-
-  it('renders the usage rows with the backend defaults', async () => {
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick(); await tick();
-    const enabled = screen.getByLabelText('usage') as HTMLInputElement;
-    expect(enabled).toBe(screen.getByTestId('usage-enabled'));
-    expect(enabled).toBeChecked();
-    const interval = screen.getByLabelText('usage every') as HTMLInputElement;
-    expect(interval).toBe(screen.getByTestId('usage-interval-secs'));
-    expect(interval.value).toBe('300');
-    const prices = screen.getByLabelText('prices') as HTMLTextAreaElement;
-    expect(prices).toBe(screen.getByTestId('usage-prices-json'));
-    expect(prices.value).toBe('{}');
-  });
-
-  it('writes the usage settings through set_fleet_setting', async () => {
-    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
-    inv.mockImplementation(async (cmd: string, args?: { key?: string; value?: string }) => {
-      if (cmd === 'set_fleet_setting') return { [args!.key!]: args!.value! };
-      if (cmd === 'mcp_status') return mcpStatusObj;
-      return null;
-    });
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('usage-enabled'));
-    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'usage.enabled', value: 'false' });
-    const interval = screen.getByTestId('usage-interval-secs') as HTMLInputElement;
-    interval.value = '600';
-    await fireEvent.change(interval);
-    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'usage.interval_secs', value: '600' });
-    const prices = screen.getByTestId('usage-prices-json') as HTMLTextAreaElement;
-    const json = '{"opus-4-1":{"input":15,"output":75,"cache_write":30,"cache_read":1.5}}';
-    prices.value = ` ${json} `;
-    await fireEvent.change(prices);
-    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'usage.prices_json', value: json });
-  });
-
-  it('refuses prices that are not a JSON object and shows the backend error for a bad one', async () => {
-    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
-    inv.mockImplementation(async (cmd: string) => {
-      if (cmd === 'set_fleet_setting') {
-        throw { code: 'E_INVALID', message: 'usage.prices_json: prices for opus must be between 0 and 10000' };
-      }
-      if (cmd === 'mcp_status') return mcpStatusObj;
-      return null;
-    });
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick(); await tick();
-    const prices = screen.getByTestId('usage-prices-json') as HTMLTextAreaElement;
-    for (const [value, message] of [
-      ['{oops', /Usage prices: not valid JSON/],
-      ['[1, 2]', /Usage prices: must be a JSON object/],
-    ] as const) {
-      prices.value = value;
-      await fireEvent.change(prices);
-      await tick();
-      expect(screen.getByRole('alert').textContent).toMatch(message);
-    }
-    expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.anything());
-    // Object-shaped but invalid: sent as typed, the backend's message shows.
-    const bad = '{"opus":{"input":-1,"output":1,"cache_write":1,"cache_read":1}}';
-    prices.value = bad;
-    await fireEvent.change(prices);
-    expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'usage.prices_json', value: bad });
-    await waitFor(() =>
-      expect(screen.getByTestId('limits-error').textContent).toContain('between 0 and 10000'),
-    );
-  });
-
+describe('SettingsDialog notifications (W2 Track D)', () => {
   it('renders the notifications section with the toast toggle on and OS off', async () => {
     render(SettingsDialog, { props: { onClose: () => {} } });
     await tick();
@@ -453,6 +259,20 @@ describe('SettingsDialog projects (W5 G3)', () => {
     expect(screen.getByTestId('projects-preview-local')).toHaveTextContent('/srv/env/<repo>');
     // remote hosts never see the env var
     expect(screen.getByTestId('projects-preview-mefistos')).toHaveTextContent('~/projects/<repo>');
+  });
+
+  it('re-reads the composer presets when it opens, so an edit starts from the fleet list', async () => {
+    composerPresets.set([{ label: 'Stale', text: 'stale' }]);
+    const fresh = [{ label: 'Phone', text: 'from the phone' }];
+    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+    const base = inv.getMockImplementation() as (cmd: string, a?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, a?: unknown) => {
+      if (cmd === 'quick_replies') return fresh;
+      return base(cmd, a);
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('quick_replies', undefined));
+    await waitFor(() => expect(get(composerPresets)).toEqual(fresh));
   });
 
   it('lists the composer presets and edits them in place, saving through the backend', async () => {
@@ -571,171 +391,82 @@ describe('SettingsDialog composer presets — moving a chip', () => {
   });
 });
 
-describe('SettingsDialog — Work lifecycle (work graph M7.3)', () => {
-  // The lifecycle inputs read `fleetSettings`, which the dialog loads on
-  // mount. The values here are OFF the defaults on purpose: an input that
-  // only ever showed SETTING_DEFAULTS (or a load that never happened) would
-  // fail, where `done_days: 2 / idle_hours: 4` could not tell the two apart.
-  afterEach(() => fleetSettings.set({ ...SETTING_DEFAULTS }));
 
-  it('shows the stored thresholds and reasons, and a dry run of the current candidates', async () => {
+describe('SettingsDialog — generated pages (declarative pages P3)', () => {
+  function routeRegistry(initial: Record<string, string> = {}) {
     const inv = mockedInvoke as ReturnType<typeof vi.fn>;
     const base = inv.getMockImplementation() as (cmd: string, a?: unknown) => Promise<unknown>;
-    inv.mockImplementation(async (cmd: string, a?: unknown) => {
-      if (cmd === 'get_fleet_settings')
-        return {
-          'work.tidy_done_days': '3',
-          'work.tidy_idle_hours': '6',
-          'work.auto_tidy_reasons': 'pr_merged_idle',
-        };
-      if (cmd === 'work_tidy')
-        return {
-          candidates: [
-            { session_id: 1, host_alias: 'h', tmux_name: 'done-one', reason: 'done_idle', action: 'safe_kill', since: 0, idle_secs: 18000, key: 'ABC-1' },
-            { session_id: 2, host_alias: 'h', tmux_name: 'merged-one', reason: 'pr_merged_idle', action: 'safe_kill', since: 0, idle_secs: 18000, key: 'ABC-2' },
-            { session_id: 3, host_alias: 'h', tmux_name: 'dup', reason: 'duplicate_worktree', action: 'kill', since: 0, idle_secs: 90000 },
-            { session_id: 4, host_alias: 'h', tmux_name: 'wontdo', reason: 'not_planned', action: 'safe_kill', since: 0, idle_secs: 18000 },
-          ],
-          auto_tidy: false,
-          auto_reasons: ['pr_merged_idle'],
-          done_days: 3,
-          idle_hours: 6,
-        };
-      if (cmd === 'work_reopened') return [];
-      return base(cmd, a);
-    });
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await waitFor(() =>
-      expect((screen.getByTestId('work-tidy-done-days') as HTMLInputElement).value).toBe('3'),
-    );
-    expect((screen.getByTestId('work-tidy-idle-hours') as HTMLInputElement).value).toBe('6');
-    expect((screen.getByTestId('work-tidy-idle-unlinked-days') as HTMLInputElement).value).toBe('7');
-    expect((screen.getByTestId('work-auto-tidy') as HTMLInputElement).checked).toBe(false);
-    expect(screen.getByTestId('work-auto-tidy-warning').textContent).toContain('never touched');
-    const reason = (r: string) => screen.getByTestId(`work-auto-tidy-reason-${r}`) as HTMLInputElement;
-    expect([reason('done_idle').checked, reason('pr_merged_idle').checked, reason('not_planned').checked]).toEqual([
-      false,
-      true,
-      false,
-    ]);
-    await fireEvent.click(screen.getByTestId('work-auto-tidy-dry-run'));
-    const preview = await screen.findByTestId('work-auto-tidy-preview');
-    // Only a safe kill / archive of an allowed reason: not the done_idle row
-    // (reason off), not the plain kill, not the not_planned row.
-    const rows = screen.getAllByTestId('work-auto-tidy-preview-row');
-    expect(rows).toHaveLength(1);
-    expect(rows[0].textContent).toContain('merged-one');
-    expect(preview.textContent).not.toContain('done-one');
-    expect(preview.textContent).toContain('once turned on');
-    // Ticking a reason writes the comma list, in the backend's order, from
-    // the stored value rather than the default.
-    await fireEvent.click(reason('not_planned'));
-    await waitFor(() =>
-      expect(inv).toHaveBeenCalledWith('set_fleet_setting', {
-        key: 'work.auto_tidy_reasons',
-        value: 'pr_merged_idle,not_planned',
-      }),
-    );
-  });
-});
+    const router = registryRouter(initial, (cmd, a) => base(cmd, a));
+    inv.mockImplementation(router.impl);
+    return inv;
+  }
+  afterEach(() => fleetSettings.set({ ...SETTING_DEFAULTS }));
 
-describe('SettingsDialog — tidy: unlinked for (work graph M11.3)', () => {
-  it('writes work.tidy_idle_unlinked_days within 1–90 and refuses the rest here', async () => {
-    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+  it('opens on General, lists every page, and renders a page from the registry', async () => {
+    const inv = routeRegistry();
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick();
-    const input = screen.getByTestId('work-tidy-idle-unlinked-days') as HTMLInputElement;
-    expect(input.min).toBe('1');
-    expect(input.max).toBe('90');
-    for (const bad of ['0', '91']) {
-      await fireEvent.change(input, { target: { value: bad } });
-      await tick();
-      expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', {
-        key: 'work.tidy_idle_unlinked_days',
-        value: bad,
-      });
+    expect(await screen.findByTestId('settings-nav-settings.automation')).toBeInTheDocument();
+    expect(screen.getByTestId('settings-nav-general').getAttribute('aria-current')).toBe('page');
+    expect(screen.getByTestId('hub-section')).toBeInTheDocument();
+    for (const id of ['settings', 'settings.limits', 'settings.work', 'settings.decisions', 'usage']) {
+      expect(screen.getByTestId(`settings-nav-${id}`)).toBeInTheDocument();
     }
-    expect(document.body.textContent).toContain('Tidy: unlinked for: must be 1–90');
-    await fireEvent.change(input, { target: { value: '14' } });
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('describe_fleet_settings', undefined));
+    await fireEvent.click(screen.getByTestId('settings-nav-settings.automation'));
+    expect(await screen.findByTestId('page-settings.automation')).toBeInTheDocument();
+    expect(screen.queryByTestId('hub-section')).toBeNull();
+    const press = screen.getByTestId('setting-playbooks-press-enter') as HTMLInputElement;
+    expect(press.checked).toBe(false);
+    await fireEvent.click(press);
     await waitFor(() =>
-      expect(inv).toHaveBeenCalledWith('set_fleet_setting', {
-        key: 'work.tidy_idle_unlinked_days',
-        value: '14',
-      }),
+      expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'playbooks.press_enter', value: 'true' }),
     );
-  });
-});
-
-describe('SettingsDialog — Decisions (Jev), experimental and off (D36)', () => {
-  it('is off by default, says what is sent where, and offers no auto mode', async () => {
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick(); await tick();
-    expect(screen.getByTestId('decide-section')).toBeInTheDocument();
-    expect(screen.getByTestId('decide-jev-enabled')).not.toBeChecked();
-    expect(screen.getByTestId('decide-jev-unassigned')).not.toBeChecked();
-    const wl = screen.getByTestId('decide-jev-work-link') as HTMLSelectElement;
-    const sm = screen.getByTestId('decide-jev-status-map') as HTMLSelectElement;
-    expect(wl.value).toBe('off');
-    expect(sm.value).toBe('off');
-    expect(Array.from(wl.querySelectorAll('option'), (o) => o.value)).toEqual(['off', 'shadow', 'assist']);
-    expect((screen.getByTestId('decide-jev-model') as HTMLSelectElement).value).toBe('jev-1.13.0');
-    expect((screen.getByTestId('decide-jev-timeout-ms') as HTMLInputElement).value).toBe('1500');
-    expect((screen.getByTestId('decide-retention-days') as HTMLInputElement).value).toBe('90');
-    const text = (screen.getByTestId('decide-explainer').textContent ?? '').replace(/\s+/g, ' ');
-    expect(text).toContain('only for organisations that opted in');
-    expect(text).toContain('never grants a permission');
-    // The key: set with fleet-hub against THIS app's data folder.
-    expect(text).toContain('fleet-hub decide set-key --data-dir DIR');
-    expect(text).toContain('sk.rlt.claude-fleet');
-    expect(text).toContain('~/.local/share/claude-fleet');
+    // The write's answer refreshes the value the page shows.
+    await waitFor(() => expect((screen.getByTestId('setting-playbooks-press-enter') as HTMLInputElement).checked).toBe(true));
   });
 
-  it('shows work link read-only: J1 is an offline benchmark until it passes (D32)', async () => {
-    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
-    inv.mockImplementation(async (cmd: string) => {
-      if (cmd === 'get_fleet_settings') return { 'decide.jev.work_link': 'shadow' };
-      if (cmd === 'mcp_status') return mcpStatusObj;
-      return null;
-    });
+  it('Decisions: off by default, says what is sent where, offers no auto mode, and asks before turning on', async () => {
+    const inv = routeRegistry();
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick(); await tick();
-    const wl = screen.getByTestId('decide-jev-work-link') as HTMLSelectElement;
-    expect(wl).toBeDisabled();
-    // A value set earlier stays readable.
-    await waitFor(() => expect(wl.value).toBe('shadow'));
-    expect(screen.getByTestId('decide-jev-work-link-desc').textContent).toContain(
-      'offline benchmark only until J1 passes its acceptance lines',
-    );
-    await fireEvent.change(wl, { target: { value: 'assist' } });
-    await tick();
-    expect(inv).not.toHaveBeenCalledWith('set_fleet_setting', expect.objectContaining({ key: 'decide.jev.work_link' }));
-    // status map stays live.
-    expect(screen.getByTestId('decide-jev-status-map')).not.toBeDisabled();
-  });
-
-  it('writes the kill switch, a mode and a number through set_fleet_setting', async () => {
-    const inv = mockedInvoke as ReturnType<typeof vi.fn>;
-    inv.mockImplementation(async (cmd: string, args?: { key?: string; value?: string }) => {
-      if (cmd === 'set_fleet_setting') return { [args!.key!]: args!.value! };
-      if (cmd === 'mcp_status') return mcpStatusObj;
-      return null;
-    });
-    render(SettingsDialog, { props: { onClose: () => {} } });
-    await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('decide-jev-enabled'));
+    await fireEvent.click(await screen.findByTestId('settings-nav-settings.decisions'));
+    const page = await screen.findByTestId('page-settings.decisions');
+    await waitFor(() => expect(screen.getByTestId('setting-decide-jev-enabled')).toBeInTheDocument());
+    expect((screen.getByTestId('setting-decide-jev-enabled') as HTMLInputElement).checked).toBe(false);
+    expect(page.textContent).toContain('only for organisations that opted in');
+    // The feature modes only show once the kill switch is on.
+    expect(screen.queryByTestId('setting-row-decide.jev.work_link')).toBeNull();
+    await fireEvent.click(screen.getByTestId('setting-decide-jev-enabled'));
+    expect((await screen.findByTestId('confirm-dialog')).textContent).toContain('sent to TypeSafe');
+    await fireEvent.click(screen.getByTestId('setting-confirm-decide.jev.enabled'));
     await waitFor(() =>
       expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'decide.jev.enabled', value: 'true' }),
     );
-    await fireEvent.change(screen.getByTestId('decide-jev-status-map'), { target: { value: 'shadow' } });
-    await waitFor(() =>
-      expect(inv).toHaveBeenCalledWith('set_fleet_setting', { key: 'decide.jev.status_map', value: 'shadow' }),
-    );
-    await fireEvent.change(screen.getByTestId('decide-jev-daily-token-budget'), { target: { value: '500000' } });
-    await waitFor(() =>
-      expect(inv).toHaveBeenCalledWith('set_fleet_setting', {
-        key: 'decide.jev.daily_token_budget',
-        value: '500000',
-      }),
-    );
+    // Work link is shown, not edited: J1 is an offline benchmark until it
+    // passes its acceptance lines (D32).
+    const wl = await screen.findByTestId('setting-decide-jev-work-link');
+    expect(wl.tagName).toBe('SPAN');
+    expect(screen.getByTestId('setting-row-decide.jev.work_link').textContent).toContain('offline benchmark only until J1');
+    const sm = screen.getByTestId('setting-decide-jev-status-map') as HTMLSelectElement;
+    expect(Array.from(sm.querySelectorAll('option'), (o) => o.value)).toEqual(['off', 'shadow', 'assist']);
+  });
+
+  it('search finds a setting and opens it on its page and tab', async () => {
+    routeRegistry();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    const search = (await screen.findByTestId('settings-search')) as HTMLInputElement;
+    await waitFor(() => expect(screen.getByTestId('settings-nav-settings.work')).toBeInTheDocument());
+    await fireEvent.input(search, { target: { value: 'unlinked' } });
+    await fireEvent.click(await screen.findByTestId('settings-hit-work.tidy_idle_unlinked_days'));
+    const row = await screen.findByTestId('setting-row-work.tidy_idle_unlinked_days');
+    await waitFor(() => expect(row.classList.contains('highlighted')).toBe(true));
+    expect(screen.getByTestId('page-settings.work-tab-1').getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('a deep link to a page opens it', async () => {
+    routeRegistry();
+    settingsSection.set('settings.limits');
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    expect(await screen.findByTestId('page-settings.limits')).toBeInTheDocument();
+    expect(get(settingsSection)).toBeNull();
   });
 });

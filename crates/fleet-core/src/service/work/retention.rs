@@ -76,6 +76,8 @@ impl RetentionDays {
             // its "forever": the floor is part of the window itself, so
             // every caller (status, the sweep, a test) gets one number.
             RetentionTable::Descriptions => describe_effective_days(self.tracker_items),
+            // The write-back outbox (M13.4e, D3) rides the journal's window.
+            RetentionTable::TrackerWrites => self.journal,
         }
     }
 }
@@ -103,7 +105,9 @@ pub(crate) fn describe_effective_days(tracker_items_days: i64) -> i64 {
 
 fn setting_of(t: RetentionTable) -> &'static str {
     match t {
-        RetentionTable::Journal => settings::WORK_RETENTION_JOURNAL_DAYS,
+        RetentionTable::Journal | RetentionTable::TrackerWrites => {
+            settings::WORK_RETENTION_JOURNAL_DAYS
+        }
         // The describe cache is swept by the tracker items' own setting.
         RetentionTable::TrackerItems | RetentionTable::Descriptions => {
             settings::WORK_RETENTION_TRACKER_ITEMS_DAYS
@@ -139,6 +143,7 @@ impl RetentionSweep {
             RetentionTable::TrackerItems => self.tracker_items += n,
             RetentionTable::WorkEvents => self.timeline_work_events += n,
             RetentionTable::Descriptions => self.describe_cache += n,
+            RetentionTable::TrackerWrites => self.tracker_writes += n,
         }
     }
 }
@@ -162,6 +167,30 @@ pub struct RetentionStatus {
     #[serde(default)]
     pub last_sweep: Option<RetentionSweep>,
     pub tick_cap: usize,
+}
+
+/// [`status`] on a store the caller has locked (a page's data source, which
+/// runs under the one lock `fetch_page_source` takes).
+pub fn status_locked(s: &Store, now: i64) -> Result<RetentionStatus, IpcError> {
+    let days = RetentionDays::from_store(s);
+    let mut tables = Vec::new();
+    for t in RetentionTable::ALL {
+        tables.push(RetentionTableStatus {
+            table: t.table().into(),
+            setting: setting_of(t).into(),
+            days: days.of(t),
+            rows: s.retention_rows(t)?,
+            would_delete: s.retention_eligible(t, now, days.of(t))?,
+        });
+    }
+    let last_sweep = s
+        .get_setting(LAST_SWEEP_KEY)?
+        .and_then(|v| serde_json::from_str(&v).ok());
+    Ok(RetentionStatus {
+        tables,
+        last_sweep,
+        tick_cap: RETENTION_TICK_CAP,
+    })
 }
 
 /// Row counts, the dry run and the last sweep. One short lock per query.
@@ -211,53 +240,14 @@ pub fn sweep_capped(store: &Mutex<Store>, now: i64, batch: usize, cap: usize) ->
         Ok(s) => RetentionDays::from_store(&s),
         Err(_) => return out,
     };
+    // The write-back outbox is one of these tables, here rather than in a
+    // tracker's pass so a failing tracker's outbox still shrinks.
     for t in RetentionTable::ALL {
-        let mut done = 0;
-        while done < cap {
-            let want = batch.min(cap - done);
-            let n = match store.lock() {
-                Ok(s) => s.retention_delete_batch(t, now, days.of(t), want),
-                Err(_) => break,
-            };
-            match n {
-                Ok(n) => {
-                    done += n;
-                    if n < want {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(table = t.table(), error = %e, "[gc] retention sweep failed");
-                    break;
-                }
-            }
-        }
-        out.add(t, done);
-    }
-    // The write-back outbox (M13.4e, D3): settled rows, by the journal's
-    // window, here rather than in a tracker's pass so a failing tracker's
-    // outbox still shrinks.
-    if days.journal > 0 {
-        let cutoff = now - days.journal * 86_400;
-        while out.tracker_writes < cap {
-            let want = batch.min(cap - out.tracker_writes);
-            let n = match store.lock() {
-                Ok(s) => s.sweep_tracker_writes(cutoff, want),
-                Err(_) => break,
-            };
-            match n {
-                Ok(n) => {
-                    out.tracker_writes += n;
-                    if n < want {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "[gc] tracker write outbox sweep failed");
-                    break;
-                }
-            }
-        }
+        let d = days.of(t);
+        let n = sweep_batches(store, batch, cap, t.table(), |s, want| {
+            s.retention_delete_batch(t, now, d, want)
+        });
+        out.add(t, n);
     }
     if let Ok(s) = store.lock() {
         if let Ok(v) = serde_json::to_string(&out) {
@@ -267,6 +257,42 @@ pub fn sweep_capped(store: &Mutex<Store>, now: i64, batch: usize, cap: usize) ->
         }
     }
     out
+}
+
+/// The bounded delete loop every retention sweep shares: `one(store, want)`
+/// deletes at most `want` rows and says how many went; it runs under its
+/// own lock per batch (never across batches), `batch` at a time, until
+/// `cap` rows are gone or a batch comes back short. Best-effort, like the
+/// other GC passes: a failed batch is logged under `what` and stops this
+/// loop (a poisoned lock stops it too). Returns the rows deleted.
+pub(crate) fn sweep_batches(
+    store: &Mutex<Store>,
+    batch: usize,
+    cap: usize,
+    what: &str,
+    mut one: impl FnMut(&Store, usize) -> Result<usize, IpcError>,
+) -> usize {
+    let mut done = 0;
+    while done < cap {
+        let want = batch.min(cap - done);
+        let n = match store.lock() {
+            Ok(s) => one(&s, want),
+            Err(_) => break,
+        };
+        match n {
+            Ok(n) => {
+                done += n;
+                if n < want {
+                    break;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(table = what, error = %e, "[gc] retention sweep failed");
+                break;
+            }
+        }
+    }
+    done
 }
 
 #[cfg(test)]
@@ -376,11 +402,27 @@ mod tests {
             }
         }
         let now = crate::service::catalog::now_secs() + 400 * 86_400;
+        let outbox = |st: &Mutex<Store>, now: i64| {
+            status(st, now)
+                .unwrap()
+                .tables
+                .into_iter()
+                .find(|t| t.table == "tracker_writes")
+                .expect("a status row for the outbox")
+        };
+        let row = outbox(&st, now);
+        assert_eq!(
+            (row.setting.as_str(), row.days, row.rows, row.would_delete),
+            (settings::WORK_RETENTION_JOURNAL_DAYS, 365, 5, 4),
+            "status reports the outbox: every row, the settled ones to go"
+        );
         assert_eq!(sweep_capped(&st, now, 2, 3).tracker_writes, 3, "the cap");
         assert_eq!(sweep_capped(&st, now, 2, 3).tracker_writes, 1);
         assert_eq!(sweep_capped(&st, now, 2, 3).tracker_writes, 0);
         let left = st.lock().unwrap().due_tracker_writes(t, now, 10).unwrap();
         assert_eq!(left.len(), 1, "the pending write is never swept");
+        let row = outbox(&st, now);
+        assert_eq!((row.rows, row.would_delete), (1, 0));
 
         settings::set(
             &st.lock().unwrap(),
@@ -389,6 +431,7 @@ mod tests {
         )
         .unwrap();
         st.lock().unwrap().finish_tracker_write(left[0].id).unwrap();
+        assert_eq!(outbox(&st, now + 4_000 * 86_400).would_delete, 0);
         assert_eq!(
             sweep(&st, now + 4_000 * 86_400).tracker_writes,
             0,
@@ -432,7 +475,8 @@ mod tests {
                 "work_journal",
                 "work_items",
                 "session_events",
-                "work_item_descriptions"
+                "work_item_descriptions",
+                "tracker_writes"
             ]
         );
         assert_eq!(s.tick_cap, RETENTION_TICK_CAP);

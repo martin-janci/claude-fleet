@@ -5,8 +5,9 @@ side: `/update/*`, the `updater` token, the desired / observed tables,
 `update_status` / `update_admin`, the channel refresh tick), **S2** (CI
 signs `release-manifest.json` and writes the `stable` / `beta` channels on
 `update-channels`), **S3** (`fleet-hub update check`, Git mode over
-fleet-core's HTTPS client) **and S5** (`fleet-hub healthcheck --ready
---json`, `fleet-hub backup`). The rest is not built. What S2 and S4 still owe is
+fleet-core's HTTPS client), **the first half of S4b** (`X-Fleet-Client`,
+`update:changed`, `fleet_health.updates`, `update_status { target }`)
+**and S5** (`fleet-hub healthcheck --ready --json`, `fleet-hub backup`). The rest is not built. What S2 and S4 still owe is
 listed under S2b and S4b in §12.
 
 It answers two findings of the release-process review
@@ -162,7 +163,7 @@ digest `record-digest` already has. It is never written by hand. A new
     "version": "0.3.4",
     "track": "stable",
     "commit": "a83f19d0c2…",
-    "build_id": "gh-run-18231-1",
+    "build_id": "rel-v0.3.4-a83f19d0c2…",
     "published_at": "2026-09-30T10:12:00Z",
     "assets_base": "https://github.com/martin-janci/claude-fleet/releases/download/v0.3.4/",
     "notes_url": "https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.4"
@@ -787,21 +788,30 @@ of these hold within `ready_timeout` (default 90 s), then keep holding for
    ```json
    { "ready": true, "live": true, "fresh": true,
      "hub": { "ready": true, "pid": 7154, "version": "0.3.4", "commit": "a83f19d…",
-              "build_id": "gh-run-18231-1", "contract": 5, "agent_proto": [1, 1],
+              "build_id": "rel-v0.3.4-a83f19d0c2…", "contract": 5, "agent_proto": [1, 1],
               "peer_proto": 1, "schema": 74, "started_at": 1790612008, "heartbeat_at": 1790612013,
-              "checks": { "store": "ok", "listener": "ok", "first_reconcile": "ok" } } }
+              "checks": { "store": "ok", "listener": "ok", "first_reconcile": "ok",
+                          "reconcile_failures": 0 } } }
    ```
 
    `first_reconcile` is one of:
-   - `ok`: the first pass of this process finished clean;
+   - `ok`: a pass of this process has finished clean. It is a latch: a
+     later failed pass does not undo it;
    - `pending`: no pass has finished yet;
-   - `failed`: it finished with failures, which is not ready;
+   - `failed`: passes finished, none of them clean, which is not ready;
    - `disabled`: `reconcile.interval_secs=0`, which counts as ready.
+
+   `reconcile_failures` is the running count of failed passes since the
+   last clean one (`fleet_health.hub.reconcile.consecutive_failures`). It
+   is reported and never part of `ready`.
 
    The commit and build ID come from `crates/fleet-hub/build.rs`:
    `FLEET_GIT_SHA` / `FLEET_BUILD_ID` from CI (`release.yml`, and the
    `hub-image.yml` build args, since the Docker context has no `.git`), else
-   `git rev-parse HEAD`, else `unknown` / `local`.
+   `git rev-parse HEAD`, else `unknown` / `local`. A release's build ID is
+   `rel-<tag>-<commit>` in all three places (the tarballs, the image and the
+   manifest), never a workflow run id: the image is built by another run,
+   and a re-run job is another attempt.
 3. **Identity.** `version`, `commit` and `build_id` equal the manifest's
    `release` (U11), and the container's image ID resolves to the desired
    digest. This is what "the updater verifies it started the right build"
@@ -927,7 +937,7 @@ Each slice lands on its own, green, with its tests.
 | **S2b** | 3 | what S2 left: `nightly.yml` (hub image + agent/hub tarballs on green `main`, `-dev.N.g<sha>`; desktop nightly in Open question 3) and `nightly.json`; the ruleset that lets only CI push `update-channels` (the owner's, in the repository settings) | `nightly.yml`, `hub-image.yml` | a `main` push moves `nightly.json` |
 | **S3** ✅ | 3 | `service::update::git_check` (a `GitCheck` from the hub's settings, pin and last-seen sequence, over `HttpsFetch`), `hub_self_request`; `fleet-hub update check [--track] [--json]` prints the decision for the running hub, verified, and installs nothing | `fleet-core` `service/update/`, `crates/fleet-hub/src/update.rs` | a standalone hub reports `update_available` against a signed fixture channel, `up_to_date` on the newest, its own pin as a rollback, and refuses an untrusted key or a replayed channel (`service/update/tests.rs`) |
 | **S4a** ✅ | 4, 5 | migration 079 (desired / observed / events / the signed-document cache `update_docs`); `/update/check` + `/update/report` (`mcp/update_route.rs`); the `updater` token mode (`fleet-hub pair --mode updater`, no tool, no `/events`); `update_status` / `update_admin { pin \| unpin \| refresh }`; the `update.*` settings with `docs/updates.md`; the refresh tick in `fleet-hub serve` (records `hub:self`); `HubUpdateChannel` (S1) | `fleet-core` `mcp/update_route.rs`, `service/update/`, `store/update.rs` | unit + route tests against signed test documents; checked on a real hub |
-| **S4b** | 4, 5 | what S4a left: `X-Fleet-Client` recording; `update:decision` / `update:changed` events; the attention reasons; `update_check_for`; `update_rollouts` and the admin rollout actions (with S9); the org-scoped policy rows | `fleet-core` | `hub-e2e.sh` section U: a fake client and a fake agent see `update_available`, `update_required` and `client_too_new` from a channel signed by an e2e key (`FLEET_UPDATE_E2E_KEYS`, `e2e` builds only) |
+| **S4b** (half ✅) | 4, 5 | **built:** `X-Fleet-Client` recorded into `update_observed` on `last_seen_at`'s beat (`fleet_update::client_header`, written there and not to `client_tokens`, so migration 060's auth-epoch trigger needs no exemption); `update:changed` (ids only, kind `update`, hidden from scoped streams); `fleet_health.updates` with `update_required`, `update_failed`, `update_rolled_back`, `rollback_failed`, `channel_stale`; `update_check_for` as `update_status { target }` (one tool fewer on the definition budget). **Left:** `update:decision` pushed per target on `/events`; `hub-e2e.sh` section U; `update_rollouts`, the admin rollout actions and `rollout_paused` (with S9); the org-scoped policy rows | `fleet-core` | `hub-e2e.sh` section U: a fake client and a fake agent see `update_available`, `update_required` and `client_too_new` from a channel signed by an e2e key (`FLEET_UPDATE_E2E_KEYS`, `e2e` builds only) |
 | **S5** ✅ | 8 | `fleet-hub healthcheck --ready --json`, `fleet-hub backup --to` | `crates/fleet-hub/src/serve.rs`, `fleet-core::store` | a test drives both against a real store |
 | **S6** | 6, 9 | `fleet-updater`: Docker adapter, the state file, the gates, rollback with and without migration; compose `auto-update` profile; image publish | `crates/fleet-updater/`, `deploy/hub/` | a docker e2e (opt-in, like `--hub-e2e`) against a local registry with three images: good, crash-on-start, and migrates-then-unready. All three end in the right state, and the third restores the backup. |
 | **S7** | 10 | desktop: `tauri-plugin-updater` wired to `Decision`; `TAURI_SIGNING_PRIVATE_KEY` = the release key; `update_check` / `update_install` commands + verdict rows; the Updates view; footer shows both versions; contract-gate exemption | `src-tauri`, `src/lib/updates.ts`, `src/components/UpdatesView.svelte` | a standalone desktop updates itself from `nightly`; a paired one from its hub |

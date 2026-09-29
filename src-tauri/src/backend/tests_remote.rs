@@ -415,6 +415,7 @@ fn sample_session_row() -> SessionRow {
         turn_seq: 7,
         last_stop_at: None,
         stale_working_at: None,
+        stale_demoted_at: None,
         work_rev: 0,
         pr_evidence: None,
         pr_checked_at: None,

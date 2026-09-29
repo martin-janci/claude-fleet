@@ -8,6 +8,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.4.2] - 2026-09-29
+
+### Added
+- **work:** page a Work view's open sections and review total in one tree read
+- **evidence:** assess a PR's result and show it — Result card, Work chip, stale CI badge
+- **conversation:** tool detail on the hub, per-tool detail views, reply actions footer
+- **update:** X-Fleet-Client, update:changed, fleet_health.updates, why (S4b, first half)
+- **evidence:** store the PR evidence and when it was last observed (migration 082)
+- **work:** a working session shows local work in progress
+- **update:** Git-mode check and `fleet-hub update check` (S3)
+- **evidence:** the PR probe reads the head commit, review and merge state, and the worktree's own HEAD
+- **pages:** the fleet's settings on a paired device — declarative pages P6
+- **work:** a merged PR stamps local work done, once
+- **decide:** Jev robustness, paired languages, floor sweep, question set and fleet_health.decide
+- **work:** work_link { action: set_status } for local work
+- **pages:** search as a command, page actions, custom cap 3 — declarative pages P5b
+- **pages:** settings proposals, review_apply and the audit — declarative pages P5a
+- **work:** record who decided an item's status
+- **pages:** flows and the tracker resource; Trackers generated — declarative pages P4b
+- **pages:** resources, master_detail and the record editor; Organisations generated — declarative pages P4a
+- **pages:** Svelte renderer, settings pages in Settings — declarative pages P3
+- **pages:** page DSL, catalog, data sources and validator — declarative pages P2
+- **settings:** registry metadata and describe — declarative pages P1
+
+### Changed
+- **add_project:** publish the grandchild pid atomically before cancelling
+- **hub-deploy:** bound the non-numeric checks without GNU timeout
+- **decide:** tidy the Jev bench, status_map trigger and claude -p runs
+- **work:** pin the kind-absent Rename fallback
+- **mcp:** compare fleet_health through the pool without its uptime clock
+- **catalog:** the unprobeable-checkout test holds on Windows too
+- **work:** guard status_changed_at writes so reverting either breaks a test
+- **work:** seed tidy fixtures through set_item_status, not a raw UPDATE
+- **work:** name ITEM_COLUMNS' length instead of hardcoding it
+
+### Fixed
+- **catalog:** name the checkout when its clone parent cannot be created
+- **hub:** hub ops, CLI and WSL review fixes
+- **update:** harden the hub's update state, reports and pins
+- **release:** one build ID for tarballs, hub image and manifest
+- **work-view:** one-read refreshes, kind-aware re-reads and review fixes
+- **work:** a stale merged signal must not stamp work named after it
+- **work:** Work view backend review fixes (counts, placements, scopes)
+- **write-back:** queue PR links made after the PR; sweep the outbox as a retention table
+- **work:** resolve a key two orgs share to the caller's own item
+- **work:** stop the chip contradicting its own status dot
+- **work:** show the effective status in the desktop Today header
+- **work:** keep a done local item's journal and handover history
+- **work:** one condition for "a working session on this item"
+- **work:** stamp the derived done where the merged PR is recorded
+- **work:** cross-check the SQL/Rust precedence, fence card.rs, fix chip
+- **reply-actions:** Retry through the outbox; refresh chips without clobbering edits
+- **sessions:** carry stale_demoted_at on the row; demote only reconciled hosts' rows
+- **rewind:** fork keeps the source's model/effort and refuses a projectless source before copying
+- **events:** judge context_full on the hub stream at health.context_red_pct
+- **work:** stop breaking phone Rename; add effective_status, fence it
+- **hosts:** Hide keeps a host's sessions; fence fleet_health.hosts[]; merge_host moves host-keyed data
+- **work:** agree on status across views, close the last hiding CASE
+- **decide:** decide status counts agreement only where the rule decided
+- **work:** stop hiding a local item's status on the session row
+- **work:** stamp status_changed_at so done can age into done_idle
+- **work:** a stamped done classifies as pr_merged_idle, not done_idle
+- **catalog:** name the checkout the hub cannot read
+
+### Documentation
+- **work:** record the journal-retention rule for local work
+- **work:** say that effective_status coerces, and pin it
+- **review:** two-day review of d4b7a21..HEAD — simplify, gaps, speed
+- **evidence:** result evidence design and plan — tie done to a commit, CI to a clock
+- **pages:** P6's phone half, on fleet-mobile
+- **api:** list the settings commands under commands::pages in the reference
+- **work:** the derived done stamp must not widen auto-tidy
+- **work:** document work_link { action: set_status } in control-api.md
+- **work:** plan for phase 1, native item status
+- **api:** list the page commands in the control-api reference
+- **work:** a derived 'done' must be stamped, not computed
+- **work:** design for sprints, releases and epics in the native work graph
+- **api:** regenerate control-api reference for get_settings describe
+- **spec:** declarative pages and forms — research and design
 ## [0.4.1] - 2026-09-29
 
 ### Added
@@ -2218,6 +2297,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.4.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.2
 [0.4.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.1
 [0.4.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.0
 [0.3.3]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.3

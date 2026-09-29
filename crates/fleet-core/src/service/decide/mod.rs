@@ -530,6 +530,15 @@ pub struct DecisionOutcome {
     /// record; act on it only through [`Self::usable`].
     pub answer: Option<DecisionAnswer>,
     pub fallback: Option<Fallback>,
+    /// The call's round trip, as recorded; `None` when nothing was sent.
+    #[serde(default)]
+    pub latency_ms: Option<i64>,
+    /// The call's input tokens and cost, as recorded (`0` when nothing was
+    /// sent) — also when the record itself failed.
+    #[serde(default)]
+    pub input_tokens: i64,
+    #[serde(default)]
+    pub cost_microusd: i64,
 }
 
 impl DecideRequest {
@@ -645,6 +654,9 @@ pub async fn decide(ctx: &DecideCtx, req: DecideRequest) -> DecisionOutcome {
             mode: None,
             answer: None,
             fallback: Some(Fallback::HttpError),
+            latency_ms: None,
+            input_tokens: 0,
+            cost_microusd: 0,
         };
     }
 
@@ -800,6 +812,9 @@ fn record(
         mode,
         answer,
         fallback,
+        latency_ms: run.latency_ms,
+        input_tokens: run.input_tokens,
+        cost_microusd: run.cost_microusd,
     }
 }
 
@@ -816,27 +831,13 @@ pub fn sweep_runs(store: &Mutex<Store>, now: i64) -> usize {
         return 0;
     }
     let cutoff = now - days * 86_400;
-    let mut done = 0;
-    while done < RETENTION_TICK_CAP {
-        let want = RETENTION_BATCH.min(RETENTION_TICK_CAP - done);
-        let n = match store.lock() {
-            Ok(s) => s.sweep_decision_runs(cutoff, want),
-            Err(_) => break,
-        };
-        match n {
-            Ok(n) => {
-                done += n;
-                if n < want {
-                    break;
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "[gc] decision_runs retention sweep failed");
-                break;
-            }
-        }
-    }
-    done
+    crate::service::work::retention::sweep_batches(
+        store,
+        RETENTION_BATCH,
+        RETENTION_TICK_CAP,
+        "decision_runs",
+        |s, want| s.sweep_decision_runs(cutoff, want),
+    )
 }
 
 // --- health (test map §7) -------------------------------------------------------------

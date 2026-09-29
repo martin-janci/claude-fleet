@@ -17,9 +17,20 @@
 //!   - every row of a conversation a CONFIRMED link (live or ended)
 //!     reaches — its snapshot ids, or its live session's conversations —
 //!     while that link's work is not done: a bare `ref_key` link (no item,
-//!     so no status), an item not `done`, or an item any live link names
-//!     (by id or key). So the latest agent note of a live item, and a live
-//!     session's primary work, keep their journal regardless of age;
+//!     so no status), a LOCAL item whatever its status, an item not `done`,
+//!     or an item any live link names (by id or key). So the latest agent
+//!     note of a live item, and a live session's primary work, keep their
+//!     journal regardless of age;
+//!
+//!     `i.source = 'local'` draws the same tracker-only line the item sweep
+//!     below draws, and it is not new behaviour: before native item status a
+//!     local item's `status_category` was permanently `'todo'`, so its links
+//!     were always kept. Once a person (or the merged-PR stamp) can say
+//!     `done`, without this clause marking local work done would quietly
+//!     make its own journal and handover history retention-eligible — losing
+//!     the history of work you just finished, which is data loss and exactly
+//!     backwards. The item itself is never swept either (`ITEMS_CTE` is
+//!     gated on `tracker_id IS NOT NULL`), so the two halves agree.
 //!   - an undelivered `handover`, and any `handover` addressed to a live
 //!     participant.
 //! * **`work_items`** (`work.retention.tracker_items_days`, by the newest of
@@ -43,6 +54,15 @@
 //!   floored window (`describe_effective_days`), because "keep forever" must
 //!   not apply to a full-text cache — that would reopen `DESCRIPTION_MAX_CHARS`
 //!   by the back door.
+//!
+//! * **`tracker_writes`** (the write-back outbox, M13.4e; by `updated_at`,
+//!   on `work.retention.journal_days`'s window): only settled rows
+//!   (`done` / `failed`); a `pending` write is never swept, however old. No
+//!   liveness rule beyond that: a done row that goes lets the same PR queue
+//!   again (the tracker upserts the same remote link — one call, no change),
+//!   and a failed row stays for the whole window, so `fleet_health`'s
+//!   `write_failures` still counts it. Its status `rows` count EVERY outbox
+//!   row, pending included, like the journal's.
 //!
 //! There is no pinned-note concept in the schema; a note is kept by the
 //! journal rules above. `0` days keeps a table forever.
@@ -83,14 +103,18 @@ pub enum RetentionTable {
     /// The `describe` cache (`work_item_descriptions`): pure age, no
     /// liveness, and never "forever" — see the module doc.
     Descriptions,
+    /// The write-back outbox (`tracker_writes`): settled rows by age, a
+    /// pending write never — see the module doc.
+    TrackerWrites,
 }
 
 impl RetentionTable {
-    pub const ALL: [RetentionTable; 4] = [
+    pub const ALL: [RetentionTable; 5] = [
         RetentionTable::Journal,
         RetentionTable::TrackerItems,
         RetentionTable::WorkEvents,
         RetentionTable::Descriptions,
+        RetentionTable::TrackerWrites,
     ];
 
     /// The SQL table.
@@ -100,6 +124,7 @@ impl RetentionTable {
             RetentionTable::TrackerItems => "work_items",
             RetentionTable::WorkEvents => "session_events",
             RetentionTable::Descriptions => "work_item_descriptions",
+            RetentionTable::TrackerWrites => "tracker_writes",
         }
     }
 
@@ -114,6 +139,12 @@ impl RetentionTable {
                 WITH eligible(id) AS ( \
                   SELECT item_id FROM work_item_descriptions WHERE fetched_at < ?1)"
                 .to_string(),
+            // Settled rows only: a pending write is never swept.
+            RetentionTable::TrackerWrites => "\
+                WITH eligible(id) AS ( \
+                  SELECT id FROM tracker_writes \
+                  WHERE state IN ('done', 'failed') AND updated_at < ?1)"
+                .to_string(),
         }
     }
 
@@ -121,9 +152,10 @@ impl RetentionTable {
     /// table's own primary key, which is `item_id` for the describe cache.
     fn key_col(self) -> &'static str {
         match self {
-            RetentionTable::Journal | RetentionTable::TrackerItems | RetentionTable::WorkEvents => {
-                "id"
-            }
+            RetentionTable::Journal
+            | RetentionTable::TrackerItems
+            | RetentionTable::WorkEvents
+            | RetentionTable::TrackerWrites => "id",
             RetentionTable::Descriptions => "item_id",
         }
     }
@@ -140,6 +172,8 @@ impl RetentionTable {
                 kinds_sql()
             ),
             RetentionTable::Descriptions => "SELECT COUNT(*) FROM work_item_descriptions".into(),
+            // Every outbox row, pending included (the module doc).
+            RetentionTable::TrackerWrites => "SELECT COUNT(*) FROM tracker_writes".into(),
         }
     }
 }
@@ -152,7 +186,8 @@ const JOURNAL_CTE: &str = "\
       SELECT l.participant_id, l.ended_at, l.snap_claude_ids FROM work_links l \
       LEFT JOIN work_items i ON i.id = l.item_id \
       WHERE l.state = 'confirmed' AND ( \
-        l.item_id IS NULL OR i.id IS NULL OR i.status_category != 'done' \
+        l.item_id IS NULL OR i.id IS NULL OR i.source = 'local' \
+        OR i.status_category != 'done' \
         OR l.item_id IN (SELECT item_id FROM live WHERE item_id IS NOT NULL) \
         OR i.key IN (SELECT ref_key FROM live WHERE ref_key IS NOT NULL))), \
     kept_conv(cid) AS ( \

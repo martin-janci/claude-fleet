@@ -30,7 +30,7 @@ import { invokeCmd, type Result } from './result';
 import { sendPrompt, sessions } from './sessions';
 import { markNeedsReattach, type Attachment } from './attachments';
 import { withAttachments, tooLong } from './attach_prompt';
-import { carriedCount, type Conversation } from './conversation';
+import { carriedCount, normalizePrompt, type Conversation } from './conversation';
 
 export type OutboxState = 'waiting' | 'sending' | 'sent' | 'queued' | 'received' | 'failed';
 
@@ -65,7 +65,9 @@ export interface OutboxMessage {
   at: string;
   /** ms timestamp the current send attempt started. */
   sendingSince: number | null;
-  /** Turns already carrying this text when it was sent (see `transcriptCarries`). */
+  /** Turns already carrying this text when it was sent: the transcript has
+   *  caught up once `carriedCount` is greater than this, so re-sending an
+   *  earlier prompt ("continue") is not mistaken for it. */
   seen: number;
   /** The row's `turn_seq` when it went out. */
   turnSeqAtSend: number | null;
@@ -91,9 +93,22 @@ export interface EnqueueInput {
   text: string;
   prefix?: string | null;
   attachments?: Attachment[];
-  /** `carriedCount` of the text at send time (0 with attachments: their
-   *  uploaded paths make the body new). */
+  /** `carriedCount` of the text at send time. The outbox adds identical
+   *  prompts still in line, and zeroes it with attachments (their uploaded
+   *  paths make the body new). */
   seen?: number;
+}
+
+/** The text a message sends: the prefix in front of a prompt (a command
+ *  goes as typed), then the attachments block for any uploaded paths. */
+export function outboxBody(m: {
+  kind: 'prompt' | 'command';
+  text: string;
+  prefix: string | null;
+  paths?: string[] | null;
+}): string {
+  const prefixed = m.prefix && m.kind === 'prompt' ? `${m.prefix}\n\n${m.text}` : m.text;
+  return withAttachments(prefixed, m.paths ?? []);
 }
 
 const TOO_LONG = 'That prompt is too long to send through tmux. Shorten it.';
@@ -179,22 +194,44 @@ export function createOutbox(deps: OutboxDeps) {
     else lastSubmit.set(sid, seq);
   }
 
+  /** Identical plain prompts of `sid` still in line (not failed): the
+   *  transcript will carry each of them before the new one. */
+  function queuedDuplicates(sid: number, body: string): number {
+    const want = normalizePrompt(body);
+    return list(sid).filter(
+      (m) =>
+        m.kind === 'prompt' &&
+        m.state !== 'failed' &&
+        m.attachments.length === 0 &&
+        normalizePrompt(outboxBody(m)) === want,
+    ).length;
+  }
+
   function enqueue(target: OutboxTarget, input: EnqueueInput): string {
     targets.set(target.id, target);
     baseline(target.id);
+    const prefix = input.prefix ?? null;
+    const attachments = input.attachments ?? [];
+    const seen =
+      attachments.length > 0
+        ? 0
+        : (input.seen ?? 0) +
+          (input.kind === 'prompt'
+            ? queuedDuplicates(target.id, outboxBody({ kind: input.kind, text: input.text, prefix }))
+            : 0);
     const msg: OutboxMessage = {
       id: `ob${++nextId}`,
       kind: input.kind,
       text: input.text,
-      prefix: input.prefix ?? null,
-      attachments: input.attachments ?? [],
+      prefix,
+      attachments,
       paths: null,
       state: 'waiting',
       error: null,
       retryable: true,
       at: new Date().toISOString(),
       sendingSince: null,
-      seen: input.seen ?? 0,
+      seen,
       turnSeqAtSend: null,
       acked: false,
     };
@@ -246,8 +283,7 @@ export function createOutbox(deps: OutboxDeps) {
     }
     m = find(sid, id)!;
 
-    const prefixed = m.prefix && m.kind === 'prompt' ? `${m.prefix}\n\n${m.text}` : m.text;
-    const body = withAttachments(prefixed, paths ?? []);
+    const body = outboxBody({ ...m, paths });
     if (tooLong(body, target.host_alias === 'local')) {
       patch(sid, id, { state: 'failed', error: TOO_LONG, retryable: false });
       return;
@@ -319,8 +355,7 @@ export function createOutbox(deps: OutboxDeps) {
     const msgs = list(sid);
     const keep = msgs.filter((m) => {
       if (m.kind !== 'prompt' || !['sent', 'queued', 'received'].includes(m.state)) return true;
-      const body = withAttachments(m.prefix ? `${m.prefix}\n\n${m.text}` : m.text, m.paths ?? []);
-      if (carriedCount(conv, body) > m.seen) return false;
+      if (carriedCount(conv, outboxBody(m)) > m.seen) return false;
       if (!at.quiet || m.turnSeqAtSend === null) return true;
       const turns = m.state === 'queued' ? 2 : 1;
       return at.turnSeq < m.turnSeqAtSend + turns;

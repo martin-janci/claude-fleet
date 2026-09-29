@@ -5,11 +5,15 @@
 //! §7.4.
 
 use super::Store;
+use crate::events::{EventBus as _, RowChange, UpdateChanged};
 use crate::ipc_error::IpcError;
 use rusqlite::OptionalExtension;
 
 /// Transition rows older than this are pruned on insert.
 pub const UPDATE_EVENT_RETENTION_SECS: i64 = 90 * 24 * 60 * 60;
+/// At most this many transitions are kept per target (the newest), so a
+/// reporter inventing attempts cannot grow the log without bound.
+pub const UPDATE_EVENTS_PER_TARGET: u32 = 200;
 
 /// An operator's pin: `target` empty means every target of the component.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -99,8 +103,33 @@ fn desired_row(r: &rusqlite::Row) -> rusqlite::Result<UpdateDesiredRow> {
 }
 
 impl Store {
-    /// Insert or replace what `row.target` says about itself.
+    /// Emit `update:changed` (update design §11): ids only, kind `update`,
+    /// so a host-bound or org-bound stream never carries it.
+    pub fn emit_update_changed(&self, what: &str, target: Option<&str>) {
+        self.bus.emit(&RowChange::UpdateChanged(UpdateChanged {
+            what: what.into(),
+            target: target.map(String::from),
+        }));
+    }
+
+    /// Insert or replace what `row.target` says about itself. Emits
+    /// `update:changed` only when something a reader shows moved (version,
+    /// digest, phase, error, platform): a routine check that changes only
+    /// the timestamps is silent.
     pub fn upsert_update_observed(&self, row: &UpdateObservedRow) -> Result<(), IpcError> {
+        let moved = match self.update_observed(&row.target)? {
+            None => true,
+            Some(p) => {
+                (&p.version, &p.digest, &p.phase, &p.last_error, &p.platform)
+                    != (
+                        &row.version,
+                        &row.digest,
+                        &row.phase,
+                        &row.last_error,
+                        &row.platform,
+                    )
+            }
+        };
         self.conn.execute(
             &format!(
                 "INSERT INTO update_observed ({OBSERVED_COLUMNS}) \
@@ -129,6 +158,9 @@ impl Store {
                 row.last_checked_at,
             ],
         )?;
+        if moved {
+            self.emit_update_changed("observed", Some(&row.target));
+        }
         Ok(())
     }
 
@@ -152,7 +184,8 @@ impl Store {
     }
 
     /// Record one transition. `false` when this `(target, attempt, phase)`
-    /// was already recorded (a replayed report).
+    /// was already recorded (a replayed report). Keeps the newest
+    /// [`UPDATE_EVENTS_PER_TARGET`] rows of `target`.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_update_event(
         &self,
@@ -184,10 +217,34 @@ impl Store {
                 now
             ],
         )?;
+        if n == 1 {
+            self.conn.execute(
+                "DELETE FROM update_events WHERE target = ?1 AND id NOT IN \
+                   (SELECT id FROM update_events WHERE target = ?1 \
+                    ORDER BY at DESC, id DESC LIMIT ?2)",
+                rusqlite::params![target, UPDATE_EVENTS_PER_TARGET],
+            )?;
+        }
         Ok(n == 1)
     }
 
-    /// The newest `limit` transitions of `target`, newest first.
+    /// The row id of the first transition recorded for `(target, attempt)`:
+    /// the order in which the hub first heard of each attempt. `None` when
+    /// none is kept.
+    pub fn update_attempt_first_seen(
+        &self,
+        target: &str,
+        attempt: &str,
+    ) -> Result<Option<i64>, IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT MIN(id) FROM update_events WHERE target = ?1 AND attempt = ?2",
+            [target, attempt],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The newest `limit` transitions of `target`, newest first. Only tests
+    /// read the log today; the dashboard's per-target history is S4b's.
     pub fn update_events(&self, target: &str, limit: u32) -> Result<Vec<UpdateEventRow>, IpcError> {
         let mut stmt = self.conn.prepare(
             "SELECT target, attempt, phase, from_version, to_version, detail, error, at \
@@ -225,6 +282,12 @@ impl Store {
                 row.set_at
             ],
         )?;
+        self.emit_update_changed(
+            "pin",
+            Some(&row.target)
+                .filter(|t| !t.is_empty())
+                .map(|t| t.as_str()),
+        );
         Ok(())
     }
 
@@ -234,6 +297,9 @@ impl Store {
             "DELETE FROM update_desired WHERE kind = 'artifact' AND component = ?1 AND target = ?2",
             [component, target],
         )?;
+        if n > 0 {
+            self.emit_update_changed("pin", Some(target).filter(|t| !t.is_empty()));
+        }
         Ok(n > 0)
     }
 
@@ -403,6 +469,49 @@ mod tests {
             1_000_000_000 + super::UPDATE_EVENT_RETENTION_SECS + 10
         ));
         assert_eq!(s.update_events("hub:self", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn events_are_capped_per_target_keeping_the_newest() {
+        let s = Store::open_in_memory().unwrap();
+        let cap = super::UPDATE_EVENTS_PER_TARGET;
+        for i in 0..cap + 5 {
+            let attempt = format!("a{i}");
+            assert!(s
+                .insert_update_event(
+                    "client:1",
+                    Some(&attempt),
+                    "checking",
+                    None,
+                    None,
+                    None,
+                    None,
+                    1_000_000_000 + i64::from(i),
+                )
+                .unwrap());
+        }
+        // Another target is not touched by client:1's cap.
+        s.insert_update_event(
+            "client:2",
+            Some("b"),
+            "checking",
+            None,
+            None,
+            None,
+            None,
+            1_000_000_000,
+        )
+        .unwrap();
+        let rows = s.update_events("client:1", cap + 10).unwrap();
+        assert_eq!(rows.len(), cap as usize);
+        assert_eq!(rows[0].attempt, format!("a{}", cap + 4));
+        assert_eq!(rows.last().unwrap().attempt, "a5");
+        assert_eq!(s.update_events("client:2", 10).unwrap().len(), 1);
+        assert_eq!(s.update_attempt_first_seen("client:1", "a0").unwrap(), None);
+        assert!(s
+            .update_attempt_first_seen("client:1", "a5")
+            .unwrap()
+            .is_some());
     }
 
     #[test]

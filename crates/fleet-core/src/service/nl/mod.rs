@@ -346,24 +346,49 @@ const CS_WORDS: &[&str] = &[
     "zda",
 ];
 
-fn fold(c: char) -> char {
-    match c {
-        'á' | 'ä' => 'a',
-        'č' => 'c',
-        'ď' => 'd',
-        'é' | 'ě' => 'e',
-        'í' => 'i',
-        'ĺ' | 'ľ' => 'l',
-        'ň' => 'n',
-        'ó' | 'ô' => 'o',
-        'ŕ' | 'ř' => 'r',
-        'š' => 's',
-        'ť' => 't',
-        'ú' | 'ů' => 'u',
-        'ý' => 'y',
-        'ž' => 'z',
-        other => other,
+/// PURE: `c` without its diacritics, lower case (`ß` → `ss`). Covers the
+/// Latin letters of Slovak, Czech, German, Polish and Hungarian; anything
+/// else is lower-cased as is. The one diacritic fold: the Slovak / Czech
+/// markers below and the benchmark's BM25 tokenizer both use it.
+pub fn fold_char(c: char, out: &mut String) {
+    let f = match c {
+        'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'ą' | 'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å' | 'Ą' => {
+            'a'
+        }
+        'č' | 'ć' | 'ç' | 'Č' | 'Ć' | 'Ç' => 'c',
+        'ď' | 'Ď' => 'd',
+        'é' | 'è' | 'ê' | 'ë' | 'ě' | 'ę' | 'É' | 'È' | 'Ê' | 'Ë' | 'Ě' | 'Ę' => 'e',
+        'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => 'i',
+        'ľ' | 'ĺ' | 'ł' | 'Ľ' | 'Ĺ' | 'Ł' => 'l',
+        'ň' | 'ń' | 'ñ' | 'Ň' | 'Ń' | 'Ñ' => 'n',
+        'ó' | 'ò' | 'ô' | 'ö' | 'õ' | 'ő' | 'ø' | 'Ó' | 'Ò' | 'Ô' | 'Ö' | 'Õ' | 'Ő' | 'Ø' => {
+            'o'
+        }
+        'ŕ' | 'ř' | 'Ŕ' | 'Ř' => 'r',
+        'š' | 'ś' | 'ş' | 'Š' | 'Ś' | 'Ş' => 's',
+        'ť' | 'ţ' | 'Ť' | 'Ţ' => 't',
+        'ú' | 'ù' | 'û' | 'ü' | 'ů' | 'ű' | 'Ú' | 'Ù' | 'Û' | 'Ü' | 'Ů' | 'Ű' => 'u',
+        'ý' | 'ÿ' | 'Ý' => 'y',
+        'ž' | 'ź' | 'ż' | 'Ž' | 'Ź' | 'Ż' => 'z',
+        'ß' => {
+            out.push_str("ss");
+            return;
+        }
+        other => {
+            out.extend(other.to_lowercase());
+            return;
+        }
+    };
+    out.push(f);
+}
+
+/// PURE: `s` folded ([`fold_char`] on every character).
+pub fn fold(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        fold_char(c, &mut out);
     }
+    out
 }
 
 /// (Slovak, Czech) evidence: function words and the `-cia` / `-ce` noun
@@ -374,7 +399,7 @@ fn sk_cs_markers(prose: &str) -> (usize, usize) {
         if w.is_empty() {
             continue;
         }
-        let w: String = w.to_lowercase().chars().map(fold).collect();
+        let w = fold(w);
         if SK_WORDS.contains(&w.as_str()) {
             sk += 1;
         }
@@ -662,6 +687,14 @@ pub fn parse_cases(jsonl: &str) -> Result<Vec<LabeledCase>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folding_strips_slovak_czech_and_german_diacritics() {
+        assert_eq!(fold("Príliš žluťoučký kůň"), "prilis zlutoucky kun");
+        assert_eq!(fold("Ľadová ôsmička, ä"), "ladova osmicka, a");
+        assert_eq!(fold("Straße ÜBER Größe"), "strasse uber grosse");
+        assert_eq!(fold("Łódź"), "lodz");
+    }
 
     /// A ranker that answers one fixed language for everything.
     struct Always(NlBucket);

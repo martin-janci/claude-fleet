@@ -368,8 +368,9 @@ Index by area (names only; see the reference for details):
   next `apply_sync` writes to its filesystem, the same reasoning as
   `apply_sync` and `set_secret`).
 - **Orchestration** — `wait_for_session`, `session_transcript`,
-  `session_conversation`, `run_prompt`, `dispatch_task`, `wait_for_task`,
-  `list_tasks`, `cancel_task`, `set_session_tags`.
+  `session_conversation`, `session_tool_detail`, `run_prompt`,
+  `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
+  `set_session_tags`.
 - **Work** — `work` (read: `{session_id}` → that session's live work links,
   primary first; `{key}` → ended links to the key, each with the snapshot of
   the session that did it), `work_link` (`{session_id, action}`: `link` a key
@@ -426,7 +427,7 @@ Index by area (names only; see the reference for details):
   `inferred`) that a person confirms or rejects; a rejected pair stays
   rejected. `source: "agent"` remains a confirmed declaration.
   Trackers (roadmap M3): `work_admin` (master token only — fleet admin, so
-  on a paired desktop the Settings → Work section says "configure on the
+  on a paired desktop the Settings → Trackers page says "configure on the
   hub") manages them: `list`, `add { site_url, provider?, transport?,
   settings? }` (the site, or any ticket / issue URL on it; the provider —
   `jira`, `github`, `asana`, `linear`, `jira_dc` — is inferred from the URL
@@ -485,8 +486,15 @@ Index by area (names only; see the reference for details):
   starts only there (`E_FORBIDDEN` says why); it never receives `work:*`
   frames on `/events`. Events: `work:item`, `work:tracker`,
   `work:tracker_removed` — emitted only when something a reader sees
-  changed; a session's `work` carries its item's `status_category`,
-  `status_name`, `url` and `unavailable`. `work:changed` (work graph M14)
+  changed; a session's `work` carries its item's `kind` (`tracker` | `local`
+  | `ref`), `status_category`, `status_name`, `url` and `unavailable`.
+  `status_category` is the tracker's own status — `null` for a local item or
+  a bare key, by design, since a paired phone tells a local item apart from
+  a ticket by that absence (native item status task 4). `effective_status`
+  is the live answer instead: the stored value with a person's override, a
+  merged-PR's stamped `done`, or a currently-working session's live
+  `in_progress` applied — present for a local item too, and the field a
+  status display should read. `work:changed` (work graph M14)
   carries ids only — `{ what: placement | rule | view | org, task_id?,
   rule_id?, view_id? }` — after a Work view structure write; a client
   re-reads what it shows. Like every `work:*` frame it never reaches a
@@ -608,6 +616,11 @@ Index by area (names only; see the reference for details):
   item). `work_link { action: "name", item_id, title }` renames a local
   item (a ticket is `E_INVALID`) and returns the item; both emit
   `session:updated` for the rows that show it and `work:item`.
+  `work_link { action: "set_status", item_id, status }` sets a local item's
+  status to `todo`, `in_progress` or `done` and returns the item; a ticket is
+  `E_INVALID` too, naming it — its status belongs to its tracker, and the
+  next sync would otherwise overwrite it here. The setting is final: fleet
+  never derives a status back over what a person set.
   `work { action: "local_items" }` lists local items (`id`, `key`, `title`,
   `created_at`, `updated_at`, `live_sessions`), newest change first.
   Readonly tokens cannot name or rename. A per-host token names work only on
@@ -642,19 +655,67 @@ Index by area (names only; see the reference for details):
   pins; a read any client may make, but a per-host or org-bound token sees
   its own row only) and `update_admin` (master token only: `pin` a version
   for a component or one target, where a pin below installed is a rollback;
-  `unpin`; `refresh` to re-read the signed channel now). The update wire
-  itself, `POST /update/check` and `/update/report`, is not a tool: see
-  `docs/updates.md`.
+  `unpin`; `refresh` to re-read the signed channel now). `update_status {
+  target }` answers for one target (`client:<id>`, `agent:<alias>`,
+  `hub:self`) with its whole decision — status, reason code, the release it
+  would be offered and whether it is mandatory — the dashboard's "why"; a
+  scoped token may ask about itself only. `fleet_health.updates` names what
+  needs a person: `update_required`, `update_failed`,
+  `update_rolled_back`, `rollback_failed` per target, and
+  `channel_stale`. Events: `update:changed` carries ids only — `{ what:
+  observed | pin | channel, target? }` — when a target's reported build or
+  phase, a pin or the verified channel changes; a client re-reads
+  `update_status`. It never reaches a per-host token or an org-bound
+  client. The update wire itself, `POST /update/check` and
+  `/update/report`, is not a tool: see `docs/updates.md`.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
   read, but master token only, since the values name hosts and their
   projects roots) and `set_setting` (change one: validated against the
   key's shape, `E_INVALID` for an unknown or derived key or a bad value;
   returns the whole object). They reach the same keys as the desktop's
-  Settings dialog and no others: `mcp.*`, `hub.*` and `controller.*` are
-  set by their own flags and commands. The ticks and sweeps read their
-  settings every pass, so a change takes effect on the next one. On a hub
-  this is how `reports.*` and `work.*`, which have no flag, are set.
+  Settings dialog and no others. `hub.*` and `mcp.*` are registered
+  read-only: `get_settings` shows them, and `set_setting` refuses them,
+  naming the flag or command that changes each one. `controller.*` and the
+  tokens are not registered at all. `get_settings { describe: true }`
+  returns every key's metadata instead of a plain map, in display order:
+  label, help, kind with bounds and options, unit, what `0` means, default,
+  value, `modified`, tags, danger, restart, AI policy, `owned_by` and option
+  labels. This is the list `docs/settings-reference.md` is generated from.
+  A write emits `settings:changed { key }`. Like `work:*`, it never reaches
+  a per-host token or an org-bound client. Every write of a registered key
+  is audited (who: `person`, `agent` for this API, or `system`; before →
+  after; the proposal it applied), and the desktop shows it as each
+  field's **History** (declarative pages P5).
+  `set_setting { propose: true, why? }` writes nothing: it validates the
+  value like a write and leaves a **proposal** a person applies or rejects
+  (Settings → Proposed changes on a standalone desktop, `fleet-hub
+  settings proposals | apply | reject` on a hub). Use it when a person
+  should decide — the work graph's rule R11 applied to settings. A key
+  whose AI policy is `never` (every change that needs confirming, and
+  every read-only key) cannot be proposed: `E_FORBIDDEN`. A value the key
+  already has is `E_INVALID`; a newer proposal for a key replaces its
+  pending one, and at most 50 wait (`E_RATE_LIMITED`). `why` is at most
+  500 characters and shown to the person as written.
+  **Who** (declarative pages P6): the master token, and a person's own
+  paired device — a client bound to no org, such as the desktop paired with
+  a hub or a phone — reach `get_settings` and `set_setting`; a per-host token
+  and an org-bound client never do (the settings are the whole fleet's). A
+  device of either mode reads; a `full` device proposes; only a device the
+  operator **trusts** (`fleet-hub client trust <name>`) writes directly and
+  decides proposals, and its writes are audited as `person` with `client
+  <name>`. The UX agent's operator client is an agent: it proposes only.
+  Four more tools are served to a paired device and not to the master (who
+  has `fleet-hub settings` on the hub machine, and whose tool list is
+  budgeted): `setting_proposals` (pending, each with the key's value now,
+  and `can_write` for this device), `setting_history` (`key`, `limit`),
+  `decide_setting_proposals` (`accept`, `reject`; trusted only) and
+  `list_pages` (the page specs, data source shapes, resources and page
+  actions a device renders).
+
+  The ticks and sweeps read their settings every pass, so a change takes
+  effect on the next one. On a hub, this is how `reports.*` and `work.*`,
+  which have no flag, are set.
 
 A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 `run_prompt` to steer it and get the reply back (or `send_prompt` →
@@ -671,11 +732,11 @@ derive from them.
   idle`. `idle`, `completed`, `stopped` and `failed` mean the turn is over
   (what `wait_for_session { until: "idle" }` and `run_prompt` wait for);
   `blocked` is a dialog inside a turn. A row the tick demoted from `working`
-  after `reconcile.stale_working_secs` with no sign of life carries
-  `stale_working_at` and reads `idle`, but that is only a guess (one long tool
-  call looks the same): `run_prompt`, `move_session` and `wait_for_session`
-  ask its pane first and count it as mid-turn unless the pane shows the idle
-  prompt.
+  after `reconcile.stale_working_secs` with no sign of life (judged only while
+  its host is being reconciled) carries `stale_working_at` and reads `idle`,
+  but that is only a guess (one long tool call looks the same): `run_prompt`,
+  `move_session` and `wait_for_session` ask its pane first and count it as
+  mid-turn unless the pane shows the idle prompt.
 - **`stuck_kind`**: `auth_menu | reconnect | trust_prompt | oom |
   press_enter`.
 - **`needs_attention.reason`** (on session rows and `/events` frames), most
@@ -987,7 +1048,12 @@ ended_at, items: [{ kind: "text", text } | { kind: "tool", summary, error }] }],
 truncated }` — the same shape the desktop's Conversation tab renders, for a
 client that wants the exchange's structure rather than one flat blob.
 `turns` defaults to 10 and is capped at 100; the character budget scales with
-it. Same errors as `session_transcript`. `run_prompt { session_id, prompt, timeout_s?, max_chars?,
+it. Same errors as `session_transcript`. `session_tool_detail { session_id,
+tool_use_id, claude_session_id? }` returns what a tool item leaves out —
+one call's input and result, `{ id, name, input, edit, command, result,
+is_error }` (`edit` is `{ file_path, old, new }` for Edit / MultiEdit /
+Write), each text capped at 8 000 chars; the phone and a hub-paired desktop
+read it when a tool row is expanded. Readonly, like `session_conversation`. `run_prompt { session_id, prompt, timeout_s?, max_chars?,
 raw? }` composes the three: deliver, wait for `turn_seq` to grow, return
 `{ turn_seq, status, transcript }`. It refuses (`E_INVALID_STATE`) a session that is not between turns (`claude_status` idle, completed or stopped): mid-turn, the previous turn's `Stop` would satisfy the wait and return the old reply.
 
@@ -1103,7 +1169,7 @@ and `claude --version`. `list_hosts` carries the sample on each row
 (`disk_home_free_kb`, `disk_home_total_kb`, `disk_tmp_free_kb`, `load_1m`,
 `mem_avail_kb`, `uptime_secs`, `health_at`), the versions stamp
 (`claude_version_at`), the last accepted hook from the host's own token
-(`last_hook_at`) and, for an agent host, the `agent_version` its last hello
+(`last_hook_at`, rewritten at most once a minute) and, for an agent host, the `agent_version` its last hello
 reported. `fleet_health.hosts[]` judges them per host:
 
 | Field | Meaning |

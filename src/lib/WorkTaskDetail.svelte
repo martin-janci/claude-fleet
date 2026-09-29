@@ -16,7 +16,8 @@
   import { orgs as orgStore } from './orgs';
   import { openExternal } from './open_external';
   import { timeAgo } from './session_status';
-  import { describeEvidence, onWorkChangedDebounced, resumeWork } from './work';
+  import { assessRow, hasReading, verdictColor, verdictLabel } from './evidence';
+  import { changedAny, describeEvidence, onWorkChangedDebounced, resumeWork } from './work';
   import { providerInfo, startWork, unavailableLabel } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
@@ -30,6 +31,7 @@
     orgSourceText,
     placementNote,
     readErrorText,
+    ruleDraftFor,
     selectedTaskId,
     taskStatus,
     trackerDown,
@@ -100,8 +102,9 @@
   }
 
   // A placement saved: show the task and its placement line as the hub
-  // answered at once (not the old "Placed …" until the next read), then
-  // re-read the whole detail.
+  // answered at once (not the old "Placed …" until the next read). The
+  // write's own bump re-reads the whole detail (debounced): one read, not a
+  // second one here.
   function placed(t: WorkTask, note: string | null) {
     if (detail) {
       const version = t.placement_version ?? 0;
@@ -112,7 +115,6 @@
           version > 0 ? { group: t.group?.label ?? '', note, version, updated_at: null, updated_by: null } : null,
       };
     }
-    void load(taskId);
   }
 
   let loadedFor: string | null = null;
@@ -134,14 +136,22 @@
   }
   void loadRules();
 
-  const off = onWorkChangedDebounced(() => {
-    void load(taskId);
-    void loadRules();
+  // The rules are re-read only when a rule may have moved; the task on
+  // anything but a saved view's change.
+  const off = onWorkChangedDebounced((kinds) => {
+    if ([...kinds].some((k) => k !== 'view')) void load(taskId);
+    if (changedAny(kinds, 'rule', 'resync', 'local')) void loadRules();
   }, () => debounceMs);
   onDestroy(off);
 
   const task: WorkTask | null = $derived(detail?.task ?? null);
   const grouped = $derived(groupSessionLinks(task?.sessions ?? []));
+  // A coarse clock for the Result chips' staleness (minute-level is plenty).
+  let nowSec = $state(Math.floor(Date.now() / 1000));
+  $effect(() => {
+    const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 60_000);
+    return () => clearInterval(t);
+  });
   const liveLink = $derived(grouped.active.find((l) => l.session_id != null && $sessions.some((r) => r.id === l.session_id)) ?? null);
   const lastPast = $derived(grouped.past.find((l) => l.resumable !== false) ?? null);
   const ruleName = $derived(task?.group?.rule_id != null ? (rules.find((r) => r.id === task.group.rule_id)?.name ?? null) : null);
@@ -223,23 +233,9 @@
     if (row) selectSessionExplicitly(row);
   }
 
-  function makeRuleDraft(t: WorkTask): WorkRuleDraft {
-    const g = t.group;
-    const prefix = t.key && /^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(t.key) ? t.key.split('-')[0] : null;
-    return {
-      name: '',
-      enabled: true,
-      group: g && g.source !== 'none' ? g.label : '',
-      expected_version: 0,
-      conditions: {
-        tracker_id: t.kind === 'tracker' ? (t.tracker_id ?? null) : null,
-        container: g?.source === 'tracker' ? (g.tracker_value ?? g.label) : null,
-        key_prefix: g?.source !== 'tracker' && prefix ? prefix : null,
-        repo: g?.source === 'repo' ? g.label : null,
-        title_contains: null,
-      },
-    };
-  }
+  // Prefilled for the group it is in now (none: the editor asks).
+  const makeRuleDraft = (t: WorkTask): WorkRuleDraft =>
+    ruleDraftFor(t, t.group && t.group.source !== 'none' ? t.group.label : '');
 </script>
 
 <section class="task-detail" data-testid="work-task-detail" aria-label="Task">
@@ -420,6 +416,17 @@
                 {#if l.branch}branch {l.branch} · {/if}{#if l.created_at}linked {timeAgo(l.created_at)}{/if}{#if l.end_reason} · ended: {l.end_reason}{/if}{#if l.resumable === false} · not resumable{/if}
                 {#if l.pr_url}
                   · <button class="link-btn" type="button" onclick={() => void openExternal(l.pr_url ?? '')}>PR</button>
+                  {@const liveRow = kind !== 'past' && l.session_id != null ? $sessions.find((r) => r.id === l.session_id) : undefined}
+                  {@const result = liveRow ? assessRow(liveRow, nowSec) : null}
+                  {#if hasReading(result)}
+                    · <span
+                      class="result"
+                      data-testid="work-task-link-result"
+                      data-verdict={result.verdict}
+                      style="color: {verdictColor(result.verdict)};"
+                      title="Result of the session's PR; open the session for the reasons"
+                    >{verdictLabel(result.verdict)}</span>
+                  {/if}
                 {/if}
               </p>
             </li>

@@ -31,6 +31,7 @@
   import { attentionIdleMinutes } from './notify';
   import { pushError } from './toasts';
   import { rowElapsed, rowPrompt, timeAgo } from './session_status';
+  import { isStale } from './evidence';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import AnswerPrompt from './AnswerPrompt.svelte';
@@ -131,6 +132,9 @@
   const sessSelected = $derived($selectedSession?.id === sess.id);
   const ctxLevel = $derived(contextLevel(sess.context_pct));
   const elapsed = $derived(rowElapsed(sess, nowSec));
+  // An old reading describes the past (result evidence): dim the badge
+  // rather than let yesterday's `passing` look current.
+  const ciStale = $derived(isStale(sess.pr_checked_at, nowSec));
   // The row's triage bucket (P13). Published as data-bucket because component
   // CSS never reaches jsdom, so this is how tests assert a row's triage state.
   const triage = $derived(rank(sess, { idleSecs: $attentionIdleMinutes * 60, now: nowSec }));
@@ -276,15 +280,29 @@
   }
 
   // ── "Name this work…" (work graph M11.1): work with a title and no
-  // ticket. A local item's title can be renamed from here too: an item with
-  // no tracker status is local (the backend refuses a ticket anyway).
+  // ticket. A local item's title can be renamed from here too (the backend
+  // refuses a ticket anyway). `status_category` stays tracker-only on the
+  // wire on purpose (native item status task 4, fix round 2 reverted an
+  // attempt to relax it): a paired phone derives "this is a local item,
+  // not a ticket" from `status_category == null`, so making it non-null
+  // for local work would silently break Rename on every phone. `kind`
+  // (`tracker` | `local` | `ref`) is the newer, explicit signal — prefer
+  // it; fall back to the `status_category == null && !url` heuristic only
+  // when a hub is old enough not to send `kind` at all, since that hub
+  // still follows the same tracker-only rule the fallback assumes. A
+  // local item's LIVE status (including the working-session lift) is
+  // `effective_status`, a different field entirely — irrelevant to this
+  // local-vs-ticket check.
   let nameDialog = $state<
     | { mode: 'name'; sessions: { id: number; label: string }[] }
     | { mode: 'rename'; itemId: number; title: string; key?: string | null }
     | null
   >(null);
   const localItem = $derived(
-    sess.work?.item_id != null && sess.work.status_category == null && !sess.work.url
+    sess.work?.item_id != null &&
+      (sess.work.kind
+        ? sess.work.kind === 'local'
+        : sess.work.status_category == null && !sess.work.url)
       ? { itemId: sess.work.item_id, title: sess.work.title, key: sess.work.key ?? null }
       : null,
   );
@@ -811,9 +829,12 @@
                 <span class="sep" aria-hidden="true">·</span>
                 <span
                   class="ci-badge"
+                  class:ci-badge--stale={ciStale}
                   data-testid="ci-badge"
                   style="color: {ciStatusColor(sess.ci_status)};"
-                  title="CI checks: {sess.ci_status}"
+                  title={ciStale && sess.pr_checked_at != null
+                    ? `CI checks: ${sess.ci_status}, last checked ${timeAgo(sess.pr_checked_at, nowSec * 1000)}`
+                    : `CI checks: ${sess.ci_status}`}
                 >{ciStatusLabel(sess.ci_status)}</span>
               {/if}
             {/if}
@@ -1029,6 +1050,9 @@
     white-space: nowrap;
     opacity: 0.75;
     font-variant-numeric: tabular-nums;
+  }
+  .ci-badge--stale {
+    opacity: 0.45;
   }
   .ci-badge {
     font-size: 0.6rem;

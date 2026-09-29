@@ -14,11 +14,11 @@
 use super::harness::HARNESS_IDS;
 use super::layer::{Axis, Layer};
 use super::model::{
-    find_placeholders, is_valid_name, Asset, AssetSpec, Header, HookAction, Kind, Marketplace,
-    Problem,
+    find_placeholders, Asset, AssetSpec, Header, HookAction, Kind, Marketplace, Problem,
 };
 use super::repo::{self, Catalog, RepoStatus};
 use super::sync::secrets::{BUILTIN_PORT, BUILTIN_TOKEN};
+use super::validate::{check_layer_name, check_name, check_resource_path};
 use super::{CATALOG, E_ASSET_NOT_FOUND, E_CATALOG_GIT, E_LINT};
 use crate::ipc_error::codes::{E_INVALID, E_LOCK, E_SERIALIZE};
 use crate::ipc_error::IpcError;
@@ -545,17 +545,6 @@ fn repo_root(store: &Mutex<Store>) -> Result<PathBuf, IpcError> {
     Ok(PathBuf::from(super::require_config(store)?.repo_path))
 }
 
-fn check_name(name: &str) -> Result<(), IpcError> {
-    if is_valid_name(name) {
-        Ok(())
-    } else {
-        Err(IpcError::new(
-            E_INVALID,
-            format!("name '{name}' must match [a-z0-9][a-z0-9-]*"),
-        ))
-    }
-}
-
 /// Only skills and agents are folders on disk, so only they can carry
 /// `resources/…` files.
 fn check_has_resources(kind: Kind) -> Result<(), IpcError> {
@@ -565,17 +554,6 @@ fn check_has_resources(kind: Kind) -> Result<(), IpcError> {
         Err(IpcError::new(
             E_INVALID,
             format!("{} assets have no resources", kind.as_str()),
-        ))
-    }
-}
-
-fn check_resource_path(rel_path: &str) -> Result<(), IpcError> {
-    if repo::valid_resource_rel_path(rel_path) {
-        Ok(())
-    } else {
-        Err(IpcError::new(
-            E_INVALID,
-            format!("invalid resource path: {rel_path}"),
         ))
     }
 }
@@ -650,11 +628,13 @@ fn write_commit_reload(
 /// returned but never block a create: a template is a starting point (the
 /// `plugin_ref` template deliberately carries `TODO` errors).
 pub fn create(args: CreateArgs, store: &Mutex<Store>) -> Result<WriteResult, IpcError> {
-    let root = repo_root(store)?;
     check_name(&args.name)?;
+    if let Some(from) = args.duplicate_from.as_deref() {
+        check_name(from)?;
+    }
+    let root = repo_root(store)?;
     let asset = match args.duplicate_from.as_deref() {
         Some(from) => {
-            check_name(from)?;
             let mut a = catalog_asset(args.kind, from)?;
             a.header.name = args.name.clone();
             a.header.source = None;
@@ -674,13 +654,13 @@ pub fn create(args: CreateArgs, store: &Mutex<Store>) -> Result<WriteResult, Ipc
 /// errors (`E_LINT`, `details` = the report). The write overwrites and
 /// prunes `resources/…` files the asset no longer lists.
 pub fn update(args: UpdateArgs, store: &Mutex<Store>) -> Result<WriteResult, IpcError> {
-    let root = repo_root(store)?;
     let asset = args.asset;
     let kind = asset.kind();
     check_name(&asset.header.name)?;
     for r in &asset.resources {
         check_resource_path(&r.rel_path)?;
     }
+    let root = repo_root(store)?;
     if !repo::asset_path(&root, kind, &asset.header.name).exists() {
         return Err(IpcError::new(
             E_ASSET_NOT_FOUND,
@@ -711,8 +691,8 @@ pub fn update(args: UpdateArgs, store: &Mutex<Store>) -> Result<WriteResult, Ipc
 /// Delete an asset's folder (skill / agent) or file, commit the removal and
 /// reload. Hosts that hold it become `orphan` until the next sync.
 pub fn delete_asset(args: AssetRef, store: &Mutex<Store>) -> Result<String, IpcError> {
-    let root = repo_root(store)?;
     check_name(&args.name)?;
+    let root = repo_root(store)?;
     repo::remove_asset(&root, args.kind, &args.name)?;
     let rel = repo::asset_rel_dir(args.kind, &args.name);
     let message = format!("catalog: delete {}/{}", args.kind.as_str(), args.name);
@@ -733,8 +713,8 @@ fn layer_rel_path(name: &str) -> String {
 /// otherwise be committed to disk and then silently dropped by
 /// `LayerSet::from_layers` on the very reload this function triggers.
 pub fn write_layer(layer: &Layer, store: &Mutex<Store>) -> Result<String, IpcError> {
+    check_layer_name(&layer.name)?;
     let root = repo_root(store)?;
-    check_name(&layer.name)?;
     if let Err(e) = layer.validate() {
         let details = serde_json::to_value(&e)
             .map_err(|e| IpcError::new(E_SERIALIZE, format!("lint report: {e}")))?;
@@ -758,8 +738,8 @@ pub fn write_layer(layer: &Layer, store: &Mutex<Store>) -> Result<String, IpcErr
 /// simply stop resolving it, matching how an asset's disappearance is
 /// handled elsewhere.
 pub fn delete_layer(name: &str, store: &Mutex<Store>) -> Result<String, IpcError> {
+    check_layer_name(name)?;
     let root = repo_root(store)?;
-    check_name(name)?;
     let rel = layer_rel_path(name);
     let path = root.join(&rel);
     if !path.is_file() {
@@ -874,10 +854,10 @@ pub fn add_resource_bytes(
     args: AddResourceBytesArgs,
     store: &Mutex<Store>,
 ) -> Result<WriteResult, IpcError> {
-    let root = repo_root(store)?;
     check_name(&args.name)?;
     check_has_resources(args.kind)?;
     check_resource_path(&args.rel_path)?;
+    let root = repo_root(store)?;
     let len = args.bytes.len() as u64;
     if len > MAX_RESOURCE_BYTES {
         return Err(too_big(&args.rel_path, len));
@@ -906,10 +886,10 @@ pub fn remove_resource(
     args: RemoveResourceArgs,
     store: &Mutex<Store>,
 ) -> Result<WriteResult, IpcError> {
-    let root = repo_root(store)?;
     check_name(&args.name)?;
     check_has_resources(args.kind)?;
     check_resource_path(&args.rel_path)?;
+    let root = repo_root(store)?;
 
     let mut asset = catalog_asset(args.kind, &args.name)?;
     let before = asset.resources.len();
@@ -959,6 +939,7 @@ pub fn repo_status(store: &Mutex<Store>) -> Result<RepoStatus, IpcError> {
 }
 
 pub fn lint_asset(args: AssetRef, store: &Mutex<Store>) -> Result<LintReport, IpcError> {
+    check_name(&args.name)?;
     let root = repo_root(store)?;
     let asset = catalog_asset(args.kind, &args.name)?;
     Ok(lint_in_repo(&asset, &root))

@@ -73,7 +73,7 @@
   import { agentPanelOpen, closeAgent, toggleAgent } from './lib/operator';
   import type { AgentContextInput } from './lib/agent_context';
   import { onboardingWelcomed, onboardingDismissed } from './lib/onboarding';
-  import { loadComposerPresets } from './lib/composer_presets';
+  import { loadComposerPresets, refreshComposerPresetsIfIdle } from './lib/composer_presets';
   import { hubStatus, loadHubStatus } from './lib/hub';
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
   import { startHubConnection, setGapHandler } from './lib/hub_connection';
@@ -211,7 +211,7 @@
   // Work view shows) refresh the Work view too; compared before the store
   // takes them.
   function onSessionEvents(events: SessionEvent[]) {
-    if (sessionEventsTouchWork(events)) bumpWorkChanged();
+    if (sessionEventsTouchWork(events)) bumpWorkChanged('session');
     applySessionEvents(events);
   }
 
@@ -305,10 +305,13 @@
     void loadTrackers();
     // A hub reconnect the hub could not replay: the backend re-lists rows
     // itself; projects/worktrees and trackers/work have list shapes their
-    // events cannot carry, so this window re-fetches them here.
+    // events cannot carry, so this window re-fetches them here. The chips
+    // have no event at all, so they are re-read too (unless an edit is
+    // pending: a reload must not replace a half-typed chip).
     setGapHandler(() => {
       void loadProjects();
       void loadTrackers();
+      void refreshComposerPresetsIfIdle();
     });
     // The composer's chip row. Fleet state since it moved off `localStorage`
     // (so the phone and this window share one list), and never on the
@@ -383,7 +386,7 @@
     if (get(hubStatus).unavailable) return;
     if (outcomeRefreshInFlight) return;
     outcomeRefreshInFlight = true;
-    bumpWorkChanged();
+    bumpWorkChanged('resync');
     void Promise.all([loadProjects(), loadSessions()]).finally(() => {
       outcomeRefreshInFlight = false;
     });
@@ -972,8 +975,8 @@
         class="hub-badge"
         class:err={($trackersHealth?.failing ?? 0) > 0}
         data-testid="footer-trackers"
-        title="Tracker sync health. Settings → Work to reconnect."
-        onclick={() => openSettingsAt('work')}>{trackersLine}</button
+        title="Tracker sync health. Settings → Trackers to reconnect."
+        onclick={() => openSettingsAt('settings.trackers')}>{trackersLine}</button
       >
     {/if}
   {:else if $hubStatus.unavailable}

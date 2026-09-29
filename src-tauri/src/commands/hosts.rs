@@ -21,13 +21,17 @@ use fleet_core::store::{AccountRow, HostRow, Store};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
+/// Async: on Windows it may wait for a WSL detection (`discover_hosts_fresh`),
+/// which must not block the main thread a sync command runs on.
 #[tauri::command]
-pub fn discover_hosts(backend: State<'_, Arc<FleetBackend>>) -> Result<Vec<SshHost>, IpcError> {
+pub async fn discover_hosts(
+    backend: State<'_, Arc<FleetBackend>>,
+) -> Result<Vec<SshHost>, IpcError> {
     // Reads *this machine's* ~/.ssh/config, which says nothing about the hub's
     // hosts — and it only ever feeds the Add-host dialog, which a client
     // cannot complete anyway.
     backend.refuse_local_only("discover_hosts")?;
-    hosts::discover_hosts()
+    hosts::discover_hosts_fresh().await
 }
 
 #[tauri::command]

@@ -213,8 +213,10 @@ const REASONS = {
     'an import reads host `local`’s Claude config, which on a hub is the hub’s own machine, not this one — call import_assets on the hub',
   catalog_spawn_author_session:
     'an author session is a Claude session in the catalog’s checkout on the hub’s machine, and the hub has no tool that starts one — edit the asset here instead',
-  get_fleet_settings:
-    'these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; the hub’s master token reads and changes them (get_settings, set_setting)',
+  // Not a command: the fleet's settings route to the hub (declarative pages
+  // P6); this is what a paired desktop says when the hub serves them none.
+  fleet_settings:
+    'the hub did not serve its settings to this device — a hub older than this app, or a device bound to one organisation, reads none; the hub’s operator changes them with fleet-hub settings or set_setting',
   list_account_usage:
     'this app does not poll account usage while a hub owns the fleet, so its cache stays empty',
   refresh_account_usage:

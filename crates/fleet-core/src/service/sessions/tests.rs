@@ -212,6 +212,17 @@ fn stale_probe(s: &Store, pane_status: crate::service::pane_intel::ClaudeStatus)
     probe
 }
 
+/// Stamp every row as observed by a reconcile pass at `at`: the stale sweep
+/// judges only rows a pass saw within its window.
+fn observed_at(s: &Store, at: i64) {
+    s.conn_for_test()
+        .execute(
+            "UPDATE sessions SET last_reconciled_at = ?1",
+            rusqlite::params![at],
+        )
+        .unwrap();
+}
+
 /// `dev-a` on `vps`, `working` by the agents' status, then demoted by the
 /// tick's stale-working rule (both the attention stamp and the veto armed).
 fn demoted_dev_a(s: &mut Store, projects: &[ProjectRow]) -> SessionRow {
@@ -254,6 +265,8 @@ fn an_attach_ends_the_stale_working_reason_but_keeps_the_demotion() {
         "the cached agents status must not undo the demotion after an attach"
     );
     assert_eq!(get(&s).stale_working_at, None, "the reason stays ended");
+    // The sweep judges only rows a pass observed within its window.
+    observed_at(&s, now_unix() + 3_600);
     assert!(
         s.age_out_stale_working(now_unix() + 3_600, 60)
             .unwrap()
@@ -267,6 +280,7 @@ fn an_attach_ends_the_stale_working_reason_but_keeps_the_demotion() {
     let probe = stale_probe(&s, ClaudeStatus::Working);
     reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
     assert_eq!(get(&s).claude_status.as_deref(), Some("working"));
+    observed_at(&s, now_unix() + 3_600);
     let again = s.age_out_stale_working(now_unix() + 3_600, 60).unwrap();
     assert_eq!(again.len(), 1, "a lifted demotion re-arms the rule");
 }
@@ -292,6 +306,7 @@ fn an_expired_stale_working_stamp_keeps_the_demotion() {
         Some("idle"),
         "the cached agents status must not undo the demotion after the TTL"
     );
+    observed_at(&s, now_unix() + 2 * ttl);
     assert!(
         s.age_out_stale_working(now_unix() + 2 * ttl, 60)
             .unwrap()
@@ -455,6 +470,7 @@ fn row(
         turn_seq: 0,
         last_stop_at: None,
         stale_working_at: None,
+        stale_demoted_at: None,
         work_rev: 0,
         pr_evidence: None,
         pr_checked_at: None,
@@ -2590,31 +2606,35 @@ fn versions_health_deps(
     )
 }
 
-/// data-sync F2/F5, hub-ops F6: a hidden host's rows were immortal because
-/// the reaper only ran inside a probed host's write.
+/// Hide is reversible (Undo, Unhide): reconcile skips a hidden host and
+/// leaves its rows frozen at their last-known state, never ghosted or
+/// deleted, so Unhide finds the same rows with their resumable ids.
 #[tokio::test]
-async fn reconcile_reaps_the_rows_of_a_hidden_host_without_probing_it() {
+async fn reconcile_keeps_a_hidden_hosts_rows_and_unhide_restores_them() {
     let store = Mutex::new(Store::open_in_memory().expect("store"));
     let (on_old, on_h) = {
         let s = store.lock().unwrap();
         s.upsert_host("h").unwrap();
         s.upsert_host("old").unwrap();
         s.set_host_hidden("old", true).unwrap();
+        let on_old = s
+            .upsert_session("dev-old", "old", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.set_claude_session_id(on_old, "cid-old").unwrap();
         (
-            s.upsert_session("dev-old", "old", None, None, 1, 1, "running", None)
-                .unwrap(),
+            on_old,
             s.upsert_session("dev-h", "h", None, None, 1, 1, "running", None)
                 .unwrap(),
         )
     };
-    let deps = || {
+    let deps = |old_lists: bool| {
         ReconcileDeps::fake_without_local(
-            |alias| {
+            move |alias| {
                 Box::new(IdentityTmux {
-                    sessions: if alias == "h" {
-                        vec![tmux_session("dev-h")]
-                    } else {
-                        Vec::new()
+                    sessions: match alias {
+                        "h" => vec![tmux_session("dev-h")],
+                        "old" if old_lists => vec![tmux_session("dev-old")],
+                        _ => Vec::new(),
                     },
                     ..Default::default()
                 })
@@ -2622,22 +2642,57 @@ async fn reconcile_reaps_the_rows_of_a_hidden_host_without_probing_it() {
             std::time::Duration::from_secs(5),
         )
     };
-    // Pass 1 ghosts, pass 2 deletes; `h` is probed and its row lives on.
+    for _ in 0..2 {
+        reconcile_sessions_with(&store, &deps(false)).await.unwrap();
+        let s = store.lock().unwrap();
+        let row = s
+            .get_session_by_id(on_old)
+            .unwrap()
+            .expect("a hidden host's row is kept");
+        assert_eq!(row.status, "running", "frozen, not ghosted");
+        assert_eq!(row.claude_session_id.as_deref(), Some("cid-old"));
+        assert_eq!(
+            s.get_session_by_id(on_h).unwrap().unwrap().status,
+            "running"
+        );
+    }
+
+    // Unhide: the next pass probes `old` and finds the same row live.
+    store.lock().unwrap().set_host_hidden("old", false).unwrap();
+    reconcile_sessions_with(&store, &deps(true)).await.unwrap();
+    let s = store.lock().unwrap();
+    let row = s.get_session("dev-old", "old").unwrap().expect("row");
+    assert_eq!(row.id, on_old, "the same row, not a new one");
+    assert_eq!(row.status, "running");
+    assert_eq!(row.claude_session_id.as_deref(), Some("cid-old"));
+}
+
+/// data-sync F2/F5: `local` on a hub without a local host is the one host
+/// nothing will ever probe, so its rows are ghosted, then deleted.
+#[tokio::test]
+async fn reconcile_still_reaps_local_on_a_hub_without_a_local_host() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    let on_local = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_session("dev-local", "local", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    let deps = || {
+        ReconcileDeps::fake_without_local(
+            |_alias| Box::new(IdentityTmux::default()),
+            std::time::Duration::from_secs(5),
+        )
+    };
     reconcile_sessions_with(&store, &deps()).await.unwrap();
     {
         let s = store.lock().unwrap();
-        assert_eq!(
-            s.get_session_by_id(on_old).unwrap().unwrap().status,
-            "ghost"
-        );
+        let row = s.get_session_by_id(on_local).unwrap().expect("ghosted");
+        assert_eq!(row.status, "ghost");
     }
     reconcile_sessions_with(&store, &deps()).await.unwrap();
     let s = store.lock().unwrap();
-    assert!(s.get_session_by_id(on_old).unwrap().is_none());
-    assert_eq!(
-        s.get_session_by_id(on_h).unwrap().unwrap().status,
-        "running"
-    );
+    assert!(s.get_session_by_id(on_local).unwrap().is_none());
 }
 
 #[tokio::test]

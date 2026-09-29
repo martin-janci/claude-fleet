@@ -142,14 +142,12 @@ pub fn ensure_repo(path: &Path, remote: Option<&str>) -> Result<(), IpcError> {
     match remote {
         Some(url) => {
             let parent = clone_parent(path);
-            // Named as the checkout, with the directory that failed: on
-            // Windows a path under a file probes as absent (not "not a
-            // directory"), so this is where such a checkout fails there.
+            // Named as the checkout, like a failed probe: Windows reads a
+            // path through a file as absent rather than failing the probe,
+            // so this is where such a checkout surfaces there.
             std::fs::create_dir_all(parent).map_err(|e| {
-                let e = std::io::Error::new(
-                    e.kind(),
-                    format!("cannot create {}: {e}", parent.display()),
-                );
+                let e =
+                    std::io::Error::new(e.kind(), format!("creating {}: {e}", parent.display()));
                 unreadable(path, &e)
             })?;
             let target = path.to_string_lossy().to_string();
@@ -1023,19 +1021,23 @@ mod tests {
     /// A checkout that cannot even be probed is reported as that, with its
     /// path — never taken for "no checkout" and cloned over. A file where a
     /// directory should be stands in for an unreadable one, which the root
-    /// test runner could read anyway.
+    /// test runner could read anyway. Unix fails the probe itself
+    /// (`NotADirectory`); Windows reads the path as absent and fails creating
+    /// the clone's parent — both name the checkout, and neither touches it.
     #[test]
     fn ensure_repo_names_a_checkout_it_cannot_probe() {
         let base = tmp("ensure-repo-unprobeable");
-        fs::write(base.join("file"), "x").unwrap();
-        let path = base.join("file").join("agent-assets");
+        let file = base.join("file");
+        fs::write(&file, "x").unwrap();
+        let path = file.join("agent-assets");
         let err = ensure_repo(&path, Some("/nonexistent/remote.git")).unwrap_err();
-        assert_eq!(err.code, "E_IO");
+        assert_eq!(err.code, "E_IO", "{}", err.message);
         assert!(
             err.message.contains(&*path.to_string_lossy()),
             "{}",
             err.message
         );
+        assert_eq!(fs::read_to_string(&file).unwrap(), "x");
     }
 
     /// A checkout that probes as absent but whose directory cannot be made
@@ -1054,7 +1056,7 @@ mod tests {
             err.message.contains(&*path.to_string_lossy())
                 && err
                     .message
-                    .contains(&format!("cannot create {}", dangling.display())),
+                    .contains(&format!("creating {}", dangling.display())),
             "{}",
             err.message
         );

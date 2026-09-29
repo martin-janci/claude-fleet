@@ -226,6 +226,95 @@ fn a_task_shows_active_and_past_sessions_apart() {
     assert_eq!(task_of(&past_only, "TK-1").counts.active, 0);
 }
 
+/// A task counts sessions, not links: a session whose link to the task
+/// ended on a branch change and was made and ended again is one past
+/// session — while it lives and after it is gone.
+#[test]
+fn a_session_with_two_past_links_is_one_past_session() {
+    let w = world();
+    link(&w, w.s1, w.t1, true);
+    link(&w, w.s2, w.t1, true);
+    let first = links_of(&w, w.s1).links[0].link.link_id;
+    {
+        let s = w.st.lock().unwrap();
+        s.seed_end_link(first, "branch_changed");
+        s.seed_duplicate_link(first);
+    }
+    let one_past = TaskCounts {
+        active: 1,
+        ended: 1,
+        suggested: 0,
+    };
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let t = task_of(&p, "TK-1");
+    assert_eq!(t.counts, one_past, "a live session's two past links");
+    assert_eq!(
+        t.sessions.iter().filter(|l| l.state == "ended").count(),
+        2,
+        "both links are still listed"
+    );
+    w.st.lock().unwrap().delete_session(w.s1).unwrap();
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(
+        task_of(&p, "TK-1").counts,
+        one_past,
+        "a gone session's two past links"
+    );
+}
+
+/// Two suggestions of one session for one task are one suggested session.
+#[test]
+fn two_suggestions_of_one_session_count_once() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        crate::service::work::detect::on_prompt(&s, w.s1, "please look at TK-3", false).unwrap();
+    }
+    let sug = links_of(&w, w.s1)
+        .links
+        .iter()
+        .find(|l| l.link.state == "suggested" && l.task.key.as_deref() == Some("TK-3"))
+        .expect("a suggestion for TK-3")
+        .link
+        .link_id;
+    w.st.lock().unwrap().seed_duplicate_link(sug);
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let t3 = task_of(&p, "TK-3");
+    assert_eq!(t3.counts.suggested, 1);
+    assert_eq!(t3.sessions.len(), 2, "both links are listed");
+}
+
+/// The Sessions view lists a live session's link that ended on a branch
+/// change (history) beside its live one, and only that session's links.
+#[test]
+fn session_tasks_lists_a_live_sessions_past_link_beside_its_live_one() {
+    let w = world();
+    link(&w, w.s1, w.t1, true);
+    let first = links_of(&w, w.s1).links[0].link.link_id;
+    w.st.lock().unwrap().seed_end_link(first, "branch_changed");
+    link(&w, w.s1, w.t2, true);
+    link(&w, w.s2, w.t3, true);
+    let st = links_of(&w, w.s1);
+    let rows: Vec<(&str, Option<&str>, bool)> = st
+        .links
+        .iter()
+        .map(|l| (l.link.state.as_str(), l.task.key.as_deref(), l.link.primary))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("active", Some("TK-2"), true),
+            ("ended", Some("TK-1"), false)
+        ]
+    );
+    assert_eq!(st.primary_link_id, Some(st.links[0].link.link_id));
+    assert_eq!(st.links[1].link.link_id, first);
+    assert_eq!(
+        st.links[1].link.end_reason.as_deref(),
+        Some("branch_changed")
+    );
+}
+
 /// UC4: a synced ticket with no session is a task, found by `has: none`,
 /// and it is not the same as a tracker that is down.
 #[test]
@@ -575,7 +664,7 @@ fn the_graph_and_the_store_agree_on_item_orgs() {
         it.id
     };
     let s = w.st.lock().unwrap();
-    let g = Graph::load(&s).unwrap();
+    let g = Graph::load(&s, &OrgScope::All).unwrap();
     for id in [w.t1, w.t2, w.t3, local] {
         assert_eq!(
             g.item_org(&g.items[&id]),
@@ -1347,4 +1436,345 @@ fn archived_hidden_counts_the_whole_result() {
         },
     );
     assert_eq!(open.archived_hidden, 0, "open already excludes done");
+}
+
+/// One refresh is one read: the sections a client has open are paged from
+/// the same built tasks exactly as their own reads page them (tasks and
+/// cursor), and `review_total` is the inbox's total under the same scope.
+#[test]
+fn a_tree_read_pages_its_sections_and_review_total_as_their_own_reads() {
+    let w = world();
+    link(&w, w.s1, w.t1, true);
+    {
+        let s = w.st.lock().unwrap();
+        for i in 0..5 {
+            s.create_local_work_item(Some(&format!("LOC-{i}")), &format!("local {i}"))
+                .unwrap();
+        }
+        crate::service::work::detect::on_prompt(&s, w.s2, "please look at TK-3 and TK-2", false)
+            .unwrap();
+    }
+    let filters = WorkTreeFilters {
+        archived: Some(false),
+        ..Default::default()
+    };
+    for (n, scope) in [OrgScope::All, bound(w.org_a), strict(w.org_a)]
+        .into_iter()
+        .enumerate()
+    {
+        let head = page(&w, &scope, filters.clone());
+        let asks: Vec<SectionAsk> = head
+            .groups
+            .iter()
+            .map(|g| SectionAsk {
+                org_id: g.org_id,
+                group_id: g.group.id.clone(),
+                limit: Some(2),
+            })
+            .collect();
+        assert!(!asks.is_empty(), "scope {n}");
+        let batched = tree(
+            &w.st,
+            &scope,
+            &TreeArgs {
+                filters: filters.clone(),
+                limit: Some(1),
+                sections: asks.clone(),
+                with_review_total: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(batched.sections.len(), asks.len(), "scope {n}");
+        for (ask, got) in asks.iter().zip(&batched.sections) {
+            let own_filters = section_filters(&filters, ask.org_id, &ask.group_id);
+            let own = tree(
+                &w.st,
+                &scope,
+                &TreeArgs {
+                    filters: own_filters.clone(),
+                    limit: ask.limit,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                (got.org_id, got.group_id.as_str()),
+                (ask.org_id, ask.group_id.as_str())
+            );
+            assert_eq!(got.tasks, own.tasks, "scope {n}: {ask:?}");
+            assert_eq!(got.next_cursor, own.next_cursor, "scope {n}: {ask:?}");
+            // The section's cursor pages on in the section's own read.
+            if let Some(c) = &got.next_cursor {
+                let next = tree(
+                    &w.st,
+                    &scope,
+                    &TreeArgs {
+                        filters: own_filters,
+                        cursor: Some(c.clone()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert!(!next.tasks.is_empty(), "scope {n}: {ask:?}");
+            }
+        }
+        let inbox = review(&w.st, &scope, None, Some(1)).unwrap();
+        assert_eq!(batched.review_total, Some(inbox.total), "scope {n}");
+        if n == 0 {
+            assert!(inbox.total > 0, "the suggestions are in the inbox");
+        }
+    }
+    // Asked for neither, a read answers as before.
+    let plain = tree(&w.st, &OrgScope::All, &TreeArgs::default()).unwrap();
+    assert!(plain.sections.is_empty());
+    assert_eq!(plain.review_total, None);
+    let json = serde_json::to_value(&plain).unwrap();
+    assert!(json.get("sections").is_none() && json.get("review_total").is_none());
+    // Too many sections is refused, never cut short.
+    let err = tree(
+        &w.st,
+        &OrgScope::All,
+        &TreeArgs {
+            sections: vec![
+                SectionAsk {
+                    org_id: None,
+                    group_id: "none".into(),
+                    limit: None,
+                };
+                TREE_MAX_SECTIONS + 1
+            ],
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID);
+}
+
+// --- native item status (design 2026-09-28 §2): the live precedence the
+// tree projects through `service::work::status::effective_status`, given
+// `has_working_session` from one join over the whole page. ---------------
+
+/// Mark `sid`'s session as presently working, the way a live Claude turn
+/// does (`crate::service::work::tidy::tests::seed_session_and_item`'s
+/// pattern): a `claude_session_id`, then its `claude_status`.
+fn mark_working(w: &W, sid: i64, claude_session_id: &str) {
+    let s = w.st.lock().unwrap();
+    s.set_claude_session_id(sid, claude_session_id).unwrap();
+    s.set_claude_status_by_session_id(claude_session_id, "working")
+        .unwrap();
+}
+
+/// A working session lifts a LOCAL item's `todo` to `in_progress` in the
+/// tree — the live signal `effective_status` computes from one join, never
+/// a query per row.
+#[test]
+fn a_working_session_shows_a_local_item_as_in_progress() {
+    let w = world();
+    w.st.lock()
+        .unwrap()
+        .name_session_work(w.s1, Some("LOC-77"), "Refactor billing")
+        .unwrap();
+    mark_working(&w, w.s1, "c-loc-77");
+
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(
+        task_of(&p, "LOC-77").status_category.as_deref(),
+        Some("in_progress")
+    );
+}
+
+/// A person's status is final: a working session does not lift it back to
+/// `in_progress` (§2 rule 1 outranks rule 3).
+#[test]
+fn a_persons_status_is_not_lifted_by_a_working_session() {
+    let w = world();
+    let (item, _) =
+        w.st.lock()
+            .unwrap()
+            .name_session_work(w.s1, Some("LOC-78"), "Something else")
+            .unwrap();
+    w.st.lock()
+        .unwrap()
+        .set_item_status(item.id, "todo")
+        .unwrap();
+    mark_working(&w, w.s1, "c-loc-78");
+
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(
+        task_of(&p, "LOC-78").status_category.as_deref(),
+        Some("todo")
+    );
+}
+
+/// A tracker item's status is its tracker's: a working session must never
+/// move it (§2, "who may be overridden").
+#[test]
+fn a_working_session_never_lifts_a_tracker_item() {
+    let w = world();
+    let t4 =
+        w.st.lock()
+            .unwrap()
+            .upsert_tracker_item(
+                w.tracker,
+                &TrackerItemWrite {
+                    external_id: "4".into(),
+                    key: Some("TK-4".into()),
+                    title: "Not started".into(),
+                    status_name: "To Do".into(),
+                    status_category: "todo".into(),
+                    containers: vec!["TP".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id;
+    link(&w, w.s1, t4, true);
+    mark_working(&w, w.s1, "c-tk-4");
+
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(task_of(&p, "TK-4").status_category.as_deref(), Some("todo"));
+}
+
+/// Fix round 1: the tree (`to_task`) and a session's own task list
+/// (`brief_of`, via `session_tasks`) must not disagree about the same
+/// item's status — both project through `effective_status` with the same
+/// page-wide working set, never a query per caller.
+#[test]
+fn the_tree_and_a_sessions_own_tasks_agree_on_a_working_items_status() {
+    let w = world();
+    w.st.lock()
+        .unwrap()
+        .name_session_work(w.s1, Some("LOC-79"), "Agree with me")
+        .unwrap();
+    mark_working(&w, w.s1, "c-loc-79");
+
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let tree_status = task_of(&p, "LOC-79").status_category.clone();
+    assert_eq!(tree_status.as_deref(), Some("in_progress"));
+
+    let links = links_of(&w, w.s1);
+    assert_eq!(links.links.len(), 1);
+    assert_eq!(
+        links.links[0].task.status_category, tree_status,
+        "the tree and the session's own task list must agree"
+    );
+}
+
+/// Fix round 2 (C2): a working session on a bare `ref_key` link (no item
+/// at all, `l.item_id IS NULL`) must not break `Store::
+/// work_items_with_working_session`'s one-join query. The clause `AND
+/// l.item_id IS NOT NULL` is load-bearing for a stronger reason than "a
+/// NULL would slip into the set": `r.get::<_, i64>` on that NULL column
+/// would **error**, and every reader that loads a `Graph` — `tree`,
+/// `task`, `session_tasks`, `review` — would fail outright, not just admit
+/// a bogus id.
+#[test]
+fn a_working_session_on_a_bare_ref_key_link_does_not_break_the_view() {
+    let w = world();
+    work_link(
+        &WorkLinkArgs {
+            key: Some("BARE-9".into()),
+            ..wl(&w, "link", w.s1)
+        },
+        &w.st,
+        &OrgScope::All,
+    )
+    .unwrap();
+    mark_working(&w, w.s1, "c-bare-9");
+
+    // None of these may error.
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert!(!p.tasks.is_empty());
+    assert!(task(&w.st, &OrgScope::All, "ref:BARE-9").is_ok());
+    assert!(session_tasks(&w.st, &OrgScope::All, w.s1).is_ok());
+    assert!(review(&w.st, &OrgScope::All, None, None).is_ok());
+}
+
+/// Fix round 2 (C3): the live signal must not leak "someone is working on
+/// this" through a session the caller cannot see. A local item owned by
+/// org A, ALSO worked by an org B session, lifts to `in_progress` for
+/// `OrgScope::All` (which sees every session) but stays at its stored
+/// value for org A's own bound scope, which cannot see org B's session.
+#[test]
+fn the_live_lift_is_fenced_by_org_scope() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        s.upsert_host("h2").unwrap();
+        s.set_host_org("h2", Some(w.org_b)).unwrap();
+        let s2b = s
+            .upsert_session("two-b", "h2", None, None, 1, 1, "running", None)
+            .unwrap();
+        let (it, _) = s
+            .name_session_work(w.s1, Some("LOC-90"), "Cross-org watch")
+            .unwrap();
+        s.seed_local_item_org(it.id, Some(w.org_a));
+        s.link_session_work(s2b, WorkTarget::Item(it.id), "manual")
+            .unwrap();
+        s.set_claude_session_id(s2b, "c-loc-90-b").unwrap();
+        s.set_claude_status_by_session_id("c-loc-90-b", "working")
+            .unwrap();
+    }
+
+    let all = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(
+        task_of(&all, "LOC-90").status_category.as_deref(),
+        Some("in_progress"),
+        "All sees org B's session working on it"
+    );
+
+    let a = bound(w.org_a);
+    let pa = page(&w, &a, WorkTreeFilters::default());
+    assert_eq!(
+        task_of(&pa, "LOC-90").status_category.as_deref(),
+        Some("todo"),
+        "org A must not see org B's session lift this to in_progress"
+    );
+}
+
+/// Fix round 3 (item 5): `to_task`'s `archived` now reads `item_status`
+/// (the live-lifted value), not the raw stored `status_category` directly
+/// — checked here rather than assumed safe. A "legacy" done item
+/// (`status_category = 'done'`, `status_set_by` NULL — written before that
+/// column existed, or by hand) that a session resumes work on is lifted to
+/// `in_progress` by the same live rule that protects a tracked done/derived
+/// stamp from a fresh working session; either way `archived` stays false,
+/// because the very link that lifts the status also makes
+/// `counts.active >= 1` for the same task. This pins that interaction.
+#[test]
+fn a_legacy_done_item_a_session_resumes_is_lifted_and_stays_unarchived() {
+    let w = world();
+    let item =
+        w.st.lock()
+            .unwrap()
+            .create_local_work_item(Some("LOC-91"), "Legacy done")
+            .unwrap();
+    // A narrow, deliberate raw UPDATE (not the banned pattern of faking a
+    // person's/tracker's status through one): simulates a `done` stamped
+    // before `status_set_by` existed, which `stamp_derived_done`/
+    // `set_item_status` — the store's only real writers — always pair with
+    // one, so there is no other way to reach this state through the store.
+    w.st.lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE work_items SET status_category = 'done' WHERE id = ?1",
+            rusqlite::params![item.id],
+        )
+        .unwrap();
+    link(&w, w.s1, item.id, true);
+    mark_working(&w, w.s1, "c-loc-91");
+
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let t = task_of(&p, "LOC-91");
+    assert_eq!(
+        t.status_category.as_deref(),
+        Some("in_progress"),
+        "nobody tracked this done, so the live lift applies"
+    );
+    assert!(
+        !t.archived,
+        "a session working it now is not archived, lifted status or not"
+    );
 }

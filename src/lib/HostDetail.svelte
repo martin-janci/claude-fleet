@@ -219,8 +219,10 @@
     const r = await rotateToken(alias);
     busy = false;
     confirm = null;
-    if (r.ok) push({ kind: 'success', message: `${alias} has a new control-API token.` });
-    else pushError(r.error, `Rotate token for ${alias} failed`);
+    if (r.ok) {
+      push({ kind: 'success', message: `${alias} has a new control-API token.` });
+      if (r.value.warning) push({ kind: 'warning', message: `${alias}: ${r.value.warning}`, sticky: true });
+    } else pushError(r.error, `Rotate token for ${alias} failed`);
   }
 
   async function confirmRemove() {

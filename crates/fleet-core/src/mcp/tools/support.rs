@@ -491,17 +491,16 @@ pub(super) fn broadcast_summary(
 /// `failed` turn (a StopFailure) has ended too, and re-prompting is what its
 /// attention reason asks for — the same set `wait_for_session { until:
 /// "idle" }` accepts, so following this error's advice cannot loop.
-/// `live` is the pane's reading, taken only for a stale-demoted row
-/// (`demoted`, its `stale_demoted_at`; `store::trusted_status`): its stored
-/// `idle` alone is not enough.
+/// `live` is the pane's reading, taken only for a stale-demoted row (its
+/// `stale_demoted_at`; `store::trusted_status`): its stored `idle` alone is
+/// not enough.
 pub(super) fn run_prompt_ready(
     row: &crate::store::SessionRow,
-    demoted: bool,
     live: Option<&str>,
 ) -> Result<(), McpError> {
-    match crate::store::trusted_status(row, demoted, live) {
+    match crate::store::trusted_status(row, live) {
         s if crate::store::turn_over(s) => Ok(()),
-        None if crate::store::needs_pane_confirmation(row, demoted) => Err(mcp_err(
+        None if crate::store::needs_pane_confirmation(row) => Err(mcp_err(
             "E_INVALID_STATE",
             format!(
                 "session {} was demoted from working after a quiet spell and its pane could \
@@ -876,10 +875,22 @@ pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError>
             None,
         ));
     }
-    if caller.is_master() || guard::is_client_tool(tool) {
+    if guard::access_allows(caller, tool) {
         return Ok(());
     }
-    let message = if guard::is_admin_tool(tool) {
+    let access = guard::policy(tool).map(|p| p.access);
+    let message = if access == Some(guard::Access::Person) {
+        format!(
+            "{tool} is for the fleet's operator or a person's own paired device, \
+             not a host's token or a device bound to an org ({} refused)",
+            caller.label()
+        )
+    } else if access == Some(guard::Access::PersonDevice) {
+        format!(
+            "{tool} is for a paired device; on the hub machine use fleet-hub settings ({} refused)",
+            caller.label()
+        )
+    } else if guard::is_admin_tool(tool) {
         format!(
             "{tool} is a fleet-admin tool: master token only ({} refused)",
             caller.label()

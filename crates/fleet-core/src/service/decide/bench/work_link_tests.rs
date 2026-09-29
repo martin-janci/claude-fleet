@@ -246,6 +246,35 @@ fn only_links_a_person_decided_become_cases() {
         .all(|c| c.truth.as_deref() == Some(option_id(i).as_str())));
 }
 
+#[test]
+fn the_store_reads_exactly_the_person_sources() {
+    let mut w = world();
+    let i = w.item("PAY-1", "Login redirect loops", *NOW - 10 * DAY);
+    for src in [
+        "manual",
+        "started",
+        "agent",
+        "agent_started",
+        "agent_inferred",
+    ] {
+        w.case(&format!("decided by {src}"), i, src, *NOW - 5 * DAY);
+    }
+    let mut got: Vec<String> =
+        w.s.bench_work_link_cases(0, 100)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.source)
+            .collect();
+    got.sort();
+    let mut want: Vec<String> = crate::store::PERSON_SOURCES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    want.sort();
+    assert_eq!(got, want);
+    assert_eq!(got, ["manual", "started"]);
+}
+
 /// Shaped like the six of 25 `--export-unlinked` rows on the production hub
 /// (2026-09-28) that were Claude Code's, as the store keeps them: the first
 /// 200 characters, so the block is never closed.

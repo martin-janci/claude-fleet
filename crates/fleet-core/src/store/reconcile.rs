@@ -190,8 +190,9 @@ impl Store {
             .collect()
     }
 
-    /// Two-phase reap for a host nothing probes (hidden, or `local` on a
-    /// hub without a local host): every live row is ghosted this call and
+    /// Two-phase reap for a host nothing will ever probe (`local` on a hub
+    /// without a local host — never a user-hidden host, whose rows Unhide
+    /// must bring back): every live row is ghosted this call and
     /// every already-ghost row is deleted, both kinds, no TTL exemption —
     /// nothing on such a host can be resumed from here. A ghosted row also
     /// loses `claude_status` / `stuck_kind` / `current_activity`: a dead
@@ -988,8 +989,10 @@ mod tests {
     use super::*;
     use crate::store::test_support::*;
 
-    /// data-sync F2/F5, hub-ops F6: a host nothing probes (hidden, or `local`
-    /// on a hub without one) kept its rows forever, some still `working`.
+    /// data-sync F2/F5, hub-ops F6: `local` on a hub without a local host (the
+    /// one host nothing will ever probe) kept its rows forever, some still
+    /// `working`. A user-hidden host is never reaped (see
+    /// `reconcile_keeps_a_hidden_hosts_rows_and_unhide_restores_them`).
     #[test]
     fn reap_host_ghosts_ghosts_live_rows_then_deletes_ghosts_without_a_probe() {
         let s = Store::open_in_memory().unwrap();
@@ -1064,6 +1067,7 @@ mod tests {
             turn_seq: 0,
             last_stop_at: None,
             stale_working_at: None,
+            stale_demoted_at: None,
             work_rev: 0,
             pr_evidence: None,
             pr_checked_at: None,
@@ -1269,6 +1273,55 @@ mod tests {
             intel_observed: true,
             ..Default::default()
         }
+    }
+
+    /// `stale_demoted_at` is a server-only `SessionRow` field (migration
+    /// 080): a pass whose only change is lifting it (the row reads
+    /// `working`) is not a client-visible change and emits no
+    /// `session:updated` — `eq_ignoring_row_version` ignores it.
+    #[test]
+    fn a_pass_that_only_lifts_stale_demoted_at_emits_no_session_event() {
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let pid = store.upsert_project("o", "r", "/base/r").unwrap();
+        let keep = vec!["s1".to_string()];
+        let sessions = vec![ReconcileSession {
+            claude_status: Some("working".to_string()),
+            ..live_session("s1", pid, 10)
+        }];
+        let pass = |store: &mut Store, ts: i64| {
+            store
+                .apply_host_reconcile(HostReconcile {
+                    sessions: &sessions,
+                    keep: &keep,
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        };
+        pass(&mut store, 1);
+        let row = store.get_session("s1", "alpha").unwrap().unwrap();
+        assert_eq!(row.claude_status.as_deref(), Some("working"));
+        store
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET stale_demoted_at = 5, context_at = context_at - 5 \
+                 WHERE id = ?1",
+                [row.id],
+            )
+            .unwrap();
+        let armed = store.get_session_by_id(row.id).unwrap().unwrap();
+        assert_eq!(armed.stale_demoted_at, Some(5));
+        bus.take();
+
+        pass(&mut store, 2);
+        let after = store.get_session_by_id(row.id).unwrap().unwrap();
+        assert_eq!(after.stale_demoted_at, None, "a working row lifts the veto");
+        assert!(after.eq_ignoring_row_version(&armed));
+        assert_eq!(
+            bus.take(),
+            vec!["host:pinged:alpha".to_string()],
+            "a veto-only change must emit no session event"
+        );
     }
 
     #[test]

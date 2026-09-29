@@ -1591,6 +1591,20 @@ describe('Sidebar triage (W2 Track D)', () => {
     expect(screen.getByTestId('ci-badge')).toHaveTextContent('CI');
   });
 
+  it('dims the CI badge when the PR reading is old, and says when it was checked', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const fresh = { ...sessionFor(1, 'dev-a'), pr_url: 'https://github.com/o/r/pull/3', ci_status: 'passing' as const, pr_checked_at: now - 60 };
+    const old = { ...sessionFor(2, 'dev-b'), pr_url: 'https://github.com/o/r/pull/4', ci_status: 'passing' as const, pr_checked_at: now - 3600 };
+    mockBackend(fakeProjects, [fresh, old]);
+    render(Sidebar);
+    await tick(); await tick();
+    const [a, b] = screen.getAllByTestId('ci-badge');
+    expect(a).not.toHaveClass('ci-badge--stale');
+    expect(a).toHaveAttribute('title', 'CI checks: passing');
+    expect(b).toHaveClass('ci-badge--stale');
+    expect(b.getAttribute('title')).toBe('CI checks: passing, last checked 1h ago');
+  });
+
   it('line 1 holds the name and one status chip; line 2 holds host, worktree, elapsed and prompt', async () => {
     const now = Math.floor(Date.now() / 1000);
     const s = {
@@ -2502,6 +2516,107 @@ describe('Sidebar work filters (work graph M10.4)', () => {
     // The group matches through its live row: showing archived lists both.
     await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'dev-a' } });
     await waitFor(() => expect(screen.getByTestId('archived-row')).toHaveTextContent('1 archived hidden'));
+  });
+
+  it('nothing archived and no past work: no archived row, in either grouping', async () => {
+    const a = { ...sessionFor(1, 'dev-a'), tags: ['PAY-7'], work: w('PAY-7', 7, 'in_progress') };
+    mockBackend(fakeProjects, [a, sessionFor(null, 'loose')]);
+    const view = render(Sidebar);
+    await tick(); await tick();
+    expect(names()).toHaveLength(2);
+    expect(screen.queryByTestId('archived-row')).toBeNull();
+    view.unmount();
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await screen.findByTestId('work-groups');
+    await tick();
+    expect(screen.queryByTestId('archived-row')).toBeNull();
+  });
+
+  it('the archived count matches a project by owner the way the list does', async () => {
+    const live = { ...sessionFor(1, 'dev-a'), work: w('PAY-1', 1, 'in_progress') };
+    const parked = { ...sessionFor(1, 'dev-parked'), work: w('PAY-2', 2, 'done', 100) };
+    const other = { ...sessionFor(2, 'old-x'), work: w('PAY-3', 3, 'done', 100) };
+    mockBackend(fakeProjects, [live, parked, other]);
+    render(Sidebar);
+    await tick();
+    expect(await screen.findByTestId('archived-row')).toHaveTextContent('2 archived hidden');
+    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'martin-janci' } });
+    await waitFor(() => expect(screen.getByTestId('archived-row')).toHaveTextContent('1 archived hidden'));
+    expect(names()).toHaveLength(1);
+    await fireEvent.click(screen.getByTestId('archived-toggle'));
+    await tick();
+    expect(names()).toHaveLength(2);
+    expect(names().some((n) => n.includes('dev-parked'))).toBe(true);
+  });
+
+  it('work mode: past work counts under a live group only when the group matches; past-only by key or name', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const link = (id: number, ref_key: string, snap_name: string) => ({
+      id, ref_key, state: 'confirmed', source: 'manual', created_at: 1, ended_at: nowSec - 60, snap_host: 'local', snap_name,
+    });
+    mockBackend(fakeProjects, [{ ...sessionFor(1, 'dev-a'), tags: ['PAY-7'] }]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, x?: { args?: { key?: string } }) =>
+      cmd === 'session_work_links'
+        ? x?.args?.key === undefined
+          ? [link(2, 'PAY-7', 'done-pay'), link(3, 'ABC-9', 'legacy-thing')]
+          : []
+        : base(cmd, x),
+    );
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    expect(await screen.findByTestId('archived-row')).toHaveTextContent('2 archived hidden');
+    const search = async (value: string) =>
+      fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value } });
+    // The live group matches through its row: its Done counts, ABC-9 not.
+    await search('dev-a');
+    await waitFor(() => expect(screen.getByTestId('archived-row')).toHaveTextContent('1 archived hidden'));
+    // A past link's own name does not match a live group.
+    await search('done-pay');
+    await waitFor(() => expect(screen.queryByTestId('archived-row')).toBeNull());
+    // A past-only group matches by a link's name, or by its key.
+    await search('legacy');
+    await waitFor(() => expect(screen.getByTestId('archived-row')).toHaveTextContent('1 archived hidden'));
+    await search('abc-9');
+    await waitFor(() => expect(screen.getByTestId('archived-row')).toHaveTextContent('1 archived hidden'));
+    await fireEvent.click(screen.getByTestId('archived-toggle'));
+    const groups = await screen.findAllByTestId('past-work-group');
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toHaveTextContent('ABC-9');
+  });
+
+  it('showing archived reveals exactly the counted rows, under host, recency and search', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const recent = { last_activity_at: now - 60 };
+    const done = (item: number) => w(`PAY-${item}`, item, 'done', 100);
+    mockBackend(fakeProjects, [
+      { ...sessionFor(1, 'dev-a'), ...recent, work: w('PAY-1', 1, 'in_progress') },
+      { ...sessionFor(1, 'dev-b'), ...recent, work: done(2) },
+      { ...sessionFor(1, 'dev-c'), ...recent, host_alias: 'mefistos', work: done(3) },
+      { ...sessionFor(2, 'dev-d'), last_activity_at: now - 40 * 86400, work: done(4) },
+      { ...sessionFor(3, 'zzz'), ...recent, work: done(5) },
+      { ...sessionFor(null, 'dev-loose'), ...recent, work: done(6) },
+      { ...sessionFor(null, 'nomatch'), ...recent, work: done(7) },
+      { ...sessionFor(null, 'dev-live'), ...recent },
+    ]);
+    localStorage.setItem('cf:pref:recency', '"7d"');
+    hostFilter.set('local');
+    try {
+      render(Sidebar);
+      await tick(); await tick();
+      await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'dev' } });
+      await waitFor(() => expect(screen.getByTestId('archived-row')).toHaveTextContent('2 archived hidden'));
+      const before = names().length;
+      expect(before).toBe(2);
+      await fireEvent.click(screen.getByTestId('archived-toggle'));
+      await tick();
+      expect(names()).toHaveLength(before + 2);
+      expect(names().filter((n) => n.includes('dev-b') || n.includes('dev-loose'))).toHaveLength(2);
+    } finally {
+      hostFilter.set('all');
+      localStorage.removeItem('cf:pref:recency');
+    }
   });
 });
 

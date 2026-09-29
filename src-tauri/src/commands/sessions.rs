@@ -305,46 +305,6 @@ pub async fn purge_project(
     bg_sessions::purge_project(args, &store, &ssh).await
 }
 
-// ── Operator settings (Wave 2 Track D) ──────────────────────────────────────
-//
-// Typed key/value settings behind the Settings dialog's automation toggles
-// (playbooks, GC, reconcile cadence). The registry in `service::settings`
-// owns the key list, defaults and validation; these wrappers only adapt
-// `tauri::State`.
-//
-// Local-only in remote mode, and this is the one pair where returning the
-// local answer would be actively misleading: these settings govern the
-// reconcile tick, the GC sweeper and the playbooks, none of which this
-// process runs when a hub owns the fleet. Showing this app's values would
-// show settings that do nothing, and writing one would change nothing.
-
-/// Every registered operator setting with its effective value.
-#[tauri::command]
-pub fn get_fleet_settings(
-    backend: State<'_, Arc<FleetBackend>>,
-    store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
-    backend.refuse_local_only("get_fleet_settings")?;
-    let s = lock(&store)?;
-    Ok(fleet_core::service::settings::read_all(&s))
-}
-
-/// Validate and persist one operator setting. `E_INVALID` for an unknown key
-/// or a value of the wrong shape. Returns the full effective map so the
-/// dialog can re-render from one source of truth.
-#[tauri::command]
-pub fn set_fleet_setting(
-    key: String,
-    value: String,
-    backend: State<'_, Arc<FleetBackend>>,
-    store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
-    backend.refuse_local_only("set_fleet_setting")?;
-    let s = lock(&store)?;
-    fleet_core::service::settings::set(&s, &key, &value)?;
-    Ok(fleet_core::service::settings::read_all(&s))
-}
-
 // ── Session timeline (Q9) ───────────────────────────────────────────────────
 
 /// Default and ceiling for `session_history`'s `limit`. The store caps the
@@ -451,27 +411,7 @@ pub async fn session_tool_detail(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<fleet_core::service::transcript::ToolDetail, IpcError> {
-    // The session id is the hub's and the transcript lives on the hub's
-    // hosts; with no hub tool to ask, a local read would look up the wrong
-    // row over this machine's SSH keys.
-    backend.refuse_local_only("session_tool_detail")?;
-    let row = {
-        let s = lock(&store)?;
-        s.get_session_by_id(args.session_id)?.ok_or_else(|| {
-            IpcError::new(
-                codes::E_NOTFOUND,
-                format!("session {} not found", args.session_id),
-            )
-        })?
-    };
-    fleet_core::service::transcript::fetch_tool_detail(
-        &store,
-        &ssh,
-        &row,
-        args.claude_session_id.as_deref(),
-        &args.tool_use_id,
-    )
-    .await
+    routed::session_tool_detail(&backend, args, &store, &ssh).await
 }
 
 // ── Activity probe (live indicator) ─────────────────────────────────────────
@@ -791,6 +731,43 @@ pub(crate) mod routed {
             turns,
             max_chars,
             transcript::CONV_EVENTS_LIMIT_UI,
+        )
+        .await
+    }
+
+    /// The session id is the hub's and the transcript lives on the hub's
+    /// hosts, so a hub client asks the hub's tool; `claude_session_id` goes
+    /// over only when set.
+    pub async fn session_tool_detail(
+        backend: &FleetBackend,
+        args: SessionToolDetailArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<fleet_core::service::transcript::ToolDetail, IpcError> {
+        if let Some(hub) = backend.hub() {
+            return hub
+                .session_tool_detail(
+                    args.session_id,
+                    &args.tool_use_id,
+                    args.claude_session_id.as_deref(),
+                )
+                .await;
+        }
+        let row = {
+            let s = lock(store)?;
+            s.get_session_by_id(args.session_id)?.ok_or_else(|| {
+                IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("session {} not found", args.session_id),
+                )
+            })?
+        };
+        fleet_core::service::transcript::fetch_tool_detail(
+            store,
+            ssh,
+            &row,
+            args.claude_session_id.as_deref(),
+            &args.tool_use_id,
         )
         .await
     }

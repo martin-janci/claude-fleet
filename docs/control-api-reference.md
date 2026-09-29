@@ -53,6 +53,12 @@ The Assets tab's catalog operations as one tool. Master or a client granted `ass
 
 Parameters: `action`, `args`, `confirm_nonce`
 
+### `decide_setting_proposals`
+
+Apply or reject settings proposals by id, each on its own; a trusted device only.
+
+Parameters: `accept`, `reject`
+
 ### `delete_worktree`
 
 Delete a git worktree on its host (no --force) and drop fleet's row. Refuses if an alive session points at it, unless force. Errors: E_WORKTREE_BUSY, E_NOTFOUND, E_GIT, E_CONFIRM_REQUIRED (desktop confirmation on).
@@ -103,7 +109,9 @@ Parameters: `host_alias`
 
 ### `get_settings`
 
-Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, work graph), each key's effective value. Read-only but master token only (it names hosts and their paths).
+Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, work graph), each key's effective value. Master token or a paired device bound to no org.
+
+Parameters: `describe`
 
 ### `hide_host`
 
@@ -162,6 +170,10 @@ Registered hosts: reachability, claude/tmux versions, linked account.
 ### `list_layers`
 
 The catalog's layer definitions (layers/*.yaml) and each host's role + active contexts. Read-only. Requires catalog_configure + catalog_load in the app.
+
+### `list_pages`
+
+The settings page specs, data source shapes, resources and page actions a device renders.
 
 ### `list_peer_links`
 
@@ -449,6 +461,12 @@ A session's recorded event timeline, newest first: status changes, prompts, stuc
 
 Parameters: `fresh_for`, `limit`, `session_id`
 
+### `session_tool_detail`
+
+One tool call's input and result (omitted by session_conversation): { id, name, input, edit {file_path, old, new} | null, command | null, result | null, is_error }; texts capped at 8000 chars. Read-only. Errors: as session_conversation, E_NOTFOUND.
+
+Parameters: `claude_session_id`, `session_id`, `tool_use_id`
+
 ### `session_transcript`
 
 Read a session's Claude Code transcript (the JSONL, not the pane): the last assistant turn as plain text, text blocks verbatim, one line per tool call, no thinking. Errors: E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet). Read-only; prefer it over capture_session for the reply. unchanged costs no transcript read.
@@ -493,9 +511,19 @@ Parameters: `host_alias`, `session_id`, `tags`, `tmux_name`
 
 ### `set_setting`
 
-Change one get_settings key, validated; E_INVALID otherwise. mcp.*, hub.* and controller.* are refused. Master token only. Returns the settings.
+Change one get_settings key, validated; E_INVALID otherwise. mcp.*, hub.* and controller.* are refused. Master, or a trusted device. Returns the settings, or with propose the proposal.
 
-Parameters: `key`, `value`
+Parameters: `key`, `propose`, `value`, `why`
+
+### `setting_history`
+
+One setting's writes, newest first: who, before and after, the proposal applied.
+
+Parameters: `key`, `limit`
+
+### `setting_proposals`
+
+Settings proposals waiting for review, each with the key's value now, and can_write: whether this device may decide.
 
 ### `spawn_review`
 
@@ -511,7 +539,9 @@ Parameters: `action`, `component`, `mandatory`, `reason`, `target`, `version`
 
 ### `update_status`
 
-Fleet updates: the verified release channel, each target's version, phase and what the hub would tell it now, per-component counts, pins. A per-host or org-bound token sees itself only.
+Fleet updates: the verified release channel, each target's version, phase and what the hub would tell it now, per-component counts, pins; with target, why. A per-host or org-bound token sees itself only.
+
+Parameters: `target`
 
 ### `usage_report`
 
@@ -557,9 +587,9 @@ Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `color`
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo). handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo). handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
 
-Parameters: `action`, `brief`, `confirm_nonce`, `days`, `decisions`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `impact_token`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `note`, `on`, `org_id`, `primary`, `project_id`, `project_ids`, `rule`, `rule_id`, `session_id`, `source`, `task_id`, `title`, `url`, `view`, `view_id`, `with_brief`, `worktree`
+Parameters: `action`, `brief`, `confirm_nonce`, `days`, `decisions`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `impact_token`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `note`, `on`, `org_id`, `primary`, `project_id`, `project_ids`, `rule`, `rule_id`, `session_id`, `source`, `status`, `task_id`, `title`, `url`, `view`, `view_id`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -673,8 +703,18 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::purge_project`
 - `commands::quick_replies::quick_replies`
 - `commands::quick_replies::set_quick_replies`
-- `commands::sessions::get_fleet_settings`
-- `commands::sessions::set_fleet_setting`
+- `commands::pages::get_fleet_settings`
+- `commands::pages::describe_fleet_settings`
+- `commands::pages::list_pages`
+- `commands::pages::fetch_page_source`
+- `commands::pages::flow_start`
+- `commands::pages::flow_submit`
+- `commands::pages::flow_back`
+- `commands::pages::flow_cancel`
+- `commands::pages::setting_proposals`
+- `commands::pages::decide_setting_proposals`
+- `commands::pages::setting_history`
+- `commands::pages::set_fleet_setting`
 - `commands::tasks::list_tasks`
 - `commands::tasks::cancel_task`
 - `commands::files::repo_changes`

@@ -5,7 +5,6 @@
     {
       "count": 1,
       "group": {
-        "editable": true,
         "id": "label:Security",
         "label": "Security",
         "source": "manual",
@@ -17,7 +16,6 @@
     {
       "count": 2,
       "group": {
-        "editable": true,
         "id": "tracker:1:TP",
         "label": "TP",
         "source": "tracker",
@@ -46,7 +44,6 @@
         "suggested": 0
       },
       "group": {
-        "editable": true,
         "id": "label:Security",
         "label": "Security",
         "source": "manual",
@@ -107,7 +104,6 @@
         "suggested": 0
       },
       "group": {
-        "editable": true,
         "id": "tracker:1:TP",
         "label": "TP",
         "source": "tracker",
@@ -168,7 +164,6 @@
         "suggested": 1
       },
       "group": {
-        "editable": true,
         "id": "tracker:1:TP",
         "label": "TP",
         "source": "tracker",

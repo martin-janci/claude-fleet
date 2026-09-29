@@ -206,10 +206,9 @@ pub fn plan_resume(
 ) -> Result<ResumePlan, IpcError> {
     crate::service::orgs::require_key(s, scope, key)?;
     let key = crate::store::normalize_work_ref(key)?;
-    let item = match s.work_item_by_key(&key)? {
-        Some(i) if scope.sees_org(s.item_org(i.id)?) => Some(i),
-        _ => None,
-    };
+    // The first item carrying `key` inside the caller's orgs (two trackers
+    // can hold the same key, one per org).
+    let item = crate::service::orgs::org_item_for_key(s, scope, &key)?;
     let mut live_links = s.live_work_sessions_for_key(&key)?;
     for (l, _) in live_links.iter_mut() {
         l.org_id = s.link_org(l)?;
@@ -962,7 +961,14 @@ where
         // The resumed session links the work: the same integrity rule as a
         // link, for every caller (M5).
         if let Some(pid) = plan.project_id {
-            let work_org = match s.work_item_by_key(&plan.key)? {
+            // The caller's own item when two orgs' trackers share the key;
+            // else the store's first, so an item the caller cannot see
+            // still refuses a cross-org resume.
+            let item = match crate::service::orgs::org_item_for_key(&s, scope, &plan.key)? {
+                Some(i) => Some(i),
+                None => s.work_item_by_key(&plan.key)?,
+            };
+            let work_org = match item {
                 Some(i) => s.item_org(i.id)?,
                 None => None,
             };

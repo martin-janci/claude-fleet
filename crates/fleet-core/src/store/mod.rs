@@ -30,6 +30,7 @@ mod rows;
 pub(crate) mod scale_fixture;
 mod schema;
 mod sessions;
+mod setting_review;
 mod tasks;
 #[cfg(test)]
 mod test_support;
@@ -47,13 +48,12 @@ mod work_detect;
 mod work_journal;
 mod work_local;
 mod work_retention;
+mod work_status;
 mod work_tidy;
 mod work_usage;
 mod work_view;
 
-pub use bench_work_link::{
-    BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow, BENCH_PERSON_SOURCES,
-};
+pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
 };
@@ -87,6 +87,10 @@ pub use schema::known_schema_version;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
 pub use sessions::PromptAckState;
+pub use setting_review::{
+    NewSettingProposal, SettingAuditRow, SettingProposalRow, DECIDED_PROPOSAL_KEEP_SECS,
+    SETTING_AUDIT_KEEP,
+};
 pub(crate) use tracker_items::ItemUpsertOutcome;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
 pub use tracker_writes::{
@@ -115,6 +119,7 @@ pub use work_journal::{
 };
 pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_MAX_CHARS};
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
+pub use work_status::STATUS_CATEGORIES;
 pub use work_tidy::ReopenedWork;
 pub use work_usage::{DetectionCounts, JournalCounts};
 pub use work_view::{
@@ -243,6 +248,13 @@ impl EventBus for StoreBus {
             return;
         }
         self.deliver(e);
+    }
+
+    /// Straight through, never held: a threshold, not a row change, and a
+    /// setting write does not roll back with an enclosing transaction's
+    /// events.
+    fn context_red_pct_changed(&self, pct: f64) {
+        self.inner.context_red_pct_changed(pct);
     }
 }
 
@@ -535,6 +547,21 @@ impl Store {
             rusqlite::params![key, value],
         )?;
         Ok(())
+    }
+
+    /// Tell the bus the `health.context_red_pct` in force is now `pct`
+    /// ([`EventBus::context_red_pct_changed`]). `service::settings::set`
+    /// calls it on every write of that setting.
+    pub fn context_red_pct_changed(&self, pct: f64) {
+        self.bus.context_red_pct_changed(pct);
+    }
+
+    /// Emit `settings:changed` for `key` (declarative pages P3). Called by
+    /// `service::settings::set` after a validated write, not by
+    /// [`Self::set_setting`]: most rows in this table are internal state
+    /// nobody renders.
+    pub fn emit_settings_changed(&self, key: &str) {
+        self.bus.emit(&RowChange::SettingsChanged(key.to_string()));
     }
 
     /// Forget a key, so the next `get_setting` answers `None` and its reader

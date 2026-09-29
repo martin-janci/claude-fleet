@@ -18,6 +18,21 @@ pass() { PASS=$((PASS + 1)); echo "PASS: $*"; }
 fail() { FAIL=$((FAIL + 1)); echo "FAIL: $*" >&2; }
 check() { local name=$1; shift; if "$@"; then pass "$name"; else fail "$name"; fi; }
 count() { ls -1 "$@" 2>/dev/null | wc -l | tr -d ' '; }
+# Runs "$@" but kills it after $1 s. `timeout` is GNU coreutils: stock macOS
+# has none, and a missing one exits 127, which reads as a failed check. So a
+# background watchdog stands in when it is absent. Its stdio is /dev/null, so
+# a sleep it leaves behind holds no pipe of ours open.
+bounded() {
+  local secs=$1; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; return; fi
+  "$@" &
+  local pid=$! rc
+  ( sleep "$secs"; kill "$pid" ) >/dev/null 2>&1 &
+  local dog=$!
+  wait "$pid"; rc=$?
+  kill "$dog" 2>/dev/null; wait "$dog" 2>/dev/null
+  return "$rc"
+}
 
 # --- backup.sh ---------------------------------------------------------------
 D="$ROOT/hub"; mkdir -p "$D/data"
@@ -157,10 +172,12 @@ PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" bash "$U/upgrade.sh" v0.3.2 >/dev/null 2>&
 check "a v-prefixed tag is refused with exit 2" test $? = 2
 
 : >"$FAKE_LOG"
-HEALTH_TRIES=abc PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" timeout 20 bash "$U/upgrade.sh" 0.3.2 >/dev/null 2>&1
+HEALTH_TRIES=abc PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" bounded 20 bash "$U/upgrade.sh" 0.3.2 >"$ROOT/upgrade-badtries.log" 2>&1
 check "a non-numeric HEALTH_TRIES is refused with exit 2 (no spin)" test $? = 2
-KEEP=x PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" timeout 20 bash "$U/upgrade.sh" 0.3.2 >/dev/null 2>&1
+check "…and says so" grep -q "HEALTH_TRIES must be a number, got 'abc'" "$ROOT/upgrade-badtries.log"
+KEEP=x PATH="$FAKE:$PATH" FLEET_HUB_DIR="$U" bounded 20 bash "$U/upgrade.sh" 0.3.2 >"$ROOT/upgrade-badkeep.log" 2>&1
 check "a non-numeric KEEP is refused with exit 2" test $? = 2
+check "…and says so" grep -q "KEEP must be a number, got 'x'" "$ROOT/upgrade-badkeep.log"
 check "…both before anything was stopped" test -z "$(grep ' stop fleet-hub' "$FAKE_LOG")"
 
 # A backup that fails after the stop: the old container starts again, the pin

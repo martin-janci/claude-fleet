@@ -543,7 +543,13 @@ the operator's side is `docs/updates.md`). Two kinds of signed document:
   `scripts/release-manifest.sh` in the `manifest` job, before `checksums`,
   so `SHA256SUMS` covers it. It waits up to 30 minutes for
   `hub-image.yml`'s digest on the release body; without one the manifest
-  still ships, with the tarballs only, and the job warns;
+  still ships, with the tarballs only, and the job warns. Its
+  `release.build_id` is `rel-<tag>-<commit>`, the same expression the
+  tarballs (`agent-hub-binaries`) and the hub image (`hub-image.yml`)
+  compile in as `FLEET_BUILD_ID`, so an updater can check the build it
+  started against the manifest (design §8.4); it never names a run, since
+  the image is another run and a re-run job another attempt
+  (`scripts/release-update-scripts-test.sh` holds the three to one form);
 - **the channel documents** — `stable.json`, `beta.json` (and later
   `nightly.json`), each with its `.minisig`, on the orphan branch
   `update-channels`: what each track currently offers, recommends,

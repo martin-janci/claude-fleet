@@ -15,7 +15,6 @@
       "suggested": 0
     },
     "group": {
-      "editable": true,
       "id": "label:Security",
       "label": "Security",
       "source": "manual",

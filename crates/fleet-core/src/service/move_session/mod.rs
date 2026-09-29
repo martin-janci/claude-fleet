@@ -407,14 +407,11 @@ const WAIT_POLL: Duration = crate::service::tasks::POLL_INTERVAL;
 /// waiter, not whether a move may proceed — the move's own `gather()` step
 /// reconciles and re-checks before it ever touches anything).
 fn source_is_idle(store: &Mutex<Store>, session_id: i64) -> Result<bool, IpcError> {
-    let s = lock(store)?;
-    let row = s.get_session_by_id(session_id)?.ok_or_else(|| {
+    let row = lock(store)?.get_session_by_id(session_id)?.ok_or_else(|| {
         IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
     })?;
-    let demoted = s.stale_demoted_by_id(session_id)?;
     Ok(crate::service::tasks::session_satisfies(
         &row,
-        demoted,
         crate::service::tasks::WaitCond::Idle,
     ))
 }
@@ -2372,20 +2369,15 @@ async fn gather(
     //    nothing moved — one long tool call looks the same — so its pane is
     //    asked, and the move goes ahead only when the pane shows it quiet.
     hooks.refresh_host(store, &src).await?;
-    let (fresh, demoted) = {
-        let s = lock(store)?;
-        let fresh = s
-            .get_session_by_id(snap.row.id)?
-            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
-        let demoted = s.stale_demoted_by_id(fresh.id)?;
-        (fresh, demoted)
-    };
-    let live = if crate::store::needs_pane_confirmation(&fresh, demoted) {
+    let fresh = lock(store)?
+        .get_session_by_id(snap.row.id)?
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "session not found"))?;
+    let live = if crate::store::needs_pane_confirmation(&fresh) {
         hooks.pane_status(store, fresh.id).await
     } else {
         None
     };
-    let status = crate::store::trusted_status(&fresh, demoted, live.as_deref()).map(str::to_string);
+    let status = crate::store::trusted_status(&fresh, live.as_deref()).map(str::to_string);
     let idle_deferred = args.dry_run && args.when == When::Idle;
     let busy = if idle_deferred {
         require_source_idle(status.as_deref()).is_err()

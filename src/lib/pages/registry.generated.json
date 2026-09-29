@@ -1,0 +1,3775 @@
+{
+  "_generated": "from crates/fleet-core/src/pages; regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
+  "actions": [
+    {
+      "command": "work_retention_sweep",
+      "help": "Delete what is past its window now, as the GC tick would: at most 2,000 rows per table, the rest over later sweeps.",
+      "id": "work.retention_sweep",
+      "label": "Sweep now"
+    }
+  ],
+  "descriptors": [
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "20",
+      "help": "Seconds between background reconcile passes, which refresh session state on every host.",
+      "key": "reconcile.interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Reconcile interval",
+      "modified": false,
+      "restart": "app",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "seconds",
+      "value": "20",
+      "zero": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "1800",
+      "help": "How long a working session may go without a hook, a turn, transcript growth or pane output before it reads idle.",
+      "key": "reconcile.stale_working_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Stale working timeout",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "seconds",
+      "value": "1800",
+      "zero": "never"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "86400",
+      "help": "How long a session marked stale asks for a look before the tick lifts the mark on its own. An attach or any hook lifts it sooner.",
+      "key": "reconcile.stale_working_ttl_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Stale mark lifts after",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "hours",
+      "value": "86400",
+      "zero": "never by age"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "1209600",
+      "help": "How long a resumable session lost to a host reboot or the tmux server exiting is kept before it is deleted, counted from when it was lost.",
+      "key": "sessions.lost_ttl_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Keep lost sessions",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "hours",
+      "value": "1209600",
+      "zero": "removed on the next pass"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "4",
+      "help": "Sessions resumed in parallel by Restore lost sessions.",
+      "key": "restore.batch_size",
+      "kind": {
+        "max": 16,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Concurrent restores",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "count",
+      "value": "4"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "3000",
+      "help": "Pause between starting each resumed session in a batch restore.",
+      "key": "restore.stagger_ms",
+      "kind": {
+        "max": 60000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Delay between restores",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "ms",
+      "value": "3000"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Press Enter for sessions stuck on a \"Press Enter\" prompt. Auth menus, trust prompts and reconnects are always notify-only.",
+      "key": "playbooks.press_enter",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Press Enter when stuck",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Recreate a session that ran out of memory, within the budget below.",
+      "key": "playbooks.oom_recreate",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Recreate out-of-memory sessions",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "2",
+      "help": "Recreates one session may get per 24 hours. A session that is working, or finished a turn after the flag, is never recreated.",
+      "key": "playbooks.oom_max_attempts",
+      "kind": {
+        "max": 20,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Out-of-memory budget",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "count",
+      "value": "2",
+      "zero": "never"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "confirm",
+        "message": "Idle sessions past the limits below will be stopped or removed without asking."
+      },
+      "default": "false",
+      "help": "Stop or remove sessions that have been idle longer than the limits below.",
+      "key": "gc.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Garbage-collect idle sessions",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "86400",
+      "help": "How long a background agent may sit idle before it is stopped.",
+      "key": "gc.bg_idle_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Background agent idle limit",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "hours",
+      "value": "86400",
+      "zero": "never"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "604800",
+      "help": "How long a shell session may sit inactive before it is killed.",
+      "key": "gc.shell_idle_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Shell idle limit",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "hours",
+      "value": "604800",
+      "zero": "never"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "0",
+      "help": "How long a work session may sit idle before it is removed. A dirty worktree goes through safe remove.",
+      "key": "gc.work_idle_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Work session idle limit",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "hours",
+      "value": "0",
+      "zero": "never"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "300",
+      "help": "Seconds between garbage-collection sweeps.",
+      "key": "gc.sweep_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "GC sweep interval",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "seconds",
+      "value": "300",
+      "zero": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "3600",
+      "help": "How long a lost session from outside fleet is kept before it is removed. It can never be resumed; this only rides out a restart.",
+      "key": "gc.external_lost_ttl_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Keep lost outside sessions",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "hours",
+      "value": "3600",
+      "zero": "the next pass"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "{}",
+      "help": "Per-host folder that holds your repositories. A host with no entry uses $CLAUDE_FLEET_PROJECTS_BASE (local only), then the layout default.",
+      "key": "projects.base_path",
+      "kind": {
+        "type": "path_map"
+      },
+      "label": "Projects roots",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "{}"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "github",
+      "help": "Where a repository sits under the projects root: github puts it at root/owner/repo, flat at root/repo.",
+      "key": "projects.layout",
+      "kind": {
+        "options": [
+          "github",
+          "flat"
+        ],
+        "type": "choice"
+      },
+      "label": "Projects layout",
+      "modified": false,
+      "option_labels": [
+        [
+          "github",
+          "github: root/owner/repo"
+        ],
+        [
+          "flat",
+          "flat: root/repo"
+        ]
+      ],
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "github"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "86400",
+      "help": "How long an open task (counted from its start, else its creation) may run before the liveness sweep fails it.",
+      "key": "tasks.max_age_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Task timeout",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "hours",
+      "value": "86400",
+      "zero": "never"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Re-add deleted worktree directories without anyone opening them. A stale entry is dropped only when its parent folder is the one seen while it was healthy, so an unmounted volume is never touched.",
+      "key": "repair.auto_on_tick",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Re-create vanished worktrees",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "600",
+      "help": "Seconds between automatic workspace checks, each repairing at most five worktrees.",
+      "key": "repair.tick_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 60,
+        "type": "secs"
+      },
+      "label": "Workspace check interval",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "seconds",
+      "value": "600"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "200",
+      "help": "Largest transcript Move to host copies; a bigger one is refused.",
+      "key": "move.max_transcript_mb",
+      "kind": {
+        "max": 4096,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: transcript cap",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "mib",
+      "value": "200"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "500",
+      "help": "Largest git bundle of unpushed work Move to host relays; a bigger one is refused.",
+      "key": "move.max_bundle_mb",
+      "kind": {
+        "max": 4096,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: git bundle cap",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "mib",
+      "value": "500"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "1024",
+      "help": "Largest single git-ignored file or directory Move to host carries; bigger ones are left behind.",
+      "key": "move.ignored_entry_kb",
+      "kind": {
+        "max": 1048576,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: ignored entry cap",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "kib",
+      "value": "1024"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "20",
+      "help": "Total git-ignored payload Move to host carries.",
+      "key": "move.ignored_total_mb",
+      "kind": {
+        "max": 1024,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: ignored total cap",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "mib",
+      "value": "20"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "200",
+      "help": "Largest per-session Claude directory (subagent transcripts, tool results) Move to host carries; above it the biggest files stay behind.",
+      "key": "move.max_session_state_mb",
+      "kind": {
+        "max": 4096,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: session state cap",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "mib",
+      "value": "200"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "240",
+      "help": "How long \"Transfer when it finishes\" waits for the session to go idle before giving up.",
+      "key": "move.wait_max_mins",
+      "kind": {
+        "max": 10080,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Move: wait timeout",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "minutes",
+      "value": "240"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "Sum each session's token usage from its Claude transcript and show an estimated cost.",
+      "key": "usage.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Collect token usage",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "300",
+      "help": "Seconds between usage passes, one batched read per host.",
+      "key": "usage.interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Usage interval",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "seconds",
+      "value": "300",
+      "zero": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "{}",
+      "help": "Per-model prices for the estimated cost, in USD per million tokens (input, output, cache_write, cache_read). {} uses the built-in prices only.",
+      "key": "usage.prices_json",
+      "kind": {
+        "type": "price_map"
+      },
+      "label": "Price overrides",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "none",
+      "value": "{}"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "5000",
+      "help": "Newest error and warning reports kept; older ones are pruned on every insert.",
+      "key": "reports.max_rows",
+      "kind": {
+        "max": 100000,
+        "min": 100,
+        "type": "int"
+      },
+      "label": "Error reports kept",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "count",
+      "value": "5000"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "604800",
+      "help": "How long an error or warning report is kept before the age sweep deletes it.",
+      "key": "reports.max_age_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Error report age",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "hours",
+      "value": "604800",
+      "zero": "never"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "85",
+      "help": "Percent of the context window at which a session needs you. The chip turns red here and amber 15 points below.",
+      "key": "health.context_red_pct",
+      "kind": {
+        "max": 100,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Context red threshold",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "percent",
+      "value": "85"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "86400",
+      "help": "How old a host's recorded Claude version may be before the \"older than the fleet\" badge stops trusting it and shows nothing.",
+      "key": "health.version_max_age_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Trust a host's Claude version for",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "hours",
+      "value": "86400"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "90",
+      "help": "Used share of a host's home filesystem at which the host reads as disk low.",
+      "key": "health.disk_low_pct",
+      "kind": {
+        "max": 100,
+        "min": 50,
+        "type": "int"
+      },
+      "label": "Disk low at",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "percent",
+      "value": "90"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "30",
+      "help": "Patch releases a host's Claude may trail the fleet's newest before the host reads as behind.",
+      "key": "health.claude_max_behind",
+      "kind": {
+        "max": 1000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Claude behind after",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "count",
+      "value": "30"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "3600",
+      "help": "How long a reachable host with a live session may send no hook before it reads as hooks silent.",
+      "key": "health.hooks_silent_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Hooks silent after",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "minutes",
+      "value": "3600"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "confirm",
+        "message": "Fleet will write its skills into a folder another git repository tracks."
+      },
+      "default": "false",
+      "help": "Write fleet's skills even when a host's ~/.claude/skills is inside a git work tree, such as a dotfiles checkout. Off: provisioning refuses such a host.",
+      "key": "provision.force_git_tree",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Provision into git-tracked skills",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "365",
+      "help": "Days a work journal row is kept once its conversation ended and its work is done or unlinked.",
+      "key": "work.retention.journal_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Retention: work journal",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "days",
+      "value": "365",
+      "zero": "forever"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "180",
+      "help": "Days a done ticket that no session links to is kept in the cache.",
+      "key": "work.retention.tracker_items_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Retention: done tickets",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "days",
+      "value": "180",
+      "zero": "forever"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "180",
+      "help": "Days handover, nudge, tidy and withdrawn-suggestion timeline events are kept; the newest of each kind per session always stays.",
+      "key": "work.retention.timeline_work_events_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Retention: work timeline",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "days",
+      "value": "180",
+      "zero": "forever"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "14",
+      "help": "How long ended work with no live session keeps a sidebar group.",
+      "key": "work.recent_days",
+      "kind": {
+        "max": 365,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Recent work",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "days",
+      "value": "14"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "300",
+      "help": "Seconds between tracker sync passes. Under a minute is raised to one.",
+      "key": "work.sync_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Tracker sync interval",
+      "modified": false,
+      "restart": "app",
+      "tags": [],
+      "unit": "seconds",
+      "value": "300",
+      "zero": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "300",
+      "help": "How long a fetched ticket description is reused before the tracker is asked again; never longer than the done-tickets retention window.",
+      "key": "work.describe_cache_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Ticket description cache",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "minutes",
+      "value": "300",
+      "zero": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "[]",
+      "help": "Projects where a sole ticket key in the branch name links automatically; elsewhere it is a suggestion. Set from the work popover.",
+      "key": "work.trusted_branch_projects",
+      "kind": {
+        "type": "id_set"
+      },
+      "label": "Trusted branch projects",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "[]"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "Keep a short, redacted prompt snippet around a detected ticket key as evidence. Off keeps only the matched text.",
+      "key": "work.evidence_snippets",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Keep evidence snippets",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Give Claude the linked ticket at session start. Makes the start hook synchronous, which can add up to 2 s when the hub is down.",
+      "key": "work.session_start_context",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Ticket context at session start",
+      "modified": false,
+      "restart": "hooks",
+      "tags": [
+        "experimental"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "After three prompts with no ticket, ask Claude once which of your few open tickets it is on. Its answer is only ever a suggestion.",
+      "key": "work.classify_nudge",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Classification nudge",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "haiku",
+      "help": "The model Summarise runs on for a past session, on that session's own host and account.",
+      "key": "work.summary_model",
+      "kind": {
+        "options": [
+          "haiku",
+          "sonnet",
+          "opus"
+        ],
+        "type": "choice"
+      },
+      "label": "Summary model",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "haiku"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "2",
+      "help": "Days a linked ticket must be done before Tidy up suggests its session.",
+      "key": "work.tidy_done_days",
+      "kind": {
+        "max": 365,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Tidy: done for",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "days",
+      "value": "2"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "4",
+      "help": "Hours a session must be idle before any tidy reason suggests it.",
+      "key": "work.tidy_idle_hours",
+      "kind": {
+        "max": 720,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Tidy: idle for",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "hours",
+      "value": "4"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "7",
+      "help": "Days a session with no work linked must sit idle and unprompted before Tidy up suggests it. Only ever suggested, never auto-tidied.",
+      "key": "work.tidy_idle_unlinked_days",
+      "kind": {
+        "max": 90,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Tidy: unlinked for",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "days",
+      "value": "7"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "confirm",
+        "message": "The sweep will safe-kill finished sessions without asking."
+      },
+      "default": "false",
+      "help": "Let the GC sweep act on the allowed tidy reasons by itself, by safe kill or archive only. Off, Tidy up only suggests. An organisation can override it.",
+      "key": "work.auto_tidy",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Auto-tidy",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "done_idle,pr_merged_idle",
+      "help": "The tidy reasons auto-tidy may act on.",
+      "key": "work.auto_tidy_reasons",
+      "kind": {
+        "options": [
+          "done_idle",
+          "pr_merged_idle",
+          "not_planned"
+        ],
+        "type": "choice_set"
+      },
+      "label": "Auto-tidy reasons",
+      "modified": false,
+      "option_labels": [
+        [
+          "done_idle",
+          "Done and idle"
+        ],
+        [
+          "pr_merged_idle",
+          "PR merged, idle"
+        ],
+        [
+          "not_planned",
+          "Won't do / duplicate"
+        ]
+      ],
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "done_idle,pr_merged_idle"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "stable",
+      "help": "Which releases the hub follows for its fleet.",
+      "key": "update.track",
+      "kind": {
+        "options": [
+          "stable",
+          "beta"
+        ],
+        "type": "choice"
+      },
+      "label": "Release track",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "stable"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "notify",
+      "help": "manual: only a pinned version; notify: offer the update; automatic: install it at the next quiet point.",
+      "key": "update.hub.mode",
+      "kind": {
+        "options": [
+          "manual",
+          "notify",
+          "automatic"
+        ],
+        "type": "choice"
+      },
+      "label": "Hub updates",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "notify"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "notify",
+      "help": "The same choice for fleet-agent on hosts the hub cannot reach.",
+      "key": "update.agent.mode",
+      "kind": {
+        "options": [
+          "manual",
+          "notify",
+          "automatic"
+        ],
+        "type": "choice"
+      },
+      "label": "Agent updates",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "notify"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "notify",
+      "help": "The same choice for the desktop app.",
+      "key": "update.desktop.mode",
+      "kind": {
+        "options": [
+          "manual",
+          "notify",
+          "automatic"
+        ],
+        "type": "choice"
+      },
+      "label": "Desktop updates",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "notify"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "notify",
+      "help": "manual or notify: a phone never installs an update silently.",
+      "key": "update.mobile.mode",
+      "kind": {
+        "options": [
+          "manual",
+          "notify"
+        ],
+        "type": "choice"
+      },
+      "label": "Phone updates",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "notify"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "21600",
+      "help": "How often the hub re-reads the release channel, and clients check again.",
+      "key": "update.check_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 900,
+        "type": "secs"
+      },
+      "label": "Update check interval",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "hours",
+      "value": "21600"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "confirm",
+        "message": "Redacted session and ticket data will be sent to TypeSafe for organisations that opted in."
+      },
+      "default": "false",
+      "help": "The kill switch for TypeSafe's decision model. Off, nothing is ever sent. On, data goes only for organisations that opted in, redacted.",
+      "key": "decide.jev.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Decisions (Jev)",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "network",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Proposing a status category for an Asana section. Shadow only records; assist suggests.",
+      "key": "decide.jev.status_map",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: status map",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Choosing a ticket for a session no rule could link. Shadow only records; assist suggests.",
+      "key": "decide.jev.work_link",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: work link",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "confirm",
+        "message": "Sessions and tickets outside every organisation will be sent to TypeSafe too."
+      },
+      "default": "false",
+      "help": "Also send sessions and tickets that belong to no organisation.",
+      "key": "decide.jev.unassigned",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Jev: send unassigned",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "network"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "1500",
+      "help": "How long one call may take. A call is never retried.",
+      "key": "decide.jev.timeout_ms",
+      "kind": {
+        "max": 30000,
+        "min": 100,
+        "type": "int"
+      },
+      "label": "Jev: timeout",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "ms",
+      "value": "1500"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "5",
+      "help": "Failed calls in a row that open the circuit breaker.",
+      "key": "decide.jev.breaker_failures",
+      "kind": {
+        "max": 100,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Jev: breaker failures",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "count",
+      "value": "5"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "300",
+      "help": "How long an open breaker refuses calls.",
+      "key": "decide.jev.breaker_open_secs",
+      "kind": {
+        "max": 86400,
+        "min": 10,
+        "type": "int"
+      },
+      "label": "Jev: breaker pause",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "seconds",
+      "value": "300"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "2000000",
+      "help": "Input tokens the decision model may be sent per UTC day. At $0.042 per million, the default is under $0.09 a day.",
+      "key": "decide.jev.daily_token_budget",
+      "kind": {
+        "max": 1000000000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Jev: daily token budget",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "tokens",
+      "value": "2000000",
+      "zero": "none"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "jev-1.13.0",
+      "help": "The model version a request names. jev-1.13.0 is pinned; jev-latest follows TypeSafe.",
+      "key": "decide.jev.model",
+      "kind": {
+        "options": [
+          "jev-1.13.0",
+          "jev-latest"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: model",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "none",
+      "value": "jev-1.13.0"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "90",
+      "help": "Days a decision record (ids and numbers, never text) is kept.",
+      "key": "decide.retention_days",
+      "kind": {
+        "max": 3650,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Jev: keep runs",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "days",
+      "value": "90",
+      "zero": "forever"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "none"
+      },
+      "default": "127.0.0.1",
+      "help": "The address the hub daemon listens on. Loopback unless the daemon was started with a routable bind.",
+      "key": "hub.bind",
+      "kind": {
+        "max": 255,
+        "type": "text"
+      },
+      "label": "Hub bind address",
+      "modified": false,
+      "owned_by": "fleet-hub serve --bind",
+      "restart": "none",
+      "tags": [
+        "network"
+      ],
+      "unit": "none",
+      "value": "127.0.0.1"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "none"
+      },
+      "default": "",
+      "help": "The URL hosts and paired clients reach the hub at. Empty means loopback with a reverse tunnel per host.",
+      "key": "hub.public_url",
+      "kind": {
+        "max": 2048,
+        "type": "text"
+      },
+      "label": "Hub public URL",
+      "modified": false,
+      "owned_by": "fleet-hub serve --public-url",
+      "restart": "none",
+      "tags": [
+        "network"
+      ],
+      "unit": "none",
+      "value": ""
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "none"
+      },
+      "default": "",
+      "help": "Extra Host header values the hub accepts, comma-separated, besides the ones its bind and public URL imply.",
+      "key": "hub.allowed_hosts",
+      "kind": {
+        "max": 4096,
+        "type": "text"
+      },
+      "label": "Hub allowed hosts",
+      "modified": false,
+      "owned_by": "fleet-hub serve --allowed-host",
+      "restart": "none",
+      "tags": [
+        "network",
+        "advanced"
+      ],
+      "unit": "none",
+      "value": ""
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "none"
+      },
+      "default": "true",
+      "help": "Whether the hub's own machine is a fleet host. On for the desktop; the daemon turns it off by default.",
+      "key": "hub.local_host",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Hub runs local sessions",
+      "modified": false,
+      "owned_by": "fleet-hub serve --local-host",
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Whether the hub daemon may serve a routable bind without TLS.",
+      "key": "hub.allow_plaintext",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Hub serves plaintext",
+      "modified": false,
+      "owned_by": "fleet-hub serve --allow-plaintext",
+      "restart": "none",
+      "tags": [
+        "network"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "How the hub daemon terminates TLS: off, behind a proxy, or cert, with its own certificate.",
+      "key": "hub.tls",
+      "kind": {
+        "options": [
+          "off",
+          "cert"
+        ],
+        "type": "choice"
+      },
+      "label": "Hub TLS",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off (a proxy in front)"
+        ],
+        [
+          "cert",
+          "Own certificate"
+        ]
+      ],
+      "owned_by": "fleet-hub serve --tls",
+      "restart": "none",
+      "tags": [
+        "network"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Whether the embedded control API (MCP) runs, so an AI assistant can drive the fleet.",
+      "key": "mcp.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Control API",
+      "modified": false,
+      "owned_by": "Settings → Control API",
+      "restart": "none",
+      "tags": [
+        "ai"
+      ],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "none"
+      },
+      "default": "4180",
+      "help": "The localhost port the control API listens on.",
+      "key": "mcp.port",
+      "kind": {
+        "max": 65535,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Control API port",
+      "modified": false,
+      "owned_by": "Settings → Control API",
+      "restart": "none",
+      "tags": [],
+      "unit": "count",
+      "value": "4180"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Every destructive control API call waits for a confirmation on the desktop.",
+      "key": "mcp.confirm_destructive",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Confirm destructive calls",
+      "modified": false,
+      "owned_by": "Settings → Control API",
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "never",
+      "danger": {
+        "level": "none"
+      },
+      "default": "30",
+      "help": "Shortest time between two broadcast prompts from the same caller.",
+      "key": "mcp.broadcast_interval_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Broadcast interval",
+      "modified": false,
+      "owned_by": "the settings table only",
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "seconds",
+      "value": "30"
+    }
+  ],
+  "pages": [
+    {
+      "id": "settings",
+      "intro": "How this fleet runs: automation, limits, projects, the work graph and decisions.",
+      "layout": "cards",
+      "sections": [
+        {
+          "items": [
+            {
+              "page": "settings.automation",
+              "type": "link"
+            },
+            {
+              "page": "settings.limits",
+              "type": "link"
+            },
+            {
+              "page": "settings.projects",
+              "type": "link"
+            },
+            {
+              "page": "settings.hub",
+              "type": "link"
+            },
+            {
+              "page": "settings.control_api",
+              "type": "link"
+            },
+            {
+              "page": "settings.review",
+              "type": "link"
+            },
+            {
+              "page": "settings.updates",
+              "type": "link"
+            }
+          ],
+          "title": "Running the fleet"
+        },
+        {
+          "items": [
+            {
+              "page": "settings.trackers",
+              "type": "link"
+            },
+            {
+              "page": "settings.work",
+              "type": "link"
+            },
+            {
+              "page": "settings.orgs",
+              "type": "link"
+            },
+            {
+              "page": "settings.decisions",
+              "type": "link"
+            }
+          ],
+          "title": "Work"
+        },
+        {
+          "items": [
+            {
+              "field": "cost_micros",
+              "label": "Estimated cost",
+              "source": {
+                "id": "usage.total"
+              },
+              "type": "stat"
+            },
+            {
+              "label": "Usage by day, model and host",
+              "page": "usage",
+              "type": "link"
+            }
+          ],
+          "title": "Usage"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Settings"
+    },
+    {
+      "id": "settings.automation",
+      "intro": "Playbooks, the idle-session GC and workspace repair run from the background tick. Everything here is off by default.",
+      "layout": "category",
+      "parent": "settings",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "playbooks.press_enter",
+              "type": "field"
+            },
+            {
+              "key": "playbooks.oom_recreate",
+              "type": "field"
+            },
+            {
+              "key": "playbooks.oom_max_attempts",
+              "type": "field",
+              "when": {
+                "key": "playbooks.oom_recreate",
+                "truthy": true
+              }
+            },
+            {
+              "text": "Auth menus, trust prompts and reconnects are always notify-only.",
+              "tone": "info",
+              "type": "notice"
+            }
+          ],
+          "title": "Playbooks"
+        },
+        {
+          "items": [
+            {
+              "key": "gc.enabled",
+              "type": "field"
+            },
+            {
+              "key": "gc.bg_idle_secs",
+              "type": "field",
+              "when": {
+                "key": "gc.enabled",
+                "truthy": true
+              }
+            },
+            {
+              "key": "gc.shell_idle_secs",
+              "type": "field",
+              "when": {
+                "key": "gc.enabled",
+                "truthy": true
+              }
+            },
+            {
+              "key": "gc.work_idle_secs",
+              "type": "field",
+              "when": {
+                "key": "gc.enabled",
+                "truthy": true
+              }
+            },
+            {
+              "key": "gc.sweep_interval_secs",
+              "type": "field",
+              "when": {
+                "key": "gc.enabled",
+                "truthy": true
+              }
+            },
+            {
+              "key": "gc.external_lost_ttl_secs",
+              "type": "field"
+            }
+          ],
+          "title": "Garbage collection"
+        },
+        {
+          "items": [
+            {
+              "key": "repair.auto_on_tick",
+              "type": "field"
+            },
+            {
+              "key": "repair.tick_interval_secs",
+              "type": "field",
+              "when": {
+                "key": "repair.auto_on_tick",
+                "truthy": true
+              }
+            }
+          ],
+          "title": "Workspace repair"
+        },
+        {
+          "advanced": true,
+          "collapsible": true,
+          "items": [
+            {
+              "key": "reconcile.interval_secs",
+              "type": "field"
+            },
+            {
+              "key": "reconcile.stale_working_secs",
+              "type": "field"
+            },
+            {
+              "key": "reconcile.stale_working_ttl_secs",
+              "type": "field"
+            }
+          ],
+          "title": "Reconcile tick"
+        },
+        {
+          "advanced": true,
+          "items": [
+            {
+              "key": "provision.force_git_tree",
+              "type": "field"
+            }
+          ],
+          "title": "Provisioning"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Automation"
+    },
+    {
+      "id": "settings.limits",
+      "intro": "How long things are kept and how large a transfer may be.",
+      "layout": "category",
+      "parent": "settings",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "tasks.max_age_secs",
+              "type": "field"
+            },
+            {
+              "key": "sessions.lost_ttl_secs",
+              "type": "field"
+            },
+            {
+              "key": "health.context_red_pct",
+              "type": "field"
+            }
+          ],
+          "title": "Sessions and tasks"
+        },
+        {
+          "intro": "When a host reads as needing a look on the Hosts view and in fleet_health.",
+          "items": [
+            {
+              "key": "health.disk_low_pct",
+              "type": "field"
+            },
+            {
+              "key": "health.hooks_silent_secs",
+              "type": "field"
+            },
+            {
+              "key": "health.claude_max_behind",
+              "type": "field"
+            },
+            {
+              "key": "health.version_max_age_secs",
+              "type": "field"
+            }
+          ],
+          "title": "Host health"
+        },
+        {
+          "items": [
+            {
+              "key": "restore.batch_size",
+              "type": "field"
+            },
+            {
+              "key": "restore.stagger_ms",
+              "type": "field"
+            }
+          ],
+          "title": "Restoring lost sessions"
+        },
+        {
+          "collapsible": true,
+          "items": [
+            {
+              "key": "move.wait_max_mins",
+              "type": "field"
+            },
+            {
+              "key": "move.max_transcript_mb",
+              "type": "field"
+            },
+            {
+              "key": "move.max_bundle_mb",
+              "type": "field"
+            },
+            {
+              "key": "move.ignored_entry_kb",
+              "type": "field"
+            },
+            {
+              "key": "move.ignored_total_mb",
+              "type": "field"
+            },
+            {
+              "key": "move.max_session_state_mb",
+              "type": "field"
+            }
+          ],
+          "title": "Move to host"
+        },
+        {
+          "items": [
+            {
+              "key": "usage.enabled",
+              "type": "field"
+            },
+            {
+              "key": "usage.interval_secs",
+              "type": "field",
+              "when": {
+                "key": "usage.enabled",
+                "truthy": true
+              }
+            },
+            {
+              "key": "usage.prices_json",
+              "type": "field",
+              "when": {
+                "key": "usage.enabled",
+                "truthy": true
+              }
+            },
+            {
+              "label": "See usage",
+              "page": "usage",
+              "type": "link"
+            }
+          ],
+          "title": "Usage"
+        },
+        {
+          "advanced": true,
+          "collapsible": true,
+          "items": [
+            {
+              "key": "reports.max_rows",
+              "type": "field"
+            },
+            {
+              "key": "reports.max_age_secs",
+              "type": "field"
+            }
+          ],
+          "title": "Error reports"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Limits"
+    },
+    {
+      "id": "settings.projects",
+      "intro": "Where fleet looks for your repositories on each host.",
+      "layout": "category",
+      "parent": "settings",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "projects.layout",
+              "type": "field",
+              "widget": "radio"
+            },
+            {
+              "key": "projects.base_path",
+              "type": "field"
+            }
+          ],
+          "title": "Projects roots"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Projects"
+    },
+    {
+      "id": "settings.work",
+      "intro": "How sessions are linked to tickets, tidied up and remembered.",
+      "layout": "category",
+      "parent": "settings",
+      "spec": "fleet.page/1",
+      "tabs": [
+        {
+          "sections": [
+            {
+              "items": [
+                {
+                  "key": "work.sync_interval_secs",
+                  "type": "field"
+                },
+                {
+                  "key": "work.recent_days",
+                  "type": "field"
+                },
+                {
+                  "key": "work.describe_cache_secs",
+                  "type": "field"
+                }
+              ],
+              "title": "Trackers"
+            },
+            {
+              "items": [
+                {
+                  "key": "work.evidence_snippets",
+                  "type": "field"
+                },
+                {
+                  "key": "work.session_start_context",
+                  "type": "field"
+                },
+                {
+                  "key": "work.classify_nudge",
+                  "type": "field"
+                },
+                {
+                  "hint": "Set from the work popover; clear it here.",
+                  "key": "work.trusted_branch_projects",
+                  "type": "field"
+                }
+              ],
+              "title": "Linking"
+            },
+            {
+              "items": [
+                {
+                  "key": "work.summary_model",
+                  "type": "field"
+                }
+              ],
+              "title": "Summaries"
+            }
+          ],
+          "title": "Detection"
+        },
+        {
+          "sections": [
+            {
+              "items": [
+                {
+                  "key": "work.tidy_done_days",
+                  "type": "field"
+                },
+                {
+                  "key": "work.tidy_idle_hours",
+                  "type": "field"
+                },
+                {
+                  "key": "work.tidy_idle_unlinked_days",
+                  "type": "field"
+                }
+              ],
+              "title": "When to suggest"
+            },
+            {
+              "items": [
+                {
+                  "key": "work.auto_tidy",
+                  "type": "field"
+                },
+                {
+                  "key": "work.auto_tidy_reasons",
+                  "type": "field",
+                  "when": {
+                    "key": "work.auto_tidy",
+                    "truthy": true
+                  }
+                },
+                {
+                  "text": "On, the sweep safe-kills finished sessions without asking. A session that is working, waiting on you, linked to in-progress work or used in the last hour is never touched.",
+                  "tone": "warn",
+                  "type": "notice"
+                },
+                {
+                  "component": "auto_tidy_preview",
+                  "type": "custom"
+                }
+              ],
+              "title": "Auto-tidy"
+            }
+          ],
+          "title": "Tidy-up"
+        },
+        {
+          "sections": [
+            {
+              "items": [
+                {
+                  "key": "work.retention.journal_days",
+                  "type": "field"
+                },
+                {
+                  "key": "work.retention.tracker_items_days",
+                  "type": "field"
+                },
+                {
+                  "key": "work.retention.timeline_work_events_days",
+                  "type": "field"
+                },
+                {
+                  "source": {
+                    "id": "work.retention"
+                  },
+                  "type": "table"
+                },
+                {
+                  "source": {
+                    "id": "work.retention_last"
+                  },
+                  "type": "record"
+                },
+                {
+                  "action": "work.retention_sweep",
+                  "type": "action"
+                }
+              ],
+              "title": "How long work history is kept"
+            }
+          ],
+          "title": "Retention"
+        }
+      ],
+      "title": "Work graph"
+    },
+    {
+      "id": "settings.decisions",
+      "intro": "Lets fleet ask TypeSafe's decision model closed-set questions. Experimental and off.",
+      "layout": "category",
+      "parent": "settings",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "decide.jev.enabled",
+              "type": "field"
+            },
+            {
+              "text": "Data goes only for organisations that opted in, redacted, and a model answer only ever pre-selects a suggestion you confirm. Set the key with fleet-hub decide set-key.",
+              "tone": "info",
+              "type": "notice"
+            }
+          ],
+          "title": "Decision model"
+        },
+        {
+          "items": [
+            {
+              "hint": "An offline benchmark only until J1 passes its acceptance lines (D32).",
+              "key": "decide.jev.work_link",
+              "type": "field",
+              "widget": "readonly"
+            },
+            {
+              "key": "decide.jev.status_map",
+              "type": "field"
+            },
+            {
+              "key": "decide.jev.unassigned",
+              "type": "field"
+            }
+          ],
+          "title": "Features",
+          "when": {
+            "key": "decide.jev.enabled",
+            "truthy": true
+          }
+        },
+        {
+          "advanced": true,
+          "collapsible": true,
+          "items": [
+            {
+              "key": "decide.jev.model",
+              "type": "field"
+            },
+            {
+              "key": "decide.jev.timeout_ms",
+              "type": "field"
+            },
+            {
+              "key": "decide.jev.breaker_failures",
+              "type": "field"
+            },
+            {
+              "key": "decide.jev.breaker_open_secs",
+              "type": "field"
+            },
+            {
+              "key": "decide.jev.daily_token_budget",
+              "type": "field"
+            },
+            {
+              "key": "decide.retention_days",
+              "type": "field"
+            }
+          ],
+          "title": "Limits"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Decisions (Jev)"
+    },
+    {
+      "id": "settings.hub",
+      "intro": "How a fleet-hub daemon serves this fleet. Read-only here: the daemon writes these when it starts.",
+      "layout": "category",
+      "parent": "settings",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "hub.bind",
+              "type": "field"
+            },
+            {
+              "key": "hub.public_url",
+              "type": "field"
+            },
+            {
+              "key": "hub.tls",
+              "type": "field"
+            },
+            {
+              "key": "hub.allow_plaintext",
+              "type": "field"
+            },
+            {
+              "key": "hub.allowed_hosts",
+              "type": "field"
+            }
+          ],
+          "title": "Serving"
+        },
+        {
+          "items": [
+            {
+              "key": "hub.local_host",
+              "type": "field"
+            }
+          ],
+          "title": "Hosts"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Hub daemon"
+    },
+    {
+      "id": "settings.control_api",
+      "intro": "The embedded MCP server an AI assistant drives the fleet through. Read-only here.",
+      "layout": "category",
+      "parent": "settings",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "mcp.enabled",
+              "type": "field"
+            },
+            {
+              "key": "mcp.port",
+              "type": "field"
+            },
+            {
+              "key": "mcp.confirm_destructive",
+              "type": "field"
+            },
+            {
+              "key": "mcp.broadcast_interval_secs",
+              "type": "field"
+            }
+          ],
+          "title": "Server"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Control API"
+    },
+    {
+      "id": "settings.trackers",
+      "intro": "Trackers add a ticket's title and status to the sessions working on it, and list your tickets in ⌘K. Nothing needs one: keys in branch names group sessions without any tracker.",
+      "layout": "master_detail",
+      "parent": "settings",
+      "resource": "tracker",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "name",
+              "type": "field"
+            },
+            {
+              "key": "provider",
+              "type": "field"
+            },
+            {
+              "key": "site_url",
+              "type": "field"
+            },
+            {
+              "key": "transport",
+              "type": "field"
+            }
+          ],
+          "title": "Tracker"
+        },
+        {
+          "items": [
+            {
+              "key": "state",
+              "type": "field"
+            },
+            {
+              "key": "last_sync_at",
+              "type": "field"
+            },
+            {
+              "key": "last_error",
+              "type": "field",
+              "when": {
+                "in": [
+                  "auth_failed",
+                  "captcha",
+                  "rate_limited",
+                  "unreachable"
+                ],
+                "key": "state"
+              }
+            },
+            {
+              "key": "username",
+              "type": "field",
+              "when": {
+                "eq": "jira",
+                "key": "provider"
+              }
+            },
+            {
+              "key": "credential_hint",
+              "type": "field"
+            }
+          ],
+          "title": "Connection"
+        },
+        {
+          "items": [
+            {
+              "text": "Atlassian API tokens expire within a year. Create a new one and replace the credential here.",
+              "tone": "warn",
+              "type": "notice"
+            }
+          ],
+          "title": "Token expired",
+          "when": {
+            "all": [
+              {
+                "eq": "auth_failed",
+                "key": "state"
+              },
+              {
+                "eq": "jira",
+                "key": "provider"
+              }
+            ]
+          }
+        },
+        {
+          "items": [
+            {
+              "text": "The tracker refused the credential. Create a new one and replace it here.",
+              "tone": "warn",
+              "type": "notice"
+            }
+          ],
+          "title": "Credential refused",
+          "when": {
+            "all": [
+              {
+                "eq": "auth_failed",
+                "key": "state"
+              },
+              {
+                "not": {
+                  "eq": "jira",
+                  "key": "provider"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "items": [
+            {
+              "text": "Log in to the site in a browser once, then Test.",
+              "tone": "warn",
+              "type": "notice"
+            }
+          ],
+          "title": "Log in first",
+          "when": {
+            "eq": "captcha",
+            "key": "state"
+          }
+        },
+        {
+          "items": [
+            {
+              "key": "pr_remote_link",
+              "type": "field"
+            }
+          ],
+          "title": "Write-back",
+          "when": {
+            "in": [
+              "jira",
+              "jira_dc"
+            ],
+            "key": "provider"
+          }
+        },
+        {
+          "items": [
+            {
+              "component": "tracker_extras",
+              "type": "custom"
+            }
+          ],
+          "title": "Sync and sections"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Trackers"
+    },
+    {
+      "id": "settings.orgs",
+      "intro": "Optional. Name an org to merge or split GitHub owners, to attach a tracker, or to make it a boundary for its hosts.",
+      "layout": "master_detail",
+      "list_items": [
+        {
+          "component": "org_suggestions",
+          "type": "custom"
+        }
+      ],
+      "parent": "settings",
+      "resource": "org",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "name",
+              "type": "field"
+            },
+            {
+              "key": "color",
+              "type": "field"
+            }
+          ],
+          "title": "Organisation"
+        },
+        {
+          "items": [
+            {
+              "key": "rules",
+              "type": "field"
+            },
+            {
+              "key": "hosts",
+              "type": "field"
+            },
+            {
+              "key": "trackers",
+              "type": "field"
+            }
+          ],
+          "title": "What belongs to it"
+        },
+        {
+          "items": [
+            {
+              "key": "isolate_sessions",
+              "type": "field"
+            },
+            {
+              "text": "Hosts outside this org can no longer list or message its sessions, and its hosts cannot see other orgs' sessions. Work data is fenced either way.",
+              "tone": "warn",
+              "type": "notice"
+            },
+            {
+              "key": "bound_sees_unassigned",
+              "type": "field"
+            }
+          ],
+          "title": "Boundary"
+        },
+        {
+          "items": [
+            {
+              "key": "auto_tidy",
+              "type": "field"
+            },
+            {
+              "key": "jev_allowed",
+              "type": "field"
+            }
+          ],
+          "title": "Automation"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Organisations"
+    },
+    {
+      "id": "settings.updates",
+      "intro": "Which releases the fleet follows, and whether each part updates itself, offers an update or waits for a pinned version. See docs/updates.md.",
+      "layout": "category",
+      "parent": "settings",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "update.track",
+              "type": "field"
+            },
+            {
+              "key": "update.check_interval_secs",
+              "type": "field"
+            },
+            {
+              "text": "Nothing installs itself yet: fleet-updater, the desktop and the phone arrive in later slices (S6–S8), so on a standalone desktop these rows have no effect. There is no nightly track until it is published (S2b).",
+              "tone": "info",
+              "type": "notice"
+            }
+          ],
+          "title": "Release track"
+        },
+        {
+          "items": [
+            {
+              "text": "This desktop installs nothing yet: these rows say what the fleet follows, and the desktop updater is slice S6. See docs/updates.md.",
+              "tone": "info",
+              "type": "notice"
+            },
+            {
+              "key": "update.hub.mode",
+              "type": "field"
+            },
+            {
+              "key": "update.agent.mode",
+              "type": "field"
+            },
+            {
+              "key": "update.desktop.mode",
+              "type": "field"
+            },
+            {
+              "key": "update.mobile.mode",
+              "type": "field"
+            }
+          ],
+          "title": "Per component"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Updates"
+    },
+    {
+      "id": "settings.review",
+      "intro": "Settings an agent proposed. Nothing changes until you apply it.",
+      "layout": "review_apply",
+      "parent": "settings",
+      "review": "settings",
+      "sections": [
+        {
+          "items": [
+            {
+              "text": "An agent proposes with set_setting { propose: true } and says why. A change that needs confirming is never proposed, and one you reject stays rejected until the agent proposes again. Every applied change is in the setting's History.",
+              "tone": "info",
+              "type": "notice"
+            }
+          ],
+          "title": "How proposals work"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Proposed changes"
+    },
+    {
+      "id": "usage",
+      "intro": "Token usage and estimated cost, read from each session's Claude transcript.",
+      "layout": "data_page",
+      "sections": [
+        {
+          "items": [
+            {
+              "field": "cost_micros",
+              "label": "Estimated cost",
+              "source": {
+                "id": "usage.total"
+              },
+              "type": "stat"
+            },
+            {
+              "field": "input_tokens",
+              "source": {
+                "id": "usage.total"
+              },
+              "type": "stat"
+            },
+            {
+              "field": "output_tokens",
+              "source": {
+                "id": "usage.total"
+              },
+              "type": "stat"
+            }
+          ],
+          "title": "Totals"
+        },
+        {
+          "items": [
+            {
+              "chart": "bar",
+              "source": {
+                "id": "usage.by_day",
+                "params": {
+                  "days": 30
+                }
+              },
+              "title": "Estimated cost per day",
+              "type": "chart"
+            }
+          ],
+          "title": "Last 30 days"
+        },
+        {
+          "items": [
+            {
+              "source": {
+                "id": "usage.by_model"
+              },
+              "type": "table"
+            }
+          ],
+          "title": "By model"
+        },
+        {
+          "items": [
+            {
+              "source": {
+                "id": "usage.by_host"
+              },
+              "type": "table"
+            }
+          ],
+          "title": "By host"
+        },
+        {
+          "items": [
+            {
+              "label": "Usage settings",
+              "page": "settings.limits",
+              "type": "link"
+            }
+          ],
+          "title": "Settings"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Usage"
+    }
+  ],
+  "resources": [
+    {
+      "color_field": "color",
+      "create": {
+        "bind": [
+          [
+            "name",
+            {
+              "from": "param",
+              "name": "name"
+            }
+          ],
+          [
+            "color",
+            {
+              "from": "param",
+              "name": "color"
+            }
+          ]
+        ],
+        "command": "add_org",
+        "envelope": "args",
+        "id": "org.add",
+        "label": "Add organisation",
+        "params": [
+          {
+            "label": "Name",
+            "max": 80,
+            "name": "name",
+            "placeholder": "Company A",
+            "required": true,
+            "type": "text"
+          },
+          {
+            "label": "Colour",
+            "name": "color",
+            "required": false,
+            "type": "color"
+          }
+        ],
+        "report": false
+      },
+      "delete": {
+        "bind": [
+          [
+            "org_id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "remove_org",
+        "confirm": "Its rules go with it, and its hosts and trackers become unassigned. Sessions are not touched.",
+        "envelope": "args",
+        "id": "org.remove",
+        "label": "Remove organisation",
+        "params": [],
+        "report": false
+      },
+      "empty": "No organisations. Without one, scopes come from GitHub owners and nothing is fenced.",
+      "fields": [
+        {
+          "edit": "name",
+          "help": "What the scope selector and the Work view call it.",
+          "id": "name",
+          "label": "Name",
+          "max": 80,
+          "type": "text"
+        },
+        {
+          "edit": "color",
+          "help": "Marks its sessions in the sidebar.",
+          "id": "color",
+          "label": "Colour",
+          "type": "color"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "owner",
+                  {
+                    "from": "param",
+                    "name": "owner"
+                  }
+                ],
+                [
+                  "repo",
+                  {
+                    "from": "param",
+                    "name": "repo"
+                  }
+                ]
+              ],
+              "command": "add_org_rule",
+              "envelope": "args",
+              "id": "org.add_owner_rule",
+              "label": "Add owner rule",
+              "params": [
+                {
+                  "label": "GitHub owner",
+                  "max": 100,
+                  "name": "owner",
+                  "placeholder": "acme",
+                  "required": true,
+                  "type": "text"
+                },
+                {
+                  "label": "Repository (optional)",
+                  "max": 100,
+                  "name": "repo",
+                  "placeholder": "api",
+                  "required": false,
+                  "type": "text"
+                }
+              ],
+              "report": false
+            },
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "path_prefix",
+                  {
+                    "from": "param",
+                    "name": "path_prefix"
+                  }
+                ]
+              ],
+              "command": "add_org_rule",
+              "envelope": "args",
+              "id": "org.add_path_rule",
+              "label": "Add path rule",
+              "params": [
+                {
+                  "label": "Path prefix",
+                  "max": 1024,
+                  "name": "path_prefix",
+                  "placeholder": "/home/me/work/acme",
+                  "required": true,
+                  "type": "text"
+                }
+              ],
+              "report": false
+            },
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "host_alias",
+                  {
+                    "from": "param",
+                    "name": "host_alias"
+                  }
+                ]
+              ],
+              "command": "add_org_rule",
+              "envelope": "args",
+              "id": "org.add_host_rule",
+              "label": "Add host rule",
+              "params": [
+                {
+                  "label": "Host",
+                  "max": 100,
+                  "name": "host_alias",
+                  "placeholder": "hetzner-a",
+                  "required": true,
+                  "type": "text"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "Which sessions belong to it: a GitHub owner (or one repository), a path prefix, or a host.",
+          "id": "rules",
+          "item_label": {
+            "type": "org_rule"
+          },
+          "label": "Rules",
+          "remove": {
+            "bind": [
+              [
+                "rule_id",
+                {
+                  "from": "item_field",
+                  "name": "id"
+                }
+              ]
+            ],
+            "command": "remove_org_rule",
+            "envelope": "args",
+            "id": "org.remove_rule",
+            "label": "Remove rule",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "host_alias",
+                  {
+                    "from": "param",
+                    "name": "host"
+                  }
+                ],
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ]
+              ],
+              "command": "assign_host_org",
+              "envelope": "args",
+              "id": "org.assign_host",
+              "label": "Add host",
+              "params": [
+                {
+                  "label": "Host",
+                  "name": "host",
+                  "required": true,
+                  "source": "hosts",
+                  "type": "options"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "A host in an org: its per-host token reads only this org's (and unassigned) work.",
+          "id": "hosts",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Hosts",
+          "remove": {
+            "bind": [
+              [
+                "host_alias",
+                {
+                  "from": "item"
+                }
+              ],
+              [
+                "org_id",
+                {
+                  "from": "null"
+                }
+              ]
+            ],
+            "command": "assign_host_org",
+            "envelope": "args",
+            "id": "org.unassign_host",
+            "label": "Take the host out",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "tracker_id",
+                  {
+                    "from": "param",
+                    "name": "tracker"
+                  }
+                ],
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ]
+              ],
+              "command": "assign_tracker_org",
+              "envelope": "args",
+              "id": "org.assign_tracker",
+              "label": "Add tracker",
+              "params": [
+                {
+                  "label": "Tracker",
+                  "name": "tracker",
+                  "required": true,
+                  "source": "trackers",
+                  "type": "options"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "Trackers whose tickets belong to this org.",
+          "id": "trackers",
+          "item_label": {
+            "field": "name",
+            "type": "field"
+          },
+          "label": "Trackers",
+          "remove": {
+            "bind": [
+              [
+                "tracker_id",
+                {
+                  "from": "item_field",
+                  "name": "id"
+                }
+              ],
+              [
+                "org_id",
+                {
+                  "from": "null"
+                }
+              ]
+            ],
+            "command": "assign_tracker_org",
+            "envelope": "args",
+            "id": "org.unassign_tracker",
+            "label": "Take the tracker out",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "badge": {
+            "text": "isolates sessions",
+            "when": "true"
+          },
+          "confirm": "Hosts outside this org will no longer list or message its sessions, and its hosts will not see other orgs' sessions. It can break a controller that dispatches across companies.",
+          "default": false,
+          "edit": "isolate_sessions",
+          "help": "Also hide this org's sessions from other orgs' hosts, and theirs from its hosts: list, peer status, messages. Work data is fenced either way.",
+          "id": "isolate_sessions",
+          "label": "Isolate sessions",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "text": "auto-tidy",
+            "when": "set"
+          },
+          "edit": "auto_tidy",
+          "help": "Auto-tidy for this org's sessions: on or off whatever the fleet-wide setting says, or inherit it. Safe kill only, never a session in use.",
+          "id": "auto_tidy",
+          "label": "Auto-tidy",
+          "type": "inherit"
+        },
+        {
+          "badge": {
+            "text": "sends to Jev",
+            "when": "true"
+          },
+          "confirm": "This org's redacted prompts and ticket titles will be sent to TypeSafe when Decisions (Jev) is on.",
+          "default": false,
+          "edit": "jev",
+          "help": "Let this org's redacted prompts and ticket titles go to TypeSafe's decision model when Decisions (Jev) is on. Only ids and numbers are recorded; an answer is at most a suggestion.",
+          "id": "jev_allowed",
+          "label": "Send to Jev",
+          "on_off": true,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "text": "bound devices: own only",
+            "when": "false"
+          },
+          "default": true,
+          "edit": "bound_sees_unassigned",
+          "help": "Devices paired to this org (fleet-hub pair --org) also see work and sessions that belong to no org, as a host does. Off: only this org's own.",
+          "id": "bound_sees_unassigned",
+          "label": "Bound devices see unassigned",
+          "on_off": false,
+          "type": "bool"
+        }
+      ],
+      "help": "Optional. Name an org to merge or split GitHub owners, to attach a tracker, or to make it a boundary: a host in an org lets its Claude read only that org's (and unassigned) work.",
+      "id": "org",
+      "id_field": "id",
+      "label": "Organisation",
+      "list": "list_orgs",
+      "plural": "Organisations",
+      "title_field": "name",
+      "update": {
+        "bind": [
+          [
+            "org_id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "update_org",
+        "envelope": "args",
+        "id": "org.update",
+        "label": "Apply",
+        "params": [],
+        "report": false
+      }
+    },
+    {
+      "actions": [
+        {
+          "bind": [
+            [
+              "tracker_id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "test_tracker",
+          "envelope": "args",
+          "id": "tracker.test",
+          "label": "Test",
+          "params": [],
+          "report": true
+        },
+        {
+          "bind": [
+            [
+              "tracker_id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ],
+            [
+              "username",
+              {
+                "from": "param",
+                "name": "email"
+              }
+            ],
+            [
+              "secret",
+              {
+                "from": "param",
+                "name": "token"
+              }
+            ]
+          ],
+          "command": "set_tracker_credential",
+          "envelope": "args",
+          "id": "tracker.replace_login",
+          "label": "Replace credential",
+          "params": [
+            {
+              "label": "Atlassian account email",
+              "max": 320,
+              "name": "email",
+              "placeholder": "you@example.com",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "label": "API token",
+              "name": "token",
+              "required": true,
+              "type": "secret"
+            }
+          ],
+          "report": false,
+          "variants": [
+            "jira"
+          ]
+        },
+        {
+          "bind": [
+            [
+              "tracker_id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ],
+            [
+              "secret",
+              {
+                "from": "param",
+                "name": "token"
+              }
+            ]
+          ],
+          "command": "set_tracker_credential",
+          "envelope": "args",
+          "id": "tracker.replace_token",
+          "label": "Replace credential",
+          "params": [
+            {
+              "label": "Token",
+              "name": "token",
+              "required": true,
+              "type": "secret"
+            }
+          ],
+          "report": false,
+          "variants": [
+            "jira_dc",
+            "asana",
+            "linear"
+          ]
+        }
+      ],
+      "create_flow": "tracker.connect",
+      "delete": {
+        "bind": [
+          [
+            "tracker_id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "remove_tracker",
+        "confirm": "Its cached tickets go with it; sessions keep their keys and links.",
+        "envelope": "args",
+        "id": "tracker.remove",
+        "label": "Remove tracker",
+        "params": [],
+        "report": false
+      },
+      "empty": "No trackers. Keys in branch names group sessions without one; connect a tracker for titles and statuses.",
+      "fields": [
+        {
+          "edit": "name",
+          "help": "What chips and ⌘K call it.",
+          "id": "name",
+          "label": "Name",
+          "max": 80,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "Which tracker it is.",
+          "id": "provider",
+          "label": "Tracker",
+          "options": [
+            [
+              "jira",
+              "Jira Cloud"
+            ],
+            [
+              "jira_dc",
+              "Jira Data Center"
+            ],
+            [
+              "github",
+              "GitHub"
+            ],
+            [
+              "asana",
+              "Asana"
+            ],
+            [
+              "linear",
+              "Linear"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "The site or workspace it reads.",
+          "id": "site_url",
+          "label": "Site",
+          "max": 2048,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "How the last test or sync went.",
+          "id": "state",
+          "label": "State",
+          "options": [
+            [
+              "ok",
+              "ok"
+            ],
+            [
+              "auth_failed",
+              "token expired or wrong"
+            ],
+            [
+              "captcha",
+              "log in via the browser"
+            ],
+            [
+              "rate_limited",
+              "rate-limited"
+            ],
+            [
+              "unreachable",
+              "unreachable"
+            ],
+            [
+              "unconfigured",
+              "not tested yet"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "When a sync last finished for it.",
+          "id": "last_sync_at",
+          "label": "Last sync",
+          "type": "time"
+        },
+        {
+          "help": "What the tracker said the last time it refused.",
+          "id": "last_error",
+          "label": "Last error",
+          "max": 4096,
+          "type": "text"
+        },
+        {
+          "help": "The account its credential belongs to (Jira Cloud).",
+          "id": "username",
+          "label": "Account",
+          "max": 320,
+          "type": "text"
+        },
+        {
+          "help": "The end of the stored credential; the rest is never shown.",
+          "id": "credential_hint",
+          "label": "Credential",
+          "max": 64,
+          "type": "text"
+        },
+        {
+          "help": "direct, or gh / requests on a named host.",
+          "id": "transport",
+          "label": "Reached through",
+          "max": 200,
+          "type": "text"
+        },
+        {
+          "confirm": "Fleet will write to this tracker: a link on each ticket whose work you linked or started gets a pull request.",
+          "default": false,
+          "edit": "settings",
+          "help": "Add a session's pull request to its ticket as a link, only for work you linked or started. The token needs permission to edit issues.",
+          "id": "pr_remote_link",
+          "label": "Link pull requests",
+          "merge_path": [
+            "write_back",
+            "pr_remote_link"
+          ],
+          "on_off": false,
+          "type": "bool"
+        }
+      ],
+      "help": "Trackers add a ticket's title and status to the sessions working on it, and list your tickets in ⌘K. Nothing needs one: keys in branch names group sessions without any tracker.",
+      "id": "tracker",
+      "id_field": "id",
+      "label": "Tracker",
+      "list": "list_trackers",
+      "plural": "Trackers",
+      "title_field": "name",
+      "update": {
+        "bind": [
+          [
+            "tracker_id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "update_tracker",
+        "envelope": "args",
+        "id": "tracker.update",
+        "label": "Apply",
+        "params": [],
+        "report": false
+      },
+      "variant_by": "provider"
+    }
+  ],
+  "sources": [
+    {
+      "fields": [
+        {
+          "id": "input_tokens",
+          "label": "Input",
+          "ty": "tokens"
+        },
+        {
+          "id": "output_tokens",
+          "label": "Output",
+          "ty": "tokens"
+        },
+        {
+          "id": "cache_write_tokens",
+          "label": "Cache write",
+          "ty": "tokens"
+        },
+        {
+          "id": "cache_read_tokens",
+          "label": "Cache read",
+          "ty": "tokens"
+        },
+        {
+          "id": "cost_micros",
+          "label": "Est. cost",
+          "ty": "usd_micros"
+        }
+      ],
+      "help": "Tokens and estimated cost over every session row that still exists, each over its whole lifetime.",
+      "id": "usage.total",
+      "label": "Token usage",
+      "params": [
+        {
+          "default": null,
+          "help": "Only this host; every host when unset.",
+          "name": "host",
+          "ty": {
+            "type": "host_alias"
+          }
+        }
+      ],
+      "shape": "record"
+    },
+    {
+      "help": "Tokens and estimated cost per UTC day from the durable roll-up, killed sessions included.",
+      "id": "usage.by_day",
+      "label": "Usage by day",
+      "params": [
+        {
+          "default": 14,
+          "help": "How many UTC days back, today included.",
+          "name": "days",
+          "ty": {
+            "max": 365,
+            "min": 1,
+            "type": "days"
+          }
+        },
+        {
+          "default": null,
+          "help": "Only this host; every host when unset.",
+          "name": "host",
+          "ty": {
+            "type": "host_alias"
+          }
+        }
+      ],
+      "shape": "series",
+      "x": {
+        "id": "day",
+        "label": "Day",
+        "ty": "day"
+      },
+      "y": [
+        {
+          "id": "cost_micros",
+          "label": "Est. cost",
+          "ty": "usd_micros"
+        },
+        {
+          "id": "input_tokens",
+          "label": "Input",
+          "ty": "tokens"
+        },
+        {
+          "id": "output_tokens",
+          "label": "Output",
+          "ty": "tokens"
+        }
+      ]
+    },
+    {
+      "columns": [
+        {
+          "id": "host",
+          "label": "Host",
+          "ty": "text"
+        },
+        {
+          "id": "input_tokens",
+          "label": "Input",
+          "ty": "tokens"
+        },
+        {
+          "id": "output_tokens",
+          "label": "Output",
+          "ty": "tokens"
+        },
+        {
+          "id": "cost_micros",
+          "label": "Est. cost",
+          "ty": "usd_micros"
+        }
+      ],
+      "help": "Tokens and estimated cost per host over the session rows that still exist.",
+      "id": "usage.by_host",
+      "label": "Usage by host",
+      "params": [],
+      "shape": "rows"
+    },
+    {
+      "columns": [
+        {
+          "id": "model",
+          "label": "Model",
+          "ty": "text"
+        },
+        {
+          "id": "sessions",
+          "label": "Sessions",
+          "ty": "int"
+        },
+        {
+          "id": "input_tokens",
+          "label": "Input",
+          "ty": "tokens"
+        },
+        {
+          "id": "output_tokens",
+          "label": "Output",
+          "ty": "tokens"
+        },
+        {
+          "id": "cost_micros",
+          "label": "Est. cost",
+          "ty": "usd_micros"
+        }
+      ],
+      "help": "Tokens and estimated cost per model over the session rows that still exist, by each session's latest model.",
+      "id": "usage.by_model",
+      "label": "Usage by model",
+      "params": [
+        {
+          "default": null,
+          "help": "Only this host; every host when unset.",
+          "name": "host",
+          "ty": {
+            "type": "host_alias"
+          }
+        }
+      ],
+      "shape": "rows"
+    },
+    {
+      "columns": [
+        {
+          "id": "kept",
+          "label": "Kept",
+          "ty": "text"
+        },
+        {
+          "id": "days",
+          "label": "Window (days, 0 = forever)",
+          "ty": "int"
+        },
+        {
+          "id": "rows",
+          "label": "Rows",
+          "ty": "int"
+        },
+        {
+          "id": "would_delete",
+          "label": "Would delete now",
+          "ty": "int"
+        }
+      ],
+      "help": "Per swept table: its window, its rows, and what a sweep would delete now (a dry run).",
+      "id": "work.retention",
+      "label": "Work retention",
+      "params": [],
+      "shape": "rows"
+    },
+    {
+      "fields": [
+        {
+          "id": "at",
+          "label": "Last sweep",
+          "ty": "time"
+        },
+        {
+          "id": "journal",
+          "label": "Journal entries",
+          "ty": "int"
+        },
+        {
+          "id": "tracker_items",
+          "label": "Done tickets",
+          "ty": "int"
+        },
+        {
+          "id": "timeline_work_events",
+          "label": "Timeline events",
+          "ty": "int"
+        },
+        {
+          "id": "tracker_writes",
+          "label": "PR links",
+          "ty": "int"
+        },
+        {
+          "id": "describe_cache",
+          "label": "Full descriptions",
+          "ty": "int"
+        }
+      ],
+      "help": "When the last sweep ran and what it deleted.",
+      "id": "work.retention_last",
+      "label": "Last retention sweep",
+      "params": [],
+      "shape": "record"
+    }
+  ]
+}

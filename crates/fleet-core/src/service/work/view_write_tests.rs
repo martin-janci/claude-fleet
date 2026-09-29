@@ -726,6 +726,11 @@ fn placement_and_rules_through_the_writes() {
         (t2.group.source.as_str(), t2.group.label.as_str()),
         ("manual", "Security")
     );
+    // The answer carries the placement just written (patched into the
+    // graph, not re-read), exactly as a fresh read shows it.
+    assert_eq!(t2.placement_version, 1);
+    let fresh = task(&w.st, &OrgScope::All, "item:2").unwrap();
+    assert_eq!(fresh.task.placement_version, 1);
     let err = structure::place(
         &w.st,
         &OrgScope::All,
@@ -763,7 +768,7 @@ fn placement_and_rules_through_the_writes() {
     assert!(pv2.kept_manual >= 1);
     assert!(pv2.affected.iter().all(|a| a.task_id != "item:2"));
     // Clearing falls back to the rule; disabling the rule to the tracker.
-    structure::place(
+    let cleared = structure::place(
         &w.st,
         &OrgScope::All,
         "item:2",
@@ -773,6 +778,9 @@ fn placement_and_rules_through_the_writes() {
         "me",
     )
     .unwrap();
+    // A cleared placement answers as none, its group the rule's.
+    assert_eq!(cleared.placement_version, 0);
+    assert_eq!(cleared.group.source, "rule");
     assert_eq!(task_of(&tree_all(&w), "TK-2").group.source, "rule");
     let err = structure::rule_save(
         &w.st,
@@ -905,6 +913,159 @@ fn placement_and_rules_through_the_writes() {
         codes::E_FORBIDDEN,
         "a host does not reorganise the fleet"
     );
+}
+
+/// Link `sid` to the bare key `key` (no item has it yet), as typed.
+fn bare(w: &W, sid: i64, key: &str) {
+    w.st.lock()
+        .unwrap()
+        .link_session_work(sid, WorkTarget::Ref(key), "manual")
+        .unwrap();
+}
+
+/// A new tracker item `key` on `w.tracker`, then the sync's retro-bind.
+fn sync_item(w: &W, ext: &str, key: &str) -> i64 {
+    let s = w.st.lock().unwrap();
+    let id = item(&s, w.tracker, ext, key, "Arrived later", "TP");
+    s.bind_tracker_refs(w.tracker).unwrap();
+    id
+}
+
+/// A person's placement on a bare key's task (`ref:KEY`) follows the task
+/// when a sync binds the key to an item (`item:N`): it used to stay keyed
+/// on the old id, and the manual group silently disappeared.
+#[test]
+fn a_placement_on_a_bare_key_follows_the_bind() {
+    let w = world();
+    bare(&w, w.s1, "TK-9");
+    let placed = structure::place(
+        &w.st,
+        &OrgScope::All,
+        "ref:TK-9",
+        Some("Payments"),
+        None,
+        Some(0),
+        "me",
+    )
+    .unwrap();
+    assert_eq!(
+        (placed.task_id.as_str(), placed.group.source.as_str()),
+        ("ref:TK-9", "manual")
+    );
+    let id = sync_item(&w, "9", "TK-9");
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let t = task_of(&p, "TK-9");
+    assert_eq!(t.task_id, format!("item:{id}"));
+    assert_eq!(
+        (t.group.source.as_str(), t.group.label.as_str()),
+        ("manual", "Payments")
+    );
+    let s = w.st.lock().unwrap();
+    assert!(s.work_placement("ref:TK-9").unwrap().is_none());
+    let moved = s.work_placement(&format!("item:{id}")).unwrap().unwrap();
+    assert_eq!(moved.group.as_deref(), Some("Payments"));
+    assert_eq!(moved.version, 2, "a re-key is a change a device must see");
+}
+
+/// The item already has its own placement: that one wins, and the bare
+/// key's is swept rather than left behind.
+#[test]
+fn an_items_own_placement_wins_over_the_bare_keys() {
+    let w = world();
+    bare(&w, w.s1, "TK-9");
+    structure::place(
+        &w.st,
+        &OrgScope::All,
+        "ref:TK-9",
+        Some("Payments"),
+        None,
+        Some(0),
+        "me",
+    )
+    .unwrap();
+    let id = {
+        let s = w.st.lock().unwrap();
+        let id = item(&s, w.tracker, "9", "TK-9", "Arrived later", "TP");
+        s.seed_placement(&format!("item:{id}"), Some("Billing"), None);
+        s.bind_tracker_refs(w.tracker).unwrap();
+        id
+    };
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let t = task_of(&p, "TK-9");
+    assert_eq!(t.task_id, format!("item:{id}"));
+    assert_eq!(
+        (t.group.source.as_str(), t.group.label.as_str()),
+        ("manual", "Billing")
+    );
+    let s = w.st.lock().unwrap();
+    assert!(
+        s.work_placement("ref:TK-9").unwrap().is_none(),
+        "the orphan is swept"
+    );
+}
+
+/// A bare link of another org stays bare (M5), so its `ref:KEY` task stays
+/// too — and keeps the person's placement.
+#[test]
+fn a_bare_key_of_another_org_keeps_its_placement() {
+    let w = world();
+    let s3 = {
+        let s = w.st.lock().unwrap();
+        s.upsert_host("h3").unwrap();
+        s.set_host_org("h3", Some(w.org_b)).unwrap();
+        s.upsert_session("three", "h3", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    bare(&w, w.s1, "TK-9");
+    bare(&w, s3, "TK-9");
+    structure::place(
+        &w.st,
+        &OrgScope::All,
+        "ref:TK-9",
+        Some("Payments"),
+        None,
+        Some(0),
+        "me",
+    )
+    .unwrap();
+    let id = sync_item(&w, "9", "TK-9");
+    let s = w.st.lock().unwrap();
+    assert_eq!(
+        s.work_placement("ref:TK-9")
+            .unwrap()
+            .unwrap()
+            .group
+            .as_deref(),
+        Some("Payments"),
+        "org B's bare task still carries it"
+    );
+    assert!(s.work_placement(&format!("item:{id}")).unwrap().is_none());
+}
+
+/// `sweep_orphan_placements` drops a placement whose task is gone (an item
+/// row deleted, a bare key no link names) and keeps every live one.
+#[test]
+fn orphan_placements_are_swept_and_live_ones_kept() {
+    let w = world();
+    bare(&w, w.s1, "FREE-1");
+    let s = w.st.lock().unwrap();
+    s.seed_placement(&format!("item:{}", w.t1), Some("Keep"), None);
+    s.seed_placement(&format!("item:{}", w.t3), Some("Gone"), None);
+    s.seed_placement("ref:FREE-1", Some("Keep too"), None);
+    s.seed_placement("ref:NOBODY-1", Some("Gone too"), None);
+    s.seed_delete_item(w.t3);
+    assert_eq!(s.sweep_orphan_placements().unwrap(), 2);
+    let mut left: Vec<String> = s
+        .work_placements()
+        .unwrap()
+        .into_iter()
+        .map(|p| p.task_id)
+        .collect();
+    left.sort();
+    let mut want = vec![format!("item:{}", w.t1), "ref:FREE-1".to_string()];
+    want.sort();
+    assert_eq!(left, want);
+    assert_eq!(s.sweep_orphan_placements().unwrap(), 0, "idempotent");
 }
 
 /// D35: views are shared on the hub; a bound client's are its org's — it
@@ -1156,6 +1317,79 @@ fn a_local_task_moves_org_only_with_a_fresh_impact() {
     )
     .unwrap_err();
     assert_eq!(err.code, codes::E_FORBIDDEN);
+}
+
+/// D31 in the impact: a bound client counts as losing or gaining a task
+/// exactly as its `OrgScope::Org` sees it — unassigned work only while its
+/// org's `bound_sees_unassigned` is on. An unbound client is never counted.
+#[test]
+fn org_impact_counts_bound_clients_as_their_scope_sees() {
+    let w = world();
+    let local = {
+        let s = w.st.lock().unwrap();
+        s.set_org_bound_sees_unassigned(w.org_a, false).unwrap();
+        s.set_org_bound_sees_unassigned(w.org_b, true).unwrap();
+        s.insert_client_token("pa", "aa01", "full").unwrap();
+        s.insert_client_token("pb", "bb02", "full").unwrap();
+        s.insert_client_token("free", "cc03", "full").unwrap();
+        s.set_client_org("pa", Some(w.org_a)).unwrap();
+        s.set_client_org("pb", Some(w.org_b)).unwrap();
+        s.name_session_work(w.s1, Some("LOC-7"), "Unassigned work")
+            .unwrap()
+            .0
+            .id
+    };
+    let tid = format!("item:{local}");
+    let counts = |i: &structure::OrgImpact| (i.bound_clients_losing, i.bound_clients_gaining);
+    // What each bound client's own scope says, for a move `from` → `to`.
+    let expect = |from: Option<i64>, to: Option<i64>| {
+        let s = w.st.lock().unwrap();
+        let (mut losing, mut gaining) = (0u32, 0u32);
+        for o in [w.org_a, w.org_b] {
+            let cs = OrgScope::for_client(&s, o).unwrap();
+            match (cs.sees_org(from), cs.sees_org(to)) {
+                (true, false) => losing += 1,
+                (false, true) => gaining += 1,
+                _ => {}
+            }
+        }
+        (losing, gaining)
+    };
+
+    // No org → A: A's client never saw unassigned work, so it gains the
+    // task; B's did, so it loses it.
+    let imp = structure::org_impact(&w.st, &OrgScope::All, &tid, Some(w.org_a)).unwrap();
+    assert_eq!(imp.from_org, None);
+    assert_eq!(counts(&imp), (1, 1));
+    assert_eq!(counts(&imp), expect(None, Some(w.org_a)));
+    structure::assign_org(
+        &w.st,
+        &OrgScope::All,
+        &tid,
+        Some(w.org_a),
+        Some(&imp.impact_token),
+    )
+    .unwrap();
+
+    // A → no org: the mirror image.
+    let imp = structure::org_impact(&w.st, &OrgScope::All, &tid, Some(0)).unwrap();
+    assert_eq!(imp.from_org, Some(w.org_a));
+    assert_eq!(counts(&imp), (1, 1));
+    assert_eq!(counts(&imp), expect(Some(w.org_a), None));
+
+    // With A's switch on, A's client sees the task in A and in no org
+    // alike: the move changes nothing for it.
+    w.st.lock()
+        .unwrap()
+        .set_org_bound_sees_unassigned(w.org_a, true)
+        .unwrap();
+    let imp = structure::org_impact(&w.st, &OrgScope::All, &tid, Some(0)).unwrap();
+    assert_eq!(
+        counts(&imp),
+        (0, 1),
+        "B's client gains the unassigned task; A's sees it either way"
+    );
+    assert_eq!(counts(&imp), expect(Some(w.org_a), None));
 }
 
 /// A scoped caller whose session's primary is another org's (a forced

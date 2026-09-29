@@ -143,7 +143,8 @@ curl -s https://fleet.example.com/mcp \
 A healthy hub answers with `db_ready: true` and the running version.
 
 `hub` is this process: `started_at`, `uptime_secs` and `reconcile`
-(`last_started_at`, `last_finished_at`, `last_duration_ms`,
+(`last_started_at`, `last_finished_at`, `last_duration_ms`, `last_ok_at`
+(when the last clean pass finished; a later failure leaves it set),
 `consecutive_failures`, `failures_total`, `last_error`) — alert on
 `consecutive_failures >= 3`. `tunnels_mode` is `none` on a public hub (hooks
 post directly; the `tunnels` map is empty because nothing applies) and
@@ -1012,6 +1013,10 @@ What a client may do:
   never a token an agent holds: what makes an agent's output safe to relay
   is precisely the marker. A fresh pairing is untrusted, and a hub older than
   this option keeps marking everything, which is the safe direction.
+  Since declarative pages P6 trust also lets the device **change the
+  fleet's settings** (`set_setting`, and applying or rejecting proposals):
+  an untrusted device reads them and can only propose. See *Proposed
+  settings and their history* below.
 - **Bound to an org** (work graph M14.1b). `fleet-hub pair --name <name>
   --org <org id>`, or `fleet-hub client bind <name> <org id>` later
   (`work_admin { action: "assign_client", name, org_id }`; no `org_id` and
@@ -1025,7 +1030,7 @@ What a client may do:
   default, as a host sees them; the master turns it off with `fleet-hub org
   set <id> --bound-sees-unassigned off` (`work_admin { action: "update_org",
   org_id, bound_sees_unassigned: false }`; on a standalone desktop, Settings →
-  Work → Organisations → *bound devices see unassigned*), and `org list`
+  Organisations → *Bound devices see unassigned*), and `org list`
   marks such an org *bound devices: own org only*. The org's bound clients then see
   only rows assigned to it. Another org's session or task answers exactly as
   one that does not exist, whatever `isolate_sessions` says (a bound client
@@ -1250,7 +1255,7 @@ docker compose exec fleet-hub fleet-hub tracker set-credential 1 \
   shows a short `Asana …123456`. A task in two projects is listed under both.
   Which **sections** mean *in progress* is inferred on the first test from
   their names (progress / doing / review → in progress, done / shipped →
-  done) and shown in Settings → Work with a Confirm button; once confirmed,
+  done) and shown in Settings → Trackers with a Confirm button; once confirmed,
   your map wins (`work_admin update` with `settings.section_map`, or
   `fleet-hub tracker section-map <id> --set 'name=category'`). The names the
   rule cannot classify stay *to do*; with the `status_map` decision feature
@@ -1289,7 +1294,7 @@ recognised.
 ### Sync metrics
 
 `fleet-hub tracker status` (`work_admin { action: status }`, master-only, and
-Settings → Work on the machine that syncs) shows each tracker's last pass:
+Settings → Trackers on the machine that syncs) shows each tracker's last pass:
 its duration, the items the tracker listed or fetched, the items that
 changed, the event frames the pass emitted, and the error it ended with
 (redacted, one line). They are kept in memory only and start empty after a
@@ -1562,8 +1567,10 @@ fleet-hub decide proposals reject 814                    # "not this": stays unm
 
 `enable`, `disable`, `mode`, `unassigned` and `set` change the `decide.*`
 settings over the running hub's `set_setting` (loopback, master token),
-like `org set`: the hub checks the value and audits the change. `set-key` and `clear-key` write `state.db` directly, like
-`fleet-hub tracker webhook`; `status`, `runs` and `proposals` open it
+like `org set`: the hub checks the value and audits the change. `set-key`
+and `clear-key` write `state.db` directly (the key is read like
+`fleet-hub tracker set-credential`'s secret: stdin, `--from-env` or
+`--ref`, never argv); `status`, `runs` and `proposals` open it
 read-only and print ids, words and numbers — never the key; the section
 names `proposals` shows come from the trackers' stored config, never from
 the record. `tracker section-map` is a `work_admin update` over loopback
@@ -1574,7 +1581,7 @@ corrected. `proposals reject <run>` writes only the run's follow-up
 (`rejected`) in `state.db`, like `set-key`: the section stays unmapped and
 the answer is not proposed again until a new one exists (another input,
 question version or model). A paired desktop refuses both (tracker
-administration); a standalone desktop decides them in Settings → Work.
+administration); a standalone desktop decides them in Settings → Trackers.
 
 The offline `work_link` benchmark (test map card J1, phase 0) measures a
 provider against the links people confirmed, before anything is turned on:
@@ -1737,7 +1744,8 @@ Besides the per-caller counters the exposition carries four process gauges:
 `fleet_reconcile_duration_ms` (the last pass's wall time),
 `fleet_reconcile_failures_total`, `fleet_sessions{status="…"}` (by
 `claude_status`, external rows excluded, the same roll-up
-`fleet_health.by_status` uses) and `fleet_hosts_reachable`.
+`fleet_health.by_status` uses) and `fleet_hosts_reachable`. They are two SQL
+counts on the hub's read pool, so a scrape never waits on the writer.
 
 Prometheus text format, **master token only** — a per-host token and a paired
 phone are both callers this reports on, and letting one read the others'
@@ -2057,6 +2065,38 @@ with `set_setting` (master token; `get_settings` reads them all). It
 reaches only the settings registry, never the `hub.*` and `mcp.*` values
 in this table.
 
+**Proposed settings and their history** (declarative pages P5). An agent
+that should not change a setting on its own proposes it instead:
+`set_setting { key, value, propose: true, why }` stores a proposal and
+writes nothing. On the hub machine, the operator reviews them:
+
+```bash
+fleet-hub settings proposals            # key: now → proposed (who), and why
+fleet-hub settings apply 4 7            # apply by id
+fleet-hub settings reject 5             # reject by id
+fleet-hub settings history work.recent_days [--limit N] [--json]
+```
+
+**On a paired device** (declarative pages P6). The desktop paired with this
+hub shows these settings in its own Settings pages, read and written
+through the hub: `get_settings` and `set_setting` answer the master and a
+person's own paired device — a client bound to no org; never a per-host
+token or an org-bound client. A device of either mode reads them; a `full`
+device proposes; a device you **trust** (`fleet-hub client trust <name>`)
+changes them and decides proposals, recorded in the history as `person
+(client <name>)`. The desktop's review uses `setting_proposals`,
+`setting_history` and `decide_setting_proposals`, served to a paired device
+and not to the master; a phone can read the page specs with `list_pages`.
+A page's data items (usage, retention) and page actions stay on a
+standalone desktop: a paired desktop shows the settings only.
+
+These read and write `state.db` directly, as the person at the console:
+an applied proposal is recorded with actor `person` and its id. Every write
+of a registered setting is kept in that history, whoever made it (5,000
+rows at most). A change that needs confirming (`gc.enabled`,
+`work.auto_tidy`, `decide.jev.*`) is never proposed: set it with
+`set_setting` yourself.
+
 **Work retention** (work graph M12.3). The GC tick deletes a row only when
 it is ended or done, older than its window, and nothing live points at it.
 `0` keeps a table forever.
@@ -2213,8 +2253,10 @@ sessions that were live on it are ghosted with `lost_reason =
 local_disabled` on every start (nothing probes `local` on such a hub, so
 they would otherwise stay live and refuse every action); they are ghosted
 on the start that finds them and reaped on the next
-(`retire_local_sessions`); any host nothing probes is reaped the same way
-each reconcile pass. `refresh_projects` has no
+(`retire_local_sessions`), and each reconcile pass reaps that `local` the
+same way. A host you hide yourself is different: Hide is reversible, so its
+sessions are only frozen at their last-known state, and Unhide finds them
+again. `refresh_projects` has no
 local projects directory to scan there and returns the stored list, after
 folding duplicate worktree rows; `forget_project {project_id}` (master) drops
 a row the scan can never revisit. And the
@@ -2440,7 +2482,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 205 commands, 128 route to a hub tool, 1 routes except for one argument shape, 55 refuse, and 21 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 215 commands, 135 route to a hub tool, 1 routes except for one argument shape, 57 refuse, and 22 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -2457,7 +2499,11 @@ Of the 205 commands, 128 route to a hub tool, 1 routes except for one argument s
 | `discard_kill_session` | the hub exposes no tool that discards a worktree and kills in one step; use safe_kill_session, or do it from the hub |
 | `discover_hosts` | it reads this machine's ~/.ssh/config, not the hub's — register hosts on the hub itself with `fleet-hub` or a standalone app |
 | `dismiss_agent_session` | use Kill instead: the hub's kill_session removes an inactive agent from the list exactly as this would. It is not routed here because the two differ on a WORKING agent, which this refuses and kill_session stops |
-| `get_fleet_settings` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; read them on the hub with get_settings (master token) |
+| `fetch_page_source` | a page's data sources read this fleet's store, which the hub owns; read the same numbers on the hub with usage_report |
+| `flow_back` | a flow administers the fleet this app owns, and the hub owns it; connect a tracker on the hub with fleet-hub tracker add <ticket-url> |
+| `flow_cancel` | a flow administers the fleet this app owns, and the hub owns it; connect a tracker on the hub with fleet-hub tracker add <ticket-url> |
+| `flow_start` | a flow administers the fleet this app owns, and the hub owns it; connect a tracker on the hub with fleet-hub tracker add <ticket-url> |
+| `flow_submit` | a flow administers the fleet this app owns, and the hub owns it; connect a tracker on the hub with fleet-hub tracker add <ticket-url> |
 | `hide_host` | hiding a host is fleet administration, which the hub reserves for its own operator — hide it there with `fleet-hub` |
 | `inspect_safe_kill` | it inspects the worktree over this machine's SSH connection and the hub exposes no tool for it; retire the session from the hub |
 | `install_fleet_hook` | the hook it installs points at this app's control API, which is not running; install it from the hub |
@@ -2486,9 +2532,7 @@ Of the 205 commands, 128 route to a hub tool, 1 routes except for one argument s
 | `repo_stage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_unstage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `rotate_host_token` | it re-provisions the host to report to this app; rotate the token on the hub |
-| `session_tool_detail` | the hub exposes no tool for one tool call's input and result; the Conversation tab's tool lines still come from session_conversation |
 | `set_account_nickname` | the nickname lives in the hub's database and there is no tool to set it; rename the account on the hub |
-| `set_fleet_setting` | these settings drive the reconcile tick, the GC sweeper and the playbooks, which the hub runs and this app does not; change them on the hub with set_setting (master token) |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `status_map_proposals` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |

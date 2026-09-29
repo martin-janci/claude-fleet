@@ -79,6 +79,7 @@ pub(crate) fn sample_session() -> SessionRow {
         turn_seq: 7,
         last_stop_at: Some(1_725_000_900),
         stale_working_at: Some(1_790_500_000),
+        stale_demoted_at: None,
         work_rev: 17,
         pr_evidence: None,
         pr_checked_at: None,
@@ -324,6 +325,7 @@ fn sample_health() -> Health {
         hub: Some(sample_hub_health()),
         tunnels_mode: Some("none".into()),
         peer_links_total: 2,
+        updates: None,
         decide: Some(sample_decide_health()),
     }
 }
@@ -355,6 +357,7 @@ fn sample_hub_health() -> HubHealth {
             last_started_at: Some(1_790_003_580),
             last_finished_at: Some(1_790_003_581),
             last_duration_ms: Some(812),
+            last_ok_at: Some(1_790_003_581),
             consecutive_failures: 0,
             failures_total: 2,
             last_error: Some("E_SSH: boom".into()),

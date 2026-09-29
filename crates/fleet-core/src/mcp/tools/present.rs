@@ -77,7 +77,7 @@ pub(super) fn visible_to(caller: &Caller, tool: &str) -> bool {
     if caller.host_alias.is_some() && guard::NOT_FOR_HOST_TOKENS.contains(&tool) {
         return false;
     }
-    caller.is_master() || guard::is_client_tool(tool)
+    guard::access_allows(caller, tool)
 }
 
 /// MCP behaviour hints for one tool, from its policy row. Only the hint that

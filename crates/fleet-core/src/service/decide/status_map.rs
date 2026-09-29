@@ -1150,8 +1150,12 @@ pub fn decide_proposal(
 /// sync's path, never failing it, one run at a time.
 pub struct StatusMapTrigger {
     ctx: DecideCtx,
-    /// Tracker → (when its last run started, its sections' digest then).
-    last: Mutex<HashMap<i64, (i64, u64)>>,
+    /// Tracker → (when its last run that got past the gate started, its
+    /// sections' digest then). Marked when the run is queued, so a pass
+    /// meanwhile does not queue it twice; unmarked again when the gate
+    /// refused it (no key yet, the breaker, the budget), so it is due on
+    /// the next pass once that clears instead of a day later.
+    last: Arc<Mutex<HashMap<i64, (i64, u64)>>>,
     running: Arc<AtomicBool>,
 }
 
@@ -1181,7 +1185,7 @@ impl StatusMapTrigger {
     pub fn new(ctx: DecideCtx) -> Arc<Self> {
         Arc::new(StatusMapTrigger {
             ctx,
-            last: Mutex::new(HashMap::new()),
+            last: Arc::new(Mutex::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -1234,6 +1238,7 @@ impl StatusMapTrigger {
             return None;
         }
         let ctx = self.ctx.clone();
+        let last = Arc::clone(&self.last);
         let running = Arc::clone(&self.running);
         /// Clears the single-flight flag however the task ends.
         struct Reset(Arc<AtomicBool>);
@@ -1248,7 +1253,14 @@ impl StatusMapTrigger {
         Some(crate::rt::spawn(async move {
             let _reset = reset;
             for id in due_ids {
-                match propose_for_tracker(&ctx, id).await {
+                let r = propose_for_tracker(&ctx, id).await;
+                // Only a run that got past the gate holds the tracker for a
+                // day. A run stopped part-way (`stopped`) did ask, and stays
+                // marked: what it left is asked on the next due run.
+                if !matches!(&r, Ok(r) if r.gated.is_none()) {
+                    let _ = last.lock().map(|mut last| last.remove(&id));
+                }
+                match r {
                     Ok(r) => tracing::debug!(
                         tracker_id = id,
                         asked = r.asked,

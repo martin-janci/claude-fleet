@@ -16,7 +16,7 @@ import { sessions } from './sessions';
 import { selectedSession, clearSelection } from './selection';
 import { session } from './hosts_fixture';
 import { link, task } from './work_view_fixture';
-import { selectedTaskId, workTreeMeta, type OrgImpact, type TaskDetail } from './work_view';
+import { noteWorkChanged, selectedTaskId, workTreeMeta, type OrgImpact, type TaskDetail } from './work_view';
 
 const trackerTask: TaskDetail = {
   task: task({
@@ -49,7 +49,7 @@ const localTask: TaskDetail = {
     org_id: null,
     org_source: 'sessions',
     org_fenced: false,
-    group: { id: 'repo:acme/api', label: 'acme/api', source: 'repo', editable: true },
+    group: { id: 'repo:acme/api', label: 'acme/api', source: 'repo' },
     placement_version: 0,
     sessions: [link({ link_id: 5, session_id: 9, name: 'api', host: 'h-a' })],
   }),
@@ -156,6 +156,37 @@ describe('WorkTaskDetail', () => {
     expect(notice.textContent?.replace(/\s+/g, ' ').trim()).toBe('Shown 600 of 6812 characters — open the ticket');
     await fireEvent.click(within(notice).getByTestId('work-task-description-open'));
     expect(vi.mocked(openExternal)).toHaveBeenCalledWith(trackerTask.task.url);
+  });
+
+  it('a live session with a PR shows its Result; an ended one does not', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const head = '1490bc3a9275fba9c26757c531b7702f5a68df8c';
+    sessions.set([
+      session('mefistos', 'api', {
+        id: 7,
+        pr_url: 'https://github.com/o/r/pull/5',
+        pr_checked_at: now - 60,
+        pr_evidence: {
+          head_oid: head, local_head: head, ahead: 0, dirty: false, draft: false, state: 'OPEN',
+          checks: { total: 2, pending: 0, skipped: 0, failing_total: 1, failing: [{ name: 'rust' }] },
+        },
+      }),
+      session('mefistos', 'web', { id: 9 }),
+    ]);
+    const withPrs: TaskDetail = {
+      ...trackerTask,
+      task: {
+        ...trackerTask.task,
+        sessions: (trackerTask.task.sessions ?? []).map((l) => ({ ...l, pr_url: 'https://github.com/o/r/pull/5' })),
+      },
+    };
+    handlers.work_task = () => withPrs;
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    const chips = screen.getAllByTestId('work-task-link-result');
+    expect(chips).toHaveLength(1);
+    expect(chips[0]).toHaveTextContent('Blocked');
+    expect(chips[0]).toHaveAttribute('data-verdict', 'blocked');
   });
 
   it('an inferred org says it is not a boundary', async () => {
@@ -269,7 +300,7 @@ describe('WorkTaskDetail', () => {
       group: { id: 'label:Payments', label: 'Payments', source: 'manual' },
       placement_version: 3,
     });
-    render(WorkTaskDetail, { taskId: 'item:12' });
+    render(WorkTaskDetail, { taskId: 'item:12', debounceMs: 5 });
     await flush();
     expect(screen.getByTestId('work-task-placement').textContent).toContain('owned by ops');
     await fireEvent.click(screen.getByTestId('work-task-place'));
@@ -285,7 +316,35 @@ describe('WorkTaskDetail', () => {
     await fireEvent.click(screen.getByTestId('work-place-submit'));
     await flush();
     expect(calls('place_work')[0]).toEqual({ task_id: 'item:12', group: 'Payments', note: 'owned by ops', expected_version: 2 });
-    expect(calls('work_task').length).toBeGreaterThanOrEqual(2);
+    // The write's own bump re-reads the detail once (debounced), not twice.
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    expect(calls('work_task')).toHaveLength(2);
+  });
+
+  it('a placement change re-reads the task, not the rules; a rule change both', async () => {
+    handlers.work_task = () => trackerTask;
+    handlers.work_rules = () => [];
+    render(WorkTaskDetail, { taskId: 'item:12', debounceMs: 5 });
+    await flush();
+    const tasks = calls('work_task').length;
+    const rules = calls('work_rules').length;
+    noteWorkChanged([{ what: 'placement', task_id: 'item:12' }]);
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    expect(calls('work_task')).toHaveLength(tasks + 1);
+    expect(calls('work_rules')).toHaveLength(rules);
+    noteWorkChanged([{ what: 'rule', rule_id: 3 }]);
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    expect(calls('work_task')).toHaveLength(tasks + 2);
+    expect(calls('work_rules')).toHaveLength(rules + 1);
+    // A saved view's change is neither's.
+    noteWorkChanged([{ what: 'view', view_id: 1 }]);
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    expect(calls('work_task')).toHaveLength(tasks + 2);
+    expect(calls('work_rules')).toHaveLength(rules + 1);
   });
 
   it('a tracker-controlled org is refused with the admin path', async () => {

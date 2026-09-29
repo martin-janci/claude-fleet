@@ -109,7 +109,7 @@ The dialog offers a generated name ("blue sirius") so you never have to invent o
 
 ### Connect a tracker (optional)
 
-Sessions already group by the ticket keys in their branch names (sidebar **View ▾ → Work**) with nothing set up. To see ticket titles and statuses, list *My work* in ⌘K and start a session from a ticket, connect your tracker in **Settings → Work → Connect a tracker**: paste any ticket or issue URL, give the credential it asks for (a Jira API token with your Atlassian email, an Asana or Linear token; GitHub needs none, only a host where `gh` is logged in) and press **Test**. On a hub, use `fleet-hub tracker add <ticket-url>` and `fleet-hub tracker set-credential <id> < token.txt` on the hub machine. Trackers are read-only and never block anything. See the [work guide](work-graph.md#trackers).
+Sessions already group by the ticket keys in their branch names (sidebar **View ▾ → Work**) with nothing set up. To see ticket titles and statuses, list *My work* in ⌘K and start a session from a ticket, connect your tracker in **Settings → Trackers → Add tracker**: paste any ticket or issue URL, give the credential the next step asks for (a Jira API token with your Atlassian email, an Asana or Linear token; GitHub needs none, only a host where `gh` is logged in) and press **Test**. On a hub, use `fleet-hub tracker add <ticket-url>` and `fleet-hub tracker set-credential <id> < token.txt` on the hub machine. Trackers are read-only and never block anything. See the [work guide](work-graph.md#trackers).
 
 ---
 

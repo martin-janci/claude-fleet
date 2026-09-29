@@ -11,7 +11,8 @@ use fleet_core::service::work::structure::{
     self, BatchResult, Deleted, LinkDecision, OrgImpact, RuleInput, RulePreview, ViewInput,
 };
 use fleet_core::service::work::view::{
-    self, ReviewPage, SessionTasks, TaskDetail, TreeArgs, TreePage, WorkTask, WorkTreeFilters,
+    self, ReviewPage, SectionAsk, SessionTasks, TaskDetail, TreeArgs, TreePage, WorkTask,
+    WorkTreeFilters,
 };
 use fleet_core::service::work::{self, WorkArgs, WorkLinkArgs};
 use fleet_core::store::{Decider, SessionRow, Store, WorkRule, WorkView};
@@ -33,6 +34,13 @@ pub struct WorkTreeCmdArgs {
     pub limit: Option<usize>,
     #[serde(default)]
     pub per_task: Option<usize>,
+    /// Open sections to page from the same read (absent from an older hub's
+    /// answer: the view then reads each by itself).
+    #[serde(default)]
+    pub sections: Option<Vec<SectionAsk>>,
+    /// Add the review inbox's total from the same read.
+    #[serde(default)]
+    pub with_review_total: Option<bool>,
 }
 
 /// A command that names one task.
@@ -336,6 +344,8 @@ pub(crate) mod routed {
             cursor: args.cursor.clone(),
             limit: args.limit,
             per_task: args.per_task,
+            sections: args.sections.clone(),
+            with_review_total: args.with_review_total,
             ..read("tree")
         };
         match backend.hub() {
@@ -348,6 +358,8 @@ pub(crate) mod routed {
                     cursor: args.cursor,
                     limit: args.limit,
                     per_task: args.per_task,
+                    sections: args.sections.unwrap_or_default(),
+                    with_review_total: args.with_review_total == Some(true),
                 },
             ),
         }

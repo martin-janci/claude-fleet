@@ -8,6 +8,7 @@
   // tech ("Copy prompt"); `copiedNote` qualifies the copy in the tooltip
   // ("Copied (truncated at 8 000 chars)").
   import { copyText } from './clipboard';
+  import Icon from './Icon.svelte';
 
   let {
     text,
@@ -35,10 +36,15 @@
   data-testid="conv-copy"
   aria-label={copied ? 'Copied' : label}
   title={copied ? (copiedNote ? `Copied (${copiedNote})` : 'Copied') : label}
-  onclick={() => void copy()}>⧉</button
+  onclick={() => void copy()}><Icon name={copied ? 'check' : 'copy'} size={14} /></button
 >
 
 <style>
+  .conv-copy {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
   .conv-copy.copied {
     color: var(--accent);
   }

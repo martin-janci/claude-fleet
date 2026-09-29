@@ -56,7 +56,7 @@
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgScope};
 use crate::service::settings;
-use crate::service::trackers::{self, tickets, ItemRef, TrackerNet};
+use crate::service::trackers::{self, ItemRef, TrackerNet};
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -91,7 +91,7 @@ pub struct Described {
 
 /// This item has no tracker fleet can ask (a local item, work graph M14), or
 /// its provider does not implement `describe` at all: the same honest refusal
-/// [`tickets::describe_offer`] gives a caller who was never offered the action
+/// [`trackers::tickets::describe_offer`] gives a caller who was never offered the action
 /// — never an empty success.
 fn unsupported(key: &str) -> IpcError {
     IpcError::new(
@@ -147,27 +147,9 @@ pub async fn describe(
     let (item_id, out_key, item_key, external_id, tracker, ttl_secs) = {
         let s = lock(store)?;
         orgs::require_key(&s, scope, &key)?;
-        // The first item carrying `key` that this caller may see. Two
-        // trackers can hold the same key (two Jira sites, one per org): the
-        // store's single "the item for this key" would pick the oldest and
-        // refuse a host of the other org over a ticket that is not theirs,
-        // when their own is right there.
-        let allowed = tickets::allowed(scope, &s)?;
-        let mut item = None;
-        for candidate in s.work_items_by_key(&key)? {
-            let visible = match &allowed {
-                None => true,
-                Some(allowed) => {
-                    allowed.contains(&candidate.id)
-                        || (candidate.tracker_id.is_none()
-                            && scope.sees_org(s.item_org(candidate.id)?))
-                }
-            };
-            if visible {
-                item = Some(candidate);
-                break;
-            }
-        }
+        // The first item carrying `key` that this caller may see: two
+        // trackers can hold the same key (two Jira sites, one per org).
+        let item = orgs::visible_item_for_key(&s, scope, &key)?;
         let Some(item) = item else {
             return Err(orgs::not_visible_to(scope, &key));
         };

@@ -2,12 +2,14 @@
 //! benchmark's lexical baseline (test map card J1, "BM25 over titles").
 //!
 //! The tokenizer is language-agnostic but aware enough of fleet's languages
-//! (D44: en, sk, cs, de): lower-cased, diacritics folded (`č` → `c`, `ä` →
-//! `a`, `ß` → `ss`), split on anything that is not a letter or a digit, and
-//! cut to a [`STEM_CHARS`]-character prefix — a crude stemmer that lets
-//! Slovak and Czech inflections (`prihlásenie` / `prihlásenia`) and English
-//! plurals meet. Tokens under [`MIN_TOKEN_CHARS`] are dropped.
+//! (D44: en, sk, cs, de): lower-cased, diacritics folded by
+//! [`crate::service::nl::fold`] (`č` → `c`, `ä` → `a`, `ß` → `ss`), split on
+//! anything that is not a letter or a digit, and cut to a
+//! [`STEM_CHARS`]-character prefix — a crude stemmer that lets Slovak and
+//! Czech inflections (`prihlásenie` / `prihlásenia`) and English plurals
+//! meet. Tokens under [`MIN_TOKEN_CHARS`] are dropped.
 
+use crate::service::nl::fold;
 use std::collections::{BTreeSet, HashMap};
 
 /// Named in the benchmark's header; bump it when the tokenizer or the
@@ -19,50 +21,6 @@ pub const STEM_CHARS: usize = 6;
 pub const MIN_TOKEN_CHARS: usize = 2;
 const K1: f64 = 1.2;
 const B: f64 = 0.75;
-
-/// PURE: `c` without its diacritics, lower case (`ß` → `ss`). Covers the
-/// Latin letters of Slovak, Czech, German, Polish and Hungarian; anything
-/// else is lower-cased as is.
-pub fn fold_char(c: char, out: &mut String) {
-    let f = match c {
-        'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'ą' | 'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å' | 'Ą' => {
-            'a'
-        }
-        'č' | 'ć' | 'ç' | 'Č' | 'Ć' | 'Ç' => 'c',
-        'ď' | 'Ď' => 'd',
-        'é' | 'è' | 'ê' | 'ë' | 'ě' | 'ę' | 'É' | 'È' | 'Ê' | 'Ë' | 'Ě' | 'Ę' => 'e',
-        'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => 'i',
-        'ľ' | 'ĺ' | 'ł' | 'Ľ' | 'Ĺ' | 'Ł' => 'l',
-        'ň' | 'ń' | 'ñ' | 'Ň' | 'Ń' | 'Ñ' => 'n',
-        'ó' | 'ò' | 'ô' | 'ö' | 'õ' | 'ő' | 'ø' | 'Ó' | 'Ò' | 'Ô' | 'Ö' | 'Õ' | 'Ő' | 'Ø' => {
-            'o'
-        }
-        'ŕ' | 'ř' | 'Ŕ' | 'Ř' => 'r',
-        'š' | 'ś' | 'ş' | 'Š' | 'Ś' | 'Ş' => 's',
-        'ť' | 'ţ' | 'Ť' | 'Ţ' => 't',
-        'ú' | 'ù' | 'û' | 'ü' | 'ů' | 'ű' | 'Ú' | 'Ù' | 'Û' | 'Ü' | 'Ů' | 'Ű' => 'u',
-        'ý' | 'ÿ' | 'Ý' => 'y',
-        'ž' | 'ź' | 'ż' | 'Ž' | 'Ź' | 'Ż' => 'z',
-        'ß' => {
-            out.push_str("ss");
-            return;
-        }
-        other => {
-            out.extend(other.to_lowercase());
-            return;
-        }
-    };
-    out.push(f);
-}
-
-/// PURE: `s` folded ([`fold_char`] on every character).
-pub fn fold(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        fold_char(c, &mut out);
-    }
-    out
-}
 
 /// PURE: one word folded and cut to its stem.
 pub fn stem(word: &str) -> String {
@@ -165,14 +123,6 @@ impl Bm25 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn folding_strips_slovak_czech_and_german_diacritics() {
-        assert_eq!(fold("Príliš žluťoučký kůň"), "prilis zlutoucky kun");
-        assert_eq!(fold("Ľadová ôsmička, ä"), "ladova osmicka, a");
-        assert_eq!(fold("Straße ÜBER Größe"), "strasse uber grosse");
-        assert_eq!(fold("Łódź"), "lodz");
-    }
 
     #[test]
     fn tokens_are_folded_split_stemmed_and_short_ones_dropped() {

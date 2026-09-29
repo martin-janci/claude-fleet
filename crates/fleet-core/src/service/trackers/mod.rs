@@ -13,6 +13,7 @@ pub mod asana;
 #[cfg(test)]
 pub mod conformance;
 pub mod github;
+pub mod infer;
 pub mod jira;
 pub mod jira_common;
 pub mod jira_dc;
@@ -24,6 +25,9 @@ mod tests_e2e_override;
 #[cfg(test)]
 #[path = "tests_isolation_providers.rs"]
 mod tests_isolation_providers;
+#[cfg(test)]
+#[path = "tests_shared_key.rs"]
+mod tests_shared_key;
 pub mod tickets;
 pub mod write_back;
 

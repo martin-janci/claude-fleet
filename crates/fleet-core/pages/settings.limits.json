@@ -1,0 +1,137 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings.limits",
+  "title": "Limits",
+  "parent": "settings",
+  "layout": "category",
+  "intro": "How long things are kept and how large a transfer may be.",
+  "sections": [
+    {
+      "title": "Sessions and tasks",
+      "items": [
+        {
+          "type": "field",
+          "key": "tasks.max_age_secs"
+        },
+        {
+          "type": "field",
+          "key": "sessions.lost_ttl_secs"
+        },
+        {
+          "type": "field",
+          "key": "health.context_red_pct"
+        }
+      ]
+    },
+    {
+      "title": "Host health",
+      "intro": "When a host reads as needing a look on the Hosts view and in fleet_health.",
+      "items": [
+        {
+          "type": "field",
+          "key": "health.disk_low_pct"
+        },
+        {
+          "type": "field",
+          "key": "health.hooks_silent_secs"
+        },
+        {
+          "type": "field",
+          "key": "health.claude_max_behind"
+        },
+        {
+          "type": "field",
+          "key": "health.version_max_age_secs"
+        }
+      ]
+    },
+    {
+      "title": "Restoring lost sessions",
+      "items": [
+        {
+          "type": "field",
+          "key": "restore.batch_size"
+        },
+        {
+          "type": "field",
+          "key": "restore.stagger_ms"
+        }
+      ]
+    },
+    {
+      "title": "Move to host",
+      "collapsible": true,
+      "items": [
+        {
+          "type": "field",
+          "key": "move.wait_max_mins"
+        },
+        {
+          "type": "field",
+          "key": "move.max_transcript_mb"
+        },
+        {
+          "type": "field",
+          "key": "move.max_bundle_mb"
+        },
+        {
+          "type": "field",
+          "key": "move.ignored_entry_kb"
+        },
+        {
+          "type": "field",
+          "key": "move.ignored_total_mb"
+        },
+        {
+          "type": "field",
+          "key": "move.max_session_state_mb"
+        }
+      ]
+    },
+    {
+      "title": "Usage",
+      "items": [
+        {
+          "type": "field",
+          "key": "usage.enabled"
+        },
+        {
+          "type": "field",
+          "key": "usage.interval_secs",
+          "when": {
+            "key": "usage.enabled",
+            "truthy": true
+          }
+        },
+        {
+          "type": "field",
+          "key": "usage.prices_json",
+          "when": {
+            "key": "usage.enabled",
+            "truthy": true
+          }
+        },
+        {
+          "type": "link",
+          "page": "usage",
+          "label": "See usage"
+        }
+      ]
+    },
+    {
+      "title": "Error reports",
+      "advanced": true,
+      "collapsible": true,
+      "items": [
+        {
+          "type": "field",
+          "key": "reports.max_rows"
+        },
+        {
+          "type": "field",
+          "key": "reports.max_age_secs"
+        }
+      ]
+    }
+  ]
+}

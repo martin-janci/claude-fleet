@@ -3033,18 +3033,43 @@ describe('ConversationPanel find, copy and turn index', () => {
     expect(btn.getAttribute('aria-label')).toBe('Copied');
   });
 
-  it('copy on a text group copies its markdown source', async () => {
+  it('copy on a reply copies its markdown source', async () => {
     mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: 'q', at: null, ended_at: null, items: [{ kind: 'text', text: 'see **this**' }] }] })));
     render(ConversationPanel, { session: session(), visible: true });
     await settle();
-    const btn = screen.getByTestId('conv-text').querySelector('[data-testid="conv-copy"]') as HTMLButtonElement;
+    const btn = screen.getByTestId('conv-reply-footer').querySelector('[data-testid="conv-copy"]') as HTMLButtonElement;
     expect(btn.getAttribute('aria-label')).toBe('Copy reply');
     await fireEvent.click(btn);
     await settle();
     expect(mockedCopy).toHaveBeenCalledWith('see **this**');
   });
 
-  it('renders an action row per reply text group', async () => {
+  it('the reply actions sit once under the turn, never inside a text block, and copy every text block', async () => {
+    mockedConv.mockReturnValue(
+      ok(
+        conv({
+          turns: [
+            {
+              prompt: 'q',
+              at: null,
+              ended_at: null,
+              items: [{ kind: 'text', text: 'first' }, tool('Read(a)', { name: 'Read', target: 'a' }), { kind: 'text', text: 'second' }],
+            },
+          ],
+        }),
+      ),
+    );
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    for (const t of screen.getAllByTestId('conv-text')) expect(t.querySelector('[data-testid="conv-copy"]')).toBeNull();
+    expect(screen.getAllByTestId('reply-quote').length).toBe(1);
+    const btn = screen.getByTestId('conv-reply-footer').querySelector('[data-testid="conv-copy"]') as HTMLButtonElement;
+    await fireEvent.click(btn);
+    await settle();
+    expect(mockedCopy).toHaveBeenCalledWith('first\n\nsecond');
+  });
+
+  it('renders an action row per reply', async () => {
     mockedConv.mockReturnValue(
       ok(
         conv({

@@ -27,7 +27,13 @@ export interface UsageSummary {
   };
   handover?: { requested?: number; written?: number; missing?: number; send_failed?: number };
   resume?: { resumed?: number; with_brief?: number; without_brief?: number };
-  journal?: { briefs_queued?: number; briefs_delivered?: number; compact_summaries?: number };
+  journal?: {
+    briefs_queued?: number;
+    briefs_delivered?: number;
+    compact_summaries?: number;
+    summaries?: number;
+    write_backs?: number;
+  };
   tidy?: { applied?: number; kept?: number; auto_tidied?: number; auto_by_reason?: Record<string, number> };
   trackers?: { tracker_id: number; passes?: number; passes_failed?: number; items_failed?: number }[];
   unrecorded?: string[];
@@ -80,7 +86,8 @@ export function usageRows(u: UsageSummary): [string, string][] {
     ['resume', `${n(r.resumed)} (${n(r.with_brief)} with a brief, ${n(r.without_brief)} without)`],
     [
       'journal',
-      `${n(j.briefs_queued)} briefs queued, ${n(j.briefs_delivered)} delivered; ${n(j.compact_summaries)} compaction summaries`,
+      `${n(j.briefs_queued)} briefs queued, ${n(j.briefs_delivered)} delivered; ${n(j.compact_summaries)} compaction summaries, ` +
+        `${n(j.summaries)} session summaries, ${n(j.write_backs)} PR links written`,
     ],
     ['tidy', `${n(t.applied)} applied, ${n(t.kept)} kept, ${n(t.auto_tidied)} auto-tidied (${pairs(t.auto_by_reason)})`],
   ];

@@ -82,8 +82,9 @@ export const SETTING_KEYS = {
  *  (`auto` is not offered, decision D36). */
 export const DECIDE_MODES = ['off', 'shadow', 'assist'] as const;
 
-/** Mirror of `settings::UPDATE_TRACKS`: the release track the hub follows. */
-export const UPDATE_TRACKS = ['stable', 'beta', 'nightly'] as const;
+/** Mirror of `settings::UPDATE_TRACKS`: the release track the hub follows.
+ *  No `nightly` until S2b publishes that channel. */
+export const UPDATE_TRACKS = ['stable', 'beta'] as const;
 /** Mirror of `settings::UPDATE_MODES`. */
 export const UPDATE_MODES = ['manual', 'notify', 'automatic'] as const;
 /** Mirror of `settings::UPDATE_MOBILE_MODES`: a phone never installs silently. */

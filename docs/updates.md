@@ -15,8 +15,9 @@ and the phones. Design and rationale:
 > from 0.4.1 trusts it; until 0.4.1 is released there is no channel to
 > read, so nothing is offered yet. `fleet-hub update check` asks the
 > channel directly (slice S3). `fleet-updater`, the desktop and the phone
-> install nothing yet (slices S6–S8), and there is no `nightly` channel
-> yet (S2b).
+> install nothing yet (slices S6–S8): on a standalone desktop the Settings
+> → Updates rows have no effect. A hub that cannot verify a channel still
+> offers nothing, and there is no `nightly` channel yet (S2b).
 
 ## Who decides what
 
@@ -41,7 +42,7 @@ A desktop with no hub reads the channel itself (Git mode) and applies its own
 |-------|-----------------|
 | `stable` | `vX.Y.Z` releases |
 | `beta` | `-rc.N` release candidates, and every stable release too |
-| `nightly` | every green `main` commit, as `X.Y.Z-dev.N.g<sha>` (not published yet) |
+| `nightly` | every green `main` commit, as `X.Y.Z-dev.N.g<sha>` (not published yet, and not selectable in `update.track` until S2b) |
 
 ## What the hub answers
 
@@ -80,10 +81,15 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   rollback. A pin the publisher does not permit (withdrawn, below its signed
   minimum) is held, never served.
 - **Re-read the channel now.** `update_admin { action: refresh }`. The hub
-  also re-reads it every `update.check_interval_secs`. A failed read keeps
-  the last good copy, and `update_status.last_refresh` says why it failed.
+  also re-reads it every `update.check_interval_secs`, and at once when
+  `update.track` or `update.check_interval_secs` changes. A failed read
+  keeps the last good copy, is logged at `warn`, and
+  `update_status.last_refresh` says why it failed.
   `FLEET_UPDATE_CHANNEL_URL` points the hub at a mirror. It changes only
   where the documents come from: what is trusted is still the signature.
+- **The transition log.** Every phase a target reports is also kept in
+  `update_events` (90 days, the newest 200 per target) for the rollout
+  view of slice S4b. Nothing reads it out yet: no tool or route exposes it.
 - **Ask the channel from the hub box.** `fleet-hub update check` reads the
   published channel itself (Git mode), verifies it against the release key,
   and says what this hub build should run under its own `update.*`
@@ -104,6 +110,33 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   including the signed documents it rests on. It exits 1 when there is no
   answer: no channel published yet, a document no trusted key signed, or
   GitHub unreachable.
+
+## What the hub knows without being asked
+
+- **`X-Fleet-Client`.** A client names its build on every request:
+
+  ```
+  X-Fleet-Client: desktop/0.4.1 (macos-aarch64; build 1a2b3c4; contract 5-6)
+  ```
+
+  The hub records it as the client's observed version, at most once a
+  minute (the same beat as its "last seen"), so the dashboard knows what a
+  desktop or a phone runs before it ever calls `/update/check`. Only a
+  paired client token is recorded, only for a client component, and only
+  what the header says about the build: the phase and the last error stay
+  the client's own reports. A missing or garbled header records nothing.
+- **What needs a person.** `fleet_health.updates` carries the channel's
+  state (`fresh`, `stale`, `none`) and one entry per target that needs a
+  person: `update_required` (the hub would refuse it until it updates),
+  `update_failed`, `update_rolled_back` and `rollback_failed` (from its
+  reported phase), plus `channel_stale` when the verified channel is past
+  its signed expiry.
+- **Why.** `update_status { target: "client:3" }` is one target's whole
+  decision: what it would be offered, why, and whether it is mandatory.
+- **Changes.** `/events` carries `update:changed` (ids only) when a
+  target's reported build or phase, a pin, or the verified channel
+  changes. A per-host token and an org-bound client never receive it; they
+  read their own row through `update_status`.
 
 ## Settings
 

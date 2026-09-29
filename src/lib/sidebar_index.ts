@@ -96,7 +96,10 @@ export function sessionFilterRow(s: SessionRow, scopeOf?: (s: SessionRow) => str
     host: s.host_alias,
     scope: scopeOf ? scopeOf(s) : 'all',
     kind: s.kind,
-    statusCategory: s.work?.status_category ?? null,
+    // `effective_status` (native item status, fix round 2) so a local
+    // item's live status filters/sorts like a tracker item's; fall back to
+    // `status_category` for a hub older than the field.
+    statusCategory: s.work?.effective_status ?? s.work?.status_category ?? null,
     statusName: s.work?.status_name ?? null,
     live: true,
     archived: false,
