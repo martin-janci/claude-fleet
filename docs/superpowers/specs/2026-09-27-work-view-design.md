@@ -212,7 +212,9 @@ changes shape. `CONTRACT_REVISION` stays 4.
 
 // GroupRef
 { "id": "tracker:1:ABC", "label": "ABC", "source": "tracker",
-  "rule_id": null, "tracker_value": "ABC", "editable": true }
+  "rule_id": null, "tracker_value": "ABC" }
+// (`editable`, always true, was dropped on 2026-09-29: every task is placeable;
+// fleet-mobile defaults it to true, and an older hub still sending it is read fine.)
 
 // WorkTaskLink — one session under a task
 {
@@ -245,7 +247,7 @@ changes shape. `CONTRACT_REVISION` stays 4.
   "org_fenced": true,                     // the org is a boundary (tracker / item), not inferred
   "org_mixed": false,                     // unfenced task whose sessions span orgs
   "group": { GroupRef },
-  "counts": { "active": 1, "ended": 2, "suggested": 1 },
+  "counts": { "active": 1, "ended": 2, "suggested": 1 },  // distinct SESSIONS, not links
   "needs_you": false, "review": false,
   "last_activity_at": 1790000200,
   "repos": ["acme/api"],

@@ -27,7 +27,8 @@ use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::OrgScope;
 use crate::store::{Decider, RuleConditions, Store, WorkRule, WorkView};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
 /// Longest group label, rule / view name.
@@ -202,18 +203,24 @@ pub fn place(
     let group = clean_text(group.unwrap_or_default(), "group", LABEL_MAX_CHARS, true)?;
     let note = clean_text(note.unwrap_or_default(), "note", NOTE_MAX_CHARS, true)?;
     let s = lock(store)?;
-    let g = Graph::load(&s)?;
+    let mut g = Graph::load(&s)?;
     // Visibility first: a task out of scope answers as an unknown one, and
     // its placement's version is never compared (no oracle).
     let (task, _) = find_task(&g, scope, task_id, false)?;
-    s.set_work_placement(
+    let placement = s.set_work_placement(
         &task.task_id,
         group.as_deref(),
         note.as_deref(),
         expected,
         by,
     )?;
-    let g = Graph::load(&s)?;
+    drop(s);
+    // Only the placement changed: patch it into the graph already loaded
+    // rather than reading every item, link and session again.
+    match placement {
+        Some(p) => g.placements.insert(task.task_id.clone(), p),
+        None => g.placements.remove(&task.task_id),
+    };
     Ok(find_task(&g, scope, &task.task_id, false)?.0)
 }
 
@@ -582,23 +589,15 @@ fn impact_of(
         .iter()
         .filter(|l| item_id.is_some() && l.link.item_id == item_id)
     {
-        let row = l.session_id.and_then(|id| g.sessions.get(&id));
-        let state = match (
-            l.link.state.as_str(),
-            l.link.ended_at.is_none() && row.is_some(),
-        ) {
-            ("confirmed", true) => "active",
-            ("confirmed", false) => "ended",
-            ("suggested", true) => "suggested",
-            _ => continue,
+        // The view's own state (a rejection moves no one), name and org.
+        let Some(state) = g.state_of(l).filter(|s| *s != "rejected") else {
+            continue;
         };
+        let row = l.session_id.and_then(|id| g.sessions.get(&id));
         let host = row
             .map(|r| r.host_alias.clone())
             .or_else(|| l.link.snap_host.clone());
-        let session_org = match row {
-            Some(r) => r.org_id,
-            None => l.link.org_id,
-        };
+        let session_org = g.session_org(l);
         if let Some(h) = &host {
             ran_on.insert(h.clone());
         }
@@ -622,15 +621,7 @@ fn impact_of(
         links.push(ImpactLink {
             link_id: l.link.id,
             session_id: row.map(|r| r.id),
-            name: row
-                .map(|r| {
-                    r.friendly_name
-                        .clone()
-                        .unwrap_or_else(|| r.tmux_name.clone())
-                })
-                .or_else(|| l.link.snap_name.clone())
-                .or_else(|| l.link.snap_tmux.clone())
-                .unwrap_or_else(|| "past session".into()),
+            name: view::link_name(row, l),
             host,
             state: state.into(),
             session_org,
@@ -642,14 +633,15 @@ fn impact_of(
     let rows = s.journal_for_conversations(&conversations)?;
     let journal_entries = rows.len() as u32;
     let summaries = rows.iter().filter(|r| r.kind == "summary").count() as u32;
-    let sees = |viewer: Option<i64>, org: Option<i64>| org.is_none() || org == viewer;
+    // A host sees its own org's and unassigned work (`OrgScope::Host`).
+    let host_sees = |viewer: Option<i64>, org: Option<i64>| org.is_none() || org == viewer;
     let mut hosts_losing = Vec::new();
     let mut hosts_gaining = Vec::new();
     for h in s.list_hosts()? {
         if !ran_on.contains(&h.alias) {
             continue;
         }
-        match (sees(h.org_id, from), sees(h.org_id, to)) {
+        match (host_sees(h.org_id, from), host_sees(h.org_id, to)) {
             (true, false) => hosts_losing.push(h.alias.clone()),
             (false, true) => hosts_gaining.push(h.alias.clone()),
             _ => {}
@@ -657,11 +649,19 @@ fn impact_of(
     }
     let mut bound_clients_losing = 0;
     let mut bound_clients_gaining = 0;
+    // A bound client sees what its `OrgScope::Org` does: unassigned work
+    // only while its org's `bound_sees_unassigned` is on (D31). One scope
+    // per org, read once.
+    let mut client_scopes: HashMap<i64, OrgScope> = HashMap::new();
     for c in s.active_client_tokens()? {
         let Some(o) = c.org_id else {
             continue;
         };
-        match (sees(Some(o), from), sees(Some(o), to)) {
+        let cs = match client_scopes.entry(o) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => e.insert(OrgScope::for_client(s, o)?),
+        };
+        match (cs.sees_org(from), cs.sees_org(to)) {
             (true, false) => bound_clients_losing += 1,
             (false, true) => bound_clients_gaining += 1,
             _ => {}
@@ -737,7 +737,7 @@ pub fn assign_org(
     let token = impact_token
         .ok_or_else(|| invalid("assign_org needs the impact_token of a fresh org_impact"))?;
     let s = lock(store)?;
-    let g = Graph::load(&s)?;
+    let mut g = Graph::load(&s)?;
     let impact = impact_of(&s, &g, scope, task_id, to)?;
     if !impact.allowed {
         return Err(match impact.reason.as_deref() {
@@ -762,7 +762,12 @@ pub fn assign_org(
         .and_then(|n| n.parse::<i64>().ok())
         .ok_or_else(|| invalid("not a local item"))?;
     s.set_local_item_org(item_id, to)?;
-    let g = Graph::load(&s)?;
+    drop(s);
+    // Only the item's own org changed (a link's org is its item's, read
+    // from the graph): patch it in rather than loading the graph again.
+    if let Some(item) = g.items.get_mut(&item_id) {
+        item.own_org = to;
+    }
     Ok(find_task(&g, scope, &impact.task_id, false)?.0)
 }
 

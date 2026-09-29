@@ -722,7 +722,7 @@ impl FleetTools {
                     .map_err(to_mcp_err)?,
             ),
             WorkAction::Rules => {
-                ok_json_compact(&w::structure::rules(&self.store, &scope).map_err(to_mcp_err)?)
+                ok_json_compact(&w::structure::rules(self.reader(), &scope).map_err(to_mcp_err)?)
             }
             WorkAction::RulePreview => {
                 let rule = args
@@ -734,7 +734,7 @@ impl FleetTools {
                 )
             }
             WorkAction::Views => {
-                ok_json_compact(&w::structure::views(&self.store, &scope).map_err(to_mcp_err)?)
+                ok_json_compact(&w::structure::views(self.reader(), &scope).map_err(to_mcp_err)?)
             }
             WorkAction::OrgImpact => {
                 let task_id = args
@@ -742,7 +742,7 @@ impl FleetTools {
                     .as_deref()
                     .ok_or_else(|| mcp_err("E_INVALID", "org_impact needs task_id", None))?;
                 ok_json_compact(
-                    &w::structure::org_impact(&self.store, &scope, task_id, args.org_id)
+                    &w::structure::org_impact(self.reader(), &scope, task_id, args.org_id)
                         .map_err(to_mcp_err)?,
                 )
             }

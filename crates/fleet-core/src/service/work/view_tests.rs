@@ -226,6 +226,95 @@ fn a_task_shows_active_and_past_sessions_apart() {
     assert_eq!(task_of(&past_only, "TK-1").counts.active, 0);
 }
 
+/// A task counts sessions, not links: a session whose link to the task
+/// ended on a branch change and was made and ended again is one past
+/// session — while it lives and after it is gone.
+#[test]
+fn a_session_with_two_past_links_is_one_past_session() {
+    let w = world();
+    link(&w, w.s1, w.t1, true);
+    link(&w, w.s2, w.t1, true);
+    let first = links_of(&w, w.s1).links[0].link.link_id;
+    {
+        let s = w.st.lock().unwrap();
+        s.seed_end_link(first, "branch_changed");
+        s.seed_duplicate_link(first);
+    }
+    let one_past = TaskCounts {
+        active: 1,
+        ended: 1,
+        suggested: 0,
+    };
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let t = task_of(&p, "TK-1");
+    assert_eq!(t.counts, one_past, "a live session's two past links");
+    assert_eq!(
+        t.sessions.iter().filter(|l| l.state == "ended").count(),
+        2,
+        "both links are still listed"
+    );
+    w.st.lock().unwrap().delete_session(w.s1).unwrap();
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(
+        task_of(&p, "TK-1").counts,
+        one_past,
+        "a gone session's two past links"
+    );
+}
+
+/// Two suggestions of one session for one task are one suggested session.
+#[test]
+fn two_suggestions_of_one_session_count_once() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        crate::service::work::detect::on_prompt(&s, w.s1, "please look at TK-3", false).unwrap();
+    }
+    let sug = links_of(&w, w.s1)
+        .links
+        .iter()
+        .find(|l| l.link.state == "suggested" && l.task.key.as_deref() == Some("TK-3"))
+        .expect("a suggestion for TK-3")
+        .link
+        .link_id;
+    w.st.lock().unwrap().seed_duplicate_link(sug);
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let t3 = task_of(&p, "TK-3");
+    assert_eq!(t3.counts.suggested, 1);
+    assert_eq!(t3.sessions.len(), 2, "both links are listed");
+}
+
+/// The Sessions view lists a live session's link that ended on a branch
+/// change (history) beside its live one, and only that session's links.
+#[test]
+fn session_tasks_lists_a_live_sessions_past_link_beside_its_live_one() {
+    let w = world();
+    link(&w, w.s1, w.t1, true);
+    let first = links_of(&w, w.s1).links[0].link.link_id;
+    w.st.lock().unwrap().seed_end_link(first, "branch_changed");
+    link(&w, w.s1, w.t2, true);
+    link(&w, w.s2, w.t3, true);
+    let st = links_of(&w, w.s1);
+    let rows: Vec<(&str, Option<&str>, bool)> = st
+        .links
+        .iter()
+        .map(|l| (l.link.state.as_str(), l.task.key.as_deref(), l.link.primary))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("active", Some("TK-2"), true),
+            ("ended", Some("TK-1"), false)
+        ]
+    );
+    assert_eq!(st.primary_link_id, Some(st.links[0].link.link_id));
+    assert_eq!(st.links[1].link.link_id, first);
+    assert_eq!(
+        st.links[1].link.end_reason.as_deref(),
+        Some("branch_changed")
+    );
+}
+
 /// UC4: a synced ticket with no session is a task, found by `has: none`,
 /// and it is not the same as a tracker that is down.
 #[test]

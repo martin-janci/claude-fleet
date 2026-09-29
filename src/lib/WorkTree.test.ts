@@ -27,9 +27,9 @@ import {
   type WorkTreePage,
 } from './work_view';
 
-const ABC = { id: 'tracker:1:ABC', label: 'ABC', source: 'tracker', rule_id: null, tracker_value: 'ABC', editable: true };
-const PAY = { id: 'label:Payments', label: 'Payments', source: 'rule', rule_id: 3, editable: true };
-const NONE = { id: 'none', label: 'No group', source: 'none', editable: true };
+const ABC = { id: 'tracker:1:ABC', label: 'ABC', source: 'tracker', rule_id: null, tracker_value: 'ABC' };
+const PAY = { id: 'label:Payments', label: 'Payments', source: 'rule', rule_id: 3 };
+const NONE = { id: 'none', label: 'No group', source: 'none' };
 
 const firstPage: WorkTreePage = {
   tasks: [

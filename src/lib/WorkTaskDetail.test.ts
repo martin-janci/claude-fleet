@@ -49,7 +49,7 @@ const localTask: TaskDetail = {
     org_id: null,
     org_source: 'sessions',
     org_fenced: false,
-    group: { id: 'repo:acme/api', label: 'acme/api', source: 'repo', editable: true },
+    group: { id: 'repo:acme/api', label: 'acme/api', source: 'repo' },
     placement_version: 0,
     sessions: [link({ link_id: 5, session_id: 9, name: 'api', host: 'h-a' })],
   }),

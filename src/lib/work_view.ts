@@ -84,7 +84,6 @@ export interface GroupRef {
   source: GroupSource | string;
   rule_id?: number | null;
   tracker_value?: string | null;
-  editable?: boolean;
 }
 
 /** `active` | `ended` | `suggested` | `rejected`. */
