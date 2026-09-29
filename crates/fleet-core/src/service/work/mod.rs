@@ -89,6 +89,17 @@ pub struct WorkArgs {
     /// Sessions per task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_task: Option<usize>,
+    /// Tree: sections to page from the same read (a Work view's open
+    /// sections, so one refresh is one read). A client's knob, kept out of
+    /// the served schema: an assistant pages one section by `filters`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub sections: Option<Vec<view::SectionAsk>>,
+    /// Tree: add the review inbox's `total` from the same read. Kept out of
+    /// the served schema, as `sections`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(skip)]
+    pub with_review_total: Option<bool>,
     /// Draft rule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "object_schema")]

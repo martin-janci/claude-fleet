@@ -1037,7 +1037,9 @@ fn routed_read_cases() -> Vec<Case> {
             "work",
             json!({ "session_id": null, "key": null, "action": "tree", "limit": 25,
                     "cursor": "c1", "per_task": 3,
-                    "filters": { "org": "none", "status": "open", "has": "active" } }),
+                    "filters": { "org": "none", "status": "open", "has": "active" },
+                    "sections": [{ "org_id": 1, "group_id": "label:Payments", "limit": 50 }],
+                    "with_review_total": true }),
             r#"{"tasks":[],"groups":[],"orgs":[],"trackers":[],"total":0,"generated_at":1}"#,
             Box::new(|b, s, _| {
                 block_on(commands::work_view::routed::work_tree(
@@ -1054,6 +1056,12 @@ fn routed_read_cases() -> Vec<Case> {
                         cursor: Some("c1".into()),
                         limit: Some(25),
                         per_task: Some(3),
+                        sections: Some(vec![fleet_core::service::work::view::SectionAsk {
+                            org_id: Some(1),
+                            group_id: "label:Payments".into(),
+                            limit: Some(50),
+                        }]),
+                        with_review_total: Some(true),
                     },
                     s,
                 ))

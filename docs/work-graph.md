@@ -209,7 +209,14 @@ including tasks with no session at all — as reads of the `work` tool
   tasks as any other. Pages are a keyset: pass
   `next_cursor` back with the same filters (other filters refuse it). No
   task is repeated across pages while the fleet changes; a task that moved
-  meanwhile may be skipped until the next full read.
+  meanwhile may be skipped until the next full read. A client (the desktop's
+  Work view) can also send `sections` (up to 100 of `{ org_id, group_id,
+  limit? }`) and `with_review_total: true`: the same read then answers
+  `sections`, each exactly the first page that section's own read
+  (`filters.org` / `filters.group`) would give, cursor included, and
+  `review_total`, the review inbox's total — so one refresh is one read.
+  Neither is in the tool's schema (an assistant pages a section by its
+  filters), and an older hub answers without them.
 - `work { action: task, task_id }` (`item:<id>` or `ref:<KEY>`): one task
   with every session and why it is linked, its tracker description (at
   most 600 characters, with `description_chars`, the full length fleet

@@ -697,6 +697,8 @@ impl FleetTools {
                         cursor: args.cursor.clone(),
                         limit: args.limit,
                         per_task: args.per_task,
+                        sections: args.sections.clone().unwrap_or_default(),
+                        with_review_total: args.with_review_total == Some(true),
                     },
                 )
                 .map_err(to_mcp_err)?,

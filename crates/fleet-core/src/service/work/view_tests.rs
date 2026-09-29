@@ -1437,3 +1437,116 @@ fn archived_hidden_counts_the_whole_result() {
     );
     assert_eq!(open.archived_hidden, 0, "open already excludes done");
 }
+
+/// One refresh is one read: the sections a client has open are paged from
+/// the same built tasks exactly as their own reads page them (tasks and
+/// cursor), and `review_total` is the inbox's total under the same scope.
+#[test]
+fn a_tree_read_pages_its_sections_and_review_total_as_their_own_reads() {
+    let w = world();
+    link(&w, w.s1, w.t1, true);
+    {
+        let s = w.st.lock().unwrap();
+        for i in 0..5 {
+            s.create_local_work_item(Some(&format!("LOC-{i}")), &format!("local {i}"))
+                .unwrap();
+        }
+        crate::service::work::detect::on_prompt(&s, w.s2, "please look at TK-3 and TK-2", false)
+            .unwrap();
+    }
+    let filters = WorkTreeFilters {
+        archived: Some(false),
+        ..Default::default()
+    };
+    for (n, scope) in [OrgScope::All, bound(w.org_a), strict(w.org_a)]
+        .into_iter()
+        .enumerate()
+    {
+        let head = page(&w, &scope, filters.clone());
+        let asks: Vec<SectionAsk> = head
+            .groups
+            .iter()
+            .map(|g| SectionAsk {
+                org_id: g.org_id,
+                group_id: g.group.id.clone(),
+                limit: Some(2),
+            })
+            .collect();
+        assert!(!asks.is_empty(), "scope {n}");
+        let batched = tree(
+            &w.st,
+            &scope,
+            &TreeArgs {
+                filters: filters.clone(),
+                limit: Some(1),
+                sections: asks.clone(),
+                with_review_total: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(batched.sections.len(), asks.len(), "scope {n}");
+        for (ask, got) in asks.iter().zip(&batched.sections) {
+            let own_filters = section_filters(&filters, ask.org_id, &ask.group_id);
+            let own = tree(
+                &w.st,
+                &scope,
+                &TreeArgs {
+                    filters: own_filters.clone(),
+                    limit: ask.limit,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                (got.org_id, got.group_id.as_str()),
+                (ask.org_id, ask.group_id.as_str())
+            );
+            assert_eq!(got.tasks, own.tasks, "scope {n}: {ask:?}");
+            assert_eq!(got.next_cursor, own.next_cursor, "scope {n}: {ask:?}");
+            // The section's cursor pages on in the section's own read.
+            if let Some(c) = &got.next_cursor {
+                let next = tree(
+                    &w.st,
+                    &scope,
+                    &TreeArgs {
+                        filters: own_filters,
+                        cursor: Some(c.clone()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert!(!next.tasks.is_empty(), "scope {n}: {ask:?}");
+            }
+        }
+        let inbox = review(&w.st, &scope, None, Some(1)).unwrap();
+        assert_eq!(batched.review_total, Some(inbox.total), "scope {n}");
+        if n == 0 {
+            assert!(inbox.total > 0, "the suggestions are in the inbox");
+        }
+    }
+    // Asked for neither, a read answers as before.
+    let plain = tree(&w.st, &OrgScope::All, &TreeArgs::default()).unwrap();
+    assert!(plain.sections.is_empty());
+    assert_eq!(plain.review_total, None);
+    let json = serde_json::to_value(&plain).unwrap();
+    assert!(json.get("sections").is_none() && json.get("review_total").is_none());
+    // Too many sections is refused, never cut short.
+    let err = tree(
+        &w.st,
+        &OrgScope::All,
+        &TreeArgs {
+            sections: vec![
+                SectionAsk {
+                    org_id: None,
+                    group_id: "none".into(),
+                    limit: None,
+                };
+                TREE_MAX_SECTIONS + 1
+            ],
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID);
+}

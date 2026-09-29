@@ -283,6 +283,40 @@ pub struct TreePage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     pub generated_at: i64,
+    /// The sections [`TreeArgs::sections`] asked for, in the order asked,
+    /// each paged from the same read (absent when none was asked, and from
+    /// a hub built before them: the client then reads each by itself).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<TreeSection>,
+    /// `review.total` under the caller's scope, when
+    /// [`TreeArgs::with_review_total`] asked (absent from an older hub).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_total: Option<u32>,
+}
+
+/// One section a tree read pages besides its first page: exactly what a
+/// read with `filters.org` = `org_id` (or `"none"`) and `filters.group` =
+/// `group_id` answers, cursor included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct SectionAsk {
+    #[serde(default)]
+    pub org_id: Option<i64>,
+    pub group_id: String,
+    /// 1–200, default 50.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// A section's page in [`TreePage::sections`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TreeSection {
+    #[serde(default)]
+    pub org_id: Option<i64>,
+    pub group_id: String,
+    pub tasks: Vec<WorkTask>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// A task's last known outcome: its newest past session, visible to the
@@ -1042,19 +1076,40 @@ impl TaskSummary<'_> {
         others: &HashMap<i64, BTreeSet<String>>,
         with_evidence: bool,
     ) -> WorkTask {
-        let mut task = self.task;
-        let sessions: Vec<TaskLink> = self
-            .links
-            .iter()
-            .take(per_task)
-            .map(|(l, st, needs_you)| {
-                task_link(g, l, st, &task.task_id, others, with_evidence, *needs_you)
-            })
-            .collect();
-        task.sessions_more = self.links.len().saturating_sub(sessions.len()) as u32;
-        task.sessions = sessions;
-        task
+        let TaskSummary { task, links } = self;
+        with_sessions(task, &links, g, per_task, others, with_evidence)
     }
+
+    /// [`Self::into_task`] of a summary that answers more than one page
+    /// (the first page and a section of the same read).
+    fn to_page_task(
+        &self,
+        g: &Graph,
+        per_task: usize,
+        others: &HashMap<i64, BTreeSet<String>>,
+    ) -> WorkTask {
+        with_sessions(self.task.clone(), &self.links, g, per_task, others, false)
+    }
+}
+
+fn with_sessions(
+    mut task: WorkTask,
+    links: &[(&ViewLink, &'static str, bool)],
+    g: &Graph,
+    per_task: usize,
+    others: &HashMap<i64, BTreeSet<String>>,
+    with_evidence: bool,
+) -> WorkTask {
+    let sessions: Vec<TaskLink> = links
+        .iter()
+        .take(per_task)
+        .map(|(l, st, needs_you)| {
+            task_link(g, l, st, &task.task_id, others, with_evidence, *needs_you)
+        })
+        .collect();
+    task.sessions_more = links.len().saturating_sub(sessions.len()) as u32;
+    task.sessions = sessions;
+    task
 }
 
 fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'g> {
@@ -1436,7 +1491,15 @@ pub struct TreeArgs {
     pub cursor: Option<String>,
     pub limit: Option<usize>,
     pub per_task: Option<usize>,
+    /// Sections to page from the same read (a client's open sections), so
+    /// one refresh is one graph load. At most [`TREE_MAX_SECTIONS`].
+    pub sections: Vec<SectionAsk>,
+    /// Add `review_total`, from the same read.
+    pub with_review_total: bool,
 }
+
+/// The most sections one tree read pages.
+pub const TREE_MAX_SECTIONS: usize = 100;
 
 fn visible_orgs(g: &Graph, scope: &OrgScope) -> Vec<OrgBrief> {
     g.orgs
@@ -1486,6 +1549,12 @@ pub(crate) fn all_tasks(g: &Graph, scope: &OrgScope, per_task: usize) -> Vec<Wor
 /// [`tree`] over a graph already loaded (tests and the scale budget).
 pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<TreePage, IpcError> {
     check_filters(&args.filters)?;
+    if args.sections.len() > TREE_MAX_SECTIONS {
+        return Err(bad(format!(
+            "sections asks for {} sections; at most {TREE_MAX_SECTIONS}",
+            args.sections.len()
+        )));
+    }
     let limit = args
         .limit
         .unwrap_or(TREE_DEFAULT_LIMIT)
@@ -1506,8 +1575,9 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
     // Section headers count every task under the filters but the group
     // one, so every section of the view has its header and count.
     let mut groups: BTreeMap<(Option<i64>, String), (GroupRef, u32, SortKey)> = BTreeMap::new();
-    let mut matching: Vec<(SortKey, TaskSummary<'_>)> = Vec::new();
-    for summary in built.iter().map(|b| summarize(g, b, false)) {
+    let summaries: Vec<TaskSummary<'_>> = built.iter().map(|b| summarize(g, b, false)).collect();
+    let mut matching: Vec<(SortKey, usize)> = Vec::new();
+    for (i, summary) in summaries.iter().enumerate() {
         let t = &summary.task;
         if !matches_filters(t, &with_archived, false) {
             continue;
@@ -1537,7 +1607,7 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
             .as_deref()
             .is_none_or(|gid| gid == t.group.id)
         {
-            matching.push((key, summary));
+            matching.push((key, i));
         }
     }
     matching.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1550,10 +1620,9 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
         }
     };
     let total = matching.len() as u32;
-    let page: Vec<(SortKey, TaskSummary<'_>)> =
-        matching.into_iter().skip(start).take(limit + 1).collect();
+    let page: Vec<(SortKey, usize)> = matching.into_iter().skip(start).take(limit + 1).collect();
     let more = page.len() > limit;
-    let page: Vec<(SortKey, TaskSummary<'_>)> = page.into_iter().take(limit).collect();
+    let page: Vec<(SortKey, usize)> = page.into_iter().take(limit).collect();
     let next_cursor = if more {
         page.last().map(|(k, _)| encode_cursor(hash.clone(), k))
     } else {
@@ -1561,8 +1630,18 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
     };
     let tasks: Vec<WorkTask> = page
         .into_iter()
-        .map(|(_, t)| t.into_task(g, per_task, &others, false))
+        .map(|(_, i)| summaries[i].to_page_task(g, per_task, &others))
         .collect();
+    let sections = if args.sections.is_empty() {
+        Vec::new()
+    } else {
+        section_pages(g, &summaries, &others, &org_names, args, per_task)
+    };
+    let review_total = if args.with_review_total {
+        Some(review_of(g, scope, None, Some(1))?.total)
+    } else {
+        None
+    };
     let mut group_list: Vec<(SortKey, TreeGroup)> = groups
         .into_iter()
         .map(|((org, _), (group, count, key))| {
@@ -1588,7 +1667,83 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
         archived_hidden,
         next_cursor,
         generated_at: g.now,
+        sections,
+        review_total,
     })
+}
+
+/// The filters one section's own read is made with: the view's, narrowed
+/// to its org and group (what a client's "Load more" sends, so the cursor
+/// here is valid there).
+fn section_filters(base: &WorkTreeFilters, org_id: Option<i64>, group_id: &str) -> WorkTreeFilters {
+    WorkTreeFilters {
+        org: Some(org_id.map_or_else(|| IdOrWord::Word("none".into()), IdOrWord::Id)),
+        group: Some(group_id.to_string()),
+        ..base.clone()
+    }
+}
+
+/// A section's bucket: its org and its group id.
+type SectionKey<'a> = (Option<i64>, &'a str);
+
+/// [`TreeArgs::sections`], each paged from the summaries already built:
+/// exactly the first page a read with [`section_filters`] answers.
+fn section_pages(
+    g: &Graph,
+    summaries: &[TaskSummary<'_>],
+    others: &HashMap<i64, BTreeSet<String>>,
+    org_names: &HashMap<i64, String>,
+    args: &TreeArgs,
+    per_task: usize,
+) -> Vec<TreeSection> {
+    // A section's filters differ from the view's only in the org and the
+    // group, which bucket the tasks: every other filter is checked once.
+    let rest = WorkTreeFilters {
+        org: None,
+        group: None,
+        ..args.filters.clone()
+    };
+    let mut buckets: HashMap<SectionKey<'_>, Vec<(SortKey, usize)>> = HashMap::new();
+    for (i, s) in summaries.iter().enumerate() {
+        let t = &s.task;
+        if matches_filters(t, &rest, false) {
+            buckets
+                .entry((t.org_id, t.group.id.as_str()))
+                .or_default()
+                .push((sort_key(t, org_names), i));
+        }
+    }
+    for bucket in buckets.values_mut() {
+        bucket.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    args.sections
+        .iter()
+        .map(|ask| {
+            let limit = ask
+                .limit
+                .unwrap_or(TREE_DEFAULT_LIMIT)
+                .clamp(1, TREE_MAX_LIMIT);
+            let hash = filters_hash(&section_filters(&args.filters, ask.org_id, &ask.group_id));
+            let all = buckets
+                .get(&(ask.org_id, ask.group_id.as_str()))
+                .map_or(&[][..], Vec::as_slice);
+            let page = &all[..all.len().min(limit)];
+            let next_cursor = if all.len() > limit {
+                page.last().map(|(k, _)| encode_cursor(hash, k))
+            } else {
+                None
+            };
+            TreeSection {
+                org_id: ask.org_id,
+                group_id: ask.group_id.clone(),
+                tasks: page
+                    .iter()
+                    .map(|(_, i)| summaries[*i].to_page_task(g, per_task, others))
+                    .collect(),
+                next_cursor,
+            }
+        })
+        .collect()
 }
 
 /// `work { action: tree, filters?, cursor?, limit?, per_task? }`.
