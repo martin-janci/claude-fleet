@@ -2301,6 +2301,102 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    async fn codex_plan_for(ssh: &Arc<SshClient>, catalog: &Catalog) -> HostPlan {
+        use crate::service::catalog::harness::codex::Codex;
+        let snap = inventory::scan_host_harness(ssh, "local", &Codex)
+            .await
+            .expect("scan");
+        let manifest = Manifest::from_snapshot(&snap, Codex.manifest_path());
+        plan::compute_host_plan(
+            catalog,
+            &Codex,
+            "local",
+            &snap,
+            &manifest,
+            &BTreeMap::new(),
+            &PlanFilter::default(),
+        )
+    }
+
+    /// F3b end to end against a real temp `$HOME`, through the real Codex
+    /// scan and planner: a catalog agent is written as
+    /// `~/.codex/agents/pm.toml`, a second plan is a no-op, and dropping it
+    /// from the catalog removes the file and its manifest entry.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_codex_agent_is_written_as_toml_and_removed_locally() {
+        use crate::service::catalog::harness::codex::Codex;
+        let _lock = crate::service::catalog::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        let repo_dir = tempfile::tempdir().unwrap();
+        let catalog = write_catalog(
+            repo_dir.path(),
+            &[
+                (
+                    "agents/pm/asset.yaml",
+                    "kind: agent\nname: pm\ndescription: Plans the work.\ntargets:\n  codex:\n    model: gpt-5.4\n",
+                ),
+                ("agents/pm/prompt.md", "You plan \"carefully\".\n"),
+            ],
+        );
+        let ssh = Arc::new(SshClient::new());
+        let ctx = ApplyCtx {
+            ssh: &ssh,
+            token: CancellationToken::new(),
+            now: 1_000,
+        };
+        let agent_file = home.path().join(".codex/agents/pm.toml");
+        let manifest_file = home.path().join(".codex/.fleet-assets.json");
+
+        // 1. Create.
+        let create = codex_plan_for(&ssh, &catalog).await;
+        assert_eq!(create.actions.len(), 1);
+        assert_eq!(create.actions[0].op, ActionOp::Create);
+        assert_eq!(
+            create.actions[0].files,
+            vec!["~/.codex/agents/pm.toml".to_string()]
+        );
+        let res = apply_host(&ctx, &Codex, &create).await;
+        assert_eq!(res.status, "applied", "{res:?}");
+        assert_eq!(res.actions[0].outcome, DONE);
+        let v: toml::Table =
+            toml::from_str(&std::fs::read_to_string(&agent_file).expect("agent written"))
+                .expect("valid TOML");
+        assert_eq!(v["name"].as_str(), Some("pm"));
+        assert_eq!(v["description"].as_str(), Some("Plans the work."));
+        assert_eq!(
+            v["developer_instructions"].as_str(),
+            Some("You plan \"carefully\".\n")
+        );
+        assert_eq!(v["model"].as_str(), Some("gpt-5.4"));
+        let manifest: Manifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_file).unwrap()).unwrap();
+        assert_eq!(
+            manifest.assets["agent/pm"].files,
+            vec!["~/.codex/agents/pm.toml".to_string()]
+        );
+
+        // 2. Nothing left to do.
+        let again = codex_plan_for(&ssh, &catalog).await;
+        assert_eq!(again.actions[0].op, ActionOp::Noop);
+
+        // 3. The agent leaves the catalog: removed, with its manifest entry.
+        let removal = codex_plan_for(&ssh, &Catalog::default()).await;
+        assert_eq!(removal.actions[0].op, ActionOp::Remove);
+        let res = apply_host(&ctx, &Codex, &removal).await;
+        assert_eq!(res.status, "applied", "{res:?}");
+        assert!(!agent_file.exists(), "the agent file is gone");
+        let manifest: Manifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_file).unwrap()).unwrap();
+        assert!(manifest.assets.is_empty(), "{manifest:?}");
+    }
+
     /// A path the applier refuses to interpolate fails its action outright,
     /// and nothing at all is sent to the host.
     #[tokio::test]

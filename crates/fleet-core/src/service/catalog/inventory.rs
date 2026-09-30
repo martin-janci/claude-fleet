@@ -692,8 +692,14 @@ mod tests {
             7,
         );
         assert_eq!(
+            rows.iter().find(|r| r.name == "h").unwrap().state,
+            "unsupported",
+            "codex renders no hooks"
+        );
+        assert_eq!(
             rows.iter().find(|r| r.name == "gone").unwrap().state,
-            "unsupported"
+            "missing",
+            "codex renders agents since F3b"
         );
         assert_eq!(
             rows.iter().find(|r| r.name == "s").unwrap().state,

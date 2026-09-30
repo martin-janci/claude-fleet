@@ -11,6 +11,7 @@
 // This module is the service layer for the twelve `catalog_*` authoring
 // commands in `commands/assets.rs`.
 
+use super::harness::codex::CODEX_SKILLS_DIR;
 use super::harness::HARNESS_IDS;
 use super::layer::{Axis, Layer};
 use super::model::{
@@ -322,6 +323,19 @@ pub fn secrets_example_names(root: &Path) -> Vec<String> {
 ///
 /// `catalog` is the catalog the asset lives in (or is about to join); it
 /// carries the other assets the uniqueness rule compares against.
+/// Whether Codex renders `a` into `~/.codex/skills/`: a skill, or an agent
+/// with `targets.codex.render_as: skill` — in both cases only while its
+/// Codex target is enabled.
+fn lands_in_codex_skills(a: &Asset) -> bool {
+    let t = a.target("codex");
+    t.enabled
+        && match a.kind() {
+            Kind::Skill => true,
+            Kind::Agent => t.render_as.as_deref() == Some("skill"),
+            _ => false,
+        }
+}
+
 pub fn lint(
     asset: &Asset,
     catalog: &Catalog,
@@ -375,6 +389,29 @@ pub fn lint(
                 other.header.name
             ),
         );
+    }
+    // F3b: Codex renders an agent with `targets.codex.render_as: skill` into
+    // `~/.codex/skills/<install name>/`, where a skill of that install name
+    // also lands — across kinds, so the rule above cannot see it. Both
+    // manifest entries would claim one path, and removing either asset would
+    // delete the other's installed copy.
+    if lands_in_codex_skills(asset) {
+        if let Some(other) = catalog.assets.iter().find(|a| {
+            a.kind() != kind && lands_in_codex_skills(a) && a.install_name() == install_name
+        }) {
+            report.error(
+                if asset.header.install_as.is_some() {
+                    "install_as"
+                } else {
+                    "name"
+                },
+                format!(
+                    "install name '{install_name}' also renders to {CODEX_SKILLS_DIR}/{install_name} for {}/{} (targets.codex.render_as: skill)",
+                    other.kind().as_str(),
+                    other.header.name
+                ),
+            );
+        }
     }
     let strings = string_fields(asset);
     for (field, value) in &strings {
@@ -1326,6 +1363,54 @@ mod tests {
             "{:?}",
             lint(&skill, &catalog, &[], true).errors
         );
+        assert!(lint(&agent, &catalog, &[], true).errors.is_empty());
+    }
+
+    /// F3b: an agent Codex renders as a skill lands in the same
+    /// `~/.codex/skills/<install name>/` as a skill of that install name —
+    /// reported from both sides; a skill with Codex disabled does not collide.
+    #[test]
+    fn lint_errors_when_a_codex_skill_agent_shares_a_skills_install_name() {
+        let mut skill = clean_skill();
+        skill.header.name = "pm".into();
+        let mut agent = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: A reasonably long description here.\ntools: [read]\ntargets:\n  codex:\n    render_as: skill\n",
+        )
+        .unwrap();
+        agent.body = "You plan.\n".into();
+        let catalog = Catalog {
+            assets: vec![skill.clone(), agent.clone()],
+            ..Default::default()
+        };
+        let report = lint(&agent, &catalog, &[], true);
+        assert_eq!(fields(&report.errors), vec!["name"], "{:?}", report.errors);
+        assert!(
+            report.errors[0].message.contains("~/.codex/skills/pm")
+                && report.errors[0].message.contains("skill/pm"),
+            "{:?}",
+            report.errors
+        );
+        let report = lint(&skill, &catalog, &[], true);
+        assert_eq!(fields(&report.errors), vec!["name"], "{:?}", report.errors);
+        assert!(
+            report.errors[0].message.contains("agent/pm"),
+            "{:?}",
+            report.errors
+        );
+
+        let mut off = skill.clone();
+        off.header.targets.insert(
+            "codex".into(),
+            TargetOverride {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        let catalog = Catalog {
+            assets: vec![off, agent.clone()],
+            ..Default::default()
+        };
         assert!(lint(&agent, &catalog, &[], true).errors.is_empty());
     }
 
