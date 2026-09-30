@@ -97,12 +97,9 @@ pub fn spawn_catalog_scan_tick(
                 _ = token.cancelled() => break,
                 _ = ticker.tick() => {}
             }
-            let head = match super::CATALOG.read() {
-                Ok(g) => match g.as_ref() {
-                    Some(c) => c.head.clone(),
-                    None => continue,
-                },
-                Err(_) => continue,
+            let head = match super::registry::personal() {
+                Ok(Some(c)) => c.head,
+                Ok(None) | Err(_) => continue,
             };
             // All store reads in one scoped guard, dropped before any await.
             let (hosts, last_sync) = {

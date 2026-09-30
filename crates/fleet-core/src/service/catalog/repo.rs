@@ -13,6 +13,20 @@ pub const SCHEMA_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Catalog {
+    /// `catalogs.id`; 0 in tests that build one by hand and never install it
+    /// under the registry. `#[serde(default)]` because `Catalog` travels the
+    /// wire nested in `resolve::Resolution` (`catalog_resolve_preview`'s
+    /// answer): a hub older than Assets S1b never sends this field, and a
+    /// desktop newer than its hub must still parse the answer rather than
+    /// error with `E_PARSE`.
+    #[serde(default)]
+    pub id: i64,
+    /// `catalogs.name` ("personal", …); default `""` until `load` sets it.
+    #[serde(default)]
+    pub name: String,
+    /// `catalogs.org_id`; `None` is the personal catalog.
+    #[serde(default)]
+    pub org_id: Option<i64>,
     pub assets: Vec<Asset>,
     pub problems: Vec<Problem>,
     pub head: String,

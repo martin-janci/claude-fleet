@@ -13,6 +13,7 @@ pub mod inventory;
 pub mod layer;
 pub mod model;
 pub mod propose;
+pub mod registry;
 pub mod repo;
 pub mod resolve;
 pub mod scan_tick;
@@ -27,11 +28,6 @@ pub use crate::ipc_error::codes::{
     E_CATALOG_NOT_CONFIGURED, E_CATALOG_PARSE, E_LINT,
 };
 
-/// The loaded catalog, process-wide. `None` until `load` succeeds. Both the
-/// Tauri commands and the MCP tools read it; only `load` writes it.
-pub static CATALOG: std::sync::LazyLock<std::sync::RwLock<Option<repo::Catalog>>> =
-    std::sync::LazyLock::new(|| std::sync::RwLock::new(None));
-
 pub fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -39,10 +35,27 @@ pub fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// `CATALOG` and `HOME` are process-global, so tests that write either must
-/// serialise on this lock.
+/// The `registry` module and `HOME` are process-global, so tests that write
+/// either must serialise on this lock.
 #[cfg(test)]
 pub static CATALOG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take [`CATALOG_TEST_LOCK`] and leave the registry empty. Every test that
+/// goes on to install a catalog (directly, or through `configure` + `load`)
+/// takes this instead of the raw lock: a registry entry a test installs by
+/// hand keeps whatever `id` its author gave it — 0 by convention when
+/// nobody sets one — and nothing clears it when the test ends, so without
+/// this, an id left behind by one test can outrank (or be outranked by) the
+/// real, store-issued catalog a *later* test installs, since both live in
+/// the same process-global map. Clearing on the way in, under the same lock
+/// that serialises every other write, guarantees each test starts from an
+/// empty registry regardless of what ran before it.
+#[cfg(test)]
+pub(crate) fn lock_registry_for_test() -> std::sync::MutexGuard<'static, ()> {
+    let guard = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    registry::clear().expect("registry lock poisoned");
+    guard
+}
 
 use crate::events::CatalogSummary;
 use crate::ipc_error::lock;
@@ -98,7 +111,7 @@ pub fn configure(args: ConfigureArgs, store: &Mutex<Store>) -> Result<CatalogCon
     Ok(lock(store)?.set_catalog_config(&path, remote)?)
 }
 
-/// (Optionally pull, then) parse the repo into `CATALOG` and record HEAD.
+/// (Optionally pull, then) parse the repo into the registry and record HEAD.
 pub fn load(pull: bool, store: &Mutex<Store>) -> Result<CatalogSummary, IpcError> {
     let cfg = require_config(store)?;
     let root = std::path::PathBuf::from(&cfg.repo_path);
@@ -114,22 +127,26 @@ pub fn load(pull: bool, store: &Mutex<Store>) -> Result<CatalogSummary, IpcError
         asset_count: cat.assets.len(),
         problem_count: cat.problems.len(),
     };
-    *CATALOG
-        .write()
-        .map_err(|_| IpcError::new(codes::E_LOCK, "catalog lock poisoned"))? = Some(cat);
     {
         let s = lock(store)?;
-        s.set_catalog_head(&summary.head, summary.loaded_at)?;
+        let personal = s.personal_catalog()?.ok_or_else(|| {
+            IpcError::new(E_CATALOG_NOT_CONFIGURED, "configure the catalog repo first")
+        })?;
+        cat.id = personal.id;
+        cat.name = personal.name;
+        cat.org_id = personal.org_id;
+        s.set_catalog_head_for(personal.id, &summary.head, summary.loaded_at)?;
+        registry::install(cat)?;
         s.bus_catalog_loaded(&summary);
     }
     Ok(summary)
 }
 
-/// Load the configured catalog into `CATALOG` unless what is there is
+/// Load the configured catalog into the registry unless what is there is
 /// already the load the store last recorded. A no-op when nothing is
 /// configured (the caller's own `require_config` reports that).
 ///
-/// `CATALOG` lives in one process's memory, but the configuration and the
+/// The registry lives in one process's memory, but the configuration and the
 /// record of the last load (`head_commit`, `last_loaded_at`) are in the
 /// store. On a hub nothing else ever calls `load`: the catalog is pointed at
 /// with `fleet-hub catalog set` and refreshed with `fleet-hub catalog reload`,
@@ -141,14 +158,9 @@ pub fn ensure_fresh(store: &Mutex<Store>) -> Result<(), IpcError> {
     let Some(cfg) = config(store)? else {
         return Ok(());
     };
-    let current = {
-        let guard = CATALOG
-            .read()
-            .map_err(|_| IpcError::new(codes::E_LOCK, "catalog lock poisoned"))?;
-        guard.as_ref().is_some_and(|c| {
-            cfg.last_loaded_at == Some(c.loaded_at) && cfg.head_commit.as_deref() == Some(&*c.head)
-        })
-    };
+    let current = registry::personal()?.is_some_and(|c| {
+        cfg.last_loaded_at == Some(c.loaded_at) && cfg.head_commit.as_deref() == Some(&*c.head)
+    });
     if !current {
         load(false, store)?;
     }
@@ -156,16 +168,7 @@ pub fn ensure_fresh(store: &Mutex<Store>) -> Result<(), IpcError> {
 }
 
 fn with_catalog<T>(f: impl FnOnce(&repo::Catalog) -> Result<T, IpcError>) -> Result<T, IpcError> {
-    let guard = CATALOG
-        .read()
-        .map_err(|_| IpcError::new(codes::E_LOCK, "catalog lock poisoned"))?;
-    match guard.as_ref() {
-        Some(c) => f(c),
-        None => Err(IpcError::new(
-            E_CATALOG_NOT_CONFIGURED,
-            "catalog not loaded; call catalog_load",
-        )),
-    }
+    registry::with_personal(f)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -628,7 +631,7 @@ mod tests {
     /// leaving a copy that matches the store's record alone.
     #[test]
     fn ensure_fresh_follows_the_stores_record() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let store = Mutex::new(Store::open_in_memory().unwrap());
         // Nothing configured: a no-op, and the listing still says why.
         ensure_fresh(&store).unwrap();
@@ -648,12 +651,14 @@ mod tests {
         )
         .unwrap();
         load(false, &store).unwrap();
-        *CATALOG.write().unwrap() = None;
+        registry::clear().unwrap();
         ensure_fresh(&store).unwrap();
         assert_eq!(list_assets(&store).unwrap().assets.len(), 1);
 
         // Matches the record: left alone (the emptied copy stays empty).
-        CATALOG.write().unwrap().as_mut().unwrap().assets.clear();
+        let mut cat = registry::personal().unwrap().unwrap();
+        cat.assets.clear();
+        registry::install(cat).unwrap();
         ensure_fresh(&store).unwrap();
         assert!(list_assets(&store).unwrap().assets.is_empty());
 
@@ -669,7 +674,37 @@ mod tests {
         .unwrap();
         ensure_fresh(&store).unwrap();
         assert_eq!(list_assets(&store).unwrap().assets.len(), 2);
-        *CATALOG.write().unwrap() = None;
+        registry::clear().unwrap();
+    }
+
+    /// Task 2: `load` sets the loaded catalog's identity from the store's
+    /// personal row, not just its content — `registry::personal()` must
+    /// agree with `store.personal_catalog()` on `id`/`name`/`org_id`.
+    #[test]
+    fn load_sets_the_catalogs_identity_from_the_stores_personal_row() {
+        let _g = lock_registry_for_test();
+        let root = repo_with_one_skill("identity");
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        configure(
+            ConfigureArgs {
+                repo_path: root.to_string_lossy().into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        load(false, &store).unwrap();
+        let personal_row = store
+            .lock()
+            .unwrap()
+            .personal_catalog()
+            .unwrap()
+            .expect("personal row");
+        let loaded = registry::personal().unwrap().expect("loaded catalog");
+        assert_eq!(loaded.name, "personal");
+        assert_eq!(loaded.org_id, None);
+        assert_eq!(loaded.id, personal_row.id);
+        registry::clear().unwrap();
     }
 
     #[test]
@@ -685,7 +720,7 @@ mod tests {
 
     #[test]
     fn configure_load_list_get() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = repo_with_one_skill("cll");
         let store = Mutex::new(Store::open_in_memory().unwrap());
         let cfg = configure(
@@ -855,7 +890,7 @@ mod tests {
     /// list the UI shows, alongside `unmanaged`.
     #[test]
     fn list_assets_lists_orphan_rows_as_unmanaged() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = repo_with_one_skill("orphan");
         let store = Mutex::new(Store::open_in_memory().unwrap());
         configure(
@@ -913,7 +948,7 @@ mod tests {
     /// `hosts(alias)` with `PRAGMA foreign_keys = ON`.
     #[test]
     fn set_host_layers_rejects_an_unknown_host() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let store = configured_store_with_layers("shl-unknown-host");
 
         let err = set_host_layers("mefistso", Some("core"), &[], &store).unwrap_err();
@@ -928,7 +963,7 @@ mod tests {
     /// unassigned but real host.
     #[test]
     fn resolve_preview_rejects_an_unknown_host() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let store = configured_store_with_layers("rp-unknown-host");
 
         let err = resolve_preview("mefistso", &store).unwrap_err();
@@ -943,7 +978,7 @@ mod tests {
     /// SQLite error instead of a clear one.
     #[test]
     fn set_host_layers_rejects_a_layer_name_the_catalog_does_not_define() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let store = configured_store_with_layers("shl-unknown");
 
         let err = set_host_layers("local", Some("ghost"), &[], &store).unwrap_err();
@@ -970,7 +1005,7 @@ mod tests {
     /// silently disagree about what a layer is.
     #[test]
     fn set_host_layers_rejects_a_layer_on_the_wrong_axis() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let store = configured_store_with_layers("shl-axis");
 
         // "extra" is a context layer; naming it as the role must fail.
@@ -997,7 +1032,7 @@ mod tests {
     /// raw SQLite error instead of a clear one.
     #[test]
     fn set_host_layers_rejects_a_duplicate_context_name() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let store = configured_store_with_layers("shl-dup-ctx");
 
         let err = set_host_layers("local", None, &["extra", "extra"], &store).unwrap_err();
@@ -1016,7 +1051,7 @@ mod tests {
     /// names the same layer as the role.
     #[test]
     fn set_host_layers_rejects_a_context_that_repeats_the_role() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let store = configured_store_with_layers("shl-role-ctx-clash");
 
         let err = set_host_layers("local", Some("core"), &["core"], &store).unwrap_err();
@@ -1036,7 +1071,7 @@ mod tests {
         // The tool describes "each host's role + active contexts"; an
         // inactive row is not part of the assignment and must not be shown
         // as if it were.
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let store = configured_store_with_layers("ll-active");
         set_host_layers("local", Some("core"), &[], &store).unwrap();
         store
@@ -1061,7 +1096,7 @@ mod tests {
 
     #[test]
     fn set_host_layers_accepts_a_valid_assignment_and_list_layers_reflects_it() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let store = configured_store_with_layers("shl-ok");
 
         let rows = set_host_layers("local", Some("core"), &["extra"], &store).unwrap();

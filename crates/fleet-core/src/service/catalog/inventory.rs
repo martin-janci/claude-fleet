@@ -164,17 +164,12 @@ pub async fn scan_hosts(
             .map_err(|_| crate::ipc_error::IpcError::lock())?;
         s.list_hosts()?
     };
-    let catalog = {
-        let g = super::CATALOG
-            .read()
-            .map_err(|_| crate::ipc_error::IpcError::new(codes::E_LOCK, "catalog lock poisoned"))?;
-        g.clone().ok_or_else(|| {
-            crate::ipc_error::IpcError::new(
-                super::E_CATALOG_NOT_CONFIGURED,
-                "catalog not loaded; call catalog_load",
-            )
-        })?
-    };
+    let catalog = super::registry::personal()?.ok_or_else(|| {
+        crate::ipc_error::IpcError::new(
+            super::E_CATALOG_NOT_CONFIGURED,
+            "catalog not loaded; call catalog_load",
+        )
+    })?;
     let mut results = Vec::new();
     for h in hosts {
         if h.hidden || only_host.is_some_and(|o| o != h.alias) {
@@ -967,15 +962,14 @@ mod tests {
     }
 
     // `CATALOG_TEST_LOCK` only serialises tests against the process-global
-    // `CATALOG`; it guards no resource the async runtime itself needs, so
-    // holding it across `scan_hosts`'s awaits is safe despite the lint.
+    // catalog registry; it guards no resource the async runtime itself
+    // needs, so holding it across `scan_hosts`'s awaits is safe despite the
+    // lint.
     #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn scan_hosts_scans_local_and_persists_rows() {
-        let _g = crate::service::catalog::CATALOG_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::service::catalog::lock_registry_for_test();
         let root = std::env::temp_dir().join(format!("fleet-catalog-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("skills/s")).unwrap();
@@ -987,7 +981,7 @@ mod tests {
         .unwrap();
         std::fs::write(root.join("skills/s/body.md"), "b\n").unwrap();
         let cat = crate::service::catalog::repo::load_dir(&root).unwrap();
-        *crate::service::catalog::CATALOG.write().unwrap() = Some(cat);
+        crate::service::catalog::registry::install(cat).unwrap();
 
         let store = std::sync::Mutex::new(crate::store::Store::open_in_memory().unwrap());
         store.lock().unwrap().insert_host("local", None).unwrap();
