@@ -204,19 +204,56 @@ fn compose<'r>(
         }
     }
 
-    // Collisions: one `(kind, install_name)` from two or more catalogs
-    // would install two assets into the same directory. Refuse every copy.
-    let mut groups: BTreeMap<(Kind, String), Vec<usize>> = BTreeMap::new();
+    // Collisions: two catalogs' assets overlapping on `(kind, name)` (the
+    // key `origin`, `provenance` and `Catalog::find` use) OR on `(kind,
+    // install_name)` (the directory a harness installs into). Each
+    // candidate is reachable via both keys, so overlapping groups are
+    // merged into connected components (union-find over candidate
+    // indices); every member of a component spanning more than one
+    // catalog is refused, exactly once.
+    let mut parent: Vec<usize> = (0..collected.len()).collect();
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    // (key kind, asset kind, value) → first candidate seen with that key.
+    let mut first: BTreeMap<(u8, Kind, String), usize> = BTreeMap::new();
     for (i, c) in collected.iter().enumerate() {
-        groups
-            .entry((c.asset.kind(), c.asset.install_name().to_string()))
-            .or_default()
-            .push(i);
+        let kind = c.asset.kind();
+        for key in [
+            (0u8, kind, c.asset.header.name.clone()),
+            (1u8, kind, c.asset.install_name().to_string()),
+        ] {
+            match first.get(&key) {
+                Some(&j) => {
+                    let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+                    if a != b {
+                        // Root at the lower index, so a component's root is
+                        // its first-collected member.
+                        parent[a.max(b)] = a.min(b);
+                    }
+                }
+                None => {
+                    first.insert(key, i);
+                }
+            }
+        }
+    }
+    let mut components: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for i in 0..collected.len() {
+        let root = find(&mut parent, i);
+        components.entry(root).or_default().push(i);
     }
     let mut dropped: BTreeSet<usize> = BTreeSet::new();
-    let mut conflicts: Vec<&Vec<usize>> = groups
+    // Keyed by root = first-collected member: reported personal first.
+    let conflicts: Vec<&Vec<usize>> = components
         .values()
         .filter(|idx| {
+            // A single-catalog component is left alone: duplicate names or
+            // install names within one catalog are the loader's job.
             idx.iter()
                 .map(|&i| collected[i].from.id)
                 .collect::<BTreeSet<_>>()
@@ -224,8 +261,6 @@ fn compose<'r>(
                 > 1
         })
         .collect();
-    // Report in the order the assets were collected (personal first).
-    conflicts.sort_by_key(|idx| idx[0]);
     for idx in conflicts {
         let reason = format!(
             "conflict: {} — use install_as or move one",
@@ -521,5 +556,137 @@ mod tests {
         let no_org = effective_for_host(&store, "h").unwrap();
         assert!(!names(&no_org).contains(&"c"), "{:?}", names(&no_org));
         assert!(no_org.refused.is_empty(), "{:?}", no_org.refused);
+    }
+
+    fn skill_as(name: &str, install_as: &str, scope: &str) -> Asset {
+        Asset::from_yaml(
+            Some(Kind::Skill),
+            &format!(
+                "kind: skill\nname: {name}\ndescription: d\nscope: {scope}\ninstall_as: {install_as}\n"
+            ),
+        )
+        .unwrap()
+    }
+
+    /// Same `(kind, name)`, different install names: no directory clash,
+    /// but `origin`/`provenance` (keyed `<kind>/<name>`) and
+    /// `Catalog::find` would be ambiguous — still a collision.
+    #[test]
+    fn a_same_name_with_different_install_names_is_still_a_collision() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        let (store, personal, acme) = seeded_store();
+        store
+            .lock()
+            .unwrap()
+            .set_host_org("h", Some(ORG_10))
+            .unwrap();
+        registry::install_personal(personal_cat(
+            personal,
+            vec![skill("x", "shared")],
+            LayerSet::default(),
+        ))
+        .unwrap();
+        registry::install_for_test(acme_cat(acme, vec![skill_as("x", "acme-x", "private")]))
+            .unwrap();
+
+        let e = effective_for_host(&store, "h").unwrap();
+        assert!(!names(&e).contains(&"x"), "{:?}", names(&e));
+        assert_eq!(e.refused.len(), 2, "{:?}", e.refused);
+        for r in &e.refused {
+            assert_eq!((r.kind.as_str(), r.name.as_str()), ("skill", "x"));
+            assert!(
+                r.reason.contains("conflict: personal/x vs acme/x"),
+                "{}",
+                r.reason
+            );
+        }
+    }
+
+    /// Personal `y` installs as `x`; acme's `x` installs as `x`: the two
+    /// overlap on the install-name key only. Both are refused, once each.
+    #[test]
+    fn a_cross_key_overlap_between_catalogs_is_a_collision() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        let (store, personal, acme) = seeded_store();
+        store
+            .lock()
+            .unwrap()
+            .set_host_org("h", Some(ORG_10))
+            .unwrap();
+        registry::install_personal(personal_cat(
+            personal,
+            vec![skill_as("y", "x", "shared"), skill("keep", "shared")],
+            LayerSet::default(),
+        ))
+        .unwrap();
+        registry::install_for_test(acme_cat(acme, vec![skill("x", "private")])).unwrap();
+
+        let e = effective_for_host(&store, "h").unwrap();
+        assert_eq!(names(&e), vec!["keep"]);
+        assert_eq!(e.refused.len(), 2, "{:?}", e.refused);
+        let mut refused: Vec<&str> = e.refused.iter().map(|r| r.name.as_str()).collect();
+        refused.sort();
+        assert_eq!(refused, vec!["x", "y"]);
+        for r in &e.refused {
+            assert!(
+                r.reason.contains("conflict: personal/y vs acme/x"),
+                "{}",
+                r.reason
+            );
+        }
+    }
+
+    /// Parity on the layered path: with only personal and a no-org host,
+    /// `effective_for_host` answers what `resolve_for_host` answers.
+    #[test]
+    fn a_layered_personal_only_host_matches_resolve_for_host() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        let (store, personal, _acme) = seeded_store();
+        store
+            .lock()
+            .unwrap()
+            .set_host_layers_for("h", personal, Some("workstation"), &["extra"])
+            .unwrap();
+        let (layers, errs) = LayerSet::from_layers(vec![
+            Layer::from_yaml(
+                "kind: layer\nname: core\naxis: role\nmembers:\n  - skill/a\n  - skill/b\n",
+            )
+            .unwrap(),
+            Layer::from_yaml(
+                "kind: layer\nname: workstation\naxis: role\nextends: core\n\
+                 members:\n  - skill/c\nexclude:\n  - skill/b\n",
+            )
+            .unwrap(),
+            Layer::from_yaml("kind: layer\nname: extra\naxis: context\nmembers:\n  - skill/d\n")
+                .unwrap(),
+        ]);
+        assert!(errs.is_empty(), "{errs:?}");
+        let cat = personal_cat(
+            personal,
+            ["a", "b", "c", "d", "e"]
+                .iter()
+                .map(|n| skill(n, "private"))
+                .collect(),
+            layers,
+        );
+        registry::install_personal(cat.clone()).unwrap();
+
+        let e = effective_for_host(&store, "h").unwrap();
+        let r = crate::service::catalog::sync::layers::resolve_for_host(&store, &cat, "h").unwrap();
+        let r_names: Vec<&str> = r
+            .catalog
+            .assets
+            .iter()
+            .map(|a| a.header.name.as_str())
+            .collect();
+        assert_eq!(names(&e), r_names);
+        assert_eq!(names(&e), vec!["a", "c", "d"]);
+        assert!(e.layered);
+        assert_eq!(e.layered, r.layered);
+        assert_eq!(
+            e.provenance.keys().collect::<Vec<_>>(),
+            r.provenance.keys().collect::<Vec<_>>()
+        );
+        assert!(e.refused.is_empty(), "{:?}", e.refused);
     }
 }
