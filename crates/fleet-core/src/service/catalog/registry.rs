@@ -107,38 +107,41 @@ pub fn with_catalogs<T>(
     f(&guard)
 }
 
+/// The loaded catalogs in composition order: personal (`org_id: None`)
+/// first, then the rest by `name`. Shared by [`union_all`] and
+/// `effective::effective_for_host`, so "which catalog wins / is named
+/// first" means the same thing in both.
+pub fn in_order(catalogs: &BTreeMap<i64, Catalog>) -> Vec<&Catalog> {
+    let mut ordered: Vec<&Catalog> = catalogs.values().collect();
+    ordered.sort_by(|a, b| match (a.org_id.is_none(), b.org_id.is_none()) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.cmp(&b.name),
+    });
+    ordered
+}
+
 /// Every loaded catalog merged into one borrowing view: personal (`org_id:
 /// None`) first, then the rest ordered by `name`. On a `(kind, name)`
 /// clash the first catalog in that order wins. `head` and `layers` are the
-/// personal catalog's (falling back to the first catalog in order when no
-/// personal catalog is loaded), so a caller that only ever read `head`
-/// before sees exactly what it saw before. `problems` is the concatenation
-/// in the same order. `origin` is filled for every asset in the result, so
-/// `Catalog::origin_of` always answers correctly on it. `None` when the
-/// registry is empty.
+/// personal catalog's, so a caller that only ever read `head` before sees
+/// exactly what it saw before. `problems` is the concatenation in the same
+/// order. `origin` is filled for every asset in the result, so
+/// `Catalog::origin_of` always answers correctly on it. `None` when no
+/// personal catalog is loaded — personal always loads first, so a registry
+/// without one is "not loaded", the same answer `with_personal` gives.
 pub fn union_all() -> Result<Option<Catalog>, IpcError> {
     with_catalogs(|catalogs| {
-        if catalogs.is_empty() {
+        let Some(personal) = catalogs.values().find(|c| c.org_id.is_none()) else {
             return Ok(None);
-        }
-        let mut ordered: Vec<&Catalog> = catalogs.values().collect();
-        ordered.sort_by(|a, b| match (a.org_id.is_none(), b.org_id.is_none()) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.cmp(&b.name),
-        });
-
-        let head_source = ordered
-            .iter()
-            .find(|c| c.org_id.is_none())
-            .copied()
-            .unwrap_or(ordered[0]);
+        };
+        let ordered = in_order(catalogs);
 
         let mut merged = Catalog {
             id: 0,
             name: String::new(),
-            head: head_source.head.clone(),
-            layers: head_source.layers.clone(),
+            head: personal.head.clone(),
+            layers: personal.layers.clone(),
             ..Default::default()
         };
 
@@ -324,6 +327,17 @@ mod tests {
     #[test]
     fn union_all_is_none_when_nothing_is_loaded() {
         let _g = crate::service::catalog::lock_registry_for_test();
+        assert!(union_all().unwrap().is_none());
+    }
+
+    /// Personal always loads first; a registry holding only org catalogs
+    /// is "not loaded" as far as the union is concerned — the same answer
+    /// `with_personal` gives — rather than a union headed by whichever org
+    /// catalog sorts first.
+    #[test]
+    fn union_all_is_none_without_a_personal_catalog() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        install_for_test(cat_with_skills(2, "acme", Some(9), &["c"])).unwrap();
         assert!(union_all().unwrap().is_none());
     }
 }
