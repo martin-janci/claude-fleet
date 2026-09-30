@@ -189,6 +189,18 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   non-empty-catalog host — never scanning it over SSH — unless
   `allow_unlayered` is set, since syncing it as-is would otherwise install
   the whole catalog there.
+- **Multi-harness F3a / F3b** (plan
+  `docs/superpowers/plans/2026-09-30-f3ab-harness-set-and-codex-agents.md`):
+  `hosts.harnesses` (migration 089, NULL = auto) and the one gate
+  `service/catalog/harness_set.rs::harness_gate` decide per host whether
+  Codex is planned and inventoried (`plan_sync`, `scan_hosts`, the
+  post-apply rescan) — `Off`, `On`, or `Retiring` (turned off but still
+  managed: removals only). The Codex scan prints `##PRESENT`
+  (`HostSnapshot::present`) and still runs on every reachable host, since it
+  is the detection. `set_host_harnesses` (MCP tool, `catalog_admin` action,
+  Host detail's Codex control) sets it; `claude` cannot be removed. Codex
+  renders agents to `~/.codex/agents/<install name>.toml` via the `toml`
+  crate.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. Only one PTY is attached at a time.

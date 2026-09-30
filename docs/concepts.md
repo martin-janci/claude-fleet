@@ -91,7 +91,7 @@ tasks are never suggested.
 Skills, subagents, hooks, MCP servers and plugin references can be kept in a
 git repo in a harness-neutral format and managed from the **Assets** tab.
 Fleet loads the repo on the controller, renders every asset the way each
-harness expects it (Claude Code fully; Codex CLI for skills and MCP servers),
+harness expects it (Claude Code fully; Codex CLI for skills, subagents and MCP servers),
 scans hosts read-only for what is actually installed, and shows each asset
 as in sync, drifted, missing or unsupported per host. Assets found on a host
 but not in the catalog are listed as unmanaged and can be imported.
@@ -110,6 +110,36 @@ unmanaged; when the original identifier is not itself a valid install name
 `install_as` and the report lists it as a warning instead. The asset editor
 exposes an "Installs as" field for the kinds that support it, and the detail
 view shows "installs as `<name>`" when one is set.
+
+**Harnesses per host.** Claude Code is synced on every host. Codex is synced
+only where the host has it: by default (*auto*) where the scan finds the
+`codex` CLI on the PATH, Codex's login (`~/.codex/auth.json`) or its session
+logs (`~/.codex/sessions`) — never `~/.codex` alone, which a Codex sync
+creates itself — or where fleet already manages Codex assets
+(`~/.codex/.fleet-assets.json` names some). Host
+detail's **Codex** control — `auto` / `on` / `off`, the `set_host_harnesses`
+tool (`null` = auto, or a list that always includes `claude`) — overrides
+it. A host with Codex turned off that still holds what fleet installed for
+Codex is *retiring*: its Codex plan only removes those assets, and once
+they are gone Codex is neither planned nor listed there. Every reachable
+host is still scanned for Codex, since the scan is what detects it. A
+catalog agent becomes a Codex subagent at `~/.codex/agents/<install
+name>.toml` — `name`, `description`, `developer_instructions` (the
+prompt), `model` only when `targets.codex.model` is set (no tier mapping),
+plus `targets.codex.extra`; `targets.codex.render_as: skill` renders it as
+a Codex skill instead, and the lint refuses such an agent whose install
+name a skill also uses. Codex subagents have no tool allowlist, so an
+agent's `tools` do not apply there (the Codex preview says so). A `${NAME}`
+secret inside a subagent's TOML is substituted as a TOML string value, so
+any characters in the secret are safe there.
+
+*Upgrading to per-host harnesses.* A host that fleet has already synced Codex
+assets to keeps Codex on under *auto* (its manifest names them) and gains
+Codex subagents on its next sync — every catalog agent now also lands in
+`~/.codex/agents/`. To retire Codex there instead, set Codex to `off` in
+Host detail: the next sync removes only what fleet installed. A Codex MCP
+server merge re-serializes `~/.codex/config.toml`, dropping its comments
+(a limitation that predates this change).
 
 **Sync** is plan-first: `plan_sync` scans the selected hosts and computes
 which assets to create, update, overwrite, adopt, or remove, returning a plan

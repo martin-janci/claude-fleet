@@ -367,6 +367,13 @@ Index by area (names only; see the reference for details):
   files; master token only — a host's layer assignment decides what the
   next `apply_sync` writes to its filesystem, the same reasoning as
   `apply_sync` and `set_secret`).
+- **Multi-harness set (F3a)** — `set_host_harnesses` (choose which
+  harnesses the catalog syncs on one host: `null` = auto — Claude, plus
+  Codex where a scan finds it or fleet already manages it there —
+  otherwise an explicit list that must include `claude`; edits fleet state
+  only, master token only, same reasoning as `set_host_layers`).
+  `catalog_admin`'s `set_host_harnesses` action is the same call for a
+  granted desktop.
 - **Orchestration** — `wait_for_session`, `session_transcript`,
   `session_conversation`, `session_tool_detail`, `run_prompt`,
   `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,

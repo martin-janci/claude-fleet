@@ -789,6 +789,20 @@ pub fn registry_put_existing(id: &str, expires_at: Instant, mut plan: SyncPlan) 
     map.insert(id.to_string(), (expires_at, plan));
 }
 
+/// Drop every parked plan that covers `host_alias` (any harness, any
+/// status), returning how many went. A host's harness choice changing
+/// (`harness_set::set_host_harnesses`) makes such a plan wrong — one
+/// computed before Codex was turned off would still write Codex there — so
+/// its id then reads as stale (`E_SYNC_PLAN_STALE`) and the caller re-plans.
+pub fn registry_drop_host(host_alias: &str) -> usize {
+    let now = Instant::now();
+    let mut map = plans();
+    map.retain(|_, (e, _)| *e > now);
+    let before = map.len();
+    map.retain(|_, (_, plan)| !plan.hosts.iter().any(|h| h.host_alias == host_alias));
+    before - map.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1666,6 +1680,32 @@ mod tests {
         assert_eq!(back.hosts.len(), 1);
         assert!(registry_take(&id).is_none(), "taking a plan consumes it");
         assert!(registry_take("no-such-plan").is_none());
+    }
+
+    fn host_plan(alias: &str) -> HostPlan {
+        HostPlan {
+            host_alias: alias.into(),
+            harness: "codex".into(),
+            status: "planned".into(),
+            detail: None,
+            actions: Vec::new(),
+            snapshot: HostSnapshot::default(),
+            manifest: Manifest::default(),
+        }
+    }
+
+    #[test]
+    fn registry_drop_host_drops_only_the_plans_covering_that_host() {
+        let gone = format!("drop-me-{}", uuid::Uuid::new_v4());
+        let kept = format!("keep-me-{}", uuid::Uuid::new_v4());
+        let both = registry_put(SyncPlan::new(vec![host_plan(&kept), host_plan(&gone)]));
+        let only = registry_put(SyncPlan::new(vec![host_plan(&gone)]));
+        let other = registry_put(SyncPlan::new(vec![host_plan(&kept)]));
+        assert_eq!(registry_drop_host(&gone), 2);
+        assert!(registry_take(&both).is_none());
+        assert!(registry_take(&only).is_none());
+        assert!(registry_take(&other).is_some(), "another host's plan stays");
+        assert_eq!(registry_drop_host(&gone), 0);
     }
 
     #[test]

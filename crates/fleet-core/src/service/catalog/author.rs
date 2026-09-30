@@ -11,6 +11,7 @@
 // This module is the service layer for the twelve `catalog_*` authoring
 // commands in `commands/assets.rs`.
 
+use super::harness::codex::CODEX_SKILLS_DIR;
 use super::harness::HARNESS_IDS;
 use super::layer::{Axis, Layer};
 use super::model::{
@@ -316,6 +317,23 @@ pub fn secrets_example_names(root: &Path) -> Vec<String> {
     }
 }
 
+/// Whether Codex renders `a` into `~/.codex/skills/`: a skill, or an agent
+/// with `targets.codex.render_as: skill` — in both cases only while its
+/// Codex target is enabled.
+fn lands_in_codex_skills(a: &Asset) -> bool {
+    let t = a.target("codex");
+    t.enabled
+        && match a.kind() {
+            Kind::Skill => true,
+            Kind::Agent => t.render_as.as_deref() == Some("skill"),
+            _ => false,
+        }
+}
+
+/// Codex's built-in subagent names: a custom agent of one of these names
+/// overrides the built-in rather than adding an agent.
+const CODEX_BUILTIN_AGENTS: &[&str] = &["default", "worker", "explorer"];
+
 /// Static lint for one asset. Errors block a save (`E_LINT`), warnings never
 /// do. The rule list is the spec's, exactly, plus the cross-asset
 /// install-name uniqueness rule below.
@@ -376,6 +394,29 @@ pub fn lint(
             ),
         );
     }
+    // F3b: Codex renders an agent with `targets.codex.render_as: skill` into
+    // `~/.codex/skills/<install name>/`, where a skill of that install name
+    // also lands — across kinds, so the rule above cannot see it. Both
+    // manifest entries would claim one path, and removing either asset would
+    // delete the other's installed copy.
+    if lands_in_codex_skills(asset) {
+        if let Some(other) = catalog.assets.iter().find(|a| {
+            a.kind() != kind && lands_in_codex_skills(a) && a.install_name() == install_name
+        }) {
+            report.error(
+                if asset.header.install_as.is_some() {
+                    "install_as"
+                } else {
+                    "name"
+                },
+                format!(
+                    "install name '{install_name}' also renders to {CODEX_SKILLS_DIR}/{install_name} for {}/{} (targets.codex.render_as: skill)",
+                    other.kind().as_str(),
+                    other.header.name
+                ),
+            );
+        }
+    }
     let strings = string_fields(asset);
     for (field, value) in &strings {
         if value.contains("TODO") {
@@ -421,6 +462,24 @@ pub fn lint(
                 format!(
                     "{SECRETS_EXAMPLE} is missing; it should list {}",
                     names.join(", ")
+                ),
+            );
+        }
+    }
+
+    // F3b: a Codex subagent's `name` is the catalog name; Codex treats one
+    // named like a built-in agent as overriding that built-in.
+    if kind == Kind::Agent {
+        let t = asset.target("codex");
+        let name = asset.header.name.as_str();
+        if t.enabled
+            && t.render_as.as_deref() != Some("skill")
+            && CODEX_BUILTIN_AGENTS.contains(&name)
+        {
+            report.warn(
+                "name",
+                format!(
+                    "Codex has a built-in '{name}' agent; this one overrides it there (rename it, or set targets.codex.enabled: false)"
                 ),
             );
         }
@@ -1240,6 +1299,48 @@ mod tests {
         assert_eq!(fields(&lint_of(&agent).warnings), vec!["tools"]);
     }
 
+    /// F3b: an agent Codex would install under a built-in agent's name
+    /// (`default`, `worker`, `explorer`) is a warning, not an error — and
+    /// not at all when Codex renders it as a skill or not at all.
+    #[test]
+    fn lint_warns_when_a_codex_subagent_takes_a_built_in_name() {
+        for name in ["default", "worker", "explorer"] {
+            let mut agent = Asset::from_yaml(
+                None,
+                &format!("kind: agent\nname: {name}\ndescription: A reasonably long description here.\ntools: [read]\n"),
+            )
+            .unwrap();
+            agent.body = "You work.\n".into();
+            let report = lint_of(&agent);
+            assert_eq!(fields(&report.warnings), vec!["name"], "{name}");
+            assert!(
+                report.warnings[0].message.contains("built-in"),
+                "{:?}",
+                report.warnings
+            );
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+        }
+        for targets in [
+            "targets:\n  codex:\n    render_as: skill\n",
+            "targets:\n  codex:\n    enabled: false\n",
+        ] {
+            let mut agent = Asset::from_yaml(
+                None,
+                &format!("kind: agent\nname: worker\ndescription: A reasonably long description here.\ntools: [read]\n{targets}"),
+            )
+            .unwrap();
+            agent.body = "You work.\n".into();
+            assert!(lint_of(&agent).warnings.is_empty(), "{targets}");
+        }
+        let mut other = Asset::from_yaml(
+            None,
+            "kind: agent\nname: planner\ndescription: A reasonably long description here.\ntools: [read]\n",
+        )
+        .unwrap();
+        other.body = "You plan.\n".into();
+        assert!(lint_of(&other).warnings.is_empty());
+    }
+
     #[test]
     fn lint_warns_on_an_unknown_target_harness() {
         let mut a = clean_skill();
@@ -1326,6 +1427,54 @@ mod tests {
             "{:?}",
             lint(&skill, &catalog, &[], true).errors
         );
+        assert!(lint(&agent, &catalog, &[], true).errors.is_empty());
+    }
+
+    /// F3b: an agent Codex renders as a skill lands in the same
+    /// `~/.codex/skills/<install name>/` as a skill of that install name —
+    /// reported from both sides; a skill with Codex disabled does not collide.
+    #[test]
+    fn lint_errors_when_a_codex_skill_agent_shares_a_skills_install_name() {
+        let mut skill = clean_skill();
+        skill.header.name = "pm".into();
+        let mut agent = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: A reasonably long description here.\ntools: [read]\ntargets:\n  codex:\n    render_as: skill\n",
+        )
+        .unwrap();
+        agent.body = "You plan.\n".into();
+        let catalog = Catalog {
+            assets: vec![skill.clone(), agent.clone()],
+            ..Default::default()
+        };
+        let report = lint(&agent, &catalog, &[], true);
+        assert_eq!(fields(&report.errors), vec!["name"], "{:?}", report.errors);
+        assert!(
+            report.errors[0].message.contains("~/.codex/skills/pm")
+                && report.errors[0].message.contains("skill/pm"),
+            "{:?}",
+            report.errors
+        );
+        let report = lint(&skill, &catalog, &[], true);
+        assert_eq!(fields(&report.errors), vec!["name"], "{:?}", report.errors);
+        assert!(
+            report.errors[0].message.contains("agent/pm"),
+            "{:?}",
+            report.errors
+        );
+
+        let mut off = skill.clone();
+        off.header.targets.insert(
+            "codex".into(),
+            TargetOverride {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        let catalog = Catalog {
+            assets: vec![off, agent.clone()],
+            ..Default::default()
+        };
         assert!(lint(&agent, &catalog, &[], true).errors.is_empty());
     }
 

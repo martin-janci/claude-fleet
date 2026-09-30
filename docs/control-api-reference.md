@@ -497,6 +497,12 @@ Set the session's friendly display name, once per task by the in-session agent (
 
 Parameters: `friendly_name`, `host_alias`, `session_id`, `tmux_name`
 
+### `set_host_harnesses`
+
+Choose which harnesses the asset catalog syncs on one host. harnesses null = auto: Claude, plus Codex where a scan finds the codex CLI, ~/.codex/auth.json or ~/.codex/sessions, or where fleet already manages Codex assets. Otherwise a list that must include "claude"; ["claude"] turns Codex off, and the next sync then removes what fleet installed for Codex there. Edits fleet state only. Master token only.
+
+Parameters: `harnesses`, `host_alias`
+
 ### `set_host_layers`
 
 Replace a host's layer assignment: one optional role plus context layers. Edits fleet state only, never catalog files. Requires a configured catalog (in the app, or `fleet-hub catalog set` on a hub). Master token only.
@@ -791,6 +797,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::assets::catalog_resolve_preview`
 - `commands::assets::catalog_propose_layers`
 - `commands::assets::catalog_set_host_layers`
+- `commands::assets::catalog_set_host_harnesses`
 - `commands::assets::catalog_layer_template`
 - `commands::assets::catalog_write_layer`
 - `commands::assets::catalog_delete_layer`

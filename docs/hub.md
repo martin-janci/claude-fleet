@@ -251,6 +251,13 @@ Step 3 is not ceremony: `up -d` recreates the container only if something
 actually changed, so a pin you forgot to edit produces a completely silent
 no-op.
 
+**Codex on upgraded hosts.** The release with per-host harnesses keeps
+Codex on for every host fleet has already synced Codex assets to, and their
+next sync adds Codex subagents (`~/.codex/agents/`). Turn Codex `off` in Host
+detail to retire it on a host instead; see *Harnesses per host* in
+`docs/concepts.md`. A Codex MCP merge re-serializes `~/.codex/config.toml`
+and drops its comments, as before.
+
 Refreshing the compose file itself (`curl -O …/deploy/hub/docker-compose.yml`)
 also upgrades you, because the copy on `main` carries the pin from the newest
 stable release. Diff it against yours before overwriting: it is the file your
@@ -988,10 +995,10 @@ What a client may do:
   `E_CONFLICT` instead of overwriting that edit.
 - **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
   `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `set_host_layers`,
-  `pair_client`, `revoke_client`, `set_client_trust` and `list_clients` are
-  master-token only, so a paired phone can neither re-provision the fleet nor
-  pair a second device nor revoke (or trust) your own client — nor even
-  enumerate the other devices you have paired.
+  `set_host_harnesses`, `pair_client`, `revoke_client`, `set_client_trust`
+  and `list_clients` are master-token only, so a paired phone can neither
+  re-provision the fleet nor pair a second device nor revoke (or trust) your
+  own client — nor even enumerate the other devices you have paired.
 - **Except what you grant: the asset catalog.** `fleet-hub client grant
   <name> assets` lets that one client manage the asset catalog from its
   Assets tab — configure and load the checkout, create / edit / delete
@@ -2506,7 +2513,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 220 commands, 142 route to a hub tool, 1 routes except for one argument shape, 55 refuse, and 22 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 221 commands, 143 route to a hub tool, 1 routes except for one argument shape, 55 refuse, and 22 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |

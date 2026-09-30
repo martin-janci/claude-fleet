@@ -404,6 +404,17 @@ fn asset_inventory_has_fleet_owned(conn: &Connection) -> rusqlite::Result<bool> 
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 089 (`hosts.harnesses`,
+/// multi-harness F3a).
+fn hosts_has_harnesses(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'harnesses'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 067 (work graph M14.1b, D31).
 fn orgs_has_bound_sees_unassigned(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -958,6 +969,13 @@ const MIGRATIONS: &[Migration] = &[
     // Declarative pages, guides: `guide_proposals`. A new table and index,
     // `IF NOT EXISTS`, safe to re-run.
     Migration::plain(88, include_str!("../../migrations/088_guides.sql")),
+    // Multi-harness F3a: which harnesses the asset catalog syncs on a host
+    // (NULL = auto). ADD COLUMN is not idempotent: the same guard 087 uses.
+    Migration {
+        version: 89,
+        sql: include_str!("../../migrations/089_host_harnesses.sql"),
+        already_applied: Some(hosts_has_harnesses),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -3925,6 +3943,30 @@ mod tests {
         }
         s.conn
             .execute_batch("DELETE FROM schema_version WHERE version >= 86;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_089_adds_hosts_harnesses_as_auto_and_is_safe_to_rerun() {
+        let s = store_at_version(88);
+        s.conn
+            .execute_batch("INSERT INTO hosts (alias, reachable) VALUES ('h', 1);")
+            .unwrap();
+        assert!(!hosts_has_harnesses(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(hosts_has_harnesses(&s.conn).unwrap());
+        let v: Option<String> = s
+            .conn
+            .query_row("SELECT harnesses FROM hosts WHERE alias = 'h'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(v, None, "an existing host starts on auto");
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 89;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);

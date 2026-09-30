@@ -298,6 +298,8 @@ export const ROUTED_ACTIONS = [
   // Task 6: import works from any host over SSH now, so it routes to the
   // hub's catalog_admin like every other asset-catalog mutation.
   'catalog_import_host',
+  // Multi-harness F3a: a host's Codex choice is a catalog_admin action too.
+  'catalog_set_host_harnesses',
   'send_prompt',
   'kill_session',
   'safe_kill_session',

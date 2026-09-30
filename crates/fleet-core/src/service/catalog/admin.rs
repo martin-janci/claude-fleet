@@ -57,6 +57,14 @@ pub struct SetHostLayersArgs {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetHostHarnessesArgs {
+    pub host_alias: String,
+    /// `None` = auto; otherwise the harness ids, `claude` among them.
+    #[serde(default)]
+    pub harnesses: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerTemplateArgs {
     pub name: String,
     pub axis: Axis,
@@ -127,6 +135,7 @@ admin_calls! {
     "resolve_preview" => ResolvePreview(ResolvePreviewArgs),
     "propose_layers" => ProposeLayers,
     "set_host_layers" => SetHostLayers(SetHostLayersArgs),
+    "set_host_harnesses" => SetHostHarnesses(SetHostHarnessesArgs),
     "layer_template" => LayerTemplate(LayerTemplateArgs),
     "write_layer" => WriteLayer(WriteLayerArgs),
     "delete_layer" => DeleteLayer(LayerRef),
@@ -210,6 +219,11 @@ pub async fn run(
             &a.host_alias,
             a.role.as_deref(),
             &a.contexts.iter().map(String::as_str).collect::<Vec<_>>(),
+            store,
+        )?),
+        AdminCall::SetHostHarnesses(a) => json(super::harness_set::set_host_harnesses(
+            &a.host_alias,
+            a.harnesses.as_deref(),
             store,
         )?),
         AdminCall::LayerTemplate(a) => {
@@ -321,6 +335,10 @@ mod tests {
                 host_alias: "h".into(),
                 role: Some("r".into()),
                 contexts: vec!["c".into()],
+            }),
+            AdminCall::SetHostHarnesses(SetHostHarnessesArgs {
+                host_alias: "h".into(),
+                harnesses: Some(vec!["claude".into(), "codex".into()]),
             }),
             AdminCall::LayerTemplate(LayerTemplateArgs {
                 name: "l".into(),

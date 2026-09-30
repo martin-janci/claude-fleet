@@ -1083,6 +1083,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "catalog_set_host_harnesses",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    (
         "catalog_layer_template",
         Verdict::Routed {
             tool: "catalog_admin",

@@ -2,6 +2,7 @@
 //! catalog assets, persist per-asset drift states.
 
 use super::harness::{json_get, ConfigMerge, Harness, HostSnapshot, MergeMode};
+use super::harness_set::{gated_catalog, harness_gate, HarnessFacts};
 use super::model::{sha256_hex, Kind};
 use super::repo::Catalog;
 use super::sync::manifest::Manifest;
@@ -151,7 +152,8 @@ pub async fn scan_host_harness(
 }
 
 /// Scan every non-hidden reachable host (or just `only_host`) with every
-/// harness that supports scanning, persisting rows per (host, harness).
+/// harness that supports scanning, persisting per (host, harness) the rows
+/// `harness_set::harness_gate` lets through.
 /// Per-host failures never abort the others (mirrors `provision_hosts`).
 pub async fn scan_hosts(
     store: &Mutex<Store>,
@@ -209,6 +211,8 @@ pub async fn scan_hosts(
                 continue;
             }
         };
+        // Multi-harness F3a: the host's own harness choice (`None` = auto).
+        let configured = h.harnesses.clone();
         for harness in super::harness::all() {
             if harness.scan_script().is_none() {
                 continue;
@@ -217,15 +221,24 @@ pub async fn scan_hosts(
             match scan_host_harness(ssh, &h.alias, harness.as_ref()).await {
                 Ok(snap) => {
                     let manifest = Manifest::from_snapshot(&snap, harness.manifest_path());
-                    let rows = compute_states(
-                        &catalog,
-                        harness.as_ref(),
-                        &h.alias,
-                        &snap,
-                        &manifest,
-                        &secrets,
-                        scanned_at,
+                    // `Off` persists no rows (clearing stale ones); `Retiring`
+                    // only fleet's own installs, as orphans.
+                    let gate = harness_gate(
+                        harness.id(),
+                        configured.as_deref(),
+                        HarnessFacts::of(&snap, &manifest),
                     );
+                    let rows = gated_catalog(gate, &catalog).map_or_else(Vec::new, |c| {
+                        compute_states(
+                            c,
+                            harness.as_ref(),
+                            &h.alias,
+                            &snap,
+                            &manifest,
+                            &secrets,
+                            scanned_at,
+                        )
+                    });
                     total += rows.len();
                     match store.lock() {
                         Ok(s) => {
@@ -679,8 +692,14 @@ mod tests {
             7,
         );
         assert_eq!(
+            rows.iter().find(|r| r.name == "h").unwrap().state,
+            "unsupported",
+            "codex renders no hooks"
+        );
+        assert_eq!(
             rows.iter().find(|r| r.name == "gone").unwrap().state,
-            "unsupported"
+            "missing",
+            "codex renders agents since F3b"
         );
         assert_eq!(
             rows.iter().find(|r| r.name == "s").unwrap().state,
@@ -1121,5 +1140,73 @@ mod tests {
             5,
         );
         assert_eq!(rows[0].state, "drifted");
+    }
+
+    /// Restores `HOME` when the test (or a panic) ends. Copied from
+    /// `sync::apply`'s test module, which cannot export it.
+    #[cfg(unix)]
+    struct HomeGuard(Option<String>);
+    #[cfg(unix)]
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    /// F3a: `scan_hosts` keeps no Codex rows for a host that turned Codex
+    /// off, even with Codex detected (`~/.codex/sessions`); back on auto,
+    /// the same host is inventoried for Codex again.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn scan_hosts_follows_the_hosts_harness_choice() {
+        let _g = crate::service::catalog::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        std::fs::create_dir_all(home.path().join(".codex/sessions")).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("skills/s")).unwrap();
+        std::fs::write(root.path().join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::write(
+            root.path().join("skills/s/asset.yaml"),
+            "kind: skill\nname: s\ndescription: d\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("skills/s/body.md"), "b\n").unwrap();
+        let cat = crate::service::catalog::repo::load_dir(root.path()).unwrap();
+        *crate::service::catalog::CATALOG.write().unwrap() = Some(cat);
+
+        let store = std::sync::Mutex::new(crate::store::Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("local", None).unwrap();
+            s.set_host_harnesses("local", Some(&["claude".to_string()][..]))
+                .unwrap();
+        }
+        let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
+        let results = scan_hosts(&store, &ssh, Some("local")).await.unwrap();
+        assert_eq!(results[0].status, "scanned", "{:?}", results[0].detail);
+        let rows = store.lock().unwrap().list_inventory().unwrap();
+        assert!(rows.iter().any(|r| r.harness == "claude" && r.name == "s"));
+        assert!(rows.iter().all(|r| r.harness != "codex"), "{rows:?}");
+
+        store
+            .lock()
+            .unwrap()
+            .set_host_harnesses("local", None)
+            .unwrap();
+        scan_hosts(&store, &ssh, Some("local")).await.unwrap();
+        let rows = store.lock().unwrap().list_inventory().unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.harness == "codex" && r.name == "s" && r.state == "missing"),
+            "{rows:?}"
+        );
     }
 }
