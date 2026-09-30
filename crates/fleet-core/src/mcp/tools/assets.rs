@@ -39,7 +39,8 @@ impl FleetTools {
     #[tool(description = "Import a host's Claude config (~/.claude skills, \
         agents, hooks, ~/.claude.json MCP servers, installed plugins) into \
         the catalog working tree as IR assets. Never overwrites; collisions \
-        are reported. Only host_alias `local`.")]
+        are reported. Any host: `local` reads this machine, others are read \
+        over SSH. `only` limits it to `<kind>:<name>` assets.")]
     pub(super) async fn import_assets(
         &self,
         Parameters(args): Parameters<catalog::ImportArgs>,
@@ -56,7 +57,9 @@ impl FleetTools {
             s.get_setting(crate::mcp::SETTING_TOKEN)
                 .map_err(|e| to_mcp_err(e.into()))?
         };
-        let rep = catalog::import_host(args, &self.store, token.as_deref()).map_err(to_mcp_err)?;
+        let rep = catalog::import_host(args, &self.store, &self.ssh, token.as_deref())
+            .await
+            .map_err(to_mcp_err)?;
         ok_json(&rep)
     }
 

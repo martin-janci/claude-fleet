@@ -2451,10 +2451,11 @@ standalone exactly as before.
   `catalog_admin` once when it opens. For a client granted the catalog
   (`fleet-hub client grant <name> assets`, see *Clients*) it is the full
   panel onto the hub's checkout: set it up, edit assets, lint, commit, push,
-  Sync and Secrets, exactly as standalone — only *Import from host* (it reads
-  host `local`, which on a hub is the hub's machine) and *Open in session*
-  stay disabled. A resource file you add is read on this machine and its
-  bytes sent to the hub. For any other client the hub answers `E_FORBIDDEN`
+  Sync, Secrets and Import from host, exactly as standalone — only *Open in
+  session* stays disabled. Import reads any host over SSH (`import_assets {
+  host_alias }`), so a hub imports from the machines it manages. A resource
+  file you add is read on this machine and its bytes sent to the hub. For
+  any other client the hub answers `E_FORBIDDEN`
   and the tab is a read-only overview: the hub's catalog through
   `list_assets` (each asset's per-host state, unmanaged assets, problems)
   and a Scan hosts button through `scan_assets`, with the grant command to
@@ -2482,7 +2483,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 217 commands, 138 route to a hub tool, 1 routes except for one argument shape, 56 refuse, and 22 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 217 commands, 139 route to a hub tool, 1 routes except for one argument shape, 55 refuse, and 22 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -2492,7 +2493,6 @@ Of the 217 commands, 138 route to a hub tool, 1 routes except for one argument s
 | `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `assign_host_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `assign_tracker_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
-| `catalog_import_host` | an import reads the Claude config of host `local`, which on a hub is the hub's own machine, not this one; call import_assets on the hub, or import on the machine whose ~/.claude you mean |
 | `catalog_spawn_author_session` | an author session is a Claude session started in the catalog's checkout on the machine that owns it, and the hub has no tool that starts one; edit the assets from this panel, or start a session in the checkout on the hub's machine |
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
 | `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |

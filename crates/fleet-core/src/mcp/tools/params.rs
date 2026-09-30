@@ -1007,10 +1007,10 @@ pub struct SetHostLayersParams {
 pub struct CatalogAdminParams {
     /// config|configure|load|get_asset|template|create_asset|update_asset|
     /// delete_asset|add_resource_bytes|remove_resource|lint_asset|lint_all|
-    /// commit_pending|push|repo_status|inventory|plan_sync|apply_sync|
-    /// last_sync|list_secrets|set_secret|delete_secret|list_layers|
-    /// resolve_preview|propose_layers|set_host_layers|layer_template|
-    /// write_layer|delete_layer
+    /// commit_pending|push|repo_status|inventory|import_host|plan_sync|
+    /// apply_sync|last_sync|list_secrets|set_secret|delete_secret|
+    /// list_layers|resolve_preview|propose_layers|set_host_layers|
+    /// layer_template|write_layer|delete_layer
     pub action: String,
     /// The desktop command's own argument object.
     #[serde(default)]

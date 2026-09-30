@@ -13,7 +13,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ImportReport {
     pub created: Vec<(String, String)>,
     pub problems: Vec<Problem>,
@@ -713,14 +713,148 @@ fn read_json(p: &Path) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// Convert a Claude config directory into catalog assets. Never overwrites;
-/// collisions become problems. `dry_run` writes nothing.
+/// Printed on the host by `import_host` for a remote alias: every file the
+/// importer reads, framed as `##FILE <home-relative path>` + one base64 line.
+/// No single quotes: the whole script is one `shell::quote`d word.
+// `###"..."###` (three `#`s), not `#"..."#`: the script's own `printf
+// "##FILE ..."` contains a `"` immediately followed by two `#`s, which would
+// otherwise close a one-`#` raw string early.
+pub const REMOTE_SOURCES_SCRIPT: &str = r###"cd "$HOME" || exit 1
+emit() { printf "##FILE %s\n" "$1"; base64 < "$1" | tr -d "\n"; printf "\n"; }
+for f in .claude/settings.json .claude.json .claude/plugins/installed_plugins.json .claude/plugins/known_marketplaces.json; do
+  [ -f "$f" ] && emit "$f"
+done
+for d in .claude/skills .claude/agents; do
+  [ -d "$d" ] || continue
+  find -L "$d" -type f -size -1024k 2>/dev/null | while IFS= read -r f; do emit "$f"; done
+done
+"###;
+
+/// Rebuild the files `REMOTE_SOURCES_SCRIPT` printed under `root`, and point
+/// `ImportSources` at them. Refuses anything outside `.claude/` and
+/// `.claude.json`.
+pub fn parse_remote_dump(stdout: &str, root: &Path) -> Result<ImportSources, IpcError> {
+    use base64::Engine;
+    let bad = |p: &str| IpcError::new(E_INVALID, format!("remote import: refusing path {p}"));
+    let mut lines = stdout.lines();
+    while let Some(line) = lines.next() {
+        let Some(path) = line.strip_prefix("##FILE ") else {
+            continue;
+        };
+        let ok = (path == ".claude.json" || path.starts_with(".claude/"))
+            && !path.split('/').any(|seg| seg == ".." || seg.is_empty());
+        if !ok {
+            return Err(bad(path));
+        }
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(lines.next().unwrap_or("").trim())
+            .map_err(|e| IpcError::new(E_INVALID, format!("remote import: {path}: {e}")))?;
+        let dest = root.join(path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, data)?;
+    }
+    Ok(ImportSources {
+        claude_dir: root.join(".claude"),
+        claude_json: root.join(".claude.json"),
+    })
+}
+
+/// Controller ruling (Task 6, security): remove fleet's own entries from a
+/// remote dump before it is imported. Each host carries a DIFFERENT bearer
+/// token than the controller's — `scrub_token` is built to redact the
+/// controller's own token and cannot catch another host's — so without this,
+/// a remote import would write another host's fleet secret straight into the
+/// catalog's git repo, which gets pushed. `import_host` calls this for every
+/// host but `local`: on `local`, fleet's entries carry the controller's own
+/// token, which every value `scrub_token` touches already redacts, and the
+/// existing tests (`import_converts_every_kind_losslessly`, keyed on
+/// `claude-fleet` importing) expect `local` to keep importing it.
+///
+/// Matches by SHAPE (`hooks_install::is_fleet_hook_entry` /
+/// `is_fleet_command_entry`, `provision::FLEET_MCP_SERVER`,
+/// `provision::FLEET_SKILL_NAMES`), never by token value, so it works no
+/// matter what the host's own token is. A hook matcher group whose `hooks`
+/// list is emptied by the filter is dropped entirely rather than left as an
+/// empty group.
+pub fn scrub_fleet_entries(src: &ImportSources) -> Result<(), IpcError> {
+    use crate::service::hooks_install::{is_fleet_command_entry, is_fleet_hook_entry};
+    use crate::service::provision::{FLEET_MCP_SERVER, FLEET_SKILL_NAMES};
+
+    for name in FLEET_SKILL_NAMES {
+        let dir = src.claude_dir.join("skills").join(name);
+        if dir.is_dir() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+    }
+
+    let settings_path = src.claude_dir.join("settings.json");
+    if let Ok(bytes) = std::fs::read(&settings_path) {
+        if let Ok(mut settings) = serde_json::from_slice::<Value>(&bytes) {
+            if let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) {
+                for (_event, entries) in hooks.iter_mut() {
+                    let Some(arr) = entries.as_array_mut() else {
+                        continue;
+                    };
+                    for entry in arr.iter_mut() {
+                        if let Some(inner) = entry.get_mut("hooks").and_then(Value::as_array_mut) {
+                            inner.retain(|h| !is_fleet_hook_entry(h) && !is_fleet_command_entry(h));
+                        }
+                    }
+                    arr.retain(|entry| {
+                        entry
+                            .get("hooks")
+                            .and_then(Value::as_array)
+                            .is_none_or(|a| !a.is_empty())
+                    });
+                }
+            }
+            let encoded = serde_json::to_vec(&settings)
+                .expect("a parsed serde_json::Value always re-serialises");
+            std::fs::write(&settings_path, encoded)?;
+        }
+    }
+
+    if let Ok(bytes) = std::fs::read(&src.claude_json) {
+        if let Ok(mut claude_json) = serde_json::from_slice::<Value>(&bytes) {
+            if let Some(servers) = claude_json
+                .get_mut("mcpServers")
+                .and_then(Value::as_object_mut)
+            {
+                servers.remove(FLEET_MCP_SERVER);
+            }
+            let encoded = serde_json::to_vec(&claude_json)
+                .expect("a parsed serde_json::Value always re-serialises");
+            std::fs::write(&src.claude_json, encoded)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// [`import_claude_only`] importing everything (`only` empty).
 pub fn import_claude(
     src: &ImportSources,
     repo_root: &Path,
     host: &str,
     fleet_token: Option<&str>,
     dry_run: bool,
+) -> Result<ImportReport, IpcError> {
+    import_claude_only(src, repo_root, host, fleet_token, dry_run, &[])
+}
+
+/// Convert a Claude config directory into catalog assets. Never overwrites;
+/// collisions become problems. `dry_run` writes nothing. `only` — `<kind>:
+/// <name>` keys — limits what is imported to those assets; empty imports
+/// everything.
+pub fn import_claude_only(
+    src: &ImportSources,
+    repo_root: &Path,
+    host: &str,
+    fleet_token: Option<&str>,
+    dry_run: bool,
+    only: &[String],
 ) -> Result<ImportReport, IpcError> {
     let mut report = ImportReport {
         created: vec![],
@@ -840,6 +974,13 @@ pub fn import_claude(
 
     for a in assets {
         let kind = a.kind();
+        if !only.is_empty()
+            && !only
+                .iter()
+                .any(|k| *k == format!("{}:{}", kind.as_str(), a.header.name))
+        {
+            continue;
+        }
         let problems = a.validate();
         if !problems.is_empty() {
             report.problems.push(Problem {
@@ -1671,5 +1812,160 @@ mod tests {
             "{:?}",
             rep.problems
         );
+    }
+
+    #[test]
+    fn parse_remote_dump_rebuilds_a_home_tree() {
+        use base64::Engine;
+        let b = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+        let out = format!(
+            "##FILE .claude/skills/w/SKILL.md\n{}\n##FILE .claude.json\n{}\n",
+            b("---\nname: w\ndescription: Make a worktree.\n---\nbody\n"),
+            b(r#"{"mcpServers":{}}"#),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let src = parse_remote_dump(&out, dir.path()).unwrap();
+        assert!(src.claude_dir.join("skills/w/SKILL.md").is_file());
+        assert_eq!(
+            std::fs::read_to_string(&src.claude_json).unwrap(),
+            r#"{"mcpServers":{}}"#
+        );
+    }
+
+    #[test]
+    fn parse_remote_dump_refuses_paths_outside_claude() {
+        for bad in ["../etc/passwd", ".claude/../x", ".ssh/id_ed25519", "/abs"] {
+            let out = format!("##FILE {bad}\nAAAA\n");
+            let dir = tempfile::tempdir().unwrap();
+            assert!(parse_remote_dump(&out, dir.path()).is_err(), "{bad}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_imports_the_named_assets() {
+        let (src, repo) = fixture("only");
+        let rep = import_claude_only(
+            &src,
+            &repo,
+            "oci",
+            Some("SECRET123"),
+            true,
+            &["skill:worktree".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            rep.created,
+            vec![("skill".to_string(), "worktree".to_string())]
+        );
+    }
+
+    #[test]
+    fn remote_script_quotes_nothing_and_frames_files() {
+        assert!(REMOTE_SOURCES_SCRIPT.contains("##FILE"));
+        assert!(
+            !REMOTE_SOURCES_SCRIPT.contains('\''),
+            "passed through shell::quote whole"
+        );
+    }
+
+    /// Controller ruling (Task 6, security): a remote import must never copy
+    /// fleet's own hook, its own MCP server or its own skills — each host
+    /// carries a DIFFERENT bearer token than the controller's, so
+    /// `scrub_token` (built to redact the controller's own token) cannot
+    /// catch it, and the catalog is a git repo that gets pushed. This pins
+    /// that `scrub_fleet_entries` (called by `import_host` for every host but
+    /// `local`) drops fleet's http hook and its MCP server entry — matched by
+    /// shape (`is_fleet_hook_entry`/`FLEET_MCP_SERVER`), not by token value —
+    /// while keeping the user's own hook and MCP server, and that the host's
+    /// token never reaches any file the import wrote under the repo.
+    #[cfg(unix)]
+    #[test]
+    fn remote_import_drops_fleets_own_hook_and_mcp_server_never_leaking_the_host_token() {
+        let base = std::env::temp_dir().join(format!("fleet-import-scrub-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let claude_dir = base.join("home/.claude");
+        let w = |rel: &str, c: &str| {
+            let p = base.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        // Fleet's exact installed shape (`hooks_install::hook_entry`): type
+        // http, url `http://127.0.0.1:4180/hook`, a `Bearer` Authorization
+        // header and its 5s timeout — alongside a user's own command hook in
+        // the same event.
+        w(
+            "home/.claude/settings.json",
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"http","url":"http://127.0.0.1:4180/hook","timeout":5,"headers":{"Authorization":"Bearer HOSTTOKEN","X-Fleet-Pane":"$TMUX_PANE"}}]}],"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo mine"}]}]}}"#,
+        );
+        w(
+            "home/.claude.json",
+            r#"{"mcpServers":{"claude-fleet":{"type":"http","url":"http://127.0.0.1:4180/mcp","headers":{"Authorization":"Bearer HOSTTOKEN"}},"jira":{"type":"stdio","command":"npx","args":["-y","jira"]}}}"#,
+        );
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        let src = ImportSources {
+            claude_dir,
+            claude_json: base.join("home/.claude.json"),
+        };
+
+        // The controller's own token (`None` here — a real caller would pass
+        // its own) never matches "HOSTTOKEN": that is the whole point of the
+        // ruling, and this test would still pass with `scrub_token` alone
+        // doing nothing, which is exactly the gap `scrub_fleet_entries` closes.
+        scrub_fleet_entries(&src).unwrap();
+        let rep = import_claude_only(&src, &repo, "oci", None, false, &[]).unwrap();
+
+        assert!(
+            rep.created
+                .contains(&("hook".to_string(), "before-tool-bash".to_string())),
+            "{:?}",
+            rep.created
+        );
+        assert!(
+            rep.created
+                .contains(&("mcp_server".to_string(), "jira".to_string())),
+            "{:?}",
+            rep.created
+        );
+        let cat = load_dir(&repo).unwrap();
+        assert!(
+            cat.find(Kind::Hook, "stop").is_none(),
+            "fleet's Stop hook must not be imported"
+        );
+        assert!(
+            cat.find(Kind::McpServer, "claude-fleet").is_none(),
+            "fleet's own MCP server must not be imported"
+        );
+
+        for entry in walkdir(&repo) {
+            let bytes = fs::read(&entry).unwrap_or_default();
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("HOSTTOKEN"),
+                "{}: leaked the host's fleet token",
+                entry.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    fn walkdir(root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&d) else {
+                continue;
+            };
+            for e in entries.filter_map(|e| e.ok()) {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push(p);
+                }
+            }
+        }
+        out
     }
 }

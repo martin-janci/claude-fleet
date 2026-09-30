@@ -121,9 +121,9 @@ Parameters: `alias`, `hidden`
 
 ### `import_assets`
 
-Import a host's Claude config (~/.claude skills, agents, hooks, ~/.claude.json MCP servers, installed plugins) into the catalog working tree as IR assets. Never overwrites; collisions are reported. Only host_alias `local`.
+Import a host's Claude config (~/.claude skills, agents, hooks, ~/.claude.json MCP servers, installed plugins) into the catalog working tree as IR assets. Never overwrites; collisions are reported. Any host: `local` reads this machine, others are read over SSH. `only` limits it to `<kind>:<name>` assets.
 
-Parameters: `dry_run`, `host_alias`
+Parameters: `dry_run`, `host_alias`, `only`
 
 ### `inbox`
 

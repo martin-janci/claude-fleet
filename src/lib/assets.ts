@@ -146,8 +146,8 @@ export function getAsset(kind: string, name: string): Promise<Result<AssetDetail
   return invokeCmd<AssetDetail>('catalog_get_asset', { args: { kind, name } });
 }
 
-export function importHost(hostAlias: string, dryRun: boolean): Promise<Result<ImportReport>> {
-  return invokeCmd<ImportReport>('catalog_import_host', { args: { host_alias: hostAlias, dry_run: dryRun } });
+export function importHost(hostAlias: string, dryRun: boolean, only: string[] = []): Promise<Result<ImportReport>> {
+  return invokeCmd<ImportReport>('catalog_import_host', { args: { host_alias: hostAlias, dry_run: dryRun, only } });
 }
 
 export function scanHosts(hostAlias?: string): Promise<Result<HostScanResult[]>> {

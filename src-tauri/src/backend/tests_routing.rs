@@ -3631,9 +3631,11 @@ fn a_refusal_never_carries_the_token() {
 ///   routed `kill_session` dismisses an inactive agent exactly as it does.
 ///
 /// The asset catalog used to be the bulk of this list: its commands refused
-/// while the hub had a tool for most of them. They route to `catalog_admin`
-/// now; `catalog_import_host` is the one left refusing, and it still has to
-/// name the hub's `import_assets` rather than deny it.
+/// while the hub had a tool for most of them. They all route to
+/// `catalog_admin` now, including `catalog_import_host` (Task 6: import
+/// works from any host over SSH); `catalog_spawn_author_session` is the one
+/// left refusing, honestly — the hub genuinely has no tool that starts a
+/// Claude session in its checkout.
 ///
 /// The sentences used to be read back out of the source, because a
 /// `#[tauri::command]` cannot be called without a live `tauri::App`. They are
@@ -3647,20 +3649,6 @@ fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
             .unwrap_or_else(|| panic!("{command} no longer refuses"))
     }
     const DENIALS: [&str; 2] = ["exposes no authoring tool", "exposes no tool"];
-
-    for (command, tool) in [("catalog_import_host", "import_assets")] {
-        let said = reason(command);
-        for d in DENIALS {
-            assert!(
-                !said.contains(d),
-                "{command} denies a tool the hub has ({tool}): {said}"
-            );
-        }
-        assert!(
-            said.contains(tool),
-            "{command} must name the hub's {tool}: {said}"
-        );
-    }
 
     let said = reason("dismiss_agent_session");
     for d in DENIALS {
@@ -4367,7 +4355,7 @@ fn catalog_admin_cases() -> Vec<Case> {
     use fleet_core::service::catalog::layer::Axis;
     use fleet_core::service::catalog::model::Kind;
     use fleet_core::service::catalog::sync::{ApplyArgs, PlanArgs};
-    use fleet_core::service::catalog::ConfigureArgs;
+    use fleet_core::service::catalog::{ConfigureArgs, ImportArgs};
 
     const CONFIG: &str =
         r#"{"repo_path":"/srv/assets","remote_url":null,"head_commit":"abc","last_loaded_at":1}"#;
@@ -4536,6 +4524,27 @@ fn catalog_admin_cases() -> Vec<Case> {
             json!({ "action": "inventory" }),
             r#"[{"host_alias":"nas","harness":"claude","kind":"skill","name":"s","state":"in_sync","scanned_at":1,"managed":true}]"#,
             Box::new(|b, s, _| block_on(r::assets_inventory(b, s)).map(|_| ())),
+        ),
+        // Task 6: import works from any host over SSH, not just `local`.
+        (
+            "catalog_import_host",
+            "catalog_admin",
+            json!({ "action": "import_host",
+                    "args": { "host_alias": "oci", "dry_run": true, "only": [] } }),
+            r#"{"created":[],"problems":[],"warnings":[],"flagged_secrets":[],"dry_run":true}"#,
+            Box::new(|b, s, h| {
+                block_on(r::catalog_import_host(
+                    b,
+                    ImportArgs {
+                        host_alias: "oci".into(),
+                        dry_run: true,
+                        only: vec![],
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
         ),
         (
             "catalog_plan_sync",

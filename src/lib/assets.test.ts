@@ -84,7 +84,7 @@ describe('assets store', () => {
     await scanHosts('mefistos');
     expect(mockedInvoke).toHaveBeenCalledWith('assets_scan_hosts', { args: { host_alias: 'mefistos' } });
     await importHost('local', true);
-    expect(mockedInvoke).toHaveBeenCalledWith('catalog_import_host', { args: { host_alias: 'local', dry_run: true } });
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_import_host', { args: { host_alias: 'local', dry_run: true, only: [] } });
   });
 
   it('mergeInventoryRow upserts by identity and clearInventoryFor prunes one host+harness', () => {

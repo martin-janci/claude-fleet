@@ -47,11 +47,12 @@ pub static CATALOG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 use crate::events::CatalogSummary;
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
+use crate::ssh::SshClient;
 use crate::store::{AssetInventoryRow, CatalogConfigRow, Store};
 use harness::RenderPlan;
 use model::{Asset, Kind, Problem};
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigureArgs {
@@ -280,38 +281,58 @@ pub struct AssetDetail {
     pub hosts: Vec<HostState>,
 }
 
-#[derive(Debug, Clone, Deserialize, rmcp::schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "ImportAssetsParams")]
 pub struct ImportArgs {
-    /// Only `local` (the fleet controller).
+    /// Any host alias; `local` reads this machine's config.
     pub host_alias: String,
     /// Report, write nothing.
     #[serde(default)]
     pub dry_run: bool,
+    /// Only these `<kind>:<name>` assets; empty imports everything.
+    #[serde(default)]
+    pub only: Vec<String>,
 }
 
-/// Import from a host's Claude config. v1 supports the controller (`local`)
-/// only; other hosts return E_ASSET_UNSUPPORTED.
-pub fn import_host(
+/// Import from a host's Claude config. `local` reads this machine's files;
+/// any other host is copied over SSH into a temporary directory first, with
+/// fleet's own hook, MCP server and skills stripped out before anything is
+/// read (`import::scrub_fleet_entries` — see its doc comment for why that
+/// matters: each host's fleet token differs from the controller's, so the
+/// usual `scrub_token` redaction cannot catch it).
+pub async fn import_host(
     args: ImportArgs,
     store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
     fleet_token: Option<&str>,
 ) -> Result<import::ImportReport, IpcError> {
     let cfg = require_config(store)?;
-    if args.host_alias != "local" {
-        return Err(IpcError::new(
-            E_ASSET_UNSUPPORTED,
-            "importing from remote hosts is not supported yet; use local",
-        ));
+    let repo = std::path::PathBuf::from(&cfg.repo_path);
+    if args.host_alias == "local" {
+        crate::service::hub::ensure_local_allowed(&args.host_alias)?;
+        let src = import::ImportSources::for_local()?;
+        return import::import_claude_only(
+            &src,
+            &repo,
+            "local",
+            fleet_token,
+            args.dry_run,
+            &args.only,
+        );
     }
-    crate::service::hub::ensure_local_allowed(&args.host_alias)?;
-    let src = import::ImportSources::for_local()?;
-    import::import_claude(
+    let script = import::REMOTE_SOURCES_SCRIPT;
+    let out = inventory::run_host_script(ssh, &args.host_alias, script).await?;
+    let tmp = tempfile::tempdir()
+        .map_err(|e| IpcError::new(codes::E_IO, format!("remote import: {e}")))?;
+    let src = import::parse_remote_dump(&out, tmp.path())?;
+    import::scrub_fleet_entries(&src)?;
+    import::import_claude_only(
         &src,
-        std::path::Path::new(&cfg.repo_path),
+        &repo,
         &args.host_alias,
         fleet_token,
         args.dry_run,
+        &args.only,
     )
 }
 
@@ -1010,5 +1031,30 @@ mod tests {
             "'other' is not a member of any assigned layer"
         );
         assert_eq!(resolved.provenance["skill/s"].introduced_by, "core");
+    }
+
+    /// `import_host` is `async` now (Task 6: a remote alias needs to SSH in
+    /// before it can import), but it must still check the catalog is
+    /// configured before it does anything else — for `local` exactly as
+    /// before, and for any other alias before it ever dials out.
+    #[tokio::test]
+    async fn import_host_requires_catalog_config_first() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
+        for host_alias in ["local", "oci"] {
+            let err = import_host(
+                ImportArgs {
+                    host_alias: host_alias.into(),
+                    dry_run: true,
+                    only: vec![],
+                },
+                &store,
+                &ssh,
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, E_CATALOG_NOT_CONFIGURED, "{host_alias}");
+        }
     }
 }

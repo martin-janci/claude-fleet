@@ -192,6 +192,38 @@ describe('AssetsPanel', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_repo_status', undefined));
   });
 
+  it('Import next to an unmanaged identity presets the dialog to its host and asset', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [],
+      catalog_import_host: { created: [['skill', 'extra']], problems: [], flagged_secrets: [], dry_run: true },
+    });
+    render(AssetsPanel);
+    const row = await screen.findByTestId('identity-row-skill-extra');
+
+    await fireEvent.click(within(row).getByText('Import'));
+
+    expect(await screen.findByTestId('import-dialog')).toBeTruthy();
+    expect(screen.getByTestId('import-only').textContent).toContain('skill:extra');
+    expect((screen.getByTestId('import-host') as HTMLSelectElement).value).toBe('local');
+
+    await fireEvent.click(screen.getByTestId('import-dry-run'));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('catalog_import_host', {
+        args: { host_alias: 'local', dry_run: true, only: ['skill:extra'] },
+      }),
+    );
+
+    // Closing clears the preset: the toolbar's own Import from host reopens
+    // it with the plain defaults, not the last identity's.
+    await fireEvent.click(screen.getByText('Close'));
+    expect(screen.queryByTestId('import-dialog')).toBeNull();
+    await fireEvent.click(screen.getByText('Import from host'));
+    expect(screen.queryByTestId('import-only')).toBeNull();
+    expect((screen.getByTestId('import-host') as HTMLSelectElement).value).toBe('local');
+  });
+
   it('scan button calls assets_scan_hosts and refreshes', async () => {
     byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: listing, assets_inventory: [], assets_scan_hosts: [{ host: 'local', status: 'scanned', detail: null, rows: 3 }], catalog_last_sync: null });
     render(AssetsPanel);

@@ -106,9 +106,11 @@ describe('REASONS against the generated local_only commands', () => {
 // how to re-verify a group.
 const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   // (The asset catalog used to be most of this list, gated by AssetsPanel's
-  // `catalog_config` check. Its commands route to the hub's `catalog_admin`
-  // now; the two that still refuse — `catalog_import_host` and
-  // `catalog_spawn_author_session` — have REASONS entries of their own.)
+  // `catalog_config` check. Every one of its commands routes to the hub's
+  // `catalog_admin` now, including `catalog_import_host` (Task 6: import
+  // works from any host over SSH) — it is a `ROUTED_ACTIONS` entry below,
+  // not a `REASONS` one. `catalog_spawn_author_session` is the one left
+  // refusing, and has a REASONS entry of its own.)
   // No frontend UI calls these at all.
   noUiControl: [
     // Host identity & health, task 5: the alias merge is an operator's

@@ -3417,7 +3417,11 @@ fn the_served_definition_budget_stays_bounded() {
     /// declarative pages P5–P6 and update S4b). Measured at 67,956 on
     /// 2026-09-29 after shared work context (`work_link` create / propose /
     /// accept and its `parent` / `notes` / `why` parameters, +410 bytes).
-    const BUDGET_BYTES: usize = 68_056;
+    /// Measured at 68,195 on 2026-09-30 after asset catalog S1a Task 6
+    /// (`import_assets`/`CatalogAdminParams::action` grew to describe
+    /// importing from any host over SSH and the new `only` parameter,
+    /// +139 bytes).
+    const BUDGET_BYTES: usize = 68_295;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
