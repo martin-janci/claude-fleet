@@ -958,6 +958,9 @@ const MIGRATIONS: &[Migration] = &[
     // Declarative pages, guides: `guide_proposals`. A new table and index,
     // `IF NOT EXISTS`, safe to re-run.
     Migration::plain(88, include_str!("../../migrations/088_guides.sql")),
+    // Assets S1b M1: `catalogs`, backfilled from `catalog_config` as
+    // `personal`. CREATE IF NOT EXISTS + INSERT OR IGNORE: safe to re-run.
+    Migration::plain(89, include_str!("../../migrations/089_catalogs.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -2251,6 +2254,39 @@ mod tests {
             )
             .unwrap();
         assert_eq!(scanned_at, 7, "the inventory row survives a re-run");
+    }
+
+    /// 089 on a database stopped at 088 with a `catalog_config` row: the row
+    /// becomes the `personal` catalog, and a re-run changes nothing.
+    #[test]
+    fn migration_89_copies_catalog_config_into_personal() {
+        let old = Store::open_in_memory().expect("open");
+        old.conn
+            .execute_batch(
+                "DROP TABLE catalogs;\
+                 INSERT INTO catalog_config (id, repo_path, remote_url, head_commit, last_loaded_at) \
+                   VALUES (1, '/r', 'git@a:b.git', 'h1', 5);\
+                 DELETE FROM schema_version WHERE version >= 89;",
+            )
+            .unwrap();
+        old.migrate().expect("089 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let p = old.personal_catalog().unwrap().expect("personal row");
+        assert_eq!((p.name.as_str(), p.repo_path.as_str()), ("personal", "/r"));
+        assert_eq!(p.remote_url.as_deref(), Some("git@a:b.git"));
+        assert_eq!(
+            (p.head_commit.as_deref(), p.last_loaded_at, p.org_id),
+            (Some("h1"), Some(5), None)
+        );
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 89;")
+            .unwrap();
+        old.migrate().expect("re-running 089 is safe");
+        assert_eq!(
+            old.list_catalogs().unwrap().len(),
+            1,
+            "no second personal row"
+        );
     }
 
     /// 034 on a database stopped at 033 with a host row: `transport` is

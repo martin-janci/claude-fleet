@@ -1,23 +1,68 @@
-//! The asset catalog's two tables (migration 030): the singleton
-//! `catalog_config` row and the per-host/per-harness `asset_inventory`.
+//! The asset catalog's tables: the `catalogs` table (migration 089, one row
+//! per source, `org_id IS NULL` for the personal catalog) plus the
+//! per-host/per-harness `asset_inventory` (migration 030). The old
+//! singleton `catalog_config` row is no longer read; `get_catalog_config` /
+//! `set_catalog_config` / `set_catalog_head` keep their signatures but are
+//! now backed by the `personal` row of `catalogs`.
 
 use super::*;
 
 impl Store {
-    pub fn get_catalog_config(&self) -> Result<Option<CatalogConfigRow>, rusqlite::Error> {
+    const CATALOG_COLS: &'static str =
+        "id, name, repo_path, remote_url, org_id, head_commit, last_loaded_at";
+
+    fn catalog_row(r: &rusqlite::Row) -> rusqlite::Result<CatalogRow> {
+        Ok(CatalogRow {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            repo_path: r.get(2)?,
+            remote_url: r.get(3)?,
+            org_id: r.get(4)?,
+            head_commit: r.get(5)?,
+            last_loaded_at: r.get(6)?,
+        })
+    }
+
+    /// Every catalog: personal first, then the rest by name.
+    pub fn list_catalogs(&self) -> Result<Vec<CatalogRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {} FROM catalogs ORDER BY (org_id IS NOT NULL), name",
+            Self::CATALOG_COLS
+        ))?;
+        let rows = stmt.query_map([], Self::catalog_row)?;
+        rows.collect()
+    }
+
+    pub fn get_catalog(&self, id: i64) -> Result<Option<CatalogRow>, rusqlite::Error> {
+        use rusqlite::OptionalExtension;
         self.conn
-            .prepare_cached(
-                "SELECT repo_path, remote_url, head_commit, last_loaded_at FROM catalog_config WHERE id = 1",
-            )?
-            .query_row([], |row| {
-                Ok(CatalogConfigRow {
-                    repo_path: row.get(0)?,
-                    remote_url: row.get(1)?,
-                    head_commit: row.get(2)?,
-                    last_loaded_at: row.get(3)?,
-                })
-            })
+            .prepare_cached(&format!(
+                "SELECT {} FROM catalogs WHERE id = ?1",
+                Self::CATALOG_COLS
+            ))?
+            .query_row([id], Self::catalog_row)
             .optional()
+    }
+
+    /// The one catalog with `org_id IS NULL`.
+    pub fn personal_catalog(&self) -> Result<Option<CatalogRow>, rusqlite::Error> {
+        use rusqlite::OptionalExtension;
+        self.conn
+            .prepare_cached(&format!(
+                "SELECT {} FROM catalogs WHERE org_id IS NULL",
+                Self::CATALOG_COLS
+            ))?
+            .query_row([], Self::catalog_row)
+            .optional()
+    }
+
+    pub fn get_catalog_config(&self) -> Result<Option<CatalogConfigRow>, rusqlite::Error> {
+        Ok(self.personal_catalog()?.map(|c| CatalogConfigRow {
+            repo_path: c.repo_path,
+            remote_url: c.remote_url,
+            head_commit: c.head_commit,
+            last_loaded_at: c.last_loaded_at,
+        }))
     }
 
     pub fn set_catalog_config(
@@ -26,9 +71,10 @@ impl Store {
         remote_url: Option<&str>,
     ) -> Result<CatalogConfigRow, rusqlite::Error> {
         self.conn.execute(
-            "INSERT INTO catalog_config (id, repo_path, remote_url) VALUES (1, ?1, ?2)
-             ON CONFLICT(id) DO UPDATE SET repo_path=excluded.repo_path, remote_url=excluded.remote_url,
-                                           head_commit=NULL, last_loaded_at=NULL",
+            "INSERT INTO catalogs (name, repo_path, remote_url, org_id, created_at)
+             VALUES ('personal', ?1, ?2, NULL, CAST(strftime('%s','now') AS INTEGER))
+             ON CONFLICT(name) DO UPDATE SET repo_path=excluded.repo_path, remote_url=excluded.remote_url,
+                                             head_commit=NULL, last_loaded_at=NULL",
             rusqlite::params![repo_path, remote_url],
         )?;
         Ok(self.get_catalog_config()?.expect("row just written"))
@@ -36,8 +82,22 @@ impl Store {
 
     pub fn set_catalog_head(&self, head: &str, loaded_at: i64) -> Result<(), rusqlite::Error> {
         self.conn.execute(
-            "UPDATE catalog_config SET head_commit=?1, last_loaded_at=?2 WHERE id = 1",
+            "UPDATE catalogs SET head_commit=?1, last_loaded_at=?2 WHERE org_id IS NULL",
             rusqlite::params![head, loaded_at],
+        )?;
+        Ok(())
+    }
+
+    /// Set the HEAD/last-loaded-at of one catalog by id.
+    pub fn set_catalog_head_for(
+        &self,
+        id: i64,
+        head: &str,
+        loaded_at: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE catalogs SET head_commit=?1, last_loaded_at=?2 WHERE id=?3",
+            rusqlite::params![head, loaded_at, id],
         )?;
         Ok(())
     }
@@ -273,6 +333,45 @@ mod tests {
         let row = s.set_catalog_config("/tmp/other", None).unwrap();
         assert_eq!(row.repo_path, "/tmp/other");
         assert!(row.remote_url.is_none());
+    }
+
+    #[test]
+    fn set_catalog_config_writes_the_personal_catalog_row() {
+        let s = Store::open_in_memory().expect("open");
+        assert!(s.personal_catalog().unwrap().is_none());
+        s.set_catalog_config("/tmp/assets", Some("git@x:y.git"))
+            .unwrap();
+        let p = s.personal_catalog().unwrap().expect("personal row");
+        assert_eq!(p.name, "personal");
+        assert_eq!(p.org_id, None);
+        assert_eq!(p.repo_path, "/tmp/assets");
+        assert_eq!(p.remote_url.as_deref(), Some("git@x:y.git"));
+        assert_eq!(s.list_catalogs().unwrap(), vec![p.clone()]);
+        assert_eq!(s.get_catalog(p.id).unwrap(), Some(p));
+    }
+
+    #[test]
+    fn set_catalog_head_for_targets_one_catalog() {
+        let s = Store::open_in_memory().expect("open");
+        s.set_catalog_config("/tmp/assets", None).unwrap();
+        let id = s.personal_catalog().unwrap().unwrap().id;
+        s.set_catalog_head_for(id, "abc", 7).unwrap();
+        let cfg = s.get_catalog_config().unwrap().unwrap();
+        assert_eq!(cfg.head_commit.as_deref(), Some("abc"));
+        assert_eq!(cfg.last_loaded_at, Some(7));
+    }
+
+    #[test]
+    fn only_the_personal_catalog_may_have_no_org() {
+        let s = Store::open_in_memory().expect("open");
+        let err = s
+            .conn
+            .execute(
+                "INSERT INTO catalogs (name, repo_path, org_id, created_at) VALUES ('other', '/x', NULL, 0)",
+                [],
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("CHECK"), "{err}");
     }
 
     #[test]
