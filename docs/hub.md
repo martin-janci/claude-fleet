@@ -988,8 +988,9 @@ What a client may do:
   `E_CONFLICT` instead of overwriting that edit.
 - **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
   `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `set_host_layers`,
-  `pair_client`, `revoke_client`, `set_client_trust` and `list_clients` are
-  master-token only, so a paired phone can neither re-provision the fleet nor
+  `set_host_harnesses`, `pair_client`, `revoke_client`, `set_client_trust`
+  and `list_clients` are master-token only, so a paired phone can neither
+  re-provision the fleet nor
   pair a second device nor revoke (or trust) your own client — nor even
   enumerate the other devices you have paired.
 - **Except what you grant: the asset catalog.** `fleet-hub client grant

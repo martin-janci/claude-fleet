@@ -372,6 +372,8 @@ Index by area (names only; see the reference for details):
   Codex where a scan finds it or fleet already manages it there —
   otherwise an explicit list that must include `claude`; edits fleet state
   only, master token only, same reasoning as `set_host_layers`).
+  `catalog_admin`'s `set_host_harnesses` action is the same call for a
+  granted desktop.
 - **Orchestration** — `wait_for_session`, `session_transcript`,
   `session_conversation`, `session_tool_detail`, `run_prompt`,
   `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
