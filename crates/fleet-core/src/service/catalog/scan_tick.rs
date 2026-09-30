@@ -4,6 +4,7 @@
 
 use crate::ssh::SshClient;
 use crate::store::Store;
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -32,6 +33,25 @@ pub fn hosts_due(
         .filter(|h| everything_changed || h.last_scan.is_none_or(|t| now - t > max_age))
         .map(|h| h.alias.clone())
         .collect()
+}
+
+/// `due`, plus whichever `owed` hosts are currently eligible (not hidden,
+/// reachable or `local`) and not already in `due` — a host whose previous
+/// scan failed or came back partial stays owed across passes regardless of
+/// staleness, so a transient failure during a catalog/sync-triggered sweep
+/// gets retried next tick rather than waiting out `max_age`.
+pub fn with_owed(due: Vec<String>, owed: &BTreeSet<String>, hosts: &[HostDue]) -> Vec<String> {
+    let mut out = due;
+    for h in hosts {
+        if owed.contains(&h.alias)
+            && !h.hidden
+            && (h.reachable || h.alias == "local")
+            && !out.contains(&h.alias)
+        {
+            out.push(h.alias.clone());
+        }
+    }
+    out
 }
 
 fn setting_secs(store: &Mutex<Store>, key: &str) -> i64 {
@@ -66,6 +86,11 @@ pub fn spawn_catalog_scan_tick(
         let mut ticker = tokio::time::interval(period);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut seen: Option<(String, Option<i64>)> = None;
+        // A host whose scan failed or came back partial (`scan_hosts`
+        // returned `Err`, or a status other than "scanned") stays here across
+        // passes until it succeeds, independent of `hosts_due`'s staleness
+        // check — see `with_owed`.
+        let mut owed: BTreeSet<String> = BTreeSet::new();
         loop {
             tokio::select! {
                 biased;
@@ -104,9 +129,30 @@ pub fn spawn_catalog_scan_tick(
                 setting_secs(&store, CATALOG_SCAN_MAX_AGE_SECS),
                 changed,
             );
+            let due = with_owed(due, &owed, &hosts);
             for alias in due {
-                if let Err(e) = super::inventory::scan_hosts(&store, &ssh, Some(&alias)).await {
-                    tracing::warn!(host = %alias, "catalog scan tick: {}", e.message);
+                match super::inventory::scan_hosts(&store, &ssh, Some(&alias)).await {
+                    Ok(results) => match results.iter().find(|r| r.host == alias) {
+                        Some(r) if r.status == "scanned" => {
+                            owed.remove(&alias);
+                        }
+                        Some(r) => {
+                            owed.insert(alias.clone());
+                            tracing::warn!(
+                                host = %alias,
+                                status = %r.status,
+                                detail = ?r.detail,
+                                "catalog scan tick: host not fully scanned; retrying next pass"
+                            );
+                        }
+                        None => {
+                            owed.insert(alias.clone());
+                        }
+                    },
+                    Err(e) => {
+                        owed.insert(alias.clone());
+                        tracing::warn!(host = %alias, "catalog scan tick: {}", e.message);
+                    }
                 }
             }
             seen = Some(now_key);
@@ -158,5 +204,38 @@ mod tests {
             hosts_due(1000, &hosts, 500, false),
             vec!["local".to_string()]
         );
+    }
+
+    #[test]
+    fn an_owed_host_is_added_even_when_the_pass_is_unchanged_and_its_scan_is_fresh() {
+        // "fresh" has a recent scan and the pass is unchanged, so
+        // `hosts_due` alone would not pick it — but it is still owed from a
+        // previous failed pass.
+        let hosts = vec![h("fresh", true, Some(990))];
+        let due = hosts_due(1000, &hosts, 500, false);
+        assert!(due.is_empty());
+        let owed: BTreeSet<String> = ["fresh".to_string()].into_iter().collect();
+        assert_eq!(with_owed(due, &owed, &hosts), vec!["fresh".to_string()]);
+    }
+
+    #[test]
+    fn an_owed_host_that_is_hidden_or_unreachable_is_not_added() {
+        let mut hidden = h("hidden", true, None);
+        hidden.hidden = true;
+        let unreachable = h("gone", false, None);
+        let hosts = vec![hidden, unreachable];
+        let owed: BTreeSet<String> = ["hidden".to_string(), "gone".to_string()]
+            .into_iter()
+            .collect();
+        assert_eq!(with_owed(Vec::new(), &owed, &hosts), Vec::<String>::new());
+    }
+
+    #[test]
+    fn no_duplicates_when_a_host_is_both_due_and_owed() {
+        let hosts = vec![h("stale", true, Some(1))];
+        let due = hosts_due(1000, &hosts, 500, false);
+        assert_eq!(due, vec!["stale".to_string()]);
+        let owed: BTreeSet<String> = ["stale".to_string()].into_iter().collect();
+        assert_eq!(with_owed(due, &owed, &hosts), vec!["stale".to_string()]);
     }
 }
