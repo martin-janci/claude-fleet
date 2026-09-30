@@ -159,27 +159,66 @@ pub fn hosts() -> Vec<(String, String)> {
         .clone()
 }
 
+/// What one `wsl.exe --list --quiet` said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Listing {
+    /// It exited 0 with these distributions (possibly none).
+    Found(Vec<String>),
+    /// It exited non-zero. WSL with no distribution does that, and so does a
+    /// WSL service that failed for a moment: the two cannot be told apart.
+    NonZero,
+    /// It could not be run, or overran its deadline and was killed.
+    NoAnswer,
+}
+
+/// The table after a detection, and whether that detection counts as an
+/// answer (for the re-detection rate, [`refresh_due`]), from the table
+/// before it (`prev`) and what `wsl.exe` said. Pure, so every case is
+/// tested without a `wsl.exe`:
+///
+/// - `Found` replaces the table (aliases in `taken` stay SSH hosts);
+/// - `NonZero` over a table with hosts keeps them and is not an answer, so
+///   the next try comes after [`REDETECT_AFTER_FAILURE`]: a transient failure
+///   must not drop hosts in use. Over an empty table it is "WSL has no
+///   distribution", an answer;
+/// - `NoAnswer` keeps the table and is not an answer.
+pub fn apply_detection(
+    prev: &[(String, String)],
+    listing: Listing,
+    taken: &[String],
+) -> (Vec<(String, String)>, bool) {
+    match listing {
+        Listing::Found(found) => (assign_aliases(&found, taken), true),
+        Listing::NonZero if prev.is_empty() => (Vec::new(), true),
+        Listing::NonZero | Listing::NoAnswer => (prev.to_vec(), false),
+    }
+}
+
 /// Re-detect the distributions (blocking, bounded by `timeout`) and replace
 /// the table. Aliases in `taken` stay SSH hosts. A failed or timed-out
-/// `wsl.exe` keeps the previous table rather than dropping hosts in use.
+/// `wsl.exe` keeps the previous table rather than dropping hosts in use
+/// (see [`apply_detection`]).
 pub fn refresh(taken: &[String], timeout: Duration) {
     *TAKEN
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = taken.to_vec();
-    let found = detect(timeout);
+    let listing = detect(timeout);
+    let answer = listing.clone();
+    let prev = hosts();
+    let (table, answered) = apply_detection(&prev, listing, taken);
     *LAST_DETECTION
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-        Some((Instant::now(), found.is_some()));
-    let Some(found) = found else {
-        tracing::warn!(
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((Instant::now(), answered));
+    match answer {
+        Listing::NoAnswer => tracing::warn!(
             timeout_ms = timeout.as_millis() as u64,
             "[wsl] wsl.exe --list did not answer; keeping the previous host table"
-        );
-        return;
-    };
-    let table = assign_aliases(&found, taken);
-    tracing::info!(hosts = ?table, "[wsl] distributions found");
+        ),
+        Listing::NonZero if !answered => {
+            tracing::warn!("[wsl] wsl.exe --list failed; keeping the previous host table")
+        }
+        _ => tracing::info!(hosts = ?table, "[wsl] distributions found"),
+    }
     *DISTROS
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = table;
@@ -209,20 +248,13 @@ pub fn pending() -> bool {
     PENDING.load(Ordering::Acquire)
 }
 
-/// Whether a `wsl-` alias the table does not hold should start another
-/// detection: not while one is running, not for an `~/.ssh/config` alias,
-/// and not sooner than [`REDETECT_EVERY`] after a detection that answered
+/// Whether another detection is due at all: not while one is running, and
+/// not sooner than [`REDETECT_EVERY`] after a detection that answered
 /// ([`REDETECT_AFTER_FAILURE`] after one that did not). `last` is when the
-/// previous detection ended and whether it answered; `None` is never.
-pub fn redetect_due(
-    alias: &str,
-    known: bool,
-    taken: &[String],
-    pending: bool,
-    last: Option<(Instant, bool)>,
-    now: Instant,
-) -> bool {
-    if !alias.starts_with(ALIAS_PREFIX) || known || pending || taken.iter().any(|t| t == alias) {
+/// previous detection ended and whether it answered; `None` is never, and
+/// then one is due.
+pub fn refresh_due(pending: bool, last: Option<(Instant, bool)>, now: Instant) -> bool {
+    if pending {
         return false;
     }
     match last {
@@ -238,11 +270,50 @@ pub fn redetect_due(
     }
 }
 
+/// Whether a `wsl-` alias the table does not hold should start another
+/// detection: not for a known host or an `~/.ssh/config` alias, and
+/// otherwise when [`refresh_due`] says so.
+pub fn redetect_due(
+    alias: &str,
+    known: bool,
+    taken: &[String],
+    pending: bool,
+    last: Option<(Instant, bool)>,
+    now: Instant,
+) -> bool {
+    if !alias.starts_with(ALIAS_PREFIX) || known || taken.iter().any(|t| t == alias) {
+        return false;
+    }
+    refresh_due(pending, last, now)
+}
+
 /// Start a background detection when `alias` is a `wsl-` alias the table
 /// does not hold and [`redetect_due`] says one is due. Only once detection
 /// is in use on this machine ([`refresh_in_background`] ran).
 fn redetect_if_missing(alias: &str) {
-    if !ENABLED.load(Ordering::Acquire) || !alias.starts_with(ALIAS_PREFIX) {
+    if !alias.starts_with(ALIAS_PREFIX) {
+        return;
+    }
+    start_detection_if(|last| {
+        redetect_due(
+            alias,
+            distro_for(alias).is_some(),
+            &TAKEN
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            pending(),
+            last,
+            Instant::now(),
+        )
+    });
+}
+
+/// Start a background detection when `due` (given the last detection) says
+/// so. Only once detection is in use on this machine
+/// ([`refresh_in_background`] ran): on every other platform nothing is
+/// detected.
+fn start_detection_if(due: impl FnOnce(Option<(Instant, bool)>) -> bool) {
+    if !ENABLED.load(Ordering::Acquire) {
         return;
     }
     // Held across the decision and the start, so two callers missing at once
@@ -250,20 +321,10 @@ fn redetect_if_missing(alias: &str) {
     let last = LAST_DETECTION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let due = redetect_due(
-        alias,
-        distro_for(alias).is_some(),
-        &TAKEN
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
-        pending(),
-        *last,
-        Instant::now(),
-    );
-    if !due {
+    if !due(*last) {
         return;
     }
-    tracing::info!(alias, "[wsl] alias not in the host table; detecting again");
+    tracing::info!("[wsl] detecting the distributions again");
     // Marked pending before the lock is released: the next caller sees it.
     PENDING.store(true, Ordering::Release);
     drop(last);
@@ -277,32 +338,58 @@ fn redetect_if_missing(alias: &str) {
     });
 }
 
-/// Wait, at most [`SETTLE_WAIT`], for a running detection when `alias` could
-/// be one of its hosts; return at once for any other alias, or when nothing
-/// is running. A `wsl-` alias the table does not hold first starts another
-/// detection when one is due ([`redetect_due`]), and waits for that.
-pub async fn settled_for(alias: &str) {
-    if !alias.starts_with(ALIAS_PREFIX) {
-        return;
+/// Whether a command for `alias` must wait for a running detection: only a
+/// `wsl-` alias the table does not hold yet (a known host goes ahead at
+/// once, whatever else is being detected). Such an alias first starts
+/// another detection when one is due ([`redetect_due`]).
+fn needs_wait(alias: &str) -> bool {
+    if !alias.starts_with(ALIAS_PREFIX) || distro_for(alias).is_some() {
+        return false;
     }
     redetect_if_missing(alias);
-    let deadline = Instant::now() + SETTLE_WAIT;
-    while pending() && Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(25)).await;
+    true
+}
+
+/// Wait, at most [`SETTLE_WAIT`], for a running detection when `alias` could
+/// be one of its hosts ([`needs_wait`]); return at once for any other alias,
+/// or when nothing is running.
+pub async fn settled_for(alias: &str) {
+    if needs_wait(alias) {
+        wait_settled().await;
     }
 }
 
 /// [`settled_for`] for a caller already off the async runtime (the PTY
 /// attach runs on a blocking thread).
 pub fn settled_for_blocking(alias: &str) {
-    if !alias.starts_with(ALIAS_PREFIX) {
+    if !needs_wait(alias) {
         return;
     }
-    redetect_if_missing(alias);
     let deadline = Instant::now() + SETTLE_WAIT;
     while pending() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+/// Wait, at most [`SETTLE_WAIT`], for a running detection to end.
+async fn wait_settled() {
+    let deadline = Instant::now() + SETTLE_WAIT;
+    while pending() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Bring the table up to date for a host picker (Add host): run one more
+/// detection when [`refresh_due`] says one is due, and wait (at most
+/// [`SETTLE_WAIT`]) for it or for one already running. A distribution
+/// installed since the last detection is then listed without a restart.
+/// A no-op where detection is not in use (every platform but Windows).
+pub async fn refresh_if_due() {
+    if !ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    start_detection_if(|last| refresh_due(pending(), last, Instant::now()));
+    wait_settled().await;
 }
 
 /// `wsl.exe`: `%SystemRoot%\System32\wsl.exe` when it is there, else the
@@ -314,35 +401,41 @@ pub fn wsl_binary() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("wsl.exe"))
 }
 
-/// Run `wsl.exe --list --quiet` with a deadline. `None` when it could not be
-/// run or overran (a WSL service still starting can take seconds), and then
-/// the process is killed rather than left behind; `Some(empty)` when WSL is
-/// there with no distribution (that exits non-zero).
+/// Run `wsl.exe --list --quiet` with a deadline. `NoAnswer` when it could
+/// not be run or overran (a WSL service still starting can take seconds),
+/// and then the process is killed rather than left behind; `NonZero` when it
+/// failed, which is also what WSL with no distribution does.
 #[cfg(windows)]
-fn detect(timeout: Duration) -> Option<Vec<String>> {
+fn detect(timeout: Duration) -> Listing {
     let mut cmd = crate::proc::std_command(wsl_binary());
     cmd.args(["--list", "--quiet"]);
     list_with_deadline(cmd, timeout)
 }
 
 #[cfg(not(windows))]
-fn detect(_timeout: Duration) -> Option<Vec<String>> {
-    None
+fn detect(_timeout: Duration) -> Listing {
+    Listing::NoAnswer
 }
 
 /// Run a `--list`-shaped command with a deadline and parse what it printed.
 /// stdout is read on its own thread so a full pipe never stalls the child.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn list_with_deadline(mut cmd: std::process::Command, timeout: Duration) -> Option<Vec<String>> {
+fn list_with_deadline(mut cmd: std::process::Command, timeout: Duration) -> Listing {
     use std::io::Read;
-    let mut child = cmd
+    let Ok(mut child) = cmd
         .env("WSL_UTF8", "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .ok()?;
-    let mut stdout = child.stdout.take()?;
+    else {
+        return Listing::NoAnswer;
+    };
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Listing::NoAnswer;
+    };
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = stdout.read_to_end(&mut buf);
@@ -358,15 +451,15 @@ fn list_with_deadline(mut cmd: std::process::Command, timeout: Duration) -> Opti
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Listing::NoAnswer;
             }
         }
     };
     let out = reader.join().unwrap_or_default();
     if !status.success() {
-        return Some(Vec::new());
+        return Listing::NonZero;
     }
-    Some(parse_list(&out))
+    Listing::Found(parse_list(&out))
 }
 
 /// The `wsl.exe` arguments that run `args` in `distro` the way `ssh` would
@@ -462,10 +555,11 @@ mod tests {
     }
 
     /// The deadline kills an overrunning `wsl.exe` instead of leaving it
-    /// behind; a non-zero exit is "no distributions", not a failure.
+    /// behind; a non-zero exit is its own answer, `NonZero`, which
+    /// [`apply_detection`] reads against the table it had.
     #[cfg(unix)]
     #[test]
-    fn listing_has_a_deadline_and_reads_a_failure_as_none_installed() {
+    fn listing_has_a_deadline_and_tells_a_failure_from_no_answer() {
         let run = |script: &str, ms: u64| {
             let mut cmd = std::process::Command::new("sh");
             cmd.args(["-c", script]);
@@ -473,11 +567,15 @@ mod tests {
         };
         assert_eq!(
             run("printf 'Ubuntu\\nDebian\\n'", 5_000),
-            Some(vec!["Ubuntu".to_string(), "Debian".to_string()])
+            Listing::Found(vec!["Ubuntu".to_string(), "Debian".to_string()])
         );
-        assert_eq!(run("echo 'no distributions'; exit 1", 5_000), Some(vec![]));
+        assert_eq!(run("printf ''", 5_000), Listing::Found(vec![]));
+        assert_eq!(
+            run("echo 'no distributions'; exit 1", 5_000),
+            Listing::NonZero
+        );
         let started = Instant::now();
-        assert_eq!(run("sleep 30", 200), None);
+        assert_eq!(run("sleep 30", 200), Listing::NoAnswer);
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "killed, not waited out"
@@ -501,6 +599,98 @@ mod tests {
         let waited = waiter.join().unwrap();
         assert!(waited >= Duration::from_millis(100), "{waited:?}");
         assert!(waited < SETTLE_WAIT, "{waited:?}");
+    }
+
+    /// A transient failure of `wsl.exe --list` never empties a table in use:
+    /// it keeps the hosts and counts as unanswered (a retry after 10 s, not
+    /// a minute). Over an empty table it is "no distribution", an answer.
+    #[test]
+    fn a_failed_listing_keeps_the_hosts_in_use() {
+        let prev = vec![("wsl-ubuntu".to_string(), "Ubuntu".to_string())];
+        assert_eq!(
+            apply_detection(&prev, Listing::NonZero, &[]),
+            (prev.clone(), false)
+        );
+        assert_eq!(apply_detection(&[], Listing::NonZero, &[]), (vec![], true));
+        assert_eq!(
+            apply_detection(&prev, Listing::NoAnswer, &[]),
+            (prev.clone(), false)
+        );
+        assert_eq!(
+            apply_detection(&[], Listing::NoAnswer, &[]),
+            (vec![], false)
+        );
+        assert_eq!(
+            apply_detection(&prev, Listing::Found(vec!["Debian".into()]), &[]),
+            (vec![("wsl-debian".to_string(), "Debian".to_string())], true)
+        );
+        assert_eq!(
+            apply_detection(&prev, Listing::Found(vec![]), &[]),
+            (vec![], true),
+            "a clean empty listing is an answer: the distribution is gone"
+        );
+        assert_eq!(
+            apply_detection(
+                &[],
+                Listing::Found(vec!["Debian".into()]),
+                &["wsl-debian".into()]
+            ),
+            (vec![], true),
+            "an ~/.ssh/config alias stays an SSH host"
+        );
+    }
+
+    /// A known WSL host never waits on a detection some other alias started;
+    /// an alias the table does not hold still does.
+    #[test]
+    fn a_known_wsl_host_does_not_wait_on_a_running_detection() {
+        let _table = TEST_TABLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_for_tests(vec![("wsl-a".into(), "A".into())]);
+        PENDING.store(true, Ordering::Release);
+
+        let started = Instant::now();
+        settled_for_blocking("wsl-a");
+        assert!(started.elapsed() < Duration::from_millis(100));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let started = Instant::now();
+        rt.block_on(settled_for("wsl-a"));
+        assert!(started.elapsed() < Duration::from_millis(100));
+
+        let waiter = std::thread::spawn(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            let started = Instant::now();
+            rt.block_on(settled_for("wsl-b"));
+            started.elapsed()
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        PENDING.store(false, Ordering::Release);
+        let waited = waiter.join().unwrap();
+        set_for_tests(Vec::new());
+        assert!(waited >= Duration::from_millis(100), "{waited:?}");
+        assert!(waited < SETTLE_WAIT, "{waited:?}");
+    }
+
+    /// Add host's re-detection: due when there never was one, not while one
+    /// runs, not right after one, and again once the last is stale.
+    #[test]
+    fn a_host_picker_redetects_only_when_due() {
+        let now = Instant::now() + Duration::from_secs(3600);
+        let ago = |s: u64| now - Duration::from_secs(s);
+        assert!(refresh_due(false, None, now), "never detected");
+        assert!(!refresh_due(true, None, now), "one is running");
+        assert!(!refresh_due(false, Some((ago(5), true)), now), "fresh");
+        assert!(refresh_due(false, Some((ago(61), true)), now), "stale");
+        assert!(!refresh_due(false, Some((ago(5), false)), now));
+        assert!(
+            refresh_due(false, Some((ago(11), false)), now),
+            "failed, retried"
+        );
     }
 
     /// A slow first `wsl.exe` must not pin `wsl-` aliases to `ssh` for the

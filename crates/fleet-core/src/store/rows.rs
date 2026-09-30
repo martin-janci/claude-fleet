@@ -213,6 +213,17 @@ pub struct SessionRow {
     /// older than the column sends none.
     #[serde(default)]
     pub stale_working_at: Option<i64>,
+    /// The stale-working demotion's own memory (`sessions.stale_demoted_at`,
+    /// migration 080): set with `stale_working_at` by the tick, but lifted
+    /// only by a hook, a pane that shows a live turn, or the row being
+    /// `working` / `blocked` again — never by an attach or the TTL. While
+    /// set, the row's stored `idle` is a guess (`store::trusted_status`).
+    /// Server-side only: `#[serde(skip)]` keeps it off the wire, the row
+    /// events and the hub JSON (a deserialized row reads `None`), and
+    /// [`SessionRow::eq_ignoring_row_version`] ignores it, so a change to it
+    /// alone is not a client-visible change.
+    #[serde(skip)]
+    pub stale_demoted_at: Option<i64>,
     /// The requester session that dispatched the task this row is working
     /// on; NULL for top-level sessions.
     #[serde(default)]
@@ -303,8 +314,9 @@ fn is_zero_i64(n: &i64) -> bool {
 }
 
 impl SessionRow {
-    /// Field-by-field equality excluding `row_version`: whether two reads of
-    /// this row carry the same user-visible content.
+    /// Field-by-field equality excluding `row_version` and the server-only
+    /// `stale_demoted_at`: whether two reads of this row carry the same
+    /// user-visible content.
     ///
     /// See the note above the `PartialEq` derive: plain `==` cannot answer
     /// that question, because `row_version` also moves for a change no wire
@@ -316,11 +328,13 @@ impl SessionRow {
     /// once per session per pass, and a `SessionRow` is some forty fields
     /// with a dozen heap allocations among them.
     pub fn eq_ignoring_row_version(&self, other: &Self) -> bool {
-        if self.row_version == other.row_version {
+        if self.row_version == other.row_version && self.stale_demoted_at == other.stale_demoted_at
+        {
             return self == other;
         }
         Self {
             row_version: other.row_version,
+            stale_demoted_at: other.stale_demoted_at,
             ..self.clone()
         } == *other
     }
@@ -351,8 +365,13 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
      (SELECT json_object('link_id', l.id, 'item_id', l.item_id, \
                          'key', COALESCE(i.key, l.ref_key), 'title', COALESCE(i.title, ''), \
                          'source', l.source, \
+                         'kind', \
+                           CASE WHEN i.id IS NULL THEN 'ref' \
+                                WHEN i.tracker_id IS NOT NULL THEN 'tracker' \
+                                ELSE 'local' END, \
                          'status_category', \
                            CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
+                         'effective_status', ", crate::effective_status_sql!(), ", \
                          'status_name', i.status_name, 'url', i.url, \
                          'unavailable', json(CASE WHEN i.unavailable_at IS NOT NULL \
                                                   THEN 'true' ELSE 'false' END), \
@@ -377,8 +396,13 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                          'rule', l.rule, \
                          'preselected', json(CASE WHEN l.preselected = 1 \
                                                   THEN 'true' ELSE 'false' END), \
+                         'kind', \
+                           CASE WHEN i.id IS NULL THEN 'ref' \
+                                WHEN i.tracker_id IS NOT NULL THEN 'tracker' \
+                                ELSE 'local' END, \
                          'status_category', \
                            CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
+                         'effective_status', ", crate::effective_status_sql!(), ", \
                          'status_name', i.status_name, 'url', i.url, \
                          'suggestions', (SELECT COUNT(*) FROM work_links s2 \
                                           WHERE s2.participant_id = p.id \
@@ -405,7 +429,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
                 COALESCE(l.decided_at, l.created_at) DESC, l.id DESC \
        LIMIT 1) AS work_suggested, ",
     crate::session_org_sql!("sessions"),
-    " AS org_id, prompt_submit_seq, stale_working_at, \
+    " AS org_id, prompt_submit_seq, stale_working_at, stale_demoted_at, \
      (SELECT COALESCE(SUM(l.version * 1000003 + l.id), 0) FROM work_links l \
         JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
        WHERE p.session_id = sessions.id AND l.ended_at IS NULL) AS work_rev, \
@@ -512,9 +536,10 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         org_id: row.get(57)?,
         prompt_submit_seq: row.get(58)?,
         stale_working_at: row.get(59)?,
-        work_rev: row.get(60)?,
-        pr_evidence: decode_pr_evidence(row.get(61)?),
-        pr_checked_at: row.get(62)?,
+        stale_demoted_at: row.get(60)?,
+        work_rev: row.get(61)?,
+        pr_evidence: decode_pr_evidence(row.get(62)?),
+        pr_checked_at: row.get(63)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
@@ -741,19 +766,15 @@ pub fn turn_over(status: Option<&str>) -> bool {
 /// asked the pane or it could not tell. Any other row's stored status
 /// stands.
 ///
-/// `demoted` is the demotion's own memory, `sessions.stale_demoted_at`
-/// (migration 080, read with `Store::stale_demoted_by_id`; not a
-/// `SessionRow` field): an attach or `reconcile.stale_working_ttl_secs`
-/// clears the `stale_working_at` attention stamp, but the stored `idle` is
-/// still a guess until a hook or the pane lifts the demotion. The stamp
-/// counts too, so a caller whose flag read failed errs towards asking.
-pub fn trusted_status<'a>(
-    row: &'a SessionRow,
-    demoted: bool,
-    live: Option<&'a str>,
-) -> Option<&'a str> {
+/// The demotion's own memory is `row.stale_demoted_at` (migration 080): an
+/// attach or `reconcile.stale_working_ttl_secs` clears the
+/// `stale_working_at` attention stamp, but the stored `idle` is still a
+/// guess until a hook or the pane lifts the demotion. The stamp counts too,
+/// so a row read without the column (a hub's JSON) errs towards asking
+/// while it is set.
+pub fn trusted_status<'a>(row: &'a SessionRow, live: Option<&'a str>) -> Option<&'a str> {
     let stored = row.claude_status.as_deref();
-    if needs_pane_confirmation(row, demoted) {
+    if needs_pane_confirmation(row) {
         live
     } else {
         stored
@@ -762,16 +783,17 @@ pub fn trusted_status<'a>(
 
 /// [`turn_over`] of the row's [`trusted_status`] with no pane reading: a
 /// stale-demoted row is never over on its stored `idle` alone.
-pub fn turn_over_row(row: &SessionRow, demoted: bool) -> bool {
-    turn_over(trusted_status(row, demoted, None))
+pub fn turn_over_row(row: &SessionRow) -> bool {
+    turn_over(trusted_status(row, None))
 }
 
-/// Whether `row` is stale-demoted (`demoted`, or its attention stamp still
-/// set) with a stored status that only a live pane reading can confirm (see
-/// [`trusted_status`]): the one case a turn-over check should spend a
-/// `session_activity` probe on.
-pub fn needs_pane_confirmation(row: &SessionRow, demoted: bool) -> bool {
-    (demoted || row.stale_working_at.is_some()) && turn_over(row.claude_status.as_deref())
+/// Whether `row` is stale-demoted (`stale_demoted_at`, or its attention
+/// stamp still set) with a stored status that only a live pane reading can
+/// confirm (see [`trusted_status`]): the one case a turn-over check should
+/// spend a `session_activity` probe on.
+pub fn needs_pane_confirmation(row: &SessionRow) -> bool {
+    (row.stale_demoted_at.is_some() || row.stale_working_at.is_some())
+        && turn_over(row.claude_status.as_deref())
 }
 
 /// SQL fragment: the new `idle_since` given the OLD row's `idle_since` and the
@@ -812,11 +834,11 @@ pub struct HostRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
     /// When `claude_version` / `tmux_version` were last read from the host
-    /// (migration 072). `None`: never — the values are whatever `add_host`
+    /// (migration 076). `None`: never — the values are whatever `add_host`
     /// or an older store left. Per-field default: an older hub omits it.
     #[serde(default)]
     pub claude_version_at: Option<i64>,
-    /// Health sample from the last reachable probe (migration 073). All
+    /// Health sample from the last reachable probe (migration 077). All
     /// per-field default: an older hub omits them.
     #[serde(default)]
     pub disk_home_free_kb: Option<i64>,
@@ -839,7 +861,7 @@ pub struct HostRow {
     /// The fleet-agent version its last hello reported (agent hosts).
     #[serde(default)]
     pub agent_version: Option<String>,
-    /// When `provision_hosts` last completed on this host (migration 074).
+    /// When `provision_hosts` last completed on this host (migration 078).
     #[serde(default)]
     pub provisioned_at: Option<i64>,
     /// `provisioned` but with content older than this build ships (or
@@ -850,7 +872,7 @@ pub struct HostRow {
 
 /// The volatile half of a host row, as `host:pinged` carries it (host
 /// identity & health, task 2): a value that moves every pass must not turn
-/// every ping into a full-row `host:probed`. Mirrors the migration-073
+/// every ping into a full-row `host:probed`. Mirrors the migration-077
 /// columns.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HostHealth {
@@ -1156,6 +1178,12 @@ pub struct AssetInventoryRow {
     pub scanned_at: i64,
     /// Whether the host's fleet manifest names this asset (migration 031).
     pub managed: bool,
+    /// Its config looks like it carries a credential (migration 087).
+    #[serde(default)]
+    pub secret_like: bool,
+    /// Fleet provisioned it: its own hooks, MCP entry or skills (087).
+    #[serde(default)]
+    pub fleet_owned: bool,
 }
 
 /// A secret name known to the sync engine (migration 031). Never carries the
@@ -1457,5 +1485,351 @@ mod tests {
         let row: ProjectRow =
             serde_json::from_str(current_hub).expect("a current hub's project row parses");
         assert!(row.system, "the flag survives the wire when it is sent");
+    }
+
+    /// `stale_demoted_at` (migration 080) is read into `SessionRow` for the
+    /// server's own turn-over checks, but never leaves it: not on the wire,
+    /// not in a row event, not in a hub's JSON — and a row parsed from one
+    /// reads `None`.
+    #[test]
+    fn stale_demoted_at_is_read_but_never_serialized() {
+        let s = crate::store::Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("w", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'idle', stale_demoted_at = 7 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.stale_demoted_at, Some(7));
+        let json = serde_json::to_value(&row).unwrap();
+        assert!(
+            json.get("stale_demoted_at").is_none(),
+            "stale_demoted_at must stay off the wire: {json}"
+        );
+        assert!(
+            json.get("stale_working_at").is_some(),
+            "its neighbour is on it"
+        );
+        let back: SessionRow = serde_json::from_value(json).unwrap();
+        assert_eq!(back.stale_demoted_at, None);
+        assert!(
+            back.eq_ignoring_row_version(&row),
+            "a demoted-only difference is not a visible one"
+        );
+    }
+
+    /// `WorkSummary.effective_status` (native item status task 4, fix round
+    /// 2): `crate::effective_status_sql!`'s SQL must agree with
+    /// `service::work::status::effective_status`'s Rust precedence, checked
+    /// end to end through `Store::get_session` — the real production path,
+    /// not a standalone query. SQLite cannot call into Rust, so the logic
+    /// is duplicated; these tests are what keeps the two from drifting.
+    /// `status_category` stays tracker-only throughout (wire compat, see
+    /// its doc on `WorkSummary`).
+    mod effective_status_on_the_session_row {
+        use super::*;
+
+        fn seed(s: &Store, name: &str) -> i64 {
+            s.upsert_host("h").unwrap();
+            s.upsert_session(name, "h", None, None, 1, 1, "running", None)
+                .unwrap()
+        }
+
+        fn mark_working(s: &Store, sid: i64, claude_session_id: &str) {
+            s.set_claude_session_id(sid, claude_session_id).unwrap();
+            s.set_claude_status_by_session_id(claude_session_id, "working")
+                .unwrap();
+        }
+
+        fn tracker_item(s: &Store, key: &str, status_category: &str) -> i64 {
+            let t = s
+                .add_tracker("jira", "Jira", "https://x.atlassian.net")
+                .unwrap();
+            s.upsert_tracker_item(
+                t.id,
+                &TrackerItemWrite {
+                    external_id: key.into(),
+                    key: Some(key.into()),
+                    title: "Ticket".into(),
+                    status_name: "status".into(),
+                    status_category: status_category.into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .id
+        }
+
+        #[test]
+        fn a_local_items_status_shows_through_effective_status_not_status_category() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            s.create_local_work_item(Some("LOC-1"), "Local work")
+                .unwrap();
+            s.link_session_work(sid, WorkTarget::Key("LOC-1"), "manual")
+                .unwrap();
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(
+                w.status_category, None,
+                "wire compat: status_category stays tracker-only"
+            );
+            assert_eq!(w.effective_status.as_deref(), Some("todo"));
+            assert_eq!(w.kind, "local");
+        }
+
+        #[test]
+        fn a_tracker_items_status_shows_in_both_fields() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            let item = tracker_item(&s, "TK-1", "in_progress");
+            s.link_session_work(sid, WorkTarget::Item(item), "manual")
+                .unwrap();
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(w.status_category.as_deref(), Some("in_progress"));
+            assert_eq!(w.effective_status.as_deref(), Some("in_progress"));
+            assert_eq!(w.kind, "tracker");
+        }
+
+        #[test]
+        fn a_working_session_lifts_effective_status_to_in_progress() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            s.create_local_work_item(Some("LOC-2"), "Local work")
+                .unwrap();
+            s.link_session_work(sid, WorkTarget::Key("LOC-2"), "manual")
+                .unwrap();
+            mark_working(&s, sid, "c-loc-2");
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(w.effective_status.as_deref(), Some("in_progress"));
+        }
+
+        /// The lift belongs to the ITEM, not "this row's own session": a
+        /// DIFFERENT session's confirmed link to the same item, working,
+        /// lifts it too — matching the Work view's `Graph`-based check,
+        /// which also looks at every confirmed link, not only the primary.
+        #[test]
+        fn a_working_session_elsewhere_on_the_same_item_also_lifts_it() {
+            let s = Store::open_in_memory().unwrap();
+            let a = seed(&s, "a");
+            let b = seed(&s, "b");
+            let item = s.create_local_work_item(Some("LOC-3"), "Shared").unwrap();
+            s.link_session_work(a, WorkTarget::Item(item.id), "manual")
+                .unwrap();
+            s.link_session_work(b, WorkTarget::Item(item.id), "manual")
+                .unwrap();
+            mark_working(&s, b, "c-loc-3-b");
+            let w = s.get_session("a", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(
+                w.effective_status.as_deref(),
+                Some("in_progress"),
+                "a's own session is idle, but b's confirmed link to the same item is working"
+            );
+        }
+
+        #[test]
+        fn a_persons_status_is_final_even_while_a_session_works_it() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            let item = s
+                .create_local_work_item(Some("LOC-4"), "Local work")
+                .unwrap();
+            s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+                .unwrap();
+            s.set_item_status(item.id, "todo").unwrap();
+            mark_working(&s, sid, "c-loc-4");
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(w.effective_status.as_deref(), Some("todo"));
+        }
+
+        /// The exact arm the SQL's `IN ('person', 'derived')` protects and
+        /// nothing else in this crate exercises through the store's real
+        /// write path (`set_item_status` only ever writes `'person'`):
+        /// narrowing the SQL to `= 'person'` would read a PR-stamped `done`
+        /// back as `in_progress` here, with every other test in this file
+        /// still green.
+        #[test]
+        fn a_derived_done_stamp_is_final_even_while_a_session_works_it() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            let item = s
+                .create_local_work_item(Some("LOC-5"), "Local work")
+                .unwrap();
+            s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+                .unwrap();
+            assert!(s.stamp_derived_done(item.id).unwrap(), "stamps once");
+            mark_working(&s, sid, "c-loc-5");
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(
+                w.effective_status.as_deref(),
+                Some("done"),
+                "a PR-stamped done must not read back as in_progress"
+            );
+        }
+
+        #[test]
+        fn a_working_session_never_lifts_a_tracker_item() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            let item = tracker_item(&s, "TK-2", "todo");
+            s.link_session_work(sid, WorkTarget::Item(item), "manual")
+                .unwrap();
+            mark_working(&s, sid, "c-tk-2");
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(
+                w.effective_status.as_deref(),
+                Some("todo"),
+                "a tracker item's column is its tracker's"
+            );
+        }
+
+        #[test]
+        fn a_bare_key_has_no_item_and_no_effective_status() {
+            let s = Store::open_in_memory().unwrap();
+            let sid = seed(&s, "dev");
+            s.link_session_work(sid, WorkTarget::Key("BARE-1"), "manual")
+                .unwrap();
+            let w = s.get_session("dev", "h").unwrap().unwrap().work.unwrap();
+            assert_eq!(w.item_id, None);
+            assert_eq!(w.status_category, None);
+            assert_eq!(w.effective_status, None);
+            assert_eq!(w.kind, "ref");
+        }
+
+        /// Cross-check (fix round 3): the SQL macro and the Rust function
+        /// must agree — not two independently hand-written literal
+        /// expectations that could each be wrong the same way. Each arm
+        /// reads the item's REAL fields back from the store
+        /// (`Store::get_work_item`) and calls
+        /// `service::work::status::effective_status` with them directly,
+        /// then compares against what the SQL computed for the very same
+        /// item through the real `Store::get_session` path — so a drift
+        /// between the two implementations shows up as a mismatch, not as
+        /// two tests that each independently typed the "right" answer.
+        #[test]
+        fn the_sql_macro_and_the_rust_function_agree_arm_by_arm() {
+            use crate::service::work::status::effective_status;
+
+            fn agree(
+                s: &Store,
+                session_name: &str,
+                item_id: i64,
+                has_working_session: bool,
+                label: &str,
+            ) {
+                let raw = s.get_work_item(item_id).unwrap().unwrap();
+                let want = effective_status(
+                    &raw.status_category,
+                    raw.status_set_by.as_deref(),
+                    &raw.source,
+                    has_working_session,
+                );
+                let got = s
+                    .get_session(session_name, "h")
+                    .unwrap()
+                    .unwrap()
+                    .work
+                    .unwrap()
+                    .effective_status;
+                assert_eq!(got.as_deref(), want, "{label}");
+            }
+
+            // person
+            {
+                let s = Store::open_in_memory().unwrap();
+                let sid = seed(&s, "person");
+                let item = s.create_local_work_item(Some("X-1"), "t").unwrap();
+                s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+                    .unwrap();
+                s.set_item_status(item.id, "done").unwrap();
+                agree(&s, "person", item.id, false, "person's setting");
+            }
+            // derived, with a working session (the arm `IN ('person',
+            // 'derived')` protects and nothing but this cross-check and
+            // `a_derived_done_stamp_is_final_even_while_a_session_works_it`
+            // exercises).
+            {
+                let s = Store::open_in_memory().unwrap();
+                let sid = seed(&s, "derived");
+                let item = s.create_local_work_item(Some("X-2"), "t").unwrap();
+                s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+                    .unwrap();
+                s.stamp_derived_done(item.id).unwrap();
+                mark_working(&s, sid, "c-x-2");
+                agree(
+                    &s,
+                    "derived",
+                    item.id,
+                    true,
+                    "derived stamp, working session",
+                );
+            }
+            // a job's status ('task'), with a working session: final.
+            {
+                let s = Store::open_in_memory().unwrap();
+                let sid = seed(&s, "task");
+                let item = s.create_local_work_item(Some("X-6"), "t").unwrap();
+                s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+                    .unwrap();
+                s.conn_ref()
+                    .execute(
+                        "UPDATE work_items SET status_category = 'todo', status_set_by = 'task' WHERE id = ?1",
+                        rusqlite::params![item.id],
+                    )
+                    .unwrap();
+                mark_working(&s, sid, "c-x-6");
+                agree(&s, "task", item.id, true, "job status, working session");
+            }
+            // live-lift on a local item
+            {
+                let s = Store::open_in_memory().unwrap();
+                let sid = seed(&s, "lift-local");
+                let item = s.create_local_work_item(Some("X-3"), "t").unwrap();
+                s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+                    .unwrap();
+                mark_working(&s, sid, "c-x-3");
+                agree(&s, "lift-local", item.id, true, "live lift on a local item");
+            }
+            // live-lift attempted on a tracker item (must not lift)
+            {
+                let s = Store::open_in_memory().unwrap();
+                let sid = seed(&s, "lift-tracker");
+                let item = tracker_item(&s, "TK-9", "todo");
+                s.link_session_work(sid, WorkTarget::Item(item), "manual")
+                    .unwrap();
+                mark_working(&s, sid, "c-x-4");
+                agree(
+                    &s,
+                    "lift-tracker",
+                    item,
+                    true,
+                    "live lift attempted on a tracker item",
+                );
+            }
+            // empty stored status: the schema (`NOT NULL DEFAULT 'todo'`)
+            // and every writer this crate has prevent it in practice — a
+            // narrow, deliberate raw `UPDATE` here (not the banned pattern
+            // of faking a person's/tracker's status through one) is the
+            // only way to drive this arm, simulating a hand-edited or
+            // pre-migration row.
+            {
+                let s = Store::open_in_memory().unwrap();
+                let sid = seed(&s, "empty");
+                let item = s.create_local_work_item(Some("X-5"), "t").unwrap();
+                s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+                    .unwrap();
+                s.conn_ref()
+                    .execute(
+                        "UPDATE work_items SET status_category = '' WHERE id = ?1",
+                        rusqlite::params![item.id],
+                    )
+                    .unwrap();
+                agree(&s, "empty", item.id, false, "empty stored status");
+            }
+        }
     }
 }

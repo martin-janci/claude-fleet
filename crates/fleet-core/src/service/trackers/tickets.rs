@@ -112,6 +112,23 @@ pub(crate) fn allowed(scope: &OrgScope, s: &Store) -> Result<Option<HashSet<i64>
     Ok(Some(out))
 }
 
+/// May `scope` read `item`? Exactly `allowed(scope, s)` containing its id,
+/// for the callers that ask about one item: without building the set of
+/// every item the caller may see.
+pub(crate) fn item_visible(
+    scope: &OrgScope,
+    s: &Store,
+    item: &WorkItemRow,
+) -> Result<bool, IpcError> {
+    match scope {
+        OrgScope::All => Ok(true),
+        OrgScope::Org { .. } => Ok(scope.sees_org(s.item_org(item.id)?)),
+        OrgScope::Host { alias, .. } => {
+            Ok(s.work_item_on_host(alias, item.id)? && scope.sees_org(s.item_org(item.id)?))
+        }
+    }
+}
+
 /// The live sessions working on `key` as far as the item of `item_org` is
 /// concerned. A link whose session is in one org while the item is in
 /// another — a bare `ref_key` that `work_link` deliberately kept bare
@@ -355,6 +372,24 @@ pub async fn lookup(
     // (two sites can share a project key). A bare key asks every cache.
     let cached = match (&tracker, by_url) {
         (Some(t), true) => lock(store)?.tracker_item_for_key_in(t.id, &key)?,
+        // A scoped caller's BARE key asks for the item IT may see: two
+        // trackers (two sites, one per org) can hold the same key, which the
+        // unscoped answer calls ambiguous and would refuse the caller over.
+        // Not a URL whose tracker stayed open (the key's claimants are
+        // several): that URL names one site's ticket, and another site's
+        // item with the same key is a different ticket — it stays
+        // ambiguous, as before.
+        (_, false) if !scope.is_all() => {
+            let s = lock(store)?;
+            let mut found = None;
+            for item in s.tracker_items_for_key(&key)? {
+                if item_visible(scope, &s, &item)? {
+                    found = Some(item);
+                    break;
+                }
+            }
+            found
+        }
         _ => lock(store)?.tracker_item_for_key(&key)?,
     };
     let item_id = match cached {
@@ -417,14 +452,12 @@ pub async fn lookup(
         }
     };
     let s = lock(store)?;
-    if let Some(allowed) = allowed(scope, &s)? {
-        if !allowed.contains(&item_id) {
-            return Err(orgs::not_visible_to(scope, &key));
-        }
-    }
     let item = s
         .get_work_item(item_id)?
         .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "item vanished"))?;
+    if !item_visible(scope, &s, &item)? {
+        return Err(orgs::not_visible_to(scope, &key));
+    }
     let meta = s.work_item_meta(item_id)?;
     let t = s
         .list_trackers()?
@@ -614,12 +647,15 @@ pub async fn resolve_start(
         (Some(id), None) => {
             let s = lock(store)?;
             // Out of scope reads exactly as unknown: no existence oracle.
-            if allowed(scope, &s)?.is_some_and(|a| !a.contains(&id)) {
-                return Err(orgs::not_found("work item", id));
+            let item = match s.get_work_item(id)? {
+                Some(item) if item_visible(scope, &s, &item)? => item,
+                _ => return Err(orgs::not_found("work item", id)),
+            };
+            if item.origin.as_deref() == Some("proposed")
+                && item.proposal_state.as_deref() != Some("accepted")
+            {
+                return Err(IpcError::new(codes::E_INVALID, "accept the proposal first"));
             }
-            let item = s
-                .get_work_item(id)?
-                .ok_or_else(|| orgs::not_found("work item", id))?;
             let key = item.key.clone().ok_or_else(|| {
                 IpcError::new(codes::E_INVALID, "that work item has no key to start from")
             })?;
@@ -1221,6 +1257,88 @@ fn link_started(
     Ok((s.get_session_by_id(row.id)?, queued))
 }
 
+/// A native item (design 2026-09-29) starts where it belongs and with what
+/// was written: an unset project comes from the item, else its parent's;
+/// an unset brief is the parent's (a ticket's own description, fenced as
+/// every start brief is) followed by the item's title and notes. Anything
+/// else starts exactly as asked.
+fn with_native_defaults(
+    store: &Mutex<Store>,
+    args: &StartArgs,
+    scope: &OrgScope,
+) -> Result<StartArgs, IpcError> {
+    let Some(id) = args.item_id else {
+        return Ok(args.clone());
+    };
+    let s = lock(store)?;
+    let Some(item) = s.get_work_item(id)? else {
+        return Ok(args.clone());
+    };
+    if !matches!(
+        item.origin.as_deref(),
+        Some("manual" | "proposed" | "agent")
+    ) {
+        return Ok(args.clone());
+    }
+    // The parent's title, brief and project reach the new session only when
+    // this caller may see the parent (another org's ticket text must not
+    // ride a subtask's start brief across the org fence).
+    let parent = match item
+        .parent_id
+        .map(|p| s.get_work_item(p))
+        .transpose()?
+        .flatten()
+    {
+        Some(p) if item_visible(scope, &s, &p)? => Some(p),
+        _ => None,
+    };
+    let mut out = args.clone();
+    if out.project_id.is_none() {
+        out.project_id = item
+            .project_id
+            .or_else(|| parent.as_ref().and_then(|p| p.project_id));
+    }
+    if out.brief.is_none() {
+        let own = match item.notes.as_deref().filter(|n| !n.trim().is_empty()) {
+            Some(n) => format!("{}\n\n{n}", item.title),
+            None => item.title.clone(),
+        };
+        out.brief = Some(match &parent {
+            Some(p) => {
+                let head = match p.key.as_deref() {
+                    Some(k) => format!("{k} {}", p.title),
+                    None => p.title.clone(),
+                };
+                let desc = s
+                    .work_item_meta(p.id)?
+                    .description
+                    .filter(|d| !d.trim().is_empty())
+                    .map(|d| {
+                        crate::mcp::guard::fence_untrusted(
+                            &d,
+                            "a tracker ticket",
+                            crate::service::work::view::DESCRIPTION_MAX_CHARS,
+                        )
+                    });
+                let task = match desc {
+                    Some(d) => format!("## Task {head}\n\n{d}"),
+                    None => format!("## Task {head}"),
+                };
+                let brief = format!(
+                    "{task}\n\n## Subtask {}\n\n{own}",
+                    item.key.as_deref().unwrap_or_default()
+                );
+                brief
+                    .chars()
+                    .take(crate::service::work::handover::BRIEF_MAX_CHARS)
+                    .collect()
+            }
+            None => own,
+        });
+    }
+    Ok(out)
+}
+
 /// `work_link { action: start }` end to end over the real `new_session`.
 pub async fn start_work(
     store: &Arc<Mutex<Store>>,
@@ -1230,6 +1348,7 @@ pub async fn start_work(
     scope: &OrgScope,
     net: &TrackerNet,
 ) -> Result<SessionRow, IpcError> {
+    let args = &with_native_defaults(store, args, scope)?;
     let plan = plan_start(store, args, scope, net).await?;
     let brief = match (&args.brief, args.with_brief) {
         (Some(b), _) => Some(b.clone()),

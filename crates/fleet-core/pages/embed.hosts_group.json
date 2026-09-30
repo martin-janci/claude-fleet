@@ -1,0 +1,22 @@
+{
+  "spec": "fleet.page/1",
+  "id": "embed.hosts_group",
+  "title": "Hosts list: account bars",
+  "intro": "The account group's 5-hour and weekly headroom at a glance.",
+  "layout": "embed",
+  "slot": "hosts_group",
+  "sections": [
+    {
+      "title": "Usage",
+      "items": [
+        {
+          "type": "account_usage",
+          "source": {
+            "id": "accounts.usage"
+          },
+          "view": "bars"
+        }
+      ]
+    }
+  ]
+}

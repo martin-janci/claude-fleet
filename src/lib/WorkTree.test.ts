@@ -17,19 +17,21 @@ import {
   activeWorkViewId,
   bumpWorkChanged,
   NEWER_HUB,
+  noteWorkChanged,
   revealTaskRequest,
   selectedTaskId,
   showTaskInWorkView,
   taskDetailOpen,
   workExpanded,
+  workLayout,
   workViewFilters,
   type WorkTreeFilters,
   type WorkTreePage,
 } from './work_view';
 
-const ABC = { id: 'tracker:1:ABC', label: 'ABC', source: 'tracker', rule_id: null, tracker_value: 'ABC', editable: true };
-const PAY = { id: 'label:Payments', label: 'Payments', source: 'rule', rule_id: 3, editable: true };
-const NONE = { id: 'none', label: 'No group', source: 'none', editable: true };
+const ABC = { id: 'tracker:1:ABC', label: 'ABC', source: 'tracker', rule_id: null, tracker_value: 'ABC' };
+const PAY = { id: 'label:Payments', label: 'Payments', source: 'rule', rule_id: 3 };
+const NONE = { id: 'none', label: 'No group', source: 'none' };
 
 const firstPage: WorkTreePage = {
   tasks: [
@@ -65,7 +67,10 @@ const firstPage: WorkTreePage = {
   generated_at: 1790000300,
 };
 
-type Args = { args: { filters?: WorkTreeFilters; cursor?: string; limit?: number } };
+type Ask = { org_id: number | null; group_id: string; limit?: number };
+type Args = {
+  args: { filters?: WorkTreeFilters; cursor?: string; limit?: number; sections?: Ask[]; with_review_total?: boolean };
+};
 let treeImpl: (a: Args['args']) => unknown;
 
 function mockHub() {
@@ -99,6 +104,8 @@ describe('WorkTree', () => {
     selectedTaskId.set(null);
     taskDetailOpen.set(false);
     revealTaskRequest.set(null);
+    // These cases test the org → group tree (Grouped); List is `TaskList`.
+    workLayout.set('grouped');
     sessions.set([session('mefistos', 'api', { id: 7 }), session('mefistos', 'web', { id: 9 })]);
     treeImpl = (a) => {
       if (a.filters?.group === 'label:Payments') {
@@ -123,7 +130,7 @@ describe('WorkTree', () => {
     render(WorkTree);
     await flush();
     const first = treeCalls()[0];
-    expect(first).toEqual({ filters: { archived: false }, limit: 50 });
+    expect(first).toEqual({ filters: { archived: false }, limit: 50, with_review_total: true });
     const orgs = screen.getAllByTestId('work-org');
     expect(orgs.map((o) => within(o).getByTestId('work-org-head').textContent?.replace(/\s+/g, ' ').trim())).toEqual([
       '▸ Acme 5',
@@ -404,6 +411,178 @@ describe('WorkTree', () => {
     expect(within(payGroup()).getAllByTestId('work-task')).toHaveLength(300);
   });
 
+  const reviewCalls = () => vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'work_review').length;
+
+  it('a change while Review shows reads only its count; back on Tasks, the tree once', async () => {
+    render(WorkTree, { debounceMs: 5 });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-tab-review'));
+    await flush();
+    const trees = treeCalls().length;
+    const reviews = reviewCalls();
+    bumpWorkChanged('placement');
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    expect(treeCalls()).toHaveLength(trees);
+    expect(reviewCalls()).toBeGreaterThan(reviews);
+    await fireEvent.click(screen.getByTestId('work-tab-tasks'));
+    await flush();
+    expect(treeCalls()).toHaveLength(trees + 1);
+    // Nothing changed since: switching back and forth reads nothing.
+    await fireEvent.click(screen.getByTestId('work-tab-review'));
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-tab-tasks'));
+    await flush();
+    expect(treeCalls()).toHaveLength(trees + 1);
+  });
+
+  const payTasks = () => [
+    task({ task_id: 'item:30', key: 'PAY-1', title: 'Refunds', group: PAY, sessions: [] }),
+    task({ task_id: 'item:31', key: 'PAY-2', title: 'Receipts', group: PAY, sessions: [] }),
+  ];
+
+  it('a hub that pages the open sections answers a refresh in one read, count included', async () => {
+    workExpanded.set({ custom: { '1|label:Payments': true } });
+    treeImpl = (a) => ({
+      ...firstPage,
+      review_total: 2,
+      sections: (a.sections ?? []).map((s) => ({
+        org_id: s.org_id,
+        group_id: s.group_id,
+        tasks: s.group_id === 'label:Payments' ? payTasks() : [],
+        next_cursor: s.group_id === 'label:Payments' ? 'pay2' : null,
+      })),
+    });
+    render(WorkTree, { debounceMs: 5 });
+    await flush();
+    expect(treeCalls()).toEqual([
+      {
+        filters: { archived: false },
+        limit: 50,
+        sections: [{ org_id: 1, group_id: 'label:Payments', limit: 50 }],
+        with_review_total: true,
+      },
+    ]);
+    expect(reviewCalls()).toBe(0);
+    expect(screen.getByText('Receipts')).toBeTruthy();
+    expect(screen.getByTestId('work-tab-review').textContent).toContain('2');
+    bumpWorkChanged('session');
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    expect(treeCalls()).toHaveLength(2);
+    expect(reviewCalls()).toBe(0);
+    // The section's cursor from the batched read pages on by itself.
+    const group = screen.getAllByTestId('work-group')[1];
+    await fireEvent.click(within(group).getByTestId('work-load-more'));
+    await flush();
+    expect(treeCalls().at(-1)).toMatchObject({ filters: { org: 1, group: 'label:Payments' }, cursor: 'pay2' });
+  });
+
+  it('a refresh does not ask again for a section the last first page covered whole', async () => {
+    workExpanded.set({ custom: { '1|label:Payments': true } });
+    treeImpl = (a) => ({
+      ...firstPage,
+      sections: (a.sections ?? []).map((s) => ({
+        org_id: s.org_id,
+        group_id: s.group_id,
+        tasks: s.group_id === 'label:Payments' ? payTasks() : [],
+        next_cursor: s.group_id === 'label:Payments' ? 'pay2' : null,
+      })),
+    });
+    render(WorkTree, { debounceMs: 5 });
+    await flush();
+    // ABC (2 tasks, count 2) is all on the first page and shown open.
+    expect(screen.getByText('Logout <b>broken</b>')).toBeTruthy();
+    bumpWorkChanged('session');
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    const calls = treeCalls();
+    expect(calls).toHaveLength(2);
+    expect(calls[1].sections).toEqual([{ org_id: 1, group_id: 'label:Payments', limit: 50 }]);
+    // Still drawn from the new first page.
+    expect(screen.getByText('Logout <b>broken</b>')).toBeTruthy();
+    expect(screen.getByText('Receipts')).toBeTruthy();
+  });
+
+  // A hub that pages sections; Payments (count 3) pages by itself from `pay2`.
+  const pagingHub = (a: Args['args']) => {
+    if (a.filters?.group === 'label:Payments' && a.cursor === 'pay2') {
+      return { ...firstPage, tasks: [task({ task_id: 'item:32', key: 'PAY-3', group: PAY, sessions: [] })], next_cursor: null };
+    }
+    return {
+      ...firstPage,
+      sections: (a.sections ?? []).map((s) => ({
+        org_id: s.org_id,
+        group_id: s.group_id,
+        tasks: s.group_id === 'label:Payments' ? payTasks() : [],
+        next_cursor: s.group_id === 'label:Payments' ? 'pay2' : null,
+      })),
+    };
+  };
+  const payAsk = (a: Args['args']) => (a.sections ?? []).find((s) => s.group_id === 'label:Payments');
+
+  it('a refresh re-asks as many as a section showed; a resync asks one page again', async () => {
+    workExpanded.set({ custom: { '1|label:Payments': true } });
+    treeImpl = pagingHub;
+    render(WorkTree, { debounceMs: 5, pageSize: 2 });
+    await flush();
+    const group = () => screen.getAllByTestId('work-group')[1];
+    await fireEvent.click(within(group()).getByTestId('work-load-more'));
+    await flush();
+    expect(within(group()).getAllByTestId('work-task')).toHaveLength(3);
+    let before = treeCalls().length;
+    noteWorkChanged([{ what: 'placement' }]);
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    let reads = treeCalls().slice(before);
+    expect(reads).toHaveLength(1);
+    expect(payAsk(reads[0])?.limit).toBeGreaterThanOrEqual(3);
+    before = treeCalls().length;
+    noteWorkChanged([{ what: 'resync' }]);
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    reads = treeCalls().slice(before);
+    expect(reads).toHaveLength(1);
+    expect(reads[0].limit).toBe(2);
+    expect(payAsk(reads[0])).toEqual({ org_id: 1, group_id: 'label:Payments', limit: 2 });
+    // Nothing kept: the section shows what the resync read gave it.
+    expect(within(group()).getAllByTestId('work-task')).toHaveLength(2);
+  });
+
+  it('a resync while Review shows reloads the whole view once back on Tasks', async () => {
+    workExpanded.set({ custom: { '1|label:Payments': true } });
+    treeImpl = pagingHub;
+    render(WorkTree, { debounceMs: 5, pageSize: 2 });
+    await flush();
+    const group = () => screen.getAllByTestId('work-group')[1];
+    await fireEvent.click(within(group()).getByTestId('work-load-more'));
+    await flush();
+    expect(within(group()).getAllByTestId('work-task')).toHaveLength(3);
+    await fireEvent.click(screen.getByTestId('work-tab-review'));
+    await flush();
+    const before = treeCalls().length;
+    noteWorkChanged([{ what: 'resync' }]);
+    await new Promise((r) => setTimeout(r, 30));
+    await flush();
+    expect(treeCalls()).toHaveLength(before);
+    await fireEvent.click(screen.getByTestId('work-tab-tasks'));
+    await flush();
+    const reads = treeCalls().slice(before);
+    expect(reads).toHaveLength(1);
+    expect(payAsk(reads[0])).toEqual({ org_id: 1, group_id: 'label:Payments', limit: 2 });
+  });
+
+  it('a hub that does not page sections still fills the open ones, each by itself', async () => {
+    workExpanded.set({ custom: { '1|label:Payments': true } });
+    render(WorkTree, { debounceMs: 5 });
+    await flush();
+    expect(treeCalls()[0].sections).toEqual([{ org_id: 1, group_id: 'label:Payments', limit: 50 }]);
+    expect(treeCalls().filter((a) => a.filters?.group === 'label:Payments')).toHaveLength(1);
+    expect(screen.getByText('Receipts')).toBeTruthy();
+    expect(reviewCalls()).toBe(1);
+    expect(screen.getByTestId('work-tab-review').textContent).toContain('4');
+  });
+
   it('a steady stream of changes still refreshes within the max wait', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     try {
@@ -430,5 +609,41 @@ describe('WorkTree', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('defaults to List and shows the grouped tree on Grouped', async () => {
+    workLayout.set('list');
+    render(WorkTree);
+    await flush();
+    expect(screen.getByTestId('task-list')).toBeTruthy();
+    // One read (the list's, archived on); the header still has its filters.
+    expect(treeCalls()).toHaveLength(1);
+    expect(treeCalls()[0].filters?.archived).toBe(true);
+    expect(screen.getByTestId('work-tab-review').textContent).toContain('4');
+    expect(screen.getByTestId('work-layout-list').getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(screen.getByTestId('work-layout-grouped'));
+    await flush();
+    expect(screen.queryByTestId('task-list')).toBeNull();
+    expect(screen.getAllByTestId('work-org').length).toBeGreaterThan(0);
+    expect(get(workLayout)).toBe('grouped');
+  });
+
+  it('"Show in Work view" from List switches to Grouped and reveals the task', async () => {
+    workLayout.set('list');
+    vi.mocked(invoke).mockImplementation(async (cmd: string, raw?: unknown) => {
+      const a = (raw as Args | undefined)?.args ?? {};
+      if (cmd === 'work_task') return { task: task({ task_id: 'item:31', group: PAY, org_id: 1 }), rules: [] };
+      if (cmd === 'work_tree') return treeImpl(a);
+      if (cmd === 'work_review') return { items: [], total: 0, next_cursor: null };
+      return [];
+    });
+    render(WorkTree);
+    await flush();
+    showTaskInWorkView('item:31');
+    await flush();
+    await flush();
+    expect(get(workLayout)).toBe('grouped');
+    expect(screen.getByText('Receipts')).toBeTruthy();
+    expect(get(revealTaskRequest)).toBeNull();
   });
 });

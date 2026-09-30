@@ -55,12 +55,14 @@ use super::status_map_robust::{
     floor_sweep_lines, language_lines, language_pairs, robustness_lines, FloorSweep, LanguagePairs,
     Robustness,
 };
-use super::{bootstrap_acc_diff, f3, percentile, Calibration, Criterion, Paired, Split, Verdict};
-use crate::ipc_error::lock;
+use super::{
+    bootstrap_acc_diff, f2, f3, gate_or_skip, pct, percentile, round3, Calibration, Criterion,
+    Paired, Split, Verdict,
+};
 use crate::service::decide::haiku::{reason::OTHER_ORG, Haiku};
 use crate::service::decide::status_map::{self as sm, MIN_CONFIDENCE, NO_RULE, UNSURE};
 use crate::service::decide::{
-    decide, gate_bench_at, DecideCtx, DecideRequest, Fallback, Feature, JevRequest, Question,
+    decide, DecideCtx, DecideRequest, Fallback, Feature, JevRequest, Question,
 };
 use crate::service::trackers::asana::{infer_section, section_key};
 use serde::{Deserialize, Serialize};
@@ -229,7 +231,8 @@ pub fn resolve_label_orgs(
             .collect();
         if !on.is_empty() && !on.iter().any(|r| r.org_id == Some(org)) {
             return Err(format!(
-                "row {row}: org_id {org}, but the trackers that list this section are in                  org(s) {}; give the row its tracker_id",
+                "row {row}: org_id {org}, but the trackers that list this section are in \
+                 org(s) {}; give the row its tracker_id",
                 on.iter()
                     .map(|r| org_name(r.org_id))
                     .collect::<Vec<_>>()
@@ -596,16 +599,8 @@ pub async fn run_jev(
     let mut out = Vec::with_capacity(cases.len());
     let mut calls = 0usize;
     for c in cases {
-        let gated = match lock(&ctx.store) {
-            Ok(s) => gate_bench_at(&s, Feature::StatusMap, c.org_id, ctx.now()),
-            Err(_) => Err(Fallback::FlagOff),
-        };
-        if let Err(f) = gated {
-            out.push(Outcome::skipped(f.as_str()));
-            continue;
-        }
-        if calls >= max_calls {
-            out.push(Outcome::skipped("max_calls"));
+        if let Err(r) = gate_or_skip(ctx, Feature::StatusMap, c.org_id, calls, max_calls) {
+            out.push(Outcome::skipped(r));
             continue;
         }
         calls += 1;
@@ -623,11 +618,6 @@ pub async fn run_jev(
             },
         )
         .await;
-        let run = res.run_id.and_then(|id| {
-            lock(&ctx.store)
-                .ok()
-                .and_then(|s| s.get_decision_run(id).ok().flatten())
-        });
         let mut o = Outcome {
             ran: res.mode.is_some(),
             // Under the floor is the adapter's abstention, not a failure.
@@ -635,9 +625,9 @@ pub async fn run_jev(
                 .fallback
                 .filter(|f| *f != Fallback::LowConfidence)
                 .map(|f| f.as_str().to_string()),
-            latency_ms: run.as_ref().and_then(|r| r.latency_ms),
-            input_tokens: run.as_ref().map(|r| r.input_tokens).unwrap_or_default(),
-            cost_microusd: run.as_ref().map(|r| r.cost_microusd).unwrap_or_default(),
+            latency_ms: res.latency_ms,
+            input_tokens: res.input_tokens,
+            cost_microusd: res.cost_microusd,
             ..Default::default()
         };
         if let Some(a) = &res.answer {
@@ -757,10 +747,6 @@ pub struct Slice {
     pub coverage: Option<f64>,
 }
 
-fn ratio(k: u64, n: u64) -> Option<f64> {
-    (n > 0).then(|| ((k as f64 / n as f64) * 1000.0).round() / 1000.0)
-}
-
 impl Slice {
     fn add(&mut self, expect: &str, answer: Option<&str>) {
         self.cases += 1;
@@ -771,8 +757,8 @@ impl Slice {
     }
 
     fn finish(mut self) -> Slice {
-        self.accuracy_on_answered = ratio(self.correct, self.answered);
-        self.coverage = ratio(self.answered, self.cases);
+        self.accuracy_on_answered = pct(self.correct, self.answered);
+        self.coverage = pct(self.answered, self.cases);
         self
     }
 }
@@ -882,10 +868,10 @@ pub fn provider_metrics(p: Provider, rows: &[(&SectionCase, &Outcome)]) -> Provi
         skipped,
         all: all.finish(),
         rule_abstained: abst.finish(),
-        applied_accuracy: ratio(app_k, app_n),
+        applied_accuracy: pct(app_k, app_n),
         done_answers: done_n,
-        done_precision: ratio(done_k, done_n),
-        done_precision_strict: ratio(strict_k, strict_n),
+        done_precision: pct(done_k, done_n),
+        done_precision_strict: pct(strict_k, strict_n),
         confusion,
         calibration: Calibration::of(&cal),
         calls,
@@ -1049,7 +1035,7 @@ pub fn haiku_criterion(p: Provider, cases: &[SectionCase], outs: &Outcomes) -> C
         })
         .collect();
     let cov = |o: &[Outcome]| {
-        ratio(
+        pct(
             paired.iter().filter(|&&i| o[i].answer.is_some()).count() as u64,
             n,
         )
@@ -1060,7 +1046,7 @@ pub fn haiku_criterion(p: Provider, cases: &[SectionCase], outs: &Outcomes) -> C
             .copied()
             .filter(|&i| o[i].answer.is_some())
             .collect();
-        ratio(
+        pct(
             answered
                 .iter()
                 .filter(|&&i| o[i].answer.as_deref() == Some(cases[i].expect))
@@ -1085,7 +1071,6 @@ pub fn haiku_criterion(p: Provider, cases: &[SectionCase], outs: &Outcomes) -> C
     let ci = bootstrap_acc_diff(&obs, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED);
     let judged = n >= JUDGE_MIN_CASES;
     let ms = |x: Option<i64>| x.map(|v| format!("{v} ms")).unwrap_or_else(|| "-".into());
-    let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
     let (verdict, what) = match ci {
         None => (Verdict::NotJudged, "not comparable (no paired answers)"),
         Some((_, lo, _)) if lo > 0.0 => (Verdict::Pass, "beats haiku"),
@@ -1112,9 +1097,9 @@ pub fn haiku_criterion(p: Provider, cases: &[SectionCase], outs: &Outcomes) -> C
             f3(acc(oh)),
             f3(cov(op)),
             f3(cov(oh)),
-            f3(ci.map(|x| r3(x.0))),
-            f3(ci.map(|x| r3(x.1))),
-            f3(ci.map(|x| r3(x.2))),
+            f3(ci.map(|x| round3(x.0))),
+            f3(ci.map(|x| round3(x.1))),
+            f3(ci.map(|x| round3(x.2))),
             ms(lp),
             ms(lh),
         ),
@@ -1201,15 +1186,14 @@ fn diff_of(
         })
         .collect();
     let ci = bootstrap_acc_diff(&obs, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED);
-    let r3 = |x: f64| (x * 1000.0).round() / 1000.0;
     Diff {
         scope,
         a: a.as_str(),
         b: b.as_str(),
         cases: obs.len() as u64,
-        diff: ci.map(|x| r3(x.0)),
-        lo: ci.map(|x| r3(x.1)),
-        hi: ci.map(|x| r3(x.2)),
+        diff: ci.map(|x| round3(x.0)),
+        lo: ci.map(|x| round3(x.1)),
+        hi: ci.map(|x| round3(x.2)),
         better: match ci {
             Some((_, lo, _)) if lo > 0.0 => a.as_str().to_string(),
             Some((_, _, hi)) if hi < 0.0 => b.as_str().to_string(),
@@ -1351,10 +1335,6 @@ pub fn report(
 }
 
 // --- lines -------------------------------------------------------------------------
-
-fn f2(x: Option<f64>) -> String {
-    x.map(|v| format!("{v:.2}")).unwrap_or_else(|| "-".into())
-}
 
 impl Report {
     /// The report of the `split` side of a set whose sides are `sizes`

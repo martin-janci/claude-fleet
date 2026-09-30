@@ -90,6 +90,9 @@ pub(crate) struct PtyShared {
     /// THIS is what the frontend acts on, so output that merely contains that
     /// text can never fake a disconnect.
     exited: AtomicBool,
+    /// What the attachment runs, for the `[cf]` exit notes
+    /// ([`attach_program_label`]): `ssh`, `wsl.exe` or `tmux attach`.
+    program: &'static str,
 }
 
 /// Un-drained output plus the "we had to throw output away" latch.
@@ -101,9 +104,16 @@ pub(crate) struct PtyBuffer {
 
 impl PtyShared {
     pub(crate) fn new() -> Self {
+        Self::for_program("ssh")
+    }
+
+    /// A fresh share for an attachment running `program` (see
+    /// [`attach_program_label`]).
+    pub(crate) fn for_program(program: &'static str) -> Self {
         Self {
             buffer: Mutex::new(PtyBuffer::default()),
             exited: AtomicBool::new(false),
+            program,
         }
     }
 
@@ -156,7 +166,6 @@ impl PtyState {
         shared: Arc<PtyShared>,
     ) -> PtyParts {
         let previous = self.take_parts();
-        self.child_gone_at = None;
         self.master = Some(master);
         self.input_tx = Some(input_tx);
         self.child = Some(child);
@@ -206,8 +215,10 @@ impl PtyState {
         }
         let gone_at = *self.child_gone_at.get_or_insert_with(Instant::now);
         if gone_at.elapsed() >= grace {
-            self.shared
-                .note("\r\n\x1b[33m[cf] ssh exited (the pseudo console stays open)\x1b[0m\r\n");
+            let program = self.shared.program;
+            self.shared.note(&format!(
+                "\r\n\x1b[33m[cf] {program} exited (the pseudo console stays open)\x1b[0m\r\n"
+            ));
             self.shared.exited.store(true, Ordering::Release);
         }
     }
@@ -427,10 +438,29 @@ pub(crate) fn attach_argv(
     session_name: &str,
     mux_opts: &[String],
 ) -> Vec<String> {
+    attach_argv_with(
+        fleet_core::wsl::distro_for(host_alias).as_deref(),
+        ssh_bin,
+        host_alias,
+        session_name,
+        mux_opts,
+    )
+}
+
+/// [`attach_argv`] with the WSL lookup already done: `wsl_distro` is
+/// `fleet_core::wsl::distro_for(host_alias)`. Pure, so the WSL routing is
+/// testable without the process-wide distribution table.
+pub(crate) fn attach_argv_with(
+    wsl_distro: Option<&str>,
+    ssh_bin: &str,
+    host_alias: &str,
+    session_name: &str,
+    mux_opts: &[String],
+) -> Vec<String> {
     // A WSL distribution on this machine: the same attach script, run by
     // `wsl.exe` instead of carried by `ssh -tt` (see `fleet_core::wsl`).
-    if let Some(distro) = fleet_core::wsl::distro_for(host_alias) {
-        return fleet_core::wsl::attach_argv(&distro, &remote_attach_script(session_name));
+    if let Some(distro) = wsl_distro {
+        return fleet_core::wsl::attach_argv(distro, &remote_attach_script(session_name));
     }
     if host_alias == "local" {
         return vec![
@@ -518,6 +548,18 @@ pub(crate) fn attach_env(lookup: impl Fn(&str) -> Option<String>) -> Vec<(String
     }
     env.push(("COLORTERM".into(), "truecolor".into()));
     env
+}
+
+/// The program an attachment runs, as the `[cf]` exit notes name it: `tmux
+/// attach` for `local`, `wsl.exe` for a WSL distribution, `ssh` otherwise.
+pub(crate) fn attach_program_label(host_alias: &str, is_wsl: bool) -> &'static str {
+    if is_wsl {
+        "wsl.exe"
+    } else if host_alias == "local" {
+        "tmux attach"
+    } else {
+        "ssh"
+    }
 }
 
 /// Marker appended at open so the user can see in the terminal that the
@@ -616,6 +658,14 @@ pub fn pty_open(
     fleet_core::validate::host_alias(&args.host_alias)?;
     fleet_core::validate::tmux_name(&args.session_name)?;
 
+    // A `wsl-` host may still be being detected at startup; until it is, it
+    // would read as an SSH alias. Waited for BEFORE `openpty`, so no pseudo
+    // console is held open through the (up to `SETTLE_WAIT`) wait.
+    fleet_core::wsl::settled_for_blocking(&args.host_alias);
+    let mux_opts = attach_mux_opts(&ssh, &args.host_alias);
+    let is_wsl = fleet_core::wsl::is_wsl_host(&args.host_alias);
+    let program = attach_program_label(&args.host_alias, is_wsl);
+
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(clamp_size(args.cols, args.rows))
@@ -623,10 +673,6 @@ pub fn pty_open(
 
     #[cfg(windows)]
     log_conpty_once();
-    let mux_opts = attach_mux_opts(&ssh, &args.host_alias);
-    // A `wsl-` host may still be being detected at startup; until it is, it
-    // would read as an SSH alias.
-    fleet_core::wsl::settled_for_blocking(&args.host_alias);
     let argv = attach_argv(
         &ssh.ssh_binary().to_string_lossy(),
         &args.host_alias,
@@ -640,14 +686,14 @@ pub fn pty_open(
     }
     // wsl.exe's own messages (a distribution that is gone) in UTF-8, not the
     // UTF-16 that would reach the pane as NUL-riddled text.
-    if fleet_core::wsl::is_wsl_host(&args.host_alias) {
+    if is_wsl {
         cmd.env("WSL_UTF8", "1");
     }
 
     let child = pair
         .slave
         .spawn_command(cmd)
-        .map_err(|e| IpcError::new(codes::E_PTY, format!("spawn tmux attach: {e}")))?;
+        .map_err(|e| IpcError::new(codes::E_PTY, format!("spawn {program}: {e}")))?;
 
     let mut reader = pair
         .master
@@ -663,7 +709,7 @@ pub fn pty_open(
     // loops on `read`) — handing the new reader its own buffer means stale
     // bytes from the old session can never bleed into the new screen. The
     // old buffer is orphaned and freed once that thread observes EOF.
-    let shared = Arc::new(PtyShared::new());
+    let shared = Arc::new(PtyShared::for_program(program));
     let input_tx = spawn_writer(writer, Arc::clone(&shared));
     let previous = {
         let mut s = state
@@ -685,7 +731,7 @@ pub fn pty_open(
             match reader.read(&mut buf) {
                 Ok(0) => {
                     shared.note(&format!(
-                        "\r\n\x1b[33m[cf] PTY EOF after {total} bytes (tmux attach exited)\x1b[0m\r\n"
+                        "\r\n\x1b[33m[cf] PTY EOF after {total} bytes ({program} exited)\x1b[0m\r\n"
                     ));
                     break;
                 }
@@ -916,6 +962,35 @@ mod tests {
             attach_argv("ssh", "local", "dev-foo", &mux()),
             vec!["tmux", "attach", "-t", "=dev-foo"]
         );
+    }
+
+    #[test]
+    fn a_wsl_host_attaches_through_wsl_exe_not_ssh() {
+        let argv = attach_argv_with(Some("Ubuntu"), "ssh", "wsl-ubuntu", "s", &[]);
+        assert!(argv[0].ends_with("wsl.exe"), "{argv:?}");
+        fn has(argv: &[String], w: &[&str]) -> bool {
+            argv.windows(w.len()).any(|x| x == w)
+        }
+        assert!(has(&argv, &["--distribution", "Ubuntu"]), "{argv:?}");
+        assert!(has(&argv, &["bash", "-lc"]), "{argv:?}");
+        assert!(!argv.iter().any(|a| a == "-tt" || a == "ssh"), "{argv:?}");
+        assert!(argv.last().unwrap().contains("tmux attach -t"), "{argv:?}");
+    }
+
+    #[test]
+    fn without_a_distro_the_same_alias_attaches_over_ssh() {
+        let argv = attach_argv_with(None, "ssh", "wsl-ubuntu", "s", &[]);
+        assert_eq!(&argv[..2], ["ssh", "-tt"]);
+        assert!(argv.iter().any(|a| a == "wsl-ubuntu"));
+    }
+
+    #[test]
+    fn exit_notes_name_the_program_the_attachment_runs() {
+        assert_eq!(attach_program_label("local", false), "tmux attach");
+        assert_eq!(attach_program_label("wsl-ubuntu", true), "wsl.exe");
+        assert_eq!(attach_program_label("hetzner", false), "ssh");
+        assert_eq!(PtyShared::new().program, "ssh");
+        assert_eq!(PtyShared::for_program("wsl.exe").program, "wsl.exe");
     }
 
     /// The attach runs the program every probe runs, not a bare `ssh` a

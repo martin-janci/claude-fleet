@@ -9,7 +9,7 @@ import { get } from 'svelte/store';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkFiltersBar from './WorkFiltersBar.svelte';
-import { activeWorkViewId, workViewFilters, type WorkView } from './work_view';
+import { activeWorkViewId, bumpWorkChanged, noteWorkChanged, workViewFilters, type WorkView } from './work_view';
 
 const orgs = [{ id: 1, name: 'Acme', color: null }];
 const trackers = [{ id: 1, name: 'Jira (acme)', provider: 'jira', state: 'ok', org_id: 1 }];
@@ -40,6 +40,31 @@ describe('WorkFiltersBar', () => {
       const h = handlers[cmd];
       return h ? h((raw as { args: Record<string, unknown> } | undefined)?.args ?? {}) : null;
     });
+  });
+
+  it('re-reads the saved views on a view change, not on a placement or a session tick', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      render(WorkFiltersBar, { orgs, trackers });
+      await flush();
+      const n = calls('work_views').length;
+      noteWorkChanged([{ what: 'placement', task_id: 'item:1' }]);
+      bumpWorkChanged('session');
+      vi.advanceTimersByTime(600);
+      await flush();
+      expect(calls('work_views')).toHaveLength(n);
+      noteWorkChanged([{ what: 'view', view_id: 1 }]);
+      vi.advanceTimersByTime(600);
+      await flush();
+      expect(calls('work_views')).toHaveLength(n + 1);
+      // A write this window made may have moved anything.
+      bumpWorkChanged();
+      vi.advanceTimersByTime(600);
+      await flush();
+      expect(calls('work_views')).toHaveLength(n + 2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('every control writes the filters; the search is debounced', async () => {
@@ -185,5 +210,15 @@ describe('WorkFiltersBar', () => {
     await fireEvent.click(screen.getByTestId('work-view-delete'));
     await flush();
     expect(calls('delete_work_view')[1]).toEqual({ view_id: 1, expected_version: 4 });
+  });
+
+  it('in the List layout the Archived switch is off-limits: Done shows them', async () => {
+    render(WorkFiltersBar, { orgs, trackers, listLayout: true });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-filters-open'));
+    await flush();
+    const sw = screen.getByTestId('work-filter-archived') as HTMLButtonElement;
+    expect(sw.disabled).toBe(true);
+    expect(sw.title).toBe('In List view, Done shows them');
   });
 });

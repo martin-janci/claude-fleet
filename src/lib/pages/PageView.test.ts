@@ -2,8 +2,14 @@ import { render, screen, fireEvent, waitFor, within } from '@testing-library/sve
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('../clipboard', () => ({ copyText: vi.fn(() => Promise.resolve(true)) }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
+import { copyText } from '../clipboard';
+import { hosts, type HostRow } from '../hosts';
+import { accounts } from '../accounts';
+import { accountUsage } from '../account_usage_store';
+import { WORK, GMAIL, snapshot } from '../hosts_fixture';
 import PageView from './PageView.svelte';
 import { fleetSettings, SETTING_DEFAULTS } from '../fleet_settings';
 import { allDescriptors, bundle, registryRouter } from './testing';
@@ -186,6 +192,99 @@ describe('PageView — data and links', () => {
     await fireEvent.click(screen.getByTestId('data-chart-usage.by_day-table-toggle'));
     expect(screen.getByTestId('data-chart-usage.by_day-table').textContent).toContain('$5.00');
     expect(inv).toHaveBeenCalledWith('fetch_page_source', { id: 'usage.by_day', params: { days: 30 } });
+  });
+
+  it('a filter sets its param on every source that takes it, and re-reads only those (the filter bar)', async () => {
+    const host = (alias: string) => ({ alias, hidden: false }) as unknown as HostRow;
+    hosts.set([host('beta'), host('alpha')]);
+    show('usage');
+    const days = (await screen.findByTestId('page-filter-days')) as HTMLSelectElement;
+    expect(days.value).toBe('30');
+    const hostSel = screen.getByTestId('page-filter-host') as HTMLSelectElement;
+    expect(Array.from(hostSel.options).map((o) => o.textContent)).toEqual(['All hosts', 'alpha', 'beta']);
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('fetch_page_source', { id: 'usage.total', params: null }));
+
+    await fireEvent.change(days, { target: { value: '7' } });
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('fetch_page_source', { id: 'usage.by_day', params: { days: 7 } }));
+    // usage.total takes no window: the change does not re-read it.
+    expect(inv.mock.calls.filter((c) => (c[1] as { id?: string })?.id === 'usage.by_host')).toHaveLength(1);
+
+    await fireEvent.change(hostSel, { target: { value: 'alpha' } });
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('fetch_page_source', { id: 'usage.by_day', params: { days: 7, host: 'alpha' } }),
+    );
+    expect(inv).toHaveBeenCalledWith('fetch_page_source', { id: 'usage.total', params: { host: 'alpha' } });
+    expect(inv).toHaveBeenCalledWith('fetch_page_source', { id: 'usage.by_model', params: { host: 'alpha' } });
+    hosts.set([]);
+  });
+
+  it('Work graph usage: the counts as a table, copied as text with the window (replaces WorkUsage)', async () => {
+    show('usage.work');
+    const table = await screen.findByTestId('data-table-work.usage');
+    await waitFor(() => expect(table.textContent).toContain('3 made (manual 3)'));
+    expect(inv).toHaveBeenCalledWith('fetch_page_source', { id: 'work.usage', params: { days: 30 } });
+    await fireEvent.change(screen.getByTestId('page-filter-days'), { target: { value: '90' } });
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('fetch_page_source', { id: 'work.usage', params: { days: 90 } }));
+    await fireEvent.click(screen.getByTestId('data-table-work.usage-copy'));
+    await waitFor(() =>
+      expect(copyText).toHaveBeenCalledWith('Work graph usage, last 90 d\nlinks: 3 made (manual 3)\ntrackers: none'),
+    );
+    expect(screen.getByTestId('data-table-work.usage-copy').textContent).toBe('Copied');
+  });
+
+  it('on a paired desktop a data page says where its data is, and reads nothing', async () => {
+    render(PageView, {
+      props: {
+        page: pageOf('usage.work'),
+        pages: bundle.pages,
+        descs,
+        values: defaults,
+        sources: bundle.sources,
+        remote: true,
+        onnavigate: () => {},
+      },
+    });
+    expect(screen.getByTestId('page-data-remote')).toBeInTheDocument();
+    expect(screen.queryByTestId('page-filters')).toBeNull();
+    expect(screen.queryByTestId('section-Counts')).toBeNull();
+    expect(inv.mock.calls.some((c) => c[0] === 'fetch_page_source')).toBe(false);
+  });
+
+  it('Claude accounts: a usage block per account from the live store, refreshed through the floor (L8)', async () => {
+    accounts.set([WORK, GMAIL]);
+    accountUsage.set({ [WORK.uuid]: snapshot(WORK.uuid, { next_try_at: 0 }) });
+    show('usage.accounts');
+    const blocks = await screen.findAllByTestId('usage-block');
+    expect(blocks).toHaveLength(2);
+    expect(inv.mock.calls.some((c) => c[0] === 'fetch_page_source')).toBe(false);
+    inv.mockImplementation(async (cmd: string) =>
+      cmd === 'refresh_account_usage' ? snapshot(WORK.uuid) : null,
+    );
+    const work = screen
+      .getAllByTestId('accounts-usage-account')
+      .find((el) => el.getAttribute('data-uuid') === WORK.uuid)!;
+    await fireEvent.click(within(work).getByTestId('usage-refresh'));
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('refresh_account_usage', { args: { account_uuid: WORK.uuid } }),
+    );
+    accounts.set([]);
+    accountUsage.set({});
+  });
+
+  it('Claude accounts: none yet, and nothing on a paired desktop', async () => {
+    accounts.set([]);
+    const { unmount } = render(PageView, {
+      props: { page: pageOf('usage.accounts'), pages: bundle.pages, descs, values: defaults, sources: bundle.sources, onnavigate: () => {} },
+    });
+    expect(screen.getByTestId('accounts-usage-empty')).toBeInTheDocument();
+    unmount();
+    accounts.set([WORK]);
+    render(PageView, {
+      props: { page: pageOf('usage.accounts'), pages: bundle.pages, descs, values: defaults, sources: bundle.sources, remote: true, onnavigate: () => {} },
+    });
+    expect(screen.getByTestId('page-data-remote')).toBeInTheDocument();
+    expect(screen.queryByTestId('usage-block')).toBeNull();
+    accounts.set([]);
   });
 
   it('follows a link to another page', async () => {

@@ -10,6 +10,7 @@ import {
   composerPresets,
   isPresetArray,
   loadComposerPresets,
+  refreshComposerPresetsIfIdle,
   flushComposerPresets,
   resetComposerPresets,
   addPreset,
@@ -19,6 +20,7 @@ import {
   presetSendsNow,
   presetsConflict,
   PRESETS_PREF,
+  SAVE_DEBOUNCE_MS,
 } from './composer_presets';
 
 const invoked = () => mockedInvoke as ReturnType<typeof vi.fn>;
@@ -210,6 +212,59 @@ describe('composer presets', () => {
     await second;
     expect(calls).toHaveLength(2);
     expect((calls[1] as { expected: unknown }).expected).toEqual([{ ...SERVED[0], label: 'One' }, SERVED[1]]);
+  });
+
+  it('an idle refresh re-reads the list and names it in the next save', async () => {
+    await loadComposerPresets();
+    const theirs = [{ label: 'Phone', text: 'from the phone', auto_send: false }];
+    backendHolds(theirs);
+    await refreshComposerPresetsIfIdle();
+    expect(get(composerPresets)).toEqual(theirs);
+    expect(JSON.parse(localStorage.getItem('cf:pref:' + PRESETS_PREF)!)).toEqual(theirs);
+    // `served` moved too: the next edit names the phone's list, not a stale one.
+    updatePreset(0, { label: 'Desk' });
+    await flushComposerPresets();
+    expect(invoked()).toHaveBeenLastCalledWith('set_quick_replies', {
+      entries: [{ ...theirs[0], label: 'Desk' }],
+      expected: theirs,
+    });
+  });
+
+  it('a refresh never replaces the list while a debounced edit is pending', async () => {
+    vi.useFakeTimers();
+    try {
+      await loadComposerPresets();
+      backendHolds([{ label: 'Phone', text: 'from the phone' }]);
+      invoked().mockClear();
+      updatePreset(0, { label: 'Typing' });
+      await refreshComposerPresetsIfIdle();
+      expect(invoked()).not.toHaveBeenCalledWith('quick_replies', undefined);
+      expect(get(composerPresets)[0].label).toBe('Typing');
+      await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS);
+      await flushComposerPresets();
+      expect(invoked()).toHaveBeenCalledWith('set_quick_replies', {
+        entries: [{ ...SERVED[0], label: 'Typing' }, SERVED[1]],
+        expected: SERVED,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a refresh drops its answer when an edit started while it was on the wire', async () => {
+    await loadComposerPresets();
+    let answer!: (v: unknown) => void;
+    invoked().mockImplementation((cmd: string, args?: { entries?: unknown }) => {
+      if (cmd === 'quick_replies') return new Promise((r) => (answer = r));
+      if (cmd === 'set_quick_replies') return Promise.resolve(args?.entries);
+      throw new Error(`unexpected command ${cmd}`);
+    });
+    const pending = refreshComposerPresetsIfIdle();
+    updatePreset(0, { label: 'Typing' });
+    answer([{ label: 'Phone', text: 'from the phone' }]);
+    await pending;
+    expect(get(composerPresets)[0].label).toBe('Typing');
+    await flushComposerPresets();
   });
 
   it('reset asks the backend for the built-ins by storing nothing', async () => {

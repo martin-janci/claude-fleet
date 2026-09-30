@@ -138,6 +138,12 @@ pub struct WorkItemRow {
     /// `todo` until someone says otherwise).
     #[serde(default)]
     pub status_category: String,
+    /// Who decided `status_category`: `None` (the sync's, or the default),
+    /// `"person"` (explicit, final) or `"derived"` (stamped from a merged PR).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_set_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_set_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
     // --- tracker attributes (migration 048, work graph M3); all default, so
@@ -183,6 +189,25 @@ pub struct WorkItemRow {
     /// not_found_or_no_permission | tracker_removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
+    // --- shared work context (migration 086); all default, so an older
+    // hub's row still reads.
+    /// manual | proposed | agent | detected (`None` reads as detected).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// The dispatched job an `agent` item mirrors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<i64>,
+    /// proposed | accepted | rejected (origin `proposed` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_why: Option<String>,
 }
 
 /// One session ↔ work link. `participant_id` is `None` once the retired
@@ -281,11 +306,37 @@ pub struct WorkSummary {
     #[serde(default)]
     pub title: String,
     pub source: String,
+    /// `tracker` | `local` | `ref` (native item status, task 4): which kind
+    /// of task this is, the same vocabulary as `WorkTask.kind`. Empty for a
+    /// hub older than this column.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
     // --- the tracker item's status (work graph M3), absent for a bare key,
     // a local item, or a hub older than M3.
+    //
+    // Deliberately NOT the effective/live status (native item status task
+    // 4, fix round 2): fleet-mobile's `WorkSummary.isLocal` derives "this is
+    // a local item, not a ticket" from `itemId != null && statusCategory ==
+    // null && url == null` — the ONLY signal it has, since it predates
+    // `kind` and has no other way to tell. Making a local item's status
+    // non-null here would silently disable "Rename work" on every paired
+    // phone, shipped builds included, which cannot be patched by anything
+    // this repo ships. See `effective_status` below for the live value.
     /// todo | in_progress | done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_category: Option<String>,
+    /// The item's status with the live precedence applied (design
+    /// 2026-09-28 §2, fix round 2): a person's setting or a stamped `done`
+    /// is final; otherwise a confirmed link whose session is presently
+    /// working lifts a LOCAL item to `in_progress`; otherwise the stored
+    /// value — for BOTH a tracker item and a local item alike, unlike
+    /// `status_category` above. This is the field a reader wanting "the
+    /// real answer" should use: the sidebar chip, the status filter, the
+    /// Today view's staleness check and the handover summary all read this,
+    /// not `status_category`. `None` for a bare key (no item at all), or a
+    /// hub older than this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_status: Option<String>,
     /// The tracker's own status name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_name: Option<String>,
@@ -498,7 +549,13 @@ pub(super) const ITEM_COLUMNS: &str =
     "id, source, key, title, url, status_category, created_at, updated_at, \
      tracker_id, external_id, aliases, kind, hierarchy_level, status_name, resolution, parent_id, \
      assignees, iteration, updated_ext, status_changed_at, fetched_at, unavailable_at, \
-     unavailable_reason";
+     unavailable_reason, status_set_by, status_set_at, origin, project_id, notes, task_id, \
+     proposal_state, proposed_by, proposal_why";
+
+/// How many columns [`ITEM_COLUMNS`] names. A query that appends its own
+/// columns after the list indexes them as `ITEM_COLUMN_COUNT + n` — never a
+/// literal, because a literal silently shifts when a column is added here.
+pub(super) const ITEM_COLUMN_COUNT: usize = 32;
 
 /// A JSON array column as a list; anything unreadable is empty.
 fn json_list(raw: Option<String>) -> Vec<String> {
@@ -531,6 +588,15 @@ pub(super) fn map_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemRow> {
         fetched_at: r.get(20)?,
         unavailable_at: r.get(21)?,
         unavailable_reason: r.get(22)?,
+        status_set_by: r.get(23)?,
+        status_set_at: r.get(24)?,
+        origin: r.get(25)?,
+        project_id: r.get(26)?,
+        notes: r.get(27)?,
+        task_id: r.get(28)?,
+        proposal_state: r.get(29)?,
+        proposed_by: r.get(30)?,
+        proposal_why: r.get(31)?,
     })
 }
 
@@ -590,8 +656,8 @@ impl Store {
             }
         }
         self.conn.execute(
-            "INSERT INTO work_items (source, key, title, created_at, updated_at) \
-             VALUES ('local', ?1, ?2, ?3, ?3)",
+            "INSERT INTO work_items (source, key, title, origin, created_at, updated_at) \
+             VALUES ('local', ?1, ?2, 'manual', ?3, ?3)",
             rusqlite::params![key, title, now],
         )?;
         let id = self.conn.last_insert_rowid();
@@ -1675,18 +1741,37 @@ impl Store {
     }
 
     /// session id → its primary work, for every live session that has one.
+    ///
+    /// `kind` is unconditional (native item status task 4, fix round 1):
+    /// this had the same tracker-only `status_category` `CASE` that hid a
+    /// local item's status on the session row, before that was fixed. Zero
+    /// non-test callers today, so nothing downstream depended on the old
+    /// hiding — but a latent copy of a just-fixed bug is exactly what waits
+    /// for its first caller.
+    ///
+    /// `status_category` itself is back to tracker-only (fix round 2): a
+    /// shipped fleet-mobile build derives "this is a local item" from
+    /// `status_category == null` on the identically-shaped `WorkSummary`
+    /// `rows.rs` stamps on the session row, and this method feeds the same
+    /// type. `effective_status` carries the live-lifted value instead — see
+    /// its doc on `WorkSummary`.
     pub fn primary_work_by_session(&self) -> Result<HashMap<i64, WorkSummary>, IpcError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT p.session_id, l.id, l.item_id, COALESCE(i.key, l.ref_key), \
                     COALESCE(i.title, ''), l.source, \
+                    CASE WHEN i.id IS NULL THEN 'ref' \
+                         WHEN i.tracker_id IS NOT NULL THEN 'tracker' \
+                         ELSE 'local' END, \
                     CASE WHEN i.tracker_id IS NOT NULL THEN i.status_category END, \
+                    {effective}, \
                     i.status_name, i.url, i.unavailable_at IS NOT NULL \
              FROM work_links l \
              JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
              LEFT JOIN work_items i ON i.id = l.item_id \
              WHERE l.ended_at IS NULL AND l.is_primary = 1 AND l.state = 'confirmed' \
                AND p.session_id IS NOT NULL",
-        )?;
+            effective = crate::effective_status_sql!(),
+        ))?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -1696,10 +1781,12 @@ impl Store {
                     key: r.get(3)?,
                     title: r.get(4)?,
                     source: r.get(5)?,
-                    status_category: r.get(6)?,
-                    status_name: r.get(7)?,
-                    url: r.get(8)?,
-                    unavailable: r.get::<_, Option<bool>>(9)?.unwrap_or(false),
+                    kind: r.get(6)?,
+                    status_category: r.get(7)?,
+                    effective_status: r.get(8)?,
+                    status_name: r.get(9)?,
+                    url: r.get(10)?,
+                    unavailable: r.get::<_, Option<bool>>(11)?.unwrap_or(false),
                     state: "confirmed".into(),
                     ..Default::default()
                 },
@@ -2064,6 +2151,13 @@ mod tests {
                 key: Some("ABC-9".into()),
                 title: "Login".into(),
                 source: "manual".into(),
+                kind: "local".into(),
+                // `status_category` stays tracker-only (fix round 2, wire
+                // compat with a shipped phone build's `isLocal`); the live
+                // value shows through `effective_status` instead —
+                // `create_local_work_item` leaves it `todo`,
+                // `status_set_by` NULL, no working session.
+                effective_status: Some("todo".into()),
                 state: "confirmed".into(),
                 strength: Some("explicit".into()),
                 ..Default::default()
@@ -2347,6 +2441,41 @@ mod tests {
             links[0].ref_key.as_deref(),
             Some("ABC-1"),
             "the survivor's primary"
+        );
+    }
+
+    #[test]
+    fn an_items_status_provenance_round_trips_and_defaults_to_none() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.create_local_work_item(None, "auth refactor").unwrap().id;
+        let row = s.get_work_item(id).unwrap().unwrap();
+        assert_eq!(row.status_category, "todo");
+        assert_eq!(
+            row.status_set_by, None,
+            "a fresh item has no decision on it"
+        );
+        assert_eq!(row.status_set_at, None);
+
+        s.conn
+            .execute(
+                "UPDATE work_items SET status_category = 'done', status_set_by = 'person', \
+                 status_set_at = 1700 WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+        let row = s.get_work_item(id).unwrap().unwrap();
+        assert_eq!(row.status_category, "done");
+        assert_eq!(row.status_set_by.as_deref(), Some("person"));
+        assert_eq!(row.status_set_at, Some(1700));
+    }
+
+    #[test]
+    fn item_column_count_matches_the_column_list() {
+        assert_eq!(
+            ITEM_COLUMNS.split(',').count(),
+            ITEM_COLUMN_COUNT,
+            "ITEM_COLUMN_COUNT must equal the columns ITEM_COLUMNS names, or every \
+             query that appends its own columns decodes the wrong index"
         );
     }
 }

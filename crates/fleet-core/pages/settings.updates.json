@@ -16,12 +16,22 @@
         {
           "type": "field",
           "key": "update.check_interval_secs"
+        },
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "Nothing installs itself yet: fleet-updater, the desktop and the phone arrive in later slices (S6–S8), so on a standalone desktop these rows have no effect. There is no nightly track until it is published (S2b)."
         }
       ]
     },
     {
       "title": "Per component",
       "items": [
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "This desktop installs nothing yet: these rows say what the fleet follows, and the desktop updater is slice S6. See docs/updates.md."
+        },
         {
           "type": "field",
           "key": "update.hub.mode"

@@ -110,10 +110,6 @@ const RETENTION_IS_ADMIN: &str = "work retention is the hub's own sweep of its s
      the fleet's administrator; set the windows with set_setting and read the status on the \
      hub";
 
-const USAGE_IS_ADMIN: &str = "the work graph's usage counts are the hub's work_admin, \
-     master-only, and a paired client is never the fleet's administrator; read them on the hub \
-     with fleet-hub work usage";
-
 /// The ten git-write commands of the Files tab, likewise.
 const NO_GIT_WRITE_TOOL: &str =
     "the hub exposes no git-write tool — a remote client must not stage or commit under a \
@@ -321,6 +317,17 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("list_local_work_items", Verdict::Routed { tool: "work" }),
     ("name_session_work", Verdict::Routed { tool: "work_link" }),
     ("rename_work_item", Verdict::Routed { tool: "work_link" }),
+    // Shared work context (design 2026-09-29): a task or subtask a person
+    // writes, and a person's decision on an agent's proposal.
+    ("create_work_task", Verdict::Routed { tool: "work_link" }),
+    (
+        "accept_work_proposal",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    (
+        "reject_work_proposal",
+        Verdict::Routed { tool: "work_link" },
+    ),
     // Work graph M14: the Work view — eight reads of `work` and ten
     // decisions of `work_link`, every one the same on a paired desktop.
     ("work_tree", Verdict::Routed { tool: "work" }),
@@ -414,13 +421,6 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             instead: RETENTION_IS_ADMIN,
         },
     ),
-    // Work graph M13.2: `work_admin { action: usage }`, master-only.
-    (
-        "work_usage",
-        Verdict::LocalOnly {
-            instead: USAGE_IS_ADMIN,
-        },
-    ),
     // Work graph M3.4: reading tickets and starting work route like every
     // other work read and decision.
     ("list_trackers", Verdict::Routed { tool: "work" }),
@@ -483,9 +483,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "session_tool_detail",
-        Verdict::LocalOnly {
-            instead: "the hub exposes no tool for one tool call's input and result; the \
-                      Conversation tab's tool lines still come from session_conversation",
+        Verdict::Routed {
+            tool: "session_tool_detail",
         },
     ),
     (
@@ -1100,10 +1099,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "catalog_import_host",
-        Verdict::LocalOnly {
-            instead: "an import reads the Claude config of host `local`, which on a hub is \
-                      the hub's own machine, not this one; call import_assets on the hub, or \
-                      import on the machine whose ~/.claude you mean",
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     // Read-only on the hosts, open to a paired client: it refreshes the

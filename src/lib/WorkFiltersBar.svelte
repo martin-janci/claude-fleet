@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onWorkChangedDebounced } from './work';
+  import { changedAny, onWorkChangedDebounced } from './work';
   // The Work view's filters and saved views (work graph M14). One filters
   // object (`WorkTreeFilters`) for the tree, the saved views and the phone:
   // org, tracker, status, mine, has, review and a search (debounced). Saved
@@ -44,7 +44,10 @@
     trackers,
     /** The search debounce, ms; injectable for tests. */
     searchDebounceMs = 300,
-  }: { orgs: WorkTreeOrg[]; trackers: WorkTreeTracker[]; searchDebounceMs?: number } = $props();
+    /** The Work tab's List layout: its Done section always reads archived
+     *  tasks, so the Archived switch does nothing there. */
+    listLayout = false,
+  }: { orgs: WorkTreeOrg[]; trackers: WorkTreeTracker[]; searchDebounceMs?: number; listLayout?: boolean } = $props();
 
   const saveBlocked = $derived(hubActionBlocked('save_work_view', $hubStatus, $hubConnection));
   const deleteBlocked = $derived(hubActionBlocked('delete_work_view', $hubStatus, $hubConnection));
@@ -215,9 +218,15 @@
     await loadViews();
   }
 
-  // Debounced like every other reader: session status ticks bump this too,
-  // and each re-read is a `work_views` call (to the hub when paired).
-  const offChanged = onWorkChangedDebounced(() => void loadViews(), () => 500);
+  // Debounced like every other reader, and only for what moves a saved
+  // view: each re-read is a `work_views` call (to the hub when paired), and
+  // session status ticks and placements bump the tick too.
+  const offChanged = onWorkChangedDebounced(
+    (kinds) => {
+      if (changedAny(kinds, 'view', 'resync', 'local')) void loadViews();
+    },
+    () => 500,
+  );
   onMount(() => void loadViews());
   onDestroy(() => {
     offF();
@@ -399,7 +408,8 @@
           role="switch"
           aria-checked={!!f.archived}
           data-testid="work-filter-archived"
-          title="Done tasks, and tasks whose sessions are all archived, with nothing running"
+          disabled={listLayout}
+          title={listLayout ? 'In List view, Done shows them' : 'Done tasks, and tasks whose sessions are all archived, with nothing running'}
           onclick={() => set({ archived: !f.archived })}
         >
           <span>Archived tasks</span><span class="switch" aria-hidden="true"></span>
@@ -419,6 +429,11 @@
 </div>
 
 <style>
+  .switch-row:disabled {
+    opacity: 0.5;
+    cursor: default;
+    background: transparent;
+  }
   .work-filters {
     display: flex;
     flex-direction: column;

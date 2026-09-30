@@ -1,0 +1,760 @@
+<title>Assets Workspace</title>
+<style>
+:root{
+  --bg:#ffffff;--bg-pane:#fafafa;--fg:#1a1a1a;--fg-muted:#6b6b6b;--border:#e5e5e5;
+  --accent:#2563eb;--accent-fg:#ffffff;--accent-soft:color-mix(in srgb,var(--accent) 10%,var(--bg));
+  --ok:#2e7d32;--warn:#b45309;--crit:#c62828;
+  --control-bg:#ffffff;--control-bg-hover:#f0f0f0;--control-bg-active:#e4e4e4;
+  --control-border:#cfcfcf;--control-border-strong:#8e8e8e;--control-fg-quiet:#5a5a5a;
+  --page:#eef0f4;--page-ink:#20242c;--page-muted:#5c6370;--shadow:0 1px 2px rgba(20,30,60,.06),0 12px 32px rgba(20,30,60,.10);
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;
+  --bg:#0f0f0f;--bg-pane:#161616;--fg:#ededed;--fg-muted:#999999;--border:#262626;
+  --accent:#60a5fa;--accent-fg:#0b1220;--accent-soft:color-mix(in srgb,var(--accent) 16%,var(--bg));
+  --ok:#5dd17a;--warn:#d29b4a;--crit:#ef5350;
+  --control-bg:#1c1c1c;--control-bg-hover:#262626;--control-bg-active:#303030;
+  --control-border:#3a3a3a;--control-border-strong:#6e6e6e;--control-fg-quiet:#a8a8a8;
+  --page:#08090b;--page-ink:#e6e8ec;--page-muted:#8d94a0;--shadow:0 1px 2px rgba(0,0,0,.4),0 16px 40px rgba(0,0,0,.5);}}
+:root[data-theme="dark"]{color-scheme:dark;
+  --bg:#0f0f0f;--bg-pane:#161616;--fg:#ededed;--fg-muted:#999999;--border:#262626;
+  --accent:#60a5fa;--accent-fg:#0b1220;--accent-soft:color-mix(in srgb,var(--accent) 16%,var(--bg));
+  --ok:#5dd17a;--warn:#d29b4a;--crit:#ef5350;
+  --control-bg:#1c1c1c;--control-bg-hover:#262626;--control-bg-active:#303030;
+  --control-border:#3a3a3a;--control-border-strong:#6e6e6e;--control-fg-quiet:#a8a8a8;
+  --page:#08090b;--page-ink:#e6e8ec;--page-muted:#8d94a0;--shadow:0 1px 2px rgba(0,0,0,.4),0 16px 40px rgba(0,0,0,.5);}
+
+*{box-sizing:border-box}
+body{background:var(--page);color:var(--page-ink);font-family:var(--sans);font-size:14px;line-height:1.45}
+.wrap{max-width:1400px;margin:0 auto;padding-inline:24px;padding-block:28px 56px;display:grid;gap:22px}
+@media (max-width:640px){.wrap{padding-inline:16px}}
+header.top{display:grid;gap:14px}
+.eyebrow{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--page-muted);font-weight:600}
+h1{margin:0;font-size:30px;line-height:1.1;letter-spacing:-.02em;font-weight:680;text-wrap:balance}
+.lede{margin:0;max-width:68ch;color:var(--page-muted);font-size:15px}
+.funnel{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;border:1px solid color-mix(in srgb,var(--page-ink) 12%,transparent);border-radius:8px;overflow:hidden;width:fit-content;max-width:100%;background:color-mix(in srgb,var(--page) 60%,var(--bg))}
+.funnel>div{padding:10px 16px;display:grid;gap:2px;border-right:1px solid color-mix(in srgb,var(--page-ink) 10%,transparent)}
+.funnel>div:last-child{border-right:0;background:var(--accent-soft)}
+.funnel b{font-size:20px;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.funnel span{font-size:12px;color:var(--page-muted)}
+.funnel .arrow{align-self:center;padding:0 2px;border:0;color:var(--page-muted)}
+nav.screens{display:flex;flex-wrap:wrap;gap:6px}
+nav.screens button{font:inherit;font-size:12.5px;height:28px;padding:0 12px;border-radius:999px;border:1px solid color-mix(in srgb,var(--page-ink) 16%,transparent);background:transparent;color:var(--page-ink);cursor:pointer;display:inline-flex;align-items:center;gap:7px}
+nav.screens button .no{font-variant-numeric:tabular-nums;color:var(--page-muted);font-size:11px}
+nav.screens button[aria-pressed="true"]{background:var(--page-ink);color:var(--page);border-color:var(--page-ink)}
+nav.screens button[aria-pressed="true"] .no{color:inherit;opacity:.7}
+nav.screens button:focus-visible,.m button:focus-visible,.m [tabindex]:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.stage{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:22px;align-items:start}
+@media (max-width:1100px){.stage{grid-template-columns:1fr}}
+.scroller{overflow-x:auto;border-radius:10px;box-shadow:var(--shadow)}
+aside.notes{display:grid;gap:14px;position:sticky;top:calc(env(safe-area-inset-top,0px) + 16px)}
+aside.notes h2{margin:0;font-size:17px;letter-spacing:-.01em;text-wrap:balance}
+aside.notes p.sum{margin:0;color:var(--page-muted)}
+aside.notes ol{list-style:none;margin:0;padding:0;display:grid;gap:12px}
+aside.notes li{display:grid;grid-template-columns:22px 1fr;gap:8px}
+aside.notes li b{display:block;font-size:13px;margin-bottom:2px}
+aside.notes li span.t{font-size:13px;color:var(--page-muted)}
+.cm{display:inline-grid;place-items:center;width:18px;height:18px;border-radius:50%;background:var(--accent);color:var(--accent-fg);font-size:10.5px;font-weight:700;font-variant-numeric:tabular-nums;flex:none;font-family:var(--sans);line-height:1}
+.m .cm{position:relative;z-index:2;box-shadow:0 0 0 2px var(--bg)}
+.foot{font-size:12px;color:var(--page-muted);max-width:90ch}
+
+/* ───────── mockup: the fleet app ───────── */
+.m{min-width:1060px;background:var(--bg);color:var(--fg);font-size:13px;border-radius:10px;overflow:hidden;border:1px solid color-mix(in srgb,var(--page-ink) 14%,transparent)}
+.m .titlebar{height:34px;display:flex;align-items:center;gap:14px;padding:0 12px;background:var(--bg-pane);border-bottom:1px solid var(--border)}
+.m .lights{display:flex;gap:6px}.m .lights i{width:11px;height:11px;border-radius:50%;background:var(--control-border)}
+.m .apptabs{display:flex;gap:2px}
+.m .apptabs span{height:24px;display:inline-flex;align-items:center;padding:0 10px;border-radius:4px;color:var(--fg-muted);font-size:12px}
+.m .apptabs span.on{background:var(--control-bg-active);color:var(--fg);font-weight:600}
+.m .ws{display:grid;grid-template-columns:172px minmax(0,1fr) 392px;height:640px}
+.m .ws.focus{grid-template-columns:48px minmax(0,1fr)}
+.m .rail{border-right:1px solid var(--border);background:var(--bg-pane);padding:10px 8px;display:flex;flex-direction:column;gap:2px}
+.m .rail button{all:unset;box-sizing:border-box;height:28px;display:flex;align-items:center;gap:9px;padding:0 8px;border-radius:6px;color:var(--control-fg-quiet);cursor:pointer;font-size:12.5px}
+.m .rail button:hover{background:var(--control-bg-hover)}
+.m .rail button.on{background:var(--accent-soft);color:var(--fg);font-weight:600}
+.m .rail button .ct{margin-left:auto;font-size:11px;font-variant-numeric:tabular-nums;color:var(--fg-muted);font-weight:400}
+.m .rail button.on .ct{color:var(--accent)}
+.m .rail svg{width:15px;height:15px;flex:none;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.m .rail .sep{height:1px;background:var(--border);margin:8px 4px}
+.m .rail .cats{display:grid;gap:4px;padding:0 8px;font-size:11px;color:var(--fg-muted)}
+.m .rail .cats div{display:flex;justify-content:space-between}
+.m .ws.focus .rail{padding:10px 6px;align-items:center}
+.m .ws.focus .rail button{width:34px;padding:0;justify-content:center}
+.m .ws.focus .rail button .lbl,.m .ws.focus .rail button .ct,.m .ws.focus .rail .cats,.m .ws.focus .rail .sep{display:none}
+.m .main{display:flex;flex-direction:column;min-width:0;min-height:0}
+.m .head{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border);min-height:46px}
+.m .head .sentence{font-size:14px;font-weight:600;letter-spacing:-.005em}
+.m .head .sub{color:var(--fg-muted);font-size:12px}
+.m .head .grow{flex:1}
+.m .body{overflow:auto;flex:1;min-height:0}
+.m .insp{border-left:1px solid var(--border);display:flex;flex-direction:column;min-height:0;background:var(--bg)}
+.m .insp .ih{padding:12px 14px 0;display:grid;gap:6px}
+.m .insp .ititle{font-size:15px;font-weight:650;letter-spacing:-.01em;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.m .insp .itabs{display:flex;gap:14px;border-bottom:1px solid var(--border);padding:0 14px;margin-top:8px}
+.m .insp .itabs span{padding:7px 0;font-size:12px;color:var(--fg-muted);border-bottom:2px solid transparent;margin-bottom:-1px}
+.m .insp .itabs span.on{color:var(--fg);border-color:var(--accent);font-weight:600}
+.m .insp .ib{padding:12px 14px;overflow:auto;display:grid;gap:14px;align-content:start;flex:1;min-height:0}
+.m .kv{display:grid;grid-template-columns:92px 1fr;gap:5px 10px;font-size:12px}
+.m .kv dt{color:var(--fg-muted)}.m .kv dd{margin:0}
+.m .sec-t{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--fg-muted);font-weight:600}
+.m .statusbar{height:25px;border-top:1px solid var(--border);background:var(--bg-pane);display:flex;align-items:center;gap:14px;padding:0 12px;font-size:11.5px;color:var(--fg-muted)}
+.m .statusbar .chip{display:inline-flex;align-items:center;gap:5px;font-family:var(--mono);font-size:11px;padding:0 6px;height:18px;border-radius:4px;border:1px solid var(--control-border);color:var(--fg)}
+.m .statusbar .grow{flex:1}
+.m .job{display:inline-flex;align-items:center;gap:6px;color:var(--fg)}
+.m .job .bar{width:60px;height:4px;border-radius:2px;background:var(--control-bg-active);overflow:hidden}
+.m .job .bar i{display:block;height:100%;width:40%;background:var(--accent)}
+
+/* controls — mirrors controls.css: 24px, radius 4, pill only for chips */
+.m .btn{all:unset;box-sizing:border-box;display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 8px;border-radius:4px;border:1px solid transparent;color:var(--control-fg-quiet);font-size:12px;cursor:pointer;white-space:nowrap}
+.m .btn:hover{background:var(--control-bg-hover)}
+.m .btn.sec{border-color:var(--control-border);background:var(--control-bg);color:var(--fg)}
+.m .btn.pri{background:var(--accent);color:var(--accent-fg);border-color:var(--accent);font-weight:600}
+.m .btn.pri:hover{filter:brightness(1.07)}
+.m .btn.lg{height:28px;padding:0 12px}
+.m .btn.danger{color:var(--crit)}
+.m kbd{font-family:var(--mono);font-size:10.5px;padding:0 4px;border-radius:3px;border:1px solid color-mix(in srgb,currentColor 35%,transparent);opacity:.85}
+.m .badge{display:inline-flex;align-items:center;gap:4px;height:18px;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid var(--control-border);color:var(--control-fg-quiet);white-space:nowrap;background:var(--bg)}
+.m .badge.org{border-color:color-mix(in srgb,var(--accent) 45%,var(--border));color:var(--accent)}
+.m .badge.priv{border-style:dashed}
+.m .badge.man{background:var(--bg-pane)}
+.m .badge.draft{border-color:var(--warn);color:var(--warn)}
+.m .badge.canary{border-color:var(--accent);color:var(--accent)}
+.m .badge.dec{font-family:var(--mono);font-size:10.5px;height:16px;padding:0 5px}
+.m .badge svg{width:10px;height:10px;stroke:currentColor;fill:none;stroke-width:2}
+.m .mono{font-family:var(--mono);font-size:11.5px}
+.m .muted{color:var(--fg-muted)}
+.m .ok{color:var(--ok)}.m .warn{color:var(--warn)}.m .crit{color:var(--crit)}
+
+/* host strip */
+.hs{display:inline-grid;grid-auto-flow:column;grid-auto-columns:14px;gap:3px;align-items:center;vertical-align:middle}
+.hs .d{width:10px;height:10px;border-radius:50%;justify-self:center;position:relative}
+.hs .d.ok{background:var(--ok)}
+.hs .d.diff{background:linear-gradient(90deg,var(--warn) 50%,transparent 50%);box-shadow:inset 0 0 0 1.5px var(--warn)}
+.hs .d.miss{box-shadow:inset 0 0 0 1.5px var(--control-border-strong)}
+.hs .d.block{background:transparent}
+.hs .d.block::before,.hs .d.block::after{content:"";position:absolute;left:4px;top:-1px;width:2px;height:12px;background:var(--crit);border-radius:1px;transform:rotate(45deg)}
+.hs .d.block::after{transform:rotate(-45deg)}
+.hs .d.na{width:6px;height:2px;border-radius:1px;background:var(--border)}
+.hs .d.stale{background:repeating-linear-gradient(135deg,var(--control-border-strong) 0 1.5px,transparent 1.5px 3.5px);box-shadow:inset 0 0 0 1px var(--control-border-strong)}
+.hs .d.org::after{content:"";position:absolute;left:-2px;right:-2px;bottom:-5px;height:2px;border-radius:1px;background:var(--accent);opacity:.7}
+.hs .d.block.org::after{transform:none;left:-2px;top:auto;width:auto;height:2px;background:var(--accent);bottom:-5px}
+.hostlabels{display:inline-grid;grid-auto-flow:column;grid-auto-columns:14px;gap:3px;font-size:9px;color:var(--fg-muted);font-family:var(--mono);text-align:center}
+
+/* list rows */
+.m .grp{display:flex;align-items:center;gap:8px;padding:12px 14px 6px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-muted);font-weight:600}
+.m .grp .n{font-variant-numeric:tabular-nums;letter-spacing:0}
+.m .grp .tri{display:inline-block;width:8px;transition:transform .15s}
+.m .row{display:grid;grid-template-columns:18px minmax(0,1fr) auto auto auto;gap:10px;align-items:center;padding:0 14px;height:34px;border-bottom:1px solid color-mix(in srgb,var(--border) 60%,transparent);cursor:pointer}
+.m .row:hover{background:var(--bg-pane)}
+.m .row.sel{background:var(--accent-soft);box-shadow:inset 2px 0 0 var(--accent)}
+.m .row .nm{display:flex;align-items:center;gap:8px;min-width:0}
+.m .row .nm b{font-weight:560;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.m .row .kind{font-size:11px;color:var(--fg-muted)}
+.m .row .why{font-size:12px;color:var(--fg-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.m .kico{width:16px;height:16px;border-radius:4px;display:grid;place-items:center;font-size:9.5px;font-weight:700;font-family:var(--mono);background:var(--control-bg-active);color:var(--control-fg-quiet)}
+.m .tg{font-size:11.5px;font-variant-numeric:tabular-nums;min-width:34px;text-align:right}
+.m .tg.none{color:var(--fg-muted)}
+
+/* changeset card */
+.m .card{margin:12px 14px;border:1px solid var(--control-border);border-radius:6px;background:var(--bg);overflow:hidden}
+.m .card.lead{border-color:color-mix(in srgb,var(--accent) 55%,var(--control-border));box-shadow:0 0 0 3px var(--accent-soft)}
+.m .card .ch{padding:12px 14px;display:grid;gap:4px}
+.m .card .ch .k{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--accent);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+.m .card .ch .s{font-size:14.5px;font-weight:600;letter-spacing:-.01em;text-wrap:balance}
+.m .card .ch .s .n{font-variant-numeric:tabular-nums}
+.m .card table{width:100%;border-collapse:collapse;font-size:12.5px}
+.m .card td{padding:0 8px;height:32px;border-top:1px solid color-mix(in srgb,var(--border) 70%,transparent);white-space:nowrap}
+.m .card td:first-child{padding-left:14px;width:24px}
+.m .card td:last-child{padding-right:14px;text-align:right}
+.m .card td.num{text-align:right;font-variant-numeric:tabular-nums;width:40px}
+.m .card tr.gsel td{background:var(--accent-soft)}
+.m .card tr{cursor:pointer}
+.m .card .cf{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid var(--border);background:var(--bg-pane);flex-wrap:wrap}
+.m .card .cf .note{font-size:11.5px;color:var(--fg-muted);margin-left:auto}
+.m .cbx{width:14px;height:14px;border-radius:3px;border:1.5px solid var(--control-border-strong);display:inline-grid;place-items:center}
+.m .cbx.on{background:var(--accent);border-color:var(--accent)}
+.m .cbx.on::after{content:"";width:7px;height:4px;border:2px solid var(--accent-fg);border-top:0;border-right:0;transform:rotate(-45deg) translate(1px,-1px)}
+.m .look{display:flex;gap:6px;flex-wrap:wrap;padding:0 14px 12px}
+.m .applied{margin:12px 14px;padding:10px 14px;border:1px solid var(--border);border-radius:6px;display:flex;align-items:center;gap:10px;font-size:12.5px;background:var(--bg-pane)}
+.m .applied .tick{width:16px;height:16px;border-radius:50%;background:var(--ok);display:grid;place-items:center}
+.m .applied .tick::after{content:"";width:7px;height:4px;border:2px solid var(--bg);border-top:0;border-right:0;transform:rotate(-45deg) translate(1px,-1px)}
+.m .fade{animation:fade .35s ease both}
+@keyframes fade{from{opacity:.25;transform:translateY(4px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.m .fade{animation:none}.m .grp .tri{transition:none}}
+
+/* query input */
+.m .query{display:flex;align-items:center;gap:6px;height:28px;padding:0 8px;border:1px solid var(--control-border);border-radius:6px;background:var(--control-bg);flex:1;max-width:520px}
+.m .query .tok{font-family:var(--mono);font-size:11px;padding:1px 6px;border-radius:4px;background:var(--accent-soft);color:var(--fg)}
+.m .query .tok i{font-style:normal;color:var(--accent)}
+.m .query .caret{width:1px;height:14px;background:var(--fg);animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+@media (prefers-reduced-motion:reduce){.m .query .caret{animation:none}}
+
+/* diff */
+.m .diff{font-family:var(--mono);font-size:11.5px;border:1px solid var(--border);border-radius:6px;overflow:hidden;line-height:1.55}
+.m .diff .dh{padding:5px 10px;background:var(--bg-pane);border-bottom:1px solid var(--border);color:var(--fg-muted);display:flex;justify-content:space-between}
+.m .diff div.l{padding:0 10px;white-space:pre-wrap}
+.m .diff .add{background:color-mix(in srgb,var(--ok) 12%,transparent)}
+.m .diff .del{background:color-mix(in srgb,var(--crit) 10%,transparent);color:var(--fg-muted)}
+
+/* focus mode */
+.m .stepper{display:flex;align-items:center;gap:0;flex-wrap:nowrap}
+.m .step{display:grid;gap:1px;padding:0 12px;border-left:1px solid var(--border)}
+.m .step:first-child{border-left:0;padding-left:0}
+.m .step .sn{font-size:10.5px;color:var(--fg-muted);letter-spacing:.05em;text-transform:uppercase;font-weight:600}
+.m .step .sv{font-size:12.5px;font-variant-numeric:tabular-nums;font-weight:600}
+.m .split{display:grid;grid-template-columns:1fr 1fr;flex:1;min-height:0}
+.m .split>section{display:flex;flex-direction:column;min-height:0;min-width:0}
+.m .split>section+section{border-left:1px solid var(--border)}
+.m .ptabs{display:flex;gap:14px;padding:0 14px;border-bottom:1px solid var(--border)}
+.m .ptabs span{padding:8px 0;font-size:12px;color:var(--fg-muted);border-bottom:2px solid transparent;margin-bottom:-1px}
+.m .ptabs span.on{color:var(--fg);border-color:var(--accent);font-weight:600}
+.m .pb{padding:12px 14px;overflow:auto;display:grid;gap:12px;align-content:start;flex:1;min-height:0}
+.m .field{display:grid;gap:4px}
+.m .field label{font-size:11.5px;color:var(--fg-muted)}
+.m .ta{border:1px solid var(--control-border);border-radius:6px;padding:8px 10px;font-size:12.5px;background:var(--control-bg);line-height:1.5}
+.m .ta.warnb{border-color:var(--warn)}
+.m .lint{font-size:11.5px;color:var(--warn);display:flex;gap:6px;align-items:center}
+.m .code{font-family:var(--mono);font-size:11.5px;line-height:1.6;border:1px solid var(--control-border);border-radius:6px;padding:8px 10px;background:var(--bg-pane);white-space:pre-wrap}
+.m .code .h{color:var(--accent);font-weight:600}
+.m .chips{display:flex;gap:4px;flex-wrap:wrap}
+.m table.cases{width:100%;border-collapse:collapse;font-size:12.5px}
+.m table.cases td{height:32px;border-bottom:1px solid color-mix(in srgb,var(--border) 70%,transparent);padding:0 6px;vertical-align:middle}
+.m table.cases td.r{text-align:right;white-space:nowrap}
+.m .yn{display:inline-flex;border:1px solid var(--control-border);border-radius:999px;overflow:hidden;font-size:10.5px}
+.m .yn span{padding:1px 7px;color:var(--fg-muted)}
+.m .yn span.on{background:var(--fg);color:var(--bg)}
+.m .fired{font-size:11px;color:var(--crit);font-family:var(--mono)}
+.m .editfoot{height:32px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;padding:0 14px;font-size:11.5px;color:var(--fg-muted);background:var(--bg-pane)}
+
+/* results matrix */
+.m table.mx{border-collapse:separate;border-spacing:0;font-size:12.5px;width:100%}
+.m table.mx th{font-weight:600;font-size:11px;color:var(--fg-muted);text-align:center;padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
+.m table.mx th:first-child{text-align:left}
+.m table.mx td{padding:0 8px;height:32px;border-bottom:1px solid color-mix(in srgb,var(--border) 60%,transparent);text-align:center;font-variant-numeric:tabular-nums;white-space:nowrap}
+.m table.mx td:first-child{text-align:left}
+.m .cell{display:inline-flex;align-items:center;gap:5px;min-width:56px;justify-content:center;height:22px;border-radius:4px;font-size:12px}
+.m .cell.p{color:var(--ok);background:color-mix(in srgb,var(--ok) 10%,transparent)}
+.m .cell.f{color:var(--crit);background:color-mix(in srgb,var(--crit) 10%,transparent);font-weight:600}
+.m .cell.fl{color:var(--warn);background:color-mix(in srgb,var(--warn) 12%,transparent)}
+.m .cell.na{color:var(--fg-muted)}
+.m .spark{display:inline-flex;gap:2px;align-items:flex-end;height:16px;vertical-align:middle}
+.m .spark i{width:5px;border-radius:1px;background:var(--ok)}
+.m .spark i.x{background:var(--crit)}
+.m .spark i.pub{outline:1px solid var(--fg-muted);outline-offset:1px}
+
+/* overlap */
+.m .clusters{display:grid;gap:0}
+.m .cl{display:grid;grid-template-columns:minmax(0,1fr) 150px 60px;gap:12px;align-items:center;padding:0 14px;height:40px;border-bottom:1px solid color-mix(in srgb,var(--border) 60%,transparent);cursor:pointer}
+.m .cl.sel{background:var(--accent-soft);box-shadow:inset 2px 0 0 var(--accent)}
+.m .rate{height:6px;border-radius:3px;background:var(--control-bg-active);overflow:hidden}
+.m .rate i{display:block;height:100%;background:var(--warn)}
+.m .rate i.hi{background:var(--crit)}
+.m table.cmx{border-collapse:separate;border-spacing:2px;font-size:11px}
+.m table.cmx th{font-weight:500;color:var(--fg-muted);font-size:10.5px;padding:2px 4px;white-space:nowrap}
+.m table.cmx th.rot{height:92px;vertical-align:bottom}
+.m table.cmx th.rot span{writing-mode:vertical-rl;transform:rotate(180deg);display:inline-block}
+.m table.cmx td{width:38px;height:30px;text-align:center;border-radius:3px;font-variant-numeric:tabular-nums;color:var(--fg)}
+
+/* mobile */
+.phone-stage{display:flex;gap:28px;align-items:flex-start;padding:28px;background:var(--bg-pane);flex-wrap:wrap}
+.phone{width:320px;border-radius:38px;border:10px solid #1b1d22;background:var(--bg);overflow:hidden;box-shadow:var(--shadow);flex:none}
+.phone .sb{height:30px;display:flex;justify-content:space-between;align-items:center;padding:0 22px;font-size:11.5px;font-weight:600}
+.phone .nav{padding:6px 16px 10px;display:grid;gap:2px;border-bottom:1px solid var(--border)}
+.phone .nav b{font-size:20px;letter-spacing:-.02em}
+.phone .nav span{font-size:12px;color:var(--fg-muted)}
+.phone .pc{padding:12px;display:grid;gap:10px;min-height:520px;align-content:start;background:var(--bg-pane)}
+.phone .mcard{background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:12px;display:grid;gap:8px}
+.phone .mcard .k{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);font-weight:700}
+.phone .mcard .s{font-size:14px;font-weight:600;line-height:1.3}
+.phone .mg{display:grid;gap:0;border-top:1px solid var(--border)}
+.phone .mg div{display:flex;justify-content:space-between;align-items:center;font-size:12.5px;height:34px;border-bottom:1px solid color-mix(in srgb,var(--border) 60%,transparent)}
+.phone .mg div:last-child{border-bottom:0}
+.phone .mbtns{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.phone .mbtns span{height:36px;border-radius:9px;display:grid;place-items:center;font-size:13px;font-weight:600;border:1px solid var(--control-border)}
+.phone .mbtns span.p{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+.phone .mbtns span.p.done{background:var(--ok);border-color:var(--ok);color:var(--bg)}
+.phone .desk{font-size:11.5px;color:var(--fg-muted);display:flex;gap:6px;align-items:center}
+.m-notes{max-width:380px;display:grid;gap:12px;font-size:13px}
+.m-notes h3{margin:0;font-size:14px}
+.m-notes p{margin:0;color:var(--fg-muted)}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="eyebrow">claude-fleet · design proposal · 29 Sep 2026</div>
+    <h1>Assets workspace</h1>
+    <p class="lede">The Assets tab today lists every copy of every asset on every host. This proposal lists each asset once, sorts the fleet for you, and brings you only the decisions a rule can't make safely. Curating, host setup, authoring and skill tests all happen in one place.</p>
+    <div class="funnel" role="img" aria-label="520 rows today become 164 assets, 8 host sets, and one card to approve">
+      <div><b>520</b><span>rows today</span></div>
+      <div><b>164</b><span>distinct assets</span></div>
+      <div><b>8</b><span>host combinations</span></div>
+      <div><b>1</b><span>card to approve</span></div>
+    </div>
+  </header>
+
+  <nav class="screens" id="screens" aria-label="Screens"></nav>
+
+  <div class="stage">
+    <div class="scroller"><div class="m" id="mock"></div></div>
+    <aside class="notes" id="notes"></aside>
+  </div>
+
+  <p class="foot">Asset names, hosts and counts come from the live hub on 29 Sep 2026 (<span style="font-family:var(--mono)">list_assets</span>). Layer names, org assignment of hosts, diffs, test results and Jev confidences are illustrative. The mockups use the app's own tokens from <span style="font-family:var(--mono)">app.css</span> and <span style="font-family:var(--mono)">controls.css</span>, so they follow your light or dark theme. Spec: <span style="font-family:var(--mono)">docs/superpowers/specs/2026-09-29-assets-workspace-design.md</span>.</p>
+</div>
+
+<script>
+(function(){
+const HOSTS=['local','mefistos','oci','trn','htz'];
+const SHORT=['loc','mef','oci','trn','htz'];
+const ORG_HOST={trn:true}; // trn is bound to org papayapos (illustrative)
+
+const IC={
+  inbox:'<path d="M3 12h5l2 3h4l2-3h5"/><path d="M5 5h14l2 7v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-6z"/>',
+  layers:'<path d="M12 3 3 8l9 5 9-5z"/><path d="m3 13 9 5 9-5"/>',
+  hosts:'<rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/>',
+  library:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+  tests:'<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>',
+  secrets:'<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M17 6l3 3"/>',
+  lock:'<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  org:'<path d="M4 21V5l8-3 8 3v16"/><path d="M9 21v-4h6v4M9 9h.01M15 9h.01M9 13h.01M15 13h.01"/>'
+};
+const svg=(k,cls)=>`<svg viewBox="0 0 24 24" ${cls?`class="${cls}"`:''} aria-hidden="true">${IC[k]}</svg>`;
+
+// state: s = [ok|diff|miss|block|na|stale] per host
+function strip(states,label){
+  const a=states.map((s,i)=>{
+    const h=HOSTS[i];const org=ORG_HOST[h]&&s!=='na'?' org':'';
+    const word={ok:'in sync',diff:'differs',miss:'missing',block:'blocked',na:'not in footprint',stale:'stale scan'}[s];
+    return `<span class="d ${s}${org}" title="${h}: ${word}"></span>`;
+  }).join('');
+  const aria=states.map((s,i)=>`${HOSTS[i]}: ${{ok:'in sync',diff:'differs',miss:'missing',block:'blocked',na:'not here',stale:'stale'}[s]}`).join(', ');
+  return `<span class="hs" role="img" aria-label="${label?label+'. ':''}${aria}">${a}</span>`;
+}
+const fp=str=>str.split('').map(c=>({o:'ok',d:'diff',m:'miss',x:'block','-':'na',s:'stale'}[c]));
+const labels=()=>`<span class="hostlabels" aria-hidden="true">${SHORT.map(s=>`<span>${s}</span>`).join('')}</span>`;
+const scope=s=>({
+  priv:`<span class="badge priv">${svg('lock')}private</span>`,
+  org:`<span class="badge org">${svg('org')}papayapos</span>`,
+  shared:`<span class="badge">shared</span>`,
+  man:`<span class="badge man">managed</span>`
+}[s]);
+const KI={skill:'S',agent:'A',hook:'H',mcp_server:'M',plugin_ref:'P',layer:'L'};
+const kico=k=>`<span class="kico" title="${k}">${KI[k]}</span>`;
+const tg=t=>{
+  if(!t)return '<span class="tg none" title="untested">○</span>';
+  if(t[0]==='✓')return `<span class="tg ok" title="all tests pass">${t}</span>`;
+  if(t[0]==='◐')return `<span class="tg warn" title="flaky">${t}</span>`;
+  return `<span class="tg crit" title="failing">${t}</span>`;
+};
+const cm=n=>`<span class="cm" aria-label="note ${n}">${n}</span>`;
+
+const S={screen:'bootstrap',applied:false,sel:{bootstrap:'authoring',inbox:'ppt-implement',layers:'core',library:'infra-status',overlap:'paperclip'},open:{insync:false}};
+
+// ─── data ───
+const LAYERS=[
+  {id:'authoring',cat:'personal',scope:'priv',n:36,fp:'oooo-',why:'Same author-* prefix, same 4 hosts',status:'identical',dec:'rule + haiku',members:['author','author-draft','author-editor','author-proofread','author-beta','author-critic (agent)','author-drafter (agent)','author-vault']},
+  {id:'papayapos-ops',cat:'papayapos',scope:'org',n:22,fp:'oo-o-',why:'ppt-*, openmarket-*, papayapos-*; found on the org host trn',status:'identical',dec:'rule + haiku',members:['ppt-implement','ppt-pr-merge','ppt-dev-team','openmarket-infra','openmarket-control','papayapos-local','papayapos-seeding','rlt-deploy']},
+  {id:'core',cat:'personal',scope:'shared',n:28,fp:'oooo-',why:'On local, mefistos, oci and trn, no family',status:'identical',dec:'rule',members:['infra-status','proj-clean','dev-session','worktree','jira-lookup','graphify','unlazy','claude-handoff']},
+  {id:'everywhere',cat:'personal',scope:'shared',n:12,fp:'ooooo',why:'Installed on all five hosts',status:'1 copy differs',dec:'rule',members:['code-review','generate-pr-description','verify-build','playwright-cli','superpowers (plugin)','skill']},
+  {id:'workstation',cat:'personal',scope:'priv',n:11,fp:'o----',why:'Plugins that exist only on this Mac',status:'identical',dec:'rule + haiku',members:['airbnb-invoices','paycheck','nas-media-organizer','adb-app-control','wireguard-peer','dns-add-host']},
+  {id:'servers',cat:'personal',scope:'shared',n:5,fp:'o-oo-',why:'On local, oci and trn',status:'identical',dec:'rule',members:['oci','argocd','salestwins-infra','stack-smoke-test','test-webhook']},
+];
+const LOOK=[['worktree','skill and plugin share a name'],['code-review','copy on oci differs'],['jira','MCP server carries a token'],['graphify','skill and plugin share a name'],['flow-veo','only on htz'],['paperclip-dev','only on trn'],['jira-worklog','copy on trn differs'],['openmarket-grant-docs','only on trn, carries a token'],['browser-use','only on oci and htz']];
+
+const INBOX={
+  needs:[
+    {id:'worktree',k:'skill',sc:'shared',fp:'ooxoo',why:'Catalog version would overwrite an edit on oci',t:'✓ 8'},
+    {id:'jira',k:'mcp_server',sc:'shared',fp:'oxoo-',why:'Needs a token in Secrets before it can reach mefistos',t:null},
+  ],
+  drift:[
+    {id:'ppt-implement',k:'skill',sc:'org',fp:'oo-d-',why:'Edited on trn 2 h ago',t:'✓ 14'},
+    {id:'infra-status',k:'skill',sc:'shared',fp:'dooo-',why:'Edited on local yesterday',t:'✓ 6'},
+  ],
+  fresh:[
+    {id:'browser-use',k:'skill',sc:'shared',fp:'--o-o',why:'Found on oci and htz · suggested layer servers',t:null,jev:'jev 0.82'},
+  ],
+  tests:[
+    {id:'paperclip-create-agent',k:'skill',sc:'shared',fp:'oooo-',why:'Trigger test regressed at a1b2c3d',t:'✗ 1'},
+  ],
+  insync:[
+    {id:'author-draft',k:'skill',sc:'priv',fp:'oooo-',t:'✓ 12'},{id:'proj-clean',k:'skill',sc:'shared',fp:'oooo-',t:'✓ 5'},{id:'code-review',k:'skill',sc:'shared',fp:'ooooo',t:'✓ 9'},{id:'openmarket-infra',k:'skill',sc:'org',fp:'oo-o-',t:null},{id:'author-critic',k:'agent',sc:'priv',fp:'oooo-',t:null},{id:'superpowers',k:'plugin_ref',sc:'shared',fp:'ooooo',t:null}
+  ]
+};
+
+const LIB=[
+  ['Skills · 97',[
+    ['airbnb-invoices','skill','priv','o----',null,'published'],
+    ['author-draft','skill','priv','oooo-','✓ 12','published'],
+    ['author-editor','skill','priv','oooo-','✓ 9','published'],
+    ['code-review','skill','shared','ooooo','✓ 9','published'],
+    ['infra-status','skill','shared','dooo-','✓ 6','published'],
+    ['openmarket-infra','skill','org','oo-o-',null,'published'],
+    ['paperclip-create-agent','skill','shared','oooo-','✗ 1','draft'],
+    ['ppt-implement','skill','org','oo-d-','✓ 14','canary'],
+    ['proj-clean','skill','shared','oooo-','✓ 5','published'],
+  ]],
+  ['Agents · 18',[
+    ['author-critic','agent','priv','oooo-',null,'published'],
+    ['pm-tech-lead','agent','org','oo-o-','◐ 1','published'],
+  ]],
+  ['MCP servers · 9',[
+    ['jira','mcp_server','shared','oxoo-',null,'published'],
+  ]],
+  ['Managed, read-only · 14',[
+    ['anthropic-skills:pdf','skill','man','o----',null,''],
+    ['superpowers:brainstorming','skill','man','ooooo',null,''],
+  ]],
+];
+
+// ─── screens ───
+const SCREENS=[
+  {id:'bootstrap',label:'First run'},
+  {id:'inbox',label:'Inbox'},
+  {id:'layers',label:'Layers and hosts'},
+  {id:'library',label:'Library'},
+  {id:'focus',label:'Author and test'},
+  {id:'results',label:'Test results'},
+  {id:'overlap',label:'Skill overlap'},
+  {id:'mobile',label:'Mobile'},
+];
+
+const NOTES={
+  bootstrap:{h:'First run: one card instead of 520 rows',s:'An empty catalog opens on a proposal, not a list. The fleet already scanned, hashed and grouped everything.',items:[
+    ['The header is a sentence','It says what is true about the fleet right now. No toolbar of 12 equal buttons.'],
+    ['Layers come from where things are installed','Host-set signature plus name families (author-*, ppt-*) decide the groups. haiku only suggests names. Each row shows who decided.'],
+    ['Scope and catalog on every group','papayapos-ops goes to the papayapos catalog and never into your personal repo.'],
+    ['Only the unclear items reach you','9 items: name collisions, differing copies, tokens, single-host strays. Fleet internals (41 rows) are hidden.'],
+    ['One commit per catalog, one Undo','Adopting writes the catalogs and nothing else. Syncing hosts is always a separate card.'],
+  ]},
+  inbox:{h:'Inbox: only what needs you',s:'In steady state everything in sync folds into one line. Each row is one asset, and its dots show every host at once.',items:[
+    ['Grouped by what you do next','Needs you, drifted, new on hosts, test regressions. The 148 assets that are fine stay folded.'],
+    ['Host strip','Dots in a fixed order: filled = in sync, half = differs, ring = missing, cross = blocked. The blue underline marks an org host.'],
+    ['Jev pre-fills, you decide','A new asset with no siblings gets a suggested layer. Jev runs in assist mode, labelled with its confidence.'],
+    ['Drift shows a diff with two choices','Take the host version or restore the catalog one. Nothing is overwritten silently.'],
+  ]},
+  layers:{h:'Layers and hosts: what goes where',s:'The backend already has layers. This is the UI they never had, plus the catalogs each host accepts.',items:[
+    ['Every layer shows its footprint','You see members, hosts and the owning catalog on one line.'],
+    ['Hosts accept catalogs explicitly','trn belongs to papayapos. Your Mac and mefistos admit the papayapos catalog. Private assets never reach an org host.'],
+    ['Why is it here?','Provenance for every asset on every host: role, context, layer.'],
+  ]},
+  library:{h:'Library: every asset once',s:'The complete catalog, deduplicated, with a token filter that reads like the question you are asking.',items:[
+    ['Token query','host:, kind:, state:, layer:, catalog:, scope:. Press / to focus it; it completes as you type.'],
+    ['Lifecycle and tests on the row','draft, canary on one host, or published. Test glyph: pass count, flaky, failing, or a quiet ring when untested.'],
+    ['Managed assets are visible, not editable','claude.ai skills and marketplace plugins show where they are installed but are never synced.'],
+  ]},
+  focus:{h:'Author and test in one view',s:'Focus mode gives the editor the full width. Every edit lands on a draft branch, never on main.',items:[
+    ['The stepper names the next gate','Edit, lint, trigger, eval, canary, smoke, roll out. The primary button always says what happens next.'],
+    ['Lint sits on the field it is about','The description overlaps paperclip at 71 %. You see that while typing, not after a sync.'],
+    ['Trigger cases next to the source','Each case is a prompt and "should fire: yes or no". A failing case shows which skill fired instead.'],
+    ['Suggest cases','Generates 5 prompts that should fire and 5 near-misses taken from neighbouring skills.'],
+    ['Autosaved on a draft branch','Form edits and an Ask Claude session write to the same draft, so you always get one reviewable diff.'],
+  ]},
+  results:{h:'Test results: one matrix per asset',s:'Cases against models and harnesses, smoke against hosts, and history against published versions.',items:[
+    ['Regression means it passed before','A case that passed at the last published commit and fails now is pinned to the top and posted to the Inbox.'],
+    ['Flaky is its own state','A half-filled cell means it passed in only some runs, shown with the ratio.'],
+    ['Cost is visible','Every run shows its cost, time and account. Tests run on a host in the asset\'s own org.'],
+  ]},
+  overlap:{h:'Skill overlap: which skills compete',s:'With about 160 skills installed, descriptions collide. This view ranks clusters by how often the wrong skill fires.',items:[
+    ['Ranked by misfire rate','Measured with real claude -p runs. A description-similarity pass only picks which clusters to measure.'],
+    ['Confusion matrix','Rows: the skill whose prompts ran. Columns: the skill that actually fired. Off-diagonal cells are misfires.'],
+    ['Fix from here','Sharpen descriptions (an agent drafts the edits on draft branches) or add a misfire as a negative case.'],
+  ]},
+  mobile:{h:'Mobile: approve, don\'t edit',s:'fleet-mobile shows the same cards in its Needs attention screen, next to blocked sessions.',items:[
+    ['Same card, same verbs','Apply or reject a whole card or one group. No mobile-only API.'],
+    ['Risky items stay on desktop','Overwrites, removals and secrets are listed, with "decide on desktop".'],
+    ['Notified on regressions','A failed smoke test or a test regression sends a notification.'],
+  ]},
+};
+
+// ─── renderers ───
+function rail(active,counts){
+  const items=[['inbox','Inbox',counts.inbox],['layers','Layers',6],['hosts','Hosts',5],['library','Library',164],['tests','Tests',counts.tests],['secrets','Secrets','']];
+  const map={bootstrap:'inbox',inbox:'inbox',layers:'layers',library:'library',focus:'library',results:'tests',overlap:'tests'};
+  const target={inbox:S.applied?'inbox':'bootstrap',layers:'layers',hosts:'layers',library:'library',tests:'results',secrets:null};
+  return `<nav class="rail" aria-label="Assets views">${items.map(([k,l,c])=>`<button type="button" class="${map[active]===k?'on':''}" data-go="${target[k]||''}" title="${l}">${svg(k)}<span class="lbl">${l}</span><span class="ct">${c}</span></button>`).join('')}
+    <div class="sep"></div>
+    <div class="cats"><div class="sec-t" style="margin-bottom:2px">Catalogs</div><div><span>personal</span><span class="mono">a1b2c3d</span></div><div><span>papayapos</span><span class="mono">9f0e1d2 ↑1</span></div></div></nav>`;
+}
+function statusbar(job){
+  return `<div class="statusbar"><span class="chip">personal @a1b2c3d</span><span class="chip">papayapos @9f0e1d2 ↑1</span><span>auto: on</span><span class="grow"></span>${job?`<span class="job">${job}<span class="bar"><i></i></span></span>`:'<span>scan 3 min ago</span>'}</div>`;
+}
+function frame(inner,{focus=false}={}){
+  return `<div class="titlebar"><span class="lights"><i></i><i></i><i></i></span><span class="apptabs"><span>Sessions</span><span>Work</span><span class="on">Assets</span><span>Hosts</span></span></div>${inner}`;
+}
+
+function bootstrapScreen(){
+  const selL=LAYERS.find(l=>l.id===S.sel.bootstrap);
+  let main;
+  if(!S.applied){
+    main=`<div class="head"><span class="sentence">164 assets found on 5 hosts · none managed yet</span><span class="sub">scan 2 min ago</span><span class="grow"></span><button class="btn" type="button">Rescan</button></div>
+    <div class="body">
+      <div class="card lead fade">
+        <div class="ch"><span class="k">Bootstrap ready ${cm(1)}</span>
+          <span class="s">Import <span class="n">114</span> assets into <span class="n">6</span> layers, assign <span class="n">5</span> hosts and hide <span class="n">41</span> fleet-internal rows. <span class="n">9</span> need a look.</span></div>
+        <table><tbody>
+        ${LAYERS.map((l,i)=>`<tr data-layer="${l.id}" class="${S.sel.bootstrap===l.id?'gsel':''}">
+          <td><span class="cbx on" role="checkbox" aria-checked="true"></span></td>
+          <td><span style="display:inline-flex;gap:8px;align-items:center">${kico('layer')}<b style="font-weight:600">${l.id}</b>${scope(l.scope)}</span>${i===1?' '+cm(3):''}</td>
+          <td class="num">${l.n}</td>
+          <td>${strip(fp(l.fp),l.id)}${i===0?' '+cm(2):''}</td>
+          <td class="${l.status==='identical'?'muted':'warn'}" style="font-size:12px">${l.status==='identical'?'identical copies':'◐ '+l.status}</td>
+          <td><span class="badge dec">${l.dec}</span></td></tr>`).join('')}
+        </tbody></table>
+        <div class="ch" style="border-top:1px solid var(--border);gap:8px"><span style="font-size:12.5px;font-weight:600">9 need a look ${cm(4)}</span></div>
+        <div class="look">${LOOK.map(([n,w])=>`<span class="badge" title="${w}"><b style="font-weight:600;color:var(--fg)">${n}</b> · ${w}</span>`).join('')}</div>
+        <div class="cf"><button class="btn pri lg" type="button" id="apply">Adopt 114 as 6 layers <kbd>⌘↵</kbd></button><button class="btn sec" type="button">Dry run</button><button class="btn" type="button">Edit layers</button><span class="note">2 commits: personal, papayapos. One Undo. No host is touched. ${cm(5)}</span></div>
+      </div>
+      <div class="grp"><span class="tri">▸</span>Hidden · fleet internals <span class="n">41</span><span style="text-transform:none;letter-spacing:0;font-weight:400">— its own hooks, MCP entry and skills; .system; synced</span></div>
+    </div>`;
+  } else {
+    main=`<div class="head"><span class="sentence">114 assets managed in 6 layers · 9 need a look</span><span class="sub">scan 2 min ago</span><span class="grow"></span><button class="btn" type="button">Rescan</button></div>
+    <div class="body">
+      <div class="applied fade"><span class="tick"></span><span><b>Adopted 114 assets.</b> <span class="mono">personal a1b2c3d</span> · <span class="mono">papayapos 9f0e1d2</span></span><span class="grow" style="flex:1"></span><button class="btn sec" type="button" id="undo">Undo</button></div>
+      <div class="card lead fade">
+        <div class="ch"><span class="k">Rollout ready</span><span class="s">Sync <span class="n">5</span> hosts: <span class="n">114</span> adopt, <span class="n">0</span> create, <span class="n">0</span> overwrite.</span><span class="muted" style="font-size:12px">Adopt only records what is already installed. No file on any host changes.</span></div>
+        <table><tbody>${HOSTS.map((h,i)=>`<tr><td><span class="cbx on"></span></td><td><b style="font-weight:600">${h}</b> ${h==='trn'?scope('org'):''}</td><td class="num">${[114,98,54,72,12][i]}</td><td class="muted">adopt</td><td></td><td class="muted" style="font-size:12px">${h==='trn'?'papayapos-ops, core, servers':h==='htz'?'everywhere':'role: '+(h==='local'?'workstation':'server')}</td></tr>`).join('')}</tbody></table>
+        <div class="cf"><button class="btn pri lg" type="button">Roll out to 5 hosts <kbd>⌘↵</kbd></button><button class="btn sec" type="button">Review plan</button><span class="note">Runs in the background; smoke tests follow.</span></div>
+      </div>
+      <div class="grp">Needs a look <span class="n">9</span></div>
+      ${LOOK.slice(0,5).map(([n,w])=>`<div class="row"><span>${kico(n==='jira'?'mcp_server':'skill')}</span><span class="nm"><b>${n}</b><span class="why">${w}</span></span><span></span><span></span><span class="btn sec" style="height:22px">Review</span></div>`).join('')}
+    </div>`;
+  }
+  const insp=`<div class="insp"><div class="ih"><span class="sec-t">Proposed layer</span><span class="ititle">${selL.id} ${scope(selL.scope)}</span><span class="muted" style="font-size:12px">catalog <b style="color:var(--fg)">${selL.cat}</b> · ${selL.n} assets</span></div>
+    <div class="itabs"><span class="on">Overview</span><span>Members</span><span>Hosts</span></div>
+    <div class="ib">
+      <dl class="kv"><dt>Why</dt><dd>${selL.why}</dd><dt>Decided by</dt><dd>${selL.dec==='rule'?'rules (host set, content hash)':'rules; name suggested by haiku'}</dd><dt>Copies</dt><dd class="${selL.status==='identical'?'ok':'warn'}">${selL.status==='identical'?'● identical everywhere':'◐ '+selL.status}</dd></dl>
+      <div style="display:grid;gap:6px"><span class="sec-t">Footprint</span><div style="display:grid;gap:2px">${strip(fp(selL.fp),selL.id)}${labels()}</div></div>
+      <div style="display:grid;gap:4px"><span class="sec-t">Members · first ${selL.members.length} of ${selL.n}</span>${selL.members.map(m=>`<div style="display:flex;gap:8px;align-items:center;height:22px">${kico(m.includes('(agent)')?'agent':m.includes('(plugin)')?'plugin_ref':'skill')}<span>${m.replace(/ \((agent|plugin)\)/,'')}</span></div>`).join('')}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sec" type="button">Rename</button><button class="btn sec" type="button">Move to catalog…</button><button class="btn sec" type="button">Split</button><button class="btn" type="button">Skip this layer</button></div>
+    </div></div>`;
+  return frame(`<div class="ws">${rail('bootstrap',{inbox:S.applied?10:1,tests:''})}<div class="main">${main}</div>${insp}</div>${statusbar(null)}`);
+}
+
+function listRow(r,selKey){
+  return `<div class="row ${S.sel[selKey]===r.id?'sel':''}" data-row="${r.id}" tabindex="0"><span>${kico(r.k)}</span><span class="nm"><b>${r.id}</b>${scope(r.sc)}${r.why?`<span class="why">${r.why}</span>`:''}${r.jev?` <span class="badge dec">${r.jev}</span>`:''}</span><span>${strip(fp(r.fp),r.id)}</span>${tg(r.t)}<span></span></div>`;
+}
+function inboxScreen(){
+  const g=(t,arr,n)=>`<div class="grp">${t} <span class="n">${arr.length}</span>${n?' '+cm(n):''}</div>${arr.map(r=>listRow(r,'inbox')).join('')}`;
+  const main=`<div class="head"><span class="sentence">6 need you · everything else is in sync</span><span class="sub">5/5 hosts · scan 3 min ago</span><span class="grow"></span><span style="display:grid;gap:1px;justify-items:end;margin-right:54px">${labels()}</span></div>
+  <div class="body">
+    ${g('Needs you',INBOX.needs,1)}
+    ${g('Drifted',INBOX.drift,4)}
+    ${g('New on hosts',INBOX.fresh,3)}
+    ${g('Test regressions',INBOX.tests)}
+    <div class="grp" style="cursor:pointer" data-toggle="insync"><span class="tri" style="transform:rotate(${S.open.insync?90:0}deg)">▸</span>In sync <span class="n">148</span> ${cm(2)}</div>
+    ${S.open.insync?INBOX.insync.map(r=>listRow(r,'inbox')).join(''):''}
+  </div>`;
+  const all=[...INBOX.needs,...INBOX.drift,...INBOX.fresh,...INBOX.tests,...INBOX.insync];
+  const r=all.find(x=>x.id===S.sel.inbox)||INBOX.drift[0];
+  let body;
+  if(r.id==='ppt-implement'||r.id==='infra-status'){
+    const host=r.id==='ppt-implement'?'trn':'local';
+    body=`<div class="diff"><div class="dh"><span>skills/${r.id}/SKILL.md</span><span>catalog → ${host}</span></div>
+      <div class="l">description: Implement one task end-to-end for</div>
+      <div class="l del">- the PPT project — pick the right specialist.</div>
+      <div class="l add">+ the PPT project — pick the right per-stack</div>
+      <div class="l add">+ specialist, verify per stack, open a draft PR.</div>
+      <div class="l"> </div><div class="l">## Verify</div>
+      <div class="l add">+ Run the stack's own check before pushing.</div></div>
+      <div style="display:grid;gap:6px"><button class="btn pri lg" type="button" style="justify-self:start">Take ${host}'s version into ${r.sc==='org'?'papayapos':'personal'}</button><button class="btn sec" type="button" style="justify-self:start">Restore catalog version on ${host} (backs up)</button><span class="muted" style="font-size:11.5px">Taking it makes a commit and re-runs the trigger tests. Restoring keeps a .fleet-bak copy on ${host}.</span></div>`;
+  } else if(r.id==='browser-use'){
+    body=`<dl class="kv"><dt>Found on</dt><dd>oci, htz (identical)</dd><dt>Suggested</dt><dd>layer <b>servers</b> · scope shared</dd><dt>Decided by</dt><dd><span class="badge dec">jev 0.82 · assist</span> Only the name and description were sent.</dd></dl>
+      <div style="display:flex;gap:6px"><button class="btn pri lg" type="button">Adopt into servers</button><button class="btn sec" type="button">Other layer…</button><button class="btn" type="button">Ignore</button></div>
+      <span class="muted" style="font-size:11.5px">Ignore sticks until the file's content changes.</span>`;
+  } else {
+    body=`<dl class="kv"><dt>Status</dt><dd>${r.why||'In sync on every host in its layers'}</dd><dt>Layer</dt><dd>${r.sc==='org'?'papayapos-ops':r.sc==='priv'?'authoring':'core'}</dd></dl><div style="display:flex;gap:6px"><button class="btn sec" type="button">Open</button></div>`;
+  }
+  const insp=`<div class="insp"><div class="ih"><span class="sec-t">${r.k.replace('_',' ')}</span><span class="ititle">${r.id} ${scope(r.sc)}</span><div style="display:grid;gap:2px">${strip(fp(r.fp),r.id)}${labels()}</div></div>
+    <div class="itabs"><span class="on">Overview</span><span>Source</span><span>Tests</span><span>Hosts</span><span>History</span></div>
+    <div class="ib">${body}</div></div>`;
+  return frame(`<div class="ws">${rail('inbox',{inbox:6,tests:1})}<div class="main">${main}</div>${insp}</div>${statusbar(null)}`);
+}
+
+function layersScreen(){
+  const main=`<div class="head"><span class="sentence">6 layers across 2 catalogs</span><span class="grow"></span><button class="btn sec" type="button">New layer</button><button class="btn" type="button">Propose again</button></div>
+  <div class="body">
+    <div class="grp">Layers ${cm(1)}</div>
+    ${LAYERS.map(l=>`<div class="row ${S.sel.layers===l.id?'sel':''}" data-lrow="${l.id}" tabindex="0" style="grid-template-columns:18px minmax(0,1fr) auto 44px auto"><span>${kico('layer')}</span><span class="nm"><b>${l.id}</b>${scope(l.scope)}<span class="why">${l.cat}</span></span><span>${strip(fp(l.fp),l.id)}</span><span class="tg muted">${l.n}</span><span></span></div>`).join('')}
+    <div class="grp">Hosts ${cm(2)}</div>
+    ${[['local','no org · admits papayapos','workstation','authoring, papayapos-ops'],['mefistos','no org · admits papayapos','server','authoring, papayapos-ops'],['oci','no org','server','authoring'],['trn','org papayapos','server','papayapos-ops'],['htz','no org','minimal','—']].map(([h,o,role,ctx])=>`<div class="row" style="grid-template-columns:18px minmax(0,1fr) 110px minmax(0,190px) 0"><span>${svg('hosts','') .replace('<svg','<svg style="width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.6"')}</span><span class="nm"><b>${h}</b>${h==='trn'?scope('org'):''}<span class="why">${o}</span></span><span class="muted" style="font-size:12px">role <b style="color:var(--fg);font-weight:560">${role}</b></span><span class="why">+ ${ctx}</span><span></span></div>`).join('')}
+  </div>`;
+  const l=LAYERS.find(x=>x.id===S.sel.layers);
+  const insp=`<div class="insp"><div class="ih"><span class="sec-t">Layer · catalog ${l.cat}</span><span class="ititle">${l.id} ${scope(l.scope)}</span></div>
+    <div class="itabs"><span class="on">Members</span><span>Hosts</span><span>History</span></div>
+    <div class="ib">
+      <div style="display:grid;gap:6px"><span class="sec-t">Installed on</span><div style="display:grid;gap:2px">${strip(fp(l.fp),l.id)}${labels()}</div></div>
+      <div style="display:grid;gap:6px"><span class="sec-t">Why is it on oci? ${cm(3)}</span><div class="code">oci → role <span class="h">server</span>
+  └ extends <span class="h">core</span>
+      └ ${l.id==='core'?'<span class="h">core</span> lists infra-status':'…'}</div></div>
+      <div style="display:grid;gap:4px"><span class="sec-t">Members · ${l.n}</span>${l.members.map(m=>`<div style="display:flex;gap:8px;align-items:center;height:22px">${kico(m.includes('(agent)')?'agent':m.includes('(plugin)')?'plugin_ref':'skill')}<span>${m.replace(/ \((agent|plugin)\)/,'')}</span></div>`).join('')}</div>
+    </div></div>`;
+  return frame(`<div class="ws">${rail('layers',{inbox:6,tests:1})}<div class="main">${main}</div>${insp}</div>${statusbar(null)}`);
+}
+
+function libraryScreen(){
+  const lc=s=>s==='draft'?'<span class="badge draft">draft</span>':s==='canary'?'<span class="badge canary">canary · oci</span>':'';
+  const main=`<div class="head"><div class="query" role="search"><span class="tok"><i>kind:</i>skill</span><span class="tok"><i>scope:</i>shared,org</span><span class="muted" style="font-size:12px">infra</span><span class="caret"></span></div>${cm(1)}<span class="grow"></span><span style="display:grid;gap:1px;justify-items:end;margin-right:54px">${labels()}</span></div>
+  <div class="body">${LIB.map(([t,rows],gi)=>`<div class="grp">${t}${gi===3?' '+cm(3):''}</div>${rows.map(([n,k,sc,f,t2,life],ri)=>`<div class="row ${S.sel.library===n?'sel':''}" data-lib="${n}" tabindex="0"><span>${kico(k)}</span><span class="nm"><b>${n}</b>${scope(sc)}${lc(life)}${gi===0&&ri===6?' '+cm(2):''}</span><span>${strip(fp(f),n)}</span>${sc==='man'?'<span class="tg none">—</span>':tg(t2)}<span></span></div>`).join('')}`).join('')}</div>`;
+  const insp=`<div class="insp"><div class="ih"><span class="sec-t">skill · catalog personal</span><span class="ititle">infra-status ${scope('shared')}</span><span class="muted" style="font-size:12px">Health-check the home and production infrastructure and report a status table.</span></div>
+    <div class="itabs"><span class="on">Overview</span><span>Source</span><span>Tests</span><span>Hosts</span><span>History</span></div>
+    <div class="ib">
+      <dl class="kv"><dt>Layer</dt><dd>core</dd><dt>Version</dt><dd class="mono">1.4.0 · a1b2c3d</dd><dt>Tests</dt><dd class="ok">✓ 6 trigger · smoke 4/4</dd></dl>
+      <div style="display:grid;gap:6px"><span class="sec-t">Where and why</span>
+      ${[['local','◐ differs','edited yesterday'],['mefistos','● in sync','via core'],['oci','● in sync','via core'],['trn','● in sync','via core'],['htz','—','not in its layers']].map(([h,s,w])=>`<div style="display:grid;grid-template-columns:70px 80px 1fr;font-size:12px;height:22px;align-items:center"><b style="font-weight:560">${h}</b><span class="${s[0]==='◐'?'warn':s[0]==='●'?'ok':'muted'}">${s}</span><span class="muted">${w}</span></div>`).join('')}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn pri" type="button">Edit <kbd>E</kbd></button><button class="btn sec" type="button">Run tests</button><button class="btn sec" type="button">Sync</button></div>
+    </div></div>`;
+  return frame(`<div class="ws">${rail('library',{inbox:6,tests:1})}<div class="main">${main}</div>${insp}</div>${statusbar(null)}`);
+}
+
+function focusScreen(){
+  const cases=[
+    ['hire a new CTO agent in paperclip','y','p',''],
+    ['create a codex worker agent for BIT','y','p',''],
+    ['draft a hire request with the gemini adapter','y','fl','3/5'],
+    ['list my paperclip agents','n','f','paperclip'],
+    ['why is my paperclip issue stuck in blocked','n','p',''],
+    ['add a new skill to the company library','n','p',''],
+  ];
+  const main=`<div class="head" style="gap:14px;flex-wrap:nowrap">
+      <span class="ititle" style="font-size:14px;display:flex;gap:8px;align-items:center;white-space:nowrap">${kico('skill')}<b style="font-weight:650">paperclip-create-agent</b>${scope('shared')}<span class="badge draft">draft</span></span>
+      <div class="stepper" style="margin-left:6px">${[['Edit','✓','ok'],['Lint','1 warning','warn'],['Trigger','5/6','crit'],['Eval','3/4 ◐','warn'],['Canary','—','muted'],['Smoke','—','muted']].map(([n,v,c])=>`<div class="step"><span class="sn">${n}</span><span class="sv ${c}">${v}</span></div>`).join('')}</div>${cm(1)}
+      <span class="grow"></span><button class="btn pri lg" type="button">Fix trigger · rerun <kbd>⌘↵</kbd></button><button class="btn" type="button">Esc</button></div>
+    <div class="split">
+      <section><div class="ptabs"><span class="on">Source</span><span>Preview · claude</span><span>Preview · codex</span><span>Diff</span></div>
+        <div class="pb">
+          <div class="field"><label for="d1">Description — decides when the skill triggers</label><div class="ta warnb" id="d1">Create new agents in Paperclip with governance-aware hiring. Use when you need to inspect adapter configuration options, compare existing agent configs and submit a hire request.</div><span class="lint">▲ Overlaps <b>paperclip</b> at 71 %. Say what this skill does that paperclip does not. ${cm(2)}</span></div>
+          <div class="field"><label>Allowed tools</label><div class="chips"><span class="badge">Read</span><span class="badge">Bash</span><span class="badge">Grep</span><span class="btn" style="height:18px;padding:0 4px">+ add</span></div></div>
+          <div class="field"><label>SKILL.md</label><div class="code"><span class="h"># Paperclip create agent</span>
+
+Hire an agent through the board API.
+
+<span class="h">## Steps</span>
+1. Read the adapter's config schema.
+2. Compare with two existing agents.
+3. Draft the prompt and submit the hire.</div></div>
+        </div>
+      </section>
+      <section><div class="ptabs"><span class="on">Triggers · 6</span><span>Evals · 4</span><span>Smoke</span></div>
+        <div class="pb">
+          <table class="cases"><tbody>${cases.map(([p,y,r,x])=>`<tr><td>${r==='p'?'<span class="ok">✓</span>':r==='f'?'<span class="crit">✗</span>':'<span class="warn">◐</span>'}</td><td>“${p}”${r==='f'?`<div class="fired">fired: paperclip-create-agent · expected: not this skill</div>`:''}</td><td class="r">${x&&r==='fl'?`<span class="warn" style="font-size:11px">${x}</span> `:''}<span class="yn" aria-label="should fire"><span class="${y==='y'?'on':''}">yes</span><span class="${y==='n'?'on':''}">no</span></span></td></tr>`).join('')}</tbody></table>
+          <div style="display:flex;gap:6px;align-items:center">${cm(3)}<button class="btn sec" type="button">+ Add case</button><button class="btn sec" type="button">✦ Suggest 10</button><span class="muted" style="font-size:11.5px">5 should fire · 5 near-misses from paperclip, paperclip-converting-plans-to-tasks</span>${cm(4)}</div>
+          <div class="muted" style="font-size:11.5px">Last run 40 s ago · haiku on mefistos · $0.03 · account tech@papayapos has 62 % weekly headroom</div>
+        </div>
+      </section>
+    </div>
+    <div class="editfoot">Autosaved <span class="mono">b7c1e0a</span> on <span class="mono">draft/skill-paperclip-create-agent</span> · Ask Claude writes here too ${cm(5)}<span class="grow" style="flex:1"></span>Esc back to list · ⌘E focus</div>`;
+  return frame(`<div class="ws focus">${rail('focus',{inbox:6,tests:1})}<div class="main">${main}</div></div>${statusbar('trigger tests 5/6')}`);
+}
+
+function resultsScreen(){
+  const C=(t,v)=>`<span class="cell ${t}">${v}</span>`;
+  const main=`<div class="head"><span class="sentence">paperclip-create-agent</span><span class="sub mono">draft b7c1e0a vs published 9f0e1d2</span><span class="grow"></span><span class="sub">38 runs · $0.42 · 1 m 12 s</span><button class="btn sec" type="button">Run all</button></div>
+  <div class="body" style="padding:6px 14px 14px;display:grid;gap:18px;align-content:start">
+    <table class="mx"><thead><tr><th>Case</th><th>haiku · claude</th><th>sonnet · claude</th><th>gpt-5.4 · codex</th><th>History ${cm(1)}</th></tr></thead><tbody>
+      <tr style="background:color-mix(in srgb,var(--crit) 5%,transparent)"><td><b class="crit">Regressed</b> · “list my paperclip agents” → no</td><td>${C('f','✗')}</td><td>${C('f','✗')}</td><td>${C('p','✓')}</td><td><span class="spark">${[1,1,1,1,1,1,0].map((v,i)=>`<i class="${v?'':'x'} ${i===5?'pub':''}" style="height:${v?14:14}px"></i>`).join('')}</span></td></tr>
+      <tr><td>“hire a new CTO agent in paperclip” → yes</td><td>${C('p','✓')}</td><td>${C('p','✓')}</td><td>${C('p','✓')}</td><td><span class="spark">${[1,1,1,1,1,1,1].map((v,i)=>`<i class="${i===5?'pub':''}" style="height:14px"></i>`).join('')}</span></td></tr>
+      <tr><td>“draft a hire request with the gemini adapter” → yes</td><td>${C('fl','◐ 3/5')}</td><td>${C('p','✓')}</td><td>${C('fl','◐ 4/5')}</td><td>${cm(2)}</td></tr>
+      <tr><td>“create a codex worker agent for BIT” → yes</td><td>${C('p','✓')}</td><td>${C('p','✓')}</td><td>${C('p','✓')}</td><td></td></tr>
+      <tr><td>Eval · hire-cto (rubric 5 items)</td><td>${C('na','—')}</td><td>${C('fl','3/5')}</td><td>${C('p','5/5')}</td><td class="muted" style="font-size:11.5px">$0.11 · 48 s</td></tr>
+    </tbody></table>
+    <div style="display:grid;gap:8px"><span class="sec-t">Smoke after the last sync ${cm(3)}</span>
+      <table class="mx"><thead><tr><th>Host</th><th>claude</th><th>codex</th><th>Checked</th><th>Account</th></tr></thead><tbody>
+      ${[['local','p','p','loads, listed','tech.chuck'],['mefistos','p','na','loads, listed','tech@papayapos'],['oci','p','p','loads, listed','tech.silvester'],['trn','p','na','loads, listed','admin@32bit'],['htz','na','na','not in its layers','—']].map(([h,a,b,c,acc])=>`<tr><td><b style="font-weight:560">${h}</b></td><td>${a==='p'?C('p','✓'):C('na','—')}</td><td>${b==='p'?C('p','✓'):C('na','—')}</td><td class="muted" style="font-size:12px">${c}</td><td class="mono muted">${acc}</td></tr>`).join('')}
+      </tbody></table></div>
+  </div>`;
+  const insp=`<div class="insp"><div class="ih"><span class="sec-t">Failing case</span><span class="ititle" style="font-size:14px">“list my paperclip agents”</span><span class="muted" style="font-size:12px">Expected: this skill does <b>not</b> fire. It fired on haiku and sonnet.</span></div>
+    <div class="itabs"><span class="on">Transcript</span><span>Diff since pass</span></div>
+    <div class="ib">
+      <div class="code">▸ user  list my paperclip agents
+▸ tool  <span class="h">Skill</span>(paperclip-create-agent)
+▸ ...   read adapter config schema</div>
+      <dl class="kv"><dt>Passed at</dt><dd class="mono">9f0e1d2 (published)</dd><dt>Fails since</dt><dd class="mono">a1b2c3d · description rewritten</dd></dl>
+      <div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn pri" type="button">Open the diff</button><button class="btn sec" type="button">Sharpen description</button></div>
+      <span class="muted" style="font-size:11.5px">The regression is also in the Inbox. Roll-out stays blocked until the trigger gate passes.</span>
+    </div></div>`;
+  return frame(`<div class="ws">${rail('results',{inbox:6,tests:1})}<div class="main">${main}</div>${insp}</div>${statusbar(null)}`);
+}
+
+function overlapScreen(){
+  const CL=[
+    {id:'paperclip',n:4,rate:18,names:'paperclip, paperclip-create-agent, paperclip-infra, paperclip-converting-plans-to-tasks'},
+    {id:'author-*',n:27,rate:11,names:'author-editor, author-line-edit, author-revise, author-proofread, …'},
+    {id:'openmarket-*',n:6,rate:7,names:'openmarket-infra, openmarket-control, openmarket-local, …'},
+    {id:'code review',n:4,rate:6,names:'code-review (skill), code-review (plugin), debug-review, generate-pr-description'},
+    {id:'ppt-*',n:6,rate:3,names:'ppt-implement, ppt-pr-merge, ppt-review-merged, …'},
+  ];
+  const M=[
+    ['paperclip',[82,12,4,2]],
+    ['create-agent',[6,88,0,6]],
+    ['paperclip-infra',[9,0,91,0]],
+    ['plans-to-tasks',[14,3,0,83]],
+  ];
+  const cols=['paperclip','create-agent','paperclip-infra','plans-to-tasks'];
+  const cell=(v,diag)=>{const a=diag?Math.round(v*0.35):Math.min(60,v*4);const col=diag?'var(--ok)':'var(--crit)';return `<td style="background:color-mix(in srgb,${col} ${a}%,transparent)${!diag&&v>=10?';font-weight:700':''}" title="${v}%">${v}</td>`;};
+  const main=`<div class="head"><span class="sentence">5 clusters where the wrong skill fires</span><span class="sub">measured nightly · 1,600 prompts · last run 04:10</span><span class="grow"></span><button class="btn sec" type="button">Run now</button></div>
+  <div class="body"><div class="grp" style="display:grid;grid-template-columns:minmax(0,1fr) 150px 60px;padding-inline:14px"><span>Cluster ${cm(1)}</span><span>Misfire rate</span><span style="text-align:right">Skills</span></div>
+  <div class="clusters">${CL.map(c=>`<div class="cl ${S.sel.overlap===c.id?'sel':''}" data-cl="${c.id}" tabindex="0"><span style="min-width:0"><b style="font-weight:600">${c.id}</b> <span class="why" style="font-size:12px;color:var(--fg-muted)">${c.names}</span></span><span style="display:grid;grid-template-columns:1fr 34px;gap:8px;align-items:center"><span class="rate"><i class="${c.rate>=15?'hi':''}" style="width:${c.rate/20*100}%"></i></span><span class="tg" style="min-width:0">${c.rate} %</span></span><span class="tg muted">${c.n}</span></div>`).join('')}</div>
+  <p class="muted" style="font-size:11.5px;padding:10px 14px;margin:0">Rate bars run from 0 to 20 %. Jev pre-screens the prompts in shadow mode. The rates shown come from real claude -p runs.</p></div>`;
+  const insp=`<div class="insp"><div class="ih"><span class="sec-t">Cluster</span><span class="ititle">paperclip · 18 % misfires</span><span class="muted" style="font-size:12px">Each skill's own trigger prompts, run against all four. Percent of runs.</span></div>
+    <div class="itabs"><span class="on">Confusion ${cm(2)}</span><span>Examples</span></div>
+    <div class="ib">
+      <div style="overflow-x:auto"><table class="cmx"><thead><tr><th style="text-align:left;vertical-align:bottom;font-size:10px">prompts of ↓ · fired →</th>${cols.map(c=>`<th class="rot"><span>${c}</span></th>`).join('')}</tr></thead><tbody>
+      ${M.map(([r,vals],i)=>`<tr><th style="text-align:right">${r}</th>${vals.map((v,j)=>cell(v,i===j)).join('')}</tr>`).join('')}</tbody></table></div>
+      <span class="muted" style="font-size:11.5px">Worst pair: 14 % of plans-to-tasks prompts fire paperclip.</span>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${cm(3)}<button class="btn pri" type="button">Sharpen 2 descriptions</button><button class="btn sec" type="button">Add as negative cases</button></div>
+    </div></div>`;
+  return frame(`<div class="ws">${rail('overlap',{inbox:6,tests:1})}<div class="main">${main}</div>${insp}</div>${statusbar(null)}`);
+}
+
+function mobileScreen(){
+  return `<div class="phone-stage">
+    <div class="phone" aria-label="fleet-mobile, Needs attention screen">
+      <div class="sb"><span>9:41</span><span>●●●</span></div>
+      <div class="nav"><b>Needs attention</b><span>1 session blocked · 2 asset changes</span></div>
+      <div class="pc">
+        <div class="mcard"><span class="k">Assets · rollout ready ${cm(1)}</span><span class="s">Sync 5 hosts: 114 adopt, 0 overwrite.</span>
+          <div class="mg"><div><span>local</span><span class="muted">114 adopt</span></div><div><span>mefistos</span><span class="muted">98 adopt</span></div><div><span>trn · papayapos</span><span class="muted">72 adopt</span></div><div><span class="muted">+ 2 hosts</span><span></span></div></div>
+          <div class="mbtns"><span>Reject</span><span class="p" id="mapply" role="button" tabindex="0">Apply</span></div></div>
+        <div class="mcard"><span class="k" style="color:var(--warn)">Assets · 2 need a decision ${cm(2)}</span>
+          <div class="mg"><div><span>worktree</span><span class="warn">overwrite on oci</span></div><div><span>jira</span><span class="crit">needs a token</span></div></div>
+          <span class="desk">▭ Decide on desktop</span></div>
+        <div class="mcard"><span class="k" style="color:var(--crit)">Tests · regression ${cm(3)}</span><span class="s" style="font-size:13px">paperclip-create-agent: “list my paperclip agents” now triggers it.</span><span class="desk">Roll-out is blocked until it passes.</span></div>
+      </div>
+    </div>
+    <div class="m-notes"><h3>What mobile does</h3><p>Approves or rejects the same changeset cards the desktop shows, using the same MCP verbs. It never edits an asset or starts a test run.</p><h3>What it leaves to desktop</h3><p>Overwrites, removals and anything with a secret are listed so you know they are waiting, and you decide them on desktop.</p></div>
+  </div>`;
+}
+
+// ─── wiring ───
+const R={bootstrap:bootstrapScreen,inbox:inboxScreen,layers:layersScreen,library:libraryScreen,focus:focusScreen,results:resultsScreen,overlap:overlapScreen,mobile:mobileScreen};
+const mock=document.getElementById('mock'),notes=document.getElementById('notes'),nav=document.getElementById('screens');
+function renderNav(){nav.innerHTML=SCREENS.map((s,i)=>`<button type="button" aria-pressed="${S.screen===s.id}" data-s="${s.id}"><span class="no">${i+1}</span>${s.label}</button>`).join('');}
+function renderNotes(){const n=NOTES[S.screen];notes.innerHTML=`<h2>${n.h}</h2><p class="sum">${n.s}</p><ol>${n.items.map((it,i)=>`<li>${cm(i+1)}<div><b>${it[0]}</b><span class="t">${it[1]}</span></div></li>`).join('')}</ol>`;}
+function render(){renderNav();mock.innerHTML=R[S.screen]();mock.style.minWidth=S.screen==='mobile'?'0':'';renderNotes();}
+function go(id){if(!id||!R[id])return;S.screen=id;try{history.replaceState(null,'','#'+id)}catch(e){}render();}
+nav.addEventListener('click',e=>{const b=e.target.closest('[data-s]');if(b)go(b.dataset.s);});
+mock.addEventListener('click',e=>{
+  const t=e.target;
+  const g=t.closest('[data-go]');if(g){go(g.dataset.go);return;}
+  if(t.closest('#apply')){S.applied=true;render();return;}
+  if(t.closest('#undo')){S.applied=false;render();return;}
+  if(t.closest('#mapply')){const b=t.closest('#mapply');b.textContent='Applied';b.classList.add('done');return;}
+  const lay=t.closest('[data-layer]');if(lay){S.sel.bootstrap=lay.dataset.layer;render();return;}
+  const row=t.closest('[data-row]');if(row){S.sel.inbox=row.dataset.row;render();return;}
+  const lr=t.closest('[data-lrow]');if(lr){S.sel.layers=lr.dataset.lrow;render();return;}
+  const cl=t.closest('[data-cl]');if(cl){S.sel.overlap=cl.dataset.cl;render();return;}
+  const tog=t.closest('[data-toggle]');if(tog){S.open.insync=!S.open.insync;render();return;}
+  const lib=t.closest('[data-lib]');if(lib){if(lib.dataset.lib==='paperclip-create-agent'){go('focus');}return;}
+});
+document.addEventListener('keydown',e=>{
+  if((e.metaKey||e.ctrlKey)&&e.key==='Enter'&&S.screen==='bootstrap'&&!S.applied){S.applied=true;render();e.preventDefault();return;}
+  if(S.screen!=='inbox'||!['j','k'].includes(e.key)||e.target.closest('input,textarea'))return;
+  const all=[...INBOX.needs,...INBOX.drift,...INBOX.fresh,...INBOX.tests,...(S.open.insync?INBOX.insync:[])].map(r=>r.id);
+  let i=all.indexOf(S.sel.inbox);i=Math.max(0,Math.min(all.length-1,i+(e.key==='j'?1:-1)));S.sel.inbox=all[i];render();
+});
+mock.addEventListener('keydown',e=>{if(e.key==='Enter'){const r=e.target.closest('[tabindex]');if(r)r.click();}});
+const h=(location.hash||'').slice(1);if(R[h])S.screen=h;
+render();
+})();
+</script>

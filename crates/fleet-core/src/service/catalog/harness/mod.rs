@@ -147,6 +147,70 @@ pub struct HostSnapshot {
     pub configs: BTreeMap<String, serde_json::Value>,
 }
 
+/// One installed asset with what a scan can say about it without the
+/// catalog: a content hash (so identical copies on different hosts are
+/// recognisable), whether it looks like it carries a secret, and whether
+/// fleet itself put it there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledAsset {
+    pub kind: Kind,
+    pub name: String,
+    pub hash: Option<String>,
+    pub secret_like: bool,
+    pub fleet_owned: bool,
+}
+
+/// JSON with every object's keys sorted, recursively: a stable input for
+/// hashing whatever order the host wrote.
+pub fn canonical_json(v: &serde_json::Value) -> String {
+    fn sorted(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(m) => {
+                let mut keys: Vec<&String> = m.keys().collect();
+                keys.sort();
+                let mut out = serde_json::Map::new();
+                for k in keys {
+                    out.insert(k.clone(), sorted(&m[k]));
+                }
+                serde_json::Value::Object(out)
+            }
+            serde_json::Value::Array(a) => serde_json::Value::Array(a.iter().map(sorted).collect()),
+            other => other.clone(),
+        }
+    }
+    sorted(v).to_string()
+}
+
+/// sha256 over `<relative path>=<file hash>` lines for every file under
+/// `prefix` (which ends in `/`), sorted by path. `None` when there is none.
+pub fn dir_hash(snap: &HostSnapshot, prefix: &str) -> Option<String> {
+    let mut lines: Vec<String> = snap
+        .files
+        .iter()
+        .filter_map(|(p, h)| p.strip_prefix(prefix).map(|rel| format!("{rel}={h}")))
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    lines.sort();
+    Some(super::model::sha256_hex(lines.join("\n").as_bytes()))
+}
+
+/// Does an MCP server entry look like it carries a credential?
+pub fn mcp_secret_like(v: &serde_json::Value) -> bool {
+    let non_empty = |k: &str| {
+        v.get(k)
+            .and_then(|o| o.as_object())
+            .is_some_and(|o| !o.is_empty())
+    };
+    let url_secret = v.get("url").and_then(|u| u.as_str()).is_some_and(|u| {
+        ["token=", "key=", "secret="]
+            .iter()
+            .any(|s| u.to_lowercase().contains(s))
+    });
+    non_empty("env") || non_empty("headers") || url_secret
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Unsupported {
     pub harness: &'static str,
@@ -174,6 +238,20 @@ pub trait Harness: Send + Sync {
     fn parse_scan(&self, stdout: &str) -> Result<HostSnapshot, IpcError>;
     /// Every asset (kind, name) the snapshot shows as installed.
     fn installed(&self, snap: &HostSnapshot) -> Vec<(Kind, String)>;
+    /// `installed()` with a content hash and flags per asset. The default
+    /// knows nothing beyond the identity.
+    fn installed_detail(&self, snap: &HostSnapshot) -> Vec<InstalledAsset> {
+        self.installed(snap)
+            .into_iter()
+            .map(|(kind, name)| InstalledAsset {
+                kind,
+                name,
+                hash: None,
+                secret_like: false,
+                fleet_owned: false,
+            })
+            .collect()
+    }
     /// Home-relative path (`~/...`) to the manifest file this harness uses
     /// to track which merges/files the sync engine applied.
     fn manifest_path(&self) -> &'static str;

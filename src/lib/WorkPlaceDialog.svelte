@@ -12,6 +12,7 @@
     conflictNotice,
     placementNote,
     placeWork,
+    ruleDraftFor,
     taskLabel,
     workTreeMeta,
     type ConflictNotice,
@@ -86,24 +87,6 @@
     }
     placed = group.trim();
   }
-
-  function ruleDraft(group: string): WorkRuleDraft {
-    const g = before.group;
-    const prefix = before.key && /^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(before.key) ? before.key.split('-')[0] : null;
-    return {
-      name: group,
-      enabled: true,
-      group,
-      expected_version: 0,
-      conditions: {
-        tracker_id: before.kind === 'tracker' ? (before.tracker_id ?? null) : null,
-        container: g?.source === 'tracker' ? (g.tracker_value ?? g.label) : null,
-        key_prefix: g?.source !== 'tracker' && prefix ? prefix : null,
-        repo: g?.source === 'repo' ? g.label : null,
-        title_contains: null,
-      },
-    };
-  }
 </script>
 
 <Modal title="Place in group" {onclose} width="440px" testid="work-place-dialog">
@@ -118,7 +101,7 @@
             class="btn"
             data-testid="work-place-make-rule"
             onclick={() => {
-              const d = ruleDraft(placed ?? '');
+              const d = ruleDraftFor(before, placed ?? '', placed ?? '');
               onclose();
               onmakerule?.(d);
             }}>Make a rule for similar tasks…</button

@@ -77,6 +77,15 @@ pub fn apply_hook(
         Some("PostToolUse") if payload.tool_name.as_deref() == Some("ExitWorktree") => {
             apply_worktree_exit_hook(store, payload, ctx.caller)
         }
+        // Claude Code's task tools (design 2026-09-29 §2): agent steps.
+        Some("PostToolUse")
+            if payload
+                .tool_name
+                .as_deref()
+                .is_some_and(|t| crate::service::work::steps::CLAUDE_STEP_TOOLS.contains(&t)) =>
+        {
+            apply_step_hook(store, payload, ctx)
+        }
         _ => Ok(()),
     }
 }
@@ -947,6 +956,50 @@ fn apply_pre_compact_hook(
     })
 }
 
+/// PostToolUse on Claude Code's task tools (design 2026-09-29 §2): the
+/// agent's own steps, journaled on the conversation. Best-effort — a
+/// malformed body records nothing and the hook still succeeds.
+fn apply_step_hook(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    ctx: &HookContext,
+) -> Result<(), IpcError> {
+    let (Some(tool), Some(input), Some(conv)) = (
+        payload.tool_name.as_deref(),
+        payload.tool_input.as_ref(),
+        payload.session_id.as_deref(),
+    ) else {
+        return Ok(());
+    };
+    let events = crate::service::work::steps::steps_from_claude_tool(
+        tool,
+        input,
+        payload.tool_response.as_ref(),
+    );
+    if events.is_empty() {
+        return Ok(());
+    }
+    let s = lock(store)?;
+    s.atomically(|s| {
+        let Some((row, _)) = resolve_and_rebind(s, payload, ctx, StartSource::Unknown)? else {
+            return Ok(());
+        };
+        let participant = match s.participant_for_session(row.id) {
+            Ok(p) => p.map(|p| p.id),
+            Err(e) => {
+                tracing::debug!(row = row.id, error = %e.message, "[steps] no participant");
+                s.ensure_in_tx()?;
+                None
+            }
+        };
+        if let Err(e) = s.record_steps(conv, participant, "hook", &events) {
+            tracing::debug!(row = row.id, error = %e.message, "[steps] not recorded");
+            s.ensure_in_tx()?;
+        }
+        Ok(())
+    })
+}
+
 /// The PostCompact hook: counts the compaction on the conversation it names
 /// (deduped against `SessionStart(compact)`, which also fires), marks the
 /// context stale when that is the current conversation, ends the
@@ -995,9 +1048,11 @@ fn apply_post_compact_hook(
 /// marks the session `idle`, bumps `turn_seq` and stamps `last_stop_at` (the
 /// completion signal `send_prompt` / `wait_for_session` / `run_prompt` build
 /// on), records `turn_done`, then kicks off the background follow-ups: the
-/// safe-kill marker scan, the task-completion marker scan and the context
-/// refresh. All are spawned so the HTTP response returns fast. A Stop from a
-/// conversation the row has left (`/clear` mid-turn) only counts the turn.
+/// safe-kill marker scan, the task-completion marker scan, the context
+/// refresh and — on a host whose hooks predate the step matcher — the agent
+/// step backstop (`work::harvest::spawn_harvest_steps`). All are spawned so
+/// the HTTP response returns fast. A Stop from a conversation the row has
+/// left (`/clear` mid-turn) only counts the turn.
 ///
 /// Claude Code's `Stop` hook fires when the agent finishes a turn and is ready
 /// for input again — NOT when the session terminates. So the right status is
@@ -1077,14 +1132,26 @@ fn apply_stop_hook(
                 .open_tasks_for_worker(before.id)
                 .map(|v| !v.is_empty())
                 .unwrap_or(false);
+            // Agent steps (design 2026-09-29 §2): a host whose hooks predate
+            // the step matcher gets the transcript backstop. Read here, under
+            // the lock, so an up-to-date host never pays for a tail read.
+            let steps_backstop = match s.get_host_row(&before.host_alias) {
+                Ok(h) => h.is_some_and(|h| h.provision_stale || !h.provisioned),
+                Err(e) => {
+                    tracing::debug!(error = %e, "[steps] host row not read");
+                    s.ensure_in_tx()?;
+                    false
+                }
+            };
             Ok(Some((
                 before.id,
                 in_flight,
                 after.filter(|_| has_open_tasks),
+                steps_backstop,
             )))
         })?
     };
-    let (row_id, safe_kill_in_flight, task_worker) = match outcome {
+    let (row_id, safe_kill_in_flight, task_worker, steps_backstop) = match outcome {
         Some(t) => t,
         None => return Ok(()),
     };
@@ -1102,6 +1169,9 @@ fn apply_stop_hook(
         crate::rt::spawn(async move {
             crate::service::tasks::handle_stop_for_worker(store, ssh, worker, cwd).await;
         });
+    }
+    if steps_backstop {
+        crate::service::work::harvest::spawn_harvest_steps(store, ssh, row_id, &session_id);
     }
     spawn_refresh_context(store, ssh, row_id);
     Ok(())
@@ -2031,6 +2101,95 @@ mod tests {
             ..Default::default()
         };
         assert!(apply_hook(&store, &make_ssh(), &payload, &ctx(&Caller::master(), None)).is_ok());
+    }
+
+    /// A store with a `local` session bound to `claude_id`, for the step
+    /// hook tests.
+    fn step_fixture(claude_id: &str) -> (Arc<Mutex<Store>>, Arc<SshClient>, i64) {
+        let store = make_store();
+        let id;
+        {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            id = s
+                .upsert_session("steps", "local", None, None, 0, 0, "running", None)
+                .unwrap();
+            s.set_claude_session_id(id, claude_id).unwrap();
+        }
+        (store, make_ssh(), id)
+    }
+
+    fn step_payload(
+        tool: &str,
+        input: serde_json::Value,
+        response: Option<serde_json::Value>,
+    ) -> HookPayload {
+        HookPayload {
+            session_id: Some("c-steps".into()),
+            hook_event_name: Some("PostToolUse".into()),
+            tool_name: Some(tool.into()),
+            tool_input: Some(input),
+            tool_response: response,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_task_create_post_tool_use_records_a_step_on_the_conversation() {
+        let (store, ssh, _sid) = step_fixture("c-steps");
+        let caller = Caller::master();
+        let payload = step_payload(
+            "TaskCreate",
+            serde_json::json!({"subject": "Read OM-110", "description": "d", "activeForm": "Reading"}),
+            Some(serde_json::json!({"task": {"id": "1", "subject": "Read OM-110"}})),
+        );
+        apply_hook(&store, &ssh, &payload, &ctx(&caller, None)).unwrap();
+        let cur = store
+            .lock()
+            .unwrap()
+            .current_steps(&["c-steps".to_string()])
+            .unwrap();
+        assert_eq!(
+            (cur[0].native_id.as_str(), cur[0].text.as_str()),
+            ("task:1", "Read OM-110")
+        );
+        // A TaskUpdate moves it; the text is kept.
+        let update = step_payload(
+            "TaskUpdate",
+            serde_json::json!({"taskId": "1", "status": "completed"}),
+            None,
+        );
+        apply_hook(&store, &ssh, &update, &ctx(&caller, None)).unwrap();
+        let cur = store
+            .lock()
+            .unwrap()
+            .current_steps(&["c-steps".to_string()])
+            .unwrap();
+        assert_eq!(cur.len(), 1);
+        assert_eq!(
+            (cur[0].text.as_str(), cur[0].state.as_str()),
+            ("Read OM-110", "completed")
+        );
+    }
+
+    #[test]
+    fn a_step_hook_for_an_unknown_conversation_or_a_bad_body_is_a_noop() {
+        let (store, ssh, _sid) = step_fixture("c-steps");
+        let caller = Caller::master();
+        let mut stray = step_payload(
+            "TodoWrite",
+            serde_json::json!({"todos": [{"content": "x", "status": "pending"}]}),
+            None,
+        );
+        stray.session_id = Some("c-other".into());
+        apply_hook(&store, &ssh, &stray, &ctx(&caller, None)).unwrap();
+        let bad = step_payload("TaskCreate", serde_json::json!({"subject": "no id"}), None);
+        apply_hook(&store, &ssh, &bad, &ctx(&caller, None)).unwrap();
+        let s = store.lock().unwrap();
+        assert!(s
+            .current_steps(&["c-steps".to_string(), "c-other".to_string()])
+            .unwrap()
+            .is_empty());
     }
 
     fn worktree_payload(path: &str, branch: Option<&str>) -> HookPayload {
@@ -3314,6 +3473,56 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(local.last_hook_at, None, "the master token names no host");
+    }
+
+    /// Hooks arrive several times per turn; the host stamp is written at
+    /// most once a minute (`HOST_HOOK_STAMP_EVERY_SECS`).
+    #[test]
+    fn two_hooks_within_a_minute_leave_the_host_stamp_at_the_first() {
+        let store = make_store();
+        store.lock().unwrap().upsert_host("h").unwrap();
+        let _id = pane_session(&store, "s", "%3");
+        let bound = host_caller("h");
+        let first = crate::store::now_unix() - 10;
+        store
+            .lock()
+            .unwrap()
+            .set_host_last_hook_at("h", first)
+            .unwrap();
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("Stop", NEW),
+            &ctx(&bound, None),
+        )
+        .unwrap();
+        let stamp = |store: &Arc<Mutex<Store>>| {
+            store
+                .lock()
+                .unwrap()
+                .get_host_row("h")
+                .unwrap()
+                .unwrap()
+                .last_hook_at
+        };
+        assert_eq!(stamp(&store), Some(first), "a hook within the minute");
+
+        // An old stamp is moved by the next hook.
+        let old = crate::store::now_unix() - 3600;
+        store
+            .lock()
+            .unwrap()
+            .conn_for_test()
+            .execute("UPDATE hosts SET last_hook_at=?1 WHERE alias='h'", [old])
+            .unwrap();
+        apply_hook(
+            &store,
+            &make_ssh(),
+            &make_payload("Stop", NEW),
+            &ctx(&bound, None),
+        )
+        .unwrap();
+        assert!(stamp(&store).is_some_and(|t| t > old + 60));
     }
 
     #[test]

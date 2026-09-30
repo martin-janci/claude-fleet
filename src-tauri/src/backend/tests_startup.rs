@@ -4,7 +4,7 @@
 //! a tautology.
 
 use super::*;
-use crate::backend::RemoteConfig;
+use crate::backend::{RemoteConfig, UnavailableHub};
 use std::sync::Mutex;
 
 /// Records what it was asked to start, in order.
@@ -35,6 +35,9 @@ impl FleetTasks for Recorder {
     }
     fn start_tracker_sync(&self) {
         self.0.lock().unwrap().push("tracker_sync");
+    }
+    fn start_catalog_scan_tick(&self) {
+        self.0.lock().unwrap().push("catalog_scan_tick");
     }
 }
 
@@ -83,6 +86,35 @@ fn a_paired_desktop_never_syncs_trackers() {
     assert!(standalone.started().contains(&"tracker_sync"));
 }
 
+/// Assets S1a: the catalog scan tick is fleet-owning exactly like the
+/// tracker sync above — a desktop paired with a hub must never rescan hosts
+/// itself, or it becomes a second brain writing the hub's inventory into its
+/// own database.
+#[test]
+fn a_paired_desktop_never_scans_the_catalog() {
+    let recorder = Recorder::default();
+    start_background_tasks(&remote(), &recorder);
+    assert!(
+        !recorder.started().contains(&"catalog_scan_tick"),
+        "a hub client started the catalog scan tick"
+    );
+    let unavailable = Recorder::default();
+    start_background_tasks(
+        &Backend::Unavailable(UnavailableHub {
+            url: Some("https://fleet.example.com".into()),
+            reason: "test".into(),
+        }),
+        &unavailable,
+    );
+    assert!(
+        !unavailable.started().contains(&"catalog_scan_tick"),
+        "an unusable hub started the catalog scan tick"
+    );
+    let standalone = Recorder::default();
+    start_background_tasks(&Backend::Local, &standalone);
+    assert!(standalone.started().contains(&"catalog_scan_tick"));
+}
+
 #[test]
 fn the_report_flusher_is_off_with_the_env_var() {
     assert!(report_flusher_wanted(None));
@@ -105,7 +137,8 @@ fn a_standalone_app_starts_all_three() {
             "control_api",
             "reconcile_tick",
             "account_usage_tick",
-            "tracker_sync"
+            "tracker_sync",
+            "catalog_scan_tick"
         ],
         "standalone must keep its control API, its reconcile tick and its \
          usage poll — and must NOT start the hub event bridge, because there \
@@ -136,6 +169,7 @@ fn lib_rs_cannot_start_a_background_task_behind_this_modules_back() {
         "spawn_event_bridge(",
         "spawn_report_flusher(",
         "spawn_tracker_sync(",
+        "spawn_catalog_scan_tick(",
     ] {
         assert!(
             !lib.contains(forbidden),
@@ -169,6 +203,7 @@ fn the_real_tasks_module_spawns_each_of_the_three_exactly_once() {
         ("spawn_event_bridge(", "the hub event bridge"),
         ("spawn_report_flusher(", "the error-report flusher"),
         ("spawn_tracker_sync(", "the tracker sync"),
+        ("spawn_catalog_scan_tick(", "the catalog scan tick"),
     ] {
         assert_eq!(
             tasks.matches(call).count(),
@@ -332,7 +367,8 @@ fn with_no_hub_configured_the_resolved_app_still_starts_all_three() {
                     "control_api",
                     "reconcile_tick",
                     "account_usage_tick",
-                    "tracker_sync"
+                    "tracker_sync",
+                    "catalog_scan_tick"
                 ],
                 "standalone behaviour must not change: settings {settings:?}"
             );

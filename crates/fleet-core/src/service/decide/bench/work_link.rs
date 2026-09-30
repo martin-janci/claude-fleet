@@ -58,11 +58,14 @@
 //! The report holds ids, words and numbers only: no prompt and no title.
 
 use super::bm25::{self, Bm25};
-use super::{bootstrap_acc_diff, mix, percentile, Calibration, Criterion, Paired, Verdict};
-use crate::ipc_error::{codes, lock, IpcError};
+use super::{
+    bootstrap_acc_diff, f2, f3, gate_or_skip, mix, pct, percentile, round3, Calibration, Criterion,
+    Paired, Verdict, MAX_CALLS,
+};
+use crate::ipc_error::{codes, IpcError};
 use crate::service::decide::haiku::{reason::OTHER_ORG, Haiku};
 use crate::service::decide::{
-    decide, gate_bench_at, DecideCtx, DecideRequest, Feature, JevRequest, NoulCriteria, Question,
+    decide, DecideCtx, DecideRequest, Feature, JevRequest, NoulCriteria, Question,
 };
 use crate::service::nl::census::{FleetPrompts, Shown};
 use crate::service::nl::{self, Ranker};
@@ -567,10 +570,6 @@ pub struct Loaded {
     pub org_names: BTreeMap<i64, String>,
 }
 
-fn pct(k: u64, n: u64) -> Option<f64> {
-    (n > 0).then(|| round3(k as f64 / n as f64))
-}
-
 /// [`pct`] of a count that is shown: none when the count shows as `<5`, so
 /// the share cannot give it away.
 fn shown_pct(k: u64, n: u64) -> Option<f64> {
@@ -579,10 +578,6 @@ fn shown_pct(k: u64, n: u64) -> Option<f64> {
     } else {
         pct(k, n)
     }
-}
-
-fn round3(x: f64) -> f64 {
-    (x * 1000.0).round() / 1000.0
 }
 
 /// The candidate pool, and the facts the filters need.
@@ -1247,20 +1242,15 @@ async fn call(
         },
     )
     .await;
-    let run = res.run_id.and_then(|id| {
-        lock(&ctx.store)
-            .ok()
-            .and_then(|s| s.get_decision_run(id).ok().flatten())
-    });
     let usable = res.usable();
     Call {
         ran: res.mode.is_some(),
         fallback: res.fallback.map(|f| f.as_str().to_string()),
         value: usable.map(|a| a.value.clone()),
         confidence: usable.and_then(|a| a.confidence),
-        latency_ms: run.as_ref().and_then(|r| r.latency_ms),
-        input_tokens: run.as_ref().map(|r| r.input_tokens).unwrap_or_default(),
-        cost_microusd: run.as_ref().map(|r| r.cost_microusd).unwrap_or_default(),
+        latency_ms: res.latency_ms,
+        input_tokens: res.input_tokens,
+        cost_microusd: res.cost_microusd,
     }
 }
 
@@ -1279,20 +1269,15 @@ pub async fn run_jev(
     let mut out = Vec::with_capacity(cases.len());
     let mut calls = 0usize;
     for case in cases {
-        let gated = match lock(&ctx.store) {
-            Ok(s) => gate_bench_at(&s, Feature::WorkLink, case.org_id, ctx.now()),
-            Err(_) => Err(crate::service::decide::Fallback::FlagOff),
+        // The gate's refusal first, then a case with nothing to choose
+        // from, then the budget.
+        let skip = match gate_or_skip(ctx, Feature::WorkLink, case.org_id, calls, max_calls) {
+            Err(r) if r != MAX_CALLS => Some(r),
+            _ if case.candidates.is_empty() => Some("no_candidates"),
+            r => r.err(),
         };
-        if let Err(f) = gated {
-            out.push(Outcome::skipped(f.as_str()));
-            continue;
-        }
-        if case.candidates.is_empty() {
-            out.push(Outcome::skipped("no_candidates"));
-            continue;
-        }
-        if calls >= max_calls {
-            out.push(Outcome::skipped("max_calls"));
+        if let Some(r) = skip {
+            out.push(Outcome::skipped(r));
             continue;
         }
         calls += 1;
@@ -2575,14 +2560,6 @@ fn language_cells(
 }
 
 // --- lines ---------------------------------------------------------------------
-
-fn f3(x: Option<f64>) -> String {
-    x.map(|v| format!("{v:.3}")).unwrap_or_else(|| "-".into())
-}
-
-fn f2(x: Option<f64>) -> String {
-    x.map(|v| format!("{v:.2}")).unwrap_or_else(|| "-".into())
-}
 
 impl BenchReport {
     /// The report as lines for a terminal.

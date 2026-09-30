@@ -4,14 +4,14 @@
   // red with diagonal stripes. Stale: dimmed with a dotted outline. Unknown
   // (expired, never fetched, missing): a DASHED EMPTY track — never a solid
   // empty bar, which would read as 100% free.
-  import type { UsageWindow } from './account_usage_store';
+  import type { UsageWindow } from '../../account_usage_store';
   import {
     freshness,
     leftPct,
     paceFraction,
     severity,
     type UsageWindowKind,
-  } from './account_usage';
+  } from '../../account_usage';
 
   let {
     window,

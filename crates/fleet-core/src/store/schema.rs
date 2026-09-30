@@ -56,8 +56,8 @@ fn usage_daily_has_backfill(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 072: `sessions` already has its
-/// `usage_backfill_until` column.
+/// `already_applied` guard of migration 075: `sessions` already has its
+/// `launch_model` column.
 fn sessions_has_launch_model(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'launch_model'",
@@ -67,6 +67,8 @@ fn sessions_has_launch_model(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 072: `sessions` already has its
+/// `usage_backfill_until` column.
 fn sessions_has_usage_backfill_until(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'usage_backfill_until'",
@@ -184,7 +186,7 @@ fn sessions_has_stale_demoted_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 072: `hosts` already has its
+/// `already_applied` guard of migration 076: `hosts` already has its
 /// `claude_version_at` column, and `ALTER TABLE ... ADD COLUMN` would fail
 /// again. See [`Migration`].
 fn hosts_has_claude_version_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -196,7 +198,7 @@ fn hosts_has_claude_version_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 073: `hosts` already has its
+/// `already_applied` guard of migration 077: `hosts` already has its
 /// `health_at` column (and the eight beside it), and `ALTER TABLE ... ADD
 /// COLUMN` would fail again. See [`Migration`].
 fn hosts_has_health_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -208,7 +210,7 @@ fn hosts_has_health_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 074: `hosts` already has its
+/// `already_applied` guard of migration 078: `hosts` already has its
 /// `provision_fingerprint` column (and `provisioned_at` beside it), and
 /// `ALTER TABLE ... ADD COLUMN` would fail again. See [`Migration`].
 fn hosts_has_provision_fingerprint(conn: &Connection) -> rusqlite::Result<bool> {
@@ -363,6 +365,39 @@ fn client_tokens_has_org(conn: &Connection) -> rusqlite::Result<bool> {
 fn client_tokens_has_assets_admin(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('client_tokens') WHERE name = 'assets_admin_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 075 (native item status): its last
+/// ADD COLUMN (`work_items.status_set_at`) present means the whole migration
+/// is — the `ALTER TABLE ... ADD COLUMN`s are not idempotent on their own.
+fn work_items_has_status_set_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'status_set_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 086 (shared work context).
+fn work_items_has_origin(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'origin'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 087 (`secret_like` / `fleet_owned`
+/// on `asset_inventory`).
+fn asset_inventory_has_fleet_owned(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('asset_inventory') WHERE name = 'fleet_owned'",
         [],
         |r| r.get(0),
     )?;
@@ -866,8 +901,9 @@ const MIGRATIONS: &[Migration] = &[
     // Stale-working acknowledgement: `sessions.stale_demoted_at`, the
     // reconcile veto's memory apart from the attention stamp (one ADD
     // COLUMN, its own guard; the backfill is `backfill_stale_demoted`,
-    // after the collision repair). Not a `SessionRow` field, so 065's
-    // row_version trigger does not watch it.
+    // after the collision repair). Read into `SessionRow` but never
+    // serialized nor compared, so 065's row_version trigger (and 082's
+    // rebuild of it) does not watch it.
     Migration {
         version: 80,
         sql: include_str!("../../migrations/080_stale_demoted.sql"),
@@ -892,6 +928,33 @@ const MIGRATIONS: &[Migration] = &[
     // Declarative pages P5: `setting_proposals` and `setting_audit`. New
     // tables and indexes, `IF NOT EXISTS`, safe to re-run.
     Migration::plain(83, include_str!("../../migrations/083_setting_review.sql")),
+    // Native item status (design 2026-09-28 §2): `status_set_by` /
+    // `status_set_at`. The `ADD COLUMN`s are not idempotent (unlike the
+    // partial index), so this needs the same guard 072/074's ADD COLUMNs use.
+    Migration {
+        version: 84,
+        sql: include_str!("../../migrations/084_native_item_status.sql"),
+        already_applied: Some(work_items_has_status_set_at),
+    },
+    // An index on `work_unlinks.item_id` for its `work_items` cascade.
+    Migration::plain(
+        85,
+        include_str!("../../migrations/085_work_unlinks_item_index.sql"),
+    ),
+    // Shared work context (design 2026-09-29): origin, project, notes, job
+    // and proposal columns on `work_items`. The ADD COLUMNs are not
+    // idempotent, so the same guard 084 uses; the backfill and indexes are.
+    Migration {
+        version: 86,
+        sql: include_str!("../../migrations/086_shared_work_context.sql"),
+        already_applied: Some(work_items_has_origin),
+    },
+    // Assets S1a: `secret_like` / `fleet_owned` on `asset_inventory`.
+    Migration {
+        version: 87,
+        sql: include_str!("../../migrations/087_inventory_flags.sql"),
+        already_applied: Some(asset_inventory_has_fleet_owned),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -1027,7 +1090,7 @@ impl Store {
         Ok(())
     }
 
-    /// Migration 072's backfill: a row the tick demoted before the veto had
+    /// Migration 080's backfill: a row the tick demoted before the veto had
     /// its own column (`stale_working_at` set, `stale_demoted_at` not) keeps
     /// its veto. Runs on every open, after the collision repair, because an
     /// UPDATE of `sessions` compiles 065's row_version trigger, which names
@@ -3378,9 +3441,9 @@ mod tests {
     /// The `sessions` columns migration 063's `sessions_row_version_bump`
     /// deliberately does NOT watch: `row_version` itself (an explicit
     /// `row_version + 1` must not re-trigger), and per-pass bookkeeping that
-    /// is not a `SessionRow` field (the reconcile's stamp, 072's usage
-    /// backfill mark, 080's stale-working veto memory, 081's pane spinner
-    /// stamp). Every other column is
+    /// is not on the wire (the reconcile's stamp, 072's usage backfill mark,
+    /// 080's stale-working veto memory — a `#[serde(skip)]` `SessionRow`
+    /// field — and 081's pane spinner stamp). Every other column is
     /// watched, so a write that changes it bumps the counter.
     const ROW_VERSION_UNWATCHED: [&str; 6] = [
         "row_version",
@@ -3807,6 +3870,58 @@ mod tests {
         assert_eq!(rv2, rv, "the stamp is bookkeeping: no row_version bump");
         s.conn
             .execute_batch("DELETE FROM schema_version WHERE version >= 81;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_086_adds_the_shared_work_columns_backfills_origin_and_is_safe_to_rerun() {
+        let s = store_at_version(85);
+        s.conn
+            .execute_batch(
+                "INSERT INTO work_items (source, key, title, created_at, updated_at) VALUES ('local', 'OPS', 'named', 1, 1);
+                 INSERT INTO work_items (source, key, title, created_at, updated_at) VALUES ('jira', 'TK-1', 'ticket', 1, 1);",
+            )
+            .unwrap();
+        assert!(!work_items_has_origin(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let got: Vec<(String, String)> = s
+            .conn
+            .prepare("SELECT title, origin FROM work_items ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            got,
+            vec![
+                ("named".into(), "manual".into()),
+                ("ticket".into(), "detected".into())
+            ]
+        );
+        for col in [
+            "project_id",
+            "notes",
+            "task_id",
+            "proposal_state",
+            "proposed_by",
+            "proposal_why",
+        ] {
+            let n: i64 = s
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = ?1",
+                    [col],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{col}");
+        }
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 86;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);

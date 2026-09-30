@@ -619,10 +619,9 @@ pub fn gather_stored(
     reader: &crate::service::orgs::OrgScope,
 ) -> Result<Gathered, IpcError> {
     let key = crate::store::normalize_work_ref(key)?;
-    let item = match s.work_item_by_key(&key)? {
-        Some(i) if reader.sees_org(s.item_org(i.id)?) => Some(i),
-        _ => None,
-    };
+    // The first item carrying `key` inside the reader's orgs: two trackers
+    // can hold the same key (one per org), and the other org's is not it.
+    let item = crate::service::orgs::org_item_for_key(s, reader, &key)?;
     let mut live = s.live_work_sessions_for_key(&key)?;
     let mut ended: Vec<WorkLinkRow> = s.ended_work_links_for_key(&key)?;
     let mut journal = s.journal_for_key(&key)?;
@@ -657,16 +656,48 @@ pub fn gather_stored(
         });
     }
 
+    // The live precedence (§2, fix round 2): `live` is already fenced by
+    // `reader` above, so this check is never a leak of a session the reader
+    // cannot see. `HandoverInput.status` used to be refused outright for a
+    // local item (`i.source != "local"`) — that hid exactly the status this
+    // whole feature exists to show; `effective_status` now answers for a
+    // local item too, not only a tracker's.
+    //
+    // The lift belongs to the ITEM, so the link must name it
+    // (`l.item_id == item.id`) — the third copy of this condition, and the
+    // one the final whole-branch review found saying something different.
+    // `live` comes from `Store::live_work_sessions_for_key`, which is
+    // key-shaped on purpose (`l.ref_key = ?1 OR l.item_id IN (…)`) so a
+    // bare `ref_key` link with no item at all counts toward this key's
+    // sessions, conversations and journal. It must NOT count toward the
+    // item's status: `crate::effective_status_sql!`'s `EXISTS` and
+    // `Store::work_items_with_working_session`'s `WHERE` both require
+    // `item_id`, and a handover that read `in_progress` while the Work
+    // view, the session row and the card all read `todo` would make the
+    // status untrustworthy exactly where a person reads it as a summary.
+    // `state == "confirmed"` is redundant (the query filters it) and kept
+    // as the written form of the shared condition.
+    let item_id = item.as_ref().map(|i| i.id);
+    let has_working_session = live.iter().any(|(l, row)| {
+        matches!((l.item_id, item_id), (Some(a), Some(b)) if a == b)
+            && l.state == "confirmed"
+            && row.claude_status.as_deref() == Some("working")
+    });
     let mut input = HandoverInput {
         key: key.clone(),
         title: item
             .as_ref()
             .map(|i| i.title.clone())
             .filter(|t| !t.is_empty()),
-        status: item
-            .as_ref()
-            .filter(|i| i.source != "local")
-            .map(|i| i.status_category.clone()),
+        status: item.as_ref().and_then(|i| {
+            crate::service::work::status::effective_status(
+                &i.status_category,
+                i.status_set_by.as_deref(),
+                &i.source,
+                has_working_session,
+            )
+            .map(str::to_string)
+        }),
         url: item.as_ref().and_then(|i| i.url.clone()),
         sessions: live.len() + ended.len(),
         live_sessions: live.len(),
@@ -1116,10 +1147,74 @@ Verify the git state before acting; this summary may be stale. Full context: the
         assert_eq!(i.last_progress.as_deref(), Some("halfway"));
         assert_eq!(i.summary.as_ref().map(|s| s.0.as_str()), Some("the gist"));
         assert!(g.target.is_none(), "no project on record");
+        // Fix round 2: a local item's status shows now (used to be refused
+        // outright for `source == "local"`, hiding exactly the answer this
+        // feature exists to give).
+        assert_eq!(i.status.as_deref(), Some("todo"));
         let brief = build_handover(i);
         assert!(
             brief.contains("Prior work: 2 sessions / 2 conversations (1 still live)"),
             "{brief}"
+        );
+    }
+
+    /// Fix round 2: the live precedence applies here too — a confirmed,
+    /// presently-working session lifts a local item's handover status to
+    /// `in_progress`, fenced by `reader` the same way `live` already is
+    /// (never a leak of a session the reader cannot see).
+    #[test]
+    fn a_working_session_lifts_the_handover_status() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let sid = s
+            .upsert_session("live", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.create_local_work_item(Some("XYZ-1"), "Ship it").unwrap();
+        s.link_session_work(sid, crate::store::WorkTarget::Key("xyz-1"), "manual")
+            .unwrap();
+        s.set_claude_session_id(sid, "c-xyz-1").unwrap();
+        s.set_claude_status_by_session_id("c-xyz-1", "working")
+            .unwrap();
+
+        let g = gather_stored(&s, "xyz-1", None, &crate::service::orgs::OrgScope::All).unwrap();
+        assert_eq!(g.input.status.as_deref(), Some("in_progress"));
+    }
+
+    /// The lift belongs to the ITEM, not the key (final review, finding 2):
+    /// a confirmed, working session holding a bare `ref_key` link with no
+    /// `item_id` does NOT lift the item's handover status — the Work view,
+    /// the session row and the card all read `todo` for it
+    /// (`crate::effective_status_sql!` and
+    /// `Store::work_items_with_working_session` both require `item_id`), and
+    /// the handover must not be the one surface that disagrees.
+    ///
+    /// The bare link still counts as one of the key's SESSIONS, which is
+    /// what `Store::live_work_sessions_for_key` is key-shaped for.
+    #[test]
+    fn a_bare_ref_links_working_session_does_not_lift_the_item() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let sid = s
+            .upsert_session("bare", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        // The link first, so it has no item to bind to; the item after, so
+        // the key resolves to a real row whose status is being computed.
+        s.link_session_work(sid, crate::store::WorkTarget::Key("BARE-9"), "manual")
+            .unwrap();
+        s.create_local_work_item(Some("BARE-9"), "Ship it").unwrap();
+        s.set_claude_session_id(sid, "c-bare-9").unwrap();
+        s.set_claude_status_by_session_id("c-bare-9", "working")
+            .unwrap();
+
+        let g = gather_stored(&s, "bare-9", None, &crate::service::orgs::OrgScope::All).unwrap();
+        assert_eq!(
+            g.input.status.as_deref(),
+            Some("todo"),
+            "a link with no item_id must not lift the item's status"
+        );
+        assert_eq!(
+            g.input.live_sessions, 1,
+            "it is still one of the key's sessions"
         );
     }
 

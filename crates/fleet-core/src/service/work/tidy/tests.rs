@@ -60,9 +60,13 @@ impl FakeExec {
     }
 }
 
-/// A reachable `local` host and an idle work session with its own
-/// worktree, linked to a work item done long ago (`done`) or still todo.
-fn seed(store: &Mutex<Store>, name: &str, status: &str) -> i64 {
+/// The common shape every `seed*` helper needs: a reachable `local` host, an
+/// idle `running` work session with its own worktree, and a fresh local item
+/// linked to it as the primary confirmed work. Status is left exactly as
+/// `create_local_work_item` leaves it — `'todo'`, `status_set_by` `NULL` —
+/// so a caller that wants no person status (the merged-PR path) need not
+/// reach around anything to get it. Returns `(session_id, item_id)`.
+fn seed_session_and_item(store: &Mutex<Store>, name: &str) -> (i64, i64) {
     let s = store.lock().unwrap();
     s.upsert_host("local").unwrap();
     s.update_host_probe("local", true, None, None, 1).unwrap();
@@ -81,12 +85,38 @@ fn seed(store: &Mutex<Store>, name: &str, status: &str) -> i64 {
     s.link_session_work(id, crate::store::WorkTarget::Item(item.id), "manual")
         .unwrap();
     s.conn_ref()
-        .execute_batch(&format!(
-            "UPDATE sessions SET idle_since = 0, worktree_key = '{name}' WHERE id = {id}; \
-             UPDATE work_items SET status_category = '{status}', status_changed_at = 0 \
-               WHERE id = {};",
-            item.id
-        ))
+        .execute(
+            &format!("UPDATE sessions SET idle_since = 0, worktree_key = '{name}' WHERE id = {id}"),
+            [],
+        )
+        .unwrap();
+    (id, item.id)
+}
+
+/// A reachable `local` host and an idle work session with its own
+/// worktree, linked to a work item a person set to `status` long ago.
+fn seed(store: &Mutex<Store>, name: &str, status: &str) -> i64 {
+    let (id, item_id) = seed_session_and_item(store, name);
+    let s = store.lock().unwrap();
+    // Through the real API, not a raw UPDATE to `status_category`: the only
+    // writers of a local item's status are creation ('todo'), this
+    // (`set_item_status`, 'person') and the merged-PR stamp ('derived'). A
+    // raw UPDATE leaves `status_set_by` NULL — a stored status with no
+    // owner that no production path can ever produce — which once
+    // manufactured an unreachable "in_progress, unowned" fixture and masked
+    // a real classification bug (task 3 fix round 2). Keep this going
+    // through the API even if it looks like it could be simplified back.
+    s.set_item_status(item_id, status).unwrap();
+    // `set_item_status` now also stamps `status_changed_at` (task 3 fix
+    // round 3) — but to the real wall clock (`now_unix()`), not this file's
+    // small synthetic `NOW`. Push it into that synthetic frame so the
+    // `done_idle` / `pr_merged_idle` age thresholds are met without waiting
+    // real time; this is a clock fixture, not a second status write.
+    s.conn_ref()
+        .execute(
+            "UPDATE work_items SET status_changed_at = 0 WHERE id = ?1",
+            [item_id],
+        )
         .unwrap();
     id
 }
@@ -426,6 +456,193 @@ async fn auto_tidy_acts_only_on_the_allowed_reasons() {
     assert!(!r.candidates.iter().any(|c| c.session_id == wip));
     assert!(r.auto_tidy);
     assert_eq!(r.auto_reasons, vec![TidyReason::DoneIdle]);
+}
+
+/// End to end, through the real read path — no hand-stamping and no
+/// hand-built `TidyLink`: a merged PR reaches `Store::stamp_derived_done`
+/// via `tidy_sessions()` (inside `work_tidy`), and the planner classifies
+/// the result as `pr_merged_idle`. Proves the two halves — the stamp write
+/// and the reason classification — actually meet (task 3 fix round 3).
+#[test]
+fn a_merged_prs_stamp_is_offered_as_pr_merged_idle_end_to_end() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let (sid, item_id) = seed_session_and_item(&store, "just-merged");
+    store
+        .lock()
+        .unwrap()
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET pr_signals = '{\"state\":\"MERGED\"}' WHERE id = ?1",
+            [sid],
+        )
+        .unwrap();
+    let r = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    let c = r
+        .candidates
+        .iter()
+        .find(|c| c.session_id == sid)
+        .expect("the merged session is a candidate");
+    assert_eq!(c.reason, TidyReason::PrMergedIdle);
+    let row = store
+        .lock()
+        .unwrap()
+        .get_work_item(item_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status_category, "done");
+    assert_eq!(row.status_set_by.as_deref(), Some("derived"));
+    // Prove `stamp_derived_done` itself wrote `status_changed_at` — nothing
+    // else in this test overwrites it, so reverting that write would show
+    // up here as `None`.
+    assert!(row.status_changed_at.is_some());
+}
+
+/// End to end for the other half (final review round 2): the merged signal
+/// is gone — `sessions.pr_signals` is deleted with its session row, and a
+/// probe that can no longer find the PR writes `NULL` — but the stamp it
+/// left behind still offers the session as `pr_merged_idle`. Before this it
+/// matched no reason at all and lingered in tidy-up forever.
+#[test]
+fn a_stamped_done_is_still_offered_once_its_signal_is_gone_end_to_end() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let (sid, item_id) = seed_session_and_item(&store, "signal-gone");
+    {
+        let s = store.lock().unwrap();
+        let merged = serde_json::json!({ "state": "MERGED" }).to_string();
+        s.set_pr_signals("local", "signal-gone", Some(&merged))
+            .unwrap();
+        assert_eq!(
+            s.get_work_item(item_id).unwrap().unwrap().status_category,
+            "done"
+        );
+        // The signal goes the way it really goes: the probe no longer finds
+        // a PR for this session.
+        s.set_pr_signals("local", "signal-gone", None).unwrap();
+        assert!(s.tidy_sessions().unwrap().iter().all(|t| !t.pr_merged));
+        // The stamp's own clock, into this file's synthetic frame.
+        s.conn_ref()
+            .execute(
+                "UPDATE work_items SET status_changed_at = 0 WHERE id = ?1",
+                [item_id],
+            )
+            .unwrap();
+    }
+    let r = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    let c = r
+        .candidates
+        .iter()
+        .find(|c| c.session_id == sid)
+        .expect("a stamped done must still be offered with no live signal");
+    assert_eq!(c.reason, TidyReason::PrMergedIdle);
+}
+
+/// Finding 1 of the final whole-branch review, and the one that made half
+/// the feature not work as shipped: the derived `done` must be stamped by
+/// the path that RECORDS the merged PR, not only by the one tidy happens to
+/// look through.
+///
+/// Two halves, in order, and note what this test does NOT do — it never
+/// calls `Store::tidy_sessions()` (nor `work_tidy`, `Snapshot::take`,
+/// `tidy_apply`), so nothing here can be satisfied by the tidy-path stamp:
+///
+/// 1. `work.auto_tidy` is unset — the default, off (D2) — so the REAL
+///    background sweep (`sweep_with`, the GC tick the app runs) reaches
+///    `auto_tidy`, which returns before `Snapshot::take`. The item is still
+///    `todo` afterwards: that is exactly the hole, and it is why the second
+///    half has to exist. Were the stamp moved back behind auto-tidy, the
+///    test would stop at the assertion after `set_pr_signals`.
+/// 2. `Store::set_pr_signals` — what the reconcile pass calls when the PR
+///    probe reads `MERGED` — stamps it, so a `kill_session` that deletes
+///    `pr_signals` with the session row can no longer lose the `done`.
+#[tokio::test]
+async fn a_merged_pr_stamps_done_in_the_background_with_auto_tidy_off() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let (sid, item_id) = seed_session_and_item(&store, "merged-bg");
+    let merged = serde_json::json!({ "head": "feat/x", "state": "MERGED" }).to_string();
+    {
+        let s = store.lock().unwrap();
+        // The merged fact as a session that has already been probed carries
+        // it, so the sweep below sees the same input the stamp reads.
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET pr_signals = ?2 WHERE id = ?1",
+                rusqlite::params![sid, merged],
+            )
+            .unwrap();
+        assert!(
+            !tidy_config(&s).auto_anywhere(),
+            "the default must be auto-tidy off, or this test proves nothing"
+        );
+    }
+    // The real background tick, auto-tidy off: it stamps nothing.
+    let exec = FakeExec::default();
+    assert_eq!(
+        sweep_with(&store, &exec, &GC_OFF, NOW).await,
+        GcReport::default()
+    );
+    let after_sweep = store
+        .lock()
+        .unwrap()
+        .get_work_item(item_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after_sweep.status_category, "todo",
+        "the tidy path is unreachable in the background with auto_tidy off — \
+         which is why the stamp cannot live only there"
+    );
+
+    // The write that records the merged PR: this is what must stamp.
+    store
+        .lock()
+        .unwrap()
+        .set_pr_signals("local", "merged-bg", Some(&merged))
+        .unwrap();
+    let row = store
+        .lock()
+        .unwrap()
+        .get_work_item(item_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.status_category, "done",
+        "a merged PR must stamp its local work done where the fact is written"
+    );
+    assert_eq!(row.status_set_by.as_deref(), Some("derived"));
+}
+
+/// Once `status_changed_at` is old enough, a person's `done` on a local item
+/// is offered as `done_idle` — the reason that, before `set_item_status`
+/// stamped `status_changed_at` (task 3 fix round 3), could never fire for
+/// native work at all: the column stayed `NULL` forever, so `done_long`
+/// (`service/gc/tidy.rs`) was always false for a local item, whoever set it.
+#[test]
+fn a_persons_done_ages_into_done_idle() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let (sid, item_id) = seed_session_and_item(&store, "shipped-by-hand");
+    {
+        let s = store.lock().unwrap();
+        let row = s.set_item_status(item_id, "done").unwrap().unwrap();
+        // Prove the API itself wrote the column, before the clock push below
+        // overwrites it — otherwise this test would still pass even if
+        // `set_item_status` never stamped `status_changed_at` at all.
+        assert!(row.status_changed_at.is_some());
+        // Push the real wall-clock stamp `set_item_status` just wrote into
+        // this file's synthetic `NOW` frame (see `seed`'s own comment).
+        s.conn_ref()
+            .execute(
+                "UPDATE work_items SET status_changed_at = 0 WHERE id = ?1",
+                [item_id],
+            )
+            .unwrap();
+    }
+    let r = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    let c = r
+        .candidates
+        .iter()
+        .find(|c| c.session_id == sid)
+        .expect("a candidate");
+    assert_eq!(c.reason, TidyReason::DoneIdle);
 }
 
 /// Orgs (work graph M5 merged into M7): `local` in Company A, sessions of

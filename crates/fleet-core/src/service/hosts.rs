@@ -15,9 +15,10 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// The hosts this machine can add: every `~/.ssh/config` alias, then, on
-/// Windows, each WSL distribution [`crate::wsl::refresh`] found at startup
-/// (an alias the config already has stays the SSH host). A distribution
-/// installed since then shows up at the next launch.
+/// Windows, each WSL distribution the last [`crate::wsl::refresh`] found
+/// (an alias the config already has stays the SSH host). This reads the
+/// table as it is; [`discover_hosts_fresh`] (the Add-host dialog) first
+/// detects again when that is due.
 pub fn discover_hosts() -> Result<Vec<SshHost>, IpcError> {
     let mut hosts = ssh_config::load_user_config();
     for (alias, distro) in crate::wsl::hosts() {
@@ -32,6 +33,18 @@ pub fn discover_hosts() -> Result<Vec<SshHost>, IpcError> {
         });
     }
     Ok(hosts)
+}
+
+/// [`discover_hosts`] for the Add-host dialog: waits for a WSL detection
+/// still running (startup's, say), or runs one more when the last is stale
+/// ([`crate::wsl::refresh_if_due`]), so a distribution installed since is
+/// listed without a restart. Everywhere but Windows that is a no-op. The
+/// `~/.ssh/config` read runs on a blocking thread.
+pub async fn discover_hosts_fresh() -> Result<Vec<SshHost>, IpcError> {
+    crate::wsl::refresh_if_due().await;
+    tokio::task::spawn_blocking(discover_hosts)
+        .await
+        .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("discover hosts: {e}")))?
 }
 
 pub fn list_hosts(store: &Mutex<Store>) -> Result<Vec<HostRow>, IpcError> {
@@ -49,9 +62,15 @@ pub fn list_hosts(store: &Mutex<Store>) -> Result<Vec<HostRow>, IpcError> {
 /// unreachable host to re-probe it, a kill loop must not.
 pub fn active_hosts(rows: Vec<HostRow>, local_enabled: bool) -> Vec<HostRow> {
     rows.into_iter()
-        .filter(|h| !h.hidden)
-        .filter(|h| local_enabled || h.alias != crate::service::projects::LOCAL_HOST)
+        .filter(|h| is_active(h, local_enabled))
         .collect()
+}
+
+/// The single definition behind [`active_hosts`]: not hidden, and not
+/// `local` when this process has no local host. Reachability is not part
+/// of it (see [`active_hosts`]).
+pub fn is_active(h: &HostRow, local_enabled: bool) -> bool {
+    !h.hidden && (local_enabled || h.alias != crate::service::projects::LOCAL_HOST)
 }
 
 /// One agent host, as `agent_status` reports it.
@@ -835,7 +854,13 @@ mod tests {
             vec!["local", "mac", "trn"],
             "reachability is the caller's business, hidden is not"
         );
-        assert_eq!(names(active_hosts(rows, false)), vec!["mac", "trn"]);
+        assert_eq!(names(active_hosts(rows.clone(), false)), vec!["mac", "trn"]);
+
+        // `is_active` is the one predicate behind it.
+        assert!(!is_active(&rows[2], true), "hidden is never active");
+        assert!(!is_active(&rows[0], false), "local without a local host");
+        assert!(is_active(&rows[0], true), "local with a local host");
+        assert!(is_active(&rows[3], false), "unreachable is still active");
     }
 
     #[tokio::test]

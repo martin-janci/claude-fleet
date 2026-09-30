@@ -1,0 +1,19 @@
+name: fleet-release toolchain
+description: >-
+  Builds target/release/fleet-release (crates/fleet-update) and installs
+  minisign: what release.yml's `manifest` and `channel` jobs and
+  update-channels.yml need to write, sign and verify the update documents.
+  The caller checks the repository out first; secrets and inputs stay on the
+  caller's own later steps, passed through `env:`.
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: .
+        key: release-manifest
+    - shell: bash
+      run: sudo apt-get update && sudo apt-get install -y minisign
+    - shell: bash
+      run: cargo build -p fleet-update --bin fleet-release --release --locked

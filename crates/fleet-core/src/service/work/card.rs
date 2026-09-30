@@ -266,7 +266,14 @@ pub fn card(store: &Mutex<Store>, key: &str, scope: &OrgScope) -> Result<TicketC
     let key = crate::store::normalize_work_ref(key)?;
     let s = lock(store)?;
     orgs::require_key(&s, scope, &key)?;
-    let Some(item) = s.work_item_by_key(&key)? else {
+    // The first item carrying `key` this caller may read (a local item
+    // with an org of its own, work graph M14, is fenced like a ticket): two
+    // trackers can hold the same key, one per org.
+    let item = orgs::visible_item_for_key(&s, scope, &key)?;
+    if item.is_none() && !s.work_items_by_key(&key)?.is_empty() {
+        return Err(orgs::not_visible_to(scope, &key));
+    }
+    let Some(item) = item else {
         // No cached item, so no tracker to ask either way: `describe_offer`
         // always answers `None` here, but it still names the key the way
         // the other two call sites do (ruling 2's flattening applies
@@ -287,13 +294,6 @@ pub fn card(store: &Mutex<Store>, key: &str, scope: &OrgScope) -> Result<TicketC
         });
     };
     let org_id = s.item_org(item.id)?;
-    if let Some(allowed) = crate::service::trackers::tickets::allowed(scope, &s)? {
-        // A local item with an org of its own (work graph M14) is fenced
-        // like a ticket.
-        if !allowed.contains(&item.id) && (item.tracker_id.is_some() || !scope.sees_org(org_id)) {
-            return Err(orgs::not_visible_to(scope, &key));
-        }
-    }
     let meta = s.work_item_meta(item.id)?;
     let acceptance = meta
         .description
@@ -330,12 +330,42 @@ pub fn card(store: &Mutex<Store>, key: &str, scope: &OrgScope) -> Result<TicketC
     );
     // An agent's card is fenced; a person's (a bound phone too) is not.
     let for_agent = matches!(scope, OrgScope::Host { .. });
+    // The live precedence (§2, fix round 2), not the raw stored value: the
+    // card is a single-item lookup, so it does not carry the "not a
+    // ticket" wire trap `WorkSummary.status_category` does (`card`'s field
+    // was always the raw value for a local item too, never hidden) — no
+    // revert needed here, only the upgrade to the live answer.
+    //
+    // Fenced by `scope` (fix round 3): a working session on the same item
+    // that this scope cannot see must not lift the card either — the same
+    // leak `Graph::load` closed for the Work view. This is cheap here
+    // (one extra `get_session_by_id` per session that matched, for a
+    // single-item lookup already drawn on every selection) unlike the
+    // per-row `SESSION_COLUMNS` path, where the same fence would cost a
+    // query per row of a list.
+    let has_working_session = s
+        .work_items_with_working_session()?
+        .into_iter()
+        .filter(|(id, _)| *id == item.id)
+        .any(|(_, session_id)| {
+            s.get_session_by_id(session_id)
+                .ok()
+                .flatten()
+                .is_some_and(|row| scope.sees_row(&row))
+        });
+    let status_category = super::status::effective_status(
+        &item.status_category,
+        item.status_set_by.as_deref(),
+        &item.source,
+        has_working_session,
+    )
+    .map(str::to_string);
     Ok(TicketCard {
         key,
         title: item.title,
         url: item.url,
         status_name: item.status_name,
-        status_category: Some(item.status_category).filter(|c| !c.is_empty()),
+        status_category,
         org_id,
         cached: true,
         acceptance: if for_agent { Vec::new() } else { acceptance },
@@ -554,5 +584,52 @@ mod tests {
         assert!(c.composer_text.contains("of 6812 chars"));
         // The person-facing fields stay plain text: no notice in them.
         assert!(!c.excerpt.unwrap_or_default().contains("shown "));
+    }
+
+    /// Fix round 3: the live lift must not leak "someone is working on
+    /// this" through a session the caller cannot see — the same fence
+    /// `Graph::load` applies for the Work view, applied here too since
+    /// `card` is a single-item lookup cheap enough to check.
+    #[test]
+    fn the_lift_is_fenced_by_org_scope() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h1").unwrap();
+        let org_a = s.add_org("Acme", None, false).unwrap();
+        s.set_host_org("h1", Some(org_a.id)).unwrap();
+        s.upsert_host("h2").unwrap();
+        let org_b = s.add_org("Beta", None, false).unwrap();
+        s.set_host_org("h2", Some(org_b.id)).unwrap();
+
+        let item = s.create_local_work_item(Some("LOC-9"), "Shared").unwrap();
+        s.seed_local_item_org(item.id, Some(org_a.id));
+
+        let sid_a = s
+            .upsert_session("a", "h1", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.link_session_work(sid_a, crate::store::WorkTarget::Item(item.id), "manual")
+            .unwrap();
+        let sid_b = s
+            .upsert_session("b", "h2", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.link_session_work(sid_b, crate::store::WorkTarget::Item(item.id), "manual")
+            .unwrap();
+        s.set_claude_session_id(sid_b, "c-loc-9-b").unwrap();
+        s.set_claude_status_by_session_id("c-loc-9-b", "working")
+            .unwrap();
+
+        let st = Mutex::new(s);
+        let all = card(&st, "LOC-9", &OrgScope::All).unwrap();
+        assert_eq!(all.status_category.as_deref(), Some("in_progress"));
+
+        let bound_a = OrgScope::Org {
+            org: org_a.id,
+            sees_unassigned: true,
+        };
+        let a = card(&st, "LOC-9", &bound_a).unwrap();
+        assert_eq!(
+            a.status_category.as_deref(),
+            Some("todo"),
+            "org A must not see org B's session lift this to in_progress"
+        );
     }
 }

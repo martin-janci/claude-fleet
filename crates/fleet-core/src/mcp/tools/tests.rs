@@ -87,6 +87,7 @@ fn readonly_token_is_refused_mutating_tools_and_allowed_reads() {
         "wait_for_session",
         "session_transcript",
         "session_conversation",
+        "session_tool_detail",
         "wait_for_task",
         "list_tasks",
         "work",
@@ -1900,41 +1901,48 @@ async fn run_prompt_refuses_a_session_that_is_not_between_turns() {
     let s = t.store.lock().unwrap();
     s.record_stop_hook("uuid-w").unwrap();
     let row = s.get_session_by_id(id).unwrap().unwrap();
-    assert!(run_prompt_ready(&row, false, None).is_ok());
+    assert!(run_prompt_ready(&row, None).is_ok());
     // A turn that ended in an API error has ended: re-prompt it.
     let failed = crate::store::SessionRow {
         claude_status: Some("failed".into()),
         ..row.clone()
     };
-    assert!(run_prompt_ready(&failed, false, None).is_ok());
+    assert!(run_prompt_ready(&failed, None).is_ok());
     assert!(crate::service::tasks::session_satisfies(
         &failed,
-        false,
         crate::service::tasks::WaitCond::Idle
     ));
     // F2 x S5: a row the tick demoted for staleness reads `idle` because
     // nothing moved — exactly what one long tool call looks like. Its stored
     // status alone must not let run_prompt through (the reply it would hand
     // back is the PREVIOUS turn's); only a pane that shows it quiet does.
-    // Keyed on the demotion (`stale_demoted_at`, the `demoted` flag): an
-    // attach or the TTL clears the attention stamp but not the guess.
+    // Keyed on the demotion (`stale_demoted_at`): an attach or the TTL
+    // clears the attention stamp but not the guess.
     let stamped = crate::store::SessionRow {
+        stale_working_at: Some(5),
+        stale_demoted_at: Some(5),
+        ..row.clone()
+    };
+    let acknowledged = crate::store::SessionRow {
+        stale_demoted_at: Some(5),
+        ..row.clone()
+    };
+    let stamp_only = crate::store::SessionRow {
         stale_working_at: Some(5),
         ..row.clone()
     };
-    // Stamp and memory, memory alone (acknowledged), stamp alone (a failed
-    // flag read errs towards asking).
-    for (r, demoted) in [(&stamped, true), (&row, true), (&stamped, false)] {
-        let e = run_prompt_ready(r, demoted, None).unwrap_err();
+    // Stamp and memory, memory alone (acknowledged), stamp alone (a row read
+    // without the column errs towards asking).
+    for r in [&stamped, &acknowledged, &stamp_only] {
+        let e = run_prompt_ready(r, None).unwrap_err();
         assert!(e.message.starts_with("E_INVALID_STATE"), "{}", e.message);
         assert!(e.message.contains("could not confirm"), "{}", e.message);
-        let e = run_prompt_ready(r, demoted, Some("working")).unwrap_err();
+        let e = run_prompt_ready(r, Some("working")).unwrap_err();
         assert!(e.message.contains("working"), "{}", e.message);
-        assert!(run_prompt_ready(r, demoted, Some("blocked")).is_err());
-        assert!(run_prompt_ready(r, demoted, Some("idle")).is_ok());
+        assert!(run_prompt_ready(r, Some("blocked")).is_err());
+        assert!(run_prompt_ready(r, Some("idle")).is_ok());
         assert!(!crate::service::tasks::session_satisfies(
             r,
-            demoted,
             crate::service::tasks::WaitCond::Idle
         ));
     }
@@ -2148,7 +2156,8 @@ fn capture_default_cap_matches_docs() {
 /// `list_peer_links`: 86; `get_settings` / `set_setting`: 88; `quick_replies`:
 /// 89; `rewind_conversation`: 90; `add_project` / `list_github_repos`: 92;
 /// `catalog_admin`, and host identity & health's `merge_host` and
-/// `forget_project`: 95; `update_status` / `update_admin`: 97.)
+/// `forget_project`: 95; `update_status` / `update_admin`: 97; `session_tool_detail`: 98 (102 with
+/// the tools main added alongside it).)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -2170,7 +2179,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 101);
+    assert_eq!(served, 102);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3403,10 +3412,19 @@ fn the_served_definition_budget_stays_bounded() {
     /// measured apart never cover the merged surface, so a merge that trips
     /// this re-measures. The why of each raise belongs in its commit
     /// message (`git log -L` on this constant), not here: a log in this
-    /// comment conflicted on every merge. Measured at 66,702 on 2026-09-29
-    /// (declarative pages P5–P6 merged with update S4b's `update_status {
-    /// target }`).
-    const BUDGET_BYTES: usize = 66_802;
+    /// comment conflicted on every merge. Measured at 67,546 on 2026-09-29
+    /// (`session_tool_detail` merged with the native item status work,
+    /// declarative pages P5–P6 and update S4b). Measured at 67,956 on
+    /// 2026-09-29 after shared work context (`work_link` create / propose /
+    /// accept and its `parent` / `notes` / `why` parameters, +410 bytes).
+    /// Measured at 68,195 on 2026-09-30 after asset catalog S1a Task 6
+    /// (`import_assets`/`CatalogAdminParams::action` grew to describe
+    /// importing from any host over SSH and the new `only` parameter,
+    /// +139 bytes). Measured at 68,519 on 2026-09-30 after asset catalog
+    /// S1a Task 7 (`plan_sync`'s description and `PlanSyncParams` grew the
+    /// `allow_unlayered` escape hatch for a remote host with no layers,
+    /// +224 bytes).
+    const BUDGET_BYTES: usize = 68_619;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -8703,10 +8721,13 @@ async fn without_an_approver_only_a_paired_client_creates_a_remote() {
 async fn list_pages_serves_the_compiled_page_bundle() {
     let (tools, _guards, _store) = client_tools();
     let v = result_json(&tools.list_pages().await.unwrap());
-    assert_eq!(
-        v["pages"].as_array().unwrap().len(),
-        crate::pages::all().len()
-    );
+    // Every page a person navigates to; never an embed page, which places
+    // items in the desktop's own screens (declarative pages L8).
+    let pages = v["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), crate::pages::navigable().len());
+    assert!(pages
+        .iter()
+        .all(|p| p["layout"] != "embed" && p.get("slot").is_none()));
     assert!(v["actions"].as_array().is_some());
     assert!(v["resources"].as_array().is_some());
 }

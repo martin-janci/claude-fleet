@@ -1,15 +1,27 @@
 <script lang="ts">
   import Modal from './Modal.svelte';
-  import { applySync, isDestructive, syncProgress, type SyncPlan, type SyncRunSummary } from './assets';
+  import { applySync, isDestructive, planSync, syncProgress, type SyncPlan, type SyncRunSummary } from './assets';
+
+  /** A host plan skipped because the host has no layers assigned — the
+   *  fleet-core detail always starts with this (see `UNLAYERED_DETAIL` in
+   *  `sync/mod.rs`); matched by prefix since the rest of the sentence is
+   *  free text. */
+  const UNLAYERED_PREFIX = 'no layers assigned';
 
   let {
     plan,
+    filter = {},
     onclose,
     onapplied,
     onopensecrets,
     onapplying,
+    onreplanned,
   }: {
     plan: SyncPlan;
+    /** The filter that produced `plan`, re-sent (with `allowUnlayered: true`
+     *  added) when the user clicks "Plan anyway" on a skipped-unlayered
+     *  host. */
+    filter?: { hostAlias?: string; kind?: string; name?: string };
     onclose: () => void;
     onapplied: (summary: SyncRunSummary) => void;
     /** Optional: a blocked-on-missing-secrets row links here so the caller
@@ -19,6 +31,10 @@
      *  so the caller (AssetsPanel) can disable its own Sync button for the
      *  duration. */
     onapplying?: (applying: boolean) => void;
+    /** Optional: fires with the freshly computed plan after "Plan anyway"
+     *  succeeds, so the caller can keep its own copy (e.g. `lastPlan`) in
+     *  sync. No-op if omitted. */
+    onreplanned?: (plan: SyncPlan) => void;
   } = $props();
 
   let applying = $state(false);
@@ -29,6 +45,17 @@
   let sawSecretMissing = $state(false);
   let summary = $state<SyncRunSummary | null>(null);
   let controller: AbortController | null = null;
+  let replanning = $state(false);
+  let replanError = $state<string | null>(null);
+
+  async function planAnyway(hostAlias: string) {
+    replanning = true;
+    replanError = null;
+    const r = await planSync({ ...filter, hostAlias, allowUnlayered: true });
+    replanning = false;
+    if (!r.ok) { replanError = r.error.message; return; }
+    onreplanned?.(r.value);
+  }
 
   const destructive = $derived(isDestructive(plan));
   const hasBlocked = $derived(plan.hosts.some((h) => h.actions.some((a) => a.op === 'blocked')));
@@ -74,6 +101,7 @@
   </div>
 
   {#if error}<p class="error" data-testid="plan-error">{error}</p>{/if}
+  {#if replanError}<p class="error" data-testid="plan-replan-error">{replanError}</p>{/if}
 
   <div class="hosts">
     {#each plan.hosts as h (h.host_alias + '::' + h.harness)}
@@ -82,7 +110,17 @@
           <strong>{h.host_alias}</strong>
           <span class="harness">{h.harness}</span>
           <span class="status">{h.status}</span>
-          {#if h.detail}<span class="detail">{h.detail}</span>{/if}
+          {#if h.detail?.startsWith(UNLAYERED_PREFIX)}
+            <span class="detail warning" data-testid={`plan-unlayered-${h.host_alias}-${h.harness}`}>{h.detail}</span>
+            <button
+              class="link quiet"
+              onclick={() => planAnyway(h.host_alias)}
+              disabled={replanning}
+              data-testid={`plan-anyway-${h.host_alias}-${h.harness}`}
+            >{replanning ? 'Planning…' : 'Plan anyway'}</button>
+          {:else if h.detail}
+            <span class="detail">{h.detail}</span>
+          {/if}
         </div>
         {#each h.actions as a (a.kind + '::' + a.name)}
           {@const outcome = outcomeFor(h.host_alias, h.harness, a.kind, a.name)}
@@ -155,6 +193,8 @@
   .host-section { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
   .host-header { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 4px; }
   .harness, .status, .detail { color: var(--fg-muted); }
+  .detail.warning { color: #d97706; }
+  .link.quiet { font-size: 11px; opacity: 0.75; }
   .action-row { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 2px 0; flex-wrap: wrap; }
   .op-badge { border-radius: 8px; padding: 1px 8px; border: 1px solid var(--border); text-transform: uppercase; font-size: 10px; }
   .op-overwrite, .op-remove { color: #e64a4a; border-color: #e64a4a; }

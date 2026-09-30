@@ -280,15 +280,29 @@
   }
 
   // ── "Name this work…" (work graph M11.1): work with a title and no
-  // ticket. A local item's title can be renamed from here too: an item with
-  // no tracker status is local (the backend refuses a ticket anyway).
+  // ticket. A local item's title can be renamed from here too (the backend
+  // refuses a ticket anyway). `status_category` stays tracker-only on the
+  // wire on purpose (native item status task 4, fix round 2 reverted an
+  // attempt to relax it): a paired phone derives "this is a local item,
+  // not a ticket" from `status_category == null`, so making it non-null
+  // for local work would silently break Rename on every phone. `kind`
+  // (`tracker` | `local` | `ref`) is the newer, explicit signal — prefer
+  // it; fall back to the `status_category == null && !url` heuristic only
+  // when a hub is old enough not to send `kind` at all, since that hub
+  // still follows the same tracker-only rule the fallback assumes. A
+  // local item's LIVE status (including the working-session lift) is
+  // `effective_status`, a different field entirely — irrelevant to this
+  // local-vs-ticket check.
   let nameDialog = $state<
     | { mode: 'name'; sessions: { id: number; label: string }[] }
     | { mode: 'rename'; itemId: number; title: string; key?: string | null }
     | null
   >(null);
   const localItem = $derived(
-    sess.work?.item_id != null && sess.work.status_category == null && !sess.work.url
+    sess.work?.item_id != null &&
+      (sess.work.kind
+        ? sess.work.kind === 'local'
+        : sess.work.status_category == null && !sess.work.url)
       ? { itemId: sess.work.item_id, title: sess.work.title, key: sess.work.key ?? null }
       : null,
   );

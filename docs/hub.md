@@ -143,7 +143,8 @@ curl -s https://fleet.example.com/mcp \
 A healthy hub answers with `db_ready: true` and the running version.
 
 `hub` is this process: `started_at`, `uptime_secs` and `reconcile`
-(`last_started_at`, `last_finished_at`, `last_duration_ms`,
+(`last_started_at`, `last_finished_at`, `last_duration_ms`, `last_ok_at`
+(when the last clean pass finished; a later failure leaves it set),
 `consecutive_failures`, `failures_total`, `last_error`) — alert on
 `consecutive_failures >= 3`. `tunnels_mode` is `none` on a public hub (hooks
 post directly; the `tunnels` map is empty because nothing applies) and
@@ -518,6 +519,13 @@ reachable stale host *content only* — skills, the CLAUDE.md block and hooks,
 with the host's existing token; no new token, no `~/.claude.json` rewrite, no
 Claude restart. By hand: `fleet-hub provision [--host <alias>]
 [--content-only]` (the `provision_hosts {host, content_only}` tool).
+
+**Upgrade heads-up (the `ag` launcher).** The fingerprint also covers fleet's
+`ag` launcher, so upgrading to the build that ships it makes every provisioned
+host stale: within about a minute of start the unattended content refresh
+installs `ag` (`~/.local/share/ag`, `~/.local/bin/ag`) and, where the host has
+no `cl` command, a `cl` shim (`claude --yolo`) on every reachable host. To opt
+out, set `provision.install_ag=false` right after upgrading.
 
 **Who owns what on a host.**
 
@@ -1566,8 +1574,10 @@ fleet-hub decide proposals reject 814                    # "not this": stays unm
 
 `enable`, `disable`, `mode`, `unassigned` and `set` change the `decide.*`
 settings over the running hub's `set_setting` (loopback, master token),
-like `org set`: the hub checks the value and audits the change. `set-key` and `clear-key` write `state.db` directly, like
-`fleet-hub tracker webhook`; `status`, `runs` and `proposals` open it
+like `org set`: the hub checks the value and audits the change. `set-key`
+and `clear-key` write `state.db` directly (the key is read like
+`fleet-hub tracker set-credential`'s secret: stdin, `--from-env` or
+`--ref`, never argv); `status`, `runs` and `proposals` open it
 read-only and print ids, words and numbers — never the key; the section
 names `proposals` shows come from the trackers' stored config, never from
 the record. `tracker section-map` is a `work_admin update` over loopback
@@ -1741,7 +1751,8 @@ Besides the per-caller counters the exposition carries four process gauges:
 `fleet_reconcile_duration_ms` (the last pass's wall time),
 `fleet_reconcile_failures_total`, `fleet_sessions{status="…"}` (by
 `claude_status`, external rows excluded, the same roll-up
-`fleet_health.by_status` uses) and `fleet_hosts_reachable`.
+`fleet_health.by_status` uses) and `fleet_hosts_reachable`. They are two SQL
+counts on the hub's read pool, so a scrape never waits on the writer.
 
 Prometheus text format, **master token only** — a per-host token and a paired
 phone are both callers this reports on, and letting one read the others'
@@ -2249,8 +2260,10 @@ sessions that were live on it are ghosted with `lost_reason =
 local_disabled` on every start (nothing probes `local` on such a hub, so
 they would otherwise stay live and refuse every action); they are ghosted
 on the start that finds them and reaped on the next
-(`retire_local_sessions`); any host nothing probes is reaped the same way
-each reconcile pass. `refresh_projects` has no
+(`retire_local_sessions`), and each reconcile pass reaps that `local` the
+same way. A host you hide yourself is different: Hide is reversible, so its
+sessions are only frozen at their last-known state, and Unhide finds them
+again. `refresh_projects` has no
 local projects directory to scan there and returns the stored list, after
 folding duplicate worktree rows; `forget_project {project_id}` (master) drops
 a row the scan can never revisit. And the
@@ -2445,10 +2458,11 @@ standalone exactly as before.
   `catalog_admin` once when it opens. For a client granted the catalog
   (`fleet-hub client grant <name> assets`, see *Clients*) it is the full
   panel onto the hub's checkout: set it up, edit assets, lint, commit, push,
-  Sync and Secrets, exactly as standalone — only *Import from host* (it reads
-  host `local`, which on a hub is the hub's machine) and *Open in session*
-  stay disabled. A resource file you add is read on this machine and its
-  bytes sent to the hub. For any other client the hub answers `E_FORBIDDEN`
+  Sync, Secrets and Import from host, exactly as standalone — only *Open in
+  session* stays disabled. Import reads any host over SSH (`import_assets {
+  host_alias }`), so a hub imports from the machines it manages. A resource
+  file you add is read on this machine and its bytes sent to the hub. For
+  any other client the hub answers `E_FORBIDDEN`
   and the tab is a read-only overview: the hub's catalog through
   `list_assets` (each asset's per-host state, unmanaged assets, problems)
   and a Scan hosts button through `scan_assets`, with the grant command to
@@ -2476,7 +2490,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 215 commands, 134 route to a hub tool, 1 routes except for one argument shape, 58 refuse, and 22 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 217 commands, 139 route to a hub tool, 1 routes except for one argument shape, 55 refuse, and 22 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -2486,7 +2500,6 @@ Of the 215 commands, 134 route to a hub tool, 1 routes except for one argument s
 | `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `assign_host_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `assign_tracker_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
-| `catalog_import_host` | an import reads the Claude config of host `local`, which on a hub is the hub's own machine, not this one; call import_assets on the hub, or import on the machine whose ~/.claude you mean |
 | `catalog_spawn_author_session` | an author session is a Claude session started in the catalog's checkout on the machine that owns it, and the hub has no tool that starts one; edit the assets from this panel, or start a session in the checkout on the hub's machine |
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
 | `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
@@ -2526,7 +2539,6 @@ Of the 215 commands, 134 route to a hub tool, 1 routes except for one argument s
 | `repo_stage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_unstage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `rotate_host_token` | it re-provisions the host to report to this app; rotate the token on the hub |
-| `session_tool_detail` | the hub exposes no tool for one tool call's input and result; the Conversation tab's tool lines still come from session_conversation |
 | `set_account_nickname` | the nickname lives in the hub's database and there is no tool to set it; rename the account on the hub |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
@@ -2538,7 +2550,6 @@ Of the 215 commands, 134 route to a hub tool, 1 routes except for one argument s
 | `update_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `work_retention_status` | work retention is the hub's own sweep of its store: its status and sweep_now are the hub's work_admin, master-only, and a paired client is never the fleet's administrator; set the windows with set_setting and read the status on the hub |
 | `work_retention_sweep` | work retention is the hub's own sweep of its store: its status and sweep_now are the hub's work_admin, master-only, and a paired client is never the fleet's administrator; set the windows with set_setting and read the status on the hub |
-| `work_usage` | the work graph's usage counts are the hub's work_admin, master-only, and a paired client is never the fleet's administrator; read them on the hub with fleet-hub work usage |
 <!-- END GENERATED: hub-client verdicts -->
 
 ### Version skew

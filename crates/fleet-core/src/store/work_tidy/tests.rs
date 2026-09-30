@@ -95,8 +95,7 @@ fn an_attach_acknowledges_a_stale_working_stamp() {
         "the cleared stamp is a visible change (065's trigger bumps it)"
     );
     assert!(
-        s.stale_demoted(&after.host_alias, &after.tmux_name)
-            .unwrap(),
+        after.stale_demoted_at.is_some(),
         "an attach ends the reason, not the demotion's veto"
     );
     assert!(
@@ -218,6 +217,28 @@ fn tidy_sessions_reads_status_pr_tasks_and_protections() {
     assert!(tb.in_progress, "any live link in progress protects");
     assert!(!tb.pr_merged);
     assert!(tb.open_tasks, "the worker of an open task");
+}
+
+/// The merged-PR signal `tidy_sessions` already reads (work graph M7)
+/// stamps the linked local item `done`, once — see `Store::stamp_derived_done`.
+#[test]
+fn a_merged_pr_stamps_its_linked_local_item_done() {
+    let s = Store::open_in_memory().unwrap();
+    let sid = seed(&s, "dev");
+    let item = s.create_local_work_item(None, "auth refactor").unwrap();
+    s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+        .unwrap();
+    s.conn
+        .execute(
+            "UPDATE sessions SET pr_signals = '{\"head\":\"x\",\"state\":\"MERGED\"}' \
+             WHERE id = ?1",
+            [sid],
+        )
+        .unwrap();
+    s.tidy_sessions().unwrap();
+    let row = s.get_work_item(item.id).unwrap().unwrap();
+    assert_eq!(row.status_category, "done");
+    assert_eq!(row.status_set_by.as_deref(), Some("derived"));
 }
 
 fn tracker(s: &Store) -> i64 {

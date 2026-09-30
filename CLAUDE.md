@@ -119,6 +119,17 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   are server-driven wizards — the backend decides each step, a secret is
   never stored; `tracker.connect` backs Settings → Trackers
   (`settings.trackers`), which replaced WorkSettings' tracker list.
+  P4c: a `data_page`'s `filters` set a source parameter by name on every
+  item that takes it (Usage's window and host); Usage → Work graph usage
+  (`usage.work`, source `work.usage` over `UsageSummary::rows`) replaced
+  the hand-built WorkUsage panel and the `work_usage` command.
+  P4d: layout L8 `embed` places catalog items in the desktop's own
+  screens at a closed `Slot`; account usage (`account_usage { view }`,
+  live source `accounts.usage` over `list_account_usage`) is drawn that
+  way in Host detail, the Hosts list, the New-session chips and the
+  footer, and on Usage → Claude accounts. Embed pages are not in
+  `list_pages`: the desktop reads `src/lib/pages/embeds.generated.json`
+  (REGEN_PAGE_DOCS); the views are `src/lib/pages/usage/`.
   P5: `set_setting { propose: true, why }` leaves a proposal, never a
   write (`service/settings_review.rs`, migration 083); every registered
   write is audited through `settings::set_by` with its `Actor`; layout L6
@@ -150,6 +161,25 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (declarative pages P6) —
   and follows `GET /events` instead of polling. Hub-only; `fleet-hub
   pair|client` is the operator's side. See `docs/hub.md` → *Pair a phone*.
+- **Assets S1a — unmanaged inventory** (plan
+  `docs/superpowers/plans/2026-09-29-assets-s1a-foundation.md`, spec
+  `docs/superpowers/specs/2026-09-29-assets-workspace-design.md`): an
+  unmanaged row keeps its `host_hash` (content hash) and
+  `secret_like`/`fleet_owned` flags (migration 087); `list_assets` returns
+  `identities`, folding every host's copies of a `(kind, name)` into one
+  `AssetIdentity` by host-set signature and classifying it
+  (`service/catalog/identity.rs`).
+  `service/catalog/scan_tick.rs` rescans a host whose inventory is older
+  than `catalog.scan_max_age_secs` on a `catalog.scan_check_secs` timer,
+  rescans every host after the catalog HEAD or a sync changes, and keeps a
+  host whose rescan failed owed until it succeeds. `import_assets` (needs
+  the `assets` grant) reads any registered host over SSH through
+  `REMOTE_SOURCES_SCRIPT`, scrubbing fleet-owned hook entries
+  (`hooks_install::is_fleet_owned_hook`), confined to top-level symlinks
+  under a 64 MiB cap. `plan_sync` skips a non-`local`, unlayered,
+  non-empty-catalog host — never scanning it over SSH — unless
+  `allow_unlayered` is set, since syncing it as-is would otherwise install
+  the whole catalog there.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. Only one PTY is attached at a time.
@@ -159,7 +189,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 215
+  verdict is written down once, in `backend/verdicts.rs`, for all 217
   commands; `backend/tests_routing.rs` reads the handler list from `lib.rs`, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table
@@ -422,6 +452,21 @@ ages out lost external rows. Attention reasons `stop_failed`,
 `context_full`, `stale_working`, `ci_failing`. Plan
 `docs/superpowers/plans/2026-09-27-session-state-machine.md`.
 
+The stale-working acknowledgement (#381) is landed, per
+`docs/superpowers/plans/2026-09-28-stale-working-acknowledge.md`: the tick
+runs `Store::expire_stale_working`, which lifts the `stale_working_at`
+stamp once the row is working / blocked again or older than
+`reconcile.stale_working_ttl_secs`; an attach (`touch_session`) clears it
+too. Migration 080 adds `stale_demoted_at`, the reconcile veto's own
+memory: cleared by a hook, a pane that shows a live turn, or the row being
+`working` / `blocked` again — never by an attach or the TTL — and while it
+is set a turn-over check asks the pane (`store::trusted_status`). It is a
+`#[serde(skip)]` `SessionRow` field: off the wire, and a change to it alone
+emits nothing. Migration 081 adds `pane_working_at`, so a long tool call
+whose spinner is on screen is not stale. The sweep judges only rows a
+reconcile pass observed within the window (`last_reconciled_at`), so an
+unreachable or unprobed host's `working` rows are never demoted.
+
 Hub ops and accounting (plan D, #344) is landed: `fleet_health.hub`
 (uptime, reconcile timing), process gauges on `/metrics`, a transcript's
 first read booked as `backfill` apart from the day's live cost (migration
@@ -429,6 +474,25 @@ first read booked as `backfill` apart from the day's live cost (migration
 `deploy/hub/backup.sh` / `upgrade.sh` and the `behind-proxy` compose; see
 `docs/hub.md` → *Backups* / *Upgrade with the script*, plan
 `docs/superpowers/plans/2026-09-27-hub-ops-accounting.md`.
+
+Host identity and health (#354) is landed, per
+`docs/superpowers/plans/2026-09-27-host-identity-health.md`: migrations
+076 (`hosts.claude_version_at`), 077 (the health sample — disk / load /
+mem / uptime, `health_at`, `last_hook_at`, `agent_version`) and 078
+(`provision_fingerprint` / `provisioned_at`). The reconcile probe reads
+versions every `VERSIONS_REFRESH_SECS` (6 h) and the health sample every
+pass, which rides `host:pinged`; `fleet_health.hosts[]` (`disk_low` /
+`claude_behind` / `agent_behind` / `hooks_silent`) is judged against
+`health.version_max_age_secs`, `health.disk_low_pct`,
+`health.claude_max_behind` and `health.hooks_silent_secs`. One rule,
+`service::hosts::active_hosts`, picks the hosts of every host loop: a
+hidden host is skipped by reconcile, not reaped. `merge_host` /
+`fleet-hub host merge <from> <into>` retires a renamed alias (its
+worktrees, sessions, usage, asset inventory, org rules and org move to the
+target); a provisioning records its content fingerprint, so an older one
+reads `provision_stale` (`fleet-hub provision --host <alias>
+--content-only` refreshes it); `forget_project` drops a project row, and
+`refresh_projects` drops rows that vanished.
 
 Conversation event tracking is landed end to end (migration 037
 `conversations` table; `SessionStart`/`PreCompact`/`PostCompact` hooks;
@@ -523,8 +587,12 @@ update check [--track] [--json]`, which reads the published channel and
 prints what this build should run, verified; it installs nothing.
 
 Trusted keys are `fleet_update::keys::RELEASE_KEYS`: the owner's release
-key since #384 (made on the owner's machine by `scripts/release-key.sh`;
-the secret half is only the `RELEASE_SIGNING_KEY` secret and the owner's
-backup). Nothing is offered until 0.4.1 publishes the first channel; an
-`e2e` build also reads `FLEET_UPDATE_E2E_KEYS`. S2b (nightly), the rest
-of S4b and S6–S9 are not built; the other §13 questions wait on the owner.
+key (made on the owner's machine only, `scripts/release-key.sh`) is trusted
+since a3033c2 / #384 (v0.4.1); the secret half is only the
+`RELEASE_SIGNING_KEY` repository secret and the owner's backup. Nothing is
+offered until 0.4.1 publishes the first channel. `FLEET_UPDATE_E2E_KEYS`
+(read by `e2e` builds only) is reserved for S4b's hub-e2e section U;
+nothing uses it yet. `update.track` offers `stable` / `beta` only until S2b
+publishes `nightly` (a stored `nightly` resolves to `stable`). S2b
+(nightly), the rest of S4b and S6–S9 are not built; the
+other §13 questions wait on the owner.

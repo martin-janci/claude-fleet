@@ -2308,6 +2308,55 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Status (task 2, native item status): host A's own local item, set by
+    // whoever may see it; another host's answers as unknown — the same
+    // fence rename uses.
+    let unknown_item_status = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "set_status", "item_id": 999_999, "status": "done" }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "set_status",
+        move |_, _| json!({ "action": "set_status", "item_id": local_a, "status": "done" }),
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    same_as_unknown(a, &unknown_item_status, &local_a.to_string(), "999999")
+                }
+                _ => assert!(
+                    text(a).contains("\"status_category\":\"done\""),
+                    "{who:?}: {a:?}"
+                ),
+            }
+        },
+    )
+    .await;
+    // A ticket's status is not a person's to set here: refused for who
+    // sees it, unknown otherwise (`store::tracker_items` owns it).
+    m.row(
+        "work_link",
+        "set_status",
+        |fx, _| json!({ "action": "set_status", "item_id": fx.item_b, "status": "done" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostA | Who::HostNone | Who::BoundA => {
+                    is_code(who, a, "E_NOTFOUND", "another org's ticket")
+                }
+                _ => is_code(who, a, "E_INVALID", "a ticket"),
+            }
+        },
+    )
+    .await;
     m.row(
         "work",
         "local_items",
@@ -2340,6 +2389,103 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // ── Shared work context (design 2026-09-29) ────────────────────────
+    // A standalone task needs an unscoped caller: a new item has no links,
+    // and a scoped caller sees a local item only through its links.
+    m.row(
+        "work_link",
+        "create",
+        |_, _| json!({ "action": "create", "title": "matrix task" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::Master | Who::ClientFull => {
+                    assert!(text(a).contains("\"origin\":\"manual\""), "{who:?}: {a:?}")
+                }
+                _ => is_code(
+                    who,
+                    a,
+                    "E_FORBIDDEN",
+                    "a standalone task needs an unscoped caller",
+                ),
+            }
+        },
+    )
+    .await;
+    // A subtask under host A's local item: whoever sees the item may add
+    // one; another host's (or org's) caller reads it as an unknown id.
+    let unknown_parent = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "create", "parent": "item:999999", "title": "t" }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "create",
+        move |_, _| json!({ "action": "create", "parent": format!("item:{local_a}"), "title": "matrix step" }),
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    same_as_unknown(a, &unknown_parent, &local_a.to_string(), "999999")
+                }
+                _ => assert!(
+                    text(a).contains(&format!("\"parent_id\":{local_a}")),
+                    "{who:?}: {a:?}"
+                ),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "propose",
+        move |_, _| {
+            json!({ "action": "propose", "parent": format!("item:{local_a}"),
+                    "title": "matrix idea", "why": "x" })
+        },
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    is_code(who, a, "E_NOTFOUND", "another org's parent")
+                }
+                _ => assert!(
+                    text(a).contains("\"proposal_state\":\"proposed\""),
+                    "{who:?}: {a:?}"
+                ),
+            }
+        },
+    )
+    .await;
+    // A person decides: never a per-host token or a bound client.
+    for action in ["accept", "reject"] {
+        m.row(
+            "work_link",
+            action,
+            move |_, _| json!({ "action": action, "item_id": 999_999 }),
+            |_, who, a| {
+                if readonly_refused(who, a) {
+                    return;
+                }
+                match who {
+                    Who::Master | Who::ClientFull => {
+                        is_code(who, a, "E_NOTFOUND", "unknown proposal")
+                    }
+                    _ => is_code(who, a, "E_FORBIDDEN", "a person decides"),
+                }
+            },
+        )
+        .await;
+    }
     // ── idle_unlinked and keep (work graph M11.3) ──────────────────────
     // Two work sessions with their own worktrees and no work linked, idle
     // and unprompted forever: A's on h-a, B's on h-b.
@@ -3824,8 +3970,9 @@ fn seed_usage(fx: &Fx) {
 async fn fleet_healths_totals_are_fenced_for_an_org_bound_client() {
     let fx = fixture(false);
     seed_usage(&fx);
-    // (daily cost, usage_by_host keys, hosts_total, sessions_total)
-    let read = |a: &Answer| -> (i64, Vec<String>, i64, i64) {
+    // (daily cost, usage_by_host keys, hosts_total, sessions_total,
+    // hosts[] aliases)
+    let read = |a: &Answer| -> (i64, Vec<String>, i64, i64, Vec<String>) {
         let v: Value = serde_json::from_str(text(a)).unwrap();
         let day: i64 = v["usage_by_day"]
             .as_array()
@@ -3837,27 +3984,40 @@ async fn fleet_healths_totals_are_fenced_for_an_org_bound_client() {
             .as_object()
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default();
+        let mut rows: Vec<String> = v["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["alias"].as_str().unwrap().to_string())
+            .collect();
+        rows.sort();
         (
             day,
             hosts,
             v["hosts_total"].as_i64().unwrap(),
             v["sessions_total"].as_i64().unwrap(),
+            rows,
         )
     };
     let names = |hs: &[&str]| hs.iter().map(|h| h.to_string()).collect::<Vec<_>>();
-    let everything = (23_100, names(&["h-a", "h-b", "h-n"]), 3, 4);
+    let all = names(&["h-a", "h-b", "h-n"]);
+    let everything = (23_100, all.clone(), 3, 4, all);
+    let (an, bn) = (names(&["h-a", "h-n"]), names(&["h-b", "h-n"]));
+    let (ha, hb, hn) = (names(&["h-a"]), names(&["h-b"]), names(&["h-n"]));
     for who in EVERYONE {
         let a = call(&fx, *who, "fleet_health", json!({})).await;
         assert_eq!(code(&a), "OK", "{who:?}: {a:?}");
         let want = match who {
             // D31 on (the default): the org's hosts and h-n. s_x is A's
             // too; B's s_b and its 20 000 are nowhere.
-            Who::BoundA => (3_100, names(&["h-a", "h-n"]), 2, 3),
-            Who::BoundB => (23_000, names(&["h-b", "h-n"]), 2, 2),
-            // As before: its own host's spend, fleet-wide counts.
-            Who::HostA => (100, names(&["h-a"]), 3, 4),
-            Who::HostB => (20_000, names(&["h-b"]), 3, 4),
-            Who::HostNone => (3_000, names(&["h-n"]), 3, 4),
+            // hosts[] (disk, load, versions) is narrowed the same way.
+            Who::BoundA => (3_100, an.clone(), 2, 3, an.clone()),
+            Who::BoundB => (23_000, bn.clone(), 2, 2, bn.clone()),
+            // As before: its own host's spend, fleet-wide counts; hosts[]
+            // is its own host's row only.
+            Who::HostA => (100, ha.clone(), 3, 4, ha.clone()),
+            Who::HostB => (20_000, hb.clone(), 3, 4, hb.clone()),
+            Who::HostNone => (3_000, hn.clone(), 3, 4, hn.clone()),
             _ => everything.clone(),
         };
         assert_eq!(read(&a), want, "{who:?}");
@@ -3874,8 +4034,8 @@ async fn fleet_healths_totals_are_fenced_for_an_org_bound_client() {
         is_ok(Who::Master, &a, "D31 off");
     }
     for (who, want) in [
-        (Who::BoundA, (100, names(&["h-a"]), 1, 2)),
-        (Who::BoundB, (20_000, names(&["h-b"]), 1, 1)),
+        (Who::BoundA, (100, ha.clone(), 1, 2, ha.clone())),
+        (Who::BoundB, (20_000, hb.clone(), 1, 1, hb.clone())),
         (Who::Master, everything.clone()),
         (Who::ClientReadonly, everything.clone()),
     ] {

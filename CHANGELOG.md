@@ -8,6 +8,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.4.3] - 2026-09-30
+
+### Added
+- **pages:** embed pages (L8); account usage drawn through the catalog everywhere — declarative pages P4d
+- **work:** the view carries origin, project, parent, proposals, jobs and agent steps
+- **work:** desktop create_work_task and proposal decisions, routed
+- **work:** work_link create / propose / accept / reject
+- **work:** dispatched jobs appear as agent subtasks and follow the job
+- **work:** starting a native item uses its project and the parent ticket's brief
+- **ui:** task page — notes, subtasks, proposals, jobs and agent steps
+- **ui:** Work tab List layout — To do / Doing / Done under the existing header and filters
+- **ui:** remove the global Tasks popover; jobs are in the Work list
+- **work:** agent proposals — capped, decided once, a rejected title stays rejected
+- **work:** native tasks and subtasks (TASK-<id>), job mirrors, depth one
+- **work:** capture Claude Code task steps from PostToolUse, transcript backstop for stale hosts
+- **ag:** one-command installer
+- **ag:** doctor with exact fixes, install hints
+- **ag:** alias shims that work in tmux, ssh and fleet panes
+- **ag:** Codex driver — exec, resume, yolo, model/effort mapping
+- **work:** list data — wire fields, create/decide wrappers, status grouping, layout pref
+- **ag:** normalised flags and Claude Code launch
+- **ag:** launcher skeleton — config reader, harness registry, list/which
+- **work:** agent steps — Claude Code adapter and the journal's step kind
+- **work:** a job's status ('task') is final over the live lift
+- **work:** migration 086 — origin, project, notes, job and proposal columns
+- **conversation:** responsive header bar with one control height and a slim context gauge
+- **pages:** data-page filter bar; Work graph usage as a generated page — declarative pages P4c
+
+### Changed
+- cargo fmt
+- **ag:** run the launcher tests on macOS bash 3.2 + Linux; docs
+- **pages:** read the host filter's options with Array.from for svelte-check
+
+### Fixed
+- **work:** sort step groups with sort_by_key (clippy::unnecessary_sort_by on rust 1.98)
+- **work:** batch-B join — start briefs never carry a parent the caller cannot see; regenerate the control API reference; raise the tool-definition budget to 68,056 (measured 67,956 on 2026-09-29 after work_link create/propose/accept and parent/notes/why, +410 bytes)
+- **work:** local items named after migration 086 are origin 'manual'
+- **ag:** config comments, CDPATH safety, shim/harness hardening; tests
+- **ag:** stricter flag parsing, resume picker, --flag=value
+- **ag:** never replace a foreign ag; doctor detects shadowing
+- **desktop:** put back the nulls the hub strips, so the Hosts view stops crashing
+- **terminal:** the selection follows its text when the screen scrolls
+- **catalog:** name the checkout when its directory cannot be made
+
+### Documentation
+- **assets:** the interactive mockups of the Assets workspace, beside the spec
+- **work:** shared work context — skill, user guide, hook matcher, command count, spec status
+- **assets:** the S1a implementation plan — identities, scan tick, remote import, unlayered guard
+- public-safe spec/plan copies; deferred follow-ups
+- add architecture diagrams (standalone, hub, mobile)
+- **work:** implementation plan for shared work context (roadmap part 1); mark the list-only plan superseded
+- **assets:** hosts accept catalogs explicitly, so a personal host can run an org's assets
+- **assets:** the Assets workspace design — inbox over layers, scopes and org catalogs, authoring and skill tests
+- **work:** shared work context — keep today's Work header, add a List | Grouped toggle; trackers are already connected on the hub
+- **work:** shared work context — map every existing Work feature into the new view; owner's mockup review
+- **work:** design for shared work context (AI task system roadmap part 1)
+- capture AI task system vision, roadmap and countermeasures
+- **work:** implementation plan for the internal task list; spec revisions after reading the code
+- **work:** design for one internal task list (own + dispatched tasks)
+## [0.4.2] - 2026-09-29
+
+### Added
+- **work:** page a Work view's open sections and review total in one tree read
+- **evidence:** assess a PR's result and show it — Result card, Work chip, stale CI badge
+- **conversation:** tool detail on the hub, per-tool detail views, reply actions footer
+- **update:** X-Fleet-Client, update:changed, fleet_health.updates, why (S4b, first half)
+- **evidence:** store the PR evidence and when it was last observed (migration 082)
+- **work:** a working session shows local work in progress
+- **update:** Git-mode check and `fleet-hub update check` (S3)
+- **evidence:** the PR probe reads the head commit, review and merge state, and the worktree's own HEAD
+- **pages:** the fleet's settings on a paired device — declarative pages P6
+- **work:** a merged PR stamps local work done, once
+- **decide:** Jev robustness, paired languages, floor sweep, question set and fleet_health.decide
+- **work:** work_link { action: set_status } for local work
+- **pages:** search as a command, page actions, custom cap 3 — declarative pages P5b
+- **pages:** settings proposals, review_apply and the audit — declarative pages P5a
+- **work:** record who decided an item's status
+- **pages:** flows and the tracker resource; Trackers generated — declarative pages P4b
+- **pages:** resources, master_detail and the record editor; Organisations generated — declarative pages P4a
+- **pages:** Svelte renderer, settings pages in Settings — declarative pages P3
+- **pages:** page DSL, catalog, data sources and validator — declarative pages P2
+- **settings:** registry metadata and describe — declarative pages P1
+
+### Changed
+- **add_project:** publish the grandchild pid atomically before cancelling
+- **hub-deploy:** bound the non-numeric checks without GNU timeout
+- **decide:** tidy the Jev bench, status_map trigger and claude -p runs
+- **work:** pin the kind-absent Rename fallback
+- **mcp:** compare fleet_health through the pool without its uptime clock
+- **catalog:** the unprobeable-checkout test holds on Windows too
+- **work:** guard status_changed_at writes so reverting either breaks a test
+- **work:** seed tidy fixtures through set_item_status, not a raw UPDATE
+- **work:** name ITEM_COLUMNS' length instead of hardcoding it
+
+### Fixed
+- **catalog:** name the checkout when its clone parent cannot be created
+- **hub:** hub ops, CLI and WSL review fixes
+- **update:** harden the hub's update state, reports and pins
+- **release:** one build ID for tarballs, hub image and manifest
+- **work-view:** one-read refreshes, kind-aware re-reads and review fixes
+- **work:** a stale merged signal must not stamp work named after it
+- **work:** Work view backend review fixes (counts, placements, scopes)
+- **write-back:** queue PR links made after the PR; sweep the outbox as a retention table
+- **work:** resolve a key two orgs share to the caller's own item
+- **work:** stop the chip contradicting its own status dot
+- **work:** show the effective status in the desktop Today header
+- **work:** keep a done local item's journal and handover history
+- **work:** one condition for "a working session on this item"
+- **work:** stamp the derived done where the merged PR is recorded
+- **work:** cross-check the SQL/Rust precedence, fence card.rs, fix chip
+- **reply-actions:** Retry through the outbox; refresh chips without clobbering edits
+- **sessions:** carry stale_demoted_at on the row; demote only reconciled hosts' rows
+- **rewind:** fork keeps the source's model/effort and refuses a projectless source before copying
+- **events:** judge context_full on the hub stream at health.context_red_pct
+- **work:** stop breaking phone Rename; add effective_status, fence it
+- **hosts:** Hide keeps a host's sessions; fence fleet_health.hosts[]; merge_host moves host-keyed data
+- **work:** agree on status across views, close the last hiding CASE
+- **decide:** decide status counts agreement only where the rule decided
+- **work:** stop hiding a local item's status on the session row
+- **work:** stamp status_changed_at so done can age into done_idle
+- **work:** a stamped done classifies as pr_merged_idle, not done_idle
+- **catalog:** name the checkout the hub cannot read
+
+### Documentation
+- **work:** record the journal-retention rule for local work
+- **work:** say that effective_status coerces, and pin it
+- **review:** two-day review of d4b7a21..HEAD — simplify, gaps, speed
+- **evidence:** result evidence design and plan — tie done to a commit, CI to a clock
+- **pages:** P6's phone half, on fleet-mobile
+- **api:** list the settings commands under commands::pages in the reference
+- **work:** the derived done stamp must not widen auto-tidy
+- **work:** document work_link { action: set_status } in control-api.md
+- **work:** plan for phase 1, native item status
+- **api:** list the page commands in the control-api reference
+- **work:** a derived 'done' must be stamped, not computed
+- **work:** design for sprints, releases and epics in the native work graph
+- **api:** regenerate control-api reference for get_settings describe
+- **spec:** declarative pages and forms — research and design
 ## [0.4.1] - 2026-09-29
 
 ### Added
@@ -2218,6 +2356,8 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.4.3]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.3
+[0.4.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.2
 [0.4.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.1
 [0.4.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.0
 [0.3.3]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.3.3

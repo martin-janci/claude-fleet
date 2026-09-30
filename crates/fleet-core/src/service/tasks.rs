@@ -149,12 +149,12 @@ impl WaitCond {
     }
 }
 
-/// PURE: does `row` satisfy `cond`? A stale-demoted row (`demoted`, its
-/// `stale_demoted_at` — `Store::stale_demoted_by_id`) never satisfies
-/// `Idle` here — see [`WaitCond::Idle`].
-pub fn session_satisfies(row: &SessionRow, demoted: bool, cond: WaitCond) -> bool {
+/// PURE: does `row` satisfy `cond`? A stale-demoted row (its
+/// `stale_demoted_at`) never satisfies `Idle` here — see
+/// [`WaitCond::Idle`].
+pub fn session_satisfies(row: &SessionRow, cond: WaitCond) -> bool {
     match cond {
-        WaitCond::Idle => crate::store::turn_over_row(row, demoted),
+        WaitCond::Idle => crate::store::turn_over_row(row),
         WaitCond::TurnGt(t) => row.turn_seq > t,
     }
 }
@@ -250,28 +250,22 @@ pub async fn wait_for_session_probed(
     let mut last_probe: Option<tokio::time::Instant> = None;
     loop {
         // Lock, read one row, unlock — never across the sleep or the probe.
-        let (row, demoted) = {
-            let s = lock(store)?;
-            let row = s.get_session_by_id(session_id)?.ok_or_else(|| {
-                IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
-            })?;
-            let demoted = s.stale_demoted_by_id(session_id)?;
-            (row, demoted)
-        };
-        if session_satisfies(&row, demoted, cond) {
+        let row = lock(store)?.get_session_by_id(session_id)?.ok_or_else(|| {
+            IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
+        })?;
+        if session_satisfies(&row, cond) {
             return Ok(WaitOutcome {
                 satisfied: true,
                 row,
             });
         }
         if cond == WaitCond::Idle
-            && crate::store::needs_pane_confirmation(&row, demoted)
+            && crate::store::needs_pane_confirmation(&row)
             && last_probe.is_none_or(|t| t.elapsed() >= probe_every)
         {
             last_probe = Some(tokio::time::Instant::now());
             let live = probe.pane_status(row.id).await;
-            if crate::store::turn_over(crate::store::trusted_status(&row, demoted, live.as_deref()))
-            {
+            if crate::store::turn_over(crate::store::trusted_status(&row, live.as_deref())) {
                 return Ok(WaitOutcome {
                     satisfied: true,
                     row,
@@ -371,6 +365,7 @@ pub fn start_task(s: &Store, task: &TaskRow) -> Result<TaskRow, IpcError> {
     if let Some(w) = row.worker_session_id {
         let _ = s.insert_session_event(w, "task_started", Some(&format!("task={}", row.id)));
     }
+    mirror_state(s, row.id);
     Ok(row)
 }
 
@@ -381,6 +376,7 @@ pub fn fail_task(s: &Store, task_id: i64, error: &str) -> Result<Option<TaskRow>
         if let Some(ref r) = row {
             note_finished(s, r, "task_failed", error);
         }
+        mirror_state(s, task_id);
     }
     Ok(row)
 }
@@ -399,6 +395,7 @@ pub fn cancel_task(s: &Store, task_id: i64, reason: &str) -> Result<TaskRow, Ipc
         ));
     }
     note_finished(s, &row, "task_cancelled", reason);
+    mirror_state(s, row.id);
     Ok(row)
 }
 
@@ -417,6 +414,7 @@ pub fn complete_task(s: &Store, task: &TaskRow, result: &str) -> Result<bool, Ip
         return Ok(false);
     }
     if let Some(ref r) = row {
+        mirror_state(s, r.id);
         note_finished(s, r, "task_done", result);
         if let (Some(w), Some(req)) = (r.worker_session_id, r.requester_session_id) {
             if w != req {
@@ -426,6 +424,63 @@ pub fn complete_task(s: &Store, task: &TaskRow, result: &str) -> Result<bool, Ip
         }
     }
     Ok(true)
+}
+
+/// Shared work context (design 2026-09-29): a dispatched job becomes an
+/// `agent` subtask of the requester's primary work — or of that work's
+/// parent when the requester is on a native subtask (depth one) — with the
+/// worker linked SECONDARY, so the primary `inherit_worker_work` gave it
+/// stays. Best-effort: the dispatch already happened.
+pub fn mirror_dispatched(s: &Store, task: &TaskRow, requester: Option<i64>, worker: i64) {
+    let run = || -> Result<(), IpcError> {
+        let primary = match requester {
+            Some(r) => s
+                .session_work_links(r)?
+                .into_iter()
+                .find(|l| l.is_primary && l.state == "confirmed" && l.ended_at.is_none())
+                .and_then(|l| l.item_id),
+            None => None,
+        };
+        let parent = match primary.map(|id| s.get_work_item(id)).transpose()?.flatten() {
+            Some(p)
+                if matches!(p.origin.as_deref(), Some("manual" | "proposed" | "agent"))
+                    && p.parent_id.is_some() =>
+            {
+                p.parent_id
+            }
+            Some(p) => Some(p.id),
+            None => None,
+        };
+        let project = s.get_session_by_id(worker)?.and_then(|r| r.project_id);
+        let item = s.create_agent_task_item(task, parent, project)?;
+        s.link_session_work_as(
+            worker,
+            crate::store::WorkTarget::Item(item.id),
+            "agent_started",
+            false,
+            None,
+        )?;
+        Ok(())
+    };
+    if let Err(e) = run() {
+        tracing::debug!(task = task.id, error = %e.message, "[tasks] mirroring a job into work failed");
+    }
+}
+
+/// A mirrored job's item follows the job's state (best-effort; a job with
+/// no item is left alone).
+fn mirror_state(s: &Store, task_id: i64) {
+    let run = || -> Result<(), IpcError> {
+        let (Some(task), Some(item)) = (s.get_task(task_id)?, s.work_item_for_task(task_id)?)
+        else {
+            return Ok(());
+        };
+        s.set_item_status_from_task(item.id, crate::store::job_status(&task.state))?;
+        Ok(())
+    };
+    if let Err(e) = run() {
+        tracing::debug!(task = task_id, error = %e.message, "[tasks] mirroring a job's state failed");
+    }
 }
 
 fn note_finished(s: &Store, row: &TaskRow, kind: &str, detail: &str) {
@@ -831,6 +886,93 @@ mod tests {
             .unwrap()
     }
 
+    // ---- shared work context: job mirrors ----
+
+    #[test]
+    fn a_dispatched_job_is_a_subtask_of_the_requesters_task_and_follows_the_job() {
+        let s = Store::open_in_memory().unwrap();
+        let req = seed(&s, "local", "ctl");
+        let w = seed(&s, "local", "w");
+        let parent = s
+            .create_native_item(&crate::store::NativeItem {
+                title: "Ship v1",
+                ..Default::default()
+            })
+            .unwrap();
+        s.link_session_work(req, crate::store::WorkTarget::Item(parent.id), "manual")
+            .unwrap();
+        let t = create_task(&s, Some(req), Some(w), "Write the changelog").unwrap();
+        // As `dispatch_task` does: the worker inherits the requester's
+        // work as its primary before the job is mirrored.
+        s.inherit_worker_work(w, req).unwrap();
+        mirror_dispatched(&s, &t, Some(req), w);
+        let it = s.work_item_for_task(t.id).unwrap().expect("mirrored");
+        assert_eq!(it.parent_id, Some(parent.id));
+        assert!(s
+            .session_work_links(w)
+            .unwrap()
+            .iter()
+            .any(|l| l.item_id == Some(it.id) && l.state == "confirmed" && !l.is_primary));
+        let t = start_task(&s, &t).unwrap();
+        assert_eq!(
+            s.get_work_item(it.id).unwrap().unwrap().status_category,
+            "in_progress"
+        );
+        assert!(complete_task(&s, &t, "done: CHANGELOG.md").unwrap());
+        assert_eq!(
+            s.get_work_item(it.id).unwrap().unwrap().status_category,
+            "done"
+        );
+    }
+
+    #[test]
+    fn a_requester_on_a_subtask_parents_the_job_to_that_subtasks_parent() {
+        let s = Store::open_in_memory().unwrap();
+        let req = seed(&s, "local", "ctl");
+        let w = seed(&s, "local", "w");
+        let ticket = s.create_local_work_item(Some("OM-110"), "Qomora").unwrap();
+        let sub = s
+            .create_native_item(&crate::store::NativeItem {
+                title: "Stats",
+                parent_id: Some(ticket.id),
+                ..Default::default()
+            })
+            .unwrap();
+        s.link_session_work(req, crate::store::WorkTarget::Item(sub.id), "manual")
+            .unwrap();
+        let t = create_task(&s, Some(req), Some(w), "Run the SELECTs").unwrap();
+        mirror_dispatched(&s, &t, Some(req), w);
+        assert_eq!(
+            s.work_item_for_task(t.id).unwrap().unwrap().parent_id,
+            Some(ticket.id),
+            "depth stays one"
+        );
+    }
+
+    #[test]
+    fn failed_and_cancelled_jobs_are_done_and_an_unmirrored_job_still_moves() {
+        let s = Store::open_in_memory().unwrap();
+        let w = seed(&s, "local", "w");
+        let f = create_task(&s, None, Some(w), "a").unwrap();
+        mirror_dispatched(&s, &f, None, w);
+        fail_task(&s, f.id, "send failed").unwrap();
+        assert_eq!(
+            s.work_item_for_task(f.id).unwrap().unwrap().status_category,
+            "done"
+        );
+        let c = create_task(&s, None, Some(w), "c").unwrap();
+        mirror_dispatched(&s, &c, None, w);
+        cancel_task(&s, c.id, "not needed").unwrap();
+        assert_eq!(
+            s.work_item_for_task(c.id).unwrap().unwrap().status_category,
+            "done"
+        );
+        let plain = create_task(&s, None, Some(w), "b").unwrap();
+        let plain = start_task(&s, &plain).unwrap();
+        assert!(complete_task(&s, &plain, "ok").unwrap());
+        assert!(s.work_item_for_task(plain.id).unwrap().is_none());
+    }
+
     // ---- marker ----
 
     #[test]
@@ -915,18 +1057,18 @@ mod tests {
         s.set_claude_session_id(id, "uuid-w").unwrap();
         let row = s.get_session_by_id(id).unwrap().unwrap();
         assert!(
-            !session_satisfies(&row, false, WaitCond::Idle),
+            !session_satisfies(&row, WaitCond::Idle),
             "unknown status is not idle"
         );
-        assert!(!session_satisfies(&row, false, WaitCond::TurnGt(0)));
+        assert!(!session_satisfies(&row, WaitCond::TurnGt(0)));
         s.record_prompt_submit_hook("uuid-w").unwrap();
         let row = s.get_session_by_id(id).unwrap().unwrap();
-        assert!(!session_satisfies(&row, false, WaitCond::Idle));
+        assert!(!session_satisfies(&row, WaitCond::Idle));
         s.record_stop_hook("uuid-w").unwrap();
         let row = s.get_session_by_id(id).unwrap().unwrap();
-        assert!(session_satisfies(&row, false, WaitCond::Idle));
-        assert!(session_satisfies(&row, false, WaitCond::TurnGt(0)));
-        assert!(!session_satisfies(&row, false, WaitCond::TurnGt(1)));
+        assert!(session_satisfies(&row, WaitCond::Idle));
+        assert!(session_satisfies(&row, WaitCond::TurnGt(0)));
+        assert!(!session_satisfies(&row, WaitCond::TurnGt(1)));
     }
 
     #[tokio::test]
@@ -1024,6 +1166,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.row.stale_working_at, None, "the attach acknowledged it");
+        assert_eq!(out.row.stale_demoted_at, Some(5), "the demotion stands");
         assert!(
             !out.satisfied,
             "an acknowledged demotion's stored idle is still not believed"
@@ -1073,7 +1216,10 @@ mod tests {
         stopper.await.unwrap();
         assert!(out.satisfied);
         assert_eq!(out.row.stale_working_at, None);
-        assert!(!store.lock().unwrap().stale_demoted_by_id(id).unwrap());
+        assert_eq!(
+            out.row.stale_demoted_at, None,
+            "the hook lifted the demotion"
+        );
     }
 
     /// Final review, Important 2. `complete_task` posts the result to the

@@ -4,6 +4,13 @@
   "description": "One page: a route (`id`), a layout, and its content as sections or tabs\nof sections.",
   "type": "object",
   "properties": {
+    "filters": {
+      "description": "A `data_page`'s filter bar: each filter sets the parameter of the\nsame name on every data item whose source declares it.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Filter"
+      }
+    },
     "id": {
       "description": "Dotted lowercase route, e.g. \"settings.automation\". Also the deep\nlink: `settings/<id>#<key>`.",
       "type": "string"
@@ -56,6 +63,17 @@
       "items": {
         "$ref": "#/$defs/Section"
       }
+    },
+    "slot": {
+      "description": "An `embed` page's place in a hand-built screen (`Slot`). Only an\nembed page names one, and each slot has at most one page.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Slot"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "spec": {
       "description": "Always \"fleet.page/1\".",
@@ -171,6 +189,45 @@
         }
       ]
     },
+    "Filter": {
+      "description": "One control in a `data_page`'s filter bar, bound by name to a source\nparameter (`pages::sources`). Its control follows the parameter's type:\na `days` parameter is a select over `choices`, a `host` parameter a\nselect over the registered hosts with \"All hosts\" first. A data item\nmay not also set a filtered parameter literally.",
+      "type": "object",
+      "properties": {
+        "choices": {
+          "description": "A `days` filter's options, ascending. A `host` filter has none.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "default": {
+          "description": "The option picked when the page opens: one of `choices`; the first\nwhen absent. A `host` filter starts at \"All hosts\".",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "label": {
+          "description": "The control's label; the parameter's own name when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "param": {
+          "description": "The source parameter this filter sets, e.g. \"days\" or \"host\".",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "param"
+      ]
+    },
     "Item": {
       "description": "One thing on a page. Tagged by `type`, one shape per purpose.",
       "oneOf": [
@@ -276,6 +333,10 @@
                 "type": "string"
               }
             },
+            "copy": {
+              "description": "Offer \"Copy as text\": the source's label with the filters, then\none line per row, `first: rest, …`.",
+              "type": "boolean"
+            },
             "source": {
               "$ref": "#/$defs/SourceRef"
             },
@@ -316,6 +377,28 @@
             "type",
             "source",
             "chart"
+          ]
+        },
+        {
+          "description": "An account's plan headroom from an `account_usage` source, drawn as\n`view`. On a page it shows every account; in an embed slot, the\nslot's host or account.",
+          "type": "object",
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/SourceRef"
+            },
+            "type": {
+              "type": "string",
+              "const": "account_usage"
+            },
+            "view": {
+              "$ref": "#/$defs/UsageView"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "source",
+            "view"
           ]
         },
         {
@@ -439,6 +522,11 @@
           "description": "L7: stats, charts and tables over data sources.",
           "type": "string",
           "const": "data_page"
+        },
+        {
+          "description": "L8: items placed inside a hand-built screen at a named `slot`\nrather than a page of their own. Never in the page tree.",
+          "type": "string",
+          "const": "embed"
         }
       ]
     },
@@ -494,6 +582,41 @@
         "items"
       ]
     },
+    "Slot": {
+      "description": "The places in hand-built screens an `embed` page fills. Closed: each is\na spot in the desktop's own UI with the context it hands its items\n(`catalog::slot_views` says which items each one takes).",
+      "oneOf": [
+        {
+          "description": "Host detail, under the account: context the host and its account.",
+          "type": "string",
+          "const": "host_detail"
+        },
+        {
+          "description": "A Hosts-list account group's title line, after its name.",
+          "type": "string",
+          "const": "hosts_group_title"
+        },
+        {
+          "description": "A Hosts-list account group's header, right side.",
+          "type": "string",
+          "const": "hosts_group"
+        },
+        {
+          "description": "Each host chip in the New-session dialog, under the alias.",
+          "type": "string",
+          "const": "new_session_chip"
+        },
+        {
+          "description": "Under the New-session dialog's host chips: the selected host.",
+          "type": "string",
+          "const": "new_session_host"
+        },
+        {
+          "description": "The window's status footer, right end.",
+          "type": "string",
+          "const": "status_footer"
+        }
+      ]
+    },
     "SourceRef": {
       "description": "A data source by id, with literal parameters.",
       "type": "object",
@@ -546,6 +669,46 @@
         "info",
         "warn",
         "danger"
+      ]
+    },
+    "UsageView": {
+      "description": "How an `account_usage` item draws an account's plan headroom. The\nwording, staleness and severity rules are the same in every view (the\nhosts-view design's \"Showing usage\" and \"Staleness and failure\").",
+      "oneOf": [
+        {
+          "description": "The full block: status lines, the 5-hour and weekly rows with pace,\nper-model rows, the source and age, and a floor-respecting refresh.",
+          "type": "string",
+          "const": "block"
+        },
+        {
+          "description": "The plan tier and a freshness mark.",
+          "type": "string",
+          "const": "freshness"
+        },
+        {
+          "description": "The 5-hour and weekly mini bars with % left and reset.",
+          "type": "string",
+          "const": "bars"
+        },
+        {
+          "description": "One short headroom label (a host chip).",
+          "type": "string",
+          "const": "chip"
+        },
+        {
+          "description": "One full sentence for the selected host.",
+          "type": "string",
+          "const": "line"
+        },
+        {
+          "description": "A warning when the selected host's account is low; nothing otherwise.",
+          "type": "string",
+          "const": "warning"
+        },
+        {
+          "description": "The status footer's one segment for the whole fleet.",
+          "type": "string",
+          "const": "footer"
+        }
       ]
     },
     "Widget": {

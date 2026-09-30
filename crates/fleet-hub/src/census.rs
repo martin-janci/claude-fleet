@@ -5,12 +5,12 @@
 //! write. The census prints counts only; `--export-sample` is the one path
 //! that writes text, to a new local file the operator asked for (D46).
 
-use crate::config::{self, HubOptions};
+use crate::config::HubOptions;
+use crate::dbarg::{db_path, open_read_only};
 use crate::out;
-use crate::serve;
 use clap::Subcommand;
 use fleet_core::service::nl::{self, census, Detector};
-use fleet_core::store::Store;
+use fleet_core::store::now_unix;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -53,30 +53,6 @@ pub enum CensusCmd {
         #[arg(long, value_name = "FILE", requires = "export_sample")]
         out: Option<PathBuf>,
     },
-}
-
-fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-/// `--db`, else the hub's own `state.db` (which must exist).
-fn db_path(
-    db: Option<PathBuf>,
-    opts: &HubOptions,
-    env: &HashMap<String, String>,
-) -> Result<PathBuf, String> {
-    match db {
-        Some(p) if p.is_file() => Ok(p),
-        Some(p) => Err(format!("no database at {}", p.display())),
-        None => serve::existing_db(&config::resolve_data_dir(opts, env)),
-    }
-}
-
-fn open(path: &Path) -> Result<Store, String> {
-    Store::open_read_only(path).map_err(|e| format!("open {} read-only: {e}", path.display()))
 }
 
 /// Create `path` for the sample: new only, owner-only on unix.
@@ -122,8 +98,8 @@ pub fn run(
                 print(json, || serde_json::to_string_pretty(&eval), eval.lines())?;
                 return Ok(ExitCode::SUCCESS);
             }
-            let store = open(&db_path(db, opts, env)?)?;
-            let o = census::CensusOptions::new(days, org, max_per_source, now())
+            let store = open_read_only(&db_path(db.as_deref(), opts, env)?)?;
+            let o = census::CensusOptions::new(days, org, max_per_source, now_unix())
                 .map_err(|e| e.message)?;
             if let (Some(n), Some(path)) = (export_sample, out_path) {
                 let cases =
@@ -244,16 +220,5 @@ mod tests {
         }
         let e = create_private(&p).unwrap_err();
         assert!(e.contains("never written over"), "{e}");
-    }
-
-    #[test]
-    fn a_missing_db_is_named() {
-        let e = db_path(
-            Some(PathBuf::from("/nonexistent/state.db")),
-            &HubOptions::default(),
-            &HashMap::new(),
-        )
-        .unwrap_err();
-        assert!(e.contains("/nonexistent/state.db"), "{e}");
     }
 }

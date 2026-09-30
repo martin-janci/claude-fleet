@@ -87,13 +87,15 @@ the terminal, move and transfer. There are two differences:
 The distributions are detected when the app starts, in the background: the
 first `wsl.exe` after a reboot starts the WSL service, which can take several
 seconds, and the window does not wait for it. A command for a `wsl-` host
-that comes in before detection has finished waits for it, up to 20 seconds.
-If that first detection timed out, or a `wsl-` host is not in the table (a
-distribution installed or renamed since), the next command for it detects
-again and waits for that: at most every 10 seconds after a detection that
-timed out, every minute after one that answered. **Add a host** lists what
-the last detection found; restart the app to list a new distribution there
-at once.
+that is not in the table yet waits for a running detection, up to 20
+seconds; a host already found goes ahead at once. If that first detection
+timed out, or a `wsl-` host is not in the table (a distribution installed or
+renamed since), the next command for it detects again and waits for that: at
+most every 10 seconds after a detection that timed out or failed, every
+minute after one that answered. A `wsl.exe --list` that fails for a moment
+keeps the distributions already found. **Add a host** waits for a detection
+still running and detects again when the last one is older than that, so a
+distribution installed since shows up there without a restart.
 
 Commands start in the distribution user's home directory (`wsl.exe --cd
 ~`), as they would over SSH. When `wsl.exe` leaves `$SHELL` unset, the
@@ -157,6 +159,14 @@ Windows' OpenSSH cannot do that: it has no ControlMaster support. On Windows
 the app therefore opens a **new SSH connection for every command**. Everything
 works, but each refresh pays a full SSH handshake per host, so the sidebar
 updates more slowly with many hosts or a slow link.
+
+So that one refresh cannot trip the server's `MaxStartups`, at most **4**
+connections run to one host at a time; the rest queue, and the wait counts
+against the command's own time limit (a queued command that runs out fails
+without having run). One of the four is kept for short commands: uploads,
+moves and other commands allowed more than a minute take at most three, so
+the status probe always gets through. WSL hosts are not capped: their
+commands run `wsl.exe`, not an SSH connection.
 
 The fix is **hub-client mode**. Run `fleet-hub` on a Linux machine (see
 [hub.md](hub.md)) and pair the desktop with it in **Settings → Hub**. The

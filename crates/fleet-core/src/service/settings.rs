@@ -282,6 +282,11 @@ pub const HEALTH_HOOKS_SILENT_SECS: &str = "health.hooks_silent_secs";
 /// git work tree (a dotfiles checkout, hosts F2). Off: provisioning
 /// refuses such a host with `E_INVALID` (decision B-2).
 pub const PROVISION_FORCE_GIT_TREE: &str = "provision.force_git_tree";
+/// Install fleet's `ag` launcher on every provisioned host (F2): the
+/// embedded tools/ag tree into ~/.local/share/ag and a `cl` command
+/// (`claude --yolo`) into ~/.local/bin. Off: provisioning skips it and
+/// panes launch `claude` directly unless the host already has `ag`.
+pub const PROVISION_INSTALL_AG: &str = "provision.install_ag";
 /// How many resumable lost sessions a batch restore resumes in parallel.
 /// Read by Task 3's restore path via `get_setting` + `settings::resolve`.
 pub const RESTORE_BATCH_SIZE: &str = "restore.batch_size";
@@ -463,6 +468,12 @@ pub const WORK_AUTO_TIDY_REASONS: &str = "work.auto_tidy_reasons";
 /// never killed, so neither is automatic.
 pub const AUTO_TIDY_REASONS: &[&str] = &["done_idle", "pr_merged_idle", "not_planned"];
 
+// ── asset catalog scan tick (Assets S1a; `service::catalog::scan_tick`) ──
+/// Assets S1a: how often the catalog scan tick checks for stale hosts.
+pub const CATALOG_SCAN_CHECK_SECS: &str = "catalog.scan_check_secs";
+/// A host whose newest inventory row is older than this is rescanned.
+pub const CATALOG_SCAN_MAX_AGE_SECS: &str = "catalog.scan_max_age_secs";
+
 // ── decisions (Jev evaluation, D35-D37; `service::decide`) ──
 /// The kill switch: with it off no decision-model call is ever made. Off by
 /// default; the Settings dialog's "Decisions (Jev)" toggle.
@@ -471,14 +482,18 @@ pub const DECIDE_JEV_ENABLED: &str = "decide.jev.enabled";
 pub const DECIDE_JEV_STATUS_MAP: &str = "decide.jev.status_map";
 /// `work_link`'s mode (choosing a work item for an unlinked session).
 pub const DECIDE_JEV_WORK_LINK: &str = "decide.jev.work_link";
-/// What a feature's mode may be. `auto` is not offered: no feature has
-/// passed acceptance (D36).
-pub const DECIDE_MODES: &[&str] = &["off", "shadow", "assist"];
+/// What a feature's mode may be: the store's `decision_runs.mode` words
+/// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
+/// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
+/// has passed acceptance (D36).
+pub const DECIDE_MODES: &[&str] = crate::store::DECISION_MODES;
 
 // ── update.* (application updates, update-channel design §7.3) ──
 /// The release track the hub follows for its fleet.
 pub const UPDATE_TRACK: &str = "update.track";
-pub const UPDATE_TRACKS: &[&str] = &["stable", "beta", "nightly"];
+/// `nightly` joins when S2b publishes it (`src/lib/fleet_settings.ts` keeps
+/// the same list).
+pub const UPDATE_TRACKS: &[&str] = &["stable", "beta"];
 /// Per component: `manual` (only pins), `notify` (offer), `automatic`
 /// (install at the next quiet point).
 pub const UPDATE_HUB_MODE: &str = "update.hub.mode";
@@ -860,6 +875,14 @@ pub const SPECS: &[Spec] = &[
     .danger("Fleet will write its skills into a folder another git repository tracks.")
     .tags(&[Tag::Advanced]),
     Spec::new(
+        PROVISION_INSTALL_AG,
+        "true",
+        Kind::Bool,
+        "Install the ag launcher",
+        "Provisioning installs fleet's ag launcher (~/.local/share/ag) and, when the host has no cl command, a cl shim (claude --yolo) in ~/.local/bin; panes use it when the host has no cl of its own. Off: provisioning leaves ag alone.",
+    )
+    .tags(&[Tag::Advanced]),
+    Spec::new(
         WORK_RETENTION_JOURNAL_DAYS,
         "365",
         Kind::Int { min: 0, max: 3650 },
@@ -904,6 +927,25 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Seconds)
     .zero("off")
     .restart(Restart::App),
+    Spec::new(
+        CATALOG_SCAN_CHECK_SECS,
+        "3600",
+        Kind::Secs,
+        "Asset scan check",
+        "How often fleet looks for hosts whose asset scan is stale, and rescans them. Under five minutes is raised to five.",
+    )
+    .unit(Unit::Minutes)
+    .zero("off")
+    .restart(Restart::App),
+    Spec::new(
+        CATALOG_SCAN_MAX_AGE_SECS,
+        "86400",
+        Kind::Secs,
+        "Asset scan age",
+        "A host's assets are rescanned once its last scan is older than this, and every host after the catalog or a sync changes.",
+    )
+    .unit(Unit::Hours)
+    .tags(&[Tag::Advanced]),
     Spec::new(
         WORK_DESCRIBE_CACHE_SECS,
         "300",
@@ -1639,6 +1681,15 @@ pub fn set_by(
         }
     }
     s.emit_settings_changed(key);
+    if key == HEALTH_CONTEXT_RED_PCT {
+        // The hub's `/events` stamps `needs_attention` without a store; keep
+        // its threshold equal to the one `list_sessions` now reads.
+        s.context_red_pct_changed(crate::service::health::context_red_pct(s));
+    }
+    if key.starts_with("update.") {
+        // A new track or check interval wakes the hub's channel refresh.
+        crate::service::update::settings_changed(key);
+    }
     Ok(())
 }
 

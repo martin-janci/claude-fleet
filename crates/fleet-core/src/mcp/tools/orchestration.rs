@@ -262,6 +262,36 @@ impl FleetTools {
         ok_json_compact(&conv)
     }
 
+    #[tool(description = "One tool call's input and result (omitted by \
+        session_conversation): { id, name, input, edit {file_path, old, new} \
+        | null, command | null, result | null, is_error }; texts capped at \
+        8000 chars. Read-only. Errors: as session_conversation, E_NOTFOUND.")]
+    pub(super) async fn session_tool_detail(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SessionToolDetailParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "session_tool_detail",
+            &format!(
+                "session_id={} tool_use_id={} claude_session_id={:?}",
+                p.session_id, p.tool_use_id, p.claude_session_id
+            ),
+        );
+        let row =
+            self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
+        let detail = transcript::fetch_tool_detail(
+            &self.store,
+            &self.ssh,
+            &row,
+            p.claude_session_id.as_deref(),
+            &p.tool_use_id,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json_compact(&detail)
+    }
+
     #[tool(description = "send_prompt + wait_for_session(turn_gt) + \
         session_transcript in one call. Returns { turn_seq, status: \
         satisfied | timeout, transcript } (the reply as plain text; null \
@@ -286,13 +316,9 @@ impl FleetTools {
         )?;
         // A stale-demoted row reads `idle` only because nothing moved; a
         // long tool call looks exactly like that. Ask the pane (S5 + F2).
-        // The demotion's memory, not the attention stamp: an attach or the
-        // TTL ends the reason, not the guess.
-        let demoted = lock(&self.store)
-            .map_err(to_mcp_err)?
-            .stale_demoted_by_id(row.id)
-            .map_err(|e| to_mcp_err(e.into()))?;
-        let live = if crate::store::needs_pane_confirmation(&row, demoted) {
+        // The demotion's memory (`stale_demoted_at`), not the attention
+        // stamp: an attach or the TTL ends the reason, not the guess.
+        let live = if crate::store::needs_pane_confirmation(&row) {
             tasks::LivePaneProbe {
                 store: &self.store,
                 ssh: &self.ssh,
@@ -302,7 +328,7 @@ impl FleetTools {
         } else {
             None
         };
-        run_prompt_ready(&row, demoted, live.as_deref())?;
+        run_prompt_ready(&row, live.as_deref())?;
         let _permit = self.long_poll_permit(&caller, "run_prompt")?;
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
         let before = row.turn_seq;
@@ -427,6 +453,8 @@ impl FleetTools {
                 // The worker does the requester's work (work graph M2.2).
                 let _ = s.inherit_worker_work(worker.id, req);
             }
+            // The job shows as an agent subtask of the requester's work.
+            tasks::mirror_dispatched(&s, &task, p.requester_session_id, worker.id);
             if let Some(cid) = worker.claude_session_id.as_deref() {
                 let _ = s.set_task_worker_claude_id(task.id, cid);
             }
@@ -701,6 +729,8 @@ impl FleetTools {
                         cursor: args.cursor.clone(),
                         limit: args.limit,
                         per_task: args.per_task,
+                        sections: args.sections.clone().unwrap_or_default(),
+                        with_review_total: args.with_review_total == Some(true),
                     },
                 )
                 .map_err(to_mcp_err)?,
@@ -726,7 +756,7 @@ impl FleetTools {
                     .map_err(to_mcp_err)?,
             ),
             WorkAction::Rules => {
-                ok_json_compact(&w::structure::rules(&self.store, &scope).map_err(to_mcp_err)?)
+                ok_json_compact(&w::structure::rules(self.reader(), &scope).map_err(to_mcp_err)?)
             }
             WorkAction::RulePreview => {
                 let rule = args
@@ -738,7 +768,7 @@ impl FleetTools {
                 )
             }
             WorkAction::Views => {
-                ok_json_compact(&w::structure::views(&self.store, &scope).map_err(to_mcp_err)?)
+                ok_json_compact(&w::structure::views(self.reader(), &scope).map_err(to_mcp_err)?)
             }
             WorkAction::OrgImpact => {
                 let task_id = args
@@ -746,7 +776,7 @@ impl FleetTools {
                     .as_deref()
                     .ok_or_else(|| mcp_err("E_INVALID", "org_impact needs task_id", None))?;
                 ok_json_compact(
-                    &w::structure::org_impact(&self.store, &scope, task_id, args.org_id)
+                    &w::structure::org_impact(self.reader(), &scope, task_id, args.org_id)
                         .map_err(to_mcp_err)?,
                 )
             }
@@ -762,8 +792,11 @@ impl FleetTools {
         write its hand-off. summarize {key, link_id}: \
         a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never \
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
-        kill when dirty). Work view: primary:false links a secondary; \
-        expected_* guard (E_CONFLICT).")]
+        kill when dirty). set_status {item_id, status}: a person's status for \
+        work with no ticket. create {title, parent?, notes?}: a task or \
+        subtask. propose {parent, title, why?}: a subtask a person accepts \
+        or rejects {item_id, no session_id}. Work view: primary:false links \
+        a secondary; expected_* guard (E_CONFLICT).")]
     pub(super) async fn work_link(
         &self,
         Extension(caller): Extension<Caller>,
@@ -907,6 +940,51 @@ impl FleetTools {
                 &crate::service::work::dismiss_reopened(&args, &self.store).map_err(to_mcp_err)?,
             );
         }
+        // Shared work context (design 2026-09-29): native tasks, subtasks
+        // and agent proposals. The scope gates are inside.
+        if args.action == "create" {
+            return ok_json(
+                &crate::service::work::local::create_task(&args, &self.store, &scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "propose" {
+            // The proposer is the caller's own session when it names one
+            // (through the same gate as any session argument, so another
+            // host's session name is never written or echoed), else the
+            // caller's label.
+            let proposer = match args.session_id {
+                Some(sid) => {
+                    let r =
+                        self.resolve_target_row(&caller, Some(sid), None, None, "the session")?;
+                    let name = r.friendly_name.unwrap_or(r.tmux_name);
+                    format!("{name} · {}", r.host_alias)
+                }
+                None => caller.label(),
+            };
+            return ok_json(
+                &crate::service::work::local::propose(&args, &self.store, &scope, &proposer)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        // `reject` without a session, a link or a key is a person's decision
+        // on a proposal; with one it is the link decision below (which
+        // always needs `session_id`).
+        let proposal_reject = args.action == "reject"
+            && args.session_id.is_none()
+            && args.link_id.is_none()
+            && args.key.is_none();
+        if args.action == "accept" || proposal_reject {
+            return ok_json(
+                &crate::service::work::local::decide(
+                    &args,
+                    &self.store,
+                    &scope,
+                    args.action == "accept",
+                )
+                .map_err(to_mcp_err)?,
+            );
+        }
         if args.action == "name" {
             // Work graph M11.1: name new local work on a session, or rename
             // a local item. The host and org fences are inside, and answer
@@ -929,6 +1007,23 @@ impl FleetTools {
                     None,
                 )),
             };
+        }
+        if args.action == "set_status" {
+            // A person's status for work with no ticket (design
+            // 2026-09-28 §2). The fence is inside `set_status`: an item
+            // outside the scope answers as an unknown id, and a tracker
+            // item is `E_INVALID`, naming the ticket.
+            let item_id = args
+                .item_id
+                .ok_or_else(|| mcp_err("E_INVALID", "set_status needs item_id", None))?;
+            let status = args
+                .status
+                .as_deref()
+                .ok_or_else(|| mcp_err("E_INVALID", "set_status needs status", None))?;
+            return ok_json(
+                &crate::service::work::status::set_status(&self.store, &scope, item_id, status)
+                    .map_err(to_mcp_err)?,
+            );
         }
         if args.action == "tidy_apply" {
             let items = args.items.clone().unwrap_or_default();

@@ -5,7 +5,7 @@
 //! query of its own: it names a source here, with literal parameters.
 //!
 //! Access: every source below reads the whole fleet (its usage, its work
-//! graph's retention), so it is for the process that owns the fleet (a
+//! graph's retention and usage counts), so it is for the process that owns the fleet (a
 //! standalone desktop, or a master token on a hub), exactly like
 //! `usage_report` and `work_admin`. An org-scoped variant is a new source,
 //! not a parameter.
@@ -49,10 +49,23 @@ const fn col(id: &'static str, label: &'static str, ty: ColType) -> Column {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "shape", rename_all = "snake_case")]
 pub enum Shape {
-    Scalar { ty: ColType },
-    Record { fields: &'static [Column] },
-    Rows { columns: &'static [Column] },
-    Series { x: Column, y: &'static [Column] },
+    Scalar {
+        ty: ColType,
+    },
+    Record {
+        fields: &'static [Column],
+    },
+    Rows {
+        columns: &'static [Column],
+    },
+    Series {
+        x: Column,
+        y: &'static [Column],
+    },
+    /// Per-account plan headroom snapshots
+    /// (`service::account_usage::AccountUsageSnapshot`): what an
+    /// `account_usage` item draws, and nothing else takes.
+    AccountUsage,
 }
 
 impl Shape {
@@ -62,6 +75,7 @@ impl Shape {
             Shape::Record { .. } => "record",
             Shape::Rows { .. } => "rows",
             Shape::Series { .. } => "series",
+            Shape::AccountUsage => "account_usage",
         }
     }
 }
@@ -85,6 +99,17 @@ pub struct ParamSpec {
     pub help: &'static str,
 }
 
+/// A source the app keeps current itself instead of reading through
+/// `fetch_page_source`: `command` loads it, so that command's hub verdict
+/// is the source's (`list_account_usage` is `LocalOnly`: a paired desktop
+/// has no usage cache and shows no data items), and the `event` row kind
+/// keeps it live. `fetch` refuses it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Live {
+    pub command: &'static str,
+    pub event: &'static str,
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct SourceSpec {
     pub id: &'static str,
@@ -93,6 +118,8 @@ pub struct SourceSpec {
     #[serde(flatten)]
     pub shape: Shape,
     pub params: &'static [ParamSpec],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live: Option<Live>,
 }
 
 const TOKEN_COLUMNS: &[Column] = &[
@@ -113,7 +140,19 @@ const HOST_PARAM: ParamSpec = ParamSpec {
 /// Every data source. Order is the order `describe_sources` lists them in.
 pub const SOURCES: &[SourceSpec] = &[
     SourceSpec {
+        id: "accounts.usage",
+        live: Some(Live {
+            command: "list_account_usage",
+            event: "account_usage",
+        }),
+        label: "Claude account usage",
+        help: "Each Claude account's plan headroom: the 5-hour and weekly windows, per-model limits, when it was checked and from which host, and when a refresh is allowed.",
+        shape: Shape::AccountUsage,
+        params: &[],
+    },
+    SourceSpec {
         id: "usage.total",
+        live: None,
         label: "Token usage",
         help: "Tokens and estimated cost over every session row that still exists, each over its whole lifetime.",
         shape: Shape::Record {
@@ -123,6 +162,7 @@ pub const SOURCES: &[SourceSpec] = &[
     },
     SourceSpec {
         id: "usage.by_day",
+        live: None,
         label: "Usage by day",
         help: "Tokens and estimated cost per UTC day from the durable roll-up, killed sessions included.",
         shape: Shape::Series {
@@ -145,6 +185,7 @@ pub const SOURCES: &[SourceSpec] = &[
     },
     SourceSpec {
         id: "usage.by_host",
+        live: None,
         label: "Usage by host",
         help: "Tokens and estimated cost per host over the session rows that still exist.",
         shape: Shape::Rows {
@@ -159,6 +200,7 @@ pub const SOURCES: &[SourceSpec] = &[
     },
     SourceSpec {
         id: "usage.by_model",
+        live: None,
         label: "Usage by model",
         help: "Tokens and estimated cost per model over the session rows that still exist, by each session's latest model.",
         shape: Shape::Rows {
@@ -174,6 +216,7 @@ pub const SOURCES: &[SourceSpec] = &[
     },
     SourceSpec {
         id: "work.retention",
+        live: None,
         label: "Work retention",
         help: "Per swept table: its window, its rows, and what a sweep would delete now (a dry run).",
         shape: Shape::Rows {
@@ -187,7 +230,29 @@ pub const SOURCES: &[SourceSpec] = &[
         params: &[],
     },
     SourceSpec {
+        id: "work.usage",
+        live: None,
+        label: "Work graph usage",
+        help: "How the work graph was used over the window: links, detection, handovers, resumes, the journal, tidy-up and each tracker's sync, as counts (`fleet-hub work usage`).",
+        shape: Shape::Rows {
+            columns: &[
+                col("group", "What", ColType::Text),
+                col("counted", "Counted", ColType::Text),
+            ],
+        },
+        params: &[ParamSpec {
+            name: "days",
+            ty: ParamType::Days {
+                min: 1,
+                max: crate::service::work::usage::MAX_DAYS as u64,
+            },
+            default: Some(crate::service::work::usage::DEFAULT_DAYS as u64),
+            help: "How many days back.",
+        }],
+    },
+    SourceSpec {
         id: "work.retention_last",
+        live: None,
         label: "Last retention sweep",
         help: "When the last sweep ran and what it deleted.",
         shape: Shape::Record {
@@ -261,6 +326,10 @@ fn retention_label(table: &str) -> &str {
         "work_items" => "Done tickets",
         "session_events" => "Work timeline",
         "work_item_descriptions" => "Full descriptions",
+        // The write-back outbox: a write still waiting to be sent is never
+        // swept, so its "would delete" counts settled (sent or given-up)
+        // rows only.
+        "tracker_writes" => "PR link outbox (sent or given up)",
         other => other,
     }
 }
@@ -285,6 +354,15 @@ pub fn fetch(
 ) -> Result<Value, IpcError> {
     let spec = source(id)
         .ok_or_else(|| IpcError::new(codes::E_INVALID, format!("unknown data source {id}")))?;
+    if let Some(live) = spec.live {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{id} is read live, through {} and the {} event",
+                live.command, live.event
+            ),
+        ));
+    }
     let p = resolve_params(spec, params)?;
     let host = p.get("host").and_then(Value::as_str);
     match spec.id {
@@ -373,6 +451,24 @@ pub fn fetch(
                     .collect(),
             ))
         }
+        "work.usage" => {
+            let days = p
+                .get("days")
+                .and_then(Value::as_u64)
+                .unwrap_or(u64::from(crate::service::work::usage::DEFAULT_DAYS));
+            let u = crate::service::work::usage::usage(
+                s,
+                days as u32,
+                now,
+                &crate::service::trackers::sync::metrics_for,
+            )?;
+            Ok(Value::Array(
+                u.rows()
+                    .into_iter()
+                    .map(|(group, counted)| json!({ "group": group, "counted": counted }))
+                    .collect(),
+            ))
+        }
         "work.retention_last" => {
             let st = crate::service::work::retention::status_locked(s, now)?;
             let at = st.last_sweep.as_ref().map(|l| l.at);
@@ -397,6 +493,15 @@ pub fn fetch(
 mod tests {
     use super::*;
 
+    /// Every table the retention sweep keeps has a name a person reads,
+    /// never the raw SQL table.
+    #[test]
+    fn every_swept_table_has_a_label() {
+        for t in crate::store::RetentionTable::ALL {
+            assert_ne!(retention_label(t.table()), t.table(), "{}", t.table());
+        }
+    }
+
     /// Every value `fetch` returns has exactly the columns its shape
     /// declares, so a renderer can trust the declaration.
     fn assert_matches_shape(spec: &SourceSpec, v: &Value) {
@@ -418,6 +523,7 @@ mod tests {
                     assert_eq!(keys_of(row), ids(columns), "{}", spec.id);
                 }
             }
+            Shape::AccountUsage => unreachable!("{}: a live source is never fetched", spec.id),
             Shape::Series { x, y } => {
                 let mut cols = vec![x];
                 cols.extend_from_slice(y);
@@ -476,12 +582,42 @@ mod tests {
     #[test]
     fn every_source_has_a_reader_that_returns_its_shape() {
         let (s, now) = seeded();
-        for spec in SOURCES {
+        for spec in SOURCES.iter().filter(|s| s.live.is_none()) {
             let v = fetch(&s, spec.id, &Map::new(), now)
                 .unwrap_or_else(|e| panic!("{}: {}", spec.id, e.message));
             assert_matches_shape(spec, &v);
             if let Some(rows) = v.as_array() {
                 assert!(!rows.is_empty(), "{}: the seed shows up", spec.id);
+            }
+        }
+    }
+
+    /// A live source is read through its command, never `fetch`; only an
+    /// `account_usage` source is live, and it is the only one of that shape.
+    #[test]
+    fn a_live_source_is_refused_by_fetch_and_names_its_command() {
+        let (s, now) = seeded();
+        for spec in SOURCES {
+            assert_eq!(
+                spec.live.is_some(),
+                spec.shape == Shape::AccountUsage,
+                "{}: live exactly when it is account usage",
+                spec.id
+            );
+            if let Some(live) = spec.live {
+                let e = fetch(&s, spec.id, &Map::new(), now).unwrap_err();
+                assert!(e.message.contains(live.command), "{}", e.message);
+                assert!(
+                    spec.params.is_empty(),
+                    "{}: a live source takes no params",
+                    spec.id
+                );
+                assert!(
+                    crate::events::EVENT_KINDS.contains(&live.event),
+                    "{}: `{}` is not an event kind",
+                    spec.id,
+                    live.event
+                );
             }
         }
     }

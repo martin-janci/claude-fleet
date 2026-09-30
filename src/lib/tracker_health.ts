@@ -86,7 +86,12 @@ const PROVIDER_SHORT: Record<string, string> = {
  *  does not know. */
 export function providerShort(provider: string | undefined): string {
   if (!provider) return 'tracker';
-  return PROVIDER_SHORT[provider] ?? provider;
+  return knownProviderShort(provider) ?? provider;
+}
+
+/** "Jira", "GitHub", … for a provider id this build knows; null otherwise. */
+export function knownProviderShort(provider: string): string | null {
+  return Object.hasOwn(PROVIDER_SHORT, provider) ? PROVIDER_SHORT[provider] : null;
 }
 
 /** "Jira (acme)". A name that already says its provider ("acme (GitHub)")

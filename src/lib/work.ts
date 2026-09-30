@@ -83,8 +83,36 @@ export function sessionWorkLinks(sessionId: number): Promise<Result<WorkLink[]>>
  *  (Re-exported by `work_view.ts`, where its readers live.) */
 export const workChanged = writable(0);
 
-export function bumpWorkChanged(): void {
+/** What moved, per bump: a session event (`session`), a `work:changed`
+ *  kind from the hub (`placement` / `org` / `rule` / `view`), the stream's
+ *  own `resync` after a gap, or a write this window made (`local`, which
+ *  may have moved anything). Readers that show only some of it (the saved
+ *  views, the rules) skip the rest. */
+export type WorkChangeKind = 'session' | 'placement' | 'org' | 'rule' | 'view' | 'resync' | 'local';
+
+const CHANGE_KINDS: ReadonlySet<string> = new Set<WorkChangeKind>([
+  'session',
+  'placement',
+  'org',
+  'rule',
+  'view',
+  'resync',
+  'local',
+]);
+
+// The kinds of the bump being delivered: set just before the store moves,
+// read by `onWorkChangedDebounced`'s subscribers in the same tick.
+let bumpKinds: readonly WorkChangeKind[] = ['local'];
+
+export function bumpWorkChanged(...kinds: WorkChangeKind[]): void {
+  const known = kinds.filter((k) => CHANGE_KINDS.has(k));
+  bumpKinds = known.length > 0 ? known : ['local'];
   workChanged.update((n) => n + 1);
+}
+
+/** Whether a debounced run's kinds include any of `want`. */
+export function changedAny(kinds: ReadonlySet<WorkChangeKind>, ...want: WorkChangeKind[]): boolean {
+  return want.some((k) => kinds.has(k));
 }
 
 /** A link decision's answer: the session's row and, for a confirm / reject
@@ -95,24 +123,26 @@ export type DecidedRow = SessionRow & { link_version?: number };
 
 /** Run `fn` once `workChanged` has been quiet for `ms()` after a bump — one
  *  re-read for a burst (a write's own bump, then its `session:updated`),
- *  never for the subscription's initial call. `ms` is read per bump, so a
- *  component can pass its prop. With `maxWaitMs`, the run comes at most
- *  that long after the first bump it waits for, so a steady stream of
- *  bumps (a busy fleet) cannot hold it back forever. The returned
- *  unsubscriber also cancels a pending run. */
+ *  never for the subscription's initial call. `fn` is given every kind the
+ *  burst carried. `ms` is read per bump, so a component can pass its prop.
+ *  With `maxWaitMs`, the run comes at most that long after the first bump
+ *  it waits for, so a steady stream of bumps (a busy fleet) cannot hold it
+ *  back forever. The returned unsubscriber also cancels a pending run. */
 export function onWorkChangedDebounced(
-  fn: () => void,
+  fn: (kinds: ReadonlySet<WorkChangeKind>) => void,
   ms: () => number,
   maxWaitMs?: () => number,
 ): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let pendingSince: number | null = null;
+  let pending = new Set<WorkChangeKind>();
   let first = true;
   const off = workChanged.subscribe(() => {
     if (first) {
       first = false;
       return;
     }
+    for (const k of bumpKinds) pending.add(k);
     clearTimeout(timer);
     let wait = ms();
     if (maxWaitMs) {
@@ -122,7 +152,9 @@ export function onWorkChangedDebounced(
     }
     timer = setTimeout(() => {
       pendingSince = null;
-      fn();
+      const kinds = pending;
+      pending = new Set();
+      fn(kinds);
     }, wait);
   });
   return () => {
@@ -434,6 +466,35 @@ export async function renameWorkItem(itemId: number, title: string): Promise<Res
     patchWorkItemTitle(itemId, r.value.title);
     bumpWorkChanged();
   }
+  return r;
+}
+
+/** A task, or a subtask under `parent` (`item:<id>`), written in Fleet. */
+export async function createWorkTask(input: {
+  title: string;
+  parent?: string | null;
+  projectId?: number | null;
+  notes?: string | null;
+}): Promise<Result<WorkItemRow>> {
+  const notes = input.notes?.trim();
+  const r = await invokeCmd<WorkItemRow>('create_work_task', {
+    args: {
+      title: input.title.trim(),
+      ...(input.parent ? { parent: input.parent } : {}),
+      ...(input.projectId != null ? { project_id: input.projectId } : {}),
+      ...(notes ? { notes } : {}),
+    },
+  });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
+/** A person accepts or rejects an agent's proposed subtask. */
+export async function decideWorkProposal(itemId: number, accept: boolean): Promise<Result<WorkItemRow>> {
+  const r = await invokeCmd<WorkItemRow>(accept ? 'accept_work_proposal' : 'reject_work_proposal', {
+    args: { item_id: itemId },
+  });
+  if (r.ok) bumpWorkChanged();
   return r;
 }
 

@@ -7,20 +7,25 @@
 //! Nothing here decides visibility: `service::work::view` filters by the
 //! caller's `OrgScope`, and `service::work::structure` gates the writes.
 
-use super::work::{link_columns_prefixed, map_item, map_link, ITEM_COLUMNS, LINK_COLUMN_COUNT};
-use super::{now_unix, ItemMeta, Store, WorkItemRow, WorkLinkRow};
+use super::work::{
+    link_columns_prefixed, map_item, map_link, ITEM_COLUMNS, ITEM_COLUMN_COUNT, LINK_COLUMN_COUNT,
+};
+use super::{now_unix, Store, WorkItemRow, WorkLinkRow};
 use crate::events::{EventBus as _, RowChange, WorkChanged};
 use crate::ipc_error::{codes, IpcError};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
-/// One work item as the Work view reads it: the row, its meta (assignee,
-/// description), the tracker's containers (project / team keys, Asana
-/// project gids) and a local item's own org (066).
+/// One work item as the Work view reads it: the row, its assignee, the
+/// tracker's containers (project / team keys, Asana project gids) and a
+/// local item's own org (066). The rest of `meta` (the description) is not
+/// read here: only a task's detail needs it, and it reads that one item's
+/// through [`Store::work_item_meta`].
 #[derive(Debug, Clone)]
 pub struct ViewItem {
     pub item: WorkItemRow,
-    pub meta: ItemMeta,
+    /// `meta.assignee_id` (the tracker account the item is assigned to).
+    pub assignee_id: Option<String>,
     pub containers: Vec<String>,
     /// `work_items.org_id`: a LOCAL item's own org; never read for a
     /// tracker item (its org is its tracker's).
@@ -178,17 +183,20 @@ impl Store {
     /// link still names (kept for that link's history).
     pub fn work_view_items(&self) -> Result<Vec<ViewItem>, IpcError> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {ITEM_COLUMNS}, meta, containers, org_id FROM work_items w \
+            "SELECT {ITEM_COLUMNS}, \
+                    CASE WHEN json_valid(w.meta) \
+                          AND json_type(w.meta, '$.assignee_id') = 'text' \
+                         THEN json_extract(w.meta, '$.assignee_id') END, \
+                    containers, org_id FROM work_items w \
              WHERE w.tracker_id IS NULL OR w.tracker_id IN (SELECT id FROM trackers) \
                 OR EXISTS (SELECT 1 FROM work_links l WHERE l.item_id = w.id)"
         ))?;
         let rows = stmt.query_map([], |r| {
-            let meta: Option<String> = r.get(23)?;
             Ok(ViewItem {
                 item: map_item(r)?,
-                meta: ItemMeta::parse(meta.as_deref()),
-                containers: json_list(r.get(24)?),
-                own_org: r.get(25)?,
+                assignee_id: r.get(ITEM_COLUMN_COUNT)?,
+                containers: json_list(r.get(ITEM_COLUMN_COUNT + 1)?),
+                own_org: r.get(ITEM_COLUMN_COUNT + 2)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -199,14 +207,46 @@ impl Store {
         self.view_links_where("1 = 1", rusqlite::params![])
     }
 
-    /// The links of one session's participant (live, suggested, rejected
-    /// and ended), newest first.
-    pub fn work_view_session_links(&self, session_id: i64) -> Result<Vec<ViewLink>, IpcError> {
-        self.view_links_where(
-            "l.participant_id = (SELECT id FROM participants \
-                                  WHERE session_id = ?1 AND retired_at IS NULL)",
-            rusqlite::params![session_id],
-        )
+    /// `(item_id, session_id)` for every live confirmed link whose session
+    /// is presently working (native item status, design 2026-09-28 §2 rule
+    /// 3): what `service::work::status::effective_status` lifts to
+    /// `in_progress` (for a local item; the function itself gates on
+    /// `source`). One query for the whole page — the shape
+    /// `Store::tidy_sessions`'s `in_progress` set already uses, joined
+    /// through `sessions` instead of filtered by the item's own stored
+    /// category.
+    ///
+    /// Returns the session too, not just the item id, so the caller can
+    /// fence the lift by `OrgScope` (`Graph::load` does: a scope that
+    /// cannot see the session must not see its "working" derived either —
+    /// fix round 2, a caller-side check this store method does not make).
+    ///
+    /// `l.item_id IS NOT NULL` is load-bearing, not an optimisation: a
+    /// `work_links` row may name a bare `ref_key` with no item yet
+    /// (migration 046's CHECK allows either), and `l.item_id` is `NULL` for
+    /// one. Without this clause, `r.get::<_, i64>(0)` on that NULL would
+    /// **error** — not silently admit a bogus id — failing the whole query
+    /// and, with it, every `tree` / `task` / `session_tasks` / `review`
+    /// call that loads a `Graph`.
+    ///
+    /// This `WHERE`, `crate::effective_status_sql!`'s `EXISTS`
+    /// (`store/work_status.rs`) and
+    /// `service::work::handover::gather_stored`'s `has_working_session` must
+    /// read as the same condition — all three answer "is a confirmed,
+    /// unended `work_links` row naming this item on a session with
+    /// `claude_status = 'working'`" — so a caller sees the same lift
+    /// whichever path served it. The macro's doc lists all three; check
+    /// them before changing any.
+    pub fn work_items_with_working_session(&self) -> Result<Vec<(i64, i64)>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT l.item_id, p.session_id FROM work_links l \
+             JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+             JOIN sessions s     ON s.id = p.session_id \
+             WHERE l.ended_at IS NULL AND l.state = 'confirmed' \
+               AND s.claude_status = 'working' AND l.item_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     fn view_links_where(
@@ -312,6 +352,23 @@ impl Store {
         )?;
         let rows = stmt.query_map([], map_placement)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Drop the placements whose task no longer exists: an `item:N` whose
+    /// item row is gone, a `ref:K` no bare link (`ref_key = K`, no item)
+    /// names any more. Run by [`Store::bind_tracker_refs`] after it re-keys
+    /// the placements it can; never on the Work view's read path. Returns
+    /// how many were removed.
+    pub fn sweep_orphan_placements(&self) -> Result<usize, IpcError> {
+        let n = self.conn.execute(
+            "DELETE FROM work_placements WHERE \
+               (task_id LIKE 'item:%' AND NOT EXISTS (SELECT 1 FROM work_items w \
+                  WHERE 'item:' || w.id = work_placements.task_id)) \
+               OR (task_id LIKE 'ref:%' AND NOT EXISTS (SELECT 1 FROM work_links l \
+                  WHERE l.item_id IS NULL AND 'ref:' || l.ref_key = work_placements.task_id))",
+            [],
+        )?;
+        Ok(n)
     }
 
     pub fn work_placement(&self, task_id: &str) -> Result<Option<Placement>, IpcError> {
@@ -664,6 +721,14 @@ impl Store {
             .unwrap();
     }
 
+    /// Remove a work item row outright (no store path deletes one; the
+    /// placement sweep's test needs an `item:N` whose item is gone).
+    pub(crate) fn seed_delete_item(&self, id: i64) {
+        self.conn
+            .execute("DELETE FROM work_items WHERE id = ?1", [id])
+            .unwrap();
+    }
+
     pub(crate) fn seed_rule(&self, name: &str, c: &RuleConditions, group: &str) -> i64 {
         self.conn
             .execute(
@@ -747,5 +812,35 @@ impl Store {
                 rusqlite::params![link_id, super::now_unix()],
             )
             .unwrap();
+    }
+
+    /// End live link `link_id` while its session lives on, as a branch
+    /// change does (no snapshot: the session is still there).
+    pub(crate) fn seed_end_link(&self, link_id: i64, reason: &str) {
+        self.conn
+            .execute(
+                "UPDATE work_links SET ended_at = ?2, end_reason = ?3, is_primary = 0 \
+                 WHERE id = ?1",
+                rusqlite::params![link_id, super::now_unix(), reason],
+            )
+            .unwrap();
+    }
+
+    /// A second row of link `link_id` — same participant, target, state and
+    /// end — as no single store path writes, but as a session's history can
+    /// hold (the same task linked, ended, linked again). Returns its id.
+    pub(crate) fn seed_duplicate_link(&self, link_id: i64) -> i64 {
+        self.conn
+            .execute(
+                "INSERT INTO work_links (item_id, ref_key, participant_id, state, source, \
+                   created_at, decided_at, ended_at, end_reason, claude_session_id, strength, \
+                   rule, evidence) \
+                 SELECT item_id, ref_key, participant_id, state, source, created_at + 1, \
+                   decided_at, ended_at, end_reason, claude_session_id, strength, rule, evidence \
+                 FROM work_links WHERE id = ?1",
+                rusqlite::params![link_id],
+            )
+            .unwrap();
+        self.conn.last_insert_rowid()
     }
 }

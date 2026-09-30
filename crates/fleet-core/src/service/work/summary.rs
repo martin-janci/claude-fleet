@@ -14,16 +14,18 @@
 //!   the fork leaves none. `--tools ''` disables every built-in tool and
 //!   `--strict-mcp-config` (with no `--mcp-config`) loads no MCP server, so
 //!   the run can only read the conversation and answer. `--settings
-//!   '{"hooks":{}}'` keeps fleet's hooks out, so it cannot journal or
-//!   deliver into itself. [`summary_script`] builds exactly this, and a test
-//!   pins it.
+//!   '{"disableAllHooks":true}'` keeps fleet's hooks out, so it cannot journal or
+//!   deliver into itself. These are the shared
+//!   [`crate::service::claude_print::isolation_flags`]; [`summary_script`]
+//!   builds exactly this, and a test pins it.
 //! * **In the conversation's own directory.** `--resume` finds a transcript
 //!   by the directory it ran in, so the script finds the transcript first
 //!   (the M11.2 probe's candidates), reads its recorded `cwd`, and runs
 //!   there. A transcript that is gone is `E_NO_TRANSCRIPT`; a directory that
 //!   is gone is `E_NOTFOUND` — nothing is recreated for a summary.
 //! * **stdout, never a pane.** The reply is read from the command's output
-//!   after a tag line, so a pane's echo can never be mistaken for it.
+//!   after the first tag line, so neither a pane's echo nor a line the model
+//!   prints can be mistaken for the verdict.
 //! * **Untrusted and bounded.** The text may quote anything the session
 //!   read: it is redacted ([`crate::logging::redact`]), capped at
 //!   [`SUMMARY_MAX_CHARS`], stored as the agent's, and fenced wherever it is
@@ -45,8 +47,8 @@ use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
-/// The tag the script prints before its answer; everything after the last
-/// `<tag>run` line is the summary.
+/// The tag the script prints before its answer; everything after the first
+/// whole `<tag>run` line is the summary.
 pub const SUMMARY_TAG: &str = "fleet-summary=";
 
 /// The most of a summary fleet keeps (and fences), in characters.
@@ -111,32 +113,19 @@ pub fn summary_script(
     claude_session_id: &str,
     model: &str,
 ) -> Result<String, String> {
+    use crate::service::claude_print;
     use crate::shell::quote;
     if !settings::SUMMARY_MODELS.contains(&model) {
         return Err(format!("refusing summary model {model:?}"));
     }
     let candidates = super::resume::transcript_candidates(stored_path, claude_session_id)?;
-    let claude = [
-        "claude",
-        "-p",
-        "--resume",
-        &quote(claude_session_id),
-        "--fork-session",
-        "--no-session-persistence",
-        "--model",
-        &quote(model),
-        // `disableAllHooks`, not `{"hooks":{}}`: Claude Code keeps the
-        // user-level hooks (fleet's own, in ~/.claude/settings.json) under an
-        // empty `hooks` object, so the fork would report itself to fleet as a
-        // new conversation and prompt. Checked against Claude Code 2.1.283.
-        "--settings",
-        &quote(r#"{"disableAllHooks":true}"#),
-        "--tools",
-        &quote(""),
-        "--strict-mcp-config",
-        &quote(SUMMARY_PROMPT),
-    ]
-    .join(" ");
+    let claude = format!(
+        "claude -p --resume {} --fork-session --model {} {} {}",
+        quote(claude_session_id),
+        quote(model),
+        claude_print::isolation_flags(),
+        quote(SUMMARY_PROMPT),
+    );
     let t = SUMMARY_TAG;
     Ok(format!(
         "set -o pipefail; f=''; \
@@ -144,11 +133,11 @@ pub fn summary_script(
          if [ -z \"$f\" ]; then echo {t}absent; exit 0; fi; \
          d=$(grep -o -m1 '\"cwd\":\"[^\"]*\"' \"$f\" | head -n1 | sed -e 's/^\"cwd\":\"//' -e 's/\"$//'); \
          if [ -z \"$d\" ] || ! cd -- \"$d\" 2>/dev/null; then echo {t}nodir; exit 0; fi; \
-         if ! command -v claude >/dev/null 2>&1; then echo {t}noclaude; exit 0; fi; \
-         t=''; if command -v timeout >/dev/null 2>&1; then t='timeout {HOST_TIMEOUT_SECS}'; fi; \
-         echo {t}run; \
-         $t {claude} </dev/null | head -c {OUTPUT_CAP_BYTES}",
+         {noclaude} \
+         {run}",
         cands = candidates.join(" "),
+        noclaude = claude_print::noclaude_check(t),
+        run = claude_print::run_capped(t, &claude, HOST_TIMEOUT_SECS, OUTPUT_CAP_BYTES, true),
     ))
 }
 
@@ -167,22 +156,21 @@ pub enum ScriptAnswer {
     Nothing,
 }
 
-/// PURE: read the script's stdout. The last tag line decides; for `run`,
-/// everything after it is the reply.
+/// PURE: read the script's stdout. The FIRST whole tag line decides; for
+/// `run`, everything after it is the reply. The script prints exactly one tag
+/// line, before `claude` starts, so a line the model prints (the summarised
+/// conversation is untrusted) can never stand in for the verdict.
 pub fn parse_script_output(stdout: &str) -> ScriptAnswer {
-    let lines: Vec<&str> = stdout.lines().collect();
-    let Some(i) = lines
-        .iter()
-        .rposition(|l| l.trim().starts_with(SUMMARY_TAG))
-    else {
-        return ScriptAnswer::Nothing;
-    };
-    match lines[i].trim().trim_start_matches(SUMMARY_TAG) {
-        "absent" => ScriptAnswer::Absent,
-        "nodir" => ScriptAnswer::NoDir,
-        "noclaude" => ScriptAnswer::NoClaude,
-        "run" => ScriptAnswer::Ran(lines[i + 1..].join("\n").trim().to_string()),
-        _ => ScriptAnswer::Nothing,
+    match crate::service::claude_print::parse_tagged(
+        stdout,
+        SUMMARY_TAG,
+        &["absent", "nodir", "noclaude", "run"],
+    ) {
+        Some(("absent", _)) => ScriptAnswer::Absent,
+        Some(("nodir", _)) => ScriptAnswer::NoDir,
+        Some(("noclaude", _)) => ScriptAnswer::NoClaude,
+        Some((_, rest)) => ScriptAnswer::Ran(rest),
+        None => ScriptAnswer::Nothing,
     }
 }
 

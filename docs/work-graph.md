@@ -71,6 +71,18 @@ and *Clear all*; an empty list names the filters that hide it.
 > **[Screenshot placeholder]** The sidebar grouped by work, with a Done
 > section open and the Filters panel's Work group showing.
 
+## The task list and the task page (2026-09-29)
+
+The Work tab opens in **List** layout; the header, filters and saved views are unchanged, and **List | Grouped** switches to the organisation → group tree described below.
+
+- **List** sorts every task the filters match into **To do**, **Doing** (a live session, or in progress) and **Done** (the last 7 days, collapsed). A ticket keeps its tracker's own status name in its row; its section follows fleet's effective status and live sessions.
+- **+ New task** writes a task in fleet itself (`TASK-<id>`); ▾ adds a project and notes. **Start** opens a session in that project with the title and notes as its first prompt.
+- **The task page** adds *Brief*, *Subtasks* (+ Add subtask, Start), *Proposals* (an agent's suggested subtasks — Accept / Reject; rejected ones behind a toggle), *Delegated jobs* with their result, and *Agent steps* — the agent's own `TaskCreate` / `TaskUpdate` todos per session, labelled "per the agent", never a status. Placement and rules sit under *Placement & rules*.
+- A subtask started from the list gets the parent ticket's brief (only when you may see that ticket) followed by its own title and notes.
+- Every `dispatch_task` job appears as an agent subtask under the requester's task and follows the job's state. The ☑ Tasks popover is gone; a session's jobs are still in its details.
+- Tracker items stay read-only: nothing here writes to Jira, Asana or GitHub.
+- Hosts pick up step capture after re-provisioning (they read `provision_stale` until then); meanwhile the Stop hook backfills steps from the transcript.
+
 ## The Work view
 
 The sidebar has two ways into the same work: **Sessions** (host / project →
@@ -220,7 +232,14 @@ including tasks with no session at all — as reads of the `work` tool
   tasks as any other. Pages are a keyset: pass
   `next_cursor` back with the same filters (other filters refuse it). No
   task is repeated across pages while the fleet changes; a task that moved
-  meanwhile may be skipped until the next full read.
+  meanwhile may be skipped until the next full read. A client (the desktop's
+  Work view) can also send `sections` (up to 100 of `{ org_id, group_id,
+  limit? }`) and `with_review_total: true`: the same read then answers
+  `sections`, each exactly the first page that section's own read
+  (`filters.org` / `filters.group`) would give, cursor included, and
+  `review_total`, the review inbox's total — so one refresh is one read.
+  Neither is in the tool's schema (an assistant pages a section by its
+  filters), and an older hub answers without them.
 - `work { action: task, task_id }` (`item:<id>` or `ref:<KEY>`): one task
   with every session and why it is linked, its tracker description (at
   most 600 characters, with `description_chars`, the full length fleet
@@ -350,6 +369,17 @@ therefore never counts as yours: it does not count toward a project's
 automatic trust, it is not written back to a tracker, and the usage
 summary counts it apart. When an agent
 decides the same way you already did, your decision is kept.
+
+### Status of work with no ticket
+
+Work fleet tracks itself — named work with no ticket — carries one of three
+states: to do, in progress, done. You never have to set it: fleet marks work
+*in progress* while a session is working on it, and *done* once the pull
+request it produced is merged. Setting it yourself overrides that for good; the
+same work will not flip back because a session started again.
+
+A ticket's status is not yours to set here — it belongs to Jira, GitHub, Asana
+or Linear, and fleet would be overwritten on its next sync. Change it there.
 
 ### Detection
 
@@ -506,12 +536,16 @@ The full details are in [hub.md → Trackers](hub.md#trackers).
 
 ### Write-back: the PR link (Jira, off by default)
 
-For a Jira tracker (Cloud or Data Center), Settings → Trackers has **Link pull requests**
-(add a session's pull request to its ticket as a link). With it on, when the PR
-probe sees a pull request on a session, fleet adds that PR to the linked
-ticket once, as a Jira remote link titled `PR: owner/repo#n`. Nothing else
-is ever written: no transition, no worklog, no comment (D29), and nothing a
-transcript or a tracker wrote.
+For a Jira tracker (Cloud or Data Center), Settings → Trackers has **Link
+pull requests** (add a session's pull request to its ticket as a link).
+With it on, when a session has a pull request, fleet adds that PR to the
+linked ticket once, as a Jira remote link titled `PR: owner/repo#n`. The
+write is queued when the PR probe sees the PR (or its state change), when a
+person links or confirms work on a session that already has a PR (also when
+the sync binds a key typed before the tracker was connected), and when you
+turn the setting on, for every PR already open on a session linked to one of
+the tracker's tickets. Nothing else is ever written: no transition, no
+worklog, no comment (D29), and nothing a transcript or a tracker wrote.
 
 - **Only work a person linked.** The link must be confirmed and made by
   hand or by *Start* (`manual` / `started`). A detection guess, an agent's
@@ -766,7 +800,10 @@ it. `0` keeps a table forever.
 - `work.retention.journal_days` (365): the work journal. Kept regardless of
   age: rows of an open conversation, of a live-linked session, and of work
   that is not done or still has a live link; an undelivered handover and
-  one addressed to a live session.
+  one addressed to a live session. Work fleet tracks itself keeps its
+  journal and handover history whatever its status — marking your own work
+  done never puts its history on a clock — the same line the ticket cache
+  draws by sweeping only tickets.
 - `work.retention.tracker_items_days` (180): cached tickets in done. Kept
   while any link, live or ended, names one, and while it is the parent of a
   kept ticket.
@@ -788,7 +825,8 @@ it. `0` keeps a table forever.
   timeline events. The newest of each kind per session stays.
 - The write-back outbox (see *Write-back*) follows the journal's window:
   a PR link that was sent, or given up on, goes once it is older than
-  `work.retention.journal_days`; one still waiting is never swept.
+  `work.retention.journal_days`; one still waiting is never swept. It has
+  its own row (`tracker_writes`, "PR link outbox") in the retention status.
 
 A sweep deletes at most 2,000 rows per table per tick, 200 per store lock.
 Settings → Limits → Retention (standalone desktop) shows the row counts, a
@@ -897,10 +935,12 @@ status` and Settings → Trackers. See
 ## Usage summary
 
 `work_admin { action: usage, days? }` (on a hub, `fleet-hub work usage
-[--days N] [--json]`; on a standalone desktop, Settings → Work → *Usage*)
+[--days N] [--json]`; on a standalone desktop, Settings → Usage → *Work
+graph usage*, also linked from Settings → General → Work)
 counts how the work graph is actually used over the last `days` (default
 30, 1 to 365). It is read-only and master-only (a per-host or client token
-is refused, and a paired desktop shows no Usage section). It records
+is refused, and a paired desktop shows no counts: the page says to read
+them on the hub). It records
 nothing, sends nothing anywhere, and holds counts and ids only: never a
 title, key, path or error text.
 
@@ -910,7 +950,7 @@ title, key, path or error text.
 | detection | suggestions made, confirmed by a person, confirmed by an agent, promoted by detection itself, rejected, withdrawn (detection took it back: withdrawn or decayed), carried (a resume, fork or inherit carried the same work onto the session and settled it), expired (the session ended undecided); the median time from suggestion to a person's decision; classification nudges |
 | handover | handovers requested and written, turns that ended without one, requests that could not be sent |
 | resume | resumes, with and without a brief |
-| journal | briefs queued and delivered, compaction summaries harvested |
+| journal | briefs queued and delivered, compaction summaries harvested, session summaries written (`work_link { summarize }`), PR links written back to a tracker |
 | tidy | sessions tidied from Tidy-up, *Keep* answers, auto-tidies per reason |
 | trackers | per tracker id: passes, failed passes and items skipped since the syncing process started (not windowed, reset on restart) |
 
@@ -939,7 +979,7 @@ links: 41 made (branch 12, manual 20, resumed 3, started 6)
 detection: 18 suggested, 9 confirmed by a person, 1 confirmed by an agent, 4 promoted, 3 rejected, 2 withdrawn, 0 carried, 1 expired; median decision 12 min; 2 nudges
 handover: 5 requested, 4 written, 1 missing, 0 send failed
 resume: 3 (2 with a brief, 1 without)
-journal: 8 briefs queued, 7 delivered; 11 compaction summaries
+journal: 8 briefs queued, 7 delivered; 11 compaction summaries, 2 session summaries, 1 PR links written
 tidy: 6 applied, 2 kept, 0 auto-tidied (none)
 tracker 1: 288 passes, 3 failed, 0 items skipped (since the sync started)
 not recorded: suggestions shown (only made, confirmed, rejected and expired are stored)
@@ -951,7 +991,11 @@ not recorded: suggestions shown (only made, confirmed, rejected and expired are 
 The phone app (fleet-mobile) reads work from a hub over its paired client
 token:
 
-- work groups (per host), the **My work** chip and the row's work chip;
+- work groups (per host), the **My work** chip and the row's work chip —
+  though not yet local work's live *in progress* / *done* (native item
+  status): the phone's wire model predates that field and reads a bare
+  key's status the old way, so a fleet-mobile release must add it before a
+  phone shows the same answer the desktop does for work with no ticket;
 - with a **full** token: Confirm / *Not this* on a suggestion, set or clear
   a link, start work from a ticket (*Start here*) and resume past work;
 - **Today** with *Copy standup*, and the ticket card with its acceptance

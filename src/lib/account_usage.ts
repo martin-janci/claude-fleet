@@ -166,6 +166,9 @@ export function notableBuckets(usage: AccountUsage | null): ModelBucket[] {
 // ── time ──
 
 function clockParts(unix: number, locale: string | undefined, timeZone: string | undefined) {
+  // `Intl` throws a RangeError on an invalid date, and a throw here takes the
+  // whole view that renders it down: a time we cannot read is a dash.
+  if (!Number.isFinite(unix)) return { weekday: '', time: '—' };
   const parts = new Intl.DateTimeFormat(locale, {
     weekday: 'short',
     hour: '2-digit',
@@ -185,7 +188,7 @@ export function clock(unix: number, locale?: string, timeZone?: string): string 
 /** `Thu 09:00`. */
 export function weekdayClock(unix: number, locale?: string, timeZone?: string): string {
   const p = clockParts(unix, locale, timeZone);
-  return `${p.weekday} ${p.time}`;
+  return p.weekday ? `${p.weekday} ${p.time}` : p.time;
 }
 
 /** A duration for a countdown or an age: `<1 min`, `38 min`, `2h 5m`, `2d 18h`. */
@@ -210,7 +213,9 @@ export function formatReset(
   locale?: string,
   timeZone?: string,
 ): string {
-  if (resetsAt === null) return 'reset time unknown';
+  // `== null` and the finite check, not `=== null`: a hub strips null keys
+  // off the wire, so a reset it never had can arrive `undefined`.
+  if (resetsAt == null || !Number.isFinite(resetsAt)) return 'reset time unknown';
   const at = window === '5h' ? clock(resetsAt, locale, timeZone) : weekdayClock(resetsAt, locale, timeZone);
   if (resetsAt <= now) return `reset at ${at}`;
   const inText = formatDuration(resetsAt - now);
@@ -225,7 +230,7 @@ export function formatResetShort(
   locale?: string,
   timeZone?: string,
 ): string {
-  if (resetsAt === null) return 'reset time unknown';
+  if (resetsAt == null || !Number.isFinite(resetsAt)) return 'reset time unknown';
   const at = window === '5h' ? clock(resetsAt, locale, timeZone) : weekdayClock(resetsAt, locale, timeZone);
   return resetsAt <= now ? `reset at ${at}` : `resets ${at}`;
 }

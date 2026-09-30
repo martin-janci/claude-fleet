@@ -8,6 +8,8 @@ import {
   freshnessMark,
   groupHostsByAccount,
   healthLine,
+  healthSampleFresh,
+  HEALTH_SAMPLE_FRESH_SECS,
   hostAttention,
   NO_ACCOUNT_LABEL,
   newestClaudeVersion,
@@ -31,6 +33,7 @@ import {
   outageUsage,
   snapshot,
 } from './hosts_fixture';
+import type { UsageWindow } from './account_usage_store';
 
 const L = 'en-GB';
 const TZ = 'UTC';
@@ -192,13 +195,13 @@ describe('host health helpers', () => {
       transport: 'agent',
       claude_version_at: NOW - 2 * 3600,
     });
-    expect(healthLine(h, NOW)).toBe('disk 98% · 3.4 GB free · load 5.3 · up 144d · agent 0.2.26');
+    expect(healthLine(h, NOW)).toBe('disk 98% · 3.4 GB free · load 5.3 · up 144d · agent 0.2.26 · sampled 2m ago');
     expect(healthLine(host('bare', { health_at: null }), NOW)).toBe('not sampled yet');
     expect(versionAge(h, NOW)).toBe('checked 2h ago');
     expect(versionAge(host('bare', { claude_version_at: null }), NOW)).toBe('never checked');
   });
 
-  it('disk_low outranks claude_old; agent_old fires when the agent is not the hub version', () => {
+  it('disk_low outranks claude_old; agent_old fires when the agent is older than the hub version', () => {
     const base = {
       hasToken: true,
       tokensLoaded: true,
@@ -216,6 +219,32 @@ describe('host health helpers', () => {
     const agent = host('trn', { transport: 'agent', agent_version: '0.2.26' });
     expect(hostAttention({ ...base, host: agent })?.kind).toBe('agent_old');
     expect(hostAttention({ ...base, host: host('ok', { transport: 'agent', agent_version: '0.3.1' }) })).toBeNull();
+    // After a hub rollback the agent is ahead: no "upgrade the agent" mark.
+    expect(hostAttention({ ...base, host: host('ahead', { transport: 'agent', agent_version: '0.4.0' }) })).toBeNull();
+  });
+
+  it('disk_low waits on a fresh health sample; the health line says how old it is', () => {
+    const base = {
+      hasToken: true,
+      tokensLoaded: true,
+      hook: { state: 'seen' as const, lastAt: NOW },
+      sessionCount: 1,
+      newestClaude: null,
+      now: NOW,
+      versionMaxAgeSecs: 86400,
+      diskLowPct: 90,
+      hubVersion: '0.3.1',
+    };
+    const full = { disk_home_free_kb: 3_600_000, disk_home_total_kb: 150_000_000 };
+    const stale = host('htz', { ...full, health_at: NOW - 2 * 3600 });
+    expect(healthSampleFresh(stale, NOW)).toBe(false);
+    expect(hostAttention({ ...base, host: stale })).toBeNull();
+    expect(healthLine(stale, NOW)).toMatch(/ · sampled 2h ago \(stale\)$/);
+    const fresh = host('htz', { ...full, health_at: NOW - 60 });
+    expect(healthSampleFresh(fresh, NOW)).toBe(true);
+    expect(hostAttention({ ...base, host: fresh })?.kind).toBe('disk_low');
+    expect(healthSampleFresh(host('x', { health_at: NOW - HEALTH_SAMPLE_FRESH_SECS }), NOW)).toBe(true);
+    expect(healthSampleFresh(host('x', { health_at: null }), NOW)).toBe(false);
   });
 
   it('provision_stale outranks disk_low and names the content-only refresh', () => {
@@ -242,6 +271,15 @@ describe('compact usage', () => {
     const s = fleetUsage()[ADMIN.uuid];
     expect(compactWindow('5h', s, NOW, L, TZ)).toEqual({ left: '91% left', reset: 'resets 15:10', freshness: 'fresh' });
     expect(compactWindow('weekly', s, NOW, L, TZ)).toEqual({ left: '58% left', reset: 'resets Thu 09:00', freshness: 'fresh' });
+  });
+
+  // Seen live: a hub sent an unused five-hour window as
+  // `{"utilization":0.0}` (nulls stripped), and the undefined reset took the
+  // Hosts view down.
+  it('treats a reset the wire left out like a null one', () => {
+    const s = fleetUsage()[ADMIN.uuid];
+    const noReset = { ...s, usage: { ...s.usage!, five_hour: { utilization: 0 } as UsageWindow } };
+    expect(compactWindow('5h', noReset, NOW, L, TZ)).toEqual({ left: '100% left', reset: null, freshness: 'fresh' });
   });
 
   it('marks stale with ~, withholds expired, and says checking… before the first fetch', () => {

@@ -368,8 +368,9 @@ Index by area (names only; see the reference for details):
   next `apply_sync` writes to its filesystem, the same reasoning as
   `apply_sync` and `set_secret`).
 - **Orchestration** — `wait_for_session`, `session_transcript`,
-  `session_conversation`, `run_prompt`, `dispatch_task`, `wait_for_task`,
-  `list_tasks`, `cancel_task`, `set_session_tags`.
+  `session_conversation`, `session_tool_detail`, `run_prompt`,
+  `dispatch_task`, `wait_for_task`, `list_tasks`, `cancel_task`,
+  `set_session_tags`.
 - **Work** — `work` (read: `{session_id}` → that session's live work links,
   primary first; `{key}` → ended links to the key, each with the snapshot of
   the session that did it), `work_link` (`{session_id, action}`: `link` a key
@@ -485,8 +486,15 @@ Index by area (names only; see the reference for details):
   starts only there (`E_FORBIDDEN` says why); it never receives `work:*`
   frames on `/events`. Events: `work:item`, `work:tracker`,
   `work:tracker_removed` — emitted only when something a reader sees
-  changed; a session's `work` carries its item's `status_category`,
-  `status_name`, `url` and `unavailable`. `work:changed` (work graph M14)
+  changed; a session's `work` carries its item's `kind` (`tracker` | `local`
+  | `ref`), `status_category`, `status_name`, `url` and `unavailable`.
+  `status_category` is the tracker's own status — `null` for a local item or
+  a bare key, by design, since a paired phone tells a local item apart from
+  a ticket by that absence (native item status task 4). `effective_status`
+  is the live answer instead: the stored value with a person's override, a
+  merged-PR's stamped `done`, or a currently-working session's live
+  `in_progress` applied — present for a local item too, and the field a
+  status display should read. `work:changed` (work graph M14)
   carries ids only — `{ what: placement | rule | view | org, task_id?,
   rule_id?, view_id? }` — after a Work view structure write; a client
   re-reads what it shows. Like every `work:*` frame it never reaches a
@@ -608,6 +616,11 @@ Index by area (names only; see the reference for details):
   item). `work_link { action: "name", item_id, title }` renames a local
   item (a ticket is `E_INVALID`) and returns the item; both emit
   `session:updated` for the rows that show it and `work:item`.
+  `work_link { action: "set_status", item_id, status }` sets a local item's
+  status to `todo`, `in_progress` or `done` and returns the item; a ticket is
+  `E_INVALID` too, naming it — its status belongs to its tracker, and the
+  next sync would otherwise overwrite it here. The setting is final: fleet
+  never derives a status back over what a person set.
   `work { action: "local_items" }` lists local items (`id`, `key`, `title`,
   `created_at`, `updated_at`, `live_sessions`), newest change first.
   Readonly tokens cannot name or rename. A per-host token names work only on
@@ -719,11 +732,11 @@ derive from them.
   idle`. `idle`, `completed`, `stopped` and `failed` mean the turn is over
   (what `wait_for_session { until: "idle" }` and `run_prompt` wait for);
   `blocked` is a dialog inside a turn. A row the tick demoted from `working`
-  after `reconcile.stale_working_secs` with no sign of life carries
-  `stale_working_at` and reads `idle`, but that is only a guess (one long tool
-  call looks the same): `run_prompt`, `move_session` and `wait_for_session`
-  ask its pane first and count it as mid-turn unless the pane shows the idle
-  prompt.
+  after `reconcile.stale_working_secs` with no sign of life (judged only while
+  its host is being reconciled) carries `stale_working_at` and reads `idle`,
+  but that is only a guess (one long tool call looks the same): `run_prompt`,
+  `move_session` and `wait_for_session` ask its pane first and count it as
+  mid-turn unless the pane shows the idle prompt.
 - **`stuck_kind`**: `auth_menu | reconnect | trust_prompt | oom |
   press_enter`.
 - **`needs_attention.reason`** (on session rows and `/events` frames), most
@@ -1035,7 +1048,12 @@ ended_at, items: [{ kind: "text", text } | { kind: "tool", summary, error }] }],
 truncated }` — the same shape the desktop's Conversation tab renders, for a
 client that wants the exchange's structure rather than one flat blob.
 `turns` defaults to 10 and is capped at 100; the character budget scales with
-it. Same errors as `session_transcript`. `run_prompt { session_id, prompt, timeout_s?, max_chars?,
+it. Same errors as `session_transcript`. `session_tool_detail { session_id,
+tool_use_id, claude_session_id? }` returns what a tool item leaves out —
+one call's input and result, `{ id, name, input, edit, command, result,
+is_error }` (`edit` is `{ file_path, old, new }` for Edit / MultiEdit /
+Write), each text capped at 8 000 chars; the phone and a hub-paired desktop
+read it when a tool row is expanded. Readonly, like `session_conversation`. `run_prompt { session_id, prompt, timeout_s?, max_chars?,
 raw? }` composes the three: deliver, wait for `turn_seq` to grow, return
 `{ turn_seq, status, transcript }`. It refuses (`E_INVALID_STATE`) a session that is not between turns (`claude_status` idle, completed or stopped): mid-turn, the previous turn's `Stop` would satisfy the wait and return the old reply.
 
@@ -1117,12 +1135,16 @@ timeline instead of a reply. See `docs/hub.md` → *Link two hubs*.
    that public URL instead (e.g. `https://fleet.example.com`), since every
    host can already reach it directly.
 4. **`~/.tmux.conf` clipboard passthrough** — ensures `set -g set-clipboard on` is present (appended if missing, file created if absent) so OSC 52 clipboard writes from inside tmux reach the host clipboard.
-5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit`, `PostToolUse(EnterWorktree|ExitWorktree)`, `SessionEnd(logout|prompt_input_exit|other|clear|resume)`, `StopFailure`, `Notification(permission_prompt|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_stale|quota_auto_resume_disabled|quota_auto_resume_fired)`, `PreCompact` and `PostCompact` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. `SessionStart` is the one event Claude Code refuses to fire as `type: "http"`, so it is instead installed as an async `curl` command hook that reads its bearer header from `~/.claude/fleet-hook.headers` (mode `0600`) rather than embedding it in the command string (see *Hook contract*). On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6); on a `fleet-hub` daemon with a public URL, the URL is that public URL's `/hook` instead (e.g. `https://fleet.example.com/hook`) and no tunnel is used. Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file and the headers file are written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq`, task completion and conversation tracking (`session_conversations`) on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass. **Hosts provisioned before the `SessionEnd` / `StopFailure` / `Notification` hooks existed must be re-provisioned** to get `stopped`, API-error turn completion and hook-driven `blocked`. **Hosts provisioned before the `SessionStart` / `PreCompact` / `PostCompact` hooks existed must be re-provisioned** to get conversation tracking across `/clear`, `/resume` and compaction (see *Hook contract*).
+5. **Hooks in `~/.claude/settings.json`** — merges fleet's `Stop`, `UserPromptSubmit`, `PostToolUse(EnterWorktree|ExitWorktree|TaskCreate|TaskUpdate|TodoWrite)`, `SessionEnd(logout|prompt_input_exit|other|clear|resume)`, `StopFailure`, `Notification(permission_prompt|elicitation_dialog|elicitation_url_dialog|quota_auto_resume_stale|quota_auto_resume_disabled|quota_auto_resume_fired)`, `PreCompact` and `PostCompact` hooks as Claude Code `type: "http"` hooks, leaving the user's own hooks alone. Each entry POSTs the hook payload to `http://127.0.0.1:<port>/hook` with `"headers": { "Authorization": "Bearer <host-token>" }` and a 5 s timeout — the token never appears in a process argv. `SessionStart` is the one event Claude Code refuses to fire as `type: "http"`, so it is instead installed as an async `curl` command hook that reads its bearer header from `~/.claude/fleet-hook.headers` (mode `0600`) rather than embedding it in the command string (see *Hook contract*). On a remote host the URL's `127.0.0.1:<port>` is the reverse tunnel's loopback end (step 6); on a `fleet-hub` daemon with a public URL, the URL is that public URL's `/hook` instead (e.g. `https://fleet.example.com/hook`) and no tunnel is used. Any older fleet entry for the same port (including the pre-0.3 `curl … /hook?token=` command form) is replaced, so re-running upgrades in place; the file and the headers file are written `0600`. Required for `safe_kill_session` to finalize, for real-time `idle` / `working` status, `turn_seq`, task completion and conversation tracking (`session_conversations`) on every host that runs Claude Code. **Settings → Install Hook (local)** performs only this step for the `local` host, using the `local` host token. **Hosts provisioned before the `UserPromptSubmit` hook existed must be re-provisioned** (no rotate needed) to get the busy signal; until then their status only flips to `working` on the next reconcile pass. **Hosts provisioned before the `SessionEnd` / `StopFailure` / `Notification` hooks existed must be re-provisioned** to get `stopped`, API-error turn completion and hook-driven `blocked`. **Hosts provisioned before the `SessionStart` / `PreCompact` / `PostCompact` hooks existed must be re-provisioned** to get conversation tracking across `/clear`, `/resume` and compaction (see *Hook contract*). **Hosts provisioned before the task-tool matcher (`TaskCreate|TaskUpdate|TodoWrite`) existed must be re-provisioned** to capture agent steps live; until then (the host reads `provision_stale`) the Stop hook backfills them from the transcript tail.
 6. **Reverse SSH tunnel** (remote hosts only, loopback hubs only) — starts an `ssh -R` tunnel so the remote host's `127.0.0.1:<port>` is forwarded to the central machine's MCP server. The server stays bound to `127.0.0.1` on the central machine; remote hosts reach it only through this authenticated tunnel. A `fleet-hub` daemon configured with a public URL skips this step entirely — every host already reaches the hub's public address directly.
 
 **After provisioning, each host must restart Claude** to load the MCP server (skill files and CLAUDE.md are picked up live, but the MCP server entry requires a restart).
 
 `provision_hosts` takes `host` (one alias; every active host when omitted) and `content_only` (steps 1, 2 and 5 only — skills, the CLAUDE.md block and hooks, with the host's existing token; no token minted, no `~/.claude.json` rewrite, no tunnel, no restart needed; a host without a token answers `E_NO_TOKEN`). Each provisioning records a fingerprint of the content it shipped, and `list_hosts` reports `provisioned_at` and `provision_stale` (provisioned with content other than this build's). Each managed skill dir carries a `.fleet-managed` marker; a skills dir inside a git work tree is refused (`E_INVALID`) unless `provision.force_git_tree` is on.
+
+Unless `provision.install_ag` is off, provisioning (full and `content_only`) also installs fleet's `ag` launcher: the embedded `tools/ag` tree is staged under `~/.local/share/fleet/ag-src` and its installer puts `ag` in `~/.local/share/ag` (linked from `~/.local/bin/ag`, never over a foreign `ag`) and adds a `cl` alias (`claude --yolo`) with its shim in `~/.local/bin` unless the host's ag config already defines `cl`. This step is optional: a failure is appended to the host result's `detail` (full and `content_only` runs alike; the hub's unattended refresh logs it) and provisioning continues. The installer never adds `cl` over a command the host already has (a `cl` elsewhere on `PATH`, or a `~/.local/bin/cl` ag did not write), and never edits a symlinked ag config. Panes then launch through the host's own `cl` if it has one, else `~/.local/share/ag/ag claude --yolo`, else `claude --dangerously-skip-permissions`.
+
+**Upgrade heads-up:** the `ag` launcher is part of the provisioning fingerprint, so upgrading to this build makes every provisioned host `provision_stale`, and the hub's unattended content refresh installs `ag` and (where the host has no `cl`) a `cl` shim on every reachable host within about a minute of start. To opt out, set `provision.install_ag=false` right after upgrading.
 
 **After upgrading claude-fleet to a build with per-host tokens, re-provision every host** (Settings → Control API → **Provision hosts**; no rotate needed). Until a host is re-provisioned it keeps authenticating with the master token and its old command hook keeps posting `?token=` — the master token is still accepted in that query form on `/hook` (only there, and only the master token) for the transition — but it has no host identity, cannot be set `readonly`, and its hook still carries the token in argv. **The `?token=` form is removed in 0.4.**
 
@@ -1151,7 +1173,7 @@ and `claude --version`. `list_hosts` carries the sample on each row
 (`disk_home_free_kb`, `disk_home_total_kb`, `disk_tmp_free_kb`, `load_1m`,
 `mem_avail_kb`, `uptime_secs`, `health_at`), the versions stamp
 (`claude_version_at`), the last accepted hook from the host's own token
-(`last_hook_at`) and, for an agent host, the `agent_version` its last hello
+(`last_hook_at`, rewritten at most once a minute) and, for an agent host, the `agent_version` its last hello
 reported. `fleet_health.hosts[]` judges them per host:
 
 | Field | Meaning |

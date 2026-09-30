@@ -24,6 +24,7 @@
     removePreset,
     movePreset,
     flushComposerPresets,
+    refreshComposerPresetsIfIdle,
     presetsConflict,
   } from './composer_presets';
   import { copyOnSelect } from './prefs';
@@ -201,6 +202,14 @@
       hubError = r.error.message;
     }
   }
+
+  // The chip editor starts from the fleet's current list, not the one read
+  // at launch: no event announces a chip saved on the phone, and an edit
+  // made from a stale list would be refused with E_CONFLICT on its first
+  // keystroke. Skipped while an edit of ours is still pending.
+  onMount(() => {
+    void refreshComposerPresetsIfIdle();
+  });
 
   // --- Pages: General (the hand-written panels below) or a generated page
   // (declarative pages P3; `crates/fleet-core/pages/`), picked in the nav. ---
@@ -853,7 +862,7 @@
       </div>
     </section>
 
-    <WorkSettings />
+    <WorkSettings onopen={(id) => select(id)} />
 
     {#if !ownsFleet}
       <section class="block" data-testid="mcp-remote-section">

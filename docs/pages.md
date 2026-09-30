@@ -76,7 +76,8 @@ page tree. `id` is dotted lowercase and is also the page's deep link.
 |---|---|---|
 | `category` | Settings in sections, saved as you change them | `field`, `stat`, `record`, `table`, `action`, `notice`, `link`, `custom` |
 | `cards` | An overview: numbers and links | `stat`, `record`, `notice`, `link` |
-| `data_page` | Stats, charts and tables | `stat`, `record`, `table`, `chart`, `action`, `notice`, `link` |
+| `data_page` | Stats, charts and tables, with an optional filter bar (see *Data pages and filters*) | `stat`, `record`, `table`, `chart`, `account_usage` (`block`), `action`, `notice`, `link` |
+| `embed` | Items placed inside one of the desktop's own screens at a named `slot` (see *Embed pages*); never in the page tree | `account_usage`, in the views its slot takes |
 | `master_detail` | A list of a resource's records beside one record's editor | `field` (naming a field of the resource), `notice`, `custom`; `list_items` above the list: `notice`, `custom` |
 | `flow` | A server-driven wizard (see *Flows*); not a page of its own yet, launched by a resource's `create_flow` | — |
 | `review_apply` | Reviewing proposed changes (see *Proposals*); names its `review` | `notice`, `link`; sections are optional |
@@ -91,8 +92,9 @@ Every item is an object tagged by `type`:
 | `field` | `key`, optional `widget`, `hint`, `when` | A registered setting. It gets exactly one home across all pages. `widget` must accept the setting's kind (see the catalog). `hint` is one extra line, 120 characters at most |
 | `stat` | `source`, then `field` for a record source, optional `label` | One number |
 | `record` | `source` | A key → value list of a record source |
-| `table` | `source`, optional `columns` | A rows source; `columns` picks and orders columns |
+| `table` | `source`, optional `columns`, `copy` | A rows source; `columns` picks and orders columns. `copy: true` adds *Copy as text*: the source's label with the filters, then one line per row (`first: rest, …`) |
 | `chart` | `source`, `chart` (`line` / `bar` / `stacked_bar` / `sparkline`), optional `title` | A series source |
+| `account_usage` | `source` (an `account_usage` source: `accounts.usage`), `view` | Claude accounts' plan headroom, with the hosts-view design's wording, staleness and severity in every view. On a page, `block` for every account; in a slot, the view the slot takes for the slot's host or account |
 | `notice` | `tone` (`info` / `warn` / `danger`), `text` | Plain text, 300 characters at most |
 | `action` | `action` | A button that runs a page action (see *Page actions*), then re-reads the page's data items. Hidden on a read-only page |
 | `link` | `page`, optional `label` | Another page's id |
@@ -100,6 +102,63 @@ Every item is an object tagged by `type`:
 
 A `source` is `{ "id": "usage.by_day", "params": { "days": 30 } }`. Parameters
 are literals, checked against the source's declared parameters.
+
+### Data pages and filters
+
+A `data_page` may have a filter bar: `filters`, a list of controls, each
+bound by name to a source parameter. A filter sets that parameter on every
+data item whose source declares it, and the items re-read when it changes;
+a source without the parameter ignores the filter.
+
+```json
+"filters": [
+  { "param": "days", "label": "Window", "choices": [7, 30, 90], "default": 30 },
+  { "param": "host", "label": "Host" }
+]
+```
+
+The control follows the parameter's type. A `days` parameter is a select
+over `choices` (ascending, each within every declaring source's bounds;
+`default` is one of them, else the first). A `host` parameter is a select
+over the registered hosts, starting at *All hosts*, which sends no host;
+it takes no `choices` or `default`. A data item may not also set a
+filtered parameter in its own `params`. `usage` and `usage.work` are the
+examples.
+
+### Embed pages
+
+An `embed` page (layout L8) places items inside a screen the desktop draws
+by hand, at a named `slot`, instead of on a page of its own. The screen
+owns the slot and hands it a context; the spec decides what goes there.
+Each slot has at most one page, an embed page has no `parent` and no tabs,
+and nothing links to it. `list_pages` never carries embed pages: the
+desktop reads them from `src/lib/pages/embeds.generated.json`, generated
+from the same specs, so a slot draws on the first frame (and a phone never
+sees them).
+
+| `slot` | Where | Context | Views |
+|---|---|---|---|
+| `host_detail` | Host detail, under the account | the host, its account and snapshot, the other hosts on the account, the refresh | `block` |
+| `hosts_group_title` | A Hosts-list account group's title line | the account and snapshot | `freshness` |
+| `hosts_group` | A Hosts-list account group's header | the account and snapshot | `bars` |
+| `new_session_chip` | Each New-session host chip | the host, its account and snapshot | `chip` |
+| `new_session_host` | Under the New-session chips | the selected host, every host, its account and snapshot | `line`, `warning` |
+| `status_footer` | The status footer's right end | every host, account and snapshot; open the Hosts view | `footer` |
+
+```json
+{ "spec": "fleet.page/1", "id": "embed.new_session_host", "title": "New session: selected host",
+  "layout": "embed", "slot": "new_session_host",
+  "sections": [{ "title": "Usage", "items": [
+    { "type": "account_usage", "source": { "id": "accounts.usage" }, "view": "line" },
+    { "type": "account_usage", "source": { "id": "accounts.usage" }, "view": "warning" }
+  ] }] }
+```
+
+A new slot is a code change: a `Slot` variant and its views in
+`catalog::slot_views`, the context in `src/lib/pages/usage/context.ts`,
+the owner's `<EmbedSlot slot=…>`, and the slot in `RENDERED_SLOTS`
+(`embeds.test.ts` holds the filled slots, the rendered ones and their
+owners equal).
 
 ### Conditions (`when`)
 
@@ -279,7 +338,8 @@ of each page says so. A device the hub's operator trusts (`fleet-hub client
 trust <name>`) edits the fields and decides proposals; an untrusted one
 sees them read-only, with that command. Data items, page actions and
 custom components read or run on this app's own store, so a paired desktop
-shows none of them; a resource page (Trackers, Organisations) stays
+shows none of them (a section of data items only is left out, and a
+`data_page` says where its data is instead); a resource page (Trackers, Organisations) stays
 read-only with the hub's reason. A hub that serves no settings to the
 device (an older hub, or a device bound to one org) leaves the page on its
 reason and the hub's answer.
@@ -290,6 +350,11 @@ reason and the hub's answer.
   or it is in `pages::UNLISTED` with a sentence saying why.
 - Keys, sources, source fields and columns, widgets, parents and link targets
   must all exist.
+- A `slot` is on an `embed` page only, once per slot, and an `account_usage`
+  item takes only the views its slot (or, on a page, `block`) allows.
+- Filters are on a `data_page` only, each names a parameter some source on
+  the page declares (with one type across them), and no item sets a
+  filtered parameter itself.
 - Titles are at most 60 characters. Text is plain, with no `<` or `>`.
 - Parents form a tree.
 - Unknown fields and item types are refused when the file is parsed.
@@ -311,6 +376,9 @@ reason and the hub's answer.
 2. Add its reader to `fetch`.
 
 `every_source_has_a_reader_that_returns_its_shape` holds the reader to the
-declared shape. A source is read-only; changes are made through actions
+declared shape. A **live** source (`live: { command, event }`, today only
+`accounts.usage`) has no reader: the app loads it with `command` and keeps
+it current from the `event` row kind, so `fetch_page_source` refuses it and
+`resource_commands_exist` holds `command` to the handler list. A source is read-only; changes are made through actions
 (design P4). Every source reads the whole fleet, so it is only for whatever
 owns the fleet. An org-scoped view is a new source, not a parameter.

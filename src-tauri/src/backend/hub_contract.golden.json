@@ -283,6 +283,7 @@
       "last_duration_ms",
       "last_error",
       "last_finished_at",
+      "last_ok_at",
       "last_started_at"
     ],
     "Health.trackers": [

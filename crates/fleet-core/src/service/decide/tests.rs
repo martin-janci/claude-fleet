@@ -206,6 +206,9 @@ async fn with_the_defaults_no_call_is_made_and_the_refusal_is_recorded() {
     assert_eq!(r.candidates, vec!["ACME-1", "ACME-2"]);
     assert_eq!(r.baseline_answer.as_deref(), Some("ACME-2"));
     assert!(r.input_fp.is_some(), "coverage rows are fingerprinted too");
+    // Nothing was sent, so the outcome carries no numbers.
+    assert_eq!(out.latency_ms, None);
+    assert_eq!((out.input_tokens, out.cost_microusd), (0, 0));
 }
 
 #[test]
@@ -385,6 +388,11 @@ async fn a_shadow_call_records_ids_numbers_and_a_fingerprint() {
     assert!(r.latency_ms.is_some());
     assert_eq!(r.input_tokens, 1_200);
     assert_eq!(r.cost_microusd, 51, "1200 tokens at $0.042/M, rounded up");
+    // The outcome carries the recorded numbers: no read-back needed.
+    assert_eq!(out.latency_ms, r.latency_ms);
+    assert!(out.latency_ms.is_some());
+    assert_eq!(out.input_tokens, r.input_tokens);
+    assert_eq!(out.cost_microusd, r.cost_microusd);
     assert_eq!(r.org_id, Some(w.org));
     assert_eq!(
         (r.subject_kind.as_str(), r.subject_id.as_str()),
@@ -928,6 +936,52 @@ fn the_fallback_vocabulary_is_the_stores() {
         assert_eq!(spec.default, "off");
         assert_eq!(f.setting_key(), format!("decide.jev.{}", f.as_str()));
     }
+}
+
+#[test]
+fn the_mode_vocabulary_is_the_stores() {
+    let modes = crate::store::DECISION_MODES;
+    // One list: the setting's choices are the store's words.
+    assert_eq!(settings::DECIDE_MODES, modes);
+    // `FeatureMode` names exactly those words, in order, and round-trips.
+    let ours: Vec<&str> = [FeatureMode::Off, FeatureMode::Shadow, FeatureMode::Assist]
+        .iter()
+        .map(|m| m.as_str())
+        .collect();
+    assert_eq!(ours, modes);
+    for m in modes {
+        assert_eq!(FeatureMode::parse(m).as_str(), *m);
+        assert_eq!(
+            serde_json::to_value(FeatureMode::parse(m)).unwrap(),
+            json!(m)
+        );
+    }
+    // The `decision_runs.mode` CHECK allows each of them.
+    let migration = include_str!("../../../migrations/069_decision_runs.sql");
+    let check = format!(
+        "mode IN ({})",
+        modes
+            .iter()
+            .map(|m| format!("'{m}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    assert!(migration.contains(&check), "{check} not in 069");
+    // The TS mirror lists the same words.
+    let ts = include_str!("../../../../../src/lib/fleet_settings.ts");
+    let line = ts
+        .lines()
+        .find(|l| l.starts_with("export const DECIDE_MODES = ["))
+        .expect("DECIDE_MODES in src/lib/fleet_settings.ts");
+    let want = format!(
+        "export const DECIDE_MODES = [{}] as const;",
+        modes
+            .iter()
+            .map(|m| format!("'{m}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    assert_eq!(line.trim_end(), want);
 }
 
 #[test]

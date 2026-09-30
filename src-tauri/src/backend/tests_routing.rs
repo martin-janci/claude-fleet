@@ -160,6 +160,9 @@ const PROJECT_TREE_PAYLOAD: &str = r#"{"project":{"id":7,"owner":"o","repo":"r",
 /// A `work_link { summarize }` answer (work graph M13.4c).
 const SUMMARY_PAYLOAD: &str = r#"{"key":"ABC-1","link_id":4,"host_alias":"hetzner","claude_session_id":"0f8fad5b-d9cb-469f-a165-70867728950e","model":"haiku","journal_id":9,"at":1,"summary":"fenced"}"#;
 const TASK_PAYLOAD: &str = r#"{"id":11,"state":"cancelled","created_at":1}"#;
+/// A native item (`TASK-<id>`, shared work context), as `work_link
+/// { create | accept | reject }` answers it.
+const NATIVE_ITEM_PAYLOAD: &str = r#"{"id":9,"source":"local","key":"TASK-9","title":"Write notes","status_category":"todo","created_at":1,"updated_at":1,"origin":"manual"}"#;
 /// A complete `MoveReport` wrapped as a `MoveOutcome::Moved` — all twelve
 /// report fields plus the internal tag `"kind":"moved"`, the last field a
 /// whole `SessionRow` (the same one as [`SESSION_PAYLOAD`]) whose own `kind`
@@ -793,6 +796,60 @@ fn routed_read_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Shared work context (design 2026-09-29).
+        (
+            "create_work_task",
+            "work_link",
+            json!({ "session_id": null, "action": "create", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "title": "Write notes",
+                    "parent": "item:5", "project_id": 3, "notes": "v1" }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::create_work_task(
+                    b,
+                    commands::work::CreateWorkTaskArgs {
+                        title: "Write notes".into(),
+                        parent: Some("item:5".into()),
+                        project_id: Some(3),
+                        notes: Some("v1".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "accept_work_proposal",
+            "work_link",
+            json!({ "session_id": null, "action": "accept", "key": null, "item_id": 9,
+                    "link_id": null, "source": null }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::decide_work_proposal(
+                    b,
+                    commands::work::WorkProposalArgs { item_id: 9 },
+                    true,
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "reject_work_proposal",
+            "work_link",
+            json!({ "session_id": null, "action": "reject", "key": null, "item_id": 9,
+                    "link_id": null, "source": null }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::decide_work_proposal(
+                    b,
+                    commands::work::WorkProposalArgs { item_id: 9 },
+                    false,
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "session_history",
             "session_history",
@@ -858,6 +915,25 @@ fn routed_read_cases() -> Vec<Case> {
                         session_id: 7,
                         turns: Some(5),
                         claude_session_id: Some("11111111-1111-1111-1111-111111111111".into()),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "session_tool_detail",
+            "session_tool_detail",
+            json!({ "session_id": 7, "tool_use_id": "toolu_1" }),
+            r#"{"id":"toolu_1","name":"Bash","input":"{}","edit":null,"command":"ls","result":"a","is_error":false}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::session_tool_detail(
+                    b,
+                    commands::sessions::SessionToolDetailArgs {
+                        session_id: 7,
+                        tool_use_id: "toolu_1".into(),
+                        claude_session_id: None,
                     },
                     s,
                     h,
@@ -1090,7 +1166,9 @@ fn routed_read_cases() -> Vec<Case> {
             "work",
             json!({ "session_id": null, "key": null, "action": "tree", "limit": 25,
                     "cursor": "c1", "per_task": 3,
-                    "filters": { "org": "none", "status": "open", "has": "active" } }),
+                    "filters": { "org": "none", "status": "open", "has": "active" },
+                    "sections": [{ "org_id": 1, "group_id": "label:Payments", "limit": 50 }],
+                    "with_review_total": true }),
             r#"{"tasks":[],"groups":[],"orgs":[],"trackers":[],"total":0,"generated_at":1}"#,
             Box::new(|b, s, _| {
                 block_on(commands::work_view::routed::work_tree(
@@ -1107,6 +1185,12 @@ fn routed_read_cases() -> Vec<Case> {
                         cursor: Some("c1".into()),
                         limit: Some(25),
                         per_task: Some(3),
+                        sections: Some(vec![fleet_core::service::work::view::SectionAsk {
+                            org_id: Some(1),
+                            group_id: "label:Payments".into(),
+                            limit: Some(50),
+                        }]),
+                        with_review_total: Some(true),
                     },
                     s,
                 ))
@@ -3547,9 +3631,11 @@ fn a_refusal_never_carries_the_token() {
 ///   routed `kill_session` dismisses an inactive agent exactly as it does.
 ///
 /// The asset catalog used to be the bulk of this list: its commands refused
-/// while the hub had a tool for most of them. They route to `catalog_admin`
-/// now; `catalog_import_host` is the one left refusing, and it still has to
-/// name the hub's `import_assets` rather than deny it.
+/// while the hub had a tool for most of them. They all route to
+/// `catalog_admin` now, including `catalog_import_host` (Task 6: import
+/// works from any host over SSH); `catalog_spawn_author_session` is the one
+/// left refusing, honestly — the hub genuinely has no tool that starts a
+/// Claude session in its checkout.
 ///
 /// The sentences used to be read back out of the source, because a
 /// `#[tauri::command]` cannot be called without a live `tauri::App`. They are
@@ -3563,20 +3649,6 @@ fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
             .unwrap_or_else(|| panic!("{command} no longer refuses"))
     }
     const DENIALS: [&str; 2] = ["exposes no authoring tool", "exposes no tool"];
-
-    for (command, tool) in [("catalog_import_host", "import_assets")] {
-        let said = reason(command);
-        for d in DENIALS {
-            assert!(
-                !said.contains(d),
-                "{command} denies a tool the hub has ({tool}): {said}"
-            );
-        }
-        assert!(
-            said.contains(tool),
-            "{command} must name the hub's {tool}: {said}"
-        );
-    }
 
     let said = reason("dismiss_agent_session");
     for d in DENIALS {
@@ -4238,6 +4310,22 @@ fn resource_commands_exist() {
             "a resource names `{cmd}`, which has no hub verdict"
         );
     }
+    // A live data source is loaded by a desktop command too.
+    for live in fleet_core::pages::sources::SOURCES
+        .iter()
+        .filter_map(|s| s.live)
+    {
+        assert!(
+            registered.iter().any(|c| c == live.command),
+            "a live source names `{}`, which lib.rs does not register",
+            live.command
+        );
+        assert!(
+            super::verdicts::verdict(live.command).is_some(),
+            "a live source names `{}`, which has no hub verdict",
+            live.command
+        );
+    }
 }
 
 /// A payload built from a real value, for the catalog answers too big to
@@ -4267,7 +4355,7 @@ fn catalog_admin_cases() -> Vec<Case> {
     use fleet_core::service::catalog::layer::Axis;
     use fleet_core::service::catalog::model::Kind;
     use fleet_core::service::catalog::sync::{ApplyArgs, PlanArgs};
-    use fleet_core::service::catalog::ConfigureArgs;
+    use fleet_core::service::catalog::{ConfigureArgs, ImportArgs};
 
     const CONFIG: &str =
         r#"{"repo_path":"/srv/assets","remote_url":null,"head_commit":"abc","last_loaded_at":1}"#;
@@ -4437,11 +4525,32 @@ fn catalog_admin_cases() -> Vec<Case> {
             r#"[{"host_alias":"nas","harness":"claude","kind":"skill","name":"s","state":"in_sync","scanned_at":1,"managed":true}]"#,
             Box::new(|b, s, _| block_on(r::assets_inventory(b, s)).map(|_| ())),
         ),
+        // Task 6: import works from any host over SSH, not just `local`.
+        (
+            "catalog_import_host",
+            "catalog_admin",
+            json!({ "action": "import_host",
+                    "args": { "host_alias": "oci", "dry_run": true, "only": [] } }),
+            r#"{"created":[],"problems":[],"warnings":[],"flagged_secrets":[],"dry_run":true}"#,
+            Box::new(|b, s, h| {
+                block_on(r::catalog_import_host(
+                    b,
+                    ImportArgs {
+                        host_alias: "oci".into(),
+                        dry_run: true,
+                        only: vec![],
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "catalog_plan_sync",
             "catalog_admin",
             json!({ "action": "plan_sync",
-                    "args": { "host_alias": "nas", "kind": "skill", "name": "s" } }),
+                    "args": { "host_alias": "nas", "kind": "skill", "name": "s", "allow_unlayered": false } }),
             r#"{"id":"p1","computed_at":1,"hosts":[],"counts":{}}"#,
             Box::new(|b, s, h| {
                 block_on(r::catalog_plan_sync(
@@ -4450,6 +4559,7 @@ fn catalog_admin_cases() -> Vec<Case> {
                         host_alias: Some("nas".into()),
                         kind: Some(Kind::Skill),
                         name: Some("s".into()),
+                        allow_unlayered: false,
                     },
                     s,
                     h,

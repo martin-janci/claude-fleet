@@ -44,11 +44,14 @@ export const SETTING_KEYS = {
   healthClaudeMaxBehind: 'health.claude_max_behind',
   healthHooksSilentSecs: 'health.hooks_silent_secs',
   provisionForceGitTree: 'provision.force_git_tree',
+  provisionInstallAg: 'provision.install_ag',
   workRetentionJournalDays: 'work.retention.journal_days',
   workRetentionTrackerItemsDays: 'work.retention.tracker_items_days',
   workRetentionTimelineWorkEventsDays: 'work.retention.timeline_work_events_days',
   workRecentDays: 'work.recent_days',
   workSyncIntervalSecs: 'work.sync_interval_secs',
+  catalogScanCheckSecs: 'catalog.scan_check_secs',
+  catalogScanMaxAgeSecs: 'catalog.scan_max_age_secs',
   workDescribeCacheSecs: 'work.describe_cache_secs',
   workTrustedBranchProjects: 'work.trusted_branch_projects',
   workEvidenceSnippets: 'work.evidence_snippets',
@@ -82,8 +85,9 @@ export const SETTING_KEYS = {
  *  (`auto` is not offered, decision D36). */
 export const DECIDE_MODES = ['off', 'shadow', 'assist'] as const;
 
-/** Mirror of `settings::UPDATE_TRACKS`: the release track the hub follows. */
-export const UPDATE_TRACKS = ['stable', 'beta', 'nightly'] as const;
+/** Mirror of `settings::UPDATE_TRACKS`: the release track the hub follows.
+ *  No `nightly` until S2b publishes that channel. */
+export const UPDATE_TRACKS = ['stable', 'beta'] as const;
 /** Mirror of `settings::UPDATE_MODES`. */
 export const UPDATE_MODES = ['manual', 'notify', 'automatic'] as const;
 /** Mirror of `settings::UPDATE_MOBILE_MODES`: a phone never installs silently. */
@@ -195,11 +199,14 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'health.claude_max_behind': '30',
   'health.hooks_silent_secs': '3600',
   'provision.force_git_tree': 'false',
+  'provision.install_ag': 'true',
   'work.retention.journal_days': '365',
   'work.retention.tracker_items_days': '180',
   'work.retention.timeline_work_events_days': '180',
   'work.recent_days': '14',
   'work.sync_interval_secs': '300',
+  'catalog.scan_check_secs': '3600',
+  'catalog.scan_max_age_secs': '86400',
   'work.describe_cache_secs': '300',
   'work.trusted_branch_projects': '[]',
   'work.evidence_snippets': 'true',

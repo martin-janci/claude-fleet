@@ -4,6 +4,7 @@ mod bench;
 mod catalog;
 mod census;
 mod config;
+mod dbarg;
 mod decide;
 mod demo;
 mod host;

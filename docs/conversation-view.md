@@ -21,9 +21,20 @@ is the only view, since they have no tmux pane to show a Terminal for.
   have *Copy*), and one muted line per tool call. Consecutive tool calls fold
   into a group (`7 tool calls · Bash, Read, Edit +2`); the running turn's
   last group stays open so calls show as they land. A call whose result was
-  an error is red with a ✗, and the group label ends with `· 1 failed`.
-- **Duration.** A finished turn shows how long it took (`2m 14s`) under its
-  reply.
+  an error is red with a ✗, and the group label ends with a red `1 failed`.
+- **Tool details.** Click a call to open its input and result, laid out by
+  tool: an edit (Edit, MultiEdit, Write) as a line diff with old / new line
+  numbers, `+N −M` and the file name in its header, and long unchanged runs
+  folded to `⋯ N unchanged lines`; a Read as the file's numbered lines; a
+  Search / Find as its list of files; Update todos as a checklist; a Run as
+  `$ command` and its output. Anything else shows its raw input and result.
+  On a desktop paired with a hub the detail is read through the hub
+  (`session_tool_detail`).
+- **Duration and reply actions.** Under each reply, one footer: how long
+  the turn took (`2m 14s`) on the left, and the reply's actions on the
+  right — *Copy* (every text block of the reply), *Quote*, then, apart
+  from those, *Retry*, *Fork here* and *Rewind here*. The row rests dimmed
+  and comes up when you point at the turn or tab into it.
 - **Live indicator.** Under the last turn: a pulsing row with the REPL's own
   spinner text (`Cooking… 3s · ↓ 306 tokens`) while Claude works, *Sent,
   waiting for Claude…* right after you send, and an amber *Claude is waiting

@@ -390,8 +390,54 @@ fn pins_are_validated() {
             .code,
         codes::E_INVALID
     );
+    // A well-formed target that does not exist is refused too.
+    assert_eq!(
+        pin(&store, "agent", "agent:box", "0.3.3", true, None, NOW)
+            .unwrap_err()
+            .code,
+        codes::E_NOTFOUND
+    );
+    assert_eq!(
+        pin(&store, "desktop", "client:999", "0.3.3", false, None, NOW)
+            .unwrap_err()
+            .code,
+        codes::E_NOTFOUND
+    );
+    let (client_id, revoked_id) = {
+        let s = lock(&store).unwrap();
+        s.insert_host("box", None).unwrap();
+        let live = s.insert_client_token("phone", "sha-a", "full").unwrap().id;
+        let gone = s.insert_client_token("old", "sha-b", "full").unwrap().id;
+        s.revoke_client_token("old").unwrap();
+        (live, gone)
+    };
     pin(&store, "agent", "agent:box", "0.3.3", true, None, NOW).unwrap();
-    pin(&store, "desktop", "client:4", "0.3.3", false, None, NOW).unwrap();
+    pin(
+        &store,
+        "desktop",
+        &format!("client:{client_id}"),
+        "0.3.3",
+        false,
+        None,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        pin(
+            &store,
+            "desktop",
+            &format!("client:{revoked_id}"),
+            "0.3.3",
+            false,
+            None,
+            NOW
+        )
+        .unwrap_err()
+        .code,
+        codes::E_NOTFOUND
+    );
+    // Unpinning a target that is gone stays possible.
+    assert!(!unpin(&store, "desktop", "client:999").unwrap());
 }
 
 #[tokio::test]
@@ -471,6 +517,217 @@ fn a_newer_update_proto_is_refused() {
             .code,
         codes::E_UNSUPPORTED
     );
+}
+
+#[test]
+fn a_hub_link_is_refused_before_its_update_proto_is_read() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let peer = client(4, TokenMode::Peer, None);
+    let none = TrustedKeys::from_base64([]).unwrap();
+    for proto in [0, 99] {
+        let mut req = desktop_req("0.3.3");
+        req.update_proto = proto;
+        assert_eq!(
+            check(&store, &peer, &req, &none, NOW).unwrap_err().code,
+            codes::E_FORBIDDEN
+        );
+        let mut r = desktop_report("a1", UpdatePhase::Downloading, "0.3.3");
+        r.update_proto = proto;
+        assert_eq!(
+            report(&store, &peer, &r, NOW).unwrap_err().code,
+            codes::E_FORBIDDEN
+        );
+    }
+}
+
+fn desktop_report(attempt: &str, phase: UpdatePhase, version: &str) -> Report {
+    Report {
+        update_proto: 1,
+        component: Component::Desktop,
+        installed: Installed::version(Version::parse(version).unwrap()),
+        phase,
+        attempt: Some(attempt.into()),
+        from: None,
+        to: None,
+        detail: serde_json::Value::Null,
+        error: None,
+    }
+}
+
+#[test]
+fn a_late_or_replayed_report_never_overwrites_a_newer_attempt() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let c = client(1, TokenMode::Full, None);
+    let observed = || {
+        let o = lock(&store)
+            .unwrap()
+            .update_observed("client:1")
+            .unwrap()
+            .unwrap();
+        (o.attempt.unwrap(), o.phase, o.version)
+    };
+    let a1 = desktop_report("a1", UpdatePhase::Installing, "0.3.3");
+    assert!(report(&store, &c, &a1, NOW).unwrap());
+    assert!(report(
+        &store,
+        &c,
+        &desktop_report("a2", UpdatePhase::Success, "0.3.4"),
+        NOW + 10
+    )
+    .unwrap());
+    let a2 = || ("a2".to_string(), "success".to_string(), "0.3.4".to_string());
+    // A replay of a1's report: nothing recorded, nothing overwritten.
+    assert!(!report(&store, &c, &a1, NOW + 20).unwrap());
+    assert_eq!(observed(), a2());
+    // A plain duplicate of the newest report.
+    assert!(!report(
+        &store,
+        &c,
+        &desktop_report("a2", UpdatePhase::Success, "0.3.4"),
+        NOW + 21
+    )
+    .unwrap());
+    assert_eq!(observed(), a2());
+    // A late, never-seen phase of the older attempt is logged, not state.
+    assert!(report(
+        &store,
+        &c,
+        &desktop_report("a1", UpdatePhase::Failed, "0.3.3"),
+        NOW + 22
+    )
+    .unwrap());
+    assert_eq!(observed(), a2());
+    assert_eq!(
+        lock(&store)
+            .unwrap()
+            .update_events("client:1", 10)
+            .unwrap()
+            .len(),
+        3
+    );
+    // A new attempt is state again.
+    assert!(report(
+        &store,
+        &c,
+        &desktop_report("a3", UpdatePhase::Checking, "0.3.4"),
+        NOW + 30
+    )
+    .unwrap());
+    assert_eq!(observed().0, "a3");
+}
+
+#[test]
+fn a_report_without_an_attempt_is_always_the_observed_state() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let c = client(1, TokenMode::Full, None);
+    let observed = || {
+        let o = lock(&store)
+            .unwrap()
+            .update_observed("client:1")
+            .unwrap()
+            .unwrap();
+        (o.attempt, o.phase, o.version)
+    };
+    let checking = |version: &str| Report {
+        attempt: None,
+        ..desktop_report("", UpdatePhase::Checking, version)
+    };
+    assert!(report(&store, &c, &checking("0.3.3"), NOW).unwrap());
+    assert_eq!(observed(), (None, "checking".into(), "0.3.3".into()));
+    for (phase, version, at) in [
+        (UpdatePhase::Downloading, "0.3.3", NOW + 10),
+        (UpdatePhase::Success, "0.3.4", NOW + 20),
+    ] {
+        assert!(report(&store, &c, &desktop_report("a1", phase, version), at).unwrap());
+    }
+    assert_eq!(
+        observed(),
+        (Some("a1".into()), "success".into(), "0.3.4".into())
+    );
+    // The same (target, no attempt, checking) event is already recorded, so
+    // nothing new is logged, but the report is still the latest state.
+    assert!(!report(&store, &c, &checking("0.3.4"), NOW + 30).unwrap());
+    assert_eq!(observed(), (None, "checking".into(), "0.3.4".into()));
+}
+
+#[tokio::test]
+async fn a_new_track_or_interval_wakes_the_refresh_tick() {
+    let s = Store::open_in_memory().unwrap();
+    settings::set(&s, settings::UPDATE_TRACK, "beta").unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), REFRESH_WAKE.notified())
+        .await
+        .expect("a track change wakes the tick");
+    assert_eq!(track(&s), Track::Beta);
+    settings::set(&s, settings::UPDATE_CHECK_INTERVAL_SECS, "7200").unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), REFRESH_WAKE.notified())
+        .await
+        .expect("an interval change wakes the tick");
+    assert_eq!(check_interval_secs(&s), 7200);
+}
+
+#[test]
+fn nightly_is_not_offered_until_it_is_published() {
+    assert_eq!(
+        settings::validate(settings::UPDATE_TRACK, "nightly")
+            .unwrap_err()
+            .code,
+        codes::E_INVALID
+    );
+    let s = Store::open_in_memory().unwrap();
+    // A value stored before nightly was withdrawn reads as the default.
+    s.set_setting(settings::UPDATE_TRACK, "nightly").unwrap();
+    assert_eq!(track(&s), Track::Stable);
+}
+
+#[test]
+fn the_hub_records_itself_and_a_new_version_clears_the_old_attempt() {
+    let s = Store::open_in_memory().unwrap();
+    let me = |v: &str| HubSelf {
+        version: v.into(),
+        commit: "abc123".into(),
+        build_id: "b42".into(),
+    };
+    // First start: no row yet.
+    record_hub_self(&s, &me("0.4.1"), NOW).unwrap();
+    let o = s.update_observed("hub:self").unwrap().unwrap();
+    assert_eq!(
+        (o.component.as_str(), o.version.as_str(), o.phase.as_str()),
+        ("hub", "0.4.1", "idle")
+    );
+    assert_eq!(o.commit_sha.as_deref(), Some("abc123"));
+    assert_eq!(o.build_id.as_deref(), Some("b42"));
+    let platform: Platform = serde_json::from_str(o.platform.as_deref().unwrap()).unwrap();
+    assert_eq!(platform, hub_platform());
+    assert!(o.attempt.is_none() && o.last_error.is_none());
+
+    // The updater reports a failed attempt on this version.
+    s.upsert_update_observed(&UpdateObservedRow {
+        phase: "failed".into(),
+        attempt: Some("a1".into()),
+        last_error: Some("ready timeout".into()),
+        digest: Some("sha256:d".into()),
+        ..o
+    })
+    .unwrap();
+    // A restart on the same version keeps what the updater said.
+    record_hub_self(&s, &me("0.4.1"), NOW + 60).unwrap();
+    let o = s.update_observed("hub:self").unwrap().unwrap();
+    assert_eq!(
+        (
+            o.phase.as_str(),
+            o.attempt.as_deref(),
+            o.last_error.as_deref()
+        ),
+        ("failed", Some("a1"), Some("ready timeout"))
+    );
+    assert_eq!(o.digest.as_deref(), Some("sha256:d"));
+    assert_eq!(o.reported_at, NOW + 60);
+
+    // A new binary: the old attempt no longer describes it.
+    record_hub_self(&s, &me("0.4.2"), NOW + 120).unwrap();
+    let o = s.update_observed("hub:self").unwrap().unwrap();
+    assert_eq!((o.version.as_str(), o.phase.as_str()), ("0.4.2", "idle"));
+    assert!(o.attempt.is_none() && o.last_error.is_none() && o.digest.is_none());
 }
 
 // ── Git mode (S3): a standalone hub reads the channel itself ──
@@ -594,28 +851,31 @@ async fn the_update_picture_emits_ids_only_when_it_moves() {
         .unwrap();
     assert!(bus.take().is_empty(), "an unchanged channel is silent");
 
-    let c = client(3, TokenMode::Full, None);
+    // A pin names a live client (the pin hardening), so pair one first.
+    let id = lock(&store)
+        .unwrap()
+        .insert_client_token("desk", "sha-desk", "full")
+        .unwrap()
+        .id;
+    bus.take();
+    let observed = format!("update:changed:observed:client:{id}");
+    let c = client(id, TokenMode::Full, None);
     check(&store, &c, &desktop_req("0.3.3"), &keys(&key), NOW).unwrap();
-    assert_eq!(
-        bus.take(),
-        vec!["update:changed:observed:client:3".to_string()]
-    );
+    assert_eq!(bus.take(), vec![observed.clone()]);
     check(&store, &c, &desktop_req("0.3.3"), &keys(&key), NOW + 60).unwrap();
     assert!(bus.take().is_empty(), "a routine re-check is silent");
     check(&store, &c, &desktop_req("0.3.4"), &keys(&key), NOW + 120).unwrap();
-    assert_eq!(
-        bus.take(),
-        vec!["update:changed:observed:client:3".to_string()]
-    );
+    assert_eq!(bus.take(), vec![observed]);
 
-    pin(&store, "desktop", "client:3", "0.3.3", false, None, NOW).unwrap();
+    let target = format!("client:{id}");
+    pin(&store, "desktop", &target, "0.3.3", false, None, NOW).unwrap();
     pin(&store, "hub", "", "0.3.3", false, None, NOW).unwrap();
     assert!(unpin(&store, "hub", "").unwrap());
     assert!(!unpin(&store, "hub", "").unwrap());
     assert_eq!(
         bus.take(),
         vec![
-            "update:changed:pin:client:3".to_string(),
+            format!("update:changed:pin:{target}"),
             "update:changed:pin:".to_string(),
             "update:changed:pin:".to_string(),
         ]

@@ -76,6 +76,9 @@ export interface HostTokenInfo {
   /** `full` | `readonly` */
   mode: string;
   created_at: number;
+  /** Set only by `rotate_host_token`: provisioned, but degraded (e.g. a WSL
+   *  distribution whose hooks cannot reach this desktop). */
+  warning?: string | null;
 }
 
 export type TokenMode = 'full' | 'readonly';

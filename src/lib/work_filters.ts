@@ -7,8 +7,9 @@
 // Where the fields come from, all client-side (no backend change):
 // - tracker: the work key's owning tracker (`trackerForKey`); a key two
 //   trackers claim, or no key, has none.
-// - status category: `SessionRow.work.status_category`; a past link has none,
-//   so a status filter hides past work.
+// - status category: `SessionRow.work.effective_status` (native item status,
+//   falling back to `status_category` for an older hub); a past link has
+//   none, so a status filter hides past work.
 // - assignee "mine": the hub's own `mine` view (`work { tickets, view: mine }`
 //   over its cache, up to 200 items): assigned to you and not done.
 // - has-session: live sessions have one, past links do not. Only in work
@@ -93,18 +94,6 @@ export const HAS_SESSION_LABELS: Record<HasSessionFilter, string> = {
  *  return: `@` never starts a Jira / GitHub / Asana / Linear display name
  *  fleet stores. */
 export const ASSIGNEE_MINE = '@me';
-
-export function isWorkFilters(v: unknown): v is WorkFilters {
-  if (typeof v !== 'object' || v === null) return false;
-  const f = v as Record<string, unknown>;
-  return (
-    (f.tracker === 'all' || (typeof f.tracker === 'number' && Number.isInteger(f.tracker))) &&
-    (STATUS_FILTERS.includes(f.status as StatusCategoryFilter) || isStatusNameFilter(f.status)) &&
-    (f.assignee === 'all' || f.assignee === 'mine') &&
-    HAS_SESSION_FILTERS.includes(f.hasSession as HasSessionFilter) &&
-    typeof f.archived === 'boolean'
-  );
-}
 
 const PREF_KEY = 'sidebar.work-filters.v2';
 /** Before archived rows were hidden by default. Every install wrote

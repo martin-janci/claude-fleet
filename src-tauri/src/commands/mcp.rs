@@ -228,6 +228,10 @@ pub struct HostTokenInfo {
     /// `full` | `readonly`.
     pub mode: String,
     pub created_at: i64,
+    /// Set only by `rotate_host_token`: a non-fatal re-provision warning,
+    /// e.g. a WSL distribution whose hooks cannot reach the desktop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 impl From<fleet_core::store::HostTokenRow> for HostTokenInfo {
@@ -236,6 +240,7 @@ impl From<fleet_core::store::HostTokenRow> for HostTokenInfo {
             host_alias: r.host_alias,
             mode: r.mode,
             created_at: r.created_at,
+            warning: None,
         }
     }
 }
@@ -296,7 +301,7 @@ pub async fn rotate_host_token(
     backend.refuse_local_only("rotate_host_token")?;
     fleet_core::validate::host_alias(&host_alias)?;
     let base = HubBase::read(&*lock(&store)?)?;
-    fleet_core::service::provision::provision_host_with_token(
+    let warning = fleet_core::service::provision::provision_host_with_token(
         &store,
         &*ssh,
         &tunnels,
@@ -307,7 +312,10 @@ pub async fn rotate_host_token(
     .await?;
     let s = lock(&store)?;
     s.get_host_token(&host_alias)?
-        .map(HostTokenInfo::from)
+        .map(|r| HostTokenInfo {
+            warning,
+            ..HostTokenInfo::from(r)
+        })
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, "host token vanished"))
 }
 
@@ -430,8 +438,27 @@ mod tests {
             HostTokenInfo {
                 host_alias: "mefistos".into(),
                 mode: "readonly".into(),
-                created_at: 7
+                created_at: 7,
+                warning: None,
             }
         );
+        // No warning → the field is absent on the wire (list / set_mode).
+        assert!(!json.contains("warning"), "{json}");
+    }
+
+    #[test]
+    fn host_token_info_carries_a_rotate_warning() {
+        let info = HostTokenInfo {
+            warning: Some("hooks can't reach the desktop".into()),
+            ..HostTokenInfo::from(fleet_core::store::HostTokenRow {
+                host_alias: "wsl-ubuntu".into(),
+                token: "s3cret".into(),
+                created_at: 7,
+                mode: "full".into(),
+            })
+        };
+        let v = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["warning"], "hooks can't reach the desktop");
+        assert_eq!(v["host_alias"], "wsl-ubuntu");
     }
 }

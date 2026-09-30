@@ -67,12 +67,23 @@
         "record",
         "table",
         "chart",
+        "account_usage",
         "action",
         "notice",
         "link"
       ],
       "supported": true
+    },
+    {
+      "id": "embed",
+      "items": [
+        "account_usage"
+      ],
+      "supported": true
     }
+  ],
+  "page_usage_views": [
+    "block"
   ],
   "resources": [
     {
@@ -1309,6 +1320,18 @@
       ]
     },
     {
+      "default_widget": "switch",
+      "key": "provision.install_ag",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Install the ag launcher",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "number",
       "key": "work.retention.journal_days",
       "kind": {
@@ -1373,6 +1396,36 @@
         "type": "secs"
       },
       "label": "Tracker sync interval",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "catalog.scan_check_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Asset scan check",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "catalog.scan_max_age_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Asset scan age",
       "widgets": [
         "number",
         "duration",
@@ -1538,8 +1591,7 @@
       "kind": {
         "options": [
           "stable",
-          "beta",
-          "nightly"
+          "beta"
         ],
         "type": "choice"
       },
@@ -1917,7 +1969,57 @@
       ]
     }
   ],
+  "slots": [
+    {
+      "id": "host_detail",
+      "views": [
+        "block"
+      ]
+    },
+    {
+      "id": "hosts_group_title",
+      "views": [
+        "freshness"
+      ]
+    },
+    {
+      "id": "hosts_group",
+      "views": [
+        "bars"
+      ]
+    },
+    {
+      "id": "new_session_chip",
+      "views": [
+        "chip"
+      ]
+    },
+    {
+      "id": "new_session_host",
+      "views": [
+        "line",
+        "warning"
+      ]
+    },
+    {
+      "id": "status_footer",
+      "views": [
+        "footer"
+      ]
+    }
+  ],
   "sources": [
+    {
+      "help": "Each Claude account's plan headroom: the 5-hour and weekly windows, per-model limits, when it was checked and from which host, and when a refresh is allowed.",
+      "id": "accounts.usage",
+      "label": "Claude account usage",
+      "live": {
+        "command": "list_account_usage",
+        "event": "account_usage"
+      },
+      "params": [],
+      "shape": "account_usage"
+    },
     {
       "fields": [
         {
@@ -2108,6 +2210,36 @@
       "id": "work.retention",
       "label": "Work retention",
       "params": [],
+      "shape": "rows"
+    },
+    {
+      "columns": [
+        {
+          "id": "group",
+          "label": "What",
+          "ty": "text"
+        },
+        {
+          "id": "counted",
+          "label": "Counted",
+          "ty": "text"
+        }
+      ],
+      "help": "How the work graph was used over the window: links, detection, handovers, resumes, the journal, tidy-up and each tracker's sync, as counts (`fleet-hub work usage`).",
+      "id": "work.usage",
+      "label": "Work graph usage",
+      "params": [
+        {
+          "default": 30,
+          "help": "How many days back.",
+          "name": "days",
+          "ty": {
+            "max": 365,
+            "min": 1,
+            "type": "days"
+          }
+        }
+      ],
       "shape": "rows"
     },
     {

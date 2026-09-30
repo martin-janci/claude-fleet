@@ -55,7 +55,7 @@ export function task(over: Partial<WorkTask> = {}): WorkTask {
     org_source: 'tracker',
     org_fenced: true,
     org_mixed: false,
-    group: { id: 'tracker:1:ABC', label: 'ABC', source: 'tracker', rule_id: null, tracker_value: 'ABC', editable: true },
+    group: { id: 'tracker:1:ABC', label: 'ABC', source: 'tracker', rule_id: null, tracker_value: 'ABC' },
     counts: { active: 1, ended: 2, suggested: 1 },
     needs_you: false,
     review: false,

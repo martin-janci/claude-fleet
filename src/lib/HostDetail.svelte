@@ -37,7 +37,7 @@
   import { hubConnection } from './hub_connection';
   import AccountNickname from './AccountNickname.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
-  import UsageBlock from './UsageBlock.svelte';
+  import EmbedSlot from './pages/EmbedSlot.svelte';
 
   let {
     host,
@@ -219,8 +219,10 @@
     const r = await rotateToken(alias);
     busy = false;
     confirm = null;
-    if (r.ok) push({ kind: 'success', message: `${alias} has a new control-API token.` });
-    else pushError(r.error, `Rotate token for ${alias} failed`);
+    if (r.ok) {
+      push({ kind: 'success', message: `${alias} has a new control-API token.` });
+      if (r.value.warning) push({ kind: 'warning', message: `${alias}: ${r.value.warning}`, sticky: true });
+    } else pushError(r.error, `Rotate token for ${alias} failed`);
   }
 
   async function confirmRemove() {
@@ -354,16 +356,21 @@
         {#if account.email}<span class="muted">{account.email}</span>{/if}
       </div>
     {/if}
-    <UsageBlock
-      {account}
-      {snapshot}
-      {sharedWith}
-      {now}
-      {locale}
-      {timeZone}
-      {suppressUnavailable}
-      onRefresh={account ? onrefreshusage : undefined}
-      refreshBlocked={refreshUsageBlocked}
+    <!-- Usage is the embed page `embed.host_detail` (declarative pages L8). -->
+    <EmbedSlot
+      slot="host_detail"
+      ctx={{
+        now,
+        locale,
+        timeZone,
+        host,
+        account,
+        snapshot,
+        sharedWith,
+        suppressUnavailable,
+        onrefresh: onrefreshusage,
+        refreshBlocked: refreshUsageBlocked,
+      }}
     />
   </section>
 

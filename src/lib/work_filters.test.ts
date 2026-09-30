@@ -15,7 +15,6 @@ import {
   activeWorkFilterCount,
   bothPredicates,
   effectiveWorkFilters,
-  isWorkFilters,
   migrateWorkFilters,
   readWorkFilters,
   loadMine,
@@ -148,14 +147,15 @@ describe('work filters over rowMatches (M10.4)', () => {
     expect([6, 4, 3].map((id) => both({ id } as SessionRow))).toEqual([true, false, false]);
   });
 
-  it('validates what it reads back', () => {
-    expect(isWorkFilters(DEFAULT_WORK_FILTERS)).toBe(true);
-    expect(isWorkFilters({ ...DEFAULT_WORK_FILTERS, tracker: 3 })).toBe(true);
-    expect(isWorkFilters({ ...DEFAULT_WORK_FILTERS, tracker: '3' })).toBe(false);
-    expect(isWorkFilters({ ...DEFAULT_WORK_FILTERS, status: 'blocked' })).toBe(false);
-    expect(isWorkFilters({ ...DEFAULT_WORK_FILTERS, assignee: 'alice' })).toBe(false);
-    expect(isWorkFilters({ ...DEFAULT_WORK_FILTERS, archived: 'no' })).toBe(false);
-    expect(isWorkFilters(null)).toBe(false);
+  it('validates what it reads back, field by field', () => {
+    const D = DEFAULT_WORK_FILTERS;
+    expect(migrateWorkFilters(D)).toEqual(D);
+    expect(migrateWorkFilters({ ...D, tracker: 3 })).toEqual({ ...D, tracker: 3 });
+    expect(migrateWorkFilters({ ...D, tracker: '3' })).toEqual(D);
+    expect(migrateWorkFilters({ ...D, status: 'blocked' })).toEqual(D);
+    expect(migrateWorkFilters({ ...D, assignee: 'alice' })).toEqual(D);
+    expect(migrateWorkFilters({ ...D, archived: 'no' })).toEqual(D);
+    expect(migrateWorkFilters(null)).toBeNull();
   });
 });
 
@@ -250,9 +250,10 @@ describe('status by tracker name', () => {
   });
 
   it('persists a name filter and drops a blank one', () => {
-    expect(isWorkFilters({ ...DEFAULT_WORK_FILTERS, status: 'name:QA Review' })).toBe(true);
-    expect(isWorkFilters({ ...DEFAULT_WORK_FILTERS, status: 'name:  ' })).toBe(false);
-    expect(isWorkFilters({ ...DEFAULT_WORK_FILTERS, status: 'qa' })).toBe(false);
+    const D = DEFAULT_WORK_FILTERS;
+    expect(migrateWorkFilters({ ...D, status: 'name:QA Review' })?.status).toBe('name:QA Review');
+    expect(migrateWorkFilters({ ...D, status: 'name:  ' })?.status).toBe(D.status);
+    expect(migrateWorkFilters({ ...D, status: 'qa' })?.status).toBe(D.status);
   });
 
   it('treats a name no session is in any more as any status', () => {

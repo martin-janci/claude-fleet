@@ -142,7 +142,14 @@ pub fn ensure_repo(path: &Path, remote: Option<&str>) -> Result<(), IpcError> {
     match remote {
         Some(url) => {
             let parent = clone_parent(path);
-            std::fs::create_dir_all(parent).map_err(|e| unreadable(parent, &e))?;
+            // Named as the checkout, like a failed probe: Windows reads a
+            // path through a file as absent rather than failing the probe,
+            // so this is where such a checkout surfaces there.
+            std::fs::create_dir_all(parent).map_err(|e| {
+                let e =
+                    std::io::Error::new(e.kind(), format!("creating {}: {e}", parent.display()));
+                unreadable(path, &e)
+            })?;
             let target = path.to_string_lossy().to_string();
             git(parent, &["clone", "-q", url, &target])?;
             Ok(())
@@ -1016,7 +1023,7 @@ mod tests {
     /// directory should be stands in for an unreadable one, which the root
     /// test runner could read anyway. Unix fails the probe itself
     /// (`NotADirectory`); Windows reads the path as absent and fails creating
-    /// the clone's parent, so the message names at least that parent.
+    /// the clone's parent — both name the checkout, and neither touches it.
     #[test]
     fn ensure_repo_names_a_checkout_it_cannot_probe() {
         let base = tmp("ensure-repo-unprobeable");
@@ -1026,7 +1033,30 @@ mod tests {
         let err = ensure_repo(&path, Some("/nonexistent/remote.git")).unwrap_err();
         assert_eq!(err.code, "E_IO", "{}", err.message);
         assert!(
-            err.message.contains(&*file.to_string_lossy()),
+            err.message.contains(&*path.to_string_lossy()),
+            "{}",
+            err.message
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), "x");
+    }
+
+    /// A checkout that probes as absent but whose directory cannot be made
+    /// names the checkout and the directory that failed. A dangling symlink
+    /// in the way does this on Unix, as a path under a file does on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_repo_names_a_checkout_it_cannot_create() {
+        let base = tmp("ensure-repo-uncreatable");
+        let dangling = base.join("dangling");
+        std::os::unix::fs::symlink(base.join("nowhere"), &dangling).unwrap();
+        let path = dangling.join("agent-assets");
+        let err = ensure_repo(&path, Some("/nonexistent/remote.git")).unwrap_err();
+        assert_eq!(err.code, "E_IO");
+        assert!(
+            err.message.contains(&*path.to_string_lossy())
+                && err
+                    .message
+                    .contains(&format!("creating {}", dangling.display())),
             "{}",
             err.message
         );

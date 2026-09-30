@@ -64,6 +64,9 @@ pub trait FleetTasks {
     /// desktop paired with a hub must not run it, or it becomes a second
     /// brain writing the hub's tickets into its own database.
     fn start_tracker_sync(&self);
+    /// Assets S1a: rescan stale hosts' assets. Fleet-owning, like the
+    /// tracker sync: a paired desktop must not run it.
+    fn start_catalog_scan_tick(&self);
 }
 
 /// `CLAUDE_FLEET_HUB_REPORTS`: unset or anything but `0`/`false` means on.
@@ -125,6 +128,7 @@ pub fn start_background_tasks(backend: &Backend, tasks: &dyn FleetTasks) {
             tasks.start_reconcile_tick();
             tasks.start_account_usage_tick();
             tasks.start_tracker_sync();
+            tasks.start_catalog_scan_tick();
         }
     }
 }

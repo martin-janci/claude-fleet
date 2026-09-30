@@ -699,23 +699,34 @@ fn write_reachable_host(
     // no other writer lands between this read, the write and the
     // read-back. `None` is a first sighting (no stored row yet).
     let mut priors: Vec<(String, Option<Prior>)> = Vec::with_capacity(live.len());
-    // Every row on this host (ghost / lost / pane-less included) with
-    // the Claude id it holds, so an inferred cwd match can be checked
-    // against the ids other rows already own.
-    let stored_ids: HashMap<String, Option<String>> = s
+    // Every row on this host (ghost / lost / pane-less included), read
+    // once: each live session's prior row, account and stale-working
+    // memory come from here, not from three point queries per session.
+    // `s` is held for this whole function and the loop below only reads,
+    // so the map is what the write sees.
+    let stored: HashMap<String, SessionRow> = s
         .list_sessions_for_host(&host.alias)?
         .into_iter()
-        .map(|r| (r.tmux_name, r.claude_session_id))
+        .map(|r| (r.tmux_name.clone(), r))
+        .collect();
+    // The Claude id every stored row holds, so an inferred cwd match can be
+    // checked against the ids other rows already own.
+    let stored_ids: HashMap<String, Option<String>> = stored
+        .iter()
+        .map(|(name, r)| (name.clone(), r.claude_session_id.clone()))
         .collect();
     let agents = pair_session_agents(live, agent_rows, &stored_ids, host.alias == "local");
     for sess in live {
         keep.push(sess.name.clone());
         let project_id = find_project_id_for_path(projects, &host.alias, &sess.path, &paths);
+        // The PRIOR stored row (transition detection below, and the
+        // stale-working veto); `None` is a first sighting.
+        let prior_row = stored.get(&sess.name);
         // Preservation invariant: if the session already has an
         // account_uuid in the DB, keep it; only capture the host's
         // current account for newly-discovered sessions.
-        let account_uuid = s
-            .get_session_account(&host.alias, &sess.name)?
+        let account_uuid = prior_row
+            .and_then(|p| p.account_uuid.clone())
             .or_else(|| host_account.clone());
         let worktree_key = worktree_key_for_host(&sess.path.to_string_lossy(), &paths);
         // The running Claude agent this session is paired with (see
@@ -738,43 +749,12 @@ fn write_reachable_host(
             .as_deref()
             .and_then(|s| s.parse::<crate::service::pane_intel::ClaudeStatus>().ok());
         let pane_status = pane.and_then(|p| p.derived_status);
-        // Transition-detection: remember the PRIOR stored values (the
-        // upsert below overwrites them). A first sighting skips the
-        // status/stuck detection but still opens its conversation; a
-        // read failure skips the session entirely. Read here, before the
-        // candidate, because the stale-working veto needs the stored stamp.
-        let prior_read = s.get_session(&sess.name, &host.alias);
-        if let Err(e) = &prior_read {
-            tracing::warn!(
-                host = %host.alias,
-                session = %sess.name,
-                error = %e,
-                "[reconcile] prior row read failed"
-            );
-            s.ensure_in_tx()?;
-        }
-        let prior_row = prior_read.as_ref().ok().cloned().flatten();
         // The veto is armed by the attention stamp OR by the demotion's own
-        // memory (`stale_demoted_at`, not a `SessionRow` field): an attach
-        // or `reconcile.stale_working_ttl_secs` ends the reason, not the
-        // demotion. A failed read leaves the veto to the stamp alone.
-        let stale = match &prior_row {
-            None => false,
-            Some(p) if p.stale_working_at.is_some() => true,
-            Some(_) => match s.stale_demoted(&host.alias, &sess.name) {
-                Ok(demoted) => demoted,
-                Err(e) => {
-                    tracing::warn!(
-                        host = %host.alias,
-                        session = %sess.name,
-                        error = %e,
-                        "[reconcile] stale-demoted read failed"
-                    );
-                    s.ensure_in_tx()?;
-                    false
-                }
-            },
-        };
+        // memory (`stale_demoted_at`): an attach or
+        // `reconcile.stale_working_ttl_secs` ends the reason, not the
+        // demotion.
+        let stale =
+            prior_row.is_some_and(|p| p.stale_working_at.is_some() || p.stale_demoted_at.is_some());
         // Prefer the authoritative `claude agents` status; fall back to
         // the pane heuristic per `status_candidate` — full weight when
         // this pass actually asked, `Blocked`-only otherwise (a
@@ -789,16 +769,17 @@ fn write_reachable_host(
         )
         .map(|s| s.as_str().to_string());
         let stuck_kind = pane.and_then(|p| p.stuck.map(|k| k.as_str().to_string()));
-        if prior_read.is_ok() {
-            priors.push((
-                sess.name.clone(),
-                prior_row.map(|p| Prior {
-                    claude_status: p.claude_status,
-                    stuck_kind: p.stuck_kind,
-                    claude_session_id: p.claude_session_id,
-                }),
-            ));
-        }
+        // Transition-detection: remember the PRIOR stored values (the
+        // upsert below overwrites them). A first sighting skips the
+        // status/stuck detection but still opens its conversation.
+        priors.push((
+            sess.name.clone(),
+            prior_row.map(|p| Prior {
+                claude_status: p.claude_status.clone(),
+                stuck_kind: p.stuck_kind.clone(),
+                claude_session_id: p.claude_session_id.clone(),
+            }),
+        ));
         sessions.push(ReconcileSession {
             tmux_name: &sess.name,
             project_id,
@@ -989,6 +970,20 @@ fn write_reachable_host(
                 if let Err(e) = crate::service::work::detect::resolve_session(s, sid) {
                     tracing::debug!(error = %e.message, "[work] PR resolve failed");
                     s.ensure_in_tx()?;
+                }
+                // The merged-PR stamp, once more now that the links have
+                // settled (native item status, design 2026-09-28 §2):
+                // `set_pr_signals` already tried, but the resolve above may
+                // have only just confirmed the link the stamp needs. Both
+                // calls are on a signal that CHANGED this pass — a stale
+                // merged signal must never stamp work the session was
+                // pointed at later — and both are idempotent, so the second
+                // writes only what the first could not see yet.
+                if info.signals.as_ref().is_some_and(|sg| sg.is_merged()) {
+                    if let Err(e) = s.stamp_derived_done_for_session(sid) {
+                        tracing::debug!(error = %e.message, "[work] merged PR did not stamp");
+                        s.ensure_in_tx()?;
+                    }
                 }
                 // Write-back (M13.4e): after the links settled, queue the
                 // PR's remote link where an admin allows it. Idempotent.
@@ -1669,9 +1664,10 @@ pub(crate) async fn reconcile_sessions_with(
         if deps.local_host {
             s.upsert_host("local")?;
         }
-        // One hidden/local rule for every host loop (hub-ops F6): hidden
-        // rows never enter the snapshot now; `reap_hidden_hosts` (step 4)
-        // handles what they still hold.
+        // One hidden/local rule for every host loop (hub-ops F6,
+        // `hosts::is_active`): hidden rows never enter the snapshot, their
+        // sessions stay frozen at their last-known state; a disabled
+        // `local` is reaped by `reap_unprobed_local` (step 4).
         crate::service::hosts::active_hosts(s.list_hosts()?, deps.local_host)
             .into_iter()
             .map(|h| {
@@ -1750,37 +1746,40 @@ pub(crate) async fn reconcile_sessions_with(
         tokio::task::yield_now().await;
     }
 
-    // 4. Hosts nothing probes — hidden rows, and `local` on a hub without a
-    //    local host — still hold session rows (a copied desktop store, a
-    //    host hidden after its rename). Reap them here, one savepoint per
-    //    host, so "hidden" stops meaning "immortal" (data-sync F2/F5).
-    reap_hidden_hosts(store, deps, now_unix());
+    // 4. `local` on a hub without a local host (`hub.local_host=false`) is
+    //    the one host nothing will ever probe, yet it can still hold rows (a
+    //    copied desktop store). Reap them here so they are not immortal
+    //    (data-sync F2/F5). A user-HIDDEN host is left alone: Hide is
+    //    reversible (Undo, Unhide), so its rows stay frozen at their
+    //    last-known state — names, work links, timeline and resumable
+    //    `claude_session_id`s intact — until the host is shown again.
+    reap_unprobed_local(store, deps, now_unix());
     Ok(())
 }
 
-/// Step 4 of [`reconcile_sessions_with`]. Best-effort per host: a failure
-/// is logged and the next pass tries again.
-pub(super) fn reap_hidden_hosts(store: &Mutex<Store>, deps: &ReconcileDeps, now: i64) {
+/// Step 4 of [`reconcile_sessions_with`]: ghost, then (next pass) delete the
+/// rows of `local` when this process has no local host. That is exactly the
+/// `local` case of [`crate::service::hosts::is_active`] — hidden hosts, the
+/// other inactive case, keep their rows. Best-effort: a failure is logged
+/// and the next pass tries again.
+pub(super) fn reap_unprobed_local(store: &Mutex<Store>, deps: &ReconcileDeps, now: i64) {
+    use crate::service::projects::LOCAL_HOST;
+    if deps.local_host {
+        return;
+    }
     let Ok(s) = lock(store) else { return };
-    let Ok(rows) = s.list_hosts() else { return };
-    for h in rows {
-        let unprobed = h.hidden || (!deps.local_host && h.alias == "local");
-        if !unprobed {
-            continue;
-        }
-        match s.reap_host_ghosts(&h.alias, now) {
-            Ok(n) if n > 0 => tracing::info!(
-                host = %h.alias,
-                reaped = n,
-                "[reconcile] reaped rows of an unprobed host"
-            ),
-            Ok(_) => {}
-            Err(e) => tracing::warn!(
-                host = %h.alias,
-                error = %e,
-                "[reconcile] reap of an unprobed host failed"
-            ),
-        }
+    match s.reap_host_ghosts(LOCAL_HOST, now) {
+        Ok(n) if n > 0 => tracing::info!(
+            host = LOCAL_HOST,
+            reaped = n,
+            "[reconcile] reaped rows of the disabled local host"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            host = LOCAL_HOST,
+            error = %e,
+            "[reconcile] reap of the disabled local host failed"
+        ),
     }
 }
 
@@ -2132,8 +2131,10 @@ pub(super) fn stale_working_veto(
 }
 
 /// The tick's stale-`working` sweep: reads `reconcile.stale_working_secs`
-/// and demotes every qualifying row (`Store::age_out_stale_working`).
-/// Best-effort; returns how many rows were demoted.
+/// and demotes every qualifying row (`Store::age_out_stale_working`) —
+/// only rows a reconcile pass observed within that window, so a skipped
+/// or failed pass, or an unreachable host, demotes nothing. Best-effort;
+/// returns how many rows were demoted.
 pub fn age_out_stale_working(store: &Mutex<Store>) -> usize {
     let Ok(s) = store.lock() else {
         return 0;

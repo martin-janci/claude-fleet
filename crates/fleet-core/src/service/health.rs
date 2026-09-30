@@ -20,8 +20,8 @@ use std::sync::Mutex;
 /// field, a wrapper object or an older hub would read as a *healthy* fleet.
 /// [`tests::a_partial_health_is_rejected_rather_than_zeroed`] pins that.
 ///
-/// `Default` went with it: nothing derived it (`health_check`'s poisoned-lock
-/// arm writes every field out), and leaving it would invite the attribute
+/// `Default` went with it: nothing derived it (`unready_health`, the poisoned-lock
+/// case, writes every field out), and leaving it would invite the attribute
 /// back.
 #[derive(Serialize, Deserialize)]
 pub struct Health {
@@ -168,7 +168,7 @@ pub struct HostHealthRow {
     /// More than `health.claude_max_behind` patch releases behind the
     /// fleet's newest FRESH version.
     pub claude_behind: bool,
-    /// An agent host whose agent is not the hub's version.
+    /// An agent host whose agent is older than the hub (not merely different).
     pub agent_behind: bool,
     /// Reachable, has a live non-external session, and no hook from its
     /// token within `hooks_silent_secs`.
@@ -185,6 +185,14 @@ pub struct HostHealthThresholds {
 /// A version stamp young enough to compare: the same 24 h the desktop's
 /// `health.version_max_age_secs` defaults to.
 const VERSION_FRESH_SECS: i64 = 86_400;
+
+/// A health sample (`HostRow::health_at`) young enough to judge `disk_low`
+/// on. The sample is rewritten on every reconcile pass (~20 s) of a
+/// reachable host, so one an hour old means the host stopped answering and
+/// its disk reading says nothing about now. The desktop's health line uses
+/// the same value (`HEALTH_SAMPLE_FRESH_SECS` in `src/lib/hosts_view.ts`);
+/// keep the two equal.
+pub const HEALTH_SAMPLE_FRESH_SECS: i64 = 3600;
 
 /// `2.1.282` → `[2, 1, 282]`; `None` when not a dotted number.
 fn version_parts(v: &str) -> Option<Vec<i64>> {
@@ -233,6 +241,10 @@ pub fn hosts_health(
                 }
                 _ => None,
             };
+            // A stale sample keeps its percent but raises no flag.
+            let sample_fresh = h
+                .health_at
+                .is_some_and(|at| now - at <= HEALTH_SAMPLE_FRESH_SECS);
             let live = agents
                 .iter()
                 .find(|(a, _)| a == &h.alias)
@@ -249,7 +261,7 @@ pub fn hosts_health(
                 claude_version_at: h.claude_version_at,
                 agent_version: agent_version.clone(),
                 disk_home_pct,
-                disk_low: disk_home_pct.is_some_and(|p| p >= t.disk_low_pct),
+                disk_low: sample_fresh && disk_home_pct.is_some_and(|p| p >= t.disk_low_pct),
                 claude_behind: match (&newest, &h.claude_version) {
                     (Some(n), Some(v)) if fresh(h) => {
                         patch_behind(v, n).is_some_and(|b| b > t.claude_max_behind)
@@ -266,8 +278,17 @@ pub fn hosts_health(
         .collect()
 }
 
+/// An agent host whose agent is OLDER than the hub. An agent ahead of the
+/// hub (after a hub rollback) is not behind, and a version that is not a
+/// dotted number flags nothing — as the desktop's `compareVersions`.
 fn agent_behind(transport: &str, agent_version: Option<&str>, hub_version: &str) -> bool {
-    transport == "agent" && agent_version.is_some_and(|v| v != hub_version)
+    transport == "agent"
+        && agent_version.is_some_and(|v| {
+            matches!(
+                (version_parts(v), version_parts(hub_version)),
+                (Some(a), Some(b)) if a < b
+            )
+        })
 }
 
 /// Overlay the agents connected right now onto [`Health::hosts`]: the live
@@ -517,6 +538,27 @@ pub fn trackers_from_store(
     metrics: &dyn Fn(&[i64]) -> Vec<SyncMetrics>,
     now: i64,
 ) -> TrackersHealth {
+    let org_hosts: Vec<String> = match scope {
+        OrgScope::Org { .. } => hosts_in_scope(s, scope)
+            .into_iter()
+            .map(|h| h.alias)
+            .collect(),
+        _ => Vec::new(),
+    };
+    trackers_scoped(s, scope, metrics, now, &org_hosts)
+}
+
+/// [`trackers_from_store`] with an org-bound client's visible hosts already
+/// in hand (`org_hosts`, read only for [`OrgScope::Org`]): one grouped count
+/// of failed writes and one backlog count over those hosts, not one query
+/// per tracker and per host.
+fn trackers_scoped(
+    s: &Store,
+    scope: &OrgScope,
+    metrics: &dyn Fn(&[i64]) -> Vec<SyncMetrics>,
+    now: i64,
+    org_hosts: &[String],
+) -> TrackersHealth {
     let rows: Vec<TrackerRow> = s
         .list_trackers()
         .unwrap_or_default()
@@ -534,12 +576,17 @@ pub fn trackers_from_store(
         .into_iter()
         .map(|o| (o.id, o.name))
         .collect();
+    let failures = if rows.is_empty() {
+        Default::default()
+    } else {
+        s.tracker_write_failures_by_tracker().unwrap_or_default()
+    };
     let trackers: Vec<TrackerHealth> = rows
         .iter()
         .map(|t| {
             let org = t.org_id.and_then(|o| orgs.get(&o).cloned());
             TrackerHealth {
-                write_failures: s.tracker_write_failures(t.id).unwrap_or(0),
+                write_failures: failures.get(&t.id).copied().unwrap_or(0),
                 ..tracker_health(t, by_id.get(&t.id), org)
             }
         })
@@ -551,10 +598,7 @@ pub fn trackers_from_store(
         degraded: count("degraded"),
         detection_backlog: match scope {
             // A bound client (M14): the hosts it sees, not the fleet.
-            OrgScope::Org { .. } => hosts_in_scope(s, scope)
-                .iter()
-                .map(|h| s.detection_backlog(before, Some(&h.alias)).unwrap_or(0))
-                .sum(),
+            OrgScope::Org { .. } => s.detection_backlog_on(before, org_hosts).unwrap_or(0),
             _ => s.detection_backlog(before, scope.host()).unwrap_or(0),
         },
         detection_backlog_days: DETECTION_BACKLOG_DAYS,
@@ -647,17 +691,128 @@ pub fn summarize(sessions: &[SessionRow], hosts: &[HostRow], context_red_pct: f6
     summary
 }
 
+/// Whose `fleet_health` is being built, and so what its roll-ups count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HealthView {
+    /// The master, an unbound client, the desktop: the whole fleet.
+    Fleet,
+    /// A per-host token: the session and host counts stay fleet-wide; the
+    /// per-host telemetry (`hosts[]`) and the spend are its own host's (same
+    /// scoping as `usage_report`); the trackers are its org's, the backlog
+    /// its host's (work graph M12.4) — none when `trackers` is `None` (the
+    /// scope could not be read).
+    Host {
+        alias: String,
+        trackers: Option<OrgScope>,
+    },
+    /// An org-bound client (work graph M14): every roll-up that sums across
+    /// hosts is over the hosts it sees ([`hosts_in_scope`]) — host counts,
+    /// the tunnels and `hosts[]`; session counts over the sessions it may
+    /// list ([`OrgScope::sees_row`]); per-host spend over those sessions on
+    /// those hosts; the daily spend over those hosts' `usage_daily` rows;
+    /// its org's trackers. `peer_links_down` is the hub's own links, not a
+    /// sum over hosts, and stays.
+    Org(OrgScope),
+    /// A scoped caller whose scope could not be read: it is told nothing
+    /// rather than the whole fleet ([`blank_rollups`]).
+    Blank,
+}
+
 pub fn health_from_store(s: &Store) -> Health {
+    health_for(s, &HealthView::Fleet, Default::default())
+}
+
+/// The health roll-up for `view`, built in ONE pass over the cached rows:
+/// one session read, one host read, the trackers once — for a scoped caller
+/// too (it used to be built fleet-wide and then re-derived). `tunnels` is
+/// the supervisor's view, narrowed like the hosts.
+pub fn health_for(
+    s: &Store,
+    view: &HealthView,
+    tunnels: std::collections::HashMap<String, crate::service::tunnel::TunnelHealth>,
+) -> Health {
     // TODO(T3): once IpcError exists, surface the failure reason here
     // instead of silently falling back to schema_version=0 / db_ready=false.
     let schema_version = s.schema_version().unwrap_or(0);
+    let now = now_unix();
     // Cached reconcile state only — no network / reconcile here. On a read
     // error, fall back to empty slices so health still reports core fields.
-    let sessions = s.list_all_sessions().unwrap_or_default();
-    let hosts = s.list_hosts().unwrap_or_default();
+    let (sessions, hosts) = if matches!(view, HealthView::Blank) {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            s.list_all_sessions().unwrap_or_default(),
+            s.list_hosts().unwrap_or_default(),
+        )
+    };
     let red = context_red_pct(s);
-    let summary = summarize(&sessions, &hosts, red);
-    Health {
+    // The live agents are overlaid by `fleet_health`, which holds the
+    // registry; from the store alone the stored hello is what there is.
+    // Judged across every host (the newest Claude is the fleet's), then
+    // narrowed to the ones the caller sees.
+    let mut host_rows = hosts_health(
+        &hosts,
+        &sessions,
+        &host_thresholds(s),
+        &[],
+        crate::app_version::get(),
+        now,
+    );
+    let metrics = &tracker_sync::metrics_for;
+    let (summary, usage_by_day, trackers, tunnels) = match view {
+        HealthView::Fleet => (
+            summarize(&sessions, &hosts, red),
+            usage::recent_days(s, now, usage::HEALTH_DAYS, None),
+            trackers_scoped(s, &OrgScope::All, metrics, now, &[]),
+            tunnels,
+        ),
+        HealthView::Host { alias, trackers } => {
+            host_rows.retain(|r| &r.alias == alias);
+            let mut summary = summarize(&sessions, &hosts, red);
+            summary.usage_by_host.retain(|k, _| k == alias);
+            (
+                summary,
+                usage::recent_days(s, now, usage::HEALTH_DAYS, Some(alias.as_str())),
+                trackers
+                    .as_ref()
+                    .map(|scope| trackers_scoped(s, scope, metrics, now, &[]))
+                    .unwrap_or_default(),
+                tunnels,
+            )
+        }
+        HealthView::Org(scope) => {
+            // [`hosts_in_scope`] over the host list already read.
+            let hosts: Vec<HostRow> = hosts
+                .into_iter()
+                .filter(|h| scope.sees_org(h.org_id))
+                .collect();
+            let visible: std::collections::BTreeSet<String> =
+                hosts.iter().map(|x| x.alias.clone()).collect();
+            host_rows.retain(|r| visible.contains(&r.alias));
+            let sessions: Vec<SessionRow> =
+                sessions.into_iter().filter(|r| scope.sees_row(r)).collect();
+            let mut summary = summarize(&sessions, &hosts, red);
+            summary
+                .usage_by_host
+                .retain(|host, _| visible.contains(host));
+            let usage_by_day =
+                usage::recent_days_on(s, now, usage::HEALTH_DAYS, &|host| visible.contains(host));
+            let aliases: Vec<String> = visible.iter().cloned().collect();
+            let trackers = trackers_scoped(s, scope, metrics, now, &aliases);
+            let tunnels: std::collections::HashMap<_, _> = tunnels
+                .into_iter()
+                .filter(|(host, _)| visible.contains(host))
+                .collect();
+            (summary, usage_by_day, trackers, tunnels)
+        }
+        HealthView::Blank => (
+            FleetSummary::default(),
+            Vec::new(),
+            TrackersHealth::default(),
+            Default::default(),
+        ),
+    };
+    let mut h = Health {
         version: crate::app_version::get().to_string(),
         tunnels: Default::default(),
         tunnels_flapping: 0,
@@ -672,45 +827,33 @@ pub fn health_from_store(s: &Store) -> Health {
         context_red_pct: red as u32,
         stuck: summary.stuck,
         usage_by_host: summary.usage_by_host,
-        usage_by_day: usage::recent_days(s, now_unix(), usage::HEALTH_DAYS, None),
+        usage_by_day,
         // G14c: a listener link never goes anywhere near `LINK_CONNECTED` on
         // its own (it has no retry loop of its own to write a different
         // `state`), so a filter on `state` alone — the old computation here —
         // never counted a stalled listener as down. `Store::peer_links_down`
         // also watches a listener's client token and its last served
         // exchange.
-        peer_links_down: s.peer_links_down(now_unix()).unwrap_or_default(),
-        trackers: trackers_from_store(s, &OrgScope::All, &tracker_sync::metrics_for, now_unix()),
+        peer_links_down: s.peer_links_down(now).unwrap_or_default(),
+        trackers,
         hub: Some(hub_health()),
         tunnels_mode: Some(tunnels_mode(s)),
         peer_links_total: s.peer_links_total().unwrap_or_default(),
         updates: None,
-        // The live agents are overlaid by `fleet_health`, which holds the
-        // registry; from the store alone the stored hello is what there is.
-        hosts: hosts_health(
-            &hosts,
-            &sessions,
-            &host_thresholds(s),
-            &[],
-            crate::app_version::get(),
-            now_unix(),
-        ),
-        decide: crate::service::decide::health(s, now_unix()),
+        hosts: host_rows,
+        // The decision envelope is the hub's own business: a scoped view
+        // gets none of it (`fleet_health` also drops it for those callers).
+        decide: if matches!(view, HealthView::Fleet) {
+            crate::service::decide::health(s, now)
+        } else {
+            None
+        },
+    };
+    h.set_tunnels(tunnels);
+    if matches!(view, HealthView::Blank) {
+        blank_rollups(&mut h);
     }
-}
-
-/// Re-read the tracker roll-up for a per-host token's scope (work graph
-/// M12.4): its org's trackers, its own host's backlog.
-pub fn scope_trackers(h: &mut Health, s: &Store, scope: &OrgScope) {
-    h.trackers = trackers_from_store(s, scope, &tracker_sync::metrics_for, now_unix());
-}
-
-/// Restrict the usage roll-ups to one host: a per-host control-API token
-/// must not read other hosts' spend (same scoping as `usage_report`). The
-/// session and host counts stay fleet-wide, as before.
-pub fn scope_usage_to_host(h: &mut Health, s: &Store, host: &str) {
-    h.usage_by_host.retain(|k, _| k == host);
-    h.usage_by_day = usage::recent_days(s, now_unix(), usage::HEALTH_DAYS, Some(host));
+    h
 }
 
 /// The hosts an org-bound client sees (work graph M14): its org's, and
@@ -723,46 +866,6 @@ pub fn hosts_in_scope(s: &Store, scope: &OrgScope) -> Vec<HostRow> {
         .into_iter()
         .filter(|h| scope.sees_org(h.org_id))
         .collect()
-}
-
-/// Re-derive every roll-up that sums across hosts for an org-bound client
-/// (work graph M14), so nothing in `fleet_health` counts another org's
-/// hosts or sessions: host counts and the tunnels over
-/// [`hosts_in_scope`]; session counts over the sessions the client may
-/// list ([`OrgScope::sees_row`]); per-host spend over those sessions on
-/// those hosts; the daily spend over those hosts' `usage_daily` rows. The
-/// trackers are [`scope_trackers`]'. `peer_links_down` is the hub's own
-/// links, not a sum over hosts, and stays.
-pub fn scope_to_org(h: &mut Health, s: &Store, scope: &OrgScope) {
-    let hosts = hosts_in_scope(s, scope);
-    let visible: std::collections::BTreeSet<String> =
-        hosts.iter().map(|x| x.alias.clone()).collect();
-    let sessions: Vec<SessionRow> = s
-        .list_all_sessions()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|r| scope.sees_row(r))
-        .collect();
-    let summary = summarize(&sessions, &hosts, context_red_pct(s));
-    h.hosts_reachable = summary.hosts_reachable;
-    h.hosts_total = summary.hosts_total;
-    h.sessions_total = summary.sessions_total;
-    h.by_status = summary.by_status;
-    h.ghosts = summary.ghosts;
-    h.context_red = summary.context_red;
-    h.stuck = summary.stuck;
-    h.usage_by_host = summary.usage_by_host;
-    h.usage_by_host.retain(|host, _| visible.contains(host));
-    h.usage_by_day = usage::recent_days_on(s, now_unix(), usage::HEALTH_DAYS, &|host| {
-        visible.contains(host)
-    });
-    let tunnels = std::mem::take(&mut h.tunnels);
-    h.set_tunnels(
-        tunnels
-            .into_iter()
-            .filter(|(host, _)| visible.contains(host))
-            .collect(),
-    );
 }
 
 /// Every roll-up blanked, for an org-bound client whose scope could not be
@@ -780,6 +883,7 @@ pub fn blank_rollups(h: &mut Health) {
     h.tunnels.clear();
     h.tunnels_flapping = 0;
     h.trackers = Default::default();
+    h.hosts.clear();
     h.decide = None;
 }
 
@@ -795,31 +899,37 @@ pub fn health_check(store: &Mutex<Store>) -> Health {
     // rather than panicking the command (which the old `.expect` did).
     match store.lock() {
         Ok(s) => health_from_store(&s),
-        Err(_) => Health {
-            version: crate::app_version::get().to_string(),
-            tunnels: Default::default(),
-            tunnels_flapping: 0,
-            db_ready: false,
-            schema_version: 0,
-            hosts_reachable: 0,
-            hosts_total: 0,
-            sessions_total: 0,
-            by_status: BTreeMap::new(),
-            ghosts: 0,
-            context_red: 0,
-            context_red_pct: crate::service::attention::DEFAULT_CONTEXT_RED_PCT as u32,
-            stuck: 0,
-            usage_by_host: BTreeMap::new(),
-            usage_by_day: Vec::new(),
-            peer_links_down: 0,
-            trackers: TrackersHealth::default(),
-            hub: None,
-            tunnels_mode: None,
-            peer_links_total: 0,
-            updates: None,
-            hosts: Vec::new(),
-            decide: None,
-        },
+        Err(_) => unready_health(),
+    }
+}
+
+/// The health of a store whose lock is poisoned: `db_ready: false`, every
+/// roll-up empty.
+pub fn unready_health() -> Health {
+    Health {
+        version: crate::app_version::get().to_string(),
+        tunnels: Default::default(),
+        tunnels_flapping: 0,
+        db_ready: false,
+        schema_version: 0,
+        hosts_reachable: 0,
+        hosts_total: 0,
+        sessions_total: 0,
+        by_status: BTreeMap::new(),
+        ghosts: 0,
+        context_red: 0,
+        context_red_pct: crate::service::attention::DEFAULT_CONTEXT_RED_PCT as u32,
+        stuck: 0,
+        usage_by_host: BTreeMap::new(),
+        usage_by_day: Vec::new(),
+        peer_links_down: 0,
+        trackers: TrackersHealth::default(),
+        hub: None,
+        tunnels_mode: None,
+        peer_links_total: 0,
+        updates: None,
+        hosts: Vec::new(),
+        decide: None,
     }
 }
 
@@ -875,6 +985,7 @@ mod tests {
             turn_seq: 0,
             last_stop_at: None,
             stale_working_at: None,
+            stale_demoted_at: None,
             work_rev: 0,
             pr_evidence: None,
             pr_checked_at: None,
@@ -940,12 +1051,14 @@ mod tests {
         full.transport = "agent".into();
         full.agent_version = Some("0.2.26".into());
         full.last_hook_at = Some(now - 7200);
+        full.health_at = Some(now - 60);
         let mut fine = host("fine", true);
         fine.disk_home_free_kb = Some(72_000_000);
         fine.disk_home_total_kb = Some(96_000_000);
         fine.claude_version = Some("2.1.282".into());
         fine.claude_version_at = Some(now - 60);
         fine.last_hook_at = Some(now - 60);
+        fine.health_at = Some(now - 60);
         let sessions = vec![
             session_on("full", Some("working")),
             session_on("fine", Some("idle")),
@@ -991,6 +1104,306 @@ mod tests {
         overlay_agents(&mut rows, &[("trn".into(), "0.3.1".into())], "0.3.1");
         assert_eq!(rows[0].agent_version.as_deref(), Some("0.3.1"));
         assert!(!rows[0].agent_behind);
+        // A live agent AHEAD of the hub (a hub rollback) is not behind.
+        rows[0].agent_behind = true;
+        overlay_agents(&mut rows, &[("trn".into(), "0.4.0".into())], "0.3.1");
+        assert_eq!(rows[0].agent_version.as_deref(), Some("0.4.0"));
+        assert!(!rows[0].agent_behind);
+    }
+
+    /// `agent_behind` is "older than the hub", not "different from it".
+    #[test]
+    fn agent_behind_only_when_older() {
+        assert!(agent_behind("agent", Some("0.2.26"), "0.3.1"));
+        assert!(!agent_behind("agent", Some("0.4.0"), "0.3.1"));
+        assert!(!agent_behind("agent", Some("0.3.1"), "0.3.1"));
+        assert!(!agent_behind("agent", Some("garbage"), "0.3.1"));
+        assert!(!agent_behind("agent", None, "0.3.1"));
+        assert!(!agent_behind("ssh", Some("0.2.26"), "0.3.1"));
+    }
+
+    /// A disk sample from a host that stopped answering keeps its percent
+    /// but no longer raises `disk_low`; neither does a host never sampled.
+    #[test]
+    fn hosts_health_ignores_a_stale_disk_sample() {
+        let now = 1_700_000_000;
+        let t = HostHealthThresholds {
+            disk_low_pct: 90,
+            claude_max_behind: 30,
+            hooks_silent_secs: 3600,
+        };
+        let mut stale = host("stale", true);
+        stale.disk_home_free_kb = Some(3_000_000);
+        stale.disk_home_total_kb = Some(150_000_000);
+        stale.health_at = Some(now - 2 * 3600);
+        let mut unstamped = stale.clone();
+        unstamped.alias = "unstamped".into();
+        unstamped.health_at = None;
+        let rows = hosts_health(&[stale, unstamped], &[], &t, &[], "0.3.1", now);
+        for r in &rows {
+            assert_eq!(r.disk_home_pct, Some(98), "{}", r.alias);
+            assert!(!r.disk_low, "{}", r.alias);
+        }
+    }
+
+    /// The code `health_for` replaced, kept as the reference: the whole
+    /// fleet's health, then each scope re-derived over second reads — one
+    /// failure count per tracker and, for an org-bound client, one backlog
+    /// count per host.
+    fn two_pass_reference(
+        s: &Store,
+        view: &HealthView,
+        tunnels: HashMap<String, TunnelHealth>,
+    ) -> Health {
+        let now = now_unix();
+        let metrics = &tracker_sync::metrics_for;
+        let mut h = health_for(s, &HealthView::Fleet, Default::default());
+        h.set_tunnels(tunnels);
+        match view {
+            HealthView::Fleet => {}
+            HealthView::Host { alias, trackers } => {
+                h.hosts.retain(|r| &r.alias == alias);
+                h.usage_by_host.retain(|k, _| k == alias);
+                h.usage_by_day =
+                    usage::recent_days(s, now, usage::HEALTH_DAYS, Some(alias.as_str()));
+                h.trackers = match trackers {
+                    Some(scope) => trackers_from_store(s, scope, metrics, now),
+                    None => Default::default(),
+                };
+            }
+            HealthView::Org(scope) => {
+                let hosts = hosts_in_scope(s, scope);
+                let visible: std::collections::BTreeSet<String> =
+                    hosts.iter().map(|x| x.alias.clone()).collect();
+                h.hosts.retain(|r| visible.contains(&r.alias));
+                let sessions: Vec<SessionRow> = s
+                    .list_all_sessions()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|r| scope.sees_row(r))
+                    .collect();
+                let summary = summarize(&sessions, &hosts, context_red_pct(s));
+                h.hosts_reachable = summary.hosts_reachable;
+                h.hosts_total = summary.hosts_total;
+                h.sessions_total = summary.sessions_total;
+                h.by_status = summary.by_status;
+                h.ghosts = summary.ghosts;
+                h.context_red = summary.context_red;
+                h.stuck = summary.stuck;
+                h.usage_by_host = summary.usage_by_host;
+                h.usage_by_host.retain(|host, _| visible.contains(host));
+                h.usage_by_day = usage::recent_days_on(s, now, usage::HEALTH_DAYS, &|host| {
+                    visible.contains(host)
+                });
+                let tunnels = std::mem::take(&mut h.tunnels);
+                h.set_tunnels(
+                    tunnels
+                        .into_iter()
+                        .filter(|(host, _)| visible.contains(host))
+                        .collect(),
+                );
+                h.trackers = trackers_from_store(s, scope, metrics, now);
+                let before = now.saturating_sub(i64::from(DETECTION_BACKLOG_DAYS) * 86_400);
+                h.trackers.detection_backlog = hosts
+                    .iter()
+                    .map(|x| s.detection_backlog(before, Some(&x.alias)).unwrap())
+                    .sum();
+            }
+            HealthView::Blank => blank_rollups(&mut h),
+        }
+        for t in &mut h.trackers.trackers {
+            t.write_failures = s.tracker_write_failures(t.tracker_id).unwrap();
+        }
+        h
+    }
+
+    /// The JSON a caller receives, minus the hub's uptime (a clock).
+    fn comparable(h: &Health) -> serde_json::Value {
+        let mut v = serde_json::to_value(h).unwrap();
+        v.as_object_mut().unwrap().remove("hub");
+        v
+    }
+
+    /// `fleet_health` is built in one pass for the caller's scope; for every
+    /// scope it must equal the two-pass code it replaced. Two orgs, three
+    /// hosts (one unassigned), sessions of every kind, usage on each host,
+    /// a tracker per org and an unassigned one, failed writes, a detection
+    /// backlog on each host, and a tunnel per host.
+    #[test]
+    fn single_pass_health_equals_the_two_pass_code_for_every_scope() {
+        let s = Store::open_in_memory().unwrap();
+        for h in ["h-a", "h-b", "h-none"] {
+            s.upsert_host(h).unwrap();
+        }
+        s.update_host_probe("h-b", false, None, None, 0).unwrap();
+        let a = s.add_org("Company A", None, false).unwrap();
+        let b = s.add_org("Company B", None, false).unwrap();
+        s.set_host_org("h-a", Some(a.id)).unwrap();
+        s.set_host_org("h-b", Some(b.id)).unwrap();
+        let now = now_unix();
+        let mut n = 0;
+        let mut add = |host: &str, kind: &str, status: Option<&str>| {
+            n += 1;
+            let id = s
+                .upsert_session(&format!("s{n}"), host, None, None, 1, 1, "running", None)
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET kind=?1, claude_status=?2 WHERE id=?3",
+                    rusqlite::params![kind, status, id],
+                )
+                .unwrap();
+            s.apply_usage(
+                id,
+                host,
+                &crate::store::UsageDelta {
+                    reset: false,
+                    totals: UsageTotals {
+                        input_tokens: 10 * n,
+                        cost_micros: 100 * n,
+                        ..Default::default()
+                    },
+                    model: Some("claude-opus-5".into()),
+                    offset: 10,
+                    source: format!("s{n}.jsonl"),
+                    last_msg_id: None,
+                    last_msg_usage: None,
+                    now,
+                    by_day: Vec::new(),
+                    backfill_until: None,
+                },
+            )
+            .unwrap();
+            id
+        };
+        let mut backlog = Vec::new();
+        for host in ["h-a", "h-b", "h-none"] {
+            backlog.push(add(host, "work", Some("working")));
+            add(host, "work", None);
+            add(host, "external", Some("idle"));
+            add(host, "shell", Some("idle"));
+        }
+        for (i, sid) in backlog.into_iter().enumerate() {
+            let key = format!("ABC-{}", i + 1);
+            let l = s
+                .link_session_work(sid, crate::store::WorkTarget::Key(&key), "manual")
+                .unwrap();
+            s.set_work_link_state_for_test(l.id, "suggested", 0)
+                .unwrap();
+        }
+        let mut trackers = Vec::new();
+        for (name, org) in [("alpha", Some(a.id)), ("beta", Some(b.id)), ("gamma", None)] {
+            let t = s
+                .add_tracker("jira", name, &format!("https://{name}.atlassian.net"))
+                .unwrap();
+            s.set_tracker_org(t.id, org).unwrap();
+            trackers.push(t.id);
+        }
+        for (k, t) in [trackers[0], trackers[0], trackers[1], trackers[2]]
+            .into_iter()
+            .enumerate()
+        {
+            let url = format!("https://github.com/o/r/pull/{k}");
+            s.enqueue_tracker_write(&crate::store::NewTrackerWrite {
+                tracker_id: t,
+                item_key: "ABC-1",
+                op: crate::store::WRITE_OP_PR_REMOTE_LINK,
+                url: &url,
+                title: "PR",
+                link_id: None,
+                claude_session_id: None,
+                session_org_id: None,
+            })
+            .unwrap();
+            let id = s
+                .due_tracker_writes(t, i64::MAX, 10)
+                .unwrap()
+                .into_iter()
+                .find(|w| w.url == url)
+                .unwrap()
+                .id;
+            s.retry_tracker_write(id, "forbidden", None, true).unwrap();
+        }
+        let tunnels = || -> HashMap<String, TunnelHealth> {
+            ["h-a", "h-b", "h-none"]
+                .into_iter()
+                .map(|h| {
+                    (
+                        h.to_string(),
+                        TunnelHealth {
+                            supervised: true,
+                            consecutive_failures: if h == "h-b" { 9 } else { 0 },
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect()
+        };
+
+        let views = [
+            HealthView::Fleet,
+            HealthView::Host {
+                alias: "h-a".into(),
+                trackers: Some(OrgScope::for_host(&s, "h-a").unwrap()),
+            },
+            HealthView::Host {
+                alias: "h-none".into(),
+                trackers: Some(OrgScope::for_host(&s, "h-none").unwrap()),
+            },
+            HealthView::Host {
+                alias: "h-b".into(),
+                trackers: None,
+            },
+            HealthView::Org(OrgScope::Org {
+                org: a.id,
+                sees_unassigned: true,
+            }),
+            HealthView::Org(OrgScope::Org {
+                org: b.id,
+                sees_unassigned: false,
+            }),
+            HealthView::Blank,
+        ];
+        for view in &views {
+            let one = health_for(&s, view, tunnels());
+            let two = two_pass_reference(&s, view, tunnels());
+            assert_eq!(comparable(&one), comparable(&two), "{view:?}");
+        }
+
+        // The fixture exercises what it claims to.
+        let fleet = health_for(&s, &HealthView::Fleet, tunnels());
+        assert_eq!(fleet.sessions_total, 6, "external and shell rows left out");
+        assert_eq!(fleet.trackers.detection_backlog, 3);
+        assert_eq!(fleet.trackers.trackers[0].write_failures, 2);
+        let org_a = health_for(
+            &s,
+            &HealthView::Org(OrgScope::Org {
+                org: a.id,
+                sees_unassigned: true,
+            }),
+            tunnels(),
+        );
+        assert_eq!(
+            org_a.hosts_total, 2,
+            "its org's host and the unassigned one"
+        );
+        assert_eq!(org_a.trackers.detection_backlog, 2);
+        assert_eq!(org_a.tunnels.len(), 2);
+        assert!(org_a.usage_by_host.keys().all(|h| h != "h-b"));
+    }
+
+    /// An org-bound client whose scope could not be read is told nothing,
+    /// per-host telemetry included.
+    #[test]
+    fn blank_rollups_clears_the_host_rows() {
+        let mut h = health_check(&Mutex::new(Store::open_in_memory().unwrap()));
+        h.hosts = vec![HostHealthRow {
+            alias: "h-b".into(),
+            disk_home_pct: Some(98),
+            ..Default::default()
+        }];
+        blank_rollups(&mut h);
+        assert!(h.hosts.is_empty());
     }
 
     /// F8: two `-term` shells were `by_status.unknown = 2`, a third said
@@ -1206,13 +1619,15 @@ mod tests {
         assert_eq!(v["usage_by_day"][0]["cost_micros"], 35);
 
         // Scoped to its own host, a per-host caller keeps alpha's usage…
-        let mut own = health_from_store(&store);
-        scope_usage_to_host(&mut own, &store, "alpha");
+        let host_view = |alias: &str| HealthView::Host {
+            alias: alias.into(),
+            trackers: None,
+        };
+        let own = health_for(&store, &host_view("alpha"), Default::default());
         assert_eq!(own.usage_by_host.len(), 1);
         assert_eq!(own.usage_by_day.len(), 1);
         // …and another host's caller sees none of it.
-        let mut other = health_from_store(&store);
-        scope_usage_to_host(&mut other, &store, "beta");
+        let other = health_for(&store, &host_view("beta"), Default::default());
         assert!(other.usage_by_host.is_empty());
         assert!(other.usage_by_day.is_empty());
         assert_eq!(other.sessions_total, 1, "counts stay fleet-wide");

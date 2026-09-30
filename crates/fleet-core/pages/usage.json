@@ -4,9 +4,28 @@
   "title": "Usage",
   "layout": "data_page",
   "intro": "Token usage and estimated cost, read from each session's Claude transcript.",
+  "filters": [
+    {
+      "param": "days",
+      "label": "Window",
+      "choices": [
+        7,
+        14,
+        30,
+        90,
+        365
+      ],
+      "default": 30
+    },
+    {
+      "param": "host",
+      "label": "Host"
+    }
+  ],
   "sections": [
     {
       "title": "Totals",
+      "intro": "Every session that still exists, over its whole life: the window does not narrow these.",
       "items": [
         {
           "type": "stat",
@@ -33,15 +52,13 @@
       ]
     },
     {
-      "title": "Last 30 days",
+      "title": "By day",
+      "intro": "Per UTC day over the window, killed sessions included.",
       "items": [
         {
           "type": "chart",
           "source": {
-            "id": "usage.by_day",
-            "params": {
-              "days": 30
-            }
+            "id": "usage.by_day"
           },
           "chart": "bar",
           "title": "Estimated cost per day"
@@ -71,8 +88,18 @@
       ]
     },
     {
-      "title": "Settings",
+      "title": "See also",
       "items": [
+        {
+          "type": "link",
+          "page": "usage.accounts",
+          "label": "Claude accounts"
+        },
+        {
+          "type": "link",
+          "page": "usage.work",
+          "label": "Work graph usage"
+        },
         {
           "type": "link",
           "page": "settings.limits",

@@ -5,7 +5,10 @@
   // session it has had — active, suggested, past, rejected — each with its
   // state and why, and the last outcome. Open / Continue / Start new act on
   // it; Place in group…, Assign org… (local tasks, with the impact dialog)
-  // and Make a rule… (with a preview) correct it.
+  // and Make a rule… (with a preview) correct it — under the *Placement &
+  // rules* disclosure, with where the org and the group come from. The
+  // shared-work sections (design 2026-09-29 §4: brief, subtasks, proposals,
+  // jobs; agent steps after Sessions) are `TaskWorkSections`.
   //
   // Tracker text and Claude's summaries are third-party text: rendered as
   // plain text, never as markup.
@@ -17,13 +20,14 @@
   import { openExternal } from './open_external';
   import { timeAgo } from './session_status';
   import { assessRow, hasReading, verdictColor, verdictLabel } from './evidence';
-  import { describeEvidence, onWorkChangedDebounced, resumeWork } from './work';
+  import { changedAny, describeEvidence, onWorkChangedDebounced, resumeWork } from './work';
   import { providerInfo, startWork, unavailableLabel } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import WorkPlaceDialog from './WorkPlaceDialog.svelte';
   import WorkOrgDialog from './WorkOrgDialog.svelte';
   import WorkRuleEditor from './WorkRuleEditor.svelte';
+  import TaskWorkSections from './TaskWorkSections.svelte';
   import {
     groupSessionLinks,
     groupSourceText,
@@ -31,6 +35,7 @@
     orgSourceText,
     placementNote,
     readErrorText,
+    ruleDraftFor,
     selectedTaskId,
     taskStatus,
     trackerDown,
@@ -101,8 +106,9 @@
   }
 
   // A placement saved: show the task and its placement line as the hub
-  // answered at once (not the old "Placed …" until the next read), then
-  // re-read the whole detail.
+  // answered at once (not the old "Placed …" until the next read). The
+  // write's own bump re-reads the whole detail (debounced): one read, not a
+  // second one here.
   function placed(t: WorkTask, note: string | null) {
     if (detail) {
       const version = t.placement_version ?? 0;
@@ -113,7 +119,6 @@
           version > 0 ? { group: t.group?.label ?? '', note, version, updated_at: null, updated_by: null } : null,
       };
     }
-    void load(taskId);
   }
 
   let loadedFor: string | null = null;
@@ -135,9 +140,11 @@
   }
   void loadRules();
 
-  const off = onWorkChangedDebounced(() => {
-    void load(taskId);
-    void loadRules();
+  // The rules are re-read only when a rule may have moved; the task on
+  // anything but a saved view's change.
+  const off = onWorkChangedDebounced((kinds) => {
+    if ([...kinds].some((k) => k !== 'view')) void load(taskId);
+    if (changedAny(kinds, 'rule', 'resync', 'local')) void loadRules();
   }, () => debounceMs);
   onDestroy(off);
 
@@ -230,23 +237,9 @@
     if (row) selectSessionExplicitly(row);
   }
 
-  function makeRuleDraft(t: WorkTask): WorkRuleDraft {
-    const g = t.group;
-    const prefix = t.key && /^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(t.key) ? t.key.split('-')[0] : null;
-    return {
-      name: '',
-      enabled: true,
-      group: g && g.source !== 'none' ? g.label : '',
-      expected_version: 0,
-      conditions: {
-        tracker_id: t.kind === 'tracker' ? (t.tracker_id ?? null) : null,
-        container: g?.source === 'tracker' ? (g.tracker_value ?? g.label) : null,
-        key_prefix: g?.source !== 'tracker' && prefix ? prefix : null,
-        repo: g?.source === 'repo' ? g.label : null,
-        title_contains: null,
-      },
-    };
-  }
+  // Prefilled for the group it is in now (none: the editor asks).
+  const makeRuleDraft = (t: WorkTask): WorkRuleDraft =>
+    ruleDraftFor(t, t.group && t.group.source !== 'none' ? t.group.label : '');
 </script>
 
 <section class="task-detail" data-testid="work-task-detail" aria-label="Task">
@@ -311,29 +304,60 @@
       {/if}
     {/if}
 
-    <dl class="prov">
-      <dt>Organisation</dt>
-      <dd data-testid="work-task-org">
-        <strong>{orgName(task.org_id)}</strong> — {orgSourceText(task)}
-      </dd>
-      <dt>Group</dt>
-      <dd data-testid="work-task-group">
-        <strong>{task.group?.source === 'none' ? 'No group' : task.group?.label}</strong> — {groupSourceText(task.group, task, ruleName)}
-        <div class="muted small" data-testid="work-task-group-note">{placementNote(task.group, task)}</div>
-        {#if detail?.placement}
-          <div class="muted small" data-testid="work-task-placement">
-            Placed{#if detail.placement.updated_by}&nbsp;by {detail.placement.updated_by}{/if}{#if detail.placement.updated_at}&nbsp;{timeAgo(detail.placement.updated_at)}{/if}{#if detail.placement.note}: “{detail.placement.note}”{/if}
-          </div>
+    {#if (task.repos ?? []).length > 0}
+      <p class="line">Repositories: <span data-testid="work-task-repos">{(task.repos ?? []).join(', ')}</span></p>
+    {/if}
+
+    <details class="more" data-testid="work-task-more">
+      <summary>Placement &amp; rules</summary>
+      <dl class="prov">
+        <dt>Organisation</dt>
+        <dd data-testid="work-task-org">
+          <strong>{orgName(task.org_id)}</strong> — {orgSourceText(task)}
+        </dd>
+        <dt>Group</dt>
+        <dd data-testid="work-task-group">
+          <strong>{task.group?.source === 'none' ? 'No group' : task.group?.label}</strong> — {groupSourceText(task.group, task, ruleName)}
+          <div class="muted small" data-testid="work-task-group-note">{placementNote(task.group, task)}</div>
+          {#if detail?.placement}
+            <div class="muted small" data-testid="work-task-placement">
+              Placed{#if detail.placement.updated_by}&nbsp;by {detail.placement.updated_by}{/if}{#if detail.placement.updated_at}&nbsp;{timeAgo(detail.placement.updated_at)}{/if}{#if detail.placement.note}: “{detail.placement.note}”{/if}
+            </div>
+          {/if}
+          {#if matchingRules.length > 0}
+            <div class="muted small" data-testid="work-task-rules">Matching rules: {matchingRules.join(', ')}</div>
+          {/if}
+        </dd>
+      </dl>
+      <div class="actions edits">
+        <button
+          class="btn btn--quiet"
+          type="button"
+          data-testid="work-task-place"
+          disabled={placeBlocked !== null}
+          title={placeBlocked ?? 'Put this task under a group of the Work view (local to fleet)'}
+          onclick={() => (placing = true)}>Place in group…</button
+        >
+        {#if task.kind === 'local'}
+          <button
+            class="btn btn--quiet"
+            type="button"
+            data-testid="work-task-assign-org"
+            disabled={orgBlocked !== null}
+            title={orgBlocked ?? 'Move this task to another organisation (the impact is shown first)'}
+            onclick={() => (assigning = true)}>Assign org…</button
+          >
         {/if}
-        {#if matchingRules.length > 0}
-          <div class="muted small" data-testid="work-task-rules">Matching rules: {matchingRules.join(', ')}</div>
-        {/if}
-      </dd>
-      {#if (task.repos ?? []).length > 0}
-        <dt>Repositories</dt>
-        <dd data-testid="work-task-repos">{(task.repos ?? []).join(', ')}</dd>
-      {/if}
-    </dl>
+        <button
+          class="btn btn--quiet"
+          type="button"
+          data-testid="work-task-make-rule"
+          disabled={ruleBlocked !== null}
+          title={ruleBlocked ?? 'A rule for tasks like this one (previewed before it is saved)'}
+          onclick={() => (ruleDraft = makeRuleDraft(task))}>Make a rule…</button
+        >
+      </div>
+    </details>
 
     <div class="actions">
       <button
@@ -369,34 +393,7 @@
         {/if}
       </p>
     {/if}
-    <div class="actions edits">
-      <button
-        class="btn btn--quiet"
-        type="button"
-        data-testid="work-task-place"
-        disabled={placeBlocked !== null}
-        title={placeBlocked ?? 'Put this task under a group of the Work view (local to fleet)'}
-        onclick={() => (placing = true)}>Place in group…</button
-      >
-      {#if task.kind === 'local'}
-        <button
-          class="btn btn--quiet"
-          type="button"
-          data-testid="work-task-assign-org"
-          disabled={orgBlocked !== null}
-          title={orgBlocked ?? 'Move this task to another organisation (the impact is shown first)'}
-          onclick={() => (assigning = true)}>Assign org…</button
-        >
-      {/if}
-      <button
-        class="btn btn--quiet"
-        type="button"
-        data-testid="work-task-make-rule"
-        disabled={ruleBlocked !== null}
-        title={ruleBlocked ?? 'A rule for tasks like this one (previewed before it is saved)'}
-        onclick={() => (ruleDraft = makeRuleDraft(task))}>Make a rule…</button
-      >
-    </div>
+    {#if detail}<TaskWorkSections {detail} part="work" />{/if}
 
     <h3>Sessions</h3>
     {#snippet linkList(list: WorkTaskLink[], label: string)}
@@ -469,6 +466,8 @@
         {#if o.summary}<p class="excerpt">{o.summary}</p>{/if}
       </div>
     {/if}
+
+    {#if detail}<TaskWorkSections {detail} part="steps" />{/if}
   {/if}
 </section>
 
@@ -646,5 +645,13 @@
   }
   .edits {
     margin-top: 0.1rem;
+  }
+  .more > summary {
+    cursor: pointer;
+    color: var(--fg-muted);
+    font-size: 0.8rem;
+  }
+  .more[open] > summary {
+    margin-bottom: 0.2rem;
   }
 </style>

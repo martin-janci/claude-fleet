@@ -178,9 +178,6 @@ const REASONS = {
     'section proposals are tracker administration, and a client is never the fleet’s administrator — use `fleet-hub decide proposals`',
   decide_status_map_proposal:
     'applying a section proposal writes the tracker’s section map, and a client is never the fleet’s administrator — use `fleet-hub decide proposals apply|reject`',
-  // Work graph M13.2: `work_admin { usage }` is master-only on the hub.
-  work_usage:
-    'the work graph’s usage counts are the hub’s administration, and a client is never the fleet’s administrator — use `fleet-hub work usage`',
   // Organisations (work graph M5): the per-host tokens' boundary is set on
   // the hub only; `work_admin` is master-only.
   add_org:
@@ -209,8 +206,6 @@ const REASONS = {
     'the setup checklist is about running a fleet from this machine, which the hub is doing instead',
   tunnel_status: 'the tunnels belong to whichever process owns the fleet',
   mcp_status: 'this app runs no embedded control API while a hub owns the fleet',
-  catalog_import_host:
-    'an import reads host `local`’s Claude config, which on a hub is the hub’s own machine, not this one — call import_assets on the hub',
   catalog_spawn_author_session:
     'an author session is a Claude session in the catalog’s checkout on the hub’s machine, and the hub has no tool that starts one — edit the asset here instead',
   // Not a command: the fleet's settings route to the hub (declarative pages
@@ -300,6 +295,9 @@ export function hubBlock(action: HubAction, status: HubStatus = get(hubStatus)):
  * cross-check test maps through too).
  */
 export const ROUTED_ACTIONS = [
+  // Task 6: import works from any host over SSH now, so it routes to the
+  // hub's catalog_admin like every other asset-catalog mutation.
+  'catalog_import_host',
   'send_prompt',
   'kill_session',
   'safe_kill_session',

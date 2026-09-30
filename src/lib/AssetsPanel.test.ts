@@ -114,7 +114,7 @@ describe('AssetsPanel', () => {
     expect(screen.getByTestId('asset-row-skill-worktree').textContent).toContain('1 in sync');
     expect(screen.getByTestId('asset-row-skill-worktree').textContent).toContain('1 missing');
     expect(screen.getByText('On hosts, not in catalog')).toBeTruthy();
-    expect(screen.getByTestId('unmanaged-row-local-claude-skill-extra')).toBeTruthy();
+    expect(screen.getByTestId('identity-row-skill-extra')).toBeTruthy();
     expect(screen.getByTestId('assets-problems').textContent).toContain('1');
     expect(screen.getByTestId('assets-head').textContent).toContain('abcdef1');
   });
@@ -192,6 +192,38 @@ describe('AssetsPanel', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_repo_status', undefined));
   });
 
+  it('Import next to an unmanaged identity presets the dialog to its host and asset', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [],
+      catalog_import_host: { created: [['skill', 'extra']], problems: [], flagged_secrets: [], dry_run: true },
+    });
+    render(AssetsPanel);
+    const row = await screen.findByTestId('identity-row-skill-extra');
+
+    await fireEvent.click(within(row).getByText('Import'));
+
+    expect(await screen.findByTestId('import-dialog')).toBeTruthy();
+    expect(screen.getByTestId('import-only').textContent).toContain('skill:extra');
+    expect((screen.getByTestId('import-host') as HTMLSelectElement).value).toBe('local');
+
+    await fireEvent.click(screen.getByTestId('import-dry-run'));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('catalog_import_host', {
+        args: { host_alias: 'local', dry_run: true, only: ['skill:extra'] },
+      }),
+    );
+
+    // Closing clears the preset: the toolbar's own Import from host reopens
+    // it with the plain defaults, not the last identity's.
+    await fireEvent.click(screen.getByText('Close'));
+    expect(screen.queryByTestId('import-dialog')).toBeNull();
+    await fireEvent.click(screen.getByText('Import from host'));
+    expect(screen.queryByTestId('import-only')).toBeNull();
+    expect((screen.getByTestId('import-host') as HTMLSelectElement).value).toBe('local');
+  });
+
   it('scan button calls assets_scan_hosts and refreshes', async () => {
     byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: listing, assets_inventory: [], assets_scan_hosts: [{ host: 'local', status: 'scanned', detail: null, rows: 3 }], catalog_last_sync: null });
     render(AssetsPanel);
@@ -218,7 +250,40 @@ describe('AssetsPanel', () => {
     expect(screen.getByTestId('orphan-badge-mefistos-claude-skill-ghost')).toBeTruthy();
     expect(within(row).queryByText('Import')).toBeNull();
     // The plain unmanaged row from `listing` still gets its Import button.
-    expect(screen.getByTestId('unmanaged-row-local-claude-skill-extra').textContent).toContain('Import');
+    expect(screen.getByTestId('identity-row-skill-extra').textContent).toContain('Import');
+  });
+
+  it('the filter matches an orphan row case-insensitively, like it does identity rows', async () => {
+    const withOrphan = {
+      ...listing,
+      unmanaged: [
+        ...listing.unmanaged,
+        { host_alias: 'mefistos', harness: 'claude', kind: 'skill', name: 'ghost', state: 'orphan', catalog_hash: null, host_hash: null, scanned_at: 1, managed: true },
+      ],
+    };
+    byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: withOrphan, assets_inventory: [], catalog_last_sync: null });
+    render(AssetsPanel);
+    await screen.findByTestId('unmanaged-row-mefistos-claude-skill-ghost');
+
+    await fireEvent.input(screen.getByPlaceholderText('filter'), { target: { value: 'GHOST' } });
+
+    expect(screen.getByTestId('unmanaged-row-mefistos-claude-skill-ghost')).toBeTruthy();
+  });
+
+  it('hides fleet internals behind a toggle', async () => {
+    const withInternal = {
+      ...listing,
+      identities: [
+        { kind: 'skill', name: 'extra', hosts: [{ host_alias: 'local', harness: 'claude', host_hash: null }], signature: 'local', variants: 0, class: 'normal' as const, reason: null },
+        { kind: 'hook', name: 'stop', hosts: [{ host_alias: 'local', harness: 'claude', host_hash: null }], signature: 'local', variants: 0, class: 'fleet_internal' as const, reason: null },
+      ],
+    };
+    byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: withInternal, assets_inventory: [], catalog_last_sync: null });
+    render(AssetsPanel);
+    expect(await screen.findByTestId('identity-row-skill-extra')).toBeTruthy();
+    expect(screen.queryByTestId('identity-row-hook-stop')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: /Show 1 fleet internal/ }));
+    expect(screen.getByTestId('identity-row-hook-stop')).toBeTruthy();
   });
 
   it('Sync button calls catalog_plan_sync and opens the plan dialog', async () => {
@@ -229,7 +294,7 @@ describe('AssetsPanel', () => {
 
     await fireEvent.click(screen.getByTestId('assets-sync'));
 
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_plan_sync', { args: { host_alias: null, kind: null, name: null } }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_plan_sync', { args: { host_alias: null, kind: null, name: null, allow_unlayered: false } }));
     expect(await screen.findByTestId('sync-plan-dialog')).toBeTruthy();
   });
 

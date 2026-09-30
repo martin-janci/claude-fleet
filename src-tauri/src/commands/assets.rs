@@ -1,13 +1,13 @@
 //! Tauri IPC wrappers for the asset catalog. Logic lives in
 //! `service::catalog`; this file only adapts `tauri::State` to plain refs.
 //!
-//! On a desktop paired with a hub, every command here but two routes to the
+//! On a desktop paired with a hub, every command here but one routes to the
 //! hub's `catalog_admin` tool with its own arguments
 //! (`service::catalog::admin::AdminCall`), so a client the operator granted
 //! (`fleet-hub client grant <name> assets`) manages the hub's catalog from
 //! this window; the hub refuses an ungranted one with `E_FORBIDDEN`, and the
-//! panel falls back to its read-only overview. `catalog_import_host` and
-//! `catalog_spawn_author_session` still refuse — see `backend::verdicts`.
+//! panel falls back to its read-only overview. `catalog_spawn_author_session`
+//! still refuses — see `backend::verdicts`.
 
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
@@ -16,9 +16,8 @@ use fleet_core::ipc_error::IpcError;
 use fleet_core::service::catalog::{
     self,
     admin::{
-        check_layer_name, check_name, check_resource_path, check_secret_name, AdminCall,
-        DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs, LoadArgs, ResolvePreviewArgs,
-        SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
+        AdminCall, DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs, LoadArgs,
+        ResolvePreviewArgs, SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
     },
     author::{
         self, AddResourceArgs, AddResourceBytesArgs, AssetRef, CommitPendingArgs, CreateArgs,
@@ -30,6 +29,7 @@ use fleet_core::service::catalog::{
     model::Asset,
     repo::RepoStatus,
     sync::{self, plan::SyncPlan, ApplyArgs, PlanArgs, SyncRunSummary},
+    validate::{check_layer_name, check_name, check_resource_path, check_secret_name},
     AssetDetail, AssetListing, ConfigureArgs, ImportArgs,
 };
 use fleet_core::ssh::SshClient;
@@ -143,17 +143,13 @@ pub async fn catalog_delete_layer(
 }
 
 #[tauri::command]
-pub fn catalog_import_host(
+pub async fn catalog_import_host(
     backend: State<'_, Arc<FleetBackend>>,
     args: ImportArgs,
     store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
 ) -> Result<ImportReport, IpcError> {
-    backend.refuse_local_only("catalog_import_host")?;
-    let token = {
-        let s = lock(&store)?;
-        s.get_setting(fleet_core::mcp::SETTING_TOKEN)?
-    };
-    catalog::import_host(args, &store, token.as_deref())
+    routed::catalog_import_host(&backend, args, &store, &ssh).await
 }
 
 #[tauri::command]
@@ -623,6 +619,24 @@ pub(crate) mod routed {
                     .await
             }
             None => Ok(lock(store)?.delete_secret(&args.name, args.host_alias.as_deref())?),
+        }
+    }
+
+    pub async fn catalog_import_host(
+        backend: &FleetBackend,
+        args: ImportArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<ImportReport, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("catalog_import_host", &AdminCall::ImportHost(args))
+                    .await
+            }
+            None => {
+                let token = lock(store)?.get_setting(fleet_core::mcp::SETTING_TOKEN)?;
+                catalog::import_host(args, store, ssh, token.as_deref()).await
+            }
         }
     }
 

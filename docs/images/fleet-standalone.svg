@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 470" width="1000" height="470" role="img">
+<style>:root {
+  --bg: #f4f6fb; --surface: #ffffff; --surface-2: #eef1f8; --line: #d9deea;
+  --fg: #151a28; --muted: #58617a;
+  --c-desk: #2563eb; --c-hub: #d97706; --c-host: #0d9488; --c-mob: #db2777; --c-agent: #65a30d; --c-trk: #7c3aed;
+  --desk-soft: color-mix(in srgb, var(--c-desk) 11%, var(--surface));
+  --hub-soft: color-mix(in srgb, var(--c-hub) 12%, var(--surface));
+  --host-soft: color-mix(in srgb, var(--c-host) 11%, var(--surface));
+  --mob-soft: color-mix(in srgb, var(--c-mob) 11%, var(--surface));
+  --agent-soft: color-mix(in srgb, var(--c-agent) 13%, var(--surface));
+  --trk-soft: color-mix(in srgb, var(--c-trk) 11%, var(--surface));
+  --f-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #0c0f16; --surface: #141925; --surface-2: #1b2130; --line: #2a3345;
+  --fg: #e9edf6; --muted: #98a3bb;
+  --c-desk: #6aa8ff; --c-hub: #fbbf24; --c-host: #2dd4bf; --c-mob: #f472b6; --c-agent: #a3e635; --c-trk: #a78bfa;
+  color-scheme: dark } }
+.bg { fill: var(--bg) }
+/* SVG styling — every fill comes from the tokens */
+text { font-family: var(--f-body); fill: var(--fg) }
+.t-title { font: 700 17px var(--f-display) }
+.t-big { font: 800 22px var(--f-display) }
+.t-sm { font-size: 12.5px; fill: var(--muted) }
+.t-mono { font: 500 12px var(--f-mono); fill: var(--muted) }
+.t-eye { font: 600 10.5px var(--f-mono); letter-spacing: .12em; fill: var(--muted) }
+.t-lbl { font: 600 12px var(--f-mono) }
+.fr-desk { fill: var(--desk-soft); stroke: var(--c-desk); stroke-width: 1.6 }
+.fr-hub { fill: var(--hub-soft); stroke: var(--c-hub); stroke-width: 1.8 }
+.fr-host { fill: var(--host-soft); stroke: var(--c-host); stroke-width: 1.4 }
+.fr-mob { fill: var(--mob-soft); stroke: var(--c-mob); stroke-width: 1.6 }
+.fr-agent { fill: var(--agent-soft); stroke: var(--c-agent); stroke-width: 1.4 }
+.fr-trk { fill: var(--trk-soft); stroke: var(--c-trk); stroke-width: 1.4 }
+.box { fill: var(--surface); stroke: var(--line); stroke-width: 1.2 }
+.box2 { fill: var(--surface-2); stroke: var(--line); stroke-width: 1 }
+.pill { fill: var(--surface); stroke: var(--line) }
+.ln-desk { stroke: var(--c-desk); fill: none; stroke-width: 2.2 }
+.ln-hub { stroke: var(--c-hub); fill: none; stroke-width: 2.2 }
+.ln-host { stroke: var(--c-host); fill: none; stroke-width: 2; stroke-dasharray: 6 5 }
+.ln-mob { stroke: var(--c-mob); fill: none; stroke-width: 2.2 }
+.ln-agent { stroke: var(--c-agent); fill: none; stroke-width: 2.4 }
+.ln-trk { stroke: var(--c-trk); fill: none; stroke-width: 2 }
+.ln-dash { stroke-dasharray: 7 6 }
+.life { stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 4 5 }
+.d-work { fill: var(--c-hub) } .d-idle { fill: var(--muted) } .d-block { fill: var(--c-mob) } .d-ok { fill: var(--c-host) }
+.k-desk { fill: var(--c-desk) } .k-hub { fill: var(--c-hub) } .k-host { fill: var(--c-host) } .k-mob { fill: var(--c-mob) } .k-agent { fill: var(--c-agent) } .k-trk { fill: var(--c-trk) }
+.tx-desk { fill: var(--c-desk) } .tx-hub { fill: var(--c-hub) } .tx-host { fill: var(--c-host) } .tx-mob { fill: var(--c-mob) } .tx-agent { fill: var(--c-agent) } .tx-trk { fill: var(--c-trk) }
+
+.flow { animation: dash 1.6s linear infinite }
+@keyframes dash { to { stroke-dashoffset: -22 } }
+@media (prefers-reduced-motion: reduce) { .flow { animation: none } }
+</style>
+<rect class="bg" x="0" y="0" width="1000" height="470" rx="16"/>
+      <title id="a-t">Desktop bez hubu</title>
+      <desc id="a-d">Laptop s aplikáciou, databázou, Control API a SSH multiplexom. Tri hosty s tmux sessionmi. SSH vedie z laptopu na hosty, hooky sa vracajú reverzným tunelom.</desc>
+      <defs>
+        <marker id="aDesk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="k-desk"/></marker>
+        <marker id="aHost" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="k-host"/></marker>
+      </defs>
+
+      <!-- laptop -->
+      <rect x="20" y="24" width="420" height="422" rx="20" class="fr-desk"/>
+      <text x="44" y="54" class="t-eye">TVOJ POČÍTAČ · macOS / Linux / Windows</text>
+      <text x="44" y="76" class="t-title">claude-fleet desktop</text>
+
+      <rect x="44" y="92" width="372" height="66" rx="12" class="box"/>
+      <text x="62" y="118" style="font-weight:600">Okno aplikácie</text>
+      <text x="62" y="140" class="t-sm">sessiony · terminál · Work · Today · nastavenia</text>
+      <text x="400" y="118" text-anchor="end" class="t-mono">Svelte 5</text>
+
+      <rect x="44" y="172" width="372" height="98" rx="12" class="box"/>
+      <text x="62" y="198" style="font-weight:600">Rust jadro</text>
+      <text x="400" y="198" text-anchor="end" class="t-mono">fleet-core</text>
+      <rect x="62" y="214" width="108" height="40" rx="8" class="box2"/><text x="116" y="239" text-anchor="middle" class="t-lbl">reconcile</text>
+      <rect x="180" y="214" width="108" height="40" rx="8" class="box2"/><text x="234" y="239" text-anchor="middle" class="t-lbl">event bus</text>
+      <rect x="298" y="214" width="100" height="40" rx="8" class="box2"/><text x="348" y="239" text-anchor="middle" class="t-lbl">GC · tidy</text>
+
+      <!-- db cylinder -->
+      <path d="M44 296 a85 12 0 0 1 170 0 v44 a85 12 0 0 1 -170 0z" class="box"/>
+      <ellipse cx="129" cy="296" rx="85" ry="12" class="box2"/>
+      <text x="129" y="330" text-anchor="middle" style="font-weight:600">state.db</text>
+      <text x="129" y="348" text-anchor="middle" class="t-mono">SQLite</text>
+
+      <rect x="232" y="284" width="184" height="74" rx="12" class="box"/>
+      <text x="248" y="310" style="font-weight:600">Control API (MCP)</text>
+      <text x="248" y="330" class="t-mono">localhost:4180</text>
+      <text x="248" y="347" class="t-sm">voliteľné, predvolene vyp.</text>
+
+      <rect x="44" y="374" width="372" height="54" rx="12" class="box"/>
+      <text x="62" y="398" style="font-weight:600">SSH ControlMaster</text>
+      <text x="62" y="416" class="t-sm">jedno trvalé spojenie na každý host</text>
+
+      <!-- hosts -->
+      <g>
+        <rect x="600" y="30" width="370" height="116" rx="16" class="fr-host"/>
+        <text x="620" y="58" class="t-title">build-01</text><text x="950" y="58" text-anchor="end" class="t-mono">Linux · tmux</text>
+        <rect x="620" y="74" width="158" height="28" rx="14" class="pill"/><circle cx="636" cy="88" r="5" class="d-work"/><text x="648" y="93" class="t-lbl">api-refactor</text>
+        <rect x="788" y="74" width="162" height="28" rx="14" class="pill"/><circle cx="804" cy="88" r="5" class="d-idle"/><text x="816" y="93" class="t-lbl">docs-sweep</text>
+        <text x="620" y="128" class="t-sm">Claude Code v tmux okne, hooky hlásia stav</text>
+      </g>
+      <g>
+        <rect x="600" y="172" width="370" height="116" rx="16" class="fr-host"/>
+        <text x="620" y="200" class="t-title">gpu-box</text><text x="950" y="200" text-anchor="end" class="t-mono">Linux · tmux</text>
+        <rect x="620" y="216" width="158" height="28" rx="14" class="pill"/><circle cx="636" cy="230" r="5" class="d-block"/><text x="648" y="235" class="t-lbl">train-eval</text>
+        <rect x="788" y="216" width="162" height="28" rx="14" class="pill"/><circle cx="804" cy="230" r="5" class="d-work"/><text x="816" y="235" class="t-lbl">bg · nightly</text>
+        <text x="620" y="270" class="t-sm">background session beží bez terminálu</text>
+      </g>
+      <g>
+        <rect x="600" y="314" width="370" height="116" rx="16" class="fr-host"/>
+        <text x="620" y="342" class="t-title">local</text><text x="950" y="342" text-anchor="end" class="t-mono">tento stroj</text>
+        <rect x="620" y="358" width="158" height="28" rx="14" class="pill"/><circle cx="636" cy="372" r="5" class="d-idle"/><text x="648" y="377" class="t-lbl">web-fix</text>
+        <text x="620" y="412" class="t-sm">vstavaný host (na Windows chýba)</text>
+      </g>
+
+      <!-- SSH out -->
+      <path d="M416 395 C 510 395, 500 62, 596 62" class="ln-desk" marker-end="url(#aDesk)"/>
+      <path d="M416 400 C 520 400, 510 204, 596 204" class="ln-desk" marker-end="url(#aDesk)"/>
+      <path d="M416 405 C 520 405, 520 346, 596 346" class="ln-desk" marker-end="url(#aDesk)"/>
+      <!-- hooks back -->
+      <path d="M600 118 C 520 118, 500 318, 420 318" class="ln-host flow" marker-end="url(#aHost)"/>
+      <path d="M600 260 C 530 260, 510 324, 420 324" class="ln-host flow" marker-end="url(#aHost)"/>
+
+      <rect x="452" y="24" width="112" height="24" rx="12" class="box"/><text x="508" y="41" text-anchor="middle" class="t-lbl tx-desk">ssh príkazy</text>
+      <rect x="446" y="440" width="126" height="24" rx="12" class="box"/><text x="509" y="457" text-anchor="middle" class="t-lbl tx-host">hooky · ssh -R</text>
+    </svg>

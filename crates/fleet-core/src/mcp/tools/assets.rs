@@ -39,15 +39,41 @@ impl FleetTools {
     #[tool(description = "Import a host's Claude config (~/.claude skills, \
         agents, hooks, ~/.claude.json MCP servers, installed plugins) into \
         the catalog working tree as IR assets. Never overwrites; collisions \
-        are reported. Only host_alias `local`.")]
+        are reported. Any host: `local` reads this machine, others are read \
+        over SSH. `only` limits it to `<kind>:<name>` assets. Master or a \
+        client granted `assets`.")]
     pub(super) async fn import_assets(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<catalog::ImportArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "import_assets",
-            &format!("host_alias={} dry_run={}", args.host_alias, args.dry_run),
+            &format!(
+                "host_alias={} dry_run={} caller={}",
+                args.host_alias,
+                args.dry_run,
+                caller.label()
+            ),
         );
+        // CRITICAL: `import_assets` is `Access::Client` (guard.rs) so a
+        // per-host token or an ungranted paired client can reach this body —
+        // and with a remote `host_alias` it now makes the hub SSH into
+        // another host and write into the catalog. `may_admin_catalog`'s own
+        // doc says a per-host token must never edit the catalog; this is the
+        // same gate `catalog_admin` runs, so the same caller who may drive
+        // that tool is the only one who may drive this one.
+        if !may_admin_catalog(&caller, &self.store)? {
+            return Err(mcp_err(
+                "E_FORBIDDEN",
+                format!(
+                    "import_assets needs the master token or a paired client granted the \
+                     asset catalog ({} refused); on the hub: fleet-hub client grant <name> assets",
+                    caller.label()
+                ),
+                None,
+            ));
+        }
         let token = {
             let s = self
                 .store
@@ -56,7 +82,9 @@ impl FleetTools {
             s.get_setting(crate::mcp::SETTING_TOKEN)
                 .map_err(|e| to_mcp_err(e.into()))?
         };
-        let rep = catalog::import_host(args, &self.store, token.as_deref()).map_err(to_mcp_err)?;
+        let rep = catalog::import_host(args, &self.store, &self.ssh, token.as_deref())
+            .await
+            .map_err(to_mcp_err)?;
         ok_json(&rep)
     }
 
@@ -66,7 +94,9 @@ impl FleetTools {
         plugin_update | noop | blocked) plus a plan_id for apply_sync. \
         plugin_update fires when a pinned plugin's catalog version changes; \
         a host left on the old version stays blocked. orphan: in the host's \
-        fleet manifest, no longer in the catalog. Nothing is written.")]
+        fleet manifest, no longer in the catalog. A remote host with no \
+        layers assigned is skipped (it would otherwise get the whole \
+        catalog) unless allow_unlayered is set. Nothing is written.")]
     pub(super) async fn plan_sync(
         &self,
         Parameters(p): Parameters<PlanSyncParams>,
@@ -88,6 +118,7 @@ impl FleetTools {
             host_alias: p.host_alias,
             kind,
             name: p.name,
+            allow_unlayered: p.allow_unlayered.unwrap_or(false),
         };
         catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
         let plan = catalog::sync::plan_sync(args, &self.store, &self.ssh)
@@ -163,19 +194,7 @@ impl FleetTools {
                 None,
             )
         })?;
-        match &mut call {
-            AdminCall::ApplySync(a) => {
-                let summary = format!("plan_id={} force_partial={}", a.plan_id, a.force_partial);
-                self.confirm_gate("apply_sync", p.confirm_nonce.as_deref(), &summary, &caller)?;
-                // A cancellation id means something only in the process that
-                // minted it: the caller's, not this one.
-                a.call_id = None;
-            }
-            // Loading and configuring are what `ensure_fresh` would do; every
-            // other call reads the catalog this process last loaded.
-            AdminCall::Config | AdminCall::Configure(_) | AdminCall::Load(_) => {}
-            _ => catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?,
-        }
+        self.prepare_admin_call(&mut call, p.confirm_nonce.as_deref(), &caller)?;
         let value = catalog::admin::run(call, &self.store, &self.ssh, &self.reg)
             .await
             .map_err(to_mcp_err)?;
@@ -313,9 +332,41 @@ impl FleetTools {
     }
 }
 
-/// Parse an MCP `kind` filter string into a `Kind`, using the same
-/// snake_case names the JSON representation already uses elsewhere
-/// (`skill`, `agent`, `hook`, `mcp_server`, `plugin_ref`).
+impl FleetTools {
+    /// What `catalog_admin` does between parsing a call and running it:
+    /// `apply_sync` passes the same confirm gate as the `apply_sync` tool and
+    /// loses the caller's `call_id`; every call but config / configure / load
+    /// and apply_sync reads a fresh catalog. `apply_sync`, like the tool,
+    /// does not refresh: it applies a plan already computed and held in the
+    /// registry, and needs the catalog only for the post-apply re-scan, which
+    /// it skips rather than fail the sync when no catalog is there.
+    pub(super) fn prepare_admin_call(
+        &self,
+        call: &mut catalog::admin::AdminCall,
+        confirm_nonce: Option<&str>,
+        caller: &Caller,
+    ) -> Result<(), McpError> {
+        use catalog::admin::AdminCall;
+        match call {
+            AdminCall::ApplySync(a) => {
+                let summary = format!("plan_id={} force_partial={}", a.plan_id, a.force_partial);
+                self.confirm_gate("apply_sync", confirm_nonce, &summary, caller)?;
+                // A cancellation id means something only in the process that
+                // minted it: the caller's, not this one.
+                a.call_id = None;
+                // No `ensure_fresh`: the plan is already computed, and a
+                // failed reload must not refuse a sync the `apply_sync`
+                // tool would run.
+            }
+            // Loading and configuring are what `ensure_fresh` would do; every
+            // other call reads the catalog this process last loaded.
+            AdminCall::Config | AdminCall::Configure(_) | AdminCall::Load(_) => {}
+            _ => catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?,
+        }
+        Ok(())
+    }
+}
+
 /// True when `caller` may use `catalog_admin`: the master, or a live `full`
 /// paired client, bound to no org, that the operator granted the asset
 /// catalog to. Read from the store on every call, so an un-grant or a revoke
@@ -338,6 +389,9 @@ fn may_admin_catalog(caller: &Caller, store: &std::sync::Mutex<Store>) -> Result
     }
 }
 
+/// Parse an MCP `kind` filter string into a `Kind`, using the same
+/// snake_case names the JSON representation already uses elsewhere
+/// (`skill`, `agent`, `hook`, `mcp_server`, `plugin_ref`).
 fn parse_kind(s: &str) -> Result<catalog::model::Kind, McpError> {
     serde_json::from_value(serde_json::Value::String(s.to_string()))
         .map_err(|_| mcp_err(codes::E_INVALID, format!("unknown asset kind '{s}'"), None))

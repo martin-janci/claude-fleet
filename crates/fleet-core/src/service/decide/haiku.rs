@@ -14,8 +14,9 @@
 //!   Only a Choice is rendered.
 //! * **A run that cannot act.** `claude -p --model <m> --output-format json
 //!   --settings '{"disableAllHooks":true}' --tools '' --strict-mcp-config
-//!   --no-session-persistence` (the flags of
-//!   [`crate::service::work::summary`]'s fork, without a conversation): no
+//!   --no-session-persistence` (the shared
+//!   [`crate::service::claude_print::isolation_flags`], as the summary's
+//!   fork uses them, without a conversation): no
 //!   tool, no MCP server, none of fleet's hooks, no transcript left on the
 //!   host. It runs in a fresh temporary directory (no project `CLAUDE.md`),
 //!   output capped. [`haiku_script`] builds exactly this, and a test pins it.
@@ -227,38 +228,27 @@ pub fn prompt_for(req: &JevRequest) -> Result<(String, Vec<String>), String> {
 /// [`MODELS`] (quoted with [`crate::shell::quote`]). It holds no case data:
 /// `claude` reads the prompt from the command's stdin.
 pub fn haiku_script(model: &str, host_timeout_secs: u64) -> Result<String, String> {
+    use crate::service::claude_print;
     use crate::shell::quote;
     if !MODELS.contains(&model) {
         return Err(format!("refusing model {model:?}"));
     }
-    let claude = [
-        "claude",
-        "-p",
-        "--model",
-        &quote(model),
-        "--output-format",
-        "json",
-        // `disableAllHooks`, not `{"hooks":{}}` (see summary.rs): fleet's
-        // user-level hooks must not see this run.
-        "--settings",
-        &quote(r#"{"disableAllHooks":true}"#),
-        "--tools",
-        &quote(""),
-        "--strict-mcp-config",
-        "--no-session-persistence",
-    ]
-    .join(" ");
+    let claude = format!(
+        "claude -p --model {} --output-format json {}",
+        quote(model),
+        claude_print::isolation_flags()
+    );
     let t = HAIKU_TAG;
     Ok(format!(
         "set -o pipefail; \
-         if ! command -v claude >/dev/null 2>&1; then echo {t}noclaude; exit 0; fi; \
+         {noclaude} \
          d=$(mktemp -d 2>/dev/null) || d=''; \
          if [ -n \"$d\" ]; then cd -- \"$d\" || exit 1; else cd / || exit 1; fi; \
-         t=''; if command -v timeout >/dev/null 2>&1; then t='timeout {host_timeout_secs}'; fi; \
-         echo {t}run; \
-         $t {claude} | head -c {OUTPUT_CAP_BYTES}; s=$?; \
+         {run}; s=$?; \
          if [ -n \"$d\" ]; then cd / && rmdir -- \"$d\" 2>/dev/null; fi; \
-         exit $s"
+         exit $s",
+        noclaude = claude_print::noclaude_check(t),
+        run = claude_print::run_capped(t, &claude, host_timeout_secs, OUTPUT_CAP_BYTES, false),
     ))
 }
 
@@ -277,16 +267,10 @@ pub enum ScriptAnswer {
 /// script prints it before `claude` starts, so nothing the model says can
 /// stand in for it.
 pub fn parse_script_output(stdout: &str) -> ScriptAnswer {
-    let lines: Vec<&str> = stdout.lines().collect();
-    let Some(i) = lines.iter().position(|l| {
-        let l = l.trim();
-        l == format!("{HAIKU_TAG}run") || l == format!("{HAIKU_TAG}noclaude")
-    }) else {
-        return ScriptAnswer::Nothing;
-    };
-    match lines[i].trim().trim_start_matches(HAIKU_TAG) {
-        "noclaude" => ScriptAnswer::NoClaude,
-        _ => ScriptAnswer::Ran(lines[i + 1..].join("\n").trim().to_string()),
+    match crate::service::claude_print::parse_tagged(stdout, HAIKU_TAG, &["run", "noclaude"]) {
+        Some(("noclaude", _)) => ScriptAnswer::NoClaude,
+        Some((_, rest)) => ScriptAnswer::Ran(rest),
+        None => ScriptAnswer::Nothing,
     }
 }
 

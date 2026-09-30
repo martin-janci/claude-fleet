@@ -39,6 +39,8 @@ pub const JOURNAL_KINDS: &[&str] = &[
     // Fleet wrote to the item's tracker (work graph M13.4e, D3): the PR as
     // a remote link, on the session's conversation.
     "write_back",
+    // An agent's own todo/task step (design 2026-09-29 §2); meta {native_id, state, agent}.
+    "step",
 ];
 
 /// `source` values.
@@ -95,6 +97,7 @@ fn cap_kind(kind: &str) -> Option<usize> {
     match kind {
         "progress" => Some(PROGRESS_CAP),
         "compact_summary" => Some(COMPACT_SUMMARY_CAP),
+        "step" => Some(crate::service::work::steps::STEP_CAP),
         _ => None,
     }
 }
@@ -130,7 +133,7 @@ impl Store {
     /// transaction. A `conversation` row is upserted (one per conversation).
     /// Returns `None` when the row was skipped: an empty body for a
     /// `progress` / `compact_summary` row, or an exact repeat of that
-    /// conversation's newest row of the same kind.
+    /// conversation's newest row of the same kind (those two kinds only).
     pub fn append_journal(
         &self,
         claude_session_id: Option<&str>,
@@ -175,7 +178,10 @@ impl Store {
         // SAVEPOINT works both standalone (autocommit — it starts an
         // implicit transaction) and already inside an open transaction.
         self.in_savepoint("append_journal", |_| -> Result<Option<i64>, IpcError> {
-            if cap_kind(kind).is_some() {
+            // Only `progress` / `compact_summary` skip a repeated body: a
+            // `step` row repeats its text when only its state moves, and
+            // `Store::record_steps` already drops events that change nothing.
+            if matches!(kind, "progress" | "compact_summary") {
                 let last: Option<String> = self
                     .conn
                     .query_row(
@@ -382,6 +388,128 @@ impl Store {
     }
 }
 
+/// One step's newest state in a conversation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StepView {
+    pub claude_session_id: String,
+    pub native_id: String,
+    pub text: String,
+    pub state: String,
+    pub at: i64,
+}
+
+impl Store {
+    /// Append the events that change a step's known text or state; each
+    /// becomes one `step` row (body = text, meta = {native_id, state, agent}).
+    /// Returns how many rows it wrote.
+    pub fn record_steps(
+        &self,
+        claude_session_id: &str,
+        participant_id: Option<i64>,
+        source: &str,
+        events: &[crate::service::work::steps::StepEvent],
+    ) -> Result<usize, IpcError> {
+        let mut known: std::collections::HashMap<String, StepView> = self
+            .current_steps(&[claude_session_id.to_string()])?
+            .into_iter()
+            .map(|v| (v.native_id.clone(), v))
+            .collect();
+        let mut wrote = 0;
+        for e in events {
+            let prev = known.get(&e.native_id);
+            let text = e.text.clone().or_else(|| prev.map(|p| p.text.clone()));
+            let Some(text) = text else { continue };
+            let state = e
+                .state
+                .map(|s| s.as_str().to_string())
+                .or_else(|| prev.map(|p| p.state.clone()))
+                .unwrap_or_else(|| "pending".into());
+            if prev.is_some_and(|p| p.text == text && p.state == state) {
+                continue;
+            }
+            let meta = serde_json::json!({
+                "native_id": e.native_id,
+                "state": state,
+                "agent": e.agent,
+            })
+            .to_string();
+            if self
+                .append_journal(
+                    Some(claude_session_id),
+                    participant_id,
+                    "step",
+                    source,
+                    Some(&text),
+                    Some(&meta),
+                )?
+                .is_some()
+            {
+                wrote += 1;
+                // A batch (one TodoWrite snapshot, a transcript tail) can
+                // name the same step twice; later events compare to this one.
+                known.insert(
+                    e.native_id.clone(),
+                    StepView {
+                        claude_session_id: claude_session_id.to_string(),
+                        native_id: e.native_id.clone(),
+                        text,
+                        state,
+                        at: now_unix(),
+                    },
+                );
+            }
+        }
+        Ok(wrote)
+    }
+
+    /// The newest state of every step in these conversations, in order of
+    /// first appearance.
+    pub fn current_steps(&self, conversation_ids: &[String]) -> Result<Vec<StepView>, IpcError> {
+        if conversation_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let json = serde_json::to_string(conversation_ids)
+            .map_err(|e| IpcError::new(codes::E_INTERNAL, e.to_string()))?;
+        let mut stmt = self.conn.prepare(
+            "SELECT claude_session_id, json_extract(meta, '$.native_id') AS nid, body, \
+                    json_extract(meta, '$.state'), at, id \
+               FROM work_journal \
+              WHERE kind = 'step' AND claude_session_id IN (SELECT value FROM json_each(?1)) \
+              ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![json], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut order: Vec<(String, String)> = Vec::new();
+        let mut last: std::collections::HashMap<(String, String), StepView> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let (conv, nid, body, state, at) = row?;
+            let k = (conv.clone(), nid.clone());
+            if !last.contains_key(&k) {
+                order.push(k.clone());
+            }
+            last.insert(
+                k,
+                StepView {
+                    claude_session_id: conv,
+                    native_id: nid,
+                    text: body.unwrap_or_default(),
+                    state,
+                    at,
+                },
+            );
+        }
+        Ok(order.into_iter().filter_map(|k| last.remove(&k)).collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,5 +711,83 @@ mod tests {
                 codes::E_INVALID
             );
         }
+    }
+
+    #[test]
+    fn steps_record_only_changes_and_read_back_their_newest_state() {
+        use crate::service::work::steps::{StepEvent, StepState};
+        let s = Store::open_in_memory().unwrap();
+        let ev = |id: &str, text: Option<&str>, st: StepState| StepEvent {
+            native_id: id.into(),
+            text: text.map(str::to_string),
+            state: Some(st),
+            agent: "claude_code",
+        };
+        assert_eq!(
+            s.record_steps(
+                "c1",
+                None,
+                "hook",
+                &[ev("task:1", Some("Read OM-110"), StepState::Pending)]
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            s.record_steps(
+                "c1",
+                None,
+                "hook",
+                &[ev("task:1", Some("Read OM-110"), StepState::Pending)]
+            )
+            .unwrap(),
+            0,
+            "no change, no row"
+        );
+        assert_eq!(
+            s.record_steps(
+                "c1",
+                None,
+                "hook",
+                &[ev("task:1", None, StepState::Completed)]
+            )
+            .unwrap(),
+            1
+        );
+        let cur = s.current_steps(&["c1".to_string()]).unwrap();
+        assert_eq!(cur.len(), 1);
+        assert_eq!(
+            (cur[0].text.as_str(), cur[0].state.as_str()),
+            ("Read OM-110", "completed")
+        );
+    }
+
+    #[test]
+    fn steps_are_capped_per_conversation() {
+        use crate::service::work::steps::{StepEvent, StepState, STEP_CAP};
+        let s = Store::open_in_memory().unwrap();
+        for i in 0..(STEP_CAP + 5) {
+            s.record_steps(
+                "c1",
+                None,
+                "hook",
+                &[StepEvent {
+                    native_id: format!("todo:{i}"),
+                    text: Some(format!("s{i}")),
+                    state: Some(StepState::Pending),
+                    agent: "claude_code",
+                }],
+            )
+            .unwrap();
+        }
+        let n: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM work_journal WHERE kind = 'step'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n as usize, STEP_CAP);
     }
 }

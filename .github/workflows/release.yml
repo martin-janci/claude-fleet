@@ -469,10 +469,15 @@ jobs:
       # (see ci.yml's hub-headless job) — nothing to install first.
       # FLEET_GIT_SHA / FLEET_BUILD_ID: the build identity fleet-hub's
       # build.rs compiles in (`healthcheck --ready`, update design U11).
+      # The build ID is `rel-<tag>-<commit>`, the SAME expression as the
+      # `manifest` job's BUILD_ID below and hub-image.yml's build arg: the
+      # updater requires the installed build_id to equal the manifest's
+      # (design §8.4 step 3), so it may not name a run (hub-image.yml is
+      # another run) or an attempt (a re-run of one job is another attempt).
       - run: cargo build -p fleet-agent -p fleet-hub --release --locked --target ${{ matrix.target }}
         env:
           FLEET_GIT_SHA: ${{ github.sha }}
-          FLEET_BUILD_ID: gh-run-${{ github.run_id }}-${{ github.run_attempt }}
+          FLEET_BUILD_ID: rel-${{ github.ref_name }}-${{ github.sha }}
       # A checked-in script rather than an inline heredoc: no ${{ }}
       # expression carrying tag/ref text is interpolated inside a `run:`
       # body — tag, target and repository all arrive through `env:` instead,
@@ -539,13 +544,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: .
-          key: release-manifest
-      - run: sudo apt-get update && sudo apt-get install -y minisign
-      - run: cargo build -p fleet-update --bin fleet-release --release --locked
+      # minisign and target/release/fleet-release.
+      - uses: ./.github/actions/fleet-release
       - name: Download every asset currently on the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -559,7 +559,9 @@ jobs:
           RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           TAG: ${{ github.ref_name }}
           GIT_SHA: ${{ github.sha }}
-          BUILD_ID: gh-run-${{ github.run_id }}-${{ github.run_attempt }}
+          # The same expression as agent-hub-binaries' and hub-image.yml's
+          # FLEET_BUILD_ID: what every artifact compiled in (U11, §8.4).
+          BUILD_ID: rel-${{ github.ref_name }}-${{ github.sha }}
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
           ASSETS_DIR: assets
           FLEET_RELEASE: target/release/fleet-release
@@ -799,17 +801,9 @@ jobs:
             echo "$TAG predates the update manifest; no channel to write."
             echo "has=0" >>"$GITHUB_OUTPUT"
           fi
+      # minisign and target/release/fleet-release.
       - if: steps.leg.outputs.has == '1'
-        uses: dtolnay/rust-toolchain@stable
-      - if: steps.leg.outputs.has == '1'
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: .
-          key: release-manifest
-      - if: steps.leg.outputs.has == '1'
-        run: sudo apt-get update && sudo apt-get install -y minisign
-      - if: steps.leg.outputs.has == '1'
-        run: cargo build -p fleet-update --bin fleet-release --release --locked
+        uses: ./.github/actions/fleet-release
       - if: steps.leg.outputs.has == '1'
         name: List the release on its tracks
         env:

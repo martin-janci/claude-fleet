@@ -75,7 +75,7 @@ echo "release-manifest.sh"
 (cd "$t" && TAG="v0.4.0" ASSETS_DIR="$assets" "$here/release-manifest.sh" 2>/dev/null)
 check "an older version needs no manifest" test ! -e "$t/release-manifest.json"
 check "no key fails the release" bash -c "cd '$t' && ! RELEASE_SIGNING_KEY= TAG=v$v ASSETS_DIR='$assets' '$here/release-manifest.sh' >/dev/null 2>&1"
-(cd "$t" && DRY_RUN=1 TAG="v$v" RELEASE_ID=1 REPO=o/r GIT_SHA=abc BUILD_ID=gh-run-1-1 \
+(cd "$t" && DRY_RUN=1 TAG="v$v" RELEASE_ID=1 REPO=o/r GIT_SHA=abc BUILD_ID="rel-v$v-abc" \
   HUB_IMAGE_WAIT_SECS=0 ASSETS_DIR="$assets" "$here/release-manifest.sh" 2>/dev/null)
 m="$t/release-manifest.json"
 check "the manifest verifies with the fleet's verifier" \
@@ -139,18 +139,45 @@ check "a key the fleet does not trust is refused" bash -c "! (cd '$t/repo' && RE
 check "and nothing was pushed" test "$(git -C "$t/remote.git" rev-parse update-channels)" = "$before"
 
 echo "release-key.sh"
-cp "$root/crates/fleet-update/src/keys.rs" "$t/keys-empty.rs"
-if grep -q '^pub const RELEASE_KEYS: &\[&str\] = &\[\];$' "$t/keys-empty.rs"; then
-  mkdir -p "$t/home"
-  FLEET_RELEASE_KEYS_RS="$t/keys-empty.rs" HOME="$t/home" USER=t "$here/release-key.sh" --no-keychain --repo o/r >"$t/key.out" 2>&1 || true
-  newpub="$(FLEET_RELEASE_KEYS_RS="$t/keys-empty.rs" "$here/release-pubkeys.sh")"
-  check "it writes one public key into keys.rs" test "$(printf '%s\n' "$newpub" | grep -c '^RW')" = 1
-  check "the secret went to gh on stdin" grep -q 'secret key' "$t/secret-RELEASE_SIGNING_KEY"
-  check "keys.rs still compiles as the same constant" grep -q '^pub const RELEASE_KEYS: &\[&str\] = &\[$' "$t/keys-empty.rs"
-  check "a second run is refused (that is a rotation)" bash -c "! FLEET_RELEASE_KEYS_RS='$t/keys-empty.rs' HOME='$t/home' '$here/release-key.sh' --no-keychain >/dev/null 2>&1"
-else
-  echo "  skip  keys.rs already names a key"
-fi
+# The real keys.rs names the owner's key, so the script runs against an
+# empty fixture of keys.rs's shape (the constant as release-key.sh finds it
+# before any key, and the fn that reads it).
+cat >"$t/keys-empty.rs" <<'RS'
+//! The release keys every build trusts (U1).
+pub const RELEASE_KEYS: &[&str] = &[];
+
+/// [`RELEASE_KEYS`] as a [`TrustedKeys`](crate::TrustedKeys).
+pub fn release_keys() -> crate::TrustedKeys {
+    crate::TrustedKeys::from_base64(RELEASE_KEYS.iter().copied())
+        .expect("a compiled-in release key must decode")
+}
+RS
+mkdir -p "$t/home"
+FLEET_RELEASE_KEYS_RS="$t/keys-empty.rs" HOME="$t/home" USER=t "$here/release-key.sh" --no-keychain --repo o/r >"$t/key.out" 2>&1 || true
+newpub="$(FLEET_RELEASE_KEYS_RS="$t/keys-empty.rs" "$here/release-pubkeys.sh")"
+check "it writes one public key into keys.rs" test "$(printf '%s\n' "$newpub" | grep -c '^RW')" = 1
+check "the secret went to gh on stdin" grep -q 'secret key' "$t/secret-RELEASE_SIGNING_KEY"
+check "keys.rs still compiles as the same constant" grep -q '^pub const RELEASE_KEYS: &\[&str\] = &\[$' "$t/keys-empty.rs"
+check "and still has the fn that reads it" grep -q '^pub fn release_keys() -> crate::TrustedKeys {$' "$t/keys-empty.rs"
+check "a second run is refused (that is a rotation)" bash -c "! FLEET_RELEASE_KEYS_RS='$t/keys-empty.rs' HOME='$t/home' '$here/release-key.sh' --no-keychain >/dev/null 2>&1"
+
+# The build identity (U11, design §8.4 step 3): the tarballs, the hub image
+# and the manifest must compile in / sign the SAME build ID, so the three
+# workflow lines use one expression, and none names a run or an attempt
+# (hub-image.yml is another run; a re-run job is another attempt).
+echo "build identity"
+wf="$root/.github/workflows"
+bid_tar="$(sed -n 's/^ *FLEET_BUILD_ID: //p' "$wf/release.yml")"
+bid_man="$(sed -n 's/^ *BUILD_ID: //p' "$wf/release.yml")"
+bid_img="$(sed -n 's/^ *FLEET_BUILD_ID=//p' "$wf/hub-image.yml")"
+check "release.yml sets FLEET_BUILD_ID once" test "$(printf '%s\n' "$bid_tar" | grep -c .)" = 1
+check "release.yml sets the manifest's BUILD_ID once" test "$(printf '%s\n' "$bid_man" | grep -c .)" = 1
+check "hub-image.yml sets FLEET_BUILD_ID once" test "$(printf '%s\n' "$bid_img" | grep -c .)" = 1
+check "the manifest signs the tarballs' build ID" test "$bid_man" = "$bid_tar"
+check "the hub image compiles in the same build ID" test "$bid_img" = "$bid_tar"
+# shellcheck disable=SC2016 # the literal workflow expression
+check "which names the tag and the commit" test "$bid_tar" = 'rel-${{ github.ref_name }}-${{ github.sha }}'
+check "and no run or attempt" bash -c "! grep -nE 'BUILD_ID[:=].*github\.run_(id|attempt)' '$wf/release.yml' '$wf/hub-image.yml'"
 
 if [ "$fails" -ne 0 ]; then
   echo "release-update-scripts-test: $fails check(s) failed" >&2
