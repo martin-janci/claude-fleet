@@ -87,6 +87,7 @@ pub fn layout_item_types(layout: Layout) -> &'static [&'static str] {
         Layout::Embed => &["account_usage"],
         Layout::MasterDetail => &["field", "notice", "custom"],
         Layout::ReviewApply => &["notice", "link"],
+        Layout::Guide => &["field", "stat", "record", "action", "notice", "link"],
         Layout::Flow | Layout::ObjectEditor => &[],
     }
 }
@@ -106,6 +107,7 @@ pub const LAYOUTS: &[Layout] = &[
     Layout::ReviewApply,
     Layout::DataPage,
     Layout::Embed,
+    Layout::Guide,
 ];
 
 /// Every slot an `embed` page can fill.

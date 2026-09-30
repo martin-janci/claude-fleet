@@ -605,6 +605,20 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "list_guides",
+            "guide",
+            json!({ "action": "list" }),
+            r#"{"guides":[],"proposals":[],"can_write":false}"#,
+            Box::new(|b, s, _| {
+                let v = block_on(commands::pages::routed::list_guides(b, s))?;
+                assert!(
+                    !v.can_write,
+                    "the hub decides whether this device may approve"
+                );
+                Ok(())
+            }),
+        ),
+        (
             "setting_history",
             "setting_history",
             json!({ "key": "work.recent_days", "limit": null }),
@@ -1364,6 +1378,29 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     s,
                     "work.recent_days".into(),
                     "3".into(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "decide_guide",
+            "guide",
+            json!({ "action": "decide", "id": 7, "approve": true }),
+            r#"{"guides":[],"proposals":[],"can_write":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::pages::routed::decide_guide(b, s, 7, true)).map(|_| ())
+            }),
+        ),
+        (
+            "remove_guide",
+            "guide",
+            json!({ "action": "remove", "page_id": "guide.cleanup" }),
+            r#"{"guides":[],"proposals":[],"can_write":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::pages::routed::remove_guide(
+                    b,
+                    s,
+                    "guide.cleanup".into(),
                 ))
                 .map(|_| ())
             }),

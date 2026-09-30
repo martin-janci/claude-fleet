@@ -955,6 +955,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/087_inventory_flags.sql"),
         already_applied: Some(asset_inventory_has_fleet_owned),
     },
+    // Declarative pages, guides: `guide_proposals`. A new table and index,
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(88, include_str!("../../migrations/088_guides.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

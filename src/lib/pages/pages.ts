@@ -19,7 +19,8 @@ export type Layout =
   | 'cards'
   | 'review_apply'
   | 'data_page'
-  | 'embed';
+  | 'embed'
+  | 'guide';
 
 /** Where an `embed` page sits in the desktop's own screens (`model.rs` `Slot`). */
 export type Slot =
@@ -110,8 +111,9 @@ export interface Page {
   resource?: string;
   /** A `master_detail` page's items about the whole list. */
   list_items?: Item[];
-  /** A `review_apply` page's proposals (`pages/review.ts`). */
-  review?: 'settings';
+  /** A `review_apply` page's proposals: settings (`pages/review.ts`) or
+   *  guides (`pages/guides.ts`). */
+  review?: 'settings' | 'guides';
   /** An `embed` page's place in a screen (`pages/embeds.ts`). */
   slot?: Slot;
   /** A `data_page`'s filter bar: each sets the same-named source param. */

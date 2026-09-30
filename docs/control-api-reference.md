@@ -113,6 +113,12 @@ Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, w
 
 Parameters: `describe`
 
+### `guide`
+
+Settings guides. catalog: what one may name; validate / propose a spec (a person approves); list; decide / remove: master or trusted device.
+
+Parameters: `action`, `approve`, `id`, `page_id`, `spec`, `why`
+
 ### `hide_host`
 
 Hide or show a host (hidden: skipped by reconcile). Returns the host row.

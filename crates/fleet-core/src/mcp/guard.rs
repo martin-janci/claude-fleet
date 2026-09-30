@@ -329,6 +329,17 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Guides (declarative pages, layout guide): any token reads the catalog,
+    // validates and proposes — a host's session is who writes one, with the
+    // fleet-guides skill — and lists. Deciding and removing are a person's:
+    // the master or a trusted device (`settings_writer`, in the tool).
+    ToolPolicy {
+        name: "guide",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Trusting a client widens what its token can do (unmarked delivery), so
     // it is credential administration like minting and revoking.
     ToolPolicy {

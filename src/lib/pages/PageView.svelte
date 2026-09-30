@@ -12,6 +12,7 @@
   import AutoTidyPreview from '../AutoTidyPreview.svelte';
   import ResourcePage from './ResourcePage.svelte';
   import ReviewApply from './ReviewApply.svelte';
+  import GuideReview from './GuideReview.svelte';
   import PageActionButton from './PageActionButton.svelte';
   import AccountsUsage from './usage/AccountsUsage.svelte';
   import type { SettingProposal } from './review';
@@ -118,6 +119,13 @@
 
   let root = $state<HTMLElement>();
 
+  // Layout L9 `guide`: one step (section) at a time. A step whose `when`
+  // no longer holds drops out, so the count follows the answers so far.
+  const shownSections = $derived(visibleSections.filter((s) => showData || !s.items.every(isData)));
+  let step = $state(0);
+  const stepAt = $derived(Math.min(step, Math.max(0, shownSections.length - 1)));
+  const lastStep = $derived(stepAt >= shownSections.length - 1);
+
   // A search hit: open the tab the setting is on, then scroll to it.
   $effect(() => {
     const key = focusKey;
@@ -171,7 +179,9 @@
     </div>
   {/if}
 
-  {#if page.layout === 'review_apply'}
+  {#if page.layout === 'review_apply' && page.review === 'guides'}
+    <GuideReview {pages} {descs} {sources} {onnavigate} />
+  {:else if page.layout === 'review_apply'}
     <ReviewApply {proposals} {pages} {descs} {readonly} {onopen} />
   {/if}
 
@@ -184,8 +194,33 @@
     <Tabs tabs={tabs.map((t) => t.title)} bind:selected={tab} label={page.title} testidPrefix={`page-${page.id}-tab`} />
   {/if}
 
-  {#if page.layout !== 'master_detail'}
-  {#each visibleSections.filter((s) => showData || !s.items.every(isData)) as section (section.title)}
+  {#if page.layout === 'guide'}
+    {@const current = shownSections[stepAt]}
+    <ol class="steps" data-testid="guide-steps">
+      {#each shownSections as s, i (s.title)}
+        <li class:done={i < stepAt} class:now={i === stepAt}>
+          <button type="button" data-testid={`guide-step-${i}`} aria-current={i === stepAt ? 'step' : undefined} onclick={() => (step = i)}
+            >{s.title}</button
+          >
+        </li>
+      {/each}
+    </ol>
+    {#if current}
+      <section class="section step" data-testid={`section-${current.title}`}>
+        <h5 data-testid="guide-progress">Step {stepAt + 1} of {shownSections.length}: {current.title}</h5>
+        {@render sectionBody(current)}
+      </section>
+    {/if}
+    <div class="guide-nav">
+      <button type="button" class="btn" data-testid="guide-back" disabled={stepAt === 0} onclick={() => (step = stepAt - 1)}>← Back</button>
+      {#if lastStep}
+        <button type="button" class="btn btn--primary" data-testid="guide-done" onclick={() => onnavigate(page.parent ?? 'guides')}>Done</button>
+      {:else}
+        <button type="button" class="btn btn--primary" data-testid="guide-next" onclick={() => (step = stepAt + 1)}>Next →</button>
+      {/if}
+    </div>
+  {:else if page.layout !== 'master_detail'}
+  {#each shownSections as section (section.title)}
     {#if section.collapsible || section.advanced}
       <Disclosure title={section.title} open={!section.advanced} badge={section.advanced ? 'Advanced' : undefined} testid={`section-${section.title}`}>
         {@render sectionBody(section)}
@@ -332,5 +367,44 @@
   }
   .link:focus-visible {
     outline: var(--ring-w) solid var(--ring);
+  }
+  .steps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.9rem;
+    list-style: none;
+    counter-reset: step;
+    margin: 0 0 0.5rem;
+    padding: 0;
+    font-size: 0.78rem;
+  }
+  .steps li {
+    counter-increment: step;
+  }
+  .steps button {
+    background: none;
+    border: none;
+    padding: 0.15rem 0;
+    font: inherit;
+    color: var(--fg-muted);
+    cursor: pointer;
+  }
+  .steps button::before {
+    content: counter(step) '. ';
+  }
+  .steps li.done button {
+    color: var(--fg);
+  }
+  .steps li.now button {
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .steps button:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+  }
+  .guide-nav {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 0.75rem;
   }
 </style>

@@ -28,9 +28,9 @@ impl std::fmt::Display for Problem {
     }
 }
 
-const MAX_TITLE: usize = 60;
-const MAX_TEXT: usize = 300;
-const MAX_HINT: usize = 120;
+pub const MAX_TITLE: usize = 60;
+pub const MAX_TEXT: usize = 300;
+pub const MAX_HINT: usize = 120;
 
 fn valid_id(id: &str) -> bool {
     !id.is_empty()
@@ -243,7 +243,14 @@ fn check_item(
                     }
                 }
             }
-            if let Some(first) = placed.insert(key.clone(), format!("{} › {at}", page.id)) {
+            // A guide is a path through settings whose home is another
+            // page: it never takes the home, only a key once per guide.
+            if page.layout == super::model::Layout::Guide {
+                if let Some(first) = placed.insert(format!("{}#guide#{key}", page.id), at.into()) {
+                    cx.bad(at, format!("`{key}` is already a step's field at {first}"));
+                }
+            } else if let Some(first) = placed.insert(key.clone(), format!("{} › {at}", page.id))
+            {
                 cx.bad(
                     at,
                     format!("`{key}` is already placed at {first}; a setting has one home"),
@@ -387,6 +394,41 @@ fn check_section(
     }
     for (i, item) in section.items.iter().enumerate() {
         check_item(cx, &format!("{at} › item {}", i + 1), page, item, placed);
+    }
+}
+
+/// Most steps a guide may have: past this it is a manual, not a guide.
+pub const MAX_GUIDE_STEPS: usize = 12;
+
+/// A guide is steps: sections (never tabs), at most [`MAX_GUIDE_STEPS`],
+/// each titled differently, since a step is named by its title.
+fn check_guide(cx: &mut Ctx, page: &Page) {
+    if page.layout != super::model::Layout::Guide {
+        return;
+    }
+    if !page.tabs.is_empty() {
+        cx.bad("", "a guide's steps are sections, not tabs");
+    }
+    if page.sections.len() > MAX_GUIDE_STEPS {
+        cx.bad(
+            "",
+            format!(
+                "{} steps, over the {MAX_GUIDE_STEPS} a guide may have",
+                page.sections.len()
+            ),
+        );
+    }
+    let mut titles = BTreeSet::new();
+    for (i, s) in page.sections.iter().enumerate() {
+        if !titles.insert(s.title.as_str()) {
+            cx.bad(&format!("section {}", i + 1), "another step has this title");
+        }
+        if s.collapsible || s.advanced {
+            cx.bad(
+                &format!("section {}", i + 1),
+                "a step is shown whole: not collapsible or advanced",
+            );
+        }
     }
 }
 
@@ -611,6 +653,7 @@ pub fn validate(pages: &[Page]) -> Vec<Problem> {
         }
         check_filters(&mut cx, page);
         check_embed(&mut cx, page);
+        check_guide(&mut cx, page);
         if !page.list_items.is_empty() && resource.is_none() {
             cx.bad("", "list_items belong to a master_detail page");
         }
@@ -743,7 +786,10 @@ pub fn for_each_item(page: &Page, mut f: impl FnMut(String, &Item)) {
 /// in `pages::UNLISTED` saying why it has none.
 pub fn unplaced_keys<'a>(pages: &[Page], unlisted: &[(&'a str, &'a str)]) -> Vec<&'static str> {
     let mut placed = BTreeSet::new();
-    for page in pages.iter().filter(|p| p.resource.is_none()) {
+    for page in pages
+        .iter()
+        .filter(|p| p.resource.is_none() && p.layout != super::model::Layout::Guide)
+    {
         for_each_item(page, |_, item| {
             if let Item::Field { key, .. } = item {
                 placed.insert(key.clone());
