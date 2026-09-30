@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostLayerRow {
     pub host_alias: String,
+    /// Which catalog this assignment belongs to (migration 091). Wire field:
+    /// `#[serde(default)]` so an older hub's `catalog_list_layers` /
+    /// `catalog_set_host_layers` answer (no `catalog_id` yet) still parses.
+    #[serde(default)]
     pub catalog_id: i64,
     pub layer_name: String,
     /// `"role"` | `"context"`.

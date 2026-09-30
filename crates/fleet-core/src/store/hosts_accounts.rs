@@ -578,7 +578,10 @@ impl Store {
                 "wt_path, parent_fp, recorded_at",
             ),
             ("dismissed_agents", "claude_session_id, dismissed_at"),
-            ("host_layers", "layer_name, axis, position, active"),
+            (
+                "host_layers",
+                "catalog_id, layer_name, axis, position, active",
+            ),
             ("catalog_secrets_host", "name, value, updated_at"),
         ] {
             tx.execute(
@@ -1068,6 +1071,28 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("local").unwrap();
         s.insert_host("mac", Some("mac")).unwrap();
+        // Layer assignments in two catalogs on the merged-away host: both
+        // must arrive under `into` carrying their own `catalog_id` (a
+        // NOT NULL column with no default — `INSERT OR IGNORE` silently
+        // drops any row missing it instead of erroring).
+        s.set_catalog_config("/p", None).unwrap();
+        let personal = s.personal_catalog().unwrap().unwrap().id;
+        let org = s.add_org("acme", None, false).unwrap().id;
+        s.conn_for_test()
+            .execute(
+                "INSERT INTO catalogs (name, repo_path, org_id, created_at) VALUES ('acme', '/a', ?1, 0)",
+                [org],
+            )
+            .unwrap();
+        let acme: i64 = s
+            .conn_for_test()
+            .query_row("SELECT id FROM catalogs WHERE name='acme'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        s.set_host_layers("local", Some("core"), &[]).unwrap();
+        s.set_host_layers_for("local", acme, Some("ops"), &["extra"])
+            .unwrap();
         let pid = s.upsert_project("o", "r", "/Users/m/o/r").unwrap();
         let wt = s
             .upsert_worktree_on(
@@ -1171,6 +1196,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(d, 1);
+        // Both catalogs' layer assignments arrived under `into` with their
+        // own catalog id, and nothing is left on `from`.
+        let p = s.get_host_layers_for("mac", personal).unwrap();
+        assert_eq!(
+            p.iter().map(|r| r.layer_name.as_str()).collect::<Vec<_>>(),
+            vec!["core"]
+        );
+        let a = s.get_host_layers_for("mac", acme).unwrap();
+        assert_eq!(a.len(), 2);
+        assert!(a.iter().all(|r| r.catalog_id == acme));
+        assert_eq!(s.get_host_layers("mac").unwrap().len(), 3);
+        assert!(s.get_host_layers("local").unwrap().is_empty());
     }
 
     #[test]
