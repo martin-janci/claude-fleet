@@ -80,7 +80,8 @@ page tree. `id` is dotted lowercase and is also the page's deep link.
 | `embed` | Items placed inside one of the desktop's own screens at a named `slot` (see *Embed pages*); never in the page tree | `account_usage`, in the views its slot takes |
 | `master_detail` | A list of a resource's records beside one record's editor | `field` (naming a field of the resource), `notice`, `custom`; `list_items` above the list: `notice`, `custom` |
 | `flow` | A server-driven wizard (see *Flows*); not a page of its own yet, launched by a resource's `create_flow` | — |
-| `review_apply` | Reviewing proposed changes (see *Proposals*); names its `review` | `notice`, `link`; sections are optional |
+| `review_apply` | Reviewing proposed changes (see *Proposals*); names its `review` (`settings`, or `guides` for Settings → Guides) | `notice`, `link`; sections are optional |
+| `guide` | A task walked through one step at a time (see *Guides*); compiled in, or proposed by an agent at runtime | `field`, `stat`, `record`, `action`, `notice`, `link` |
 | `object_editor` | One object on its own page | Not yet |
 
 ### Items
@@ -344,10 +345,62 @@ read-only with the hub's reason. A hub that serves no settings to the
 device (an older hub, or a device bound to one org) leaves the page on its
 reason and the hub's answer.
 
+### Guides
+
+A guide (layout L9 `guide`) walks a person through one task, one step at a
+time. Its `sections` are the steps, in order, shown with Back / Next / Done
+and a *Step 2 of 4* line; a step's `when` drops it until it applies, so the
+count follows the answers so far. A step holds settings `field`s (saved as
+they change, like a `category` page), `notice`s, `link`s, page `action`s and
+`stat` / `record` values. A guide passes through settings whose home is
+another page: its fields never count as a setting's one home, and a key
+appears at most once per guide. At most 12 steps, each titled differently,
+none collapsible or advanced.
+
+```json
+{ "spec": "fleet.page/1", "id": "guide.cleanup", "title": "Let fleet tidy up idle sessions",
+  "parent": "guides", "layout": "guide",
+  "sections": [
+    { "title": "What it does", "items": [ { "type": "notice", "tone": "info", "text": "…" } ] },
+    { "title": "Turn it on", "items": [ { "type": "field", "key": "gc.enabled" } ] },
+    { "title": "When it acts", "when": { "key": "gc.enabled", "truthy": true },
+      "items": [ { "type": "field", "key": "gc.bg_idle_secs", "hint": "A day suits most fleets." } ] } ] }
+```
+
+**Guides an agent writes.** A guide can also be stored at runtime
+(`service::guides`, migration 088), so a Claude session on a host — which
+has no checkout of this repository — can write one. It uses the control
+API's `guide` tool (`docs/control-api.md`), usually through the
+`fleet-guides` skill that ships in `catalog-seed/` for your asset catalog:
+
+1. `guide { action: catalog }`: the rules, every setting's key, label,
+   help, kind, unit, default, what `0` means and home page (never a value),
+   the pages, page actions and read-only sources a guide may name, and a
+   working example.
+2. `guide { action: validate, spec }` answers `{ ok, problems }`, each
+   problem with where it is — the same `pages::validate` as every page,
+   against this build's registries — plus: id `guide.<name>` and none of
+   the app's pages, parent `guides`, 16 KiB at most.
+3. `guide { action: propose, spec, why }` stores a proposal. **Nothing is
+   shown until a person approves it**: in Settings → Guides (each proposal
+   with who, why and its steps in words, then Approve / Reject), or with
+   `fleet-hub guides list | show <id> | approve <id> | reject <id> |
+   remove <guide id>` on a hub. Deciding and removing need the master or a
+   trusted device; a host's token only proposes. 20 wait at most, 50 are
+   live; a newer proposal for an id replaces the pending one, and a live
+   guide stays until its revision is approved.
+
+Approved guides join the page tree under Settings → Guides. A live guide
+is checked again whenever the pages are read, so one that names a setting
+a later build removed is left out rather than drawn broken. On a paired
+desktop the guides are the hub's (`list_guides`, `decide_guide`,
+`remove_guide` route to its `guide` tool).
+
 ## Rules the validator enforces
 
 - Every registered setting is on exactly one page (`every_setting_has_one_home`),
-  or it is in `pages::UNLISTED` with a sentence saying why.
+  or it is in `pages::UNLISTED` with a sentence saying why. A guide's
+  fields are not homes.
 - Keys, sources, source fields and columns, widgets, parents and link targets
   must all exist.
 - A `slot` is on an `embed` page only, once per slot, and an `account_usage`

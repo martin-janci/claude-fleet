@@ -327,16 +327,41 @@ pub struct AuthoringCatalog {
 }
 
 pub fn authoring_catalog(s: &Store) -> AuthoringCatalog {
+    // Where each setting lives: a guide links there for the rest of a topic.
+    let mut home = std::collections::BTreeMap::new();
+    for page in pages::all().iter().filter(|p| p.layout != Layout::Guide) {
+        validate::for_each_item(page, |_, item| {
+            if let Item::Field { key, .. } = item {
+                home.entry(key.clone()).or_insert_with(|| page.id.clone());
+            }
+        });
+    }
     let settings = settings::SPECS
         .iter()
         .map(|spec| {
             let mut v = serde_json::json!({
                 "key": spec.key,
                 "label": spec.label,
+                "help": spec.help,
                 "kind": KindDesc::from(spec.kind),
+                "unit": spec.unit,
+                "default": spec.default,
             });
+            if let Some(z) = spec.zero {
+                v["zero_means"] = z.into();
+            }
+            if let Some(h) = home.get(spec.key) {
+                v["page"] = h.clone().into();
+            }
             if spec.owned_by.is_some() {
                 v["read_only"] = true.into();
+            }
+            if !spec.option_labels.is_empty() {
+                v["options"] = spec
+                    .option_labels
+                    .iter()
+                    .map(|(value, label)| serde_json::json!({ "value": value, "label": label }))
+                    .collect();
             }
             v
         })
@@ -376,7 +401,10 @@ pub fn authoring_catalog(s: &Store) -> AuthoringCatalog {
         max_steps: validate::MAX_GUIDE_STEPS,
         limits: serde_json::json!({
             "title_chars": validate::MAX_TITLE,
+            "titles": "the guide's and every step's",
             "text_chars": validate::MAX_TEXT,
+            "text": "every notice and the guide's and a step's intro",
+            "secs_fields": "stored in seconds; the field shows and takes the setting's unit",
             "hint_chars": validate::MAX_HINT,
             "spec_bytes": MAX_SPEC_BYTES,
             "plain_text": "no < or >; no markup",

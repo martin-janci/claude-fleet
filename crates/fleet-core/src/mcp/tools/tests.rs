@@ -9003,6 +9003,11 @@ async fn a_host_proposes_a_guide_and_only_a_person_approves_it() {
         .await
         .expect_err("a host never decides");
     assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    assert!(
+        err.message.contains("an agent proposes a guide"),
+        "{}",
+        err.message
+    );
     let laptop = client_caller("laptop", TokenMode::Full);
     assert!(
         decide(laptop.clone()).await.is_err(),

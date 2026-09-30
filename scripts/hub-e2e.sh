@@ -448,6 +448,25 @@ check "agent-token mints the host's first token (only the token on stdout)" '[ $
 check "agent-token says on stderr that it minted one" 'grep -q "new token" "$ROOT/atok.err"' "$(cat "$ROOT/atok.err")"
 check "agent-token again prints the same token, minting nothing" '[ "$("$BIN" agent-token "$AH" --data-dir "$ROOT/c" 2>/dev/null)" = "$ATOK" ]' "a second call changed the token"
 
+echo "== Guides: a host's own session proposes, a person approves (declarative pages)"
+# The fleet-guides catalog skill drives exactly these calls from a session on
+# a host, with that host's token (here the agent host's first token).
+gtext() { printf '%s' "$1" | jq -r '.result.content[0].text // empty' 2>/dev/null; }
+gc=$(tool "$PC" "$PUB" "$ATOK" guide '{"action":"catalog"}')
+check "guide catalog answers a host's token, with a working example and no values" '[ "$(gtext "$gc" | jq -r ".example.id")" = guide.cleanup ] && [ "$(gtext "$gc" | jq "[.settings[] | select(has(\"value\"))] | length")" = 0 ]' "${gc:0:300}"
+GSPEC='{"spec":"fleet.page/1","id":"guide.e2e","title":"E2E guide","parent":"guides","layout":"guide","sections":[{"title":"Why","items":[{"type":"notice","tone":"info","text":"Cleanup stops idle sessions."}]},{"title":"Turn it on","items":[{"type":"field","key":"gc.enabled"}]}]}'
+gv=$(tool "$PC" "$PUB" "$ATOK" guide "{\"action\":\"validate\",\"spec\":${GSPEC/gc.enabled/gc.nope}}")
+check "guide validate names the unknown setting" '[ "$(gtext "$gv" | jq -r .ok)" = false ] && gtext "$gv" | grep -q "gc.nope"' "${gv:0:300}"
+gp=$(tool "$PC" "$PUB" "$ATOK" guide "{\"action\":\"propose\",\"spec\":$GSPEC,\"why\":\"e2e\"}")
+GID=$(gtext "$gp" | jq -r .id)
+check "a host's token proposes a guide: pending, nothing live" '[ "$(gtext "$gp" | jq -r .state)" = pending ] && "$BIN" guides list --json --data-dir "$ROOT/c" | jq -e ".guides == []" >/dev/null' "${gp:0:300}"
+gd=$(tool "$PC" "$PUB" "$ATOK" guide "{\"action\":\"decide\",\"id\":$GID,\"approve\":true}")
+check "a host's token never approves a guide" 'echo "$gd" | grep -q E_FORBIDDEN' "${gd:0:300}"
+out=$("$BIN" guides approve "$GID" --data-dir "$ROOT/c" 2>&1)
+check "fleet-hub guides approve puts it on the pages" 'echo "$out" | grep -q "approved #$GID"' "$out"
+gl=$(tool "$PC" "$PUB" "$ATOK" guide '{"action":"list"}')
+check "the host's session sees the live guide, and may not decide" '[ "$(gtext "$gl" | jq -r ".guides[0].id")" = guide.e2e ] && [ "$(gtext "$gl" | jq -r .can_write)" = false ]' "${gl:0:300}"
+
 start_agent agent1 "$ATOK"
 until_ok 50 connected
 # A digit, not a literal 0: release.sh bumps fleet-agent with the app, so this

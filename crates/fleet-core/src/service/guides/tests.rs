@@ -23,6 +23,32 @@ fn the_example_checks_and_is_what_the_catalog_hands_an_author() {
     assert!(cat.pages.iter().any(|p| p["id"] == GUIDES_PAGE));
     // Values stay out: an author learns what a setting is, not what it holds.
     assert!(cat.settings.iter().all(|v| v.get("value").is_none()));
+    // What an author needs to recommend a value: the registry's help, unit,
+    // default, what 0 means, and the page the setting lives on.
+    let behind = cat
+        .settings
+        .iter()
+        .find(|v| v["key"] == "health.claude_max_behind")
+        .unwrap();
+    assert!(
+        behind["help"].as_str().unwrap().contains("Patch releases"),
+        "{behind}"
+    );
+    assert_eq!(
+        (behind["default"].as_str(), behind["unit"].as_str()),
+        (Some("30"), Some("count"))
+    );
+    assert_eq!(behind["page"], "settings.limits");
+    let bg = cat
+        .settings
+        .iter()
+        .find(|v| v["key"] == "gc.bg_idle_secs")
+        .unwrap();
+    assert!(bg.get("zero_means").is_some(), "{bg}");
+    assert!(
+        cat.settings.iter().all(|v| v.get("page").is_some()),
+        "every setting has a home"
+    );
 }
 
 #[test]
@@ -157,4 +183,68 @@ fn a_live_guide_that_no_longer_checks_is_left_out() {
     stale["sections"][1]["items"][0]["key"] = json!("gc.removed_in_a_later_build");
     s.set_guide_spec_for_tests(row.id, &stale.to_string());
     assert!(live(&s).is_empty());
+}
+
+// ── the `fleet-guides` skill in catalog-seed/ ──
+
+fn seed_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../catalog-seed")
+}
+
+/// The skill ships as a catalog asset: the catalog's own reader loads it,
+/// its lint finds nothing, and sync renders it as a Claude skill that may
+/// call the `guide` tool.
+#[test]
+fn the_fleet_guides_skill_is_a_clean_catalog_asset() {
+    use crate::service::catalog::{author, harness::Harness, model::Kind, repo};
+    let root = seed_root();
+    let cat = repo::load_dir(&root).expect("catalog-seed loads");
+    assert!(cat.problems.is_empty(), "{:?}", cat.problems);
+    let lint = author::lint_all(&cat, &root);
+    assert_eq!((lint.errors, lint.warnings), (0, 0), "{:?}", lint.assets);
+    let skill = cat.find(Kind::Skill, "fleet-guides").expect("the skill");
+    let plan = crate::service::catalog::harness::claude::Claude
+        .render(skill)
+        .expect("renders for Claude");
+    let md = plan
+        .files
+        .iter()
+        .find(|f| f.path.ends_with("skills/fleet-guides/SKILL.md"))
+        .expect("SKILL.md");
+    let text = String::from_utf8(md.bytes.clone()).unwrap();
+    assert!(text.starts_with("---\nname: fleet-guides\n"), "{text}");
+    assert!(
+        text.contains("allowed-tools: mcp__claude-fleet__guide"),
+        "{text}"
+    );
+}
+
+/// The skill's worked example is the one `guide { catalog }` hands out, and
+/// it checks; the actions it names are the tool's.
+#[test]
+fn the_skill_teaches_the_tool_as_it_is() {
+    let body = std::fs::read_to_string(seed_root().join("skills/fleet-guides/body.md")).unwrap();
+    let start = body.find("```json\n").expect("a JSON example") + "```json\n".len();
+    let end = start + body[start..].find("```").unwrap();
+    let shown: serde_json::Value = serde_json::from_str(&body[start..end]).expect("valid JSON");
+    assert_eq!(
+        shown,
+        example(),
+        "the skill's example drifted from service::guides::example"
+    );
+    for action in ["catalog", "validate", "propose", "list"] {
+        assert!(
+            body.contains(&format!("\"action\": \"{action}\"")),
+            "the skill shows `{action}`"
+        );
+    }
+    for rule in [
+        format!("{}", validate::MAX_GUIDE_STEPS),
+        format!("≤{}", validate::MAX_HINT),
+        format!("≤{}", validate::MAX_TEXT),
+        format!("{MAX_PENDING} guides already wait"),
+        format!("{} KiB", MAX_SPEC_BYTES / 1024),
+    ] {
+        assert!(body.contains(&rule), "the skill states `{rule}`");
+    }
 }

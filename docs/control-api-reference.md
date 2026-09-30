@@ -721,6 +721,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::pages::flow_cancel`
 - `commands::pages::setting_proposals`
 - `commands::pages::decide_setting_proposals`
+- `commands::pages::list_guides`
+- `commands::pages::decide_guide`
+- `commands::pages::remove_guide`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::tasks::list_tasks`

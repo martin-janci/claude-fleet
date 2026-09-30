@@ -2084,6 +2084,22 @@ fleet-hub settings reject 5             # reject by id
 fleet-hub settings history work.recent_days [--limit N] [--json]
 ```
 
+**Guides a session proposes** (declarative pages, layout `guide`). A
+Claude session on a host — with the `fleet-guides` skill from
+`catalog-seed/` in your asset catalog — writes a step-by-step guide for
+Settings → Guides and proposes it with its own token (`guide { propose }`);
+nothing is shown until a person approves it. On the hub machine:
+
+```bash
+fleet-hub guides list [--json]          # live guides, and proposals: who, why
+fleet-hub guides show 3                 # a proposal's steps, and the settings it lets a person change
+fleet-hub guides approve 3              # on the pages (a trusted device may approve too)
+fleet-hub guides reject 4
+fleet-hub guides remove guide.cleanup   # a live guide off the pages
+```
+
+See `docs/pages.md` → *Guides*.
+
 **On a paired device** (declarative pages P6). The desktop paired with this
 hub shows these settings in its own Settings pages, read and written
 through the hub: `get_settings` and `set_setting` answer the master and a
