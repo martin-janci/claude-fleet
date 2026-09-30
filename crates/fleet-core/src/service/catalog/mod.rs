@@ -211,6 +211,10 @@ pub struct AssetSummary {
     /// before for every asset that has no `install_as`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_as: Option<String>,
+    /// Assets S1b: who may receive this asset. `#[serde(default)]` so an
+    /// older hub that predates this field still parses on the desktop side.
+    #[serde(default)]
+    pub scope: model::Scope,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,6 +280,7 @@ pub fn list_assets(store: &Mutex<Store>) -> Result<AssetListing, IpcError> {
                     tags: a.header.tags.clone(),
                     hosts: host_states(&rows, a.kind(), &a.header.name),
                     install_as: a.header.install_as.clone(),
+                    scope: a.header.scope,
                 })
                 .collect(),
             // `unmanaged` is the wire name for "installed on a host but not
@@ -559,6 +564,43 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("skills/s/body.md"), "b\n").unwrap();
+        let git = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        root
+    }
+
+    /// Two skills: `s` has no `scope` key (defaults to private), `shared-s`
+    /// is explicitly `scope: shared`.
+    fn repo_with_scoped_assets(tag: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("fleet-catalog-svc-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("skills/s")).unwrap();
+        std::fs::create_dir_all(root.join("skills/shared-s")).unwrap();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::write(
+            root.join("skills/s/asset.yaml"),
+            "kind: skill\nname: s\ndescription: d\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("skills/s/body.md"), "b\n").unwrap();
+        std::fs::write(
+            root.join("skills/shared-s/asset.yaml"),
+            "kind: skill\nname: shared-s\ndescription: d\nscope: shared\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("skills/shared-s/body.md"), "b\n").unwrap();
         let git = |args: &[&str]| {
             let o = std::process::Command::new("git")
                 .args(args)
@@ -904,6 +946,7 @@ mod tests {
             tags: Vec::new(),
             hosts: Vec::new(),
             install_as: None,
+            scope: model::Scope::Private,
         };
         let json = serde_json::to_value(&base).unwrap();
         assert!(
@@ -949,6 +992,36 @@ mod tests {
         };
         let reserialized = serde_json::to_value(&with_empty).unwrap();
         assert_eq!(reserialized["identities"], serde_json::json!([]));
+    }
+
+    /// Assets S1b: `AssetSummary.scope` mirrors each asset's own
+    /// `Header.scope`, not a catalog-wide default.
+    #[test]
+    fn list_assets_carries_scope_per_asset() {
+        let _g = lock_registry_for_test();
+        let root = repo_with_scoped_assets("scope");
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        configure(
+            ConfigureArgs {
+                repo_path: root.to_string_lossy().into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        load(false, &store).unwrap();
+
+        let listing = list_assets(&store).unwrap();
+        let scope_of = |name: &str| {
+            listing
+                .assets
+                .iter()
+                .find(|a| a.name == name)
+                .unwrap_or_else(|| panic!("no asset named {name}"))
+                .scope
+        };
+        assert_eq!(scope_of("s"), model::Scope::Private);
+        assert_eq!(scope_of("shared-s"), model::Scope::Shared);
     }
 
     /// `orphan` rows — the host still holds something a past sync wrote but

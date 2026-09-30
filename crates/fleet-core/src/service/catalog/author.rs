@@ -15,7 +15,7 @@
 use super::harness::HARNESS_IDS;
 use super::layer::{Axis, Layer};
 use super::model::{
-    find_placeholders, Asset, AssetSpec, Header, HookAction, Kind, Marketplace, Problem,
+    find_placeholders, Asset, AssetSpec, Header, HookAction, Kind, Marketplace, Problem, Scope,
 };
 use super::registry;
 use super::repo::{self, Catalog, RepoStatus};
@@ -46,6 +46,7 @@ pub fn template(kind: Kind, name: &str) -> Asset {
         tags: Vec::new(),
         source: None,
         install_as: None,
+        scope: Scope::Private,
         targets: Default::default(),
     };
     match kind {
