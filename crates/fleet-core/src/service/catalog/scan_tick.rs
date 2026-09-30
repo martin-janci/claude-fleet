@@ -5,7 +5,7 @@
 use crate::ssh::SshClient;
 use crate::store::Store;
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -52,6 +52,35 @@ pub fn with_owed(due: Vec<String>, owed: &BTreeSet<String>, hosts: &[HostDue]) -
         }
     }
     out
+}
+
+/// Hosts something outside the tick has asked to be rescanned on its next
+/// pass (a harness choice changed, `harness_set::set_host_harnesses`). The
+/// tick moves them into its own `owed` set, so a failed rescan is retried
+/// like any other owed host.
+static REQUESTED: LazyLock<Mutex<BTreeSet<String>>> = LazyLock::new(|| Mutex::new(BTreeSet::new()));
+
+fn requested() -> std::sync::MutexGuard<'static, BTreeSet<String>> {
+    // Plain data: a poisoned set is still consistent.
+    REQUESTED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Mark `alias` as owed a rescan on the tick's next pass, whatever its
+/// inventory's age.
+pub fn owe_rescan(alias: &str) {
+    requested().insert(alias.to_string());
+}
+
+/// Hand over (and clear) every [`owe_rescan`] request.
+fn take_requested() -> BTreeSet<String> {
+    std::mem::take(&mut *requested())
+}
+
+/// Whether [`owe_rescan`] was called for `alias` and the tick has not taken
+/// it yet.
+#[cfg(test)]
+pub(crate) fn rescan_requested(alias: &str) -> bool {
+    requested().contains(alias)
 }
 
 fn setting_secs(store: &Mutex<Store>, key: &str) -> i64 {
@@ -131,6 +160,7 @@ pub fn spawn_catalog_scan_tick(
                 setting_secs(&store, CATALOG_SCAN_MAX_AGE_SECS),
                 changed,
             );
+            owed.extend(take_requested());
             let due = with_owed(due, &owed, &hosts);
             for alias in due {
                 match super::inventory::scan_hosts(&store, &ssh, Some(&alias)).await {
@@ -172,6 +202,17 @@ mod tests {
             hidden: false,
             last_scan: last,
         }
+    }
+
+    /// `owe_rescan` parks the host for the tick; the tick's own drain
+    /// (`take_requested`, a `mem::take`) is not exercised here because the
+    /// set is process-wide and other tests park hosts in it concurrently.
+    #[test]
+    fn owe_rescan_parks_the_host_for_the_next_pass() {
+        let alias = format!("owed-{}", uuid::Uuid::new_v4());
+        assert!(!rescan_requested(&alias));
+        owe_rescan(&alias);
+        assert!(rescan_requested(&alias));
     }
 
     #[test]

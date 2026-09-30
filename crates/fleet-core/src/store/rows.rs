@@ -868,6 +868,13 @@ pub struct HostRow {
     /// unknown). Computed from the stored fingerprint, never stored.
     #[serde(default)]
     pub provision_stale: bool,
+    /// Which harnesses the asset catalog syncs on this host (multi-harness
+    /// F3a, migration 089). `None` = auto: Claude, plus Codex where a scan
+    /// finds it or fleet already manages Codex assets there. `Some` = exactly
+    /// these (always including `claude`). Per-field default: an older hub
+    /// omits it.
+    #[serde(default)]
+    pub harnesses: Option<Vec<String>>,
 }
 
 /// The volatile half of a host row, as `host:pinged` carries it (host
@@ -921,7 +928,8 @@ pub(super) const HOST_COLUMNS: &str =
     "alias, ssh_alias, reachable, claude_version, tmux_version, hidden, \
      last_pinged_at, account_uuid, provisioned, transport, org_id, claude_version_at, \
      disk_home_free_kb, disk_home_total_kb, disk_tmp_free_kb, load_1m, mem_avail_kb, \
-     uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint";
+     uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint, \
+     harnesses";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -954,6 +962,11 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         provisioned_at: row.get(21)?,
         provision_stale: provisioned
             && fingerprint.as_deref() != Some(crate::service::provision::fingerprint()),
+        // Migration 089. A value that is not a JSON string array reads as
+        // auto rather than failing the whole row.
+        harnesses: row
+            .get::<_, Option<String>>(23)?
+            .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()),
     })
 }
 
@@ -1163,7 +1176,7 @@ pub struct CatalogConfigRow {
     pub last_loaded_at: Option<i64>,
 }
 
-/// A catalog: a source with an owner (migration 089). `org_id: None` is the
+/// A catalog: a source with an owner (migration 090). `org_id: None` is the
 /// personal catalog — exactly one such row exists (schema `CHECK`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CatalogRow {

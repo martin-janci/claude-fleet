@@ -2,6 +2,8 @@
 //!
 //! Precedence is host override > global > built-ins (`resolve`). Values are
 //! never logged and never included in an error message — only names are.
+//! A rendered `.toml` file (a Codex subagent) is substituted as TOML, value
+//! by value, so a secret can never break or rewrite the document.
 //!
 //! `inventory::compute_states` substitutes before it compares (a host
 //! holding the real value must not read as drift), and `sync::plan_sync` /
@@ -12,6 +14,7 @@ use super::super::harness::{ConfigMerge, FileWrite, RenderPlan};
 use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::mcp::SETTING_PORT;
+use crate::service::catalog::model::find_placeholders;
 use crate::store::Store;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -226,9 +229,96 @@ fn substitute_value(
     }
 }
 
+/// Recurse into every string value of a TOML value (tables and arrays
+/// included) and substitute placeholders in each. Keys are left alone.
+fn substitute_toml_value(
+    value: &toml::Value,
+    values: &BTreeMap<String, String>,
+    missing: &mut Vec<String>,
+) -> (toml::Value, bool) {
+    match value {
+        toml::Value::String(s) => {
+            let (out, changed) = substitute_str(s, values, missing);
+            (toml::Value::String(out), changed)
+        }
+        toml::Value::Array(items) => {
+            let mut changed = false;
+            let out = items
+                .iter()
+                .map(|item| {
+                    let (v, c) = substitute_toml_value(item, values, missing);
+                    changed |= c;
+                    v
+                })
+                .collect();
+            (toml::Value::Array(out), changed)
+        }
+        toml::Value::Table(table) => {
+            let mut changed = false;
+            let mut out = toml::Table::new();
+            for (k, v) in table {
+                let (nv, c) = substitute_toml_value(v, values, missing);
+                changed |= c;
+                out.insert(k.clone(), nv);
+            }
+            (toml::Value::Table(out), changed)
+        }
+        other => (other.clone(), false),
+    }
+}
+
+/// Whether any key anywhere in `value` holds a `${NAME}` placeholder.
+fn toml_keys_hold_placeholders(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::Table(table) => table
+            .iter()
+            .any(|(k, v)| !find_placeholders(k).is_empty() || toml_keys_hold_placeholders(v)),
+        toml::Value::Array(items) => items.iter().any(toml_keys_hold_placeholders),
+        _ => false,
+    }
+}
+
+/// `${NAME}` substitution for a rendered TOML file (a Codex subagent under
+/// `~/.codex/agents/`): the text is parsed, placeholders are replaced inside
+/// string *values* only, and the document is re-serialized by the toml
+/// crate, so a secret holding `"`, `\`, `'` or a newline stays one intact
+/// string instead of breaking — or changing — the document the way a raw
+/// text replace would. The text is returned untouched when nothing was
+/// substituted. `None` when `text` is not a TOML document or the result
+/// cannot be serialized; the caller then falls back to raw replacement.
+/// `missing` is only extended on success. The second flag says a key held a
+/// placeholder (keys are never substituted).
+fn substitute_toml(
+    text: &str,
+    values: &BTreeMap<String, String>,
+    missing: &mut Vec<String>,
+) -> Option<(String, bool, bool)> {
+    let table: toml::Table = toml::from_str(text).ok()?;
+    let doc = toml::Value::Table(table);
+    let mut local_missing = Vec::new();
+    let (out, changed) = substitute_toml_value(&doc, values, &mut local_missing);
+    let text_out = if changed {
+        let toml::Value::Table(t) = out else {
+            return None;
+        };
+        toml::to_string_pretty(&t).ok()?
+    } else {
+        text.to_string()
+    };
+    for name in local_missing {
+        if !missing.contains(&name) {
+            missing.push(name);
+        }
+    }
+    Some((text_out, changed, toml_keys_hold_placeholders(&doc)))
+}
+
 /// Substitute `${NAME}` in every UTF-8 file body and every string leaf of
-/// every merge value in `plan`. Non-UTF-8 files are left untouched (a
-/// binary asset file can't contain a text placeholder). A file/merge whose
+/// every merge value in `plan`. A file whose path ends in `.toml` is
+/// substituted as TOML (`substitute_toml`): only string values, re-serialized
+/// — and if it does not parse, as raw text with a plan warning. Non-UTF-8
+/// files are left untouched (a binary asset file can't contain a text
+/// placeholder). A file/merge whose
 /// content is unchanged by substitution is not listed in `secret_files` /
 /// `secret_merge_files` even if the plan happened to reference a name that
 /// resolved to an unchanged value textually (e.g. a value equal to its own
@@ -239,12 +329,40 @@ pub fn substitute(plan: &RenderPlan, values: &BTreeMap<String, String>) -> Subst
     let mut secret_files = BTreeSet::new();
     let mut secret_merge_files = BTreeSet::new();
 
+    let mut warnings = plan.warnings.clone();
+
     let files = plan
         .files
         .iter()
         .map(|f| match std::str::from_utf8(&f.bytes) {
             Ok(text) => {
-                let (out, changed) = substitute_str(text, values, &mut missing);
+                let as_toml = if f.path.ends_with(".toml") && text.contains("${") {
+                    let parsed = substitute_toml(text, values, &mut missing);
+                    match &parsed {
+                        None => {
+                            tracing::warn!(
+                                path = %f.path,
+                                "rendered TOML file does not parse; secrets substituted as raw text"
+                            );
+                            warnings.push(format!(
+                                "{}: not a valid TOML document; secrets substituted as raw text",
+                                f.path
+                            ));
+                        }
+                        Some((_, _, true)) => warnings.push(format!(
+                            "{}: a ${{NAME}} in a TOML key is not substituted",
+                            f.path
+                        )),
+                        Some(_) => {}
+                    }
+                    parsed.map(|(out, changed, _)| (out, changed))
+                } else {
+                    None
+                };
+                let (out, changed) = match as_toml {
+                    Some(done) => done,
+                    None => substitute_str(text, values, &mut missing),
+                };
                 if changed {
                     secret_files.insert(f.path.clone());
                 }
@@ -279,7 +397,7 @@ pub fn substitute(plan: &RenderPlan, values: &BTreeMap<String, String>) -> Subst
             files,
             merges,
             placeholders: plan.placeholders.clone(),
-            warnings: plan.warnings.clone(),
+            warnings,
         }),
         missing,
         secret_files,
@@ -290,8 +408,9 @@ pub fn substitute(plan: &RenderPlan, values: &BTreeMap<String, String>) -> Subst
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::catalog::harness::MergeMode;
-    use crate::service::catalog::model::find_placeholders;
+    use crate::service::catalog::harness::codex::Codex;
+    use crate::service::catalog::harness::{Harness, MergeMode};
+    use crate::service::catalog::model::Asset;
     use serde_json::json;
 
     fn store_with(setup: impl FnOnce(&Store)) -> Mutex<Store> {
@@ -487,5 +606,90 @@ mod tests {
         let mut missing = Vec::new();
         substitute_str(text, &BTreeMap::new(), &mut missing);
         assert_eq!(missing, find_placeholders(text));
+    }
+
+    /// A secret holding `"`, `\`, `'` and a newline, substituted into a
+    /// Codex subagent's TOML (through `targets.codex.extra`), leaves a
+    /// document that parses and holds the exact secret value.
+    #[test]
+    fn substitute_writes_a_secret_into_codex_agent_toml_as_a_toml_string() {
+        let mut agent = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: d\ntargets:\n  codex:\n    extra:\n      mcp_servers:\n        jira:\n          command: npx\n          env:\n            TOKEN: \"${TOKEN}\"\n",
+        )
+        .unwrap();
+        agent.body = "Use ${TOKEN} carefully.\n".into();
+        let plan = Codex.render(&agent).unwrap();
+        assert_eq!(plan.files[0].path, "~/.codex/agents/pm.toml");
+        let secret = "a\"b\\c'd\ne";
+
+        let out = substitute(&plan, &values(&[("TOKEN", secret)]));
+
+        let text = std::str::from_utf8(&out.plan.inner().files[0].bytes).unwrap();
+        let doc: toml::Table = toml::from_str(text).expect("still a TOML document");
+        assert_eq!(
+            doc["mcp_servers"]["jira"]["env"]["TOKEN"].as_str(),
+            Some(secret)
+        );
+        assert_eq!(
+            doc["developer_instructions"].as_str(),
+            Some(format!("Use {secret} carefully.\n").as_str())
+        );
+        assert_eq!(doc["name"].as_str(), Some("pm"));
+        assert!(out.secret_files.contains("~/.codex/agents/pm.toml"));
+        assert!(out.missing.is_empty());
+        assert_eq!(out.plan.inner().warnings, plan.warnings);
+    }
+
+    #[test]
+    fn substitute_in_toml_reports_missing_names_and_keeps_an_untouched_file_byte_exact() {
+        let mut plan = RenderPlan::default();
+        let text = "name = \"pm\"\n# ${NOT_A_VALUE}\ntoken = \"${GONE}\"\n";
+        plan.files.push(FileWrite {
+            path: "~/.codex/agents/pm.toml".into(),
+            bytes: text.as_bytes().to_vec(),
+        });
+        let out = substitute(&plan, &BTreeMap::new());
+        assert_eq!(out.plan.inner().files[0].bytes, text.as_bytes());
+        assert_eq!(out.missing, vec!["GONE".to_string()]);
+        assert!(out.secret_files.is_empty());
+    }
+
+    /// A `.toml` file that does not parse still gets its placeholders
+    /// replaced (as raw text), and the plan says so.
+    #[test]
+    fn substitute_falls_back_to_raw_text_for_toml_that_does_not_parse() {
+        let mut plan = RenderPlan::default();
+        plan.files.push(FileWrite {
+            path: "~/.codex/agents/bad.toml".into(),
+            bytes: b"not [ valid = ${A}".to_vec(),
+        });
+        let out = substitute(&plan, &values(&[("A", "x")]));
+        assert_eq!(
+            std::str::from_utf8(&out.plan.inner().files[0].bytes).unwrap(),
+            "not [ valid = x"
+        );
+        assert_eq!(out.plan.inner().warnings.len(), 1);
+        assert!(
+            out.plan.inner().warnings[0].contains("~/.codex/agents/bad.toml"),
+            "{:?}",
+            out.plan.inner().warnings
+        );
+    }
+
+    /// Everything that is not a `.toml` file keeps the raw text replace.
+    #[test]
+    fn substitute_keeps_raw_replacement_for_non_toml_files() {
+        let mut plan = RenderPlan::default();
+        plan.files.push(FileWrite {
+            path: "~/.claude/agents/pm.md".into(),
+            bytes: b"token = \"${T}\"\n".to_vec(),
+        });
+        let out = substitute(&plan, &values(&[("T", "a\"b")]));
+        assert_eq!(
+            std::str::from_utf8(&out.plan.inner().files[0].bytes).unwrap(),
+            "token = \"a\"b\"\n"
+        );
+        assert!(out.plan.inner().warnings.is_empty());
     }
 }

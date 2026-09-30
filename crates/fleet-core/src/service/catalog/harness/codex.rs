@@ -1,4 +1,4 @@
-//! Codex CLI renderer (experimental): skills and MCP servers only.
+//! Codex CLI renderer (experimental): skills, subagents (TOML, one file per agent) and MCP servers.
 //!
 //! Codex's config file is TOML (`~/.codex/config.toml`), unlike Claude's JSON
 //! files. `merge_config` bridges the two by parsing TOML into a
@@ -23,10 +23,63 @@ use serde_json::{json, Value};
 pub const CODEX_SKILLS_DIR: &str = "~/.codex/skills";
 pub const CODEX_CONFIG_PATH: &str = "~/.codex/config.toml";
 pub const CODEX_MANIFEST_PATH: &str = "~/.codex/.fleet-assets.json";
+pub const CODEX_AGENTS_DIR: &str = "~/.codex/agents";
+
+/// Render warning for an agent with `tools` (F3b): Codex subagents have no
+/// per-agent tool allowlist. Shown in Asset detail's Codex preview.
+pub const CODEX_AGENT_TOOLS_WARNING: &str = "codex subagents have no tool allowlist; `tools` is not applied (targets.codex.extra.sandbox_mode can restrict the agent)";
+
+/// `targets.codex.extra` keys the agent render already sets itself: an
+/// `extra` entry under one of these is dropped (with a warning) rather than
+/// silently overwriting the asset's identity or its dedicated
+/// `targets.codex.model`.
+const CODEX_AGENT_RESERVED_KEYS: &[&str] =
+    &["name", "description", "developer_instructions", "model"];
 
 const CONFIG_FILES: &[&str] = &[CODEX_CONFIG_PATH, CODEX_MANIFEST_PATH];
 
+/// The scan's Codex presence probe (see `scan_script`). POSIX sh with no
+/// single quote: the whole script is wrapped in `shell::quote`.
+const CODEX_PRESENT_PROBE: &str = "if command -v codex >/dev/null 2>&1 || [ -e .codex/auth.json ] || [ -d .codex/sessions ]; then echo \"##PRESENT\"; fi; ";
+
+/// A `targets.codex.extra` value as TOML: nulls stripped (TOML has none);
+/// `None` when nothing representable is left.
+fn json_to_toml(v: &Value) -> Option<toml::Value> {
+    let mut v = v.clone();
+    strip_nulls(&mut v);
+    if v.is_null() {
+        return None;
+    }
+    toml::Value::try_from(&v).ok()
+}
+
 pub struct Codex;
+
+/// A top-level `~/.codex/agents/<name>.toml`, the only agent files
+/// `installed` lists.
+fn is_agent_toml(path: &str) -> bool {
+    path.strip_prefix(&format!("{CODEX_AGENTS_DIR}/"))
+        .and_then(|rest| rest.strip_suffix(".toml"))
+        .is_some_and(|stem| !stem.is_empty() && !stem.contains('/'))
+}
+
+/// `mcp_secret_like` for a Codex MCP server table, which names its HTTP
+/// headers `http_headers` rather than `headers`.
+fn codex_mcp_secret_like(v: &Value) -> bool {
+    mcp_secret_like(v)
+        || v.get("http_headers")
+            .and_then(Value::as_object)
+            .is_some_and(|h| !h.is_empty())
+}
+
+/// Whether a scanned subagent TOML (as JSON) looks like it carries a
+/// credential: any of its own `mcp_servers` does, by the MCP rule.
+fn agent_secret_like(agent: &Value) -> bool {
+    agent
+        .get("mcp_servers")
+        .and_then(Value::as_object)
+        .is_some_and(|servers| servers.values().any(codex_mcp_secret_like))
+}
 
 /// `name` is the catalog name that stays in the `SKILL.md` frontmatter;
 /// `install_name` (`Asset::install_name()`) is the identifier the skill
@@ -221,7 +274,73 @@ impl Harness for Codex {
                     value,
                 });
             }
-            AssetSpec::Agent { .. } | AssetSpec::Hook { .. } | AssetSpec::PluginRef { .. } => {
+            AssetSpec::Agent { tools, .. } => {
+                // A Codex subagent (F3b): one TOML file per agent with the
+                // required `name`, `description` and `developer_instructions`.
+                // Built as a table and serialised by the toml crate, so
+                // whatever the description or prompt holds is escaped.
+                let mut table = toml::Table::new();
+                table.insert(
+                    "name".into(),
+                    toml::Value::String(asset.header.name.clone()),
+                );
+                table.insert(
+                    "description".into(),
+                    toml::Value::String(asset.header.description.clone()),
+                );
+                table.insert(
+                    "developer_instructions".into(),
+                    toml::Value::String(asset.body.clone()),
+                );
+                // No tier → model mapping for Codex: without an explicit
+                // `targets.codex.model` the user's configured model applies.
+                if let Some(model) = &t.model {
+                    table.insert("model".into(), toml::Value::String(model.clone()));
+                }
+                if !tools.is_empty() {
+                    plan.warnings.push(CODEX_AGENT_TOOLS_WARNING.into());
+                }
+                for (k, v) in &t.extra {
+                    if CODEX_AGENT_RESERVED_KEYS.contains(&k.as_str()) {
+                        plan.warnings.push(if k == "model" {
+                            "targets.codex.extra.model ignored: use targets.codex.model".to_string()
+                        } else {
+                            format!("targets.codex.extra.{k} ignored: set by the asset")
+                        });
+                        continue;
+                    }
+                    match json_to_toml(v) {
+                        Some(tv) => {
+                            table.insert(k.clone(), tv);
+                        }
+                        None => plan.warnings.push(format!(
+                            "targets.codex.extra.{k} has no TOML form; not written"
+                        )),
+                    }
+                }
+                let text = match toml::to_string_pretty(&table) {
+                    Ok(text) => text,
+                    Err(e) => {
+                        // Never an empty file in place of the agent: with no
+                        // file the plan is a no-op whose reason is this
+                        // warning (put first, which `plan_sync` reports).
+                        tracing::warn!(
+                            asset = %asset.header.name,
+                            error = %e,
+                            "codex subagent TOML could not be serialized"
+                        );
+                        plan.warnings
+                            .insert(0, format!("codex subagent TOML could not be written: {e}"));
+                        return Ok(plan);
+                    }
+                };
+                plan.note_placeholders(&text);
+                plan.files.push(FileWrite {
+                    path: format!("{CODEX_AGENTS_DIR}/{}.toml", asset.install_name()),
+                    bytes: text.into_bytes(),
+                });
+            }
+            AssetSpec::Hook { .. } | AssetSpec::PluginRef { .. } => {
                 return Err(unsupported());
             }
         }
@@ -229,7 +348,7 @@ impl Harness for Codex {
     }
 
     /// Same shape as `Claude::scan_script`: hasher detection, `##HASHES` +
-    /// file hashes under `.codex/skills`, a hash for each config file, then
+    /// file hashes under `.codex/skills` and `.codex/agents`, a hash for each config file, then
     /// one `##CONFIG <path>` block per config file (base64, one line), then
     /// `##END`. No single quotes: the caller wraps the whole script in
     /// `shell::quote`.
@@ -239,11 +358,17 @@ impl Harness for Codex {
         s.push_str(
             "if command -v sha256sum >/dev/null 2>&1; then H=sha256sum; else H=\"shasum -a 256\"; fi; ",
         );
+        // Multi-harness F3a: is Codex itself here? `harness_set::harness_gate`
+        // serves Codex on an auto host only when this line is printed (or
+        // fleet already manages Codex assets there). Only evidence fleet
+        // never writes counts: the CLI, its login (`auth.json`) or its
+        // session logs — not `~/.codex` itself, which a Codex sync creates.
+        s.push_str(CODEX_PRESENT_PROBE);
         s.push_str("echo \"##HASHES\"; ");
         // `-exec $H {} +` (not `-print0 | xargs -0 $H`): see `Claude::scan_script`
         // for why this matters for an existing-but-empty directory.
         s.push_str(
-            "for d in .codex/skills; do if [ -d \"$d\" ]; then find -L \"$d\" -type f -exec $H {} + 2>/dev/null; fi; done; ",
+            "for d in .codex/skills .codex/agents; do if [ -d \"$d\" ]; then find -L \"$d\" -type f -exec $H {} + 2>/dev/null; fi; done; ",
         );
         let config_rel: Vec<&str> = CONFIG_FILES
             .iter()
@@ -259,13 +384,18 @@ impl Harness for Codex {
                 "echo \"##CONFIG {f}\"; if [ -f \"{rel}\" ]; then base64 < \"{rel}\" | tr -d \"\\n\"; fi; echo; "
             ));
         }
+        // Each subagent's TOML too, so `installed_detail` can tell whether an
+        // unmanaged one carries a credential (its `mcp_servers`).
+        s.push_str(
+            "for f in .codex/agents/*.toml; do if [ -f \"$f\" ]; then echo \"##CONFIG ~/$f\"; base64 < \"$f\" | tr -d \"\\n\"; echo; fi; done; ",
+        );
         s.push_str("echo \"##END\"");
         Some(s)
     }
 
     fn parse_scan(&self, stdout: &str) -> Result<HostSnapshot, IpcError> {
         super::parse_scan_blocks(stdout, &|path, bytes| {
-            if path == CODEX_CONFIG_PATH {
+            if path == CODEX_CONFIG_PATH || is_agent_toml(path) {
                 let text = std::str::from_utf8(bytes).ok()?;
                 let toml_value: toml::Value = toml::from_str(text).ok()?;
                 serde_json::to_value(toml_value).ok()
@@ -286,6 +416,13 @@ impl Harness for Codex {
             if let Some(rest) = path.strip_prefix(&format!("{CODEX_SKILLS_DIR}/")) {
                 if let Some((name, _)) = rest.split_once('/') {
                     push(Kind::Skill, name.to_string());
+                }
+            }
+            if let Some(rest) = path.strip_prefix(&format!("{CODEX_AGENTS_DIR}/")) {
+                if let Some(stem) = rest.strip_suffix(".toml") {
+                    if !stem.contains('/') {
+                        push(Kind::Agent, stem.to_string());
+                    }
                 }
             }
         }
@@ -319,7 +456,14 @@ impl Harness for Codex {
                             .and_then(|m| m.get(&name));
                         (
                             v.map(|v| sha256_hex(canonical_json(v).as_bytes())),
-                            v.is_some_and(mcp_secret_like),
+                            v.is_some_and(codex_mcp_secret_like),
+                        )
+                    }
+                    Kind::Agent => {
+                        let path = format!("{CODEX_AGENTS_DIR}/{name}.toml");
+                        (
+                            snap.files.get(&path).cloned(),
+                            snap.configs.get(&path).is_some_and(agent_secret_like),
                         )
                     }
                     _ => (None, false),
@@ -528,13 +672,17 @@ mod tests {
     }
 
     #[test]
-    fn hooks_and_plugins_are_unsupported_agents_unless_render_as_skill() {
+    fn hooks_and_plugins_are_unsupported_and_render_as_skill_still_wins() {
         let hook = Asset::from_yaml(None, "kind: hook\nname: h\ndescription: d\nevent: stop\naction: { type: command, command: x }\n").unwrap();
         assert!(Codex.render(&hook).is_err());
         let plugin = Asset::from_yaml(None, "kind: plugin_ref\nname: p\ndescription: d\nharness: claude\nmarketplace: { name: m, source: github, repo: o/r }\nplugin: p\nversion: latest\n").unwrap();
         assert!(Codex.render(&plugin).is_err());
         let agent = Asset::from_yaml(None, "kind: agent\nname: pm\ndescription: d\n").unwrap();
-        assert!(Codex.render(&agent).is_err());
+        assert_eq!(
+            Codex.render(&agent).unwrap().files[0].path,
+            "~/.codex/agents/pm.toml",
+            "since F3b a plain agent is a Codex subagent"
+        );
         let mut as_skill = Asset::from_yaml(
             None,
             "kind: agent\nname: pm\ndescription: d\ntargets:\n  codex:\n    render_as: skill\n",
@@ -546,6 +694,227 @@ mod tests {
         assert_eq!(
             plan.warnings,
             vec!["agent rendered as a codex skill (targets.codex.render_as)"]
+        );
+    }
+
+    fn toml_of(plan: &RenderPlan) -> toml::Table {
+        toml::from_str(std::str::from_utf8(&plan.files[0].bytes).unwrap()).expect("valid TOML")
+    }
+
+    #[test]
+    fn agent_renders_a_codex_subagent_toml() {
+        let mut a = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: Plans the work.\n",
+        )
+        .unwrap();
+        a.body = "You plan.\nStep by step.\n".into();
+        let plan = Codex.render(&a).unwrap();
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].path, "~/.codex/agents/pm.toml");
+        let mut want = toml::Table::new();
+        want.insert("name".into(), "pm".into());
+        want.insert("description".into(), "Plans the work.".into());
+        want.insert(
+            "developer_instructions".into(),
+            "You plan.\nStep by step.\n".into(),
+        );
+        assert_eq!(toml_of(&plan), want, "no model unless targets.codex.model");
+        assert!(plan.warnings.is_empty());
+        assert!(plan.merges.is_empty());
+    }
+
+    /// `targets.codex.extra` cannot override the identity fields the render
+    /// itself sets (`name`, `description`, `developer_instructions`) or
+    /// `model` (which has its own dedicated `targets.codex.model`) — each
+    /// attempt is skipped with a warning naming the key, other keys still
+    /// merge.
+    #[test]
+    fn agent_extra_cannot_override_identity_or_model() {
+        let mut a = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: d\ntargets:\n  codex:\n    extra:\n      name: other\n      description: other\n      developer_instructions: other\n      model: x\n      sandbox_mode: read-only\n",
+        )
+        .unwrap();
+        a.body = "b\n".into();
+        let plan = Codex.render(&a).unwrap();
+        let v = toml_of(&plan);
+        assert_eq!(v["name"].as_str(), Some("pm"), "the catalog name wins");
+        assert_eq!(v["description"].as_str(), Some("d"));
+        assert_eq!(v["developer_instructions"].as_str(), Some("b\n"));
+        assert!(
+            v.get("model").is_none(),
+            "no model unless targets.codex.model, {v:?}"
+        );
+        assert_eq!(v["sandbox_mode"].as_str(), Some("read-only"));
+        let mut warnings = plan.warnings.clone();
+        warnings.sort();
+        assert_eq!(
+            warnings,
+            vec![
+                "targets.codex.extra.description ignored: set by the asset".to_string(),
+                "targets.codex.extra.developer_instructions ignored: set by the asset".to_string(),
+                "targets.codex.extra.model ignored: use targets.codex.model".to_string(),
+                "targets.codex.extra.name ignored: set by the asset".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_model_and_extra_come_from_targets_codex_only() {
+        let mut a = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: d\ntools: [read, bash]\nmodel: strong\ntargets:\n  codex:\n    model: gpt-5.4\n    extra:\n      model_reasoning_effort: high\n      sandbox_mode: read-only\n      dropped: null\n",
+        )
+        .unwrap();
+        a.body = "b\n".into();
+        let plan = Codex.render(&a).unwrap();
+        let v = toml_of(&plan);
+        assert_eq!(
+            v["model"].as_str(),
+            Some("gpt-5.4"),
+            "the tier is never mapped for codex"
+        );
+        assert_eq!(v["model_reasoning_effort"].as_str(), Some("high"));
+        assert_eq!(v["sandbox_mode"].as_str(), Some("read-only"));
+        assert!(v.get("dropped").is_none());
+        assert!(v.get("tools").is_none());
+        assert_eq!(
+            plan.warnings,
+            vec![
+                CODEX_AGENT_TOOLS_WARNING.to_string(),
+                "targets.codex.extra.dropped has no TOML form; not written".to_string(),
+            ]
+        );
+    }
+
+    /// The TOML comes from the toml crate, so nothing in a description or
+    /// prompt can close a string and inject a key.
+    #[test]
+    fn agent_toml_escapes_whatever_the_text_holds() {
+        let mut a = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: 'Says \"hi\" = [x]'\n",
+        )
+        .unwrap();
+        a.body = "'''\n\"\"\"\nname = \"evil\"\n".into();
+        let v = toml_of(&Codex.render(&a).unwrap());
+        assert_eq!(v["name"].as_str(), Some("pm"));
+        assert_eq!(v["description"].as_str(), Some("Says \"hi\" = [x]"));
+        assert_eq!(
+            v["developer_instructions"].as_str(),
+            Some("'''\n\"\"\"\nname = \"evil\"\n")
+        );
+    }
+
+    #[test]
+    fn agent_renders_under_install_as_keeping_the_catalog_name() {
+        let mut a = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: d\ninstall_as: pm_agent\n",
+        )
+        .unwrap();
+        a.body = "b\n".into();
+        let plan = Codex.render(&a).unwrap();
+        assert_eq!(plan.files[0].path, "~/.codex/agents/pm_agent.toml");
+        assert_eq!(toml_of(&plan)["name"].as_str(), Some("pm"));
+    }
+
+    #[test]
+    fn a_codex_disabled_agent_renders_nothing() {
+        let a = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: d\ntargets:\n  codex:\n    enabled: false\n",
+        )
+        .unwrap();
+        let plan = Codex.render(&a).unwrap();
+        assert!(plan.files.is_empty());
+        assert_eq!(
+            plan.warnings,
+            vec!["disabled for codex by targets.codex.enabled"]
+        );
+    }
+
+    #[test]
+    fn installed_lists_agents_and_detail_hashes_their_toml() {
+        let mut s = HostSnapshot::default();
+        s.files
+            .insert(format!("{CODEX_AGENTS_DIR}/pm.toml"), "ab".into());
+        s.files
+            .insert(format!("{CODEX_AGENTS_DIR}/notes.md"), "cd".into());
+        s.files
+            .insert(format!("{CODEX_AGENTS_DIR}/nested/x.toml"), "ef".into());
+        assert_eq!(Codex.installed(&s), vec![(Kind::Agent, "pm".to_string())]);
+        let d = Codex.installed_detail(&s);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].hash.as_deref(), Some("ab"));
+        assert!(!d[0].secret_like && !d[0].fleet_owned);
+    }
+
+    /// An unmanaged subagent whose own `mcp_servers` carry `env` or
+    /// `http_headers` reads as `secret_like`, by the same rule as a Codex MCP
+    /// server in `config.toml`; one without reads clean.
+    #[test]
+    fn installed_detail_flags_a_subagent_with_secret_like_mcp_servers() {
+        let mut s = HostSnapshot::default();
+        for name in ["plain", "env", "headers"] {
+            s.files
+                .insert(format!("{CODEX_AGENTS_DIR}/{name}.toml"), "ab".into());
+        }
+        s.configs.insert(
+            format!("{CODEX_AGENTS_DIR}/plain.toml"),
+            json!({"name": "plain", "mcp_servers": {"fs": {"command": "npx"}}}),
+        );
+        s.configs.insert(
+            format!("{CODEX_AGENTS_DIR}/env.toml"),
+            json!({"name": "env", "mcp_servers": {"jira": {"command": "npx", "env": {"T": "x"}}}}),
+        );
+        s.configs.insert(
+            format!("{CODEX_AGENTS_DIR}/headers.toml"),
+            json!({"name": "headers", "mcp_servers": {"api": {"url": "https://x", "http_headers": {"Authorization": "Bearer x"}}}}),
+        );
+        let d = Codex.installed_detail(&s);
+        let flag = |n: &str| d.iter().find(|a| a.name == n).unwrap().secret_like;
+        assert!(!flag("plain"));
+        assert!(flag("env"));
+        assert!(flag("headers"));
+    }
+
+    /// The real scan hashes `~/.codex/agents`, and `installed` reads the
+    /// agent back from it.
+    #[cfg(unix)]
+    #[test]
+    fn scan_script_hashes_codex_agents_under_bash() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let agents = tmp.path().join(".codex/agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("pm.toml"), b"name = \"pm\"\n").unwrap();
+        let out = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(Codex.scan_script().unwrap())
+            .env("HOME", tmp.path())
+            .output()
+            .expect("run scan script");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let snap = Codex
+            .parse_scan(&String::from_utf8(out.stdout).unwrap())
+            .unwrap();
+        assert!(
+            snap.files.contains_key("~/.codex/agents/pm.toml"),
+            "{:?}",
+            snap.files
+        );
+        assert_eq!(
+            Codex.installed(&snap),
+            vec![(Kind::Agent, "pm".to_string())]
+        );
+        assert_eq!(
+            snap.configs["~/.codex/agents/pm.toml"]["name"], "pm",
+            "the agent's TOML is read back for the secret-like check"
         );
     }
 
@@ -582,6 +951,80 @@ mod tests {
             "no single quotes: the whole script is passed through shell::quote"
         );
         assert_eq!(Codex.manifest_path(), CODEX_MANIFEST_PATH);
+    }
+
+    /// F3a: the scan probes for Codex itself — the CLI on PATH, its login
+    /// (`~/.codex/auth.json`) or its session logs (`~/.codex/sessions`),
+    /// evidence a fleet sync never writes — before `##HASHES`, without any
+    /// single quote (the caller wraps the whole script in `shell::quote`).
+    #[test]
+    fn scan_script_probes_for_codex() {
+        let s = Codex.scan_script().unwrap();
+        assert!(
+            s.contains("if command -v codex >/dev/null 2>&1 || [ -e .codex/auth.json ] || [ -d .codex/sessions ]; then echo \"##PRESENT\"; fi; "),
+            "{s}"
+        );
+        assert!(
+            s.find("##PRESENT").unwrap() < s.find("##HASHES").unwrap(),
+            "{s}"
+        );
+        assert!(!s.contains("[ -d .codex ]"), "{s}");
+        assert!(!s.contains('\''));
+    }
+
+    /// Runs the scan under plain `sh` (no login profile) against a temp
+    /// `$HOME`, with `PATH` limited to the system directories so the codex
+    /// CLI of the machine running the test cannot answer for it.
+    #[cfg(unix)]
+    fn present_with(setup: impl FnOnce(&std::path::Path)) -> bool {
+        let tmp = tempfile::TempDir::new().unwrap();
+        setup(tmp.path());
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(Codex.scan_script().unwrap())
+            .env("HOME", tmp.path())
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("run scan script");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Codex
+            .parse_scan(&String::from_utf8(out.stdout).unwrap())
+            .unwrap()
+            .present
+    }
+
+    /// Codex's own login or session logs read as present; a `~/.codex` that
+    /// holds only what a fleet sync writes (skills, agents, `config.toml`,
+    /// the manifest) does not — that is fleet's own trace, not Codex.
+    #[cfg(unix)]
+    #[test]
+    fn only_codex_own_state_reads_as_present() {
+        if ["/usr/bin/codex", "/bin/codex"]
+            .iter()
+            .any(|p| std::path::Path::new(p).exists())
+        {
+            return; // the CLI itself answers on this machine
+        }
+        assert!(present_with(|h| {
+            std::fs::create_dir_all(h.join(".codex/sessions")).unwrap();
+        }));
+        assert!(present_with(|h| {
+            std::fs::create_dir_all(h.join(".codex")).unwrap();
+            std::fs::write(h.join(".codex/auth.json"), b"{}").unwrap();
+        }));
+        assert!(!present_with(|h| {
+            std::fs::create_dir_all(h.join(".codex/skills/s")).unwrap();
+            std::fs::create_dir_all(h.join(".codex/agents")).unwrap();
+            std::fs::write(h.join(".codex/skills/s/SKILL.md"), b"x").unwrap();
+            std::fs::write(h.join(".codex/agents/pm.toml"), b"name = \"pm\"\n").unwrap();
+            std::fs::write(h.join(".codex/config.toml"), b"").unwrap();
+            std::fs::write(h.join(".codex/.fleet-assets.json"), b"{}").unwrap();
+        }));
+        assert!(!present_with(|_| {}));
     }
 
     /// Builds `##HASHES`/`##CONFIG` scan output with a real base64-encoded

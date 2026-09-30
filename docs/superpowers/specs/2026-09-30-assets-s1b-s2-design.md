@@ -56,7 +56,7 @@ left for later.
 
 ## Data model
 
-Each milestone adds the tables it needs (M1: `catalogs`, migration 089;
+Each milestone adds the tables it needs (M1: `catalogs`, migration 090;
 M2–M4 as in the Milestones table).
 
 **New tables**
@@ -296,7 +296,7 @@ Each ends with `cargo test --workspace`, `pnpm test`, `pnpm check` green.
 
 | M | Contents |
 |---|---|
-| M1 | migration 089 `catalogs` (+ backfill); `registry.rs` (loaded catalogs by id; personal); `scope` in `asset.yaml` |
+| M1 | migration 090 `catalogs` (+ backfill); `registry.rs` (loaded catalogs by id; personal); `scope` in `asset.yaml` |
 | M2 | `host_layers.catalog_id`, `asset_inventory.catalog_id`, manifest `catalog`, `effective_for_host`, `with_catalog(id, f)`; layers must not override `scope` |
 | M3 | `host_catalogs`, `client_catalog_grants`, `load(id)` / per-catalog `ensure_fresh` |
 | M4 | `changesets`, `changeset_items`, `asset_triage_verdicts` |

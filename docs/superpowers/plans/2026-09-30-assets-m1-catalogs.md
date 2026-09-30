@@ -4,7 +4,7 @@
 
 **Goal:** Replace the single-row `catalog_config` and the process-global `CATALOG: Option<Catalog>` with a `catalogs` table and a registry keyed by catalog id, and add the typed `scope: private | shared` to assets — with behaviour unchanged: there is still exactly one catalog, `personal`.
 
-**Architecture:** Migration 089 creates `catalogs` and copies the `catalog_config` row into it as `personal`. The store's existing catalog-config API keeps its signatures but reads and writes the `personal` row, so every caller (desktop, hub CLI, MCP) keeps working. A new `service/catalog/registry.rs` holds loaded catalogs by id; the ~12 production reads of `CATALOG` go through `registry::personal()` / `with_personal()`. `Header` gains `scope`, written to YAML only when it is `shared`.
+**Architecture:** Migration 090 creates `catalogs` and copies the `catalog_config` row into it as `personal`. The store's existing catalog-config API keeps its signatures but reads and writes the `personal` row, so every caller (desktop, hub CLI, MCP) keeps working. A new `service/catalog/registry.rs` holds loaded catalogs by id; the ~12 production reads of `CATALOG` go through `registry::personal()` / `with_personal()`. `Header` gains `scope`, written to YAML only when it is `shared`.
 
 **Tech Stack:** Rust (fleet-core, rusqlite), Svelte/TS types only.
 
@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Migration number **089** (`089_catalogs.sql`); 088 is the latest on `main`.
+- Migration number **090** (`090_catalogs.sql`); `main` took 089 for `hosts.harnesses` (F3a), so this one follows it.
 - A catalog with `org_id NULL` is exactly the one named `personal` (`CHECK ((name = 'personal') = (org_id IS NULL))`).
 - `scope` defaults to **private**; YAML omits `scope` when it is private; the JSON API always carries it.
 - Behaviour after M1 is identical to before for a user with one catalog: `catalog_config`/`catalog_load`/`catalog set` work unchanged.
@@ -31,8 +31,8 @@ The spec lists one migration for all of S1b+S2. This plan gives each milestone t
 
 | File | Responsibility |
 |---|---|
-| `crates/fleet-core/migrations/089_catalogs.sql` (new) | `catalogs` table + backfill from `catalog_config` |
-| `crates/fleet-core/src/store/schema.rs` | register migration 89 |
+| `crates/fleet-core/migrations/090_catalogs.sql` (new) | `catalogs` table + backfill from `catalog_config` |
+| `crates/fleet-core/src/store/schema.rs` | register migration 90 |
 | `crates/fleet-core/src/store/rows.rs` | `CatalogRow` |
 | `crates/fleet-core/src/store/catalog.rs` | `list_catalogs`, `get_catalog`, `personal_catalog`, `set_catalog_head_for`; the existing config API reimplemented on `catalogs` |
 | `crates/fleet-core/src/service/catalog/registry.rs` (new) | loaded catalogs by id: `install`, `get`, `personal`, `with_personal`, `clear` |
@@ -46,7 +46,7 @@ The spec lists one migration for all of S1b+S2. This plan gives each milestone t
 ### Task 1: The `catalogs` table under the existing config API
 
 **Files:**
-- Create: `crates/fleet-core/migrations/089_catalogs.sql`
+- Create: `crates/fleet-core/migrations/090_catalogs.sql`
 - Modify: `crates/fleet-core/src/store/schema.rs` (`MIGRATIONS`, after the 88 entry)
 - Modify: `crates/fleet-core/src/store/rows.rs` (next to `CatalogConfigRow`)
 - Modify: `crates/fleet-core/src/store/catalog.rs` (`get_catalog_config`, `set_catalog_config`, `set_catalog_head`, + new functions)
@@ -123,41 +123,41 @@ fn only_the_personal_catalog_may_have_no_org() {
 In `store/schema.rs` tests, beside the 030 re-run test (same pattern: an in-memory store, roll `schema_version` back, `migrate()` again):
 
 ```rust
-/// 089 on a database stopped at 088 with a `catalog_config` row: the row
+/// 090 on a database stopped at 089 with a `catalog_config` row: the row
 /// becomes the `personal` catalog, and a re-run changes nothing.
 #[test]
-fn migration_89_copies_catalog_config_into_personal() {
+fn migration_90_copies_catalog_config_into_personal() {
     let old = Store::open_in_memory().expect("open");
     old.conn
         .execute_batch(
             "DROP TABLE catalogs;\
              INSERT INTO catalog_config (id, repo_path, remote_url, head_commit, last_loaded_at) \
                VALUES (1, '/r', 'git@a:b.git', 'h1', 5);\
-             DELETE FROM schema_version WHERE version >= 89;",
+             DELETE FROM schema_version WHERE version >= 90;",
         )
         .unwrap();
-    old.migrate().expect("089 on an existing DB");
+    old.migrate().expect("090 on an existing DB");
     assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     let p = old.personal_catalog().unwrap().expect("personal row");
     assert_eq!((p.name.as_str(), p.repo_path.as_str()), ("personal", "/r"));
     assert_eq!(p.remote_url.as_deref(), Some("git@a:b.git"));
     assert_eq!((p.head_commit.as_deref(), p.last_loaded_at, p.org_id), (Some("h1"), Some(5), None));
     old.conn
-        .execute_batch("DELETE FROM schema_version WHERE version >= 89;")
+        .execute_batch("DELETE FROM schema_version WHERE version >= 90;")
         .unwrap();
-    old.migrate().expect("re-running 089 is safe");
+    old.migrate().expect("re-running 090 is safe");
     assert_eq!(old.list_catalogs().unwrap().len(), 1, "no second personal row");
 }
 ```
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `cargo test -p fleet-core store::catalog` and `cargo test -p fleet-core migration_89`
+Run: `cargo test -p fleet-core store::catalog` and `cargo test -p fleet-core migration_90`
 Expected: compile errors (`personal_catalog`, `CatalogRow`, … not found).
 
 - [ ] **Step 3: Implement**
 
-`migrations/089_catalogs.sql`:
+`migrations/090_catalogs.sql`:
 
 ```sql
 -- Assets S1b (M1): a catalog is a source with an owner. `org_id NULL` is the
@@ -179,7 +179,7 @@ INSERT OR IGNORE INTO catalogs (name, repo_path, remote_url, org_id, head_commit
   SELECT 'personal', repo_path, remote_url, NULL, head_commit, last_loaded_at, CAST(strftime('%s','now') AS INTEGER)
   FROM catalog_config WHERE id = 1;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (89);
+INSERT OR IGNORE INTO schema_version (version) VALUES (90);
 ```
 
 `store/schema.rs` — append:
@@ -187,7 +187,7 @@ INSERT OR IGNORE INTO schema_version (version) VALUES (89);
 ```rust
     // Assets S1b M1: `catalogs`, backfilled from `catalog_config` as
     // `personal`. CREATE IF NOT EXISTS + INSERT OR IGNORE: safe to re-run.
-    Migration::plain(89, include_str!("../../migrations/089_catalogs.sql")),
+    Migration::plain(90, include_str!("../../migrations/090_catalogs.sql")),
 ```
 
 `store/rows.rs` — `CatalogRow` exactly as in Interfaces.
@@ -286,8 +286,8 @@ Expected: PASS, including the unchanged `catalog_config_set_get_and_head` and ev
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/fleet-core/migrations/089_catalogs.sql crates/fleet-core/src/store
-git commit -m "feat(catalog): a catalogs table under the existing config API (migration 089)"
+git add crates/fleet-core/migrations/090_catalogs.sql crates/fleet-core/src/store
+git commit -m "feat(catalog): a catalogs table under the existing config API (migration 090)"
 ```
 
 ---
@@ -598,7 +598,7 @@ Expected: no diff (M1 changes no tool, setting, page or verdict). Commit any reg
 
 - [ ] **Step 3: Docs**
 
-`CLAUDE.md` — one short paragraph: catalogs live in the `catalogs` table (migration 089; `catalog_config` is no longer read), the existing config API and `fleet-hub catalog set` address the `personal` row; loaded catalogs are in `service/catalog/registry.rs` (`personal()`, `with_personal`, `get(id)`); assets carry `scope: private | shared` (private by default, omitted from YAML). Point at this plan and the S1b+S2 spec.
+`CLAUDE.md` — one short paragraph: catalogs live in the `catalogs` table (migration 090; `catalog_config` is no longer read), the existing config API and `fleet-hub catalog set` address the `personal` row; loaded catalogs are in `service/catalog/registry.rs` (`personal()`, `with_personal`, `get(id)`); assets carry `scope: private | shared` (private by default, omitted from YAML). Point at this plan and the S1b+S2 spec.
 
 `docs/hub.md` "Asset catalog": one sentence that `catalog set` configures the `personal` catalog, and that per-org catalogs arrive later (S1b M3).
 

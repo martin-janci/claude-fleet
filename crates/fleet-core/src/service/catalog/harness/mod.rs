@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
-/// Reserved: enumerates supported harness ids without building the whole
-/// registry via `all()`. Nothing calls this outside tests yet.
-#[allow(dead_code)]
+/// Every harness id the catalog knows, in the order an explicit
+/// `hosts.harnesses` list is normalised to. Read by the lint (`targets.<h>`)
+/// and by `harness_set` (multi-harness F3a).
 pub const HARNESS_IDS: &[&str] = &["claude", "codex"];
 
 /// A file the harness would write on the host. `path` uses `~/` for the home dir.
@@ -139,12 +139,19 @@ impl RenderPlan {
     }
 }
 
-/// What a host scan found: file hashes keyed by `~/`-relative path, and parsed
-/// JSON config files keyed the same way.
+/// What a host scan found: file hashes keyed by `~/`-relative path, parsed
+/// JSON config files keyed the same way, and whether the scan saw the
+/// harness itself on the host.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct HostSnapshot {
     pub files: BTreeMap<String, String>,
     pub configs: BTreeMap<String, serde_json::Value>,
+    /// A `##PRESENT` line was in the scan output (multi-harness F3a). Only
+    /// a scan that probes for its harness prints one — Codex's does (the
+    /// `codex` CLI on PATH, `~/.codex/auth.json` or `~/.codex/sessions`);
+    /// Claude's does not, and `harness_set::harness_gate` never asks for
+    /// Claude.
+    pub present: bool,
 }
 
 /// One installed asset with what a scan can say about it without the
@@ -510,6 +517,11 @@ pub fn parse_scan_blocks(
             current_config = None;
             continue;
         }
+        if line == "##PRESENT" {
+            snap.present = true;
+            current_config = None;
+            continue;
+        }
         if let Some(path) = line.strip_prefix("##CONFIG ") {
             current_config = Some(path.trim().to_string());
             continue;
@@ -713,5 +725,21 @@ mod tests {
         assert!(by_id("codex").is_some());
         assert!(by_id("nope").is_none());
         assert_eq!(all().len(), 2);
+    }
+
+    /// `##PRESENT` (multi-harness F3a) says the scan saw the harness itself
+    /// on the host; its absence says it did not. It is neither a hash line
+    /// nor a config body, wherever it appears.
+    #[test]
+    fn parse_scan_blocks_reads_the_presence_line() {
+        let present = parse_scan_blocks(
+            "##PRESENT\n##HASHES\naaaa  .codex/skills/s/SKILL.md\n##END\n",
+            &|_, _| None,
+        )
+        .unwrap();
+        assert!(present.present);
+        assert_eq!(present.files.len(), 1);
+        let absent = parse_scan_blocks("##HASHES\n##END\n", &|_, _| None).unwrap();
+        assert!(!absent.present);
     }
 }

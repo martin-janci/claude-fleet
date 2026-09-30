@@ -142,7 +142,8 @@ ag shims                                    # (re)generate alias shims from conf
    `~/.gemini/GEMINI.md`, `~/.augment/rules/<name>.md`. New `ConfigMerge` mode `Block`.
    Replaces the hard-coded block in `provision.rs`. Enforces Codex's 32 KiB budget (warning).
 2. **Codex agent render**: IR Agent → `~/.codex/agents/<n>.toml` (`name`, `description`,
-   `developer_instructions`, `model` from tier map). Hooks for Codex via `hooks.json` pointing at
+   `developer_instructions`, and `model` only from `targets.codex.model` — no tier map for Codex,
+   decided 2026-09-30). Hooks for Codex via `hooks.json` pointing at
    `ag hook-shim` (+ document the trust step; `ag doctor` detects untrusted).
 3. **Per-host harness set**: `hosts.harnesses` (detected by scan, overridable) — sync plans only
    for enabled harnesses.
@@ -159,6 +160,9 @@ ag shims                                    # (re)generate alias shims from conf
    rules as layers' `overrides`/`exclude`). Exactly one writable **personal** source is the default
    target for authoring, imports and tutor proposals; team sources are read-only unless the user
    has push rights. `resolve_preview` shows provenance as `source/layer`.
+   *Superseded (2026-09-30):* catalog sources are now the assets-workspace S1b sub-project
+   (`docs/superpowers/specs/2026-09-29-assets-workspace-design.md`); T1 builds on S1b rather
+   than adding its own `catalog_sources` table.
 8. **`Alias` kind**: launcher shims (`cl = claude --yolo`) as catalog assets, rendered by provision
    into `~/.config/ag/config` — so a user's aliases follow them to every host.
 
@@ -257,7 +261,7 @@ they can be proposed.
 
 | Phase | Deliverable | Exit criterion |
 |---|---|---|
-| **T1 Catalog sources** | §5.2 item 7 + `Alias` kind (item 8) | library + team + personal repos resolve with provenance; owner's dotfiles-derived layer is the personal source |
+| **T1 Catalog sources** | §5.2 item 7 (superseded: builds on assets-workspace S1b, no own `catalog_sources`) + `Alias` kind (item 8) | library + team + personal repos resolve with provenance; owner's dotfiles-derived layer is the personal source |
 | **T2 View tool in chat** | `show_view` MCP + inline render + `flow_submit` round-trip | an operator session can ask a multi-field question and receive the answer as a turn |
 | **T3 Recipe library** | public library source, ~20 recipes with tags/stacks/harness support, lint + secret scan in CI | library lints clean; recipes render for claude + codex |
 | **T4 Tutor v1 (Claude)** | `fleet-tutor` session, `tutor` skill, interview → propose → apply → teach, onboarding step | a fresh account on a fresh host gets a reviewed personal set synced, following only the tutor |

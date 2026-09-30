@@ -13,6 +13,11 @@ vi.mock('./sessions', async () => {
   };
 });
 
+vi.mock('./hosts', async () => {
+  const actual = await vi.importActual<typeof import('./hosts')>('./hosts');
+  return { ...actual, setHostHarnesses: vi.fn() };
+});
+
 import HostDetail from './HostDetail.svelte';
 import { sharedWith } from './hosts_view';
 import { timeAgo } from './session_status';
@@ -20,7 +25,7 @@ import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
 import { ADMIN, GMAIL, NOW, fleetHosts, fleetSessions, fleetUsage, host, session } from './hosts_fixture';
 import { viewHostSessions } from './host_actions';
-import { hostFilter } from './hosts';
+import { hostFilter, setHostHarnesses } from './hosts';
 import { onHostsCloseRequested } from './app_views';
 import {
   restoreHostSessions,
@@ -33,6 +38,7 @@ import {
 const mockedRestore = restoreHostSessions as unknown as ReturnType<typeof vi.fn>;
 const mockedDiscover = discoverLostSessions as unknown as ReturnType<typeof vi.fn>;
 const mockedNewSession = newSessionAbortable as unknown as ReturnType<typeof vi.fn>;
+const mockedSetHarnesses = setHostHarnesses as unknown as ReturnType<typeof vi.fn>;
 
 function mount(alias: string, over: Record<string, unknown> = {}) {
   const hosts = fleetHosts();
@@ -630,5 +636,40 @@ describe('HostDetail find lost conversations', () => {
 
     expect(screen.getByTestId('discover-error').textContent).toContain('host offline');
     expect(screen.queryByTestId('discover-list')).toBeNull();
+  });
+});
+
+describe('HostDetail Codex assets (F3a)', () => {
+  beforeEach(() => mockedSetHarnesses.mockReset());
+  afterEach(() => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+  });
+
+  it('a host with no choice reads auto, and picking on sends the explicit list', async () => {
+    mockedSetHarnesses.mockResolvedValueOnce({ ok: true, value: host('mefistos', { harnesses: ['claude', 'codex'] }) });
+    mount('mefistos');
+    const sel = screen.getByTestId('detail-codex') as HTMLSelectElement;
+    expect(sel.value).toBe('auto');
+    await fireEvent.change(sel, { target: { value: 'on' } });
+    expect(mockedSetHarnesses).toHaveBeenCalledWith('mefistos', ['claude', 'codex']);
+  });
+
+  it('an explicit list without codex reads off, and auto sends null', async () => {
+    mockedSetHarnesses.mockResolvedValueOnce({ ok: true, value: host('mefistos') });
+    mount('mefistos', { host: host('mefistos', { harnesses: ['claude'] }) });
+    const sel = screen.getByTestId('detail-codex') as HTMLSelectElement;
+    expect(sel.value).toBe('off');
+    await fireEvent.change(sel, { target: { value: 'auto' } });
+    expect(mockedSetHarnesses).toHaveBeenCalledWith('mefistos', null);
+  });
+
+  it('an offline paired desktop cannot change it and says why', () => {
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://hub.example' });
+    hubConnection.set({ state: 'offline', attempt: 1, retry_in_secs: 5, reason: 'refused' });
+    mount('mefistos');
+    const sel = screen.getByTestId('detail-codex') as HTMLSelectElement;
+    expect(sel.disabled).toBe(true);
+    expect(sel.title).toContain('https://hub.example');
   });
 });

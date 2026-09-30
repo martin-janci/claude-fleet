@@ -39,6 +39,8 @@ to be able to move to a different harness later without rewriting the estate.
   inventory (this spec), (2) sync engine, (3) authoring.
 - Second harness validated now is Codex CLI. The Codex adapter renders skills
   and MCP servers only and is marked experimental; no Codex host scanning.
+  (Later: Codex hosts are scanned, and since multi-harness F3b agents render
+  as Codex subagents — `docs/superpowers/plans/2026-09-30-f3ab-harness-set-and-codex-agents.md`.)
 
 ## The universal model (IR)
 
@@ -159,7 +161,7 @@ and reports them in the preview. Substitution is sub-project 2.
 |---|---|
 | skill | `~/.codex/skills/<name>/SKILL.md` + resources, 1:1 |
 | mcp_server | `[mcp_servers.<name>]` table in `~/.codex/config.toml` |
-| agent | unsupported; skipped with a warning unless `targets.codex.render_as: skill` |
+| agent | `~/.codex/agents/<name>.toml` subagent (`name`, `description`, `developer_instructions`, `model` only from `targets.codex.model`) since multi-harness F3b; `targets.codex.render_as: skill` renders a skill instead |
 | hook | unsupported; skipped with a warning |
 | plugin_ref | not applicable (`harness: claude`) |
 
@@ -175,7 +177,7 @@ inventory.rs  scan hosts, compute per-asset state, persist rows
 harness/
   mod.rs      trait Harness + RenderPlan types + registry
   claude.rs   full: skill, agent, hook, mcp_server, plugin_ref
-  codex.rs    skill + mcp_server; experimental
+  codex.rs    skill + agent + mcp_server; experimental
 ```
 
 Service functions take `&Mutex<Store>` and `&Arc<SshClient>`, never Tauri

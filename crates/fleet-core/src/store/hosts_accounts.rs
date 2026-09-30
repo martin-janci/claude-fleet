@@ -465,6 +465,40 @@ impl Store {
         Ok(())
     }
 
+    /// Set which harnesses the asset catalog syncs on a host (multi-harness
+    /// F3a, migration 089): `None` = auto, `Some` = exactly this list, stored
+    /// as JSON. The list is stored as given —
+    /// `service::catalog::harness_set::set_host_harnesses` validates and
+    /// normalises it first. An unknown alias is `E_NOTFOUND`, as in
+    /// `set_host_transport`.
+    pub fn set_host_harnesses(
+        &self,
+        alias: &str,
+        harnesses: Option<&[String]>,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        let json = match harnesses {
+            Some(list) => Some(serde_json::to_string(list).map_err(|e| {
+                crate::ipc_error::IpcError::new(
+                    codes::E_SERIALIZE,
+                    format!("encode harnesses: {e}"),
+                )
+            })?),
+            None => None,
+        };
+        let n = self.conn.execute(
+            "UPDATE hosts SET harnesses=?1 WHERE alias=?2",
+            rusqlite::params![json, alias],
+        )?;
+        if n == 0 {
+            return Err(crate::ipc_error::IpcError::new(
+                codes::E_NOTFOUND,
+                format!("host {alias} not found"),
+            ));
+        }
+        self.emit_host(alias, |bus, row| bus.host_probed(row))?;
+        Ok(())
+    }
+
     /// Mark a host provisioned (or not). With `true` the content fingerprint
     /// this build ships and the time are recorded too (migration 078), so
     /// `HostRow::provision_stale` can compare on every later read; with
@@ -1922,5 +1956,41 @@ mod tests {
             s.get_host_identity("ghost").unwrap(),
             StoredIdentity::default()
         );
+    }
+
+    /// Multi-harness F3a: a new host is on auto (`None`); a list round-trips
+    /// through its JSON column, `None` clears it again, every write emits the
+    /// row, and an unknown alias is `E_NOTFOUND`.
+    #[test]
+    fn set_host_harnesses_round_trips_a_list_and_auto() {
+        let bus = Arc::new(crate::events::RecordingEventBus::new());
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        assert_eq!(
+            s.get_host_row("h").unwrap().unwrap().harnesses,
+            None,
+            "a new host is on auto"
+        );
+        bus.take();
+        let both = vec!["claude".to_string(), "codex".to_string()];
+        s.set_host_harnesses("h", Some(both.as_slice())).unwrap();
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().harnesses, Some(both));
+        assert!(bus.take().contains(&"host:probed:h".to_string()));
+        s.set_host_harnesses("h", None).unwrap();
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().harnesses, None);
+        let err = s.set_host_harnesses("nope", None).unwrap_err();
+        assert_eq!(err.code, "E_NOTFOUND");
+    }
+
+    /// A stored value that is not a JSON string array (hand-edited, or from a
+    /// future schema) reads as auto instead of failing every host read.
+    #[test]
+    fn an_unreadable_harnesses_value_reads_as_auto() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        s.conn
+            .execute("UPDATE hosts SET harnesses='not json' WHERE alias='h'", [])
+            .unwrap();
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().harnesses, None);
     }
 }

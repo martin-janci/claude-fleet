@@ -17,6 +17,9 @@ import {
   resetTombstonesForTests,
   isPickableHost,
   defaultHost,
+  setHostHarnesses,
+  codexModeOf,
+  harnessesFor,
 } from './hosts';
 
 const sampleLocal = {
@@ -144,5 +147,33 @@ describe('defaultHost', () => {
   it('falls back to local when nothing is pickable', () => {
     expect(defaultHost([])).toBe('local');
     expect(defaultHost([row('local', { hidden: true })])).toBe('local');
+  });
+});
+
+describe('host harnesses (F3a)', () => {
+  it('reads Codex as auto / on / off from the harnesses field', () => {
+    expect(codexModeOf({})).toBe('auto');
+    expect(codexModeOf({ harnesses: null })).toBe('auto');
+    expect(codexModeOf({ harnesses: ['claude', 'codex'] })).toBe('on');
+    expect(codexModeOf({ harnesses: ['claude'] })).toBe('off');
+  });
+
+  it('a mode stores null for auto and always keeps claude in a list', () => {
+    expect(harnessesFor('auto')).toBeNull();
+    expect(harnessesFor('on')).toEqual(['claude', 'codex']);
+    expect(harnessesFor('off')).toEqual(['claude']);
+  });
+
+  it('setHostHarnesses sends the list and merges the answered row', async () => {
+    hosts.set([sampleLocal]);
+    const answered = { ...sampleLocal, harnesses: ['claude', 'codex'] };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(answered);
+    const r = await setHostHarnesses('local', ['claude', 'codex']);
+    expect(r.ok).toBe(true);
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'catalog_set_host_harnesses',
+      { args: { host_alias: 'local', harnesses: ['claude', 'codex'] } },
+    ]);
+    expect(get(hosts)[0].harnesses).toEqual(['claude', 'codex']);
   });
 });

@@ -17,4 +17,4 @@ INSERT OR IGNORE INTO catalogs (name, repo_path, remote_url, org_id, head_commit
   SELECT 'personal', repo_path, remote_url, NULL, head_commit, last_loaded_at, CAST(strftime('%s','now') AS INTEGER)
   FROM catalog_config WHERE id = 1;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (89);
+INSERT OR IGNORE INTO schema_version (version) VALUES (90);

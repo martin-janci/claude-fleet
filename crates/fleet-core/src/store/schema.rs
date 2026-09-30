@@ -404,6 +404,17 @@ fn asset_inventory_has_fleet_owned(conn: &Connection) -> rusqlite::Result<bool> 
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 089 (`hosts.harnesses`,
+/// multi-harness F3a).
+fn hosts_has_harnesses(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'harnesses'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 067 (work graph M14.1b, D31).
 fn orgs_has_bound_sees_unassigned(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -958,9 +969,16 @@ const MIGRATIONS: &[Migration] = &[
     // Declarative pages, guides: `guide_proposals`. A new table and index,
     // `IF NOT EXISTS`, safe to re-run.
     Migration::plain(88, include_str!("../../migrations/088_guides.sql")),
+    // Multi-harness F3a: which harnesses the asset catalog syncs on a host
+    // (NULL = auto). ADD COLUMN is not idempotent: the same guard 087 uses.
+    Migration {
+        version: 89,
+        sql: include_str!("../../migrations/089_host_harnesses.sql"),
+        already_applied: Some(hosts_has_harnesses),
+    },
     // Assets S1b M1: `catalogs`, backfilled from `catalog_config` as
     // `personal`. CREATE IF NOT EXISTS + INSERT OR IGNORE: safe to re-run.
-    Migration::plain(89, include_str!("../../migrations/089_catalogs.sql")),
+    Migration::plain(90, include_str!("../../migrations/090_catalogs.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -2257,20 +2275,20 @@ mod tests {
         assert_eq!(scanned_at, 7, "the inventory row survives a re-run");
     }
 
-    /// 089 on a database stopped at 088 with a `catalog_config` row: the row
+    /// 090 on a database stopped at 089 with a `catalog_config` row: the row
     /// becomes the `personal` catalog, and a re-run changes nothing.
     #[test]
-    fn migration_89_copies_catalog_config_into_personal() {
+    fn migration_90_copies_catalog_config_into_personal() {
         let old = Store::open_in_memory().expect("open");
         old.conn
             .execute_batch(
                 "DROP TABLE catalogs;\
                  INSERT INTO catalog_config (id, repo_path, remote_url, head_commit, last_loaded_at) \
                    VALUES (1, '/r', 'git@a:b.git', 'h1', 5);\
-                 DELETE FROM schema_version WHERE version >= 89;",
+                 DELETE FROM schema_version WHERE version >= 90;",
             )
             .unwrap();
-        old.migrate().expect("089 on an existing DB");
+        old.migrate().expect("090 on an existing DB");
         assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         let p = old.personal_catalog().unwrap().expect("personal row");
         assert_eq!((p.name.as_str(), p.repo_path.as_str()), ("personal", "/r"));
@@ -2280,9 +2298,9 @@ mod tests {
             (Some("h1"), Some(5), None)
         );
         old.conn
-            .execute_batch("DELETE FROM schema_version WHERE version >= 89;")
+            .execute_batch("DELETE FROM schema_version WHERE version >= 90;")
             .unwrap();
-        old.migrate().expect("re-running 089 is safe");
+        old.migrate().expect("re-running 090 is safe");
         assert_eq!(
             old.list_catalogs().unwrap().len(),
             1,
@@ -3962,6 +3980,30 @@ mod tests {
         }
         s.conn
             .execute_batch("DELETE FROM schema_version WHERE version >= 86;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_089_adds_hosts_harnesses_as_auto_and_is_safe_to_rerun() {
+        let s = store_at_version(88);
+        s.conn
+            .execute_batch("INSERT INTO hosts (alias, reachable) VALUES ('h', 1);")
+            .unwrap();
+        assert!(!hosts_has_harnesses(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(hosts_has_harnesses(&s.conn).unwrap());
+        let v: Option<String> = s
+            .conn
+            .query_row("SELECT harnesses FROM hosts WHERE alias = 'h'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(v, None, "an existing host starts on auto");
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 89;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);

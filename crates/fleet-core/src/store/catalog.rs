@@ -1,4 +1,4 @@
-//! The asset catalog's tables: the `catalogs` table (migration 089, one row
+//! The asset catalog's tables: the `catalogs` table (migration 090, one row
 //! per source, `org_id IS NULL` for the personal catalog) plus the
 //! per-host/per-harness `asset_inventory` (migration 030). The old
 //! singleton `catalog_config` row is no longer read; `get_catalog_config` /
