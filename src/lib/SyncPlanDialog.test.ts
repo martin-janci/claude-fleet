@@ -118,6 +118,35 @@ describe('SyncPlanDialog', () => {
     resolveInvoke({ plan_id: 'plan-1', started_at: 1, finished_at: 2, hosts: [] });
   });
 
+  it('shows a warning and a "Plan anyway" button for a host skipped as unlayered, and re-plans with allow_unlayered on click', async () => {
+    const skipped = hostPlan({
+      host_alias: 'oci',
+      status: 'skipped',
+      detail: 'no layers assigned: syncing would install the whole catalog here. Assign a role first (set_host_layers), or plan with allow_unlayered.',
+    });
+    const p = plan([skipped]);
+    const onreplanned = vi.fn();
+    invoke.mockResolvedValueOnce(plan([hostPlan({ host_alias: 'oci', actions: [action()] })], { create: 1 }));
+    render(SyncPlanDialog, {
+      plan: p,
+      filter: { hostAlias: 'oci' },
+      onclose: () => {},
+      onapplied: () => {},
+      onreplanned,
+    });
+
+    expect(screen.getByTestId('plan-unlayered-oci-claude').textContent).toContain('no layers assigned');
+    await fireEvent.click(screen.getByTestId('plan-anyway-oci-claude'));
+
+    await waitFor(() => expect(onreplanned).toHaveBeenCalled());
+    const call = invoke.mock.calls.find((c) => c[0] === 'catalog_plan_sync');
+    expect(call).toBeDefined();
+    const args = (call![1] as { args: { host_alias: string; allow_unlayered: boolean } }).args;
+    expect(args.host_alias).toBe('oci');
+    expect(args.allow_unlayered).toBe(true);
+    expect(onreplanned).toHaveBeenCalledWith(expect.objectContaining({ counts: { create: 1 } }));
+  });
+
   it('surfaces E_SECRET_MISSING from apply and keeps the force-partial checkbox available', async () => {
     invoke.mockRejectedValueOnce({ code: 'E_SECRET_MISSING', message: 'missing secrets: GH_TOKEN; set them or force_partial' });
     const p = plan([hostPlan({ actions: [action({ op: 'create' })] })], { create: 1 });

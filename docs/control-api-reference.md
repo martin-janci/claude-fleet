@@ -257,9 +257,9 @@ Parameters: `session_id`
 
 ### `plan_sync`
 
-Compute a sync plan: scan the hosts, compare every catalog asset with what is installed, and return per-host actions (create | update | overwrite | adopt | remove | plugin_install | plugin_update | noop | blocked) plus a plan_id for apply_sync. plugin_update fires when a pinned plugin's catalog version changes; a host left on the old version stays blocked. orphan: in the host's fleet manifest, no longer in the catalog. Nothing is written.
+Compute a sync plan: scan the hosts, compare every catalog asset with what is installed, and return per-host actions (create | update | overwrite | adopt | remove | plugin_install | plugin_update | noop | blocked) plus a plan_id for apply_sync. plugin_update fires when a pinned plugin's catalog version changes; a host left on the old version stays blocked. orphan: in the host's fleet manifest, no longer in the catalog. A remote host with no layers assigned is skipped (it would otherwise get the whole catalog) unless allow_unlayered is set. Nothing is written.
 
-Parameters: `host_alias`, `kind`, `name`
+Parameters: `allow_unlayered`, `host_alias`, `kind`, `name`
 
 ### `probe_host`
 

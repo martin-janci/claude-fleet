@@ -125,17 +125,27 @@ describe('assets store', () => {
 });
 
 describe('sync engine wrappers', () => {
-  it('planSync sends null for every absent filter field', async () => {
+  it('planSync sends null for every absent filter field, and allow_unlayered false by default', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(syncPlan([]));
     await planSync({});
-    expect(mockedInvoke).toHaveBeenCalledWith('catalog_plan_sync', { args: { host_alias: null, kind: null, name: null } });
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_plan_sync', {
+      args: { host_alias: null, kind: null, name: null, allow_unlayered: false },
+    });
   });
 
   it('planSync passes through the fields given', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(syncPlan([]));
     await planSync({ hostAlias: 'mefistos', kind: 'skill', name: 'worktree' });
     expect(mockedInvoke).toHaveBeenCalledWith('catalog_plan_sync', {
-      args: { host_alias: 'mefistos', kind: 'skill', name: 'worktree' },
+      args: { host_alias: 'mefistos', kind: 'skill', name: 'worktree', allow_unlayered: false },
+    });
+  });
+
+  it('planSync sends allow_unlayered true when given', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(syncPlan([]));
+    await planSync({ hostAlias: 'oci', allowUnlayered: true });
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_plan_sync', {
+      args: { host_alias: 'oci', kind: null, name: null, allow_unlayered: true },
     });
   });
 

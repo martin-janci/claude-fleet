@@ -4550,7 +4550,7 @@ fn catalog_admin_cases() -> Vec<Case> {
             "catalog_plan_sync",
             "catalog_admin",
             json!({ "action": "plan_sync",
-                    "args": { "host_alias": "nas", "kind": "skill", "name": "s" } }),
+                    "args": { "host_alias": "nas", "kind": "skill", "name": "s", "allow_unlayered": false } }),
             r#"{"id":"p1","computed_at":1,"hosts":[],"counts":{}}"#,
             Box::new(|b, s, h| {
                 block_on(r::catalog_plan_sync(
@@ -4559,6 +4559,7 @@ fn catalog_admin_cases() -> Vec<Case> {
                         host_alias: Some("nas".into()),
                         kind: Some(Kind::Skill),
                         name: Some("s".into()),
+                        allow_unlayered: false,
                     },
                     s,
                     h,

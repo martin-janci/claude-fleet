@@ -340,6 +340,7 @@ mod tests {
                 host_alias: Some("h".into()),
                 kind: Some(Kind::Hook),
                 name: None,
+                allow_unlayered: false,
             }),
             AdminCall::ApplySync(ApplyArgs {
                 plan_id: "p".into(),

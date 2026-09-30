@@ -298,9 +298,14 @@ export const lastSyncRun = writable<SyncRunSummary | null>(null);
  *  in-flight apply. */
 export const syncProgress = writable<SyncProgress | null>(null);
 
-export function planSync(f: { hostAlias?: string; kind?: string; name?: string }): Promise<Result<SyncPlan>> {
+export function planSync(f: { hostAlias?: string; kind?: string; name?: string; allowUnlayered?: boolean }): Promise<Result<SyncPlan>> {
   return invokeCmd<SyncPlan>('catalog_plan_sync', {
-    args: { host_alias: f.hostAlias ?? null, kind: f.kind ?? null, name: f.name ?? null },
+    args: {
+      host_alias: f.hostAlias ?? null,
+      kind: f.kind ?? null,
+      name: f.name ?? null,
+      allow_unlayered: f.allowUnlayered ?? false,
+    },
   });
 }
 

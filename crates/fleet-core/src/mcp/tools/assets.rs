@@ -94,7 +94,9 @@ impl FleetTools {
         plugin_update | noop | blocked) plus a plan_id for apply_sync. \
         plugin_update fires when a pinned plugin's catalog version changes; \
         a host left on the old version stays blocked. orphan: in the host's \
-        fleet manifest, no longer in the catalog. Nothing is written.")]
+        fleet manifest, no longer in the catalog. A remote host with no \
+        layers assigned is skipped (it would otherwise get the whole \
+        catalog) unless allow_unlayered is set. Nothing is written.")]
     pub(super) async fn plan_sync(
         &self,
         Parameters(p): Parameters<PlanSyncParams>,
@@ -116,6 +118,7 @@ impl FleetTools {
             host_alias: p.host_alias,
             kind,
             name: p.name,
+            allow_unlayered: p.allow_unlayered.unwrap_or(false),
         };
         catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
         let plan = catalog::sync::plan_sync(args, &self.store, &self.ssh)

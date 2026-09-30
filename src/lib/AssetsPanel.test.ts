@@ -294,7 +294,7 @@ describe('AssetsPanel', () => {
 
     await fireEvent.click(screen.getByTestId('assets-sync'));
 
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_plan_sync', { args: { host_alias: null, kind: null, name: null } }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_plan_sync', { args: { host_alias: null, kind: null, name: null, allow_unlayered: false } }));
     expect(await screen.findByTestId('sync-plan-dialog')).toBeTruthy();
   });
 

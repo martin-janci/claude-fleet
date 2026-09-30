@@ -43,6 +43,10 @@
   let filter = $state('');
   let selected = $state<{ kind: string; name: string } | null>(null);
   let syncPlan = $state<SyncPlan | null>(null);
+  // The filter `syncPlan` was computed from, so SyncPlanDialog's "Plan
+  // anyway" (on a skipped-unlayered host) can re-plan with the same scope
+  // plus allowUnlayered.
+  let syncFilter = $state<{ hostAlias?: string; kind?: string; name?: string }>({});
   // The most recent plan computed (kept after the dialog closes) so the
   // SecretsPanel can offer the names its blocked/missing-secret actions
   // named, without recomputing a plan just to open it.
@@ -271,11 +275,17 @@
 
   async function requestSync(filter: { hostAlias?: string; kind?: string; name?: string }) {
     busy = 'plan'; error = null;
+    syncFilter = filter;
     const r = await planSync(filter);
     busy = '';
     if (!r.ok) { error = r.error.message; return; }
     syncPlan = r.value;
     lastPlan = r.value;
+  }
+
+  function onSyncReplanned(p: SyncPlan) {
+    syncPlan = p;
+    lastPlan = p;
   }
 
   function onSyncApplied(summary: SyncRunSummary) {
@@ -461,10 +471,12 @@
   {#if syncPlan}
     <SyncPlanDialog
       plan={syncPlan}
+      filter={syncFilter}
       onclose={() => (syncPlan = null)}
       onapplied={onSyncApplied}
       onopensecrets={() => (showSecrets = true)}
       onapplying={(a) => (busy = a ? 'apply' : '')}
+      onreplanned={onSyncReplanned}
     />
   {/if}
   {#if showSecrets}

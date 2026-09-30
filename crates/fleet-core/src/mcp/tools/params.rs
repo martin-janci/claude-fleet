@@ -878,6 +878,10 @@ pub struct PlanSyncParams {
     /// Only this asset.
     #[serde(default)]
     pub name: Option<String>,
+    /// Plan remote hosts that have no layers (they would get the whole
+    /// catalog). Off by default.
+    #[serde(default)]
+    pub allow_unlayered: Option<bool>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
