@@ -317,12 +317,6 @@ pub fn secrets_example_names(root: &Path) -> Vec<String> {
     }
 }
 
-/// Static lint for one asset. Errors block a save (`E_LINT`), warnings never
-/// do. The rule list is the spec's, exactly, plus the cross-asset
-/// install-name uniqueness rule below.
-///
-/// `catalog` is the catalog the asset lives in (or is about to join); it
-/// carries the other assets the uniqueness rule compares against.
 /// Whether Codex renders `a` into `~/.codex/skills/`: a skill, or an agent
 /// with `targets.codex.render_as: skill` — in both cases only while its
 /// Codex target is enabled.
@@ -336,6 +330,16 @@ fn lands_in_codex_skills(a: &Asset) -> bool {
         }
 }
 
+/// Codex's built-in subagent names: a custom agent of one of these names
+/// overrides the built-in rather than adding an agent.
+const CODEX_BUILTIN_AGENTS: &[&str] = &["default", "worker", "explorer"];
+
+/// Static lint for one asset. Errors block a save (`E_LINT`), warnings never
+/// do. The rule list is the spec's, exactly, plus the cross-asset
+/// install-name uniqueness rule below.
+///
+/// `catalog` is the catalog the asset lives in (or is about to join); it
+/// carries the other assets the uniqueness rule compares against.
 pub fn lint(
     asset: &Asset,
     catalog: &Catalog,
@@ -458,6 +462,24 @@ pub fn lint(
                 format!(
                     "{SECRETS_EXAMPLE} is missing; it should list {}",
                     names.join(", ")
+                ),
+            );
+        }
+    }
+
+    // F3b: a Codex subagent's `name` is the catalog name; Codex treats one
+    // named like a built-in agent as overriding that built-in.
+    if kind == Kind::Agent {
+        let t = asset.target("codex");
+        let name = asset.header.name.as_str();
+        if t.enabled
+            && t.render_as.as_deref() != Some("skill")
+            && CODEX_BUILTIN_AGENTS.contains(&name)
+        {
+            report.warn(
+                "name",
+                format!(
+                    "Codex has a built-in '{name}' agent; this one overrides it there (rename it, or set targets.codex.enabled: false)"
                 ),
             );
         }
@@ -1275,6 +1297,48 @@ mod tests {
         .unwrap();
         agent.body = "You are a demo.\n".into();
         assert_eq!(fields(&lint_of(&agent).warnings), vec!["tools"]);
+    }
+
+    /// F3b: an agent Codex would install under a built-in agent's name
+    /// (`default`, `worker`, `explorer`) is a warning, not an error — and
+    /// not at all when Codex renders it as a skill or not at all.
+    #[test]
+    fn lint_warns_when_a_codex_subagent_takes_a_built_in_name() {
+        for name in ["default", "worker", "explorer"] {
+            let mut agent = Asset::from_yaml(
+                None,
+                &format!("kind: agent\nname: {name}\ndescription: A reasonably long description here.\ntools: [read]\n"),
+            )
+            .unwrap();
+            agent.body = "You work.\n".into();
+            let report = lint_of(&agent);
+            assert_eq!(fields(&report.warnings), vec!["name"], "{name}");
+            assert!(
+                report.warnings[0].message.contains("built-in"),
+                "{:?}",
+                report.warnings
+            );
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+        }
+        for targets in [
+            "targets:\n  codex:\n    render_as: skill\n",
+            "targets:\n  codex:\n    enabled: false\n",
+        ] {
+            let mut agent = Asset::from_yaml(
+                None,
+                &format!("kind: agent\nname: worker\ndescription: A reasonably long description here.\ntools: [read]\n{targets}"),
+            )
+            .unwrap();
+            agent.body = "You work.\n".into();
+            assert!(lint_of(&agent).warnings.is_empty(), "{targets}");
+        }
+        let mut other = Asset::from_yaml(
+            None,
+            "kind: agent\nname: planner\ndescription: A reasonably long description here.\ntools: [read]\n",
+        )
+        .unwrap();
+        other.body = "You plan.\n".into();
+        assert!(lint_of(&other).warnings.is_empty());
     }
 
     #[test]

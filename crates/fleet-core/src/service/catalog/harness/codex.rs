@@ -302,9 +302,11 @@ impl Harness for Codex {
                 }
                 for (k, v) in &t.extra {
                     if CODEX_AGENT_RESERVED_KEYS.contains(&k.as_str()) {
-                        plan.warnings.push(format!(
-                            "targets.codex.extra.{k} ignored: set by the asset (use targets.codex.model for the model)"
-                        ));
+                        plan.warnings.push(if k == "model" {
+                            "targets.codex.extra.model ignored: use targets.codex.model".to_string()
+                        } else {
+                            format!("targets.codex.extra.{k} ignored: set by the asset")
+                        });
                         continue;
                     }
                     match json_to_toml(v) {
@@ -316,7 +318,22 @@ impl Harness for Codex {
                         )),
                     }
                 }
-                let text = toml::to_string_pretty(&table).unwrap_or_default();
+                let text = match toml::to_string_pretty(&table) {
+                    Ok(text) => text,
+                    Err(e) => {
+                        // Never an empty file in place of the agent: with no
+                        // file the plan is a no-op whose reason is this
+                        // warning (put first, which `plan_sync` reports).
+                        tracing::warn!(
+                            asset = %asset.header.name,
+                            error = %e,
+                            "codex subagent TOML could not be serialized"
+                        );
+                        plan.warnings
+                            .insert(0, format!("codex subagent TOML could not be written: {e}"));
+                        return Ok(plan);
+                    }
+                };
                 plan.note_placeholders(&text);
                 plan.files.push(FileWrite {
                     path: format!("{CODEX_AGENTS_DIR}/{}.toml", asset.install_name()),
@@ -710,28 +727,35 @@ mod tests {
     /// `targets.codex.extra` cannot override the identity fields the render
     /// itself sets (`name`, `description`, `developer_instructions`) or
     /// `model` (which has its own dedicated `targets.codex.model`) — each
-    /// attempt is skipped and warned about, other keys still merge.
+    /// attempt is skipped with a warning naming the key, other keys still
+    /// merge.
     #[test]
     fn agent_extra_cannot_override_identity_or_model() {
         let mut a = Asset::from_yaml(
             None,
-            "kind: agent\nname: pm\ndescription: d\ntargets:\n  codex:\n    extra:\n      name: other\n      model: x\n      sandbox_mode: read-only\n",
+            "kind: agent\nname: pm\ndescription: d\ntargets:\n  codex:\n    extra:\n      name: other\n      description: other\n      developer_instructions: other\n      model: x\n      sandbox_mode: read-only\n",
         )
         .unwrap();
         a.body = "b\n".into();
         let plan = Codex.render(&a).unwrap();
         let v = toml_of(&plan);
         assert_eq!(v["name"].as_str(), Some("pm"), "the catalog name wins");
+        assert_eq!(v["description"].as_str(), Some("d"));
+        assert_eq!(v["developer_instructions"].as_str(), Some("b\n"));
         assert!(
             v.get("model").is_none(),
             "no model unless targets.codex.model, {v:?}"
         );
         assert_eq!(v["sandbox_mode"].as_str(), Some("read-only"));
+        let mut warnings = plan.warnings.clone();
+        warnings.sort();
         assert_eq!(
-            plan.warnings,
+            warnings,
             vec![
-                "targets.codex.extra.model ignored: set by the asset (use targets.codex.model for the model)".to_string(),
-                "targets.codex.extra.name ignored: set by the asset (use targets.codex.model for the model)".to_string(),
+                "targets.codex.extra.description ignored: set by the asset".to_string(),
+                "targets.codex.extra.developer_instructions ignored: set by the asset".to_string(),
+                "targets.codex.extra.model ignored: use targets.codex.model".to_string(),
+                "targets.codex.extra.name ignored: set by the asset".to_string(),
             ]
         );
     }
