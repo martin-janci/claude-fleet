@@ -239,6 +239,12 @@ impl Harness for Codex {
         s.push_str(
             "if command -v sha256sum >/dev/null 2>&1; then H=sha256sum; else H=\"shasum -a 256\"; fi; ",
         );
+        // Multi-harness F3a: is Codex itself here? `harness_set::harness_gate`
+        // serves Codex on an auto host only when this line is printed (or
+        // fleet already manages Codex assets there).
+        s.push_str(
+            "if command -v codex >/dev/null 2>&1 || [ -d .codex ]; then echo \"##PRESENT\"; fi; ",
+        );
         s.push_str("echo \"##HASHES\"; ");
         // `-exec $H {} +` (not `-print0 | xargs -0 $H`): see `Claude::scan_script`
         // for why this matters for an existing-but-empty directory.
@@ -582,6 +588,44 @@ mod tests {
             "no single quotes: the whole script is passed through shell::quote"
         );
         assert_eq!(Codex.manifest_path(), CODEX_MANIFEST_PATH);
+    }
+
+    /// F3a: the scan probes for Codex itself — the CLI on PATH or a
+    /// `~/.codex` directory — without any single quote (the caller wraps
+    /// the whole script in `shell::quote`).
+    #[test]
+    fn scan_script_probes_for_codex() {
+        let s = Codex.scan_script().unwrap();
+        assert!(
+            s.contains("if command -v codex >/dev/null 2>&1 || [ -d .codex ]; then echo \"##PRESENT\"; fi; "),
+            "{s}"
+        );
+        assert!(!s.contains('\''));
+    }
+
+    /// The real scan under `bash -lc` against a temp `$HOME` that has a
+    /// `~/.codex` directory reads back as present, whether or not the
+    /// machine running the test has the codex CLI.
+    #[cfg(unix)]
+    #[test]
+    fn a_codex_directory_reads_as_present_under_bash() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".codex")).unwrap();
+        let out = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(Codex.scan_script().unwrap())
+            .env("HOME", tmp.path())
+            .output()
+            .expect("run scan script");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let snap = Codex
+            .parse_scan(&String::from_utf8(out.stdout).unwrap())
+            .unwrap();
+        assert!(snap.present);
     }
 
     /// Builds `##HASHES`/`##CONFIG` scan output with a real base64-encoded
