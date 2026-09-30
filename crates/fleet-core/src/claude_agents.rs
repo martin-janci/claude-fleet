@@ -11,7 +11,10 @@
 //!   observed; documented `working | blocked | done | failed | stopped`),
 //!   sometimes with `status: "idle"` as well. The docs also describe
 //!   `status: waiting` plus a `waitingFor` reason while a session waits on
-//!   the user.
+//!   the user. Later CLIs put `state` on interactive rows too, and report
+//!   `state: blocked` with `status: idle` and no `waitingFor` when a turn
+//!   ended on a question — the input box, not a dialog (see
+//!   [`normalize_status`]).
 //!
 //! [`normalize_status`] folds both shapes into the fleet vocabulary at parse
 //! time, so `ClaudeAgentRow::status` only ever holds a known value (or
@@ -95,11 +98,19 @@ struct RawAgentRow {
 
 impl From<RawAgentRow> for ClaudeAgentRow {
     fn from(raw: RawAgentRow) -> Self {
+        let kind = match value_str(raw.kind.as_ref()).as_deref() {
+            Some("interactive") => AgentKind::Interactive,
+            _ => AgentKind::Background,
+        };
         let state = value_str(raw.state.as_ref());
         let status = value_str(raw.status.as_ref());
         let waiting_for = waiting_reason(raw.waiting_for.as_ref());
-        let normalized =
-            normalize_status(state.as_deref(), status.as_deref(), waiting_for.as_deref());
+        let normalized = normalize_status(
+            kind,
+            state.as_deref(),
+            status.as_deref(),
+            waiting_for.as_deref(),
+        );
         let agent = raw.name.as_deref().unwrap_or("");
         if let Some(reason) = &waiting_for {
             // No column holds the waiting reason yet, so the log is the only
@@ -115,10 +126,6 @@ impl From<RawAgentRow> for ClaudeAgentRow {
                 "claude agents: no known status in row; the pane fallback decides"
             );
         }
-        let kind = match value_str(raw.kind.as_ref()).as_deref() {
-            Some("interactive") => AgentKind::Interactive,
-            _ => AgentKind::Background,
-        };
         let job_id = value_str(raw.id.as_ref()).filter(|s| is_job_id(s));
         let started_at = raw
             .started_at
@@ -203,7 +210,18 @@ fn map_value(v: &str) -> Option<ClaudeStatus> {
 ///
 /// An unrecognised value falls through to the next source. `None` comes back
 /// when nothing is recognised, so the pane-derived fallback decides.
+///
+/// One exception to 3, for an INTERACTIVE row whose process is alive (it
+/// carries a `status`): `state: blocked` with no `waitingFor` is not a
+/// dialog. The CLI's `blocked` also covers "a question it asked" in its
+/// reply, and "when the wait is an open prompt in a live process,
+/// `waitingFor` names it" (agent-view docs) — so without one, the REPL is at
+/// its input box and a typed message is the answer. Fleet's `blocked` means a
+/// dialog a keystroke answers (the hub refuses typed text into it), so the
+/// row takes its `status` instead: a finished turn that ends in a question
+/// reads `idle`, not `blocked` forever.
 fn normalize_status(
+    kind: AgentKind,
     state: Option<&str>,
     status: Option<&str>,
     waiting_for: Option<&str>,
@@ -218,7 +236,13 @@ fn normalize_status(
     if waiting_for.is_some() {
         return Some(ClaudeStatus::Blocked);
     }
-    state.or_else(|| status.and_then(map_value))
+    let live_status = status.and_then(map_value);
+    if kind == AgentKind::Interactive && state == Some(ClaudeStatus::Blocked) {
+        if let Some(s) = live_status.filter(|s| *s != ClaudeStatus::Blocked) {
+            return Some(s);
+        }
+    }
+    state.or(live_status)
 }
 
 /// Parse the stdout of `claude agents --json`. Output that is not a JSON array
@@ -691,19 +715,72 @@ mod tests {
     fn normalize_status_precedence() {
         use ClaudeStatus::*;
         assert_eq!(
-            normalize_status(Some("done"), Some("busy"), None),
+            normalize_status(AgentKind::Background, Some("done"), Some("busy"), None),
             Some(Completed)
         );
         assert_eq!(
-            normalize_status(None, Some("idle"), Some("x")),
+            normalize_status(AgentKind::Background, None, Some("idle"), Some("x")),
             Some(Blocked)
         );
-        assert_eq!(normalize_status(None, Some("busy"), None), Some(Working));
         assert_eq!(
-            normalize_status(Some("blocked"), Some("idle"), None),
+            normalize_status(AgentKind::Background, None, Some("busy"), None),
+            Some(Working)
+        );
+        assert_eq!(
+            normalize_status(AgentKind::Background, Some("blocked"), Some("idle"), None),
             Some(Blocked)
         );
-        assert_eq!(normalize_status(None, None, None), None);
+        assert_eq!(
+            normalize_status(AgentKind::Background, None, None, None),
+            None
+        );
+    }
+
+    /// An interactive REPL that ended its turn on a question: the CLI says
+    /// `state: blocked`, its live process says `status: idle`, and nothing
+    /// is open (`waitingFor` absent). That is the input box, not a dialog —
+    /// read as blocked, the hub refused every typed reply to it and the row
+    /// stayed blocked for hours. A real open prompt still names itself in
+    /// `waitingFor`, and a background row keeps `state` as before.
+    #[test]
+    fn an_interactive_blocked_state_without_waiting_for_follows_its_status() {
+        use ClaudeStatus::*;
+        let i = AgentKind::Interactive;
+        assert_eq!(
+            normalize_status(i, Some("blocked"), Some("idle"), None),
+            Some(Idle)
+        );
+        assert_eq!(
+            normalize_status(i, Some("blocked"), Some("busy"), None),
+            Some(Working)
+        );
+        assert_eq!(
+            normalize_status(i, Some("blocked"), Some("waiting"), None),
+            Some(Blocked),
+            "the process itself says it waits"
+        );
+        assert_eq!(
+            normalize_status(i, Some("blocked"), None, None),
+            Some(Blocked),
+            "no live process to type into"
+        );
+        assert_eq!(
+            normalize_status(i, Some("blocked"), Some("idle"), Some("permission prompt")),
+            Some(Blocked)
+        );
+        let json = r#"[
+          {"kind":"interactive","state":"blocked","status":"idle"},
+          {"kind":"interactive","state":"blocked","status":"waiting","waitingFor":"input needed"},
+          {"kind":"background","state":"blocked","status":"idle"}
+        ]"#;
+        assert_eq!(
+            statuses(json),
+            vec![
+                Some("idle".into()),
+                Some("blocked".into()),
+                Some("blocked".into())
+            ]
+        );
     }
 
     /// A non-empty `waitingFor` wins over a NON-TERMINAL state (`working`,
@@ -714,12 +791,22 @@ mod tests {
     fn waiting_for_beats_a_non_terminal_state_only() {
         use ClaudeStatus::*;
         assert_eq!(
-            normalize_status(Some("working"), Some("busy"), Some("permission prompt")),
+            normalize_status(
+                AgentKind::Background,
+                Some("working"),
+                Some("busy"),
+                Some("permission prompt")
+            ),
             Some(Blocked),
             "a working agent that asks for permission is blocked"
         );
         assert_eq!(
-            normalize_status(Some("idle"), None, Some("input needed")),
+            normalize_status(
+                AgentKind::Background,
+                Some("idle"),
+                None,
+                Some("input needed")
+            ),
             Some(Blocked)
         );
         for (terminal, want) in [
@@ -728,7 +815,12 @@ mod tests {
             ("stopped", Stopped),
         ] {
             assert_eq!(
-                normalize_status(Some(terminal), Some("idle"), Some("permission prompt")),
+                normalize_status(
+                    AgentKind::Background,
+                    Some(terminal),
+                    Some("idle"),
+                    Some("permission prompt")
+                ),
                 Some(want),
                 "{terminal} is terminal and outlives a waiting reason"
             );
