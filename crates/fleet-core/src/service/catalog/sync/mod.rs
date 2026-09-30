@@ -25,6 +25,7 @@ pub mod manifest;
 pub mod plan;
 pub mod secrets;
 
+use super::harness_set::{self, gated_catalog, harness_gate, HarnessFacts, HarnessGate};
 use crate::cancel::{CancelGuard, CancellationRegistry};
 use crate::events::SyncProgress;
 use crate::ipc_error::lock;
@@ -127,11 +128,14 @@ fn skipped_plan(host_alias: &str, harness: &str, detail: &str) -> HostPlan {
 
 /// Scan one (host, harness), persist the inventory rows that scan implies
 /// (so the asset matrix refreshes through the row events
-/// `replace_host_inventory` already emits) and hand the snapshot and its
-/// managed manifest back to the caller. `secrets` is resolved by the caller
-/// BEFORE this await — `secrets::resolve` takes the store lock internally.
-/// Persisting is best-effort: a scan is still usable if the rows could not
-/// be written.
+/// `replace_host_inventory` already emits) and hand the snapshot, its
+/// managed manifest and the harness's gate back to the caller. `secrets` is
+/// resolved by the caller BEFORE this await — `secrets::resolve` takes the
+/// store lock internally. `configured` is the host's `harnesses` column
+/// (`None` = auto): the rows follow `harness_set::harness_gate` — none for
+/// `Off` (persisting the empty list clears rows an earlier scan left), only
+/// fleet's own installs (as orphans) for `Retiring`. Persisting is
+/// best-effort: a scan is still usable if the rows could not be written.
 async fn scan_and_persist(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
@@ -139,13 +143,17 @@ async fn scan_and_persist(
     harness: &dyn super::harness::Harness,
     host_alias: &str,
     secrets: &BTreeMap<String, String>,
-) -> Result<(super::harness::HostSnapshot, Manifest), IpcError> {
+    configured: Option<&[String]>,
+) -> Result<(super::harness::HostSnapshot, Manifest, HarnessGate), IpcError> {
     let scanned_at = super::now_secs();
     let snap = super::inventory::scan_host_harness(ssh, host_alias, harness).await?;
     let manifest = Manifest::from_snapshot(&snap, harness.manifest_path());
-    let rows = super::inventory::compute_states(
-        catalog, harness, host_alias, &snap, &manifest, secrets, scanned_at,
-    );
+    let gate = harness_gate(harness.id(), configured, HarnessFacts::of(&snap, &manifest));
+    let rows = gated_catalog(gate, catalog).map_or_else(Vec::new, |c| {
+        super::inventory::compute_states(
+            c, harness, host_alias, &snap, &manifest, secrets, scanned_at,
+        )
+    });
     match store.lock() {
         Ok(s) => {
             if let Err(e) = s.replace_host_inventory(host_alias, harness.id(), &rows) {
@@ -163,7 +171,7 @@ async fn scan_and_persist(
             "store mutex poisoned while persisting inventory"
         ),
     }
-    Ok((snap, manifest))
+    Ok((snap, manifest, gate))
 }
 
 /// Compute what a sync would do across the fleet, park it in the plan
@@ -220,8 +228,19 @@ pub async fn plan_sync(
         if h.hidden || filter.host_alias.as_deref().is_some_and(|o| o != h.alias) {
             continue;
         }
+        // Multi-harness F3a: the host's own harness choice (`None` = auto).
+        // Before a scan nothing is detected, so a host skipped before
+        // scanning is reported under Claude and the harnesses it lists only.
+        let configured = h.harnesses.as_deref();
+        let listed: Vec<&dyn super::harness::Harness> = scanning
+            .iter()
+            .copied()
+            .filter(|hn| {
+                harness_gate(hn.id(), configured, HarnessFacts::UNKNOWN) != HarnessGate::Off
+            })
+            .collect();
         if h.alias != "local" && !h.reachable {
-            for hn in &scanning {
+            for hn in &listed {
                 host_plans.push(skipped_plan(&h.alias, hn.id(), "unreachable"));
             }
             continue;
@@ -230,7 +249,7 @@ pub async fn plan_sync(
         let secrets = match secrets::resolve(store, &h.alias) {
             Ok(v) => v,
             Err(e) => {
-                for hn in &scanning {
+                for hn in &listed {
                     host_plans.push(skipped_plan(&h.alias, hn.id(), &e.message));
                 }
                 continue;
@@ -243,7 +262,7 @@ pub async fn plan_sync(
         let resolved = match layers::resolve_for_host(store, &catalog, &h.alias) {
             Ok(r) => r,
             Err(e) => {
-                for harness in &scanning {
+                for harness in &listed {
                     host_plans.push(skipped_plan(&h.alias, harness.id(), &e.message));
                 }
                 continue;
@@ -251,7 +270,7 @@ pub async fn plan_sync(
         };
         // A remote host with no layers would otherwise receive the whole
         // catalog — the spec's first critical finding. Refuse it up front,
-        // before the scan: every scanning harness gets the same skipped
+        // before the scan: every listed harness gets the same skipped
         // plan and the host is never touched over SSH.
         if refuse_unlayered(
             &h.alias,
@@ -259,7 +278,7 @@ pub async fn plan_sync(
             args.allow_unlayered,
             resolved.catalog.assets.is_empty(),
         ) {
-            for harness in &scanning {
+            for harness in &listed {
                 host_plans.push(skipped_plan(&h.alias, harness.id(), UNLAYERED_DETAIL));
             }
             continue;
@@ -275,18 +294,35 @@ pub async fn plan_sync(
             layered: resolved.layered,
             ..filter.clone()
         };
+        // Every scanning harness is scanned, even one this host may not
+        // serve: the scan is what detects it and reads its manifest.
         for harness in &scanning {
             let harness = *harness;
-            match scan_and_persist(store, ssh, &catalog, harness, &h.alias, &secrets).await {
-                Ok((snap, manifest)) => host_plans.push(plan::compute_host_plan(
-                    &resolved.catalog,
-                    harness,
-                    &h.alias,
-                    &snap,
-                    &manifest,
-                    &secrets,
-                    &host_filter,
-                )),
+            match scan_and_persist(
+                store, ssh, &catalog, harness, &h.alias, &secrets, configured,
+            )
+            .await
+            {
+                Ok((snap, manifest, gate)) => {
+                    // `Off` plans nothing; `Retiring` plans against an empty
+                    // catalog, so only removals of fleet's own installs remain.
+                    let Some(planned) = gated_catalog(gate, &resolved.catalog) else {
+                        continue;
+                    };
+                    let mut hp = plan::compute_host_plan(
+                        planned,
+                        harness,
+                        &h.alias,
+                        &snap,
+                        &manifest,
+                        &secrets,
+                        &host_filter,
+                    );
+                    if gate == HarnessGate::Retiring {
+                        hp.detail = Some(harness_set::retiring_detail(harness.id()));
+                    }
+                    host_plans.push(hp);
+                }
                 Err(e) => host_plans.push(skipped_plan(&h.alias, harness.id(), &e.message)),
             }
         }
@@ -380,7 +416,27 @@ async fn rescan_after_apply(
             return;
         }
     };
-    if let Err(e) = scan_and_persist(store, ssh, catalog, harness, host_alias, &secrets).await {
+    // F3a: the host's harness choice decides which rows the re-scan keeps.
+    // Read before the await, as everywhere else.
+    let configured = match store.lock() {
+        Ok(s) => s
+            .get_host_row(host_alias)
+            .ok()
+            .flatten()
+            .and_then(|r| r.harnesses),
+        Err(_) => None,
+    };
+    if let Err(e) = scan_and_persist(
+        store,
+        ssh,
+        catalog,
+        harness,
+        host_alias,
+        &secrets,
+        configured.as_deref(),
+    )
+    .await
+    {
         tracing::warn!(
             host = host_alias,
             harness = harness.id(),
@@ -675,8 +731,36 @@ mod tests {
     fn store_with_local(bus: Arc<RecordingEventBus>) -> Mutex<Store> {
         let dyn_bus: Arc<dyn crate::events::EventBus> = bus;
         let store = Mutex::new(Store::open_with_bus_in_memory(dyn_bus).unwrap());
-        store.lock().unwrap().insert_host("local", None).unwrap();
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("local", None).unwrap();
+            // Multi-harness F3a: pin Codex on, so these tests plan it whether
+            // or not the machine running them has the codex CLI (auto would
+            // follow detection).
+            s.set_host_harnesses(
+                "local",
+                Some(&["claude".to_string(), "codex".to_string()][..]),
+            )
+            .unwrap();
+        }
         store
+    }
+
+    fn harness_ids(plan: &SyncPlan) -> Vec<&str> {
+        plan.hosts.iter().map(|h| h.harness.as_str()).collect()
+    }
+
+    fn load_one_skill() -> tempfile::TempDir {
+        let repo_dir = tempfile::tempdir().unwrap();
+        let files = one_skill("b\n");
+        load_catalog(
+            repo_dir.path(),
+            &files
+                .iter()
+                .map(|(a, b)| (*a, b.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        repo_dir
     }
 
     /// `plan_sync` against `local` with a temp HOME: one `HostPlan` per
@@ -1276,5 +1360,190 @@ mod tests {
             .unwrap()
             .expect("the run is in the history");
         assert_eq!(last.plan_id, id);
+    }
+
+    /// F3a: a host that turned Codex off (and has no Codex manifest) gets no
+    /// Codex plan, and a Codex inventory row an earlier scan left is gone.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_sync_leaves_codex_out_on_a_host_that_turned_it_off() {
+        let _lock = super::super::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        let _repo = load_one_skill();
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        {
+            let s = store.lock().unwrap();
+            s.set_host_harnesses("local", Some(&["claude".to_string()][..]))
+                .unwrap();
+            s.replace_host_inventory(
+                "local",
+                "codex",
+                &[crate::store::AssetInventoryRow {
+                    host_alias: "local".into(),
+                    harness: "codex".into(),
+                    kind: "skill".into(),
+                    name: "s".into(),
+                    state: "missing".into(),
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+        }
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(PlanArgs::default(), &store, &ssh).await.unwrap();
+        assert_eq!(harness_ids(&plan), vec!["claude"], "{:?}", plan.hosts);
+        let rows = store.lock().unwrap().list_inventory().unwrap();
+        assert!(
+            rows.iter().any(|r| r.name == "s" && r.harness == "claude"),
+            "{rows:?}"
+        );
+        assert!(rows.iter().all(|r| r.harness != "codex"), "{rows:?}");
+    }
+
+    /// F3a: on auto, a host with a `~/.codex` directory is planned and
+    /// inventoried for Codex (deterministic whatever PATH holds: the
+    /// directory alone is detection).
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_sync_plans_codex_where_auto_finds_it() {
+        let _lock = super::super::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        let _repo = load_one_skill();
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        store
+            .lock()
+            .unwrap()
+            .set_host_harnesses("local", None)
+            .unwrap();
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(PlanArgs::default(), &store, &ssh).await.unwrap();
+        let codex = plan
+            .hosts
+            .iter()
+            .find(|h| h.harness == "codex")
+            .expect("codex is planned");
+        assert_eq!(codex.status, "planned");
+        assert_eq!(codex.detail, None);
+        assert_eq!(
+            codex.actions.iter().find(|a| a.name == "s").map(|a| a.op),
+            Some(ActionOp::Create)
+        );
+        let rows = store.lock().unwrap().list_inventory().unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.harness == "codex" && r.name == "s" && r.state == "missing"),
+            "{rows:?}"
+        );
+    }
+
+    /// F3a: turning Codex off on a host fleet already synced Codex assets to
+    /// retires it — the plan is removals only, and says why — while Claude
+    /// is planned as before.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_sync_retires_codex_when_turned_off_but_still_managed() {
+        let _lock = super::super::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        std::fs::write(
+            home.path().join(".codex/.fleet-assets.json"),
+            r#"{"version":1,"updated_at":0,"assets":{"skill/s":
+                {"hash":"h","files":["~/.codex/skills/s/SKILL.md"],"merges":[],"synced_at":0}}}"#,
+        )
+        .unwrap();
+        let _repo = load_one_skill();
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        store
+            .lock()
+            .unwrap()
+            .set_host_harnesses("local", Some(&["claude".to_string()][..]))
+            .unwrap();
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(PlanArgs::default(), &store, &ssh).await.unwrap();
+        let codex = plan.hosts.iter().find(|h| h.harness == "codex").unwrap();
+        assert_eq!(codex.status, "planned");
+        assert_eq!(
+            codex.detail.as_deref(),
+            Some(harness_set::retiring_detail("codex").as_str())
+        );
+        assert_eq!(
+            codex
+                .actions
+                .iter()
+                .map(|a| (a.name.as_str(), a.op))
+                .collect::<Vec<_>>(),
+            vec![("s", ActionOp::Remove)]
+        );
+        let claude = plan.hosts.iter().find(|h| h.harness == "claude").unwrap();
+        assert_eq!(
+            claude.actions.iter().find(|a| a.name == "s").map(|a| a.op),
+            Some(ActionOp::Create)
+        );
+        let rows = store.lock().unwrap().list_inventory().unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.harness == "codex" && r.name == "s" && r.state == "orphan"),
+            "{rows:?}"
+        );
+    }
+
+    /// F3a: a host skipped before its scan (here: unlayered and remote) is
+    /// reported under Claude and the harnesses it lists — nothing is known
+    /// about the others until a scan runs.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_host_skipped_before_its_scan_reports_claude_and_its_listed_harnesses() {
+        let _lock = super::super::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _repo = load_one_skill();
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("oci", Some("oci")).unwrap();
+            s.update_host_probe("oci", true, None, None, 1).unwrap();
+        }
+        let ssh = Arc::new(SshClient::new());
+        let args = || PlanArgs {
+            host_alias: Some("oci".into()),
+            ..PlanArgs::default()
+        };
+
+        let auto = plan_sync(args(), &store, &ssh).await.unwrap();
+        assert_eq!(harness_ids(&auto), vec!["claude"], "{:?}", auto.hosts);
+
+        store
+            .lock()
+            .unwrap()
+            .set_host_harnesses(
+                "oci",
+                Some(&["claude".to_string(), "codex".to_string()][..]),
+            )
+            .unwrap();
+        let listed = plan_sync(args(), &store, &ssh).await.unwrap();
+        assert_eq!(harness_ids(&listed), vec!["claude", "codex"]);
+        assert!(listed
+            .hosts
+            .iter()
+            .all(|h| h.status == "skipped" && h.detail.as_deref() == Some(UNLAYERED_DETAIL)));
     }
 }
