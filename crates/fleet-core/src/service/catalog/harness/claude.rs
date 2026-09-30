@@ -477,9 +477,14 @@ impl Harness for Claude {
     }
 
     fn installed_detail(&self, snap: &HostSnapshot) -> Vec<InstalledAsset> {
-        use crate::service::hooks_install::{is_fleet_command_entry, is_fleet_hook_entry};
+        use crate::service::hooks_install::is_fleet_owned_hook;
         use crate::service::provision::{FLEET_MCP_SERVER, FLEET_SKILL_NAMES};
-        let is_fleet = |e: &Value| is_fleet_hook_entry(e) || is_fleet_command_entry(e);
+        // `is_fleet_owned_hook` covers every shape fleet has ever installed a
+        // hook as, including the pre-Track-B legacy `curl … /hook?token=`
+        // command hook that the two narrower checks alone miss (S1a review
+        // finding 5 — same gap Security fix round 1, IMPORTANT 1 already
+        // fixed for `scrub_fleet_entries`).
+        let is_fleet = is_fleet_owned_hook;
         self.installed(snap)
             .into_iter()
             .map(|(kind, name)| {
@@ -1158,6 +1163,28 @@ eyJwbHVnaW5zIjp7InN1cGVycG93ZXJzQHN1cGVycG93ZXJzLW1hcmtldHBsYWNlIjpbeyJ2ZXJzaW9u
             stop.hash.as_deref(),
             Some(sha256_hex(canonical_json(&user_only).as_bytes()).as_str())
         );
+    }
+
+    /// S1a review finding 5: a host provisioned before Track-B still has its
+    /// hook installed as the legacy `curl … /hook?token=` command shape —
+    /// neither `is_fleet_hook_entry` (http shape) nor `is_fleet_command_entry`
+    /// (the headers-file async command shape) recognises it, so
+    /// `installed_detail` must go through `is_fleet_owned_hook` (which does)
+    /// or such a hook reads as a foreign, not-fleet-owned asset.
+    #[test]
+    fn installed_detail_marks_legacy_token_hook_as_fleet_owned() {
+        let mut s = HostSnapshot::default();
+        s.configs.insert(
+            SETTINGS_PATH.into(),
+            serde_json::json!({"hooks": {
+                "Stop": [
+                    {"hooks": [{"type": "command",
+                                 "command": "curl -sS -X POST --data-binary @- 'http://127.0.0.1:4180/hook?token=old' 2>/dev/null || true"}]}
+                ]
+            }}),
+        );
+        let d = Claude.installed_detail(&s);
+        assert!(detail(&d, Kind::Hook, "stop").fleet_owned);
     }
 
     #[test]
