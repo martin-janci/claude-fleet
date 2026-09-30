@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **Build environment (this machine):** every cargo command runs with `export CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-martinjanci-dotfiles--claude-worktrees-predpriprava-abstrakcia-b4016d/68b6c39a-1fd3-4adb-9557-acca1a9b7199/scratchpad/cf-target`. A fleet-core rebuild takes 30–60 min on this shared, overloaded machine, so each task makes ALL its edits first and runs only its targeted test filters (libtest takes several filters, OR-ed); one whole-crate run happens in Task 7.
+- **Build environment (this machine):** every cargo command runs with `export CARGO_TARGET_DIR=<shared-target-dir>`. A fleet-core rebuild takes 30–60 min on this shared, overloaded machine, so each task makes ALL its edits first and runs only its targeted test filters (libtest takes several filters, OR-ed); one whole-crate run happens in Task 7.
 - **Known pre-existing failure:** `service::rewind::tests::the_removal_script_leaves_a_tree_a_live_pane_is_in` fails in deep scratch directories (unix socket path too long). It is not ours; do not fix it, report it.
 - **User decisions (2026-09-30), binding:** Codex per host = auto-detect (codex CLI on PATH or `~/.codex` exists) + manual override per host; a host that already has a Codex manifest with entries stays served so its removals still run; Claude is always on. Codex agent TOML omits `model` unless the asset sets `targets.codex.model` (no tier → model mapping for Codex).
 - **Parallel initiative S1b** (`docs/superpowers/specs/2026-09-29-assets-workspace-design.md`) will also change `plan_sync`'s host filtering. Keep the `sync/mod.rs` change small and composable: the gate decision lives ONLY in `harness_set::harness_gate`; `plan_sync` gains one `listed` line, four `&scanning` → `&listed` edits in the pre-scan skip loops, one argument to `scan_and_persist`, and the gated match arm.
@@ -158,7 +158,7 @@ Append to `mod tests` in `crates/fleet-core/src/store/schema.rs` (after `migrati
 
 Run:
 ```bash
-export CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-martinjanci-dotfiles--claude-worktrees-predpriprava-abstrakcia-b4016d/68b6c39a-1fd3-4adb-9557-acca1a9b7199/scratchpad/cf-target
+export CARGO_TARGET_DIR=<shared-target-dir>
 cargo test -p fleet-core --lib set_host_harnesses an_unreadable_harnesses migration_088 2>&1 | tail -20
 ```
 Expected: compile errors — `no method named set_host_harnesses`, `no field harnesses on type HostRow`, `cannot find function hosts_has_harnesses`.
@@ -289,7 +289,7 @@ In `src-tauri/src/backend/tests_contract.rs`, `sample_host()` (line 160), after 
 
 Run:
 ```bash
-export CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-martinjanci-dotfiles--claude-worktrees-predpriprava-abstrakcia-b4016d/68b6c39a-1fd3-4adb-9557-acca1a9b7199/scratchpad/cf-target
+export CARGO_TARGET_DIR=<shared-target-dir>
 cargo test -p fleet-core --lib set_host_harnesses an_unreadable_harnesses migration_088 every_migration_records_its_own_version host_row 2>&1 | tail -8
 REGEN_HUB_CONTRACT=1 cargo test -p claude-fleet --lib contract 2>&1 | tail -5
 cargo test -p claude-fleet --lib contract 2>&1 | tail -5
@@ -496,7 +496,7 @@ Add `pub mod harness_set;` in `crates/fleet-core/src/service/catalog/mod.rs` aft
 
 Run:
 ```bash
-export CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-martinjanci-dotfiles--claude-worktrees-predpriprava-abstrakcia-b4016d/68b6c39a-1fd3-4adb-9557-acca1a9b7199/scratchpad/cf-target
+export CARGO_TARGET_DIR=<shared-target-dir>
 cargo test -p fleet-core --lib service::catalog::harness_set service::catalog::harness::tests::parse_scan_blocks_reads_the_presence_line service::catalog::harness::codex::tests 2>&1 | tail -20
 ```
 Expected: compile errors — `no field present on type HostSnapshot`, `cannot find function harness_gate`, `cannot find type HarnessGate`, … (`scan_script_probes_for_codex` would fail its `contains` assertion once the crate compiles).
@@ -694,7 +694,7 @@ pub fn normalize_harnesses(list: &[String]) -> Result<Vec<String>, IpcError> {
 
 Run:
 ```bash
-export CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-martinjanci-dotfiles--claude-worktrees-predpriprava-abstrakcia-b4016d/68b6c39a-1fd3-4adb-9557-acca1a9b7199/scratchpad/cf-target
+export CARGO_TARGET_DIR=<shared-target-dir>
 cargo test -p fleet-core --lib service::catalog::harness_set service::catalog::harness::tests service::catalog::harness::codex::tests service::catalog::harness::claude::tests 2>&1 | tail -8
 ```
 Expected: all PASS (every existing harness/codex/claude test included — `scan_script_runs_under_bash_and_parses_cleanly` still sees exactly its two files; `##PRESENT` is not a hash line).
@@ -1013,7 +1013,7 @@ In `crates/fleet-core/src/service/catalog/inventory.rs` tests, append:
 
 Run:
 ```bash
-export CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-martinjanci-dotfiles--claude-worktrees-predpriprava-abstrakcia-b4016d/68b6c39a-1fd3-4adb-9557-acca1a9b7199/scratchpad/cf-target
+export CARGO_TARGET_DIR=<shared-target-dir>
 cargo test -p fleet-core --lib service::catalog::sync::tests service::catalog::inventory::tests 2>&1 | tail -25
 ```
 Expected: `harness_set` is not in scope in `sync::tests` (compile error `use of undeclared crate or module harness_set`) — once that import exists, the four new sync tests and `scan_hosts_follows_the_hosts_harness_choice` FAIL (a Codex plan is still pushed for an off host, no retiring detail, two skipped rows on the auto host, Codex rows kept).
@@ -1258,7 +1258,7 @@ and replace the `Ok(snap) => { … let rows = compute_states(…); …` head (li
 
 Run:
 ```bash
-export CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-martinjanci-dotfiles--claude-worktrees-predpriprava-abstrakcia-b4016d/68b6c39a-1fd3-4adb-9557-acca1a9b7199/scratchpad/cf-target
+export CARGO_TARGET_DIR=<shared-target-dir>
 cargo test -p fleet-core --lib service::catalog::sync service::catalog::inventory service::catalog::scan_tick service::catalog::harness_set 2>&1 | tail -10
 ```
 Expected: all PASS — the new tests, and every existing `sync::tests` test with its original assertions (two `HostPlan`s on the pinned `local`).
@@ -1405,7 +1405,7 @@ async fn set_host_harnesses_sets_normalises_and_clears() {
 
 Run:
 ```bash
-export CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-martinjanci-dotfiles--claude-worktrees-predpriprava-abstrakcia-b4016d/68b6c39a-1fd3-4adb-9557-acca1a9b7199/scratchpad/cf-target
+export CARGO_TARGET_DIR=<shared-target-dir>
 cargo test -p fleet-core --lib service::catalog::harness_set service::catalog::admin mcp::tools::tests_catalog_admin mcp::tools::tests::fleet_admin_tools_are_master_only mcp::tools::tests::layer_read_tools mcp::tools::tests::router_sum_serves_every_tool 2>&1 | tail -20
 ```
 Expected: compile errors — `cannot find function set_host_harnesses in this scope` (harness_set), `no variant SetHostHarnesses`, `cannot find type SetHostHarnessesArgs`, `cannot find struct SetHostHarnessesParams`, `no method named set_host_harnesses on FleetTools`.
@@ -1535,7 +1535,7 @@ In `mcp/guard.rs`, after the `set_host_layers` row (line 925):
 
 Run:
 ```bash
-export CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-martinjanci-dotfiles--claude-worktrees-predpriprava-abstrakcia-b4016d/68b6c39a-1fd3-4adb-9557-acca1a9b7199/scratchpad/cf-target
+export CARGO_TARGET_DIR=<shared-target-dir>
 cargo test -p fleet-core --lib service::catalog::harness_set service::catalog::admin mcp::tools::tests_catalog_admin mcp::tools::tests::fleet_admin_tools_are_master_only mcp::tools::tests::layer_read_tools mcp::tools::tests::router_sum_serves_every_tool mcp::tools::tests::every_router_tool_has_exactly_one_tool_policy_row 2>&1 | tail -8
 REGEN_DOCS=1 cargo test -p fleet-core reference_is_current 2>&1 | tail -3
 cargo test -p fleet-core --lib mcp::tools::tests::the_served_definition_budget_stays_bounded -- --nocapture 2>&1 | grep -E '^master:|test result|panicked'
@@ -1688,7 +1688,7 @@ describe('HostDetail Codex assets (F3a)', () => {
 Run:
 ```bash
 pnpm test src/lib/hosts.test.ts src/lib/HostDetail.test.ts 2>&1 | tail -15
-export CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-martinjanci-dotfiles--claude-worktrees-predpriprava-abstrakcia-b4016d/68b6c39a-1fd3-4adb-9557-acca1a9b7199/scratchpad/cf-target
+export CARGO_TARGET_DIR=<shared-target-dir>
 cargo test -p claude-fleet --lib backend::tests_routing 2>&1 | tail -10
 ```
 Expected: Vitest FAILS (`setHostHarnesses is not a function` / `codexModeOf is not a function`, no `detail-codex` element); cargo fails to compile (`cannot find function catalog_set_host_harnesses in module r`).
@@ -1837,7 +1837,7 @@ and in the Integration section, directly after `<h3>Integration</h3>` (line 487)
 
 Run:
 ```bash
-export CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-martinjanci-dotfiles--claude-worktrees-predpriprava-abstrakcia-b4016d/68b6c39a-1fd3-4adb-9557-acca1a9b7199/scratchpad/cf-target
+export CARGO_TARGET_DIR=<shared-target-dir>
 REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen 2>&1 | tail -3
 cargo test -p claude-fleet --lib backend:: 2>&1 | tail -5
 git diff --stat src/lib/hub_verdicts.generated.json docs/hub.md
@@ -2194,7 +2194,7 @@ In `author.rs` tests, after `lint_allows_the_same_install_name_across_kinds` (li
 
 Run:
 ```bash
-export CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-martinjanci-dotfiles--claude-worktrees-predpriprava-abstrakcia-b4016d/68b6c39a-1fd3-4adb-9557-acca1a9b7199/scratchpad/cf-target
+export CARGO_TARGET_DIR=<shared-target-dir>
 cargo test -p fleet-core --lib service::catalog::harness::codex service::catalog::inventory::tests::compute_states_covers_all_five_states service::catalog::sync::apply::tests::a_codex_agent service::catalog::author::tests::lint_ 2>&1 | tail -25
 ```
 Expected: compile errors `cannot find value CODEX_AGENTS_DIR` / `CODEX_AGENT_TOOLS_WARNING`; once those exist, the agent render tests, `compute_states_covers_all_five_states`, the apply e2e (Blocked, not Create) and the new lint test FAIL.
@@ -2351,7 +2351,7 @@ and in `lint`, directly after the same-kind install-name block (after line 378):
 
 Run:
 ```bash
-export CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-martinjanci-dotfiles--claude-worktrees-predpriprava-abstrakcia-b4016d/68b6c39a-1fd3-4adb-9557-acca1a9b7199/scratchpad/cf-target
+export CARGO_TARGET_DIR=<shared-target-dir>
 cargo test -p fleet-core --lib service::catalog 2>&1 | tail -8
 ```
 Expected: all `service::catalog` tests PASS — including `lint_allows_the_same_install_name_across_kinds` (its agent has no `render_as`, so it renders to `~/.codex/agents`), `templates_are_clean_except_the_plugin_ref_todos`, `plan::tests::an_unsupported_kind_blocks_and_a_disabled_target_noops` (a hook) and `catalog::tests` previews (a hook).
@@ -2448,7 +2448,7 @@ agent's `tools` do not apply there (the Codex preview says so).
 
 Run:
 ```bash
-export CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-martinjanci-dotfiles--claude-worktrees-predpriprava-abstrakcia-b4016d/68b6c39a-1fd3-4adb-9557-acca1a9b7199/scratchpad/cf-target
+export CARGO_TARGET_DIR=<shared-target-dir>
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tail -5
 cargo test -p fleet-core 2>&1 | grep -E '^test result|FAILED|panicked' | tail -15
