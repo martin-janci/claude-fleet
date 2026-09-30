@@ -51,6 +51,32 @@ fn json_to_toml(v: &Value) -> Option<toml::Value> {
 
 pub struct Codex;
 
+/// A top-level `~/.codex/agents/<name>.toml`, the only agent files
+/// `installed` lists.
+fn is_agent_toml(path: &str) -> bool {
+    path.strip_prefix(&format!("{CODEX_AGENTS_DIR}/"))
+        .and_then(|rest| rest.strip_suffix(".toml"))
+        .is_some_and(|stem| !stem.is_empty() && !stem.contains('/'))
+}
+
+/// `mcp_secret_like` for a Codex MCP server table, which names its HTTP
+/// headers `http_headers` rather than `headers`.
+fn codex_mcp_secret_like(v: &Value) -> bool {
+    mcp_secret_like(v)
+        || v.get("http_headers")
+            .and_then(Value::as_object)
+            .is_some_and(|h| !h.is_empty())
+}
+
+/// Whether a scanned subagent TOML (as JSON) looks like it carries a
+/// credential: any of its own `mcp_servers` does, by the MCP rule.
+fn agent_secret_like(agent: &Value) -> bool {
+    agent
+        .get("mcp_servers")
+        .and_then(Value::as_object)
+        .is_some_and(|servers| servers.values().any(codex_mcp_secret_like))
+}
+
 /// `name` is the catalog name that stays in the `SKILL.md` frontmatter;
 /// `install_name` (`Asset::install_name()`) is the identifier the skill
 /// directory is derived from, so an `install_as` renders under the host
@@ -337,13 +363,18 @@ impl Harness for Codex {
                 "echo \"##CONFIG {f}\"; if [ -f \"{rel}\" ]; then base64 < \"{rel}\" | tr -d \"\\n\"; fi; echo; "
             ));
         }
+        // Each subagent's TOML too, so `installed_detail` can tell whether an
+        // unmanaged one carries a credential (its `mcp_servers`).
+        s.push_str(
+            "for f in .codex/agents/*.toml; do if [ -f \"$f\" ]; then echo \"##CONFIG ~/$f\"; base64 < \"$f\" | tr -d \"\\n\"; echo; fi; done; ",
+        );
         s.push_str("echo \"##END\"");
         Some(s)
     }
 
     fn parse_scan(&self, stdout: &str) -> Result<HostSnapshot, IpcError> {
         super::parse_scan_blocks(stdout, &|path, bytes| {
-            if path == CODEX_CONFIG_PATH {
+            if path == CODEX_CONFIG_PATH || is_agent_toml(path) {
                 let text = std::str::from_utf8(bytes).ok()?;
                 let toml_value: toml::Value = toml::from_str(text).ok()?;
                 serde_json::to_value(toml_value).ok()
@@ -404,15 +435,16 @@ impl Harness for Codex {
                             .and_then(|m| m.get(&name));
                         (
                             v.map(|v| sha256_hex(canonical_json(v).as_bytes())),
-                            v.is_some_and(mcp_secret_like),
+                            v.is_some_and(codex_mcp_secret_like),
                         )
                     }
-                    Kind::Agent => (
-                        snap.files
-                            .get(&format!("{CODEX_AGENTS_DIR}/{name}.toml"))
-                            .cloned(),
-                        false,
-                    ),
+                    Kind::Agent => {
+                        let path = format!("{CODEX_AGENTS_DIR}/{name}.toml");
+                        (
+                            snap.files.get(&path).cloned(),
+                            snap.configs.get(&path).is_some_and(agent_secret_like),
+                        )
+                    }
                     _ => (None, false),
                 };
                 InstalledAsset {
@@ -791,6 +823,35 @@ mod tests {
         assert!(!d[0].secret_like && !d[0].fleet_owned);
     }
 
+    /// An unmanaged subagent whose own `mcp_servers` carry `env` or
+    /// `http_headers` reads as `secret_like`, by the same rule as a Codex MCP
+    /// server in `config.toml`; one without reads clean.
+    #[test]
+    fn installed_detail_flags_a_subagent_with_secret_like_mcp_servers() {
+        let mut s = HostSnapshot::default();
+        for name in ["plain", "env", "headers"] {
+            s.files
+                .insert(format!("{CODEX_AGENTS_DIR}/{name}.toml"), "ab".into());
+        }
+        s.configs.insert(
+            format!("{CODEX_AGENTS_DIR}/plain.toml"),
+            json!({"name": "plain", "mcp_servers": {"fs": {"command": "npx"}}}),
+        );
+        s.configs.insert(
+            format!("{CODEX_AGENTS_DIR}/env.toml"),
+            json!({"name": "env", "mcp_servers": {"jira": {"command": "npx", "env": {"T": "x"}}}}),
+        );
+        s.configs.insert(
+            format!("{CODEX_AGENTS_DIR}/headers.toml"),
+            json!({"name": "headers", "mcp_servers": {"api": {"url": "https://x", "http_headers": {"Authorization": "Bearer x"}}}}),
+        );
+        let d = Codex.installed_detail(&s);
+        let flag = |n: &str| d.iter().find(|a| a.name == n).unwrap().secret_like;
+        assert!(!flag("plain"));
+        assert!(flag("env"));
+        assert!(flag("headers"));
+    }
+
     /// The real scan hashes `~/.codex/agents`, and `installed` reads the
     /// agent back from it.
     #[cfg(unix)]
@@ -822,6 +883,10 @@ mod tests {
         assert_eq!(
             Codex.installed(&snap),
             vec![(Kind::Agent, "pm".to_string())]
+        );
+        assert_eq!(
+            snap.configs["~/.codex/agents/pm.toml"]["name"], "pm",
+            "the agent's TOML is read back for the secret-like check"
         );
     }
 
