@@ -29,6 +29,13 @@ pub const CODEX_AGENTS_DIR: &str = "~/.codex/agents";
 /// per-agent tool allowlist. Shown in Asset detail's Codex preview.
 pub const CODEX_AGENT_TOOLS_WARNING: &str = "codex subagents have no tool allowlist; `tools` is not applied (targets.codex.extra.sandbox_mode can restrict the agent)";
 
+/// `targets.codex.extra` keys the agent render already sets itself: an
+/// `extra` entry under one of these is dropped (with a warning) rather than
+/// silently overwriting the asset's identity or its dedicated
+/// `targets.codex.model`.
+const CODEX_AGENT_RESERVED_KEYS: &[&str] =
+    &["name", "description", "developer_instructions", "model"];
+
 const CONFIG_FILES: &[&str] = &[CODEX_CONFIG_PATH, CODEX_MANIFEST_PATH];
 
 /// A `targets.codex.extra` value as TOML: nulls stripped (TOML has none);
@@ -264,6 +271,12 @@ impl Harness for Codex {
                     plan.warnings.push(CODEX_AGENT_TOOLS_WARNING.into());
                 }
                 for (k, v) in &t.extra {
+                    if CODEX_AGENT_RESERVED_KEYS.contains(&k.as_str()) {
+                        plan.warnings.push(format!(
+                            "targets.codex.extra.{k} ignored: set by the asset (use targets.codex.model for the model)"
+                        ));
+                        continue;
+                    }
                     match json_to_toml(v) {
                         Some(tv) => {
                             table.insert(k.clone(), tv);
@@ -656,6 +669,35 @@ mod tests {
         assert_eq!(toml_of(&plan), want, "no model unless targets.codex.model");
         assert!(plan.warnings.is_empty());
         assert!(plan.merges.is_empty());
+    }
+
+    /// `targets.codex.extra` cannot override the identity fields the render
+    /// itself sets (`name`, `description`, `developer_instructions`) or
+    /// `model` (which has its own dedicated `targets.codex.model`) — each
+    /// attempt is skipped and warned about, other keys still merge.
+    #[test]
+    fn agent_extra_cannot_override_identity_or_model() {
+        let mut a = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: d\ntargets:\n  codex:\n    extra:\n      name: other\n      model: x\n      sandbox_mode: read-only\n",
+        )
+        .unwrap();
+        a.body = "b\n".into();
+        let plan = Codex.render(&a).unwrap();
+        let v = toml_of(&plan);
+        assert_eq!(v["name"].as_str(), Some("pm"), "the catalog name wins");
+        assert!(
+            v.get("model").is_none(),
+            "no model unless targets.codex.model, {v:?}"
+        );
+        assert_eq!(v["sandbox_mode"].as_str(), Some("read-only"));
+        assert_eq!(
+            plan.warnings,
+            vec![
+                "targets.codex.extra.model ignored: set by the asset (use targets.codex.model for the model)".to_string(),
+                "targets.codex.extra.name ignored: set by the asset (use targets.codex.model for the model)".to_string(),
+            ]
+        );
     }
 
     #[test]
