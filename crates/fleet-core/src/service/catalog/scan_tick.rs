@@ -126,11 +126,13 @@ pub fn spawn_catalog_scan_tick(
                 _ = token.cancelled() => break,
                 _ = ticker.tick() => {}
             }
-            let head = match super::CATALOG.read() {
-                Ok(g) => match g.as_ref() {
-                    Some(c) => c.head.clone(),
-                    None => continue,
-                },
+            // A borrow via `with_personal` rather than `personal()`'s full
+            // clone: only the `head` string needs to leave the closure,
+            // not the whole catalog (assets, resources and all). Nothing
+            // loaded, or the registry lock poisoned, both `continue` —
+            // this tick just has nothing to compare against yet.
+            let head = match super::registry::with_personal(|c| Ok(c.head.clone())) {
+                Ok(head) => head,
                 Err(_) => continue,
             };
             // All store reads in one scoped guard, dropped before any await.

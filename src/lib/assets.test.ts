@@ -238,6 +238,14 @@ describe('authoring wrappers', () => {
     expect(mockedInvoke).toHaveBeenCalledWith('catalog_update_asset', { args: { asset: { ...asset, resources: [] } } });
   });
 
+  it('updateAsset sends scope unchanged', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ commit: 'abc', lint: { errors: [], warnings: [] } });
+    const asset = editableAsset({ scope: 'shared' });
+    const r = await updateAsset(asset);
+    expect(r.ok).toBe(true);
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_update_asset', { args: { asset: { ...asset, resources: [] } } });
+  });
+
   it('updateAsset surfaces E_LINT with the report in details', async () => {
     const report = { errors: [{ field: 'description', message: 'must not be empty' }], warnings: [] };
     (mockedInvoke as ReturnType<typeof vi.fn>).mockRejectedValueOnce({ code: 'E_LINT', message: 'lint errors', details: report });

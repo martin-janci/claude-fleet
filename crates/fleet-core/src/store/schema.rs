@@ -976,6 +976,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/089_host_harnesses.sql"),
         already_applied: Some(hosts_has_harnesses),
     },
+    // Assets S1b M1: `catalogs`, backfilled from `catalog_config` as
+    // `personal`. CREATE IF NOT EXISTS + INSERT OR IGNORE: safe to re-run.
+    Migration::plain(90, include_str!("../../migrations/090_catalogs.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -1297,6 +1300,7 @@ mod tests {
         "tasks",
         "worktree_parent_fingerprints",
         "catalog_config",
+        "catalogs",
         "asset_inventory",
         "catalog_secrets",
         "catalog_secrets_host",
@@ -2269,6 +2273,39 @@ mod tests {
             )
             .unwrap();
         assert_eq!(scanned_at, 7, "the inventory row survives a re-run");
+    }
+
+    /// 090 on a database stopped at 089 with a `catalog_config` row: the row
+    /// becomes the `personal` catalog, and a re-run changes nothing.
+    #[test]
+    fn migration_90_copies_catalog_config_into_personal() {
+        let old = Store::open_in_memory().expect("open");
+        old.conn
+            .execute_batch(
+                "DROP TABLE catalogs;\
+                 INSERT INTO catalog_config (id, repo_path, remote_url, head_commit, last_loaded_at) \
+                   VALUES (1, '/r', 'git@a:b.git', 'h1', 5);\
+                 DELETE FROM schema_version WHERE version >= 90;",
+            )
+            .unwrap();
+        old.migrate().expect("090 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let p = old.personal_catalog().unwrap().expect("personal row");
+        assert_eq!((p.name.as_str(), p.repo_path.as_str()), ("personal", "/r"));
+        assert_eq!(p.remote_url.as_deref(), Some("git@a:b.git"));
+        assert_eq!(
+            (p.head_commit.as_deref(), p.last_loaded_at, p.org_id),
+            (Some("h1"), Some(5), None)
+        );
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 90;")
+            .unwrap();
+        old.migrate().expect("re-running 090 is safe");
+        assert_eq!(
+            old.list_catalogs().unwrap().len(),
+            1,
+            "no second personal row"
+        );
     }
 
     /// 034 on a database stopped at 033 with a host row: `transport` is

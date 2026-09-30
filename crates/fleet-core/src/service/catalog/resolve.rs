@@ -102,6 +102,9 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
     if ordered.is_empty() {
         return Resolution {
             catalog: Catalog {
+                id: catalog.id,
+                name: catalog.name.clone(),
+                org_id: catalog.org_id,
                 assets: catalog.assets.clone(),
                 problems: catalog.problems.clone(),
                 head: catalog.head.clone(),
@@ -179,6 +182,9 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
 
     Resolution {
         catalog: Catalog {
+            id: catalog.id,
+            name: catalog.name.clone(),
+            org_id: catalog.org_id,
             assets,
             problems,
             head: catalog.head.clone(),

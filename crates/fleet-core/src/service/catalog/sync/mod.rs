@@ -96,13 +96,10 @@ pub struct SyncRunSummary {
     pub hosts: Vec<HostSyncResult>,
 }
 
-/// The loaded catalog, cloned out of the global so nothing holds the
-/// `CATALOG` lock across an await.
+/// The loaded personal catalog, cloned out of the registry so nothing holds
+/// its lock across an await.
 fn catalog() -> Result<super::repo::Catalog, IpcError> {
-    let g = super::CATALOG
-        .read()
-        .map_err(|_| IpcError::new(codes::E_LOCK, "catalog lock poisoned"))?;
-    g.clone().ok_or_else(|| {
+    super::registry::personal()?.ok_or_else(|| {
         IpcError::new(
             super::E_CATALOG_NOT_CONFIGURED,
             "catalog not loaded; call catalog_load",
@@ -682,7 +679,7 @@ mod tests {
             std::fs::write(p, body).unwrap();
         }
         let cat = repo::load_dir(root).unwrap();
-        *super::super::CATALOG.write().unwrap() = Some(cat);
+        super::super::registry::install(cat).unwrap();
     }
 
     fn one_skill(body: &str) -> Vec<(&'static str, String)> {
@@ -787,9 +784,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn plan_sync_plans_every_scanning_harness_and_registers_the_plan() {
-        let _lock = super::super::CATALOG_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = super::super::lock_registry_for_test();
         let home = tempfile::tempdir().unwrap();
         let _home = HomeGuard(std::env::var("HOME").ok());
         std::env::set_var("HOME", home.path());
@@ -834,9 +829,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn plan_sync_rejects_an_unknown_host_alias() {
-        let _lock = super::super::CATALOG_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = super::super::lock_registry_for_test();
         let home = tempfile::tempdir().unwrap();
         let _home = HomeGuard(std::env::var("HOME").ok());
         std::env::set_var("HOME", home.path());
@@ -871,9 +864,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn plan_sync_with_a_known_host_alias_is_unchanged() {
-        let _lock = super::super::CATALOG_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = super::super::lock_registry_for_test();
         let home = tempfile::tempdir().unwrap();
         let _home = HomeGuard(std::env::var("HOME").ok());
         std::env::set_var("HOME", home.path());
@@ -933,9 +924,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn plan_sync_skips_an_unlayered_remote_host() {
-        let _lock = super::super::CATALOG_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = super::super::lock_registry_for_test();
         let repo_dir = tempfile::tempdir().unwrap();
         let files = one_skill("b\n");
         load_catalog(
@@ -990,9 +979,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn plan_sync_plans_the_resolved_catalog_but_scans_the_full_one() {
-        let _lock = super::super::CATALOG_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = super::super::lock_registry_for_test();
         let home = tempfile::tempdir().unwrap();
         let _home = HomeGuard(std::env::var("HOME").ok());
         std::env::set_var("HOME", home.path());
@@ -1054,9 +1041,7 @@ mod tests {
         // The `layered` flag must reach the planner per host: an unassigned
         // host keeps the pre-layers `Remove` for a plugin the catalog no
         // longer has, while a host with an assignment reports it as a `Noop`.
-        let _lock = super::super::CATALOG_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = super::super::lock_registry_for_test();
         let home = tempfile::tempdir().unwrap();
         let _home = HomeGuard(std::env::var("HOME").ok());
         std::env::set_var("HOME", home.path());
@@ -1109,9 +1094,7 @@ mod tests {
         // `Remove` — through resolve → Manifest::orphans, not special code.
         // Without the assignment, `t` is still in the effective catalog and
         // must NOT be removed.
-        let _lock = super::super::CATALOG_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = super::super::lock_registry_for_test();
         let home = tempfile::tempdir().unwrap();
         let _home = HomeGuard(std::env::var("HOME").ok());
         std::env::set_var("HOME", home.path());
@@ -1182,9 +1165,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn apply_sync_refuses_a_plan_blocked_on_missing_secrets() {
-        let _lock = super::super::CATALOG_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = super::super::lock_registry_for_test();
         let home = tempfile::tempdir().unwrap();
         let _home = HomeGuard(std::env::var("HOME").ok());
         std::env::set_var("HOME", home.path());
@@ -1244,9 +1225,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn plan_apply_and_replan_locally() {
-        let _lock = super::super::CATALOG_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = super::super::lock_registry_for_test();
         let home = tempfile::tempdir().unwrap();
         let _home = HomeGuard(std::env::var("HOME").ok());
         std::env::set_var("HOME", home.path());
@@ -1319,8 +1298,10 @@ mod tests {
     /// reported `skipped` / `cancelled`, no progress is emitted (there is
     /// no pair about to be applied, and the run never completes), and the
     /// run is still recorded so the history says how far it got.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn apply_sync_skips_every_pair_when_the_token_is_already_cancelled() {
+        let _lock = super::super::lock_registry_for_test();
         let bus = Arc::new(RecordingEventBus::new());
         let store = store_with_local(bus.clone());
         let ssh = Arc::new(SshClient::new());
@@ -1385,9 +1366,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn plan_sync_leaves_codex_out_on_a_host_that_turned_it_off() {
-        let _lock = super::super::CATALOG_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = super::super::lock_registry_for_test();
         let home = tempfile::tempdir().unwrap();
         let _home = HomeGuard(std::env::var("HOME").ok());
         std::env::set_var("HOME", home.path());
@@ -1431,9 +1410,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn plan_sync_plans_codex_where_auto_finds_it() {
-        let _lock = super::super::CATALOG_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = super::super::lock_registry_for_test();
         let home = tempfile::tempdir().unwrap();
         let _home = HomeGuard(std::env::var("HOME").ok());
         std::env::set_var("HOME", home.path());
@@ -1474,9 +1451,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn plan_sync_retires_codex_when_turned_off_but_still_managed() {
-        let _lock = super::super::CATALOG_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = super::super::lock_registry_for_test();
         let home = tempfile::tempdir().unwrap();
         let _home = HomeGuard(std::env::var("HOME").ok());
         std::env::set_var("HOME", home.path());
@@ -1530,9 +1505,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_host_skipped_before_its_scan_reports_claude_and_its_listed_harnesses() {
-        let _lock = super::super::CATALOG_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _lock = super::super::lock_registry_for_test();
         let _repo = load_one_skill();
         let store = store_with_local(Arc::new(RecordingEventBus::new()));
         {

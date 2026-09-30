@@ -129,6 +129,15 @@ impl Default for TargetOverride {
     }
 }
 
+/// Who may receive an asset (Assets S1b). See `Header::scope`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    #[default]
+    Private,
+    Shared,
+}
+
 /// Fields shared by every asset kind.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Header {
@@ -155,6 +164,13 @@ pub struct Header {
     /// `plugin_ref`. See `Asset::install_name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_as: Option<String>,
+    /// Who may receive this asset (Assets S1b). Only meaningful in the
+    /// personal catalog: `private` never reaches an org-bound host,
+    /// `shared` may. Assets in an org catalog are org-scoped regardless.
+    /// Always present in the JSON API; omitted from `asset.yaml` when
+    /// private (the default), so existing files stay unchanged.
+    #[serde(default)]
+    pub scope: Scope,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub targets: BTreeMap<String, TargetOverride>,
 }
@@ -338,6 +354,12 @@ impl Serialize for AssetFile {
         // `asset.yaml` clean.
         if matches!(map.get("tags"), Some(serde_yaml::Value::Sequence(s)) if s.is_empty()) {
             map.remove("tags");
+        }
+        // `Header::scope` likewise always serialises in `Asset`'s JSON but
+        // is stripped from the on-disk YAML when it's the default
+        // (`private`), so existing `asset.yaml` files stay unchanged.
+        if matches!(map.get("scope"), Some(serde_yaml::Value::String(s)) if s == "private") {
+            map.remove("scope");
         }
         serde_yaml::Value::Mapping(map).serialize(serializer)
     }
@@ -974,5 +996,41 @@ version: "6.3.0"
         assert_eq!(Kind::PluginRef.dir(), "plugins");
         assert_eq!(Kind::from_dir("agents"), Some(Kind::Agent));
         assert_eq!(Kind::Hook.as_str(), "hook");
+    }
+
+    #[test]
+    fn scope_defaults_to_private_and_is_not_written_to_yaml() {
+        let a =
+            Asset::from_yaml(Some(Kind::Skill), "kind: skill\nname: s\ndescription: d\n").unwrap();
+        assert_eq!(a.header.scope, Scope::Private);
+        let yaml = a.to_yaml();
+        assert!(!yaml.contains("scope"), "{yaml}");
+    }
+
+    #[test]
+    fn shared_scope_round_trips_through_yaml() {
+        let a = Asset::from_yaml(
+            Some(Kind::Skill),
+            "kind: skill\nname: s\ndescription: d\nscope: shared\n",
+        )
+        .unwrap();
+        assert_eq!(a.header.scope, Scope::Shared);
+        let yaml = a.to_yaml();
+        assert!(yaml.contains("scope: shared"), "{yaml}");
+        assert_eq!(
+            Asset::from_yaml(Some(Kind::Skill), &yaml)
+                .unwrap()
+                .header
+                .scope,
+            Scope::Shared
+        );
+    }
+
+    #[test]
+    fn the_json_api_always_carries_scope() {
+        let a =
+            Asset::from_yaml(Some(Kind::Skill), "kind: skill\nname: s\ndescription: d\n").unwrap();
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["scope"], "private");
     }
 }

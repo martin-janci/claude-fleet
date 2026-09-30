@@ -328,6 +328,7 @@ fn catalog_admin_apply_sync_drops_the_callers_call_id() {
 /// exactly as the `apply_sync` tool does.
 #[test]
 fn catalog_admin_refreshes_the_catalog_for_every_call_but_config_load_and_apply_sync() {
+    let _g = crate::service::catalog::lock_registry_for_test();
     let s = Store::open_in_memory().unwrap();
     s.set_catalog_config("/nonexistent/claude-fleet-catalog-test", None)
         .unwrap();

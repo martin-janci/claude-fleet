@@ -3,7 +3,7 @@
 use super::harness::claude::{hook_asset_name, unmap_event, unmap_tier, unmap_tool};
 use super::model::{
     is_valid_install_name, is_valid_name, Asset, AssetSpec, Header, HookAction, HookMatch, Kind,
-    Marketplace, Problem, Resource, Source, TargetOverride,
+    Marketplace, Problem, Resource, Scope, Source, TargetOverride,
 };
 use super::repo::{asset_path, write_asset};
 use super::E_ASSET_EXISTS;
@@ -267,6 +267,7 @@ fn header(
         // it. Hooks and plugin refs never call `apply_install_as`, so it
         // stays `None` for them.
         install_as: None,
+        scope: Scope::Private,
         targets: BTreeMap::new(),
     }
 }

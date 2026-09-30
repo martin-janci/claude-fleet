@@ -24,10 +24,14 @@ export interface AssetInventoryRow {
 }
 export interface HostState { host_alias: string; harness: string; state: string }
 export interface Problem { path: string; message: string }
+/** Assets S1b: who may receive an asset. */
+export type AssetScope = 'private' | 'shared';
 export interface AssetSummary {
   kind: string; name: string; version: string; description: string; tags: string[]; hosts: HostState[];
   /** The identifier the asset installs under, when it differs from `name`. */
   install_as?: string;
+  /** Optional because an older hub (pre-M1) omits the key. */
+  scope?: AssetScope;
 }
 /** Assets S1a (Task 3/4): `unmanaged` rows grouped per (kind, name) and
  *  classified server-side. Optional because older hubs (pre-migration 087)
@@ -93,6 +97,11 @@ export interface EditableAsset {
    *  accepts either an absent key or an explicit `null` back (`Option<String>`
    *  with `#[serde(default, skip_serializing_if = "Option::is_none")]`). */
   install_as?: string | null;
+  /** Assets S1b: who may receive this asset. Absent means `private` (the
+   *  default); the index signature already round-trips it through
+   *  `updateAsset` like any other field this UI has no dedicated control
+   *  for — declared explicitly here only for the type. */
+  scope?: AssetScope;
   body: string;
   resources?: ResourceRef[];
   [key: string]: unknown;

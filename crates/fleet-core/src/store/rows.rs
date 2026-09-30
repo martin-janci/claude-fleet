@@ -1176,6 +1176,19 @@ pub struct CatalogConfigRow {
     pub last_loaded_at: Option<i64>,
 }
 
+/// A catalog: a source with an owner (migration 090). `org_id: None` is the
+/// personal catalog — exactly one such row exists (schema `CHECK`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CatalogRow {
+    pub id: i64,
+    pub name: String,
+    pub repo_path: String,
+    pub remote_url: Option<String>,
+    pub org_id: Option<i64>,
+    pub head_commit: Option<String>,
+    pub last_loaded_at: Option<i64>,
+}
+
 /// Drift state of one catalog asset on one host for one harness
 /// (migration 030). `state` is one of in_sync | drifted | missing |
 /// unmanaged | unsupported.

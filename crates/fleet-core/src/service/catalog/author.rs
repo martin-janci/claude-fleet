@@ -6,7 +6,8 @@
 //! Every operation resolves the repo root from the stored catalog config,
 //! performs the write, stages only the paths it touched, auto-commits with a
 //! generated `catalog: …` message, and ends with `catalog::load(false)` so
-//! `CATALOG` and the UI refresh through the existing `catalog:loaded` event.
+//! the registry and the UI refresh through the existing `catalog:loaded`
+//! event.
 
 // This module is the service layer for the twelve `catalog_*` authoring
 // commands in `commands/assets.rs`.
@@ -15,13 +16,14 @@ use super::harness::codex::CODEX_SKILLS_DIR;
 use super::harness::HARNESS_IDS;
 use super::layer::{Axis, Layer};
 use super::model::{
-    find_placeholders, Asset, AssetSpec, Header, HookAction, Kind, Marketplace, Problem,
+    find_placeholders, Asset, AssetSpec, Header, HookAction, Kind, Marketplace, Problem, Scope,
 };
+use super::registry;
 use super::repo::{self, Catalog, RepoStatus};
 use super::sync::secrets::{BUILTIN_PORT, BUILTIN_TOKEN};
 use super::validate::{check_layer_name, check_name, check_resource_path};
-use super::{CATALOG, E_ASSET_NOT_FOUND, E_CATALOG_GIT, E_LINT};
-use crate::ipc_error::codes::{E_INVALID, E_LOCK, E_SERIALIZE};
+use super::{E_ASSET_NOT_FOUND, E_CATALOG_GIT, E_LINT};
+use crate::ipc_error::codes::{E_INVALID, E_SERIALIZE};
 use crate::ipc_error::IpcError;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -45,6 +47,7 @@ pub fn template(kind: Kind, name: &str) -> Asset {
         tags: Vec::new(),
         source: None,
         install_as: None,
+        scope: Scope::Private,
         targets: Default::default(),
     };
     match kind {
@@ -617,20 +620,25 @@ fn check_has_resources(kind: Kind) -> Result<(), IpcError> {
     }
 }
 
-/// A clone of the named asset out of the loaded `CATALOG`.
+/// A clone of the named asset out of the loaded personal catalog. Borrows
+/// via `with_personal` rather than `registry::personal()?` so only the one
+/// matching `Asset` is ever cloned, not the whole catalog (every other
+/// asset's `resources`, base64'd bytes included). An unloaded catalog and a
+/// present-but-missing asset are the same answer here, same as before this
+/// module read a registry at all: `E_ASSET_NOT_FOUND`, never
+/// `E_CATALOG_NOT_CONFIGURED`.
 fn catalog_asset(kind: Kind, name: &str) -> Result<Asset, IpcError> {
-    let guard = CATALOG
-        .read()
-        .map_err(|_| IpcError::new(E_LOCK, "catalog lock poisoned"))?;
-    guard
-        .as_ref()
-        .and_then(|c| c.find(kind, name).cloned())
-        .ok_or_else(|| {
-            IpcError::new(
-                E_ASSET_NOT_FOUND,
-                format!("{} {name} is not in the catalog", kind.as_str()),
-            )
-        })
+    let not_found = || {
+        IpcError::new(
+            E_ASSET_NOT_FOUND,
+            format!("{} {name} is not in the catalog", kind.as_str()),
+        )
+    };
+    match registry::with_personal(|c| Ok(c.find(kind, name).cloned())) {
+        Ok(found) => found.ok_or_else(not_found),
+        Err(e) if e.code == super::E_CATALOG_NOT_CONFIGURED => Err(not_found()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Lint against the catalog as currently loaded (an unloaded catalog lints
@@ -638,9 +646,9 @@ fn catalog_asset(kind: Kind, name: &str) -> Result<Asset, IpcError> {
 fn lint_in_repo(asset: &Asset, root: &Path) -> LintReport {
     let names = secrets_example_names(root);
     let exists = root.join(SECRETS_EXAMPLE).exists();
-    let guard = CATALOG.read().ok();
+    let loaded = registry::personal().ok().flatten();
     let empty = Catalog::default();
-    let catalog = guard.as_ref().and_then(|g| g.as_ref()).unwrap_or(&empty);
+    let catalog = loaded.as_ref().unwrap_or(&empty);
     lint(asset, catalog, &names, exists)
 }
 
@@ -817,15 +825,15 @@ fn resource_message(kind: Kind, name: &str) -> String {
 }
 
 // Both resource operations rewrite the whole asset from the copy in the
-// in-memory `CATALOG` — its `resources` carry the bytes `load_dir` read, so
+// in-memory registry — its `resources` carry the bytes `load_dir` read, so
 // an overwrite reproduces the untouched files and prunes the rest. That
-// assumes `CATALOG` matches the working tree: it holds what the last
-// `catalog::load` saw, every authoring operation ends with one, and the
-// sequence here is synchronous, so the window in which someone could edit
-// the repo underneath is a single operation. A concurrent outside edit to
-// another of *this asset's* files would be reverted by the rewrite (and show
-// up in the commit); anything else in the repo is untouched, because only
-// this asset's path is ever staged.
+// assumes the registry's personal catalog matches the working tree: it
+// holds what the last `catalog::load` saw, every authoring operation ends
+// with one, and the sequence here is synchronous, so the window in which
+// someone could edit the repo underneath is a single operation. A
+// concurrent outside edit to another of *this asset's* files would be
+// reverted by the rewrite (and show up in the commit); anything else in the
+// repo is untouched, because only this asset's path is ever staged.
 
 /// Resources are base64'd whole into the asset's YAML and committed to the
 /// catalog repo, which is synced to every host — a large pick silently
@@ -1006,19 +1014,17 @@ pub fn lint_asset(args: AssetRef, store: &Mutex<Store>) -> Result<LintReport, Ip
 
 pub fn lint_everything(store: &Mutex<Store>) -> Result<LintAll, IpcError> {
     let root = repo_root(store)?;
-    let guard = CATALOG
-        .read()
-        .map_err(|_| IpcError::new(E_LOCK, "catalog lock poisoned"))?;
+    let loaded = registry::personal()?;
     let empty = Catalog::default();
-    let catalog = guard.as_ref().unwrap_or(&empty);
+    let catalog = loaded.as_ref().unwrap_or(&empty);
     Ok(lint_all(catalog, &root))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::catalog::lock_registry_for_test;
     use crate::service::catalog::model::{Resource, Source, TargetOverride};
-    use crate::service::catalog::CATALOG_TEST_LOCK;
     use std::path::PathBuf;
 
     // ------------------------------------------------------------ helpers
@@ -1555,7 +1561,7 @@ mod tests {
 
     #[test]
     fn create_update_delete_round_trip() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("roundtrip");
         let store = configured_store(&root);
 
@@ -1641,7 +1647,7 @@ mod tests {
 
     #[test]
     fn update_refuses_on_lint_errors_and_writes_nothing() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("lintrefuse");
         let store = configured_store(&root);
         create(
@@ -1688,7 +1694,7 @@ mod tests {
     /// of its own (which is what a whole-tree check would have done).
     #[test]
     fn update_with_no_change_is_a_no_op_even_with_the_tree_dirty() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("noop");
         let store = configured_store(&root);
         create(
@@ -1745,7 +1751,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resources_add_and_remove_commit_and_prune() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("resources");
         let store = configured_store(&root);
         create(
@@ -1906,7 +1912,7 @@ mod tests {
 
     #[test]
     fn add_resource_refuses_a_file_over_the_size_cap() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("resources-cap");
         let store = configured_store(&root);
         create(
@@ -1944,7 +1950,7 @@ mod tests {
 
     #[test]
     fn duplicate_from_copies_body_and_resources() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("duplicate");
         let store = configured_store(&root);
         create(
@@ -2016,7 +2022,7 @@ mod tests {
 
     #[test]
     fn commit_pending_commits_a_dirty_tree_and_errors_when_clean() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("pending");
         let store = configured_store(&root);
         assert_eq!(
@@ -2052,7 +2058,7 @@ mod tests {
 
     #[test]
     fn push_to_a_bare_remote_updates_ahead_count() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("push");
         let bare = tmp("push-remote");
         git(&bare, &["init", "-q", "--bare", "-b", "main"]);
@@ -2086,7 +2092,7 @@ mod tests {
 
     #[test]
     fn lint_asset_and_lint_everything_read_the_loaded_catalog() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("lintops");
         let store = configured_store(&root);
         create(
@@ -2132,10 +2138,8 @@ mod tests {
     // ------------------------------------------------------------- layers
 
     fn catalog_layer(name: &str) -> Option<crate::service::catalog::layer::Layer> {
-        CATALOG
-            .read()
+        registry::personal()
             .unwrap()
-            .as_ref()
             .and_then(|c| c.layers.get(name).cloned())
     }
 
@@ -2163,7 +2167,7 @@ mod tests {
 
     #[test]
     fn write_layer_creates_then_updates_commit_and_reload() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("layer-write");
         let store = configured_store(&root);
 
@@ -2199,7 +2203,7 @@ mod tests {
     /// tree or the repo history.
     #[test]
     fn write_layer_refuses_a_key_in_both_members_and_exclude() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("layer-write-clash");
         let store = configured_store(&root);
         let before = subjects(&root);
@@ -2217,7 +2221,7 @@ mod tests {
 
     #[test]
     fn write_layer_refuses_a_malformed_key() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("layer-write-malformed");
         let store = configured_store(&root);
         let before = subjects(&root);
@@ -2234,7 +2238,7 @@ mod tests {
 
     #[test]
     fn delete_layer_removes_commits_and_reloads() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("layer-delete");
         let store = configured_store(&root);
         write_layer(&layer_template("workstation", Axis::Role), &store).unwrap();

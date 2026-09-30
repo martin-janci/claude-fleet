@@ -201,6 +201,24 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   Host detail's Codex control) sets it; `claude` cannot be removed. Codex
   renders agents to `~/.codex/agents/<install name>.toml` via the `toml`
   crate.
+- **Assets M1 — catalogs table** (plan
+  `docs/superpowers/plans/2026-09-30-assets-m1-catalogs.md`, spec
+  `docs/superpowers/specs/2026-09-30-assets-s1b-s2-design.md`): a catalog is
+  now a row in the `catalogs` table (migration 090, `org_id IS NULL` for the
+  personal one), not the old singleton `catalog_config` — which stays in the
+  schema but is no longer read. The existing config API
+  (`get_catalog_config`/`set_catalog_config`/`set_catalog_head`) and
+  `fleet-hub catalog set` keep their old shape and now address the
+  `personal` row. Loaded catalogs live in `service/catalog/registry.rs`
+  (`personal()`, `with_personal`, `get(id)`), which replaces the single
+  process-global `Option<Catalog>`; registry then store is allowed (the
+  `resolve_preview` path); store then registry is never allowed — read
+  store rows first, release the guard, then take the registry. Assets
+  carry `scope: private |
+  shared` (private by default, omitted from `asset.yaml` when private,
+  always present in the JSON API and on `AssetSummary`) — meaningful only in
+  the personal catalog, since an org catalog's assets are org-scoped
+  regardless.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. Only one PTY is attached at a time.
