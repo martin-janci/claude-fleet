@@ -96,9 +96,11 @@ mod tests {
     use std::sync::Mutex;
 
     /// FKs are ON, so `local` must exist before an assignment references it.
+    /// `set_host_layers` now also needs a personal catalog to target.
     fn store_with_local() -> Store {
         let s = Store::open_in_memory().expect("open");
         s.upsert_host("local").expect("host");
+        s.set_catalog_config("/p", None).expect("personal catalog");
         s
     }
 
@@ -249,11 +251,12 @@ mod tests {
         let store = Mutex::new(store_with_local());
         {
             let s = store.lock().unwrap();
+            let personal = s.personal_catalog().unwrap().unwrap().id;
             s.conn_ref()
                 .execute(
-                    "INSERT INTO host_layers (host_alias, layer_name, axis, position, active) \
-                     VALUES ('local', 'core', 'bogus', 0, 1)",
-                    [],
+                    "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis, position, active) \
+                     VALUES ('local', ?1, 'core', 'bogus', 0, 1)",
+                    [personal],
                 )
                 .unwrap();
         }
@@ -269,11 +272,12 @@ mod tests {
         {
             let s = store.lock().unwrap();
             s.set_host_layers("local", Some("core"), &[]).unwrap();
+            let personal = s.personal_catalog().unwrap().unwrap().id;
             s.conn_ref()
                 .execute(
-                    "INSERT INTO host_layers (host_alias, layer_name, axis, position, active) \
-                     VALUES ('local', 'extra', 'bogus', 0, 1)",
-                    [],
+                    "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis, position, active) \
+                     VALUES ('local', ?1, 'extra', 'bogus', 0, 1)",
+                    [personal],
                 )
                 .unwrap();
         }

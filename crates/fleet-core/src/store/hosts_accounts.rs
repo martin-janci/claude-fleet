@@ -1381,6 +1381,7 @@ mod tests {
     fn delete_host_removes_its_layer_assignment() {
         let s = Store::open_in_memory().unwrap();
         s.insert_host("h", Some("h")).unwrap();
+        s.set_catalog_config("/p", None).unwrap();
         s.set_host_layers("h", Some("workstation"), &["papayapos"])
             .unwrap();
         assert_eq!(s.get_host_layers("h").unwrap().len(), 2);

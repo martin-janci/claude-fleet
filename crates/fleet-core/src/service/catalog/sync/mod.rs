@@ -756,6 +756,8 @@ mod tests {
                 Some(&["claude".to_string(), "codex".to_string()][..]),
             )
             .unwrap();
+            // `set_host_layers` now targets the personal catalog.
+            s.set_catalog_config("/p", None).unwrap();
         }
         store
     }

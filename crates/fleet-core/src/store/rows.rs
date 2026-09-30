@@ -1210,6 +1210,10 @@ pub struct AssetInventoryRow {
     /// Fleet provisioned it: its own hooks, MCP entry or skills (087).
     #[serde(default)]
     pub fleet_owned: bool,
+    /// Which catalog this asset came from (migration 091). `None` for an
+    /// `unmanaged`/`orphan` row, which names nothing the catalog defines.
+    #[serde(default)]
+    pub catalog_id: Option<i64>,
 }
 
 /// A secret name known to the sync engine (migration 031). Never carries the

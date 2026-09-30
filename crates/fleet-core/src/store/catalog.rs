@@ -122,13 +122,14 @@ impl Store {
         )?;
         for r in rows {
             tx.execute(
-                "INSERT INTO asset_inventory (host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO asset_inventory (host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned, catalog_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 rusqlite::params![
                     host_alias, harness, r.kind, r.name, r.state, r.catalog_hash, r.host_hash, r.scanned_at,
                     if r.managed { 1 } else { 0 },
                     if r.secret_like { 1 } else { 0 },
                     if r.fleet_owned { 1 } else { 0 },
+                    r.catalog_id,
                 ],
             )?;
         }
@@ -142,7 +143,7 @@ impl Store {
 
     pub fn list_inventory(&self) -> Result<Vec<AssetInventoryRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned
+            "SELECT host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned, catalog_id
              FROM asset_inventory ORDER BY host_alias, harness, kind, name",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -158,6 +159,7 @@ impl Store {
                 managed: row.get::<_, i64>(8)? != 0,
                 secret_like: row.get::<_, i64>(9)? != 0,
                 fleet_owned: row.get::<_, i64>(10)? != 0,
+                catalog_id: row.get(11)?,
             })
         })?;
         rows.collect()
@@ -391,6 +393,7 @@ mod tests {
             managed: false,
             secret_like: false,
             fleet_owned: false,
+            catalog_id: None,
         };
         s.replace_host_inventory(
             "local",
@@ -481,6 +484,7 @@ mod tests {
             managed: false,
             secret_like: true,
             fleet_owned: true,
+            catalog_id: None,
         };
         s.replace_host_inventory(
             "local",

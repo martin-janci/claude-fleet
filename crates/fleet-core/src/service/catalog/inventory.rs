@@ -523,6 +523,7 @@ pub fn compute_states(
                 managed: false,
                 secret_like: a.secret_like,
                 fleet_owned: a.fleet_owned,
+                catalog_id: None,
             });
         }
     }

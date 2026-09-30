@@ -1214,14 +1214,21 @@ mod tests {
         let _g = lock_registry_for_test();
         let store = configured_store_with_layers("ll-active");
         set_host_layers("local", Some("core"), &[], &store).unwrap();
+        let personal = store
+            .lock()
+            .unwrap()
+            .personal_catalog()
+            .unwrap()
+            .unwrap()
+            .id;
         store
             .lock()
             .unwrap()
             .conn_ref()
             .execute(
-                "INSERT INTO host_layers (host_alias, layer_name, axis, position, active) \
-                 VALUES ('local', 'extra', 'context', 0, 0)",
-                [],
+                "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis, position, active) \
+                 VALUES ('local', ?1, 'extra', 'context', 0, 0)",
+                [personal],
             )
             .unwrap();
 

@@ -4468,7 +4468,7 @@ fn catalog_admin_cases() -> Vec<Case> {
             "catalog_list_layers",
             "catalog_admin",
             json!({ "action": "list_layers" }),
-            Box::leak(format!(r#"{{"layers":[{layer}],"hosts":[{{"host_alias":"nas","layer_name":"core","axis":"role","position":0,"active":true}}]}}"#).into_boxed_str()),
+            Box::leak(format!(r#"{{"layers":[{layer}],"hosts":[{{"host_alias":"nas","catalog_id":1,"layer_name":"core","axis":"role","position":0,"active":true}}]}}"#).into_boxed_str()),
             Box::new(|b, s, _| block_on(r::catalog_list_layers(b, s)).map(|_| ())),
         ),
         (
@@ -4499,7 +4499,7 @@ fn catalog_admin_cases() -> Vec<Case> {
             "catalog_admin",
             json!({ "action": "set_host_layers",
                     "args": { "host_alias": "nas", "role": "core", "contexts": ["gpu"] } }),
-            r#"[{"host_alias":"nas","layer_name":"core","axis":"role","position":0,"active":true}]"#,
+            r#"[{"host_alias":"nas","catalog_id":1,"layer_name":"core","axis":"role","position":0,"active":true}]"#,
             Box::new(|b, s, _| {
                 block_on(r::catalog_set_host_layers(
                     b,

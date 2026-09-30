@@ -393,6 +393,18 @@ fn work_items_has_origin(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 091 (`catalog_id` on
+/// `asset_inventory`; `host_layers` is rebuilt unconditionally by the same
+/// migration, keyed off this column since `ADD COLUMN` is not idempotent).
+fn asset_inventory_has_catalog_id(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('asset_inventory') WHERE name = 'catalog_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 087 (`secret_like` / `fleet_owned`
 /// on `asset_inventory`).
 fn asset_inventory_has_fleet_owned(conn: &Connection) -> rusqlite::Result<bool> {
@@ -979,6 +991,13 @@ const MIGRATIONS: &[Migration] = &[
     // Assets S1b M1: `catalogs`, backfilled from `catalog_config` as
     // `personal`. CREATE IF NOT EXISTS + INSERT OR IGNORE: safe to re-run.
     Migration::plain(90, include_str!("../../migrations/090_catalogs.sql")),
+    // Assets S1b M2: `catalog_id` on `host_layers` (rebuilt) and
+    // `asset_inventory`.
+    Migration {
+        version: 91,
+        sql: include_str!("../../migrations/091_catalog_ids.sql"),
+        already_applied: Some(asset_inventory_has_catalog_id),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -2308,6 +2327,44 @@ mod tests {
         );
     }
 
+    /// 091 on a database stopped at 090: existing host_layers rows and managed
+    /// inventory rows get the personal catalog's id; a re-run is safe.
+    #[test]
+    fn migration_91_backfills_catalog_ids() {
+        let old = Store::open_in_memory().expect("open");
+        old.set_catalog_config("/p", None).unwrap();
+        let personal = old.personal_catalog().unwrap().unwrap().id;
+        old.upsert_host("h").unwrap();
+        // Recreate the 090 shape of host_layers and drop the new inventory column.
+        old.conn
+            .execute_batch(
+                "DROP TABLE host_layers;\
+                 CREATE TABLE host_layers (host_alias TEXT NOT NULL REFERENCES hosts(alias), layer_name TEXT NOT NULL, \
+                   axis TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, \
+                   PRIMARY KEY (host_alias, layer_name));\
+                 INSERT INTO host_layers (host_alias, layer_name, axis) VALUES ('h', 'core', 'role');\
+                 ALTER TABLE asset_inventory DROP COLUMN catalog_id;\
+                 INSERT INTO asset_inventory (host_alias, harness, kind, name, state, scanned_at, managed) \
+                   VALUES ('h','claude','skill','a','in_sync',1,1), ('h','claude','skill','u','unmanaged',1,0);\
+                 DELETE FROM schema_version WHERE version >= 91;",
+            )
+            .unwrap();
+        old.migrate().expect("091");
+        let rows = old.get_host_layers_for("h", personal).unwrap();
+        assert_eq!(rows.len(), 1);
+        let inv = old.list_inventory().unwrap();
+        assert_eq!(
+            inv.iter().find(|r| r.name == "a").unwrap().catalog_id,
+            Some(personal)
+        );
+        assert_eq!(inv.iter().find(|r| r.name == "u").unwrap().catalog_id, None);
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 91;")
+            .unwrap();
+        old.migrate().expect("re-running 091 is safe");
+        assert_eq!(old.get_host_layers("h").unwrap().len(), 1);
+    }
+
     /// 034 on a database stopped at 033 with a host row: `transport` is
     /// added, defaulting to `ssh` for the existing row. Rolling the recorded
     /// version back and migrating again (tests do this to simulate re-running
@@ -2328,6 +2385,12 @@ mod tests {
                 "INSERT INTO host_layers (host_alias, layer_name, axis) \
                  VALUES ('h', 'base', 'role');",
             )
+            .unwrap();
+        // 091 attaches a pre-existing host_layers row to the personal
+        // catalog; without a `catalog_config` row to seed it, 090 creates no
+        // personal catalog and the row would be dropped by 091's rebuild.
+        old.conn
+            .execute_batch("INSERT INTO catalog_config (id, repo_path) VALUES (1, '/p');")
             .unwrap();
         old.migrate().expect("merged head on a released main DB");
         assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
@@ -2377,16 +2440,22 @@ mod tests {
         old.conn
             .execute_batch("INSERT INTO hosts (alias) VALUES ('h');")
             .unwrap();
+        // host_layers now carries a NOT NULL catalog_id (091): a catalog
+        // must exist before a row can reference one.
+        old.set_catalog_config("/p", None).unwrap();
+        let personal = old.personal_catalog().unwrap().unwrap().id;
         old.conn
-            .execute_batch(
-                "INSERT INTO host_layers (host_alias, layer_name, axis) \
-                 VALUES ('h', 'base', 'role');",
+            .execute(
+                "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis) \
+                 VALUES ('h', ?1, 'base', 'role');",
+                [personal],
             )
             .expect("host_layers exists and accepts a row");
         // …and its unique-active-role index came with it.
-        let err = old.conn.execute_batch(
-            "INSERT INTO host_layers (host_alias, layer_name, axis) \
-             VALUES ('h', 'other', 'role');",
+        let err = old.conn.execute(
+            "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis) \
+             VALUES ('h', ?1, 'other', 'role');",
+            [personal],
         );
         assert!(err.is_err(), "the active-role index is in place");
         // The column the branch had already added was not added twice.
