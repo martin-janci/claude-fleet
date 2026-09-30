@@ -330,6 +330,33 @@ impl FleetTools {
         .map_err(to_mcp_err)?;
         ok_json(&out)
     }
+
+    #[tool(description = "Choose which harnesses the asset catalog syncs \
+        on one host. harnesses null = auto: Claude, plus Codex where a scan \
+        finds the codex CLI or ~/.codex, or where fleet already manages \
+        Codex assets. Otherwise a list that must include \"claude\"; \
+        [\"claude\"] turns Codex off, and the next sync then removes what \
+        fleet installed for Codex there. Edits fleet state only. Master \
+        token only.")]
+    pub(super) async fn set_host_harnesses(
+        &self,
+        Parameters(p): Parameters<SetHostHarnessesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Master-only, like set_host_layers (`guard::TOOL_POLICIES`): which
+        // harnesses a host serves decides what the NEXT apply_sync writes to
+        // — or removes from — its filesystem.
+        audit(
+            "set_host_harnesses",
+            &format!("host_alias={} harnesses={:?}", p.host_alias, p.harnesses),
+        );
+        let row = catalog::harness_set::set_host_harnesses(
+            &p.host_alias,
+            p.harnesses.as_deref(),
+            &self.store,
+        )
+        .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
 }
 
 impl FleetTools {

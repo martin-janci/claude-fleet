@@ -21,9 +21,11 @@
 use super::harness::{HostSnapshot, HARNESS_IDS};
 use super::repo::Catalog;
 use super::sync::manifest::Manifest;
-use crate::ipc_error::codes::E_INVALID;
-use crate::ipc_error::IpcError;
+use crate::ipc_error::codes::{E_INVALID, E_NOTFOUND};
+use crate::ipc_error::{lock, IpcError};
+use crate::store::{HostRow, Store};
 use std::sync::LazyLock;
+use std::sync::Mutex;
 
 /// The harness no host can turn off in F3a: fleet's own sessions, hooks,
 /// MCP entry and provisioned skills are Claude's.
@@ -131,6 +133,25 @@ pub fn normalize_harnesses(list: &[String]) -> Result<Vec<String>, IpcError> {
         .filter(|id| list.iter().any(|h| h == *id))
         .map(|id| id.to_string())
         .collect())
+}
+
+/// Set a host's harness choice: `None` = auto, `Some` = an explicit list
+/// (checked and ordered by [`normalize_harnesses`]; `claude` required).
+/// Edits fleet state only — the next `plan_sync` follows it. Returns the
+/// host's new row. The `set_host_harnesses` MCP tool, `catalog_admin`'s
+/// `set_host_harnesses` action and the `catalog_set_host_harnesses`
+/// desktop command all land here.
+pub fn set_host_harnesses(
+    host_alias: &str,
+    harnesses: Option<&[String]>,
+    store: &Mutex<Store>,
+) -> Result<HostRow, IpcError> {
+    crate::validate::host_alias(host_alias)?;
+    let normalized = harnesses.map(normalize_harnesses).transpose()?;
+    let s = lock(store)?;
+    s.set_host_harnesses(host_alias, normalized.as_deref())?;
+    s.get_host_row(host_alias)?
+        .ok_or_else(|| IpcError::new(E_NOTFOUND, format!("host {host_alias} not found")))
 }
 
 #[cfg(test)]
@@ -271,5 +292,42 @@ mod tests {
         let err = normalize_harnesses(&list(&["claude", "gemini"])).unwrap_err();
         assert_eq!(err.code, "E_INVALID");
         assert!(err.message.contains("gemini"), "{}", err.message);
+    }
+
+    #[test]
+    fn set_host_harnesses_normalises_validates_and_clears() {
+        let store = std::sync::Mutex::new(crate::store::Store::open_in_memory().unwrap());
+        store.lock().unwrap().insert_host("h", Some("h")).unwrap();
+        let row = set_host_harnesses(
+            "h",
+            Some(list(&["codex", "claude", "codex"]).as_slice()),
+            &store,
+        )
+        .unwrap();
+        assert_eq!(row.harnesses, Some(list(&["claude", "codex"])));
+        let err = set_host_harnesses("h", Some(list(&["codex"]).as_slice()), &store).unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+        let err = set_host_harnesses("h", Some(list(&["claude", "gemini"]).as_slice()), &store)
+            .unwrap_err();
+        assert_eq!(err.code, "E_INVALID");
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .get_host_row("h")
+                .unwrap()
+                .unwrap()
+                .harnesses,
+            Some(list(&["claude", "codex"])),
+            "a refused call writes nothing"
+        );
+        assert_eq!(
+            set_host_harnesses("h", None, &store).unwrap().harnesses,
+            None
+        );
+        assert_eq!(
+            set_host_harnesses("ghost", None, &store).unwrap_err().code,
+            "E_NOTFOUND"
+        );
     }
 }

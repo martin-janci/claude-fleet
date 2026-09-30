@@ -285,6 +285,7 @@ fn layer_read_tools_are_readonly_and_the_setter_is_not() {
     assert!(is_readonly_tool("resolve_preview"));
     assert!(is_readonly_tool("propose_layers"));
     assert!(!is_readonly_tool("set_host_layers"));
+    assert!(!is_readonly_tool("set_host_harnesses"));
 }
 
 #[test]
@@ -337,6 +338,7 @@ fn fleet_admin_tools_are_master_only() {
         "apply_sync",
         "set_secret",
         "set_host_layers",
+        "set_host_harnesses",
     ] {
         let err = enforce_admin(&full, t).expect_err(t);
         assert!(
@@ -2157,7 +2159,7 @@ fn capture_default_cap_matches_docs() {
 /// 89; `rewind_conversation`: 90; `add_project` / `list_github_repos`: 92;
 /// `catalog_admin`, and host identity & health's `merge_host` and
 /// `forget_project`: 95; `update_status` / `update_admin`: 97; `session_tool_detail`: 98 (102 with
-/// the tools main added alongside it).)
+/// the tools main added alongside it; multi-harness F3a's `set_host_harnesses`: 103.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -2179,7 +2181,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 102);
+    assert_eq!(served, 103);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3423,8 +3425,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// +139 bytes). Measured at 68,519 on 2026-09-30 after asset catalog
     /// S1a Task 7 (`plan_sync`'s description and `PlanSyncParams` grew the
     /// `allow_unlayered` escape hatch for a remote host with no layers,
-    /// +224 bytes).
-    const BUDGET_BYTES: usize = 68_619;
+    /// +224 bytes). Measured at 69,180 on 2026-09-30 after multi-harness F3a
+    /// (`set_host_harnesses` and its `catalog_admin` action).
+    const BUDGET_BYTES: usize = 69_280;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

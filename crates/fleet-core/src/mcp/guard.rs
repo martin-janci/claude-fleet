@@ -923,6 +923,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Multi-harness F3a: which harnesses a host serves decides what the NEXT
+    // apply_sync writes to (or removes from) its filesystem — the same
+    // reasoning as set_host_layers.
+    ToolPolicy {
+        name: "set_host_harnesses",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Host-reboot recovery. `discover_lost_sessions` scans a host's Claude
     // transcripts and enriches the candidates from the store — no ssh writes
     // and no store writes, so a readonly token may call it; it walks a

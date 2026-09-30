@@ -379,3 +379,64 @@ fn the_action_param_names_every_admin_call() {
         );
     }
 }
+
+/// Multi-harness F3a: the tool sets, normalises and clears a host's harness
+/// choice; `catalog_admin` reaches the same function (the way a granted
+/// desktop does); a per-host token is refused.
+#[tokio::test]
+async fn set_host_harnesses_sets_normalises_and_clears() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let t = tools(s);
+    let harnesses_of = |t: &FleetTools| {
+        t.store
+            .lock()
+            .unwrap()
+            .get_host_row("local")
+            .unwrap()
+            .unwrap()
+            .harnesses
+    };
+
+    t.set_host_harnesses(Parameters(SetHostHarnessesParams {
+        host_alias: "local".into(),
+        harnesses: Some(vec!["codex".into(), "claude".into()]),
+    }))
+    .await
+    .unwrap();
+    assert_eq!(
+        harnesses_of(&t),
+        Some(vec!["claude".to_string(), "codex".to_string()])
+    );
+
+    let err = t
+        .set_host_harnesses(Parameters(SetHostHarnessesParams {
+            host_alias: "local".into(),
+            harnesses: Some(vec!["codex".into()]),
+        }))
+        .await
+        .unwrap_err();
+    assert!(err.message.starts_with("E_INVALID"), "{}", err.message);
+
+    t.set_host_harnesses(Parameters(SetHostHarnessesParams {
+        host_alias: "local".into(),
+        harnesses: None,
+    }))
+    .await
+    .unwrap();
+    assert_eq!(harnesses_of(&t), None);
+
+    call(
+        &t,
+        &Caller::master(),
+        "set_host_harnesses",
+        Some(json!({ "host_alias": "local", "harnesses": ["claude"] })),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(harnesses_of(&t), Some(vec!["claude".to_string()]));
+
+    let err = enforce_admin(&host("local"), "set_host_harnesses").unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+}
