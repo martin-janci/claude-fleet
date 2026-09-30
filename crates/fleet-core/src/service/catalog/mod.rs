@@ -200,9 +200,16 @@ pub struct AssetListing {
     pub unmanaged: Vec<AssetInventoryRow>,
     pub problems: Vec<Problem>,
     /// Assets S1a: `unmanaged` rows grouped per (kind, name) and classified.
-    /// Absent from older hubs; the frontend groups client-side then.
-    #[serde(default)]
-    pub identities: Vec<identity::AssetIdentity>,
+    /// `None` (and thus absent on the wire) for an old hub whose reply has
+    /// no `identities` key — never `Some(vec![])`, which would look like a
+    /// hub that ran the grouping and found nothing. The frontend's
+    /// `identitiesOf` falls back to client-side grouping only when the key
+    /// is truly missing; a `#[serde(default)]` `Vec` would silently collapse
+    /// that distinction into an empty-but-present list, which is the bug
+    /// this type is guarding against (a hub-client desktop losing the
+    /// "on hosts, not in catalog" section for anyone talking to an old hub).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identities: Option<Vec<identity::AssetIdentity>>,
 }
 
 /// Which hosts hold this catalog asset, and in what state. `unmanaged` and
@@ -262,7 +269,7 @@ pub fn list_assets(store: &Mutex<Store>) -> Result<AssetListing, IpcError> {
                 .cloned()
                 .collect(),
             problems: cat.problems.clone(),
-            identities,
+            identities: Some(identities),
         })
     })
 }
@@ -810,6 +817,37 @@ mod tests {
             serde_json::to_value(&with).unwrap()["install_as"],
             serde_json::json!("foo_bar")
         );
+    }
+
+    /// An old hub's reply has no `identities` key at all; deserializing that
+    /// into `AssetListing` must land on `None`, and re-serializing `None`
+    /// must omit the key again — never round-trip it into a present-but-empty
+    /// `[]`, which is indistinguishable on the frontend from "the hub ran
+    /// grouping and found nothing" and makes `identitiesOf` skip its
+    /// client-side fallback (the S1a review finding this test pins).
+    #[test]
+    fn asset_listing_identities_round_trips_absent_vs_empty() {
+        let without_key = serde_json::json!({
+            "head": "abc",
+            "loaded_at": 1,
+            "assets": [],
+            "unmanaged": [],
+            "problems": [],
+        });
+        let listing: AssetListing = serde_json::from_value(without_key).unwrap();
+        assert!(listing.identities.is_none());
+        let reserialized = serde_json::to_value(&listing).unwrap();
+        assert!(
+            !reserialized.as_object().unwrap().contains_key("identities"),
+            "{reserialized}"
+        );
+
+        let with_empty = AssetListing {
+            identities: Some(Vec::new()),
+            ..listing
+        };
+        let reserialized = serde_json::to_value(&with_empty).unwrap();
+        assert_eq!(reserialized["identities"], serde_json::json!([]));
     }
 
     /// `orphan` rows — the host still holds something a past sync wrote but
