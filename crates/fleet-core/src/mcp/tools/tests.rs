@@ -2179,7 +2179,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 102);
+    assert_eq!(served, 103);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3423,8 +3423,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// +139 bytes). Measured at 68,519 on 2026-09-30 after asset catalog
     /// S1a Task 7 (`plan_sync`'s description and `PlanSyncParams` grew the
     /// `allow_unlayered` escape hatch for a remote host with no layers,
-    /// +224 bytes).
-    const BUDGET_BYTES: usize = 68_619;
+    /// +224 bytes). Measured at 69,306 on 2026-09-30 after declarative
+    /// pages' `guide` tool (a host's session proposes a guide, +787 bytes).
+    const BUDGET_BYTES: usize = 69_406;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -8933,4 +8934,121 @@ async fn add_project_never_binds_an_mcp_callers_call_id() {
         desktop.is_cancelled(),
         "the desktop's slot survives the MCP call and its Cancel still works"
     );
+}
+
+/// Guides (declarative pages, layout guide): a host's own session reads the
+/// catalog, validates and proposes — that is who writes one — but never
+/// decides; a person does, on the master or a trusted device. Nothing is
+/// live before that.
+#[tokio::test]
+async fn a_host_proposes_a_guide_and_only_a_person_approves_it() {
+    let (tools, _guards, store) = client_tools();
+    let call = |c: Caller, p: serde_json::Value| {
+        tools.guide(
+            Extension(c),
+            Parameters(serde_json::from_value::<GuideParams>(p).unwrap()),
+        )
+    };
+    let host = host_caller("web-1", TokenMode::Full);
+    assert!(present::visible_to(&host, "guide"));
+
+    let cat = result_json(
+        &call(host.clone(), serde_json::json!({ "action": "catalog" }))
+            .await
+            .unwrap(),
+    );
+    let example = cat["example"].clone();
+    assert_eq!(cat["layout"], "guide");
+
+    let mut bad = example.clone();
+    bad["sections"][1]["items"][0]["key"] = serde_json::json!("gc.nope");
+    let v = result_json(
+        &call(
+            host.clone(),
+            serde_json::json!({ "action": "validate", "spec": bad }),
+        )
+        .await
+        .unwrap(),
+    );
+    assert_eq!(v["ok"], false);
+    assert!(
+        v["problems"][0].as_str().unwrap().contains("gc.nope"),
+        "{v}"
+    );
+
+    let p = result_json(
+        &call(
+            host.clone(),
+            serde_json::json!({ "action": "propose", "spec": example, "why": "people ask" }),
+        )
+        .await
+        .expect("a host proposes"),
+    );
+    let id = p["id"].as_i64().unwrap();
+    assert_eq!(p["state"], "pending");
+    {
+        let s = store.lock().unwrap();
+        let row = s.guide_proposal(id).unwrap().unwrap();
+        assert_eq!(row.source, "agent");
+        assert!(crate::service::guides::live(&s).is_empty());
+    }
+
+    let decide = |c: Caller| {
+        call(
+            c,
+            serde_json::json!({ "action": "decide", "id": id, "approve": true }),
+        )
+    };
+    let err = decide(host.clone())
+        .await
+        .expect_err("a host never decides");
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    assert!(
+        err.message.contains("an agent proposes a guide"),
+        "{}",
+        err.message
+    );
+    let laptop = client_caller("laptop", TokenMode::Full);
+    assert!(
+        decide(laptop.clone()).await.is_err(),
+        "untrusted cannot decide"
+    );
+    let listed = result_json(
+        &call(laptop.clone(), serde_json::json!({ "action": "list" }))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        (
+            listed["can_write"].as_bool(),
+            listed["proposals"].as_array().map(Vec::len)
+        ),
+        (Some(false), Some(1))
+    );
+
+    let v = result_json(
+        &decide(trusted(laptop))
+            .await
+            .expect("a trusted device decides"),
+    );
+    assert_eq!(v["guides"][0]["id"], "guide.cleanup");
+    let row = store.lock().unwrap().guide_proposal(id).unwrap().unwrap();
+    assert_eq!(row.decided_by.as_deref(), Some("person (client laptop)"));
+
+    let err = call(
+        host,
+        serde_json::json!({ "action": "remove", "page_id": "guide.cleanup" }),
+    )
+    .await
+    .expect_err("a host never removes");
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    let v = result_json(
+        &call(
+            Caller::master(),
+            serde_json::json!({ "action": "remove", "page_id": "guide.cleanup" }),
+        )
+        .await
+        .expect("the master removes"),
+    );
+    assert!(v["guides"].as_array().unwrap().is_empty());
 }

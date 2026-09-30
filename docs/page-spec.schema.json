@@ -527,6 +527,11 @@
           "description": "L8: items placed inside a hand-built screen at a named `slot`\nrather than a page of their own. Never in the page tree.",
           "type": "string",
           "const": "embed"
+        },
+        {
+          "description": "L9: a step-by-step guide. Each section is one step, shown one at a\ntime with Back / Next; a step's `when` skips it. Its fields are a\npath through settings whose home is another page, saved as they\nchange: a guide never owns a setting. A guide may also be stored at\nruntime (`service::guides`), proposed by an agent and approved by a\nperson.",
+          "type": "string",
+          "const": "guide"
         }
       ]
     },
@@ -537,6 +542,11 @@
           "description": "Settings an agent proposed over the control API (`set_setting\n{ propose: true }`): `setting_proposals`, applied or rejected with\n`decide_setting_proposals`.",
           "type": "string",
           "const": "settings"
+        },
+        {
+          "description": "Guides an agent proposed (`guide { propose }`, `service::guides`):\napproved or rejected one at a time; an approved one joins the pages\nunder this one.",
+          "type": "string",
+          "const": "guides"
         }
       ]
     },

@@ -99,6 +99,7 @@ pub const PAGE_FILES: &[(&str, &str)] = &[
         "settings.review.json",
         include_str!("../../pages/settings.review.json"),
     ),
+    ("guides.json", include_str!("../../pages/guides.json")),
     ("usage.json", include_str!("../../pages/usage.json")),
     (
         "usage.work.json",

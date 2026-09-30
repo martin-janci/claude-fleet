@@ -7,6 +7,7 @@ mod config;
 mod dbarg;
 mod decide;
 mod demo;
+mod guides;
 mod host;
 mod org;
 mod out;
@@ -172,6 +173,16 @@ enum Cmd {
     Settings {
         #[command(subcommand)]
         cmd: settings::SettingsCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// Review guides a Claude session proposed over the control API
+    /// (declarative pages, layout guide): list, show, approve, reject,
+    /// remove. Reads and writes the database directly, as the person at
+    /// this console.
+    Guides {
+        #[command(subcommand)]
+        cmd: guides::GuidesCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -444,6 +455,7 @@ async fn main() -> ExitCode {
         Cmd::Census { cmd, opts } => census::run(cmd, &opts, &env),
         Cmd::Decide { cmd, opts } => decide::run(cmd, &opts, &env).await,
         Cmd::Settings { cmd, opts } => settings::run(cmd, &opts, &env),
+        Cmd::Guides { cmd, opts } => guides::run(cmd, &opts, &env),
         Cmd::Update { cmd, opts } => update::run(cmd, &opts, &env).await,
         Cmd::Reports {
             limit,

@@ -2823,6 +2823,26 @@
       "title": "Proposed changes"
     },
     {
+      "id": "guides",
+      "intro": "Step-by-step walks through a task. An agent can propose one with the fleet-guides skill; it is listed here once a person approves it.",
+      "layout": "review_apply",
+      "review": "guides",
+      "sections": [
+        {
+          "items": [
+            {
+              "text": "A Claude session proposes a guide over the control API. It shows up below for review: open it to preview, then approve or reject. Approved guides appear under this page. On a hub, fleet-hub guides lists and decides them.",
+              "tone": "info",
+              "type": "notice"
+            }
+          ],
+          "title": "How a guide gets here"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Guides"
+    },
+    {
       "filters": [
         {
           "choices": [

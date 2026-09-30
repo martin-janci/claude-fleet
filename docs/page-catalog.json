@@ -80,6 +80,18 @@
         "account_usage"
       ],
       "supported": true
+    },
+    {
+      "id": "guide",
+      "items": [
+        "field",
+        "stat",
+        "record",
+        "action",
+        "notice",
+        "link"
+      ],
+      "supported": true
     }
   ],
   "page_usage_views": [

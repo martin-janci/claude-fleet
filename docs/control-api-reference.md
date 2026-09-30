@@ -113,6 +113,12 @@ Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, w
 
 Parameters: `describe`
 
+### `guide`
+
+Settings guides. catalog: what one may name; validate / propose a spec (a person approves); list; decide / remove: master or trusted device.
+
+Parameters: `action`, `approve`, `id`, `page_id`, `spec`, `why`
+
 ### `hide_host`
 
 Hide or show a host (hidden: skipped by reconcile). Returns the host row.
@@ -715,6 +721,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::pages::flow_cancel`
 - `commands::pages::setting_proposals`
 - `commands::pages::decide_setting_proposals`
+- `commands::pages::list_guides`
+- `commands::pages::decide_guide`
+- `commands::pages::remove_guide`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::tasks::list_tasks`
