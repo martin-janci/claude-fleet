@@ -48,10 +48,10 @@
   let replanning = $state(false);
   let replanError = $state<string | null>(null);
 
-  async function planAnyway() {
+  async function planAnyway(hostAlias: string) {
     replanning = true;
     replanError = null;
-    const r = await planSync({ ...filter, allowUnlayered: true });
+    const r = await planSync({ ...filter, hostAlias, allowUnlayered: true });
     replanning = false;
     if (!r.ok) { replanError = r.error.message; return; }
     onreplanned?.(r.value);
@@ -114,7 +114,7 @@
             <span class="detail warning" data-testid={`plan-unlayered-${h.host_alias}-${h.harness}`}>{h.detail}</span>
             <button
               class="link quiet"
-              onclick={planAnyway}
+              onclick={() => planAnyway(h.host_alias)}
               disabled={replanning}
               data-testid={`plan-anyway-${h.host_alias}-${h.harness}`}
             >{replanning ? 'Planning…' : 'Plan anyway'}</button>
