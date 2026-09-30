@@ -769,6 +769,20 @@ fn read_json(p: &Path) -> Value {
 /// a subshell, where `total`'s updates — and `emit`'s `exit` once the cap
 /// trips — would be lost the moment the loop ends instead of stopping the
 /// script.
+///
+/// Security fix round 2: every conditional test uses `if …; then …; fi`
+/// (which is 0 whenever the condition is false and there is no `else`),
+/// never `test && emit` — a `for` loop's own exit status is whatever its
+/// LAST command returned, so `[ -f "$f" ] && emit "$f"` as the loop's last
+/// line made the whole script exit non-zero the moment the final
+/// glob-matched (or literal, unexpanded) entry failed `-f`: an empty
+/// `.claude/agents`, or one whose last sorted entry is a dangling symlink or
+/// a directory. `run_host_script` turns that into `E_SCAN`, failing a
+/// perfectly normal remote import. The trailing `exit 0` is the belt: even a
+/// construct this file didn't think to guard cannot flip the script's own
+/// exit status any more, because it is never the last thing that runs — the
+/// one exception is `emit`'s own `exit 1` on `##TRUNCATED`, which fires
+/// (and returns) before `exit 0` is ever reached.
 // `###"..."###` (three `#`s), not `#"..."#`: the script's own `printf
 // "##FILE ..."`/`"##TRUNCATED"` contain a `"` immediately followed by two
 // `#`s, which would otherwise close a one-`#` raw string early.
@@ -787,7 +801,7 @@ emit() {
   printf "\n"
 }
 for f in .claude/settings.json .claude.json .claude/plugins/installed_plugins.json .claude/plugins/known_marketplaces.json; do
-  [ -f "$f" ] && emit "$f"
+  if [ -f "$f" ]; then emit "$f"; fi
 done
 if [ -d .claude/skills ]; then
   for entry in .claude/skills/*; do
@@ -797,9 +811,10 @@ if [ -d .claude/skills ]; then
 fi
 if [ -d .claude/agents ]; then
   for f in .claude/agents/*.md; do
-    [ -f "$f" ] && emit "$f"
+    if [ -f "$f" ]; then emit "$f"; fi
   done
 fi
+exit 0
 "###;
 
 /// True when every component of `path` is a plain name (`Component::Normal`)
@@ -2035,6 +2050,113 @@ mod tests {
         assert!(
             REMOTE_SOURCES_SCRIPT.contains("##TRUNCATED"),
             "must signal a dump cut short at the size cap"
+        );
+    }
+
+    /// Runs `REMOTE_SOURCES_SCRIPT` for real, with `HOME` pointed at a fresh
+    /// `tempfile` directory — the same `bash -lc <script>` invocation
+    /// `run_host_script`'s local branch uses, just with `HOME` overridden on
+    /// the CHILD process only (never the test process's own environment, so
+    /// tests running in parallel never see or race each other's `$HOME`).
+    #[cfg(unix)]
+    fn run_remote_script(home: &Path) -> std::process::Output {
+        crate::proc::std_command("bash")
+            .args(["-lc", REMOTE_SOURCES_SCRIPT])
+            .env("HOME", home)
+            .output()
+            .expect("spawn bash")
+    }
+
+    /// Security fix round 2: a `for` loop's exit status is its LAST
+    /// command's, so `[ -f "$f" ] && emit "$f"` as an agents-loop's last line
+    /// made the whole script exit non-zero whenever `.claude/agents` existed
+    /// but held no `.md` file — the unmatched glob stays literal and fails
+    /// `-f`. `run_host_script` turns that non-zero exit into `E_SCAN`,
+    /// failing a completely ordinary remote import. Fixed with `if …; then
+    /// …; fi` (0 when the condition is false, per POSIX) plus a trailing
+    /// `exit 0`; this proves it end to end rather than trusting the shell
+    /// semantics by inspection.
+    #[cfg(unix)]
+    #[test]
+    fn remote_script_exits_zero_with_an_empty_agents_dir() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".claude/agents")).unwrap();
+        let out = run_remote_script(home.path());
+        assert!(
+            out.status.success(),
+            "status={:?} stdout={} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("##FILE"),
+            "nothing to dump: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    /// The same bug, the other repro from the finding: the last SORTED entry
+    /// in `.claude/agents` is a dangling symlink (`-f` follows it, finds
+    /// nothing, fails) rather than the glob just not matching.
+    #[cfg(unix)]
+    #[test]
+    fn remote_script_exits_zero_when_the_last_agent_entry_is_a_dangling_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        let agents = home.path().join(".claude/agents");
+        fs::create_dir_all(&agents).unwrap();
+        // "zz" sorts after every ordinary agent name, so the glob's LAST
+        // match is the dangling one — exactly the shape that tripped the
+        // old script's final-command-decides-the-exit-status bug.
+        std::os::unix::fs::symlink(agents.join("nowhere"), agents.join("zz.md")).unwrap();
+        let out = run_remote_script(home.path());
+        assert!(
+            out.status.success(),
+            "status={:?} stdout={} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A real skill and a real agent survive the round trip: the script's
+    /// stdout, fed straight to `parse_remote_dump`, rebuilds both files.
+    #[cfg(unix)]
+    #[test]
+    fn remote_script_output_round_trips_through_parse_remote_dump() {
+        let home = tempfile::tempdir().unwrap();
+        let claude = home.path().join(".claude");
+        fs::create_dir_all(claude.join("skills/worktree")).unwrap();
+        fs::write(
+            claude.join("skills/worktree/SKILL.md"),
+            "---\nname: worktree\ndescription: Make a worktree.\n---\nbody\n",
+        )
+        .unwrap();
+        fs::create_dir_all(claude.join("agents")).unwrap();
+        fs::write(
+            claude.join("agents/pm.md"),
+            "---\nname: pm\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        fs::write(claude.join("settings.json"), "{}").unwrap();
+        fs::write(home.path().join(".claude.json"), r#"{"mcpServers":{}}"#).unwrap();
+
+        let out = run_remote_script(home.path());
+        assert!(
+            out.status.success(),
+            "status={:?} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).unwrap();
+
+        let rebuilt = tempfile::tempdir().unwrap();
+        let src = parse_remote_dump(&stdout, rebuilt.path()).unwrap();
+        assert!(src.claude_dir.join("skills/worktree/SKILL.md").is_file());
+        assert!(src.claude_dir.join("agents/pm.md").is_file());
+        assert_eq!(
+            std::fs::read_to_string(&src.claude_json).unwrap(),
+            r#"{"mcpServers":{}}"#
         );
     }
 
