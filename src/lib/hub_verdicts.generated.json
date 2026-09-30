@@ -90,6 +90,7 @@
     "catalog_remove_resource",
     "catalog_repo_status",
     "catalog_resolve_preview",
+    "catalog_set_host_harnesses",
     "catalog_set_host_layers",
     "catalog_set_secret",
     "catalog_template",

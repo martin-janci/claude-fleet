@@ -4346,7 +4346,7 @@ fn catalog_admin_cases() -> Vec<Case> {
     use commands::assets::routed as r;
     use fleet_core::service::catalog::admin::{
         DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs, LoadArgs, ResolvePreviewArgs,
-        SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
+        SetHostHarnessesArgs, SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
     };
     use fleet_core::service::catalog::author::{
         self, AddResourceArgs, AssetRef, CommitPendingArgs, CreateArgs, RemoveResourceArgs,
@@ -4367,6 +4367,7 @@ fn catalog_admin_cases() -> Vec<Case> {
     let detail =
         Box::leak(format!(r#"{{"asset":{asset},"previews":[],"hosts":[]}}"#).into_boxed_str());
     let layer = payload_of(&author::layer_template("core", Axis::Role));
+    let host_row = payload_of(&crate::backend::contract::tests::sample_host());
     let skill = |name: &str| AssetRef {
         kind: Kind::Skill,
         name: name.into(),
@@ -4469,6 +4470,24 @@ fn catalog_admin_cases() -> Vec<Case> {
                         host_alias: "nas".into(),
                         role: Some("core".into()),
                         contexts: vec!["gpu".into()],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_set_host_harnesses",
+            "catalog_admin",
+            json!({ "action": "set_host_harnesses",
+                    "args": { "host_alias": "nas", "harnesses": ["claude", "codex"] } }),
+            host_row,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_set_host_harnesses(
+                    b,
+                    SetHostHarnessesArgs {
+                        host_alias: "nas".into(),
+                        harnesses: Some(vec!["claude".into(), "codex".into()]),
                     },
                     s,
                 ))

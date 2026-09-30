@@ -7,7 +7,7 @@
   // `Rotate token…` and `Remove host…` sit at the bottom, have no keyboard
   // shortcut, and confirm with Cancel focused, stating the consequence.
   import type { HostRow } from './hosts';
-  import { deleteHost } from './hosts';
+  import { deleteHost, setHostHarnesses, codexModeOf, harnessesFor, type HarnessMode } from './hosts';
   import type { AccountRow } from './accounts';
   import type { AccountUsageSnapshot } from './account_usage_store';
   import type { HostTokenInfo, TokenMode } from './mcp';
@@ -178,6 +178,17 @@
   // true there — without this, the empty-token line below would show "…"
   // forever instead of a real answer.
   const hostTokensBlocked = $derived(hubBlock('host_tokens', $hubStatus));
+
+  // Which harnesses the asset catalog syncs here (F3a) routes to the hub's
+  // catalog_admin, so a paired desktop only needs the live link.
+  const harnessBlocked = $derived(hubActionBlocked('catalog_set_host_harnesses', $hubStatus, $hubConnection));
+
+  async function onCodexMode(mode: HarnessMode) {
+    busy = true;
+    const r = await setHostHarnesses(host.alias, harnessesFor(mode));
+    busy = false;
+    if (!r.ok) pushError(r.error, 'Codex setting not changed');
+  }
 
   // Resume is a `new_session` carrying `resume_claude_session_id`, and
   // `new_session` ROUTES: a paired desktop resumes through the hub like any
@@ -485,6 +496,25 @@
   <!-- 5. Integration -->
   <section class="block" aria-label="Integration">
     <h3>Integration</h3>
+    <div class="kv">
+      <span
+        class="label"
+        title="Which harnesses the asset catalog syncs here. auto = Codex where the codex CLI or ~/.codex is found; off = the next sync removes what fleet installed for Codex"
+        >Codex</span
+      >
+      <select
+        value={codexModeOf(host)}
+        disabled={busy || harnessBlocked !== null}
+        title={harnessBlocked ?? ''}
+        aria-label="Codex assets"
+        data-testid="detail-codex"
+        onchange={(e) => onCodexMode((e.currentTarget as HTMLSelectElement).value as HarnessMode)}
+      >
+        <option value="auto">auto</option>
+        <option value="on">on</option>
+        <option value="off">off</option>
+      </select>
+    </div>
     <div class="kv">
       <span class="label" title="Control-API token: full = every tool, readonly = observe only">Token</span>
       {#if token}

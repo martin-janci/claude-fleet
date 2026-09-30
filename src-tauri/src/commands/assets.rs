@@ -17,7 +17,7 @@ use fleet_core::service::catalog::{
     self,
     admin::{
         AdminCall, DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs, LoadArgs,
-        ResolvePreviewArgs, SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
+        ResolvePreviewArgs, SetHostHarnessesArgs, SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
     },
     author::{
         self, AddResourceArgs, AddResourceBytesArgs, AssetRef, CommitPendingArgs, CreateArgs,
@@ -34,7 +34,7 @@ use fleet_core::service::catalog::{
 };
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{
-    AssetInventoryRow, CatalogConfigRow, HostLayerRow, SecretRow, SessionRow, Store,
+    AssetInventoryRow, CatalogConfigRow, HostLayerRow, HostRow, SecretRow, SessionRow, Store,
 };
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -114,6 +114,15 @@ pub async fn catalog_set_host_layers(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<HostLayerRow>, IpcError> {
     routed::catalog_set_host_layers(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn catalog_set_host_harnesses(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: SetHostHarnessesArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<HostRow, IpcError> {
+    routed::catalog_set_host_harnesses(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -475,6 +484,27 @@ pub(crate) mod routed {
                 &args.host_alias,
                 args.role.as_deref(),
                 &args.contexts.iter().map(String::as_str).collect::<Vec<_>>(),
+                store,
+            ),
+        }
+    }
+
+    pub async fn catalog_set_host_harnesses(
+        backend: &FleetBackend,
+        args: SetHostHarnessesArgs,
+        store: &Mutex<Store>,
+    ) -> Result<HostRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route(
+                    "catalog_set_host_harnesses",
+                    &AdminCall::SetHostHarnesses(args),
+                )
+                .await
+            }
+            None => catalog::harness_set::set_host_harnesses(
+                &args.host_alias,
+                args.harnesses.as_deref(),
                 store,
             ),
         }

@@ -534,6 +534,7 @@ pub fn run() {
             commands::assets::catalog_resolve_preview,
             commands::assets::catalog_propose_layers,
             commands::assets::catalog_set_host_layers,
+            commands::assets::catalog_set_host_harnesses,
             commands::assets::catalog_layer_template,
             commands::assets::catalog_write_layer,
             commands::assets::catalog_delete_layer,
