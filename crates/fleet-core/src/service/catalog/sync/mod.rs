@@ -418,13 +418,30 @@ async fn rescan_after_apply(
     };
     // F3a: the host's harness choice decides which rows the re-scan keeps.
     // Read before the await, as everywhere else.
-    let configured = match store.lock() {
-        Ok(s) => s
-            .get_host_row(host_alias)
-            .ok()
-            .flatten()
-            .and_then(|r| r.harnesses),
-        Err(_) => None,
+    // A failed read falls back to auto, and says so: the re-scan then keeps
+    // whatever auto would, which can differ from an explicit choice.
+    let configured = match lock(store) {
+        Ok(s) => match s.get_host_row(host_alias) {
+            Ok(row) => row.and_then(|r| r.harnesses),
+            Err(e) => {
+                tracing::warn!(
+                    host = host_alias,
+                    harness = harness.id(),
+                    error = %e,
+                    "could not read the host's harness choice for the post-sync re-scan; using auto"
+                );
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                host = host_alias,
+                harness = harness.id(),
+                error = %e.message,
+                "could not lock the store for the post-sync re-scan's harness choice; using auto"
+            );
+            None
+        }
     };
     if let Err(e) = scan_and_persist(
         store,

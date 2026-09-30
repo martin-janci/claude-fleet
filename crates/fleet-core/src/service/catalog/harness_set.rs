@@ -139,7 +139,10 @@ pub fn normalize_harnesses(list: &[String]) -> Result<Vec<String>, IpcError> {
 
 /// Set a host's harness choice: `None` = auto, `Some` = an explicit list
 /// (checked and ordered by [`normalize_harnesses`]; `claude` required).
-/// Edits fleet state only — the next `plan_sync` follows it. Returns the
+/// Edits fleet state only — the next `plan_sync` follows it. Every parked
+/// sync plan covering the host is dropped (one computed before Codex was
+/// turned off must not be applied after), and the host is owed a rescan on
+/// the scan tick's next pass so its inventory follows the choice. Returns the
 /// host's new row. The `set_host_harnesses` MCP tool, `catalog_admin`'s
 /// `set_host_harnesses` action and the `catalog_set_host_harnesses`
 /// desktop command all land here.
@@ -150,10 +153,22 @@ pub fn set_host_harnesses(
 ) -> Result<HostRow, IpcError> {
     crate::validate::host_alias(host_alias)?;
     let normalized = harnesses.map(normalize_harnesses).transpose()?;
-    let s = lock(store)?;
-    s.set_host_harnesses(host_alias, normalized.as_deref())?;
-    s.get_host_row(host_alias)?
-        .ok_or_else(|| IpcError::new(E_NOTFOUND, format!("host {host_alias} not found")))
+    let row = {
+        let s = lock(store)?;
+        s.set_host_harnesses(host_alias, normalized.as_deref())?;
+        s.get_host_row(host_alias)?
+            .ok_or_else(|| IpcError::new(E_NOTFOUND, format!("host {host_alias} not found")))?
+    };
+    let dropped = super::sync::plan::registry_drop_host(host_alias);
+    if dropped > 0 {
+        tracing::info!(
+            host = host_alias,
+            dropped,
+            "harness choice changed; dropped parked sync plans covering the host"
+        );
+    }
+    super::scan_tick::owe_rescan(host_alias);
+    Ok(row)
 }
 
 #[cfg(test)]
@@ -294,6 +309,52 @@ mod tests {
         let err = normalize_harnesses(&list(&["claude", "gemini"])).unwrap_err();
         assert_eq!(err.code, "E_INVALID");
         assert!(err.message.contains("gemini"), "{}", err.message);
+    }
+
+    /// A harness change drops every parked plan covering the host (so one
+    /// computed before Codex went off cannot be applied) and owes the host
+    /// a rescan; another host's plan stays.
+    #[test]
+    fn set_host_harnesses_drops_parked_plans_and_owes_a_rescan() {
+        use crate::service::catalog::sync::plan::{
+            registry_put, registry_take, HostPlan, SyncPlan,
+        };
+        let alias = format!("hs-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        let other = format!("hs-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        let hp = |a: &str| HostPlan {
+            host_alias: a.to_string(),
+            harness: "codex".into(),
+            status: "planned".into(),
+            detail: None,
+            actions: Vec::new(),
+            snapshot: HostSnapshot::default(),
+            manifest: Manifest::default(),
+        };
+        let store = std::sync::Mutex::new(crate::store::Store::open_in_memory().unwrap());
+        store
+            .lock()
+            .unwrap()
+            .insert_host(&alias, Some("h"))
+            .unwrap();
+        let stale = registry_put(SyncPlan::new(vec![hp(&alias)]));
+        let kept = registry_put(SyncPlan::new(vec![hp(&other)]));
+
+        set_host_harnesses(&alias, Some(list(&["claude"]).as_slice()), &store).unwrap();
+
+        assert!(
+            registry_take(&stale).is_none(),
+            "the pre-change plan is gone"
+        );
+        assert!(registry_take(&kept).is_some(), "another host's plan stays");
+        assert!(crate::service::catalog::scan_tick::rescan_requested(&alias));
+        assert!(!crate::service::catalog::scan_tick::rescan_requested(
+            &other
+        ));
+
+        // A refused call changes nothing, so it drops nothing either.
+        let again = registry_put(SyncPlan::new(vec![hp(&alias)]));
+        assert!(set_host_harnesses(&alias, Some(list(&["codex"]).as_slice()), &store).is_err());
+        assert!(registry_take(&again).is_some());
     }
 
     #[test]
