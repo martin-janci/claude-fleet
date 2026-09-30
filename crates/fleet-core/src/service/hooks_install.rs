@@ -82,6 +82,25 @@ pub(crate) fn is_fleet_command_entry(h: &serde_json::Value) -> bool {
         })
 }
 
+/// True when `h` is ANY shape fleet has ever installed a hook as: the
+/// current http shape ([`is_fleet_hook_entry`]), the current SessionStart
+/// async command shape ([`is_fleet_command_entry`]), or the pre-Track-B
+/// `curl … /hook?token=` legacy command shape ([`LEGACY_TOKEN_HOOK`],
+/// whatever base URL it points at — `merge_hook_into_settings_json`'s own
+/// `strip_fleet` already treats it this way). Security fix round 1,
+/// IMPORTANT 1: a consumer that checks only the first two (as
+/// `service::catalog::import::scrub_fleet_entries` used to) misses a host
+/// provisioned before Track-B, whose hook still carries the master token in
+/// its `command` argv rather than a header.
+pub(crate) fn is_fleet_owned_hook(h: &serde_json::Value) -> bool {
+    is_fleet_hook_entry(h)
+        || is_fleet_command_entry(h)
+        || (h.get("type").and_then(|t| t.as_str()) == Some("command")
+            && h.get("command")
+                .and_then(|c| c.as_str())
+                .is_some_and(|c| c.contains(LEGACY_TOKEN_HOOK)))
+}
+
 /// Matcher of fleet's PostToolUse hook (Claude Code matchers are regexes):
 /// `EnterWorktree` registers a worktree row for the calling host,
 /// `ExitWorktree` with `action: "remove"` drops it. The `WorktreeCreate` /
@@ -692,6 +711,28 @@ mod tests {
             "old shape must be replaced, not kept beside the new one: {stop:?}"
         );
         assert_eq!(stop[0]["hooks"][0]["headers"]["X-Fleet-Pane"], "$TMUX_PANE");
+    }
+
+    /// Security fix round 1, IMPORTANT 1: `is_fleet_owned_hook` must match
+    /// all three shapes fleet has ever installed — including the pre-Track-B
+    /// legacy one, which `is_fleet_hook_entry`/`is_fleet_command_entry` alone
+    /// never covered.
+    #[test]
+    fn is_fleet_owned_hook_matches_every_shape_including_legacy() {
+        let http = hook_entry("http://127.0.0.1:4180/hook", "tok");
+        assert!(is_fleet_owned_hook(&http));
+
+        let session_start = command_hook_entry("http://127.0.0.1:4180/hook", false);
+        assert!(is_fleet_owned_hook(&session_start));
+
+        let legacy = serde_json::json!({
+            "type": "command",
+            "command": "curl -sS -X POST --data-binary @- 'http://127.0.0.1:4180/hook?token=old' 2>/dev/null || true"
+        });
+        assert!(is_fleet_owned_hook(&legacy));
+
+        let users_own = serde_json::json!({ "type": "command", "command": "npx tsc --noEmit" });
+        assert!(!is_fleet_owned_hook(&users_own));
     }
 
     #[test]

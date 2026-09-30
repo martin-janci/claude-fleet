@@ -132,6 +132,22 @@ fn slug_or_problem(
     }
 }
 
+/// Security fix round 1, IMPORTANT 4: whether `name` (a pre-slug identifier,
+/// or an already-valid catalog name — `slugify` is idempotent on one) should
+/// be processed at all under `only`. Called BEFORE a kind importer generates
+/// any problem, warning or flagged secret for it, so `only = ["skill:foo"]`
+/// produces a report about `foo` alone — not one that also lists an
+/// unrelated hook's "only the first of N was imported" note, an unrelated
+/// MCP server's flagged literal secret, or an unrelated plugin's missing
+/// version. `only` empty means "keep everything", same as the final
+/// assembly loop's own check.
+fn only_wants(only: &[String], kind: Kind, name: &str) -> bool {
+    only.is_empty()
+        || only
+            .iter()
+            .any(|o| *o == format!("{}:{}", kind.as_str(), slugify(name)))
+}
+
 /// Whether `original` should become the asset's `install_as`: `Some(original)`
 /// when the catalog slug diverges from the host identifier and that
 /// identifier is itself a valid install name; `None` when they match
@@ -410,6 +426,7 @@ fn import_hooks(
     taken: &mut Vec<String>,
     flagged: &mut Vec<String>,
     problems: &mut Vec<Problem>,
+    only: &[String],
 ) -> Vec<Asset> {
     let mut out = Vec::new();
     let Some(hooks) = settings.get("hooks").and_then(Value::as_object) else {
@@ -448,6 +465,15 @@ fn import_hooks(
                 n += 1;
             }
             taken.push(name.clone());
+
+            // The name is reserved above regardless — so a later, WANTED
+            // entry that would collide with this skipped one's base name
+            // still gets the same numbered suffix a full import would have
+            // given it — but nothing else about a filtered-out entry is
+            // computed or reported.
+            if !only_wants(only, Kind::Hook, &name) {
+                continue;
+            }
 
             if count > 1 {
                 problems.push(Problem {
@@ -544,12 +570,16 @@ fn import_mcp(
     slugs: &mut SlugMap,
     problems: &mut Vec<Problem>,
     warnings: &mut Vec<Problem>,
+    only: &[String],
 ) -> Vec<Asset> {
     let mut out = Vec::new();
     let Some(servers) = claude_json.get("mcpServers").and_then(Value::as_object) else {
         return out;
     };
     for (name, s) in servers {
+        if !only_wants(only, Kind::McpServer, name) {
+            continue;
+        }
         let Some(slug) = slug_or_problem(slugs, Kind::McpServer, name, path, problems) else {
             continue;
         };
@@ -634,6 +664,7 @@ fn import_mcp(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn import_plugins(
     installed: &Value,
     known: &Value,
@@ -641,6 +672,7 @@ fn import_plugins(
     path: &Path,
     problems: &mut Vec<Problem>,
     slugs: &mut SlugMap,
+    only: &[String],
 ) -> Vec<Asset> {
     let mut out = Vec::new();
     let Some(plugins) = installed.get("plugins").and_then(Value::as_object) else {
@@ -650,6 +682,9 @@ fn import_plugins(
         let Some((plugin, market)) = key.split_once('@') else {
             continue;
         };
+        if !only_wants(only, Kind::PluginRef, plugin) {
+            continue;
+        }
         // Scan every record (not just the first) for an installed version;
         // a plugin with none recorded is reported, not defaulted to latest.
         let version = records
@@ -716,33 +751,98 @@ fn read_json(p: &Path) -> Value {
 /// Printed on the host by `import_host` for a remote alias: every file the
 /// importer reads, framed as `##FILE <home-relative path>` + one base64 line.
 /// No single quotes: the whole script is one `shell::quote`d word.
+///
+/// Security fix round 1, IMPORTANT 3: this used to be `find -L "$d" -type f`
+/// over the whole `skills`/`agents` tree, which follows EVERY symlink it
+/// meets, at any depth — a skill containing `ref -> ~` would dump the
+/// caller's whole home directory (`~/.ssh/*` included) into a repo that gets
+/// pushed, and the total size was unbounded. Now: a top-level entry of
+/// `.claude/skills` is walked with `find -H`, which resolves only that
+/// command-line argument itself, never a symlink found while walking under
+/// it; `.claude/agents` is top-level `*.md` files only, so a link there is
+/// followed once and never recursed into either way. `emit` also tracks a
+/// running total and, at 64 MiB, prints `##TRUNCATED` and exits non-zero —
+/// `run_host_script` already turns a non-zero exit into an error, and
+/// `parse_remote_dump` refuses a `##TRUNCATED` line even if a caller handed
+/// it stdout directly. The `while read` loops read from `<(find …)` rather
+/// than `find … | while …`, on purpose: piping into `while` runs the loop in
+/// a subshell, where `total`'s updates — and `emit`'s `exit` once the cap
+/// trips — would be lost the moment the loop ends instead of stopping the
+/// script.
 // `###"..."###` (three `#`s), not `#"..."#`: the script's own `printf
-// "##FILE ..."` contains a `"` immediately followed by two `#`s, which would
-// otherwise close a one-`#` raw string early.
+// "##FILE ..."`/`"##TRUNCATED"` contain a `"` immediately followed by two
+// `#`s, which would otherwise close a one-`#` raw string early.
 pub const REMOTE_SOURCES_SCRIPT: &str = r###"cd "$HOME" || exit 1
-emit() { printf "##FILE %s\n" "$1"; base64 < "$1" | tr -d "\n"; printf "\n"; }
+total=0
+cap=67108864
+emit() {
+  sz=$(wc -c < "$1" 2>/dev/null) || return 0
+  total=$((total + sz))
+  if [ "$total" -gt "$cap" ]; then
+    printf "##TRUNCATED\n"
+    exit 1
+  fi
+  printf "##FILE %s\n" "$1"
+  base64 < "$1" | tr -d "\n"
+  printf "\n"
+}
 for f in .claude/settings.json .claude.json .claude/plugins/installed_plugins.json .claude/plugins/known_marketplaces.json; do
   [ -f "$f" ] && emit "$f"
 done
-for d in .claude/skills .claude/agents; do
-  [ -d "$d" ] || continue
-  find -L "$d" -type f -size -1024k 2>/dev/null | while IFS= read -r f; do emit "$f"; done
-done
+if [ -d .claude/skills ]; then
+  for entry in .claude/skills/*; do
+    [ -e "$entry" ] || continue
+    while IFS= read -r f; do emit "$f"; done < <(find -H "$entry" -type f -size -512k 2>/dev/null)
+  done
+fi
+if [ -d .claude/agents ]; then
+  for f in .claude/agents/*.md; do
+    [ -f "$f" ] && emit "$f"
+  done
+fi
 "###;
+
+/// True when every component of `path` is a plain name (`Component::Normal`)
+/// — no `..`, no leading `/`, no `.`, and (checked up front, since
+/// `std::path::Path` on this platform is POSIX and would happily accept
+/// either as an ordinary character) no `\` or `:`, which on Windows are a
+/// path separator and a drive-letter marker respectively. Security fix round
+/// 1, CRITICAL 2: `path.split('/')` alone let `.claude/..\..\x` through — a
+/// literal backslash is just an ordinary byte to a `/`-only splitter, but
+/// `..\..\x` is a real traversal the moment this repo (or the temp dir a
+/// remote dump lands in) is on a Windows machine.
+fn is_confined_path(path: &str) -> bool {
+    if path.contains('\\') || path.contains(':') {
+        return false;
+    }
+    Path::new(path)
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+/// Remote dumps are capped at 64 MiB (`REMOTE_SOURCES_SCRIPT`'s own running
+/// total); it prints this line and exits non-zero rather than silently
+/// truncating a file mid-write. `run_host_script` already turns a non-zero
+/// exit into an error before `parse_remote_dump` ever sees the output, but a
+/// caller that hands it stdout directly (as the unit tests do) needs this
+/// checked here too.
+const TRUNCATED_MARKER: &str = "##TRUNCATED";
 
 /// Rebuild the files `REMOTE_SOURCES_SCRIPT` printed under `root`, and point
 /// `ImportSources` at them. Refuses anything outside `.claude/` and
-/// `.claude.json`.
+/// `.claude.json`, and a dump the script cut short at its 64 MiB cap.
 pub fn parse_remote_dump(stdout: &str, root: &Path) -> Result<ImportSources, IpcError> {
     use base64::Engine;
     let bad = |p: &str| IpcError::new(E_INVALID, format!("remote import: refusing path {p}"));
     let mut lines = stdout.lines();
     while let Some(line) = lines.next() {
+        if line == TRUNCATED_MARKER {
+            return Err(IpcError::new(E_INVALID, "remote dump exceeds 64 MiB"));
+        }
         let Some(path) = line.strip_prefix("##FILE ") else {
             continue;
         };
-        let ok = (path == ".claude.json" || path.starts_with(".claude/"))
-            && !path.split('/').any(|seg| seg == ".." || seg.is_empty());
+        let ok = (path == ".claude.json" || path.starts_with(".claude/")) && is_confined_path(path);
         if !ok {
             return Err(bad(path));
         }
@@ -772,14 +872,15 @@ pub fn parse_remote_dump(stdout: &str, root: &Path) -> Result<ImportSources, Ipc
 /// existing tests (`import_converts_every_kind_losslessly`, keyed on
 /// `claude-fleet` importing) expect `local` to keep importing it.
 ///
-/// Matches by SHAPE (`hooks_install::is_fleet_hook_entry` /
-/// `is_fleet_command_entry`, `provision::FLEET_MCP_SERVER`,
+/// Matches by SHAPE (`hooks_install::is_fleet_owned_hook` — every shape
+/// fleet has ever installed a hook as, including the pre-Track-B legacy
+/// `curl … /hook?token=` one, `provision::FLEET_MCP_SERVER`,
 /// `provision::FLEET_SKILL_NAMES`), never by token value, so it works no
 /// matter what the host's own token is. A hook matcher group whose `hooks`
 /// list is emptied by the filter is dropped entirely rather than left as an
 /// empty group.
 pub fn scrub_fleet_entries(src: &ImportSources) -> Result<(), IpcError> {
-    use crate::service::hooks_install::{is_fleet_command_entry, is_fleet_hook_entry};
+    use crate::service::hooks_install::is_fleet_owned_hook;
     use crate::service::provision::{FLEET_MCP_SERVER, FLEET_SKILL_NAMES};
 
     for name in FLEET_SKILL_NAMES {
@@ -799,7 +900,7 @@ pub fn scrub_fleet_entries(src: &ImportSources) -> Result<(), IpcError> {
                     };
                     for entry in arr.iter_mut() {
                         if let Some(inner) = entry.get_mut("hooks").and_then(Value::as_array_mut) {
-                            inner.retain(|h| !is_fleet_hook_entry(h) && !is_fleet_command_entry(h));
+                            inner.retain(|h| !is_fleet_owned_hook(h));
                         }
                     }
                     arr.retain(|entry| {
@@ -882,6 +983,9 @@ pub fn import_claude_only(
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
+            if !only_wants(only, Kind::Skill, &name) {
+                continue;
+            }
             if !p.is_dir() {
                 if std::fs::symlink_metadata(&p)
                     .map(|m| m.file_type().is_symlink())
@@ -926,6 +1030,9 @@ pub fn import_claude_only(
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
+            if !only_wants(only, Kind::Agent, &name) {
+                continue;
+            }
             let Some(slug) =
                 slug_or_problem(&mut slugs, Kind::Agent, &name, &p, &mut report.problems)
             else {
@@ -950,6 +1057,7 @@ pub fn import_claude_only(
         &mut taken,
         &mut report.flagged_secrets,
         &mut report.problems,
+        only,
     ));
     assets.extend(import_mcp(
         &read_json(&src.claude_json),
@@ -960,6 +1068,7 @@ pub fn import_claude_only(
         &mut slugs,
         &mut report.problems,
         &mut report.warnings,
+        only,
     ));
     let installed_path = src.claude_dir.join("plugins/installed_plugins.json");
     let known_path = src.claude_dir.join("plugins/known_marketplaces.json");
@@ -970,6 +1079,7 @@ pub fn import_claude_only(
         &installed_path,
         &mut report.problems,
         &mut slugs,
+        only,
     ));
 
     for a in assets {
@@ -1323,6 +1433,7 @@ mod tests {
             &mut taken,
             &mut flagged,
             &mut problems,
+            &[],
         );
         assert_eq!(assets.len(), 1);
         assert!(problems.is_empty());
@@ -1354,6 +1465,7 @@ mod tests {
             &mut slugs,
             &mut problems,
             &mut warnings,
+            &[],
         );
         let AssetSpec::McpServer { env, .. } = &assets[0].spec else {
             panic!()
@@ -1376,6 +1488,7 @@ mod tests {
             &mut taken,
             &mut flagged2,
             &mut problems,
+            &[],
         );
         let AssetSpec::Hook { action, .. } = &assets[0].spec else {
             panic!()
@@ -1409,6 +1522,7 @@ mod tests {
             &mut taken,
             &mut flagged,
             &mut problems,
+            &[],
         );
         assert_eq!(assets.len(), 1);
         match &assets[0].spec {
@@ -1446,6 +1560,7 @@ mod tests {
             &mut taken,
             &mut flagged,
             &mut problems,
+            &[],
         );
         assert_eq!(assets.len(), 1);
         // The empty entry did not reserve "stop"; the real one got it.
@@ -1466,6 +1581,7 @@ mod tests {
             Path::new("installed_plugins.json"),
             &mut problems,
             &mut slugs,
+            &[],
         );
         assert!(assets.is_empty());
         assert_eq!(problems.len(), 1);
@@ -1490,6 +1606,7 @@ mod tests {
             Path::new("installed_plugins.json"),
             &mut problems,
             &mut slugs,
+            &[],
         );
         assert!(problems.is_empty(), "{problems:?}");
         match &assets[0].spec {
@@ -1557,6 +1674,7 @@ mod tests {
             &mut slugs,
             &mut problems,
             &mut warnings,
+            &[],
         );
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(assets.len(), 1);
@@ -1726,6 +1844,7 @@ mod tests {
             &mut slugs,
             &mut problems,
             &mut warnings,
+            &[],
         );
         assert!(problems.is_empty(), "{problems:?}");
         assert!(warnings.is_empty(), "{warnings:?}");
@@ -1834,11 +1953,36 @@ mod tests {
 
     #[test]
     fn parse_remote_dump_refuses_paths_outside_claude() {
-        for bad in ["../etc/passwd", ".claude/../x", ".ssh/id_ed25519", "/abs"] {
+        for bad in [
+            "../etc/passwd",
+            ".claude/../x",
+            ".ssh/id_ed25519",
+            "/abs",
+            // Security fix round 1, CRITICAL 2: a `/`-only splitter never
+            // saw these as traversal, but on a Windows machine `\` is a real
+            // separator and `C:` a real drive prefix.
+            ".claude\\..\\..\\x",
+            ".claude/x:y",
+            "C:\\Windows\\x",
+        ] {
             let out = format!("##FILE {bad}\nAAAA\n");
             let dir = tempfile::tempdir().unwrap();
             assert!(parse_remote_dump(&out, dir.path()).is_err(), "{bad}");
         }
+    }
+
+    /// Security fix round 1, IMPORTANT 3: the script caps a dump at 64 MiB
+    /// and signals a cut-short one with a bare `##TRUNCATED` line (on top of
+    /// exiting non-zero, which `run_host_script` already turns into an error
+    /// before this function ever runs — this is the belt covering a caller
+    /// that hands stdout straight to `parse_remote_dump`, as this test does).
+    #[test]
+    fn parse_remote_dump_refuses_a_truncated_dump() {
+        let out = "##FILE .claude.json\ne30=\n##TRUNCATED\n";
+        let dir = tempfile::tempdir().unwrap();
+        let err = parse_remote_dump(out, dir.path()).err().unwrap();
+        assert_eq!(err.code, E_INVALID);
+        assert!(err.message.contains("64 MiB"), "{}", err.message);
     }
 
     #[cfg(unix)]
@@ -1858,6 +2002,15 @@ mod tests {
             rep.created,
             vec![("skill".to_string(), "worktree".to_string())]
         );
+        // Security fix round 1, IMPORTANT 4: the fixture has plenty to say
+        // about assets `only` excludes — a broken symlink under `skills/`
+        // (a `problems` entry), and jira's literal `JIRA_TOKEN` (a
+        // `flagged_secrets` entry, verified present without `only` by
+        // `import_converts_every_kind_losslessly` below). None of it must
+        // reach the report when the caller asked for `skill:worktree` alone.
+        assert!(rep.problems.is_empty(), "{:?}", rep.problems);
+        assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+        assert!(rep.flagged_secrets.is_empty(), "{:?}", rep.flagged_secrets);
     }
 
     #[test]
@@ -1866,6 +2019,22 @@ mod tests {
         assert!(
             !REMOTE_SOURCES_SCRIPT.contains('\''),
             "passed through shell::quote whole"
+        );
+        // Security fix round 1, IMPORTANT 3: `-L` follows every symlink at
+        // any depth under the tree it's given; `-H` resolves only the
+        // command-line argument itself (one top-level entry at a time here),
+        // never a link `find` meets while walking under it.
+        assert!(
+            !REMOTE_SOURCES_SCRIPT.contains("-L "),
+            "must not recurse through nested symlinks: {REMOTE_SOURCES_SCRIPT}"
+        );
+        assert!(
+            REMOTE_SOURCES_SCRIPT.contains("-H "),
+            "must resolve only each top-level entry, not what it links to deeper down"
+        );
+        assert!(
+            REMOTE_SOURCES_SCRIPT.contains("##TRUNCATED"),
+            "must signal a dump cut short at the size cap"
         );
     }
 
@@ -1890,13 +2059,17 @@ mod tests {
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(p, c).unwrap();
         };
-        // Fleet's exact installed shape (`hooks_install::hook_entry`): type
-        // http, url `http://127.0.0.1:4180/hook`, a `Bearer` Authorization
-        // header and its 5s timeout — alongside a user's own command hook in
-        // the same event.
+        // Fleet's exact installed shapes: the current http hook
+        // (`hooks_install::hook_entry`), the current SessionStart async
+        // command hook (`hooks_install::session_start_command` — no token in
+        // this one's argv, but it must still be recognised and dropped so no
+        // stray `session-start` asset is created), and the pre-Track-B
+        // legacy `curl … /hook?token=` command hook (IMPORTANT 1: this is
+        // the shape `is_fleet_hook_entry`/`is_fleet_command_entry` alone
+        // missed) — alongside a user's own command hook in a fourth event.
         w(
             "home/.claude/settings.json",
-            r#"{"hooks":{"Stop":[{"hooks":[{"type":"http","url":"http://127.0.0.1:4180/hook","timeout":5,"headers":{"Authorization":"Bearer HOSTTOKEN","X-Fleet-Pane":"$TMUX_PANE"}}]}],"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo mine"}]}]}}"#,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"http","url":"http://127.0.0.1:4180/hook","timeout":5,"headers":{"Authorization":"Bearer HOSTTOKEN","X-Fleet-Pane":"$TMUX_PANE"}}]}],"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo mine"}]}],"SessionStart":[{"hooks":[{"type":"command","command":"curl -sS -m 5 -o /dev/null -X POST -H @\"$HOME/.claude/fleet-hook.headers\" -H \"X-Fleet-Pane: ${TMUX_PANE:-}\" -H 'Content-Type: application/json' --data-binary @- 'http://127.0.0.1:4180/hook' || true","async":true,"timeout":5}]}],"SubagentStop":[{"hooks":[{"type":"command","command":"curl -sS -X POST --data-binary @- 'http://127.0.0.1:4180/hook?token=HOSTTOKEN' 2>/dev/null || true"}]}]}}"#,
         );
         w(
             "home/.claude.json",
@@ -1933,6 +2106,14 @@ mod tests {
         assert!(
             cat.find(Kind::Hook, "stop").is_none(),
             "fleet's Stop hook must not be imported"
+        );
+        assert!(
+            cat.find(Kind::Hook, "session-start").is_none(),
+            "fleet's SessionStart command hook must not be imported"
+        );
+        assert!(
+            cat.find(Kind::Hook, "subagent-stop").is_none(),
+            "fleet's legacy /hook?token= command hook must not be imported"
         );
         assert!(
             cat.find(Kind::McpServer, "claude-fleet").is_none(),

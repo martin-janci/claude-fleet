@@ -294,6 +294,24 @@ pub struct ImportArgs {
     pub only: Vec<String>,
 }
 
+/// `host_alias` must be a registered, non-hidden host before `import_host`
+/// dials it over SSH. Security fix round 1, IMPORTANT 2: without this, any
+/// string a caller sends reaches `run_host_script`/`ssh` unchecked, so a
+/// caller who may drive `import_assets` at all (the master, or a client
+/// granted the catalog) could make the hub dial an arbitrary
+/// hostname/address that was never added to the fleet. Looked up before any
+/// `.await` in the caller, so the store guard is never held across one.
+fn require_dialable_host(store: &Mutex<Store>, host_alias: &str) -> Result<(), IpcError> {
+    let known = lock(store)?.get_host_row(host_alias)?;
+    match known {
+        Some(h) if !h.hidden => Ok(()),
+        _ => Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("host {host_alias} not found"),
+        )),
+    }
+}
+
 /// Import from a host's Claude config. `local` reads this machine's files;
 /// any other host is copied over SSH into a temporary directory first, with
 /// fleet's own hook, MCP server and skills stripped out before anything is
@@ -320,6 +338,7 @@ pub async fn import_host(
             &args.only,
         );
     }
+    require_dialable_host(store, &args.host_alias)?;
     let script = import::REMOTE_SOURCES_SCRIPT;
     let out = inventory::run_host_script(ssh, &args.host_alias, script).await?;
     let tmp = tempfile::tempdir()
@@ -1055,6 +1074,53 @@ mod tests {
             .await
             .unwrap_err();
             assert_eq!(err.code, E_CATALOG_NOT_CONFIGURED, "{host_alias}");
+        }
+    }
+
+    /// Security fix round 1, IMPORTANT 2: `import_host` must not dial an
+    /// arbitrary string over SSH — only a registered, non-hidden host. Both
+    /// cases must refuse `E_NOTFOUND` before ever reaching `run_host_script`
+    /// (a real ssh subprocess would hang/fail slowly against "ghost" or a
+    /// hidden host with no real address, which this test never triggers).
+    #[tokio::test]
+    async fn import_host_refuses_an_unregistered_or_hidden_alias_before_dialing_out() {
+        let root = repo_with_one_skill("import-host-dial");
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        configure(
+            ConfigureArgs {
+                repo_path: root.to_string_lossy().into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .insert_host("hidden-host", None)
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .set_host_hidden("hidden-host", true)
+            .unwrap();
+        let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
+
+        for (alias, why) in [("ghost", "never registered"), ("hidden-host", "hidden")] {
+            let err = import_host(
+                ImportArgs {
+                    host_alias: alias.into(),
+                    dry_run: true,
+                    only: vec![],
+                },
+                &store,
+                &ssh,
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.code, codes::E_NOTFOUND, "{why}: {}", err.message);
+            assert!(err.message.contains(alias), "{why}: {}", err.message);
         }
     }
 }

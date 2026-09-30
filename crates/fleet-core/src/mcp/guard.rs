@@ -816,8 +816,10 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     // inventory. `scan_assets` is read-only ON THE HOSTS — like
     // `refresh_projects` it re-reads external state and refreshes the cache
     // rows that describe it, changing nothing a session or host depends on.
-    // `import_assets` WRITES the controller's catalog repo working tree and
-    // is therefore mutating.
+    // `import_assets` WRITES the controller's catalog repo working tree — and,
+    // for a remote `host_alias`, makes the hub SSH into another host — so it
+    // is `NOT_FOR_HOST_TOKENS` and its body checks `may_admin_catalog`,
+    // exactly like `catalog_admin`.
     ToolPolicy {
         name: "list_assets",
         access: Access::Client,
@@ -1036,11 +1038,13 @@ pub fn is_client_tool(name: &str) -> bool {
 }
 
 /// `Client` tools a per-host token is nonetheless refused, at the central
-/// gate and in the tool list alike. `catalog_admin` answers the master and a
-/// GRANTED paired client only (the tool checks the grant itself); a host's
-/// Claude editing what Sync then writes to every host is what the master
-/// gate exists to prevent.
-pub const NOT_FOR_HOST_TOKENS: &[&str] = &["catalog_admin"];
+/// gate and in the tool list alike. `catalog_admin` and `import_assets`
+/// answer the master and a GRANTED paired client only (each tool checks the
+/// grant itself, via `may_admin_catalog`); a host's Claude editing — or, for
+/// `import_assets` with a remote `host_alias`, making the hub SSH into
+/// another host and write into — the catalog is what the master gate exists
+/// to prevent.
+pub const NOT_FOR_HOST_TOKENS: &[&str] = &["catalog_admin", "import_assets"];
 
 // --- legacy name lists -------------------------------------------------------
 //
