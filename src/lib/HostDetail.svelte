@@ -499,7 +499,7 @@
     <div class="kv">
       <span
         class="label"
-        title="Which harnesses the asset catalog syncs here. auto = Codex where the codex CLI or ~/.codex is found; off = the next sync removes what fleet installed for Codex"
+        title="Which harnesses the asset catalog syncs here. auto = Codex where the codex CLI, ~/.codex/auth.json or ~/.codex/sessions is found; off = the next sync removes what fleet installed for Codex"
         >Codex</span
       >
       <select

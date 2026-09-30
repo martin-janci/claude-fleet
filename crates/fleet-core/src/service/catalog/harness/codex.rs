@@ -38,6 +38,10 @@ const CODEX_AGENT_RESERVED_KEYS: &[&str] =
 
 const CONFIG_FILES: &[&str] = &[CODEX_CONFIG_PATH, CODEX_MANIFEST_PATH];
 
+/// The scan's Codex presence probe (see `scan_script`). POSIX sh with no
+/// single quote: the whole script is wrapped in `shell::quote`.
+const CODEX_PRESENT_PROBE: &str = "if command -v codex >/dev/null 2>&1 || [ -e .codex/auth.json ] || [ -d .codex/sessions ]; then echo \"##PRESENT\"; fi; ";
+
 /// A `targets.codex.extra` value as TOML: nulls stripped (TOML has none);
 /// `None` when nothing representable is left.
 fn json_to_toml(v: &Value) -> Option<toml::Value> {
@@ -339,10 +343,10 @@ impl Harness for Codex {
         );
         // Multi-harness F3a: is Codex itself here? `harness_set::harness_gate`
         // serves Codex on an auto host only when this line is printed (or
-        // fleet already manages Codex assets there).
-        s.push_str(
-            "if command -v codex >/dev/null 2>&1 || [ -d .codex ]; then echo \"##PRESENT\"; fi; ",
-        );
+        // fleet already manages Codex assets there). Only evidence fleet
+        // never writes counts: the CLI, its login (`auth.json`) or its
+        // session logs — not `~/.codex` itself, which a Codex sync creates.
+        s.push_str(CODEX_PRESENT_PROBE);
         s.push_str("echo \"##HASHES\"; ");
         // `-exec $H {} +` (not `-print0 | xargs -0 $H`): see `Claude::scan_script`
         // for why this matters for an existing-but-empty directory.
@@ -925,31 +929,37 @@ mod tests {
         assert_eq!(Codex.manifest_path(), CODEX_MANIFEST_PATH);
     }
 
-    /// F3a: the scan probes for Codex itself — the CLI on PATH or a
-    /// `~/.codex` directory — without any single quote (the caller wraps
-    /// the whole script in `shell::quote`).
+    /// F3a: the scan probes for Codex itself — the CLI on PATH, its login
+    /// (`~/.codex/auth.json`) or its session logs (`~/.codex/sessions`),
+    /// evidence a fleet sync never writes — before `##HASHES`, without any
+    /// single quote (the caller wraps the whole script in `shell::quote`).
     #[test]
     fn scan_script_probes_for_codex() {
         let s = Codex.scan_script().unwrap();
         assert!(
-            s.contains("if command -v codex >/dev/null 2>&1 || [ -d .codex ]; then echo \"##PRESENT\"; fi; "),
+            s.contains("if command -v codex >/dev/null 2>&1 || [ -e .codex/auth.json ] || [ -d .codex/sessions ]; then echo \"##PRESENT\"; fi; "),
             "{s}"
         );
+        assert!(
+            s.find("##PRESENT").unwrap() < s.find("##HASHES").unwrap(),
+            "{s}"
+        );
+        assert!(!s.contains("[ -d .codex ]"), "{s}");
         assert!(!s.contains('\''));
     }
 
-    /// The real scan under `bash -lc` against a temp `$HOME` that has a
-    /// `~/.codex` directory reads back as present, whether or not the
-    /// machine running the test has the codex CLI.
+    /// Runs the scan under plain `sh` (no login profile) against a temp
+    /// `$HOME`, with `PATH` limited to the system directories so the codex
+    /// CLI of the machine running the test cannot answer for it.
     #[cfg(unix)]
-    #[test]
-    fn a_codex_directory_reads_as_present_under_bash() {
+    fn present_with(setup: impl FnOnce(&std::path::Path)) -> bool {
         let tmp = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".codex")).unwrap();
-        let out = std::process::Command::new("bash")
-            .arg("-lc")
+        setup(tmp.path());
+        let out = std::process::Command::new("sh")
+            .arg("-c")
             .arg(Codex.scan_script().unwrap())
             .env("HOME", tmp.path())
+            .env("PATH", "/usr/bin:/bin")
             .output()
             .expect("run scan script");
         assert!(
@@ -957,10 +967,40 @@ mod tests {
             "stderr: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let snap = Codex
+        Codex
             .parse_scan(&String::from_utf8(out.stdout).unwrap())
-            .unwrap();
-        assert!(snap.present);
+            .unwrap()
+            .present
+    }
+
+    /// Codex's own login or session logs read as present; a `~/.codex` that
+    /// holds only what a fleet sync writes (skills, agents, `config.toml`,
+    /// the manifest) does not — that is fleet's own trace, not Codex.
+    #[cfg(unix)]
+    #[test]
+    fn only_codex_own_state_reads_as_present() {
+        if ["/usr/bin/codex", "/bin/codex"]
+            .iter()
+            .any(|p| std::path::Path::new(p).exists())
+        {
+            return; // the CLI itself answers on this machine
+        }
+        assert!(present_with(|h| {
+            std::fs::create_dir_all(h.join(".codex/sessions")).unwrap();
+        }));
+        assert!(present_with(|h| {
+            std::fs::create_dir_all(h.join(".codex")).unwrap();
+            std::fs::write(h.join(".codex/auth.json"), b"{}").unwrap();
+        }));
+        assert!(!present_with(|h| {
+            std::fs::create_dir_all(h.join(".codex/skills/s")).unwrap();
+            std::fs::create_dir_all(h.join(".codex/agents")).unwrap();
+            std::fs::write(h.join(".codex/skills/s/SKILL.md"), b"x").unwrap();
+            std::fs::write(h.join(".codex/agents/pm.toml"), b"name = \"pm\"\n").unwrap();
+            std::fs::write(h.join(".codex/config.toml"), b"").unwrap();
+            std::fs::write(h.join(".codex/.fleet-assets.json"), b"{}").unwrap();
+        }));
+        assert!(!present_with(|_| {}));
     }
 
     /// Builds `##HASHES`/`##CONFIG` scan output with a real base64-encoded

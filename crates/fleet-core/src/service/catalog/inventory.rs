@@ -1157,8 +1157,8 @@ mod tests {
     }
 
     /// F3a: `scan_hosts` keeps no Codex rows for a host that turned Codex
-    /// off, even with `~/.codex` present; back on auto, the same host is
-    /// inventoried for Codex again.
+    /// off, even with Codex detected (`~/.codex/sessions`); back on auto,
+    /// the same host is inventoried for Codex again.
     #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
@@ -1169,7 +1169,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _home = HomeGuard(std::env::var("HOME").ok());
         std::env::set_var("HOME", home.path());
-        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        std::fs::create_dir_all(home.path().join(".codex/sessions")).unwrap();
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("skills/s")).unwrap();
         std::fs::write(root.path().join("catalog.yaml"), "schema_version: 1\n").unwrap();

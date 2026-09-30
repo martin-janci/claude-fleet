@@ -333,8 +333,8 @@ impl FleetTools {
 
     #[tool(description = "Choose which harnesses the asset catalog syncs \
         on one host. harnesses null = auto: Claude, plus Codex where a scan \
-        finds the codex CLI or ~/.codex, or where fleet already manages \
-        Codex assets. Otherwise a list that must include \"claude\"; \
+        finds the codex CLI, ~/.codex/auth.json or ~/.codex/sessions, or \
+        where fleet already manages Codex assets. Otherwise a list that must include \"claude\"; \
         [\"claude\"] turns Codex off, and the next sync then removes what \
         fleet installed for Codex there. Edits fleet state only. Master \
         token only.")]

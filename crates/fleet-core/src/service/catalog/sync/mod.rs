@@ -1406,9 +1406,10 @@ mod tests {
         assert!(rows.iter().all(|r| r.harness != "codex"), "{rows:?}");
     }
 
-    /// F3a: on auto, a host with a `~/.codex` directory is planned and
-    /// inventoried for Codex (deterministic whatever PATH holds: the
-    /// directory alone is detection).
+    /// F3a: on auto, a host with Codex's own session logs
+    /// (`~/.codex/sessions`) is planned and inventoried for Codex
+    /// (deterministic whatever PATH holds: the directory alone is
+    /// detection).
     #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
@@ -1419,7 +1420,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let _home = HomeGuard(std::env::var("HOME").ok());
         std::env::set_var("HOME", home.path());
-        std::fs::create_dir_all(home.path().join(".codex")).unwrap();
+        std::fs::create_dir_all(home.path().join(".codex/sessions")).unwrap();
         let _repo = load_one_skill();
         let store = store_with_local(Arc::new(RecordingEventBus::new()));
         store

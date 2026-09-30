@@ -3,8 +3,10 @@
 //! Claude is always served. Another harness (today: Codex) is served where
 //! the host says so (`hosts.harnesses`, migration 088) or — when the host
 //! leaves it to fleet (`NULL`, "auto") — where a scan finds it: the Codex
-//! scan prints `##PRESENT` when the `codex` CLI is on PATH or `~/.codex`
-//! exists (`HostSnapshot::present`). Every scanning harness is still scanned
+//! scan prints `##PRESENT` when the `codex` CLI is on PATH, or Codex's login
+//! (`~/.codex/auth.json`) or session logs (`~/.codex/sessions`) exist —
+//! never on `~/.codex` alone, which a Codex sync creates itself
+//! (`HostSnapshot::present`). Every scanning harness is still scanned
 //! on every reachable host, because the scan is the only place detection and
 //! the host's manifest come from; the gate decides what is *planned* and
 //! *inventoried*.

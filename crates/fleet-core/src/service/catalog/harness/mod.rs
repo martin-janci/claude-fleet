@@ -148,8 +148,9 @@ pub struct HostSnapshot {
     pub configs: BTreeMap<String, serde_json::Value>,
     /// A `##PRESENT` line was in the scan output (multi-harness F3a). Only
     /// a scan that probes for its harness prints one — Codex's does (the
-    /// `codex` CLI on PATH, or a `~/.codex` directory); Claude's does not,
-    /// and `harness_set::harness_gate` never asks for Claude.
+    /// `codex` CLI on PATH, `~/.codex/auth.json` or `~/.codex/sessions`);
+    /// Claude's does not, and `harness_set::harness_gate` never asks for
+    /// Claude.
     pub present: bool,
 }
 
