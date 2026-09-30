@@ -18,9 +18,12 @@ vite.config.ts.timestamp-*
 # Claude Code session state, its per-session worktrees (checkouts of this same
 # repo — tens of GB) and local MCP wiring. Only settings.local.json used to be
 # ignored, so `git status` showed `?? .claude/` and a `git add -A` would try to
-# stage the whole worktree tree. Nothing under .claude/ is tracked; to share a
-# file from it later, add a `!` negation line below.
-.claude/
+# stage the whole worktree tree. Nothing under .claude/ is tracked but hooks/
+# (the web session's SessionStart setup); to share another file from it, add
+# a `!` negation line below. `.claude/*`, not `.claude/`: git cannot re-include
+# a path whose parent directory is itself excluded.
+.claude/*
+!.claude/hooks/
 .mcp.json
 
 # ripgrep-only overrides (re-admits the gitignored graft/ tree to search)

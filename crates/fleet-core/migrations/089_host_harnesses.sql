@@ -6,4 +6,4 @@
 -- idempotent: guarded in schema.rs.
 ALTER TABLE hosts ADD COLUMN harnesses TEXT;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (88);
+INSERT OR IGNORE INTO schema_version (version) VALUES (89);

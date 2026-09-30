@@ -44,8 +44,8 @@
 
 | File | Responsibility |
 |---|---|
-| `crates/fleet-core/migrations/088_host_harnesses.sql` (new) | `hosts.harnesses TEXT` (NULL = auto) |
-| `crates/fleet-core/src/store/schema.rs` | guard `hosts_has_harnesses`, `MIGRATIONS` entry 88, migration test |
+| `crates/fleet-core/migrations/089_host_harnesses.sql` (new) | `hosts.harnesses TEXT` (NULL = auto) |
+| `crates/fleet-core/src/store/schema.rs` | guard `hosts_has_harnesses`, `MIGRATIONS` entry 89, migration test |
 | `crates/fleet-core/src/store/rows.rs` | `HostRow.harnesses`, `HOST_COLUMNS`, `map_host_row` |
 | `crates/fleet-core/src/store/hosts_accounts.rs` | `Store::set_host_harnesses` + tests |
 | six fleet-core `HostRow { … }` literals + `src-tauri/src/backend/tests_contract.rs` | `harnesses` field |
@@ -69,11 +69,11 @@
 
 ---
 
-### Task 1: Store a per-host harness choice (migration 088)
+### Task 1: Store a per-host harness choice (migration 089)
 
 **Files:**
-- Create: `crates/fleet-core/migrations/088_host_harnesses.sql`
-- Modify: `crates/fleet-core/src/store/schema.rs:396-405` (new guard after `asset_inventory_has_fleet_owned`), `:952-957` (MIGRATIONS entry after 87), tests module (new test after `migration_086_…`, ~line 3930)
+- Create: `crates/fleet-core/migrations/089_host_harnesses.sql`
+- Modify: `crates/fleet-core/src/store/schema.rs:396-405` (new guard after `asset_inventory_has_fleet_owned`), `:952-957` (MIGRATIONS entry after 88 — main took 088 for guides), tests module (new test after `migration_086_…`, ~line 3930)
 - Modify: `crates/fleet-core/src/store/rows.rs:864-871` (field), `:920-924` (`HOST_COLUMNS`), `:955-957` (`map_host_row`)
 - Modify: `crates/fleet-core/src/store/hosts_accounts.rs` (setter after `set_host_transport`, ~line 467; tests at the end of `mod tests`)
 - Modify (add `harnesses: None,` after `provision_stale: …,`): `crates/fleet-core/src/service/hosts.rs:837`, `crates/fleet-core/src/service/onboarding.rs:186`, `crates/fleet-core/src/service/account_usage_poll.rs:270`, `crates/fleet-core/src/service/health.rs:1033`, `crates/fleet-core/src/service/account_usage.rs:1186`, `crates/fleet-core/src/store/reconcile.rs:1110`
@@ -130,8 +130,8 @@ Append to `mod tests` in `crates/fleet-core/src/store/schema.rs` (after `migrati
 
 ```rust
     #[test]
-    fn migration_088_adds_hosts_harnesses_as_auto_and_is_safe_to_rerun() {
-        let s = store_at_version(87);
+    fn migration_089_adds_hosts_harnesses_as_auto_and_is_safe_to_rerun() {
+        let s = store_at_version(88);
         s.conn
             .execute_batch("INSERT INTO hosts (alias, reachable) VALUES ('h', 1);")
             .unwrap();
@@ -147,7 +147,7 @@ Append to `mod tests` in `crates/fleet-core/src/store/schema.rs` (after `migrati
             .unwrap();
         assert_eq!(v, None, "an existing host starts on auto");
         s.conn
-            .execute_batch("DELETE FROM schema_version WHERE version >= 88;")
+            .execute_batch("DELETE FROM schema_version WHERE version >= 89;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
@@ -159,13 +159,13 @@ Append to `mod tests` in `crates/fleet-core/src/store/schema.rs` (after `migrati
 Run:
 ```bash
 export CARGO_TARGET_DIR=<shared-target-dir>
-cargo test -p fleet-core --lib set_host_harnesses an_unreadable_harnesses migration_088 2>&1 | tail -20
+cargo test -p fleet-core --lib set_host_harnesses an_unreadable_harnesses migration_089 2>&1 | tail -20
 ```
 Expected: compile errors — `no method named set_host_harnesses`, `no field harnesses on type HostRow`, `cannot find function hosts_has_harnesses`.
 
 - [ ] **Step 3: Implement**
 
-Create `crates/fleet-core/migrations/088_host_harnesses.sql`:
+Create `crates/fleet-core/migrations/089_host_harnesses.sql`:
 
 ```sql
 -- Multi-harness F3a: which harnesses the asset catalog syncs on a host.
@@ -176,13 +176,13 @@ Create `crates/fleet-core/migrations/088_host_harnesses.sql`:
 -- idempotent: guarded in schema.rs.
 ALTER TABLE hosts ADD COLUMN harnesses TEXT;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (88);
+INSERT OR IGNORE INTO schema_version (version) VALUES (89);
 ```
 
 In `crates/fleet-core/src/store/schema.rs`, after `asset_inventory_has_fleet_owned` (line 405):
 
 ```rust
-/// `already_applied` guard of migration 088 (`hosts.harnesses`,
+/// `already_applied` guard of migration 089 (`hosts.harnesses`,
 /// multi-harness F3a).
 fn hosts_has_harnesses(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -194,14 +194,14 @@ fn hosts_has_harnesses(conn: &Connection) -> rusqlite::Result<bool> {
 }
 ```
 
-and in `MIGRATIONS`, after the version-87 entry (line 957):
+and in `MIGRATIONS`, after the version-88 entry (main's `088_guides.sql`):
 
 ```rust
     // Multi-harness F3a: which harnesses the asset catalog syncs on a host
     // (NULL = auto). ADD COLUMN is not idempotent: the same guard 087 uses.
     Migration {
-        version: 88,
-        sql: include_str!("../../migrations/088_host_harnesses.sql"),
+        version: 89,
+        sql: include_str!("../../migrations/089_host_harnesses.sql"),
         already_applied: Some(hosts_has_harnesses),
     },
 ```
@@ -210,7 +210,7 @@ In `crates/fleet-core/src/store/rows.rs`, add the field after `provision_stale` 
 
 ```rust
     /// Which harnesses the asset catalog syncs on this host (multi-harness
-    /// F3a, migration 088). `None` = auto: Claude, plus Codex where a scan
+    /// F3a, migration 089). `None` = auto: Claude, plus Codex where a scan
     /// finds it or fleet already manages Codex assets there. `Some` = exactly
     /// these (always including `claude`). Per-field default: an older hub
     /// omits it.
@@ -232,7 +232,7 @@ pub(super) const HOST_COLUMNS: &str =
 In `map_host_row`, after the `provision_stale: …` field (line 956-957):
 
 ```rust
-        // Migration 088. A value that is not a JSON string array reads as
+        // Migration 089. A value that is not a JSON string array reads as
         // auto rather than failing the whole row.
         harnesses: row
             .get::<_, Option<String>>(23)?
@@ -243,7 +243,7 @@ In `crates/fleet-core/src/store/hosts_accounts.rs`, after `set_host_transport` (
 
 ```rust
     /// Set which harnesses the asset catalog syncs on a host (multi-harness
-    /// F3a, migration 088): `None` = auto, `Some` = exactly this list, stored
+    /// F3a, migration 089): `None` = auto, `Some` = exactly this list, stored
     /// as JSON. The list is stored as given —
     /// `service::catalog::harness_set::set_host_harnesses` validates and
     /// normalises it first. An unknown alias is `E_NOTFOUND`, as in
@@ -290,7 +290,7 @@ In `src-tauri/src/backend/tests_contract.rs`, `sample_host()` (line 160), after 
 Run:
 ```bash
 export CARGO_TARGET_DIR=<shared-target-dir>
-cargo test -p fleet-core --lib set_host_harnesses an_unreadable_harnesses migration_088 every_migration_records_its_own_version host_row 2>&1 | tail -8
+cargo test -p fleet-core --lib set_host_harnesses an_unreadable_harnesses migration_089 every_migration_records_its_own_version host_row 2>&1 | tail -8
 REGEN_HUB_CONTRACT=1 cargo test -p claude-fleet --lib contract 2>&1 | tail -5
 cargo test -p claude-fleet --lib contract 2>&1 | tail -5
 git diff --stat src-tauri/src/backend/hub_contract.golden.json
@@ -300,8 +300,8 @@ Expected: the fleet-core tests PASS; the REGEN run rewrites the golden and fails
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/fleet-core/migrations/088_host_harnesses.sql crates/fleet-core/src/store crates/fleet-core/src/service/hosts.rs crates/fleet-core/src/service/onboarding.rs crates/fleet-core/src/service/account_usage_poll.rs crates/fleet-core/src/service/health.rs crates/fleet-core/src/service/account_usage.rs src-tauri/src/backend/tests_contract.rs src-tauri/src/backend/hub_contract.golden.json
-git commit -m "feat(store): hosts.harnesses, a per-host harness choice (migration 088)"
+git add crates/fleet-core/migrations/089_host_harnesses.sql crates/fleet-core/src/store crates/fleet-core/src/service/hosts.rs crates/fleet-core/src/service/onboarding.rs crates/fleet-core/src/service/account_usage_poll.rs crates/fleet-core/src/service/health.rs crates/fleet-core/src/service/account_usage.rs src-tauri/src/backend/tests_contract.rs src-tauri/src/backend/hub_contract.golden.json
+git commit -m "feat(store): hosts.harnesses, a per-host harness choice (migration 089)"
 ```
 
 ---
@@ -557,7 +557,7 @@ Replace the contents of `crates/fleet-core/src/service/catalog/harness_set.rs` a
 //! Which harnesses the asset catalog serves on a host (multi-harness F3a).
 //!
 //! Claude is always served. Another harness (today: Codex) is served where
-//! the host says so (`hosts.harnesses`, migration 088) or — when the host
+//! the host says so (`hosts.harnesses`, migration 089) or — when the host
 //! leaves it to fleet (`NULL`, "auto") — where a scan finds it: the Codex
 //! scan prints `##PRESENT` when the `codex` CLI is on PATH or `~/.codex`
 //! exists (`HostSnapshot::present`). Every scanning harness is still scanned
@@ -2432,7 +2432,7 @@ agent's `tools` do not apply there (the Codex preview says so).
 ```markdown
 - **Multi-harness F3a / F3b** (plan
   `docs/superpowers/plans/2026-09-30-f3ab-harness-set-and-codex-agents.md`):
-  `hosts.harnesses` (migration 088, NULL = auto) and the one gate
+  `hosts.harnesses` (migration 089, NULL = auto) and the one gate
   `service/catalog/harness_set.rs::harness_gate` decide per host whether
   Codex is planned and inventoried (`plan_sync`, `scan_hosts`, the
   post-apply rescan) — `Off`, `On`, or `Retiring` (turned off but still

@@ -977,6 +977,38 @@ pub struct DecideSettingProposalsParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GuideAction {
+    Catalog,
+    Validate,
+    Propose,
+    List,
+    Decide,
+    Remove,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct GuideParams {
+    /// catalog, validate, propose, list, decide or remove.
+    pub action: GuideAction,
+    /// validate / propose: fleet.page/1, layout guide.
+    #[serde(default)]
+    pub spec: Option<serde_json::Value>,
+    /// propose: why (≤500 chars).
+    #[serde(default)]
+    pub why: Option<String>,
+    /// decide: proposal id.
+    #[serde(default)]
+    pub id: Option<i64>,
+    /// decide: approve or reject.
+    #[serde(default)]
+    pub approve: Option<bool>,
+    /// remove: guide id.
+    #[serde(default)]
+    pub page_id: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ListClientsParams {
     /// Include revoked clients (kept for the audit trail).
     #[serde(default)]

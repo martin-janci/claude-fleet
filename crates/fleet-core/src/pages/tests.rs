@@ -618,7 +618,8 @@ fn the_catalog_names_what_the_validator_accepts() {
             "cards",
             "review_apply",
             "data_page",
-            "embed"
+            "embed",
+            "guide"
         ]
     );
     assert_eq!(
@@ -659,4 +660,61 @@ fn an_action_item_names_a_page_action() {
     assert_eq!(messages(&[ok]), "");
     let bad = category(json!([{ "type": "action", "action": "work.nuke" }]));
     assert!(messages(&[bad]).contains("`work.nuke` is not a page action"));
+}
+
+fn guide(steps: Value) -> Page {
+    page(json!({
+        "spec": "fleet.page/1", "id": "guide.t", "title": "T", "layout": "guide",
+        "sections": steps
+    }))
+}
+
+#[test]
+fn a_guide_walks_through_settings_without_taking_their_home() {
+    let g = guide(json!([
+        { "title": "Why", "items": [{ "type": "notice", "tone": "info", "text": "Tidy up by itself." }] },
+        { "title": "Turn it on", "items": [
+            { "type": "field", "key": "gc.enabled" },
+            { "type": "field", "key": "gc.bg_idle_secs", "when": { "key": "gc.enabled", "truthy": true } }
+        ] },
+        { "title": "Done", "when": { "key": "gc.enabled", "truthy": true },
+          "items": [{ "type": "link", "page": "guide.t", "label": "Start again" }] }
+    ]));
+    // The compiled pages give gc.enabled its home; the guide passes by.
+    let mut pages = compiled_pages();
+    pages.push(g.clone());
+    assert_eq!(messages(&pages), "");
+    assert!(unplaced_keys(&pages, UNLISTED).is_empty());
+    // A guide alone is no home.
+    assert!(unplaced_keys(&[g], UNLISTED).contains(&"gc.enabled"));
+}
+
+#[test]
+fn a_guide_is_a_short_list_of_distinct_steps() {
+    let notice = json!([{ "type": "notice", "tone": "info", "text": "x" }]);
+    let got = messages(&[guide(json!([
+        { "title": "A", "items": notice },
+        { "title": "A", "collapsible": true, "items": [
+            { "type": "field", "key": "gc.enabled" },
+            { "type": "field", "key": "gc.enabled" },
+            { "type": "table", "source": { "id": "usage.by_day" } },
+            { "type": "custom", "component": "auto_tidy_preview" }
+        ] }
+    ]))]);
+    assert!(got.contains("another step has this title"), "{got}");
+    assert!(got.contains("not collapsible or advanced"), "{got}");
+    assert!(got.contains("already a step's field"), "{got}");
+    assert!(got.contains("cannot hold a `table`"), "{got}");
+    assert!(got.contains("cannot hold a `custom`"), "{got}");
+
+    let many: Vec<Value> = (0..=super::validate::MAX_GUIDE_STEPS)
+        .map(|i| json!({ "title": format!("Step {i}"), "items": notice }))
+        .collect();
+    assert!(messages(&[guide(json!(many))]).contains("over the 12 a guide may have"));
+
+    let tabs = page(json!({
+        "spec": "fleet.page/1", "id": "guide.t", "title": "T", "layout": "guide",
+        "tabs": [{ "title": "A", "sections": [{ "title": "S", "items": notice }] }]
+    }));
+    assert!(messages(&[tabs]).contains("steps are sections, not tabs"));
 }

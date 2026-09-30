@@ -663,6 +663,9 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "setting_history",
         },
     ),
+    ("list_guides", Verdict::Routed { tool: "guide" }),
+    ("decide_guide", Verdict::Routed { tool: "guide" }),
+    ("remove_guide", Verdict::Routed { tool: "guide" }),
     (
         "set_fleet_setting",
         Verdict::Routed {

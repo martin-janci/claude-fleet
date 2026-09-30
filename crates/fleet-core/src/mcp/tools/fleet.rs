@@ -643,6 +643,86 @@ impl FleetTools {
         ok_json_compact(&crate::pages::bundle())
     }
 
+    // ---- guides (declarative pages, layout guide) ----
+
+    #[tool(description = "Settings guides. catalog: what one may name; \
+        validate / propose a spec (a person approves); list; decide / remove: \
+        master or trusted device.")]
+    pub(super) async fn guide(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<GuideParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::service::guides;
+        let spec = || {
+            p.spec.as_ref().ok_or_else(|| {
+                mcp_err(codes::E_INVALID, "spec is required: the guide's JSON", None)
+            })
+        };
+        let who = settings_actor(&caller);
+        match p.action {
+            GuideAction::Catalog => {
+                audit("guide", "action=catalog");
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                ok_json_compact(&guides::authoring_catalog(&s))
+            }
+            GuideAction::Validate => {
+                audit("guide", "action=validate");
+                let spec = spec()?;
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                ok_json_compact(&guides::check(&s, spec))
+            }
+            GuideAction::Propose => {
+                audit("guide", "action=propose");
+                let spec = spec()?;
+                let row = {
+                    let s = lock(&self.store).map_err(to_mcp_err)?;
+                    guides::propose(&s, spec, p.why.as_deref(), who.actor()).map_err(to_mcp_err)?
+                };
+                tracing::info!(guide = %row.page_id, id = row.id, "[mcp] proposed a guide");
+                ok_json_compact(&serde_json::json!({
+                    "id": row.id,
+                    "page_id": row.page_id,
+                    "state": row.state,
+                    "next": "a person approves or rejects it in Settings → Guides (on a hub: fleet-hub guides)",
+                }))
+            }
+            GuideAction::List => {
+                audit("guide", "action=list");
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                let view =
+                    guides::view(&s, guide_decider(&caller, &who).is_ok()).map_err(to_mcp_err)?;
+                ok_json_compact(&view)
+            }
+            GuideAction::Decide => {
+                let id =
+                    p.id.ok_or_else(|| mcp_err(codes::E_INVALID, "id is required", None))?;
+                let approve = p
+                    .approve
+                    .ok_or_else(|| mcp_err(codes::E_INVALID, "approve is required", None))?;
+                audit("guide", &format!("action=decide id={id} approve={approve}"));
+                guide_decider(&caller, &who)?;
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                let view = guides::decide(&s, id, approve, who.actor()).map_err(to_mcp_err)?;
+                ok_json_compact(&view)
+            }
+            GuideAction::Remove => {
+                let page_id = p
+                    .page_id
+                    .as_deref()
+                    .ok_or_else(|| mcp_err(codes::E_INVALID, "page_id is required", None))?;
+                audit(
+                    "guide",
+                    &format!("action=remove page_id={}", page_id.escape_debug()),
+                );
+                guide_decider(&caller, &who)?;
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                let view = guides::remove(&s, page_id, who.actor()).map_err(to_mcp_err)?;
+                ok_json_compact(&view)
+            }
+        }
+    }
+
     // ---- workspace repair ----
 }
 
@@ -705,6 +785,21 @@ pub(super) fn settings_writer(caller: &Caller, who: &SettingsWho) -> Result<(), 
             ),
             None,
         )),
+    }
+}
+
+/// Deciding or removing a guide is a person's, as a settings write is:
+/// the master or a trusted device. An agent — a host's own session with
+/// the fleet-guides skill — is told what it may do instead.
+fn guide_decider(caller: &Caller, who: &SettingsWho) -> Result<(), McpError> {
+    match who {
+        SettingsWho::Agent(_) => Err(mcp_err(
+            "E_FORBIDDEN",
+            "an agent proposes a guide (guide with action propose); a person approves it in \
+             Settings → Guides or with fleet-hub guides",
+            None,
+        )),
+        _ => settings_writer(caller, who),
     }
 }
 

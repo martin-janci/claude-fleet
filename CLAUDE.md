@@ -144,6 +144,15 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   `setting_history`, `decide_setting_proposals`, `list_pages`) are not
   served to the master. A paired desktop's pages show the hub's settings
   (`remote` hides data items, page actions and custom components).
+  Guides: layout L9 `guide` (a section per step, Back / Next / Done; a
+  guide's fields are never a setting's home), stored at runtime too
+  (`service/guides.rs`, migration 088): the control API's `guide` tool
+  (`Access::Client`, so a host's own token reaches it) serves `catalog` /
+  `validate` / `propose` / `list`, and `decide` / `remove` need the
+  master or a trusted device; a person approves in Settings → Guides or
+  `fleet-hub guides`. A host's session writes one with the `fleet-guides`
+  skill, shipped as a catalog asset in `catalog-seed/` (its example and
+  limits are held to the tool by `service::guides` tests).
 - **Status vocabulary** (`claude_status`, `stuck_kind`) lives in the enums in
   `service/pane_intel.rs`; the MCP tool descriptions and the generated
   reference derive from them, so add values there, not in prose.
@@ -182,7 +191,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   the whole catalog there.
 - **Multi-harness F3a / F3b** (plan
   `docs/superpowers/plans/2026-09-30-f3ab-harness-set-and-codex-agents.md`):
-  `hosts.harnesses` (migration 088, NULL = auto) and the one gate
+  `hosts.harnesses` (migration 089, NULL = auto) and the one gate
   `service/catalog/harness_set.rs::harness_gate` decide per host whether
   Codex is planned and inventoried (`plan_sync`, `scan_hosts`, the
   post-apply rescan) — `Off`, `On`, or `Retiring` (turned off but still
@@ -201,7 +210,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (Settings → Hub) resolves once at startup to a window onto that hub; every
   command routes to a hub tool, refuses with `E_LOCAL_ONLY`, or is the same in
   both modes, under the rule *parity or refusal* in `docs/hub.md`. That
-  verdict is written down once, in `backend/verdicts.rs`, for all 217
+  verdict is written down once, in `backend/verdicts.rs`, for all 220
   commands; `backend/tests_routing.rs` reads the handler list from `lib.rs`, each command's
   body, and every routed call and refusal to it, and `backend/verdict_gen.rs`
   publishes it to `src/lib/hub_verdicts.generated.json` and the refusal table

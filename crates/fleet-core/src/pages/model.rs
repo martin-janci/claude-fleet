@@ -95,6 +95,10 @@ pub enum ReviewSource {
     /// { propose: true }`): `setting_proposals`, applied or rejected with
     /// `decide_setting_proposals`.
     Settings,
+    /// Guides an agent proposed (`guide { propose }`, `service::guides`):
+    /// approved or rejected one at a time; an approved one joins the pages
+    /// under this one.
+    Guides,
 }
 
 /// The prepared layouts (design §4). A layout decides spacing, saving
@@ -121,6 +125,13 @@ pub enum Layout {
     /// L8: items placed inside a hand-built screen at a named `slot`
     /// rather than a page of their own. Never in the page tree.
     Embed,
+    /// L9: a step-by-step guide. Each section is one step, shown one at a
+    /// time with Back / Next; a step's `when` skips it. Its fields are a
+    /// path through settings whose home is another page, saved as they
+    /// change: a guide never owns a setting. A guide may also be stored at
+    /// runtime (`service::guides`), proposed by an agent and approved by a
+    /// person.
+    Guide,
 }
 
 /// The places in hand-built screens an `embed` page fills. Closed: each is

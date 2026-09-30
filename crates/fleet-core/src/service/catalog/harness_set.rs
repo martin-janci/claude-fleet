@@ -1,7 +1,7 @@
 //! Which harnesses the asset catalog serves on a host (multi-harness F3a).
 //!
 //! Claude is always served. Another harness (today: Codex) is served where
-//! the host says so (`hosts.harnesses`, migration 088) or — when the host
+//! the host says so (`hosts.harnesses`, migration 089) or — when the host
 //! leaves it to fleet (`NULL`, "auto") — where a scan finds it: the Codex
 //! scan prints `##PRESENT` when the `codex` CLI is on PATH, or Codex's login
 //! (`~/.codex/auth.json`) or session logs (`~/.codex/sessions`) exist —

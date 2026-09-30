@@ -12,6 +12,7 @@
   } from './pages/pages';
   import { subscribeToRowEvents } from './events';
   import { loadProposals, settingProposals, settingsWritable } from './pages/review';
+  import { allPages, guideProposals, loadGuides } from './pages/guides';
   import { hosts } from './hosts';
   import { mcpStatus } from './mcp';
   import { onboardingDismissed, onboardingWelcomed } from './onboarding';
@@ -223,7 +224,7 @@
   let hubPagesError = $state<string | null>(null);
   /** The generated pages have the fleet's settings to show here. */
   const pagesHere = $derived(ownsFleet || hubPages === 'ok');
-  const currentPage = $derived($pagesBundle.pages.find((p) => p.id === view));
+  const currentPage = $derived($allPages.find((p) => p.id === view));
 
   function select(next: string, key?: string) {
     view = next;
@@ -246,7 +247,7 @@
     const section = $settingsSection;
     if (!section) return;
     settingsSection.set(null);
-    if (section.includes('.') || section === 'settings' || section === 'usage') {
+    if (section.includes('.') || section === 'settings' || section === 'usage' || section === 'guides') {
       select(section);
       return;
     }
@@ -290,6 +291,9 @@
     // The page specs are compiled in: the same list whether or not a hub
     // owns the fleet, so the nav shows it either way.
     void loadPages();
+    // Guides an agent proposed and a person approved: this app's, or the
+    // hub's on a paired desktop.
+    void loadGuides();
     if (!ownsTheFleet($hubStatus)) {
       // The control API and the stranded-token check do not apply to a hub
       // client, and both are guarded on the backend. The settings do: a
@@ -436,11 +440,11 @@
     </header>
     <div class="settings-body">
     <SettingsNav
-      pages={$pagesBundle.pages}
+      pages={$allPages}
       descs={$descriptors}
       values={$settingValues}
       selected={view}
-      counts={pagesHere ? { 'settings.review': $settingProposals.length } : {}}
+      counts={pagesHere ? { 'settings.review': $settingProposals.length, guides: $guideProposals.length } : {}}
       canWrite={pagesHere && $settingsWritable}
       onselect={select} />
     <div class="settings-content">
@@ -918,7 +922,7 @@
         {#key currentPage.id}
           <PageView
             page={currentPage}
-            pages={$pagesBundle.pages}
+            pages={$allPages}
             descs={$descriptors}
             values={$settingValues}
             sources={$pagesBundle.sources}
@@ -955,7 +959,7 @@
             readonly={!ownsFleet && !$settingsWritable}
             remote={!ownsFleet}
             page={currentPage}
-            pages={$pagesBundle.pages}
+            pages={$allPages}
             descs={$descriptors}
             values={$settingValues}
             sources={$pagesBundle.sources}

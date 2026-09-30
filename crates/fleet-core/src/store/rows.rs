@@ -869,7 +869,7 @@ pub struct HostRow {
     #[serde(default)]
     pub provision_stale: bool,
     /// Which harnesses the asset catalog syncs on this host (multi-harness
-    /// F3a, migration 088). `None` = auto: Claude, plus Codex where a scan
+    /// F3a, migration 089). `None` = auto: Claude, plus Codex where a scan
     /// finds it or fleet already manages Codex assets there. `Some` = exactly
     /// these (always including `claude`). Per-field default: an older hub
     /// omits it.
@@ -962,7 +962,7 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         provisioned_at: row.get(21)?,
         provision_stale: provisioned
             && fingerprint.as_deref() != Some(crate::service::provision::fingerprint()),
-        // Migration 088. A value that is not a JSON string array reads as
+        // Migration 089. A value that is not a JSON string array reads as
         // auto rather than failing the whole row.
         harnesses: row
             .get::<_, Option<String>>(23)?

@@ -8,6 +8,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.4.4] - 2026-09-30
+
+### Added
+- **pages:** the fleet-guides catalog skill, tested end to end with a fresh agent
+- **pages:** guides — layout L9 and guides an agent proposes at runtime
+- **sync:** an unlayered remote host is skipped instead of getting the whole catalog
+- **catalog:** import from any host over SSH, optionally only the assets asked for
+- **catalog:** a scan tick that rescans stale hosts and every host after a catalog or sync change
+- **assets:** one row per asset with a host strip; fleet internals folded away
+- **catalog:** list_assets groups unmanaged copies into classified identities
+- **catalog:** unmanaged inventory rows keep their content hash and flags (migration 087)
+- **catalog:** a content hash and fleet/secret flags for every installed asset
+- **provision:** install the ag launcher and a cl command on every host
+- **settings:** provision.install_ag — install the ag launcher on provisioned hosts
+- **tmux:** the pane command falls back to a provisioned ag before plain claude
+- **ag:** install.sh --alias adds an alias unless the user already has one
+
+### Changed
+- **catalog:** cover HostStrip states and the identity-differ contract
+- **claude:** install openssh-client in web sessions
+
+### Fixed
+- **catalog:** installed_detail recognizes the legacy token hook too
+- **catalog:** normalize only's host-identifier entries before matching
+- **catalog:** AssetListing.identities is Option so old-hub fallback fires
+- **sync:** "Plan anyway" re-plans the clicked host, not the whole fleet
+- **catalog:** the remote dump script exits 0 whatever the agents dir holds
+- **catalog:** gate import_assets, confine the remote dump, scrub legacy token hooks
+- **catalog:** a host whose rescan failed stays owed until it succeeds
+- **assets:** the orphan filter ignores case like the identity filter
+- **settings:** provision.install_ag help says the cl shim is only added where no cl exists
+- **provision:** surface ag warnings from content-only runs; keep the restart hint
+- **hub:** ship tools/ag in the hub image build context
+- **ag:** --alias never shadows a user's command or a symlinked config
+
+### Documentation
+- CLAUDE.md names host_hash and the identities response field
+- CLAUDE.md notes for the assets S1a foundation
+- upgrade heads-up for the ag rollout
+- provisioning installs ag; panes launch through it
 ## [0.4.3] - 2026-09-30
 
 ### Added
@@ -2356,6 +2396,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.4.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.4
 [0.4.3]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.3
 [0.4.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.2
 [0.4.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.1

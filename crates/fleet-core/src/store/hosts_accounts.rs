@@ -466,7 +466,7 @@ impl Store {
     }
 
     /// Set which harnesses the asset catalog syncs on a host (multi-harness
-    /// F3a, migration 088): `None` = auto, `Some` = exactly this list, stored
+    /// F3a, migration 089): `None` = auto, `Some` = exactly this list, stored
     /// as JSON. The list is stored as given —
     /// `service::catalog::harness_set::set_host_harnesses` validates and
     /// normalises it first. An unknown alias is `E_NOTFOUND`, as in
