@@ -127,16 +127,24 @@ pub fn load(pull: bool, store: &Mutex<Store>) -> Result<CatalogSummary, IpcError
         asset_count: cat.assets.len(),
         problem_count: cat.problems.len(),
     };
+    // The store guard and the registry lock are never held at the same
+    // time: `resolve_preview` (via `with_catalog` → `sync::layers::
+    // resolve_for_host`) takes the registry read lock and, from inside
+    // that closure, the store lock — the opposite order from what this
+    // function used to do (store guard held across `registry::install`).
+    // Two callers on opposite lock orders can deadlock each other, so each
+    // store/registry access below is its own, non-overlapping critical
+    // section. See `registry.rs`'s module doc.
+    let personal = lock(store)?.personal_catalog()?.ok_or_else(|| {
+        IpcError::new(E_CATALOG_NOT_CONFIGURED, "configure the catalog repo first")
+    })?;
+    cat.id = personal.id;
+    cat.name = personal.name;
+    cat.org_id = personal.org_id;
+    registry::install_personal(cat)?;
     {
         let s = lock(store)?;
-        let personal = s.personal_catalog()?.ok_or_else(|| {
-            IpcError::new(E_CATALOG_NOT_CONFIGURED, "configure the catalog repo first")
-        })?;
-        cat.id = personal.id;
-        cat.name = personal.name;
-        cat.org_id = personal.org_id;
         s.set_catalog_head_for(personal.id, &summary.head, summary.loaded_at)?;
-        registry::install(cat)?;
         s.bus_catalog_loaded(&summary);
     }
     Ok(summary)
@@ -158,9 +166,19 @@ pub fn ensure_fresh(store: &Mutex<Store>) -> Result<(), IpcError> {
     let Some(cfg) = config(store)? else {
         return Ok(());
     };
-    let current = registry::personal()?.is_some_and(|c| {
-        cfg.last_loaded_at == Some(c.loaded_at) && cfg.head_commit.as_deref() == Some(&*c.head)
-    });
+    // Compares through the closure rather than `registry::personal()?`
+    // (which clones the whole catalog, resources included) so the common
+    // "already fresh" path — every MCP asset tool calls this — only ever
+    // clones a `loaded_at` and a `head` string. Nothing loaded, or the
+    // registry lock poisoned, both count as "not current": `load` below
+    // either fixes the first or surfaces the second on its own next
+    // registry access.
+    let current = registry::with_personal(|c| Ok((c.loaded_at, c.head.clone()))).is_ok_and(
+        |(loaded_at, head)| {
+            cfg.last_loaded_at == Some(loaded_at)
+                && cfg.head_commit.as_deref() == Some(head.as_str())
+        },
+    );
     if !current {
         load(false, store)?;
     }
@@ -704,6 +722,54 @@ mod tests {
         assert_eq!(loaded.name, "personal");
         assert_eq!(loaded.org_id, None);
         assert_eq!(loaded.id, personal_row.id);
+        registry::clear().unwrap();
+    }
+
+    /// Fix round 1, item 2: `load` must not just install the current
+    /// personal catalog — it must evict any OTHER `org_id: None` entry the
+    /// registry happens to be holding (a stale one, under a different id,
+    /// however it got there), so the registry can never disagree with
+    /// itself about which catalog is "the" personal one.
+    #[test]
+    fn load_evicts_a_stale_personal_entry_with_a_different_id() {
+        let _g = lock_registry_for_test();
+        let root = repo_with_one_skill("evict-stale");
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        configure(
+            ConfigureArgs {
+                repo_path: root.to_string_lossy().into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        let real_id = store
+            .lock()
+            .unwrap()
+            .personal_catalog()
+            .unwrap()
+            .unwrap()
+            .id;
+        // A stale personal entry under an id that is NOT this store's own
+        // — simulates whatever left one behind (a hand-built test catalog,
+        // or a previous process's load under a since-changed id).
+        let stale_id = real_id + 1000;
+        registry::install(repo::Catalog {
+            id: stale_id,
+            name: "personal".into(),
+            org_id: None,
+            ..Default::default()
+        })
+        .unwrap();
+
+        load(false, &store).unwrap();
+
+        let loaded = registry::personal().unwrap().expect("loaded catalog");
+        assert_eq!(loaded.id, real_id, "load's own catalog must win");
+        assert!(
+            registry::get(stale_id).unwrap().is_none(),
+            "the stale entry must be evicted, not left to coexist"
+        );
         registry::clear().unwrap();
     }
 

@@ -560,16 +560,25 @@ fn check_has_resources(kind: Kind) -> Result<(), IpcError> {
     }
 }
 
-/// A clone of the named asset out of the loaded personal catalog.
+/// A clone of the named asset out of the loaded personal catalog. Borrows
+/// via `with_personal` rather than `registry::personal()?` so only the one
+/// matching `Asset` is ever cloned, not the whole catalog (every other
+/// asset's `resources`, base64'd bytes included). An unloaded catalog and a
+/// present-but-missing asset are the same answer here, same as before this
+/// module read a registry at all: `E_ASSET_NOT_FOUND`, never
+/// `E_CATALOG_NOT_CONFIGURED`.
 fn catalog_asset(kind: Kind, name: &str) -> Result<Asset, IpcError> {
-    registry::personal()?
-        .and_then(|c| c.find(kind, name).cloned())
-        .ok_or_else(|| {
-            IpcError::new(
-                E_ASSET_NOT_FOUND,
-                format!("{} {name} is not in the catalog", kind.as_str()),
-            )
-        })
+    let not_found = || {
+        IpcError::new(
+            E_ASSET_NOT_FOUND,
+            format!("{} {name} is not in the catalog", kind.as_str()),
+        )
+    };
+    match registry::with_personal(|c| Ok(c.find(kind, name).cloned())) {
+        Ok(found) => found.ok_or_else(not_found),
+        Err(e) if e.code == super::E_CATALOG_NOT_CONFIGURED => Err(not_found()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Lint against the catalog as currently loaded (an unloaded catalog lints
