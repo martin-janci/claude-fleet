@@ -121,9 +121,9 @@ Parameters: `alias`, `hidden`
 
 ### `import_assets`
 
-Import a host's Claude config (~/.claude skills, agents, hooks, ~/.claude.json MCP servers, installed plugins) into the catalog working tree as IR assets. Never overwrites; collisions are reported. Only host_alias `local`.
+Import a host's Claude config (~/.claude skills, agents, hooks, ~/.claude.json MCP servers, installed plugins) into the catalog working tree as IR assets. Never overwrites; collisions are reported. Any host: `local` reads this machine, others are read over SSH. `only` limits it to `<kind>:<name>` assets. Master or a client granted `assets`.
 
-Parameters: `dry_run`, `host_alias`
+Parameters: `dry_run`, `host_alias`, `only`
 
 ### `inbox`
 
@@ -257,9 +257,9 @@ Parameters: `session_id`
 
 ### `plan_sync`
 
-Compute a sync plan: scan the hosts, compare every catalog asset with what is installed, and return per-host actions (create | update | overwrite | adopt | remove | plugin_install | plugin_update | noop | blocked) plus a plan_id for apply_sync. plugin_update fires when a pinned plugin's catalog version changes; a host left on the old version stays blocked. orphan: in the host's fleet manifest, no longer in the catalog. Nothing is written.
+Compute a sync plan: scan the hosts, compare every catalog asset with what is installed, and return per-host actions (create | update | overwrite | adopt | remove | plugin_install | plugin_update | noop | blocked) plus a plan_id for apply_sync. plugin_update fires when a pinned plugin's catalog version changes; a host left on the old version stays blocked. orphan: in the host's fleet manifest, no longer in the catalog. A remote host with no layers assigned is skipped (it would otherwise get the whole catalog) unless allow_unlayered is set. Nothing is written.
 
-Parameters: `host_alias`, `kind`, `name`
+Parameters: `allow_unlayered`, `host_alias`, `kind`, `name`
 
 ### `probe_host`
 

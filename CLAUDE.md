@@ -161,6 +161,25 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (declarative pages P6) —
   and follows `GET /events` instead of polling. Hub-only; `fleet-hub
   pair|client` is the operator's side. See `docs/hub.md` → *Pair a phone*.
+- **Assets S1a — unmanaged inventory** (plan
+  `docs/superpowers/plans/2026-09-29-assets-s1a-foundation.md`, spec
+  `docs/superpowers/specs/2026-09-29-assets-workspace-design.md`): an
+  unmanaged row keeps its `host_hash` (content hash) and
+  `secret_like`/`fleet_owned` flags (migration 087); `list_assets` returns
+  `identities`, folding every host's copies of a `(kind, name)` into one
+  `AssetIdentity` by host-set signature and classifying it
+  (`service/catalog/identity.rs`).
+  `service/catalog/scan_tick.rs` rescans a host whose inventory is older
+  than `catalog.scan_max_age_secs` on a `catalog.scan_check_secs` timer,
+  rescans every host after the catalog HEAD or a sync changes, and keeps a
+  host whose rescan failed owed until it succeeds. `import_assets` (needs
+  the `assets` grant) reads any registered host over SSH through
+  `REMOTE_SOURCES_SCRIPT`, scrubbing fleet-owned hook entries
+  (`hooks_install::is_fleet_owned_hook`), confined to top-level symlinks
+  under a 64 MiB cap. `plan_sync` skips a non-`local`, unlayered,
+  non-empty-catalog host — never scanning it over SSH — unless
+  `allow_unlayered` is set, since syncing it as-is would otherwise install
+  the whole catalog there.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. Only one PTY is attached at a time.

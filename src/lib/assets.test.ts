@@ -11,6 +11,7 @@ import {
   createAsset, updateAsset, deleteAsset, addResource, removeResource, lintAsset, lintAll,
   commitPending, pushCatalog, repoStatus, assetTemplate, spawnAuthorSession, resourceSize,
   repoStatusStore, KIND_FIELDS, TOOLS, TIERS, EVENTS,
+  identitiesOf, hostOrder,
   type AssetInventoryRow, type AssetListing, type SyncPlan, type HostPlan, type SyncAction,
   type EditableAsset,
 } from './assets';
@@ -83,7 +84,7 @@ describe('assets store', () => {
     await scanHosts('mefistos');
     expect(mockedInvoke).toHaveBeenCalledWith('assets_scan_hosts', { args: { host_alias: 'mefistos' } });
     await importHost('local', true);
-    expect(mockedInvoke).toHaveBeenCalledWith('catalog_import_host', { args: { host_alias: 'local', dry_run: true } });
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_import_host', { args: { host_alias: 'local', dry_run: true, only: [] } });
   });
 
   it('mergeInventoryRow upserts by identity and clearInventoryFor prunes one host+harness', () => {
@@ -103,20 +104,48 @@ describe('assets store', () => {
     expect(groups[0].assets[0].name).toBe('s');
     expect(stateCounts(listing.assets[0].hosts)).toEqual({ in_sync: 1, drifted: 1, missing: 0, unsupported: 0 });
   });
+
+  it('identitiesOf prefers the server grouping and falls back to client-side', () => {
+    const rows = [
+      row({ host_alias: 'oci', name: 'w', state: 'unmanaged', managed: false }),
+      row({ host_alias: 'local', name: 'w', state: 'unmanaged', managed: false }),
+      row({ host_alias: 'local', name: 'gone', state: 'orphan' }),
+    ];
+    const fallback = identitiesOf({ ...listing, unmanaged: rows, identities: undefined });
+    expect(fallback.map((i) => [i.name, i.signature])).toEqual([['w', 'local,oci']]);
+    const server = { ...listing, unmanaged: rows, identities: [{ kind: 'skill', name: 'x', hosts: [], signature: 'trn', variants: 1, class: 'normal' as const, reason: null }] };
+    expect(identitiesOf(server)[0].name).toBe('x');
+  });
+
+  it('hostOrder puts local first, then alphabetical', () => {
+    const ids = [{ kind: 'skill', name: 'a', signature: 'oci,local', variants: 1, class: 'normal' as const, reason: null,
+      hosts: [{ host_alias: 'trn', harness: 'claude', host_hash: null }, { host_alias: 'local', harness: 'claude', host_hash: null }, { host_alias: 'htz', harness: 'claude', host_hash: null }] }];
+    expect(hostOrder(ids)).toEqual(['local', 'htz', 'trn']);
+  });
 });
 
 describe('sync engine wrappers', () => {
-  it('planSync sends null for every absent filter field', async () => {
+  it('planSync sends null for every absent filter field, and allow_unlayered false by default', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(syncPlan([]));
     await planSync({});
-    expect(mockedInvoke).toHaveBeenCalledWith('catalog_plan_sync', { args: { host_alias: null, kind: null, name: null } });
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_plan_sync', {
+      args: { host_alias: null, kind: null, name: null, allow_unlayered: false },
+    });
   });
 
   it('planSync passes through the fields given', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(syncPlan([]));
     await planSync({ hostAlias: 'mefistos', kind: 'skill', name: 'worktree' });
     expect(mockedInvoke).toHaveBeenCalledWith('catalog_plan_sync', {
-      args: { host_alias: 'mefistos', kind: 'skill', name: 'worktree' },
+      args: { host_alias: 'mefistos', kind: 'skill', name: 'worktree', allow_unlayered: false },
+    });
+  });
+
+  it('planSync sends allow_unlayered true when given', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(syncPlan([]));
+    await planSync({ hostAlias: 'oci', allowUnlayered: true });
+    expect(mockedInvoke).toHaveBeenCalledWith('catalog_plan_sync', {
+      args: { host_alias: 'oci', kind: null, name: null, allow_unlayered: true },
     });
   });
 

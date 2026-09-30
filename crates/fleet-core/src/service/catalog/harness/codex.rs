@@ -13,11 +13,11 @@
 
 use super::claude::frontmatter;
 use super::{
-    ConfigMerge, FileWrite, Harness, HostSnapshot, ManifestMerge, MergeMode, RenderPlan,
-    Unsupported,
+    canonical_json, dir_hash, mcp_secret_like, ConfigMerge, FileWrite, Harness, HostSnapshot,
+    InstalledAsset, ManifestMerge, MergeMode, RenderPlan, Unsupported,
 };
 use crate::ipc_error::IpcError;
-use crate::service::catalog::model::{Asset, AssetSpec, Kind};
+use crate::service::catalog::model::{sha256_hex, Asset, AssetSpec, Kind};
 use serde_json::{json, Value};
 
 pub const CODEX_SKILLS_DIR: &str = "~/.codex/skills";
@@ -300,6 +300,39 @@ impl Harness for Codex {
             }
         }
         out
+    }
+
+    fn installed_detail(&self, snap: &HostSnapshot) -> Vec<InstalledAsset> {
+        self.installed(snap)
+            .into_iter()
+            .map(|(kind, name)| {
+                let (hash, secret_like) = match kind {
+                    Kind::Skill => (
+                        dir_hash(snap, &format!("{CODEX_SKILLS_DIR}/{name}/")),
+                        false,
+                    ),
+                    Kind::McpServer => {
+                        let v = snap
+                            .configs
+                            .get(CODEX_CONFIG_PATH)
+                            .and_then(|c| c.get("mcp_servers"))
+                            .and_then(|m| m.get(&name));
+                        (
+                            v.map(|v| sha256_hex(canonical_json(v).as_bytes())),
+                            v.is_some_and(mcp_secret_like),
+                        )
+                    }
+                    _ => (None, false),
+                };
+                InstalledAsset {
+                    kind,
+                    name,
+                    hash,
+                    secret_like,
+                    fleet_owned: false,
+                }
+            })
+            .collect()
     }
 
     fn manifest_path(&self) -> &'static str {
@@ -744,6 +777,29 @@ mod tests {
         assert_eq!(
             snap.configs[CODEX_CONFIG_PATH]["mcp_servers"]["fleet"]["url"],
             "http://127.0.0.1:4180/mcp"
+        );
+    }
+
+    #[test]
+    fn codex_installed_detail_hashes_skills_and_flags_env() {
+        let mut s = HostSnapshot::default();
+        s.files
+            .insert(format!("{CODEX_SKILLS_DIR}/worktree/SKILL.md"), "aa".into());
+        s.configs.insert(
+            CODEX_CONFIG_PATH.into(),
+            serde_json::json!({"mcp_servers": {"jira": {"command": "npx", "env": {"T": "x"}}}}),
+        );
+        let d = Codex.installed_detail(&s);
+        let skill = d.iter().find(|a| a.kind == Kind::Skill).unwrap();
+        assert_eq!(
+            skill.hash.as_deref(),
+            Some(sha256_hex(b"SKILL.md=aa").as_str())
+        );
+        assert!(
+            d.iter()
+                .find(|a| a.kind == Kind::McpServer)
+                .unwrap()
+                .secret_like
         );
     }
 }

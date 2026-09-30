@@ -46,6 +46,28 @@ pub struct PlanArgs {
     pub host_alias: Option<String>,
     pub kind: Option<super::model::Kind>,
     pub name: Option<String>,
+    /// Plan a remote host that has no layers assigned. Without it such a
+    /// host is skipped: with no layers it would receive the whole catalog.
+    #[serde(default)]
+    pub allow_unlayered: bool,
+}
+
+/// Detail on every `HostPlan` `refuse_unlayered` produces. Shared by the
+/// engine (what it stamps on a skipped plan) and the MCP tool description
+/// (what the caller should expect), so the two never drift apart.
+pub const UNLAYERED_DETAIL: &str =
+    "no layers assigned: syncing would install the whole catalog here. \
+    Assign a role first (set_host_layers), or plan with allow_unlayered.";
+
+/// A remote host with no layers would receive the whole catalog. `local` is
+/// exempt: a single-machine user syncs its own catalog back to itself.
+pub(crate) fn refuse_unlayered(
+    alias: &str,
+    layered: bool,
+    allow: bool,
+    catalog_empty: bool,
+) -> bool {
+    alias != "local" && !layered && !allow && !catalog_empty
 }
 
 /// Apply a plan `plan_sync` computed and parked in the registry.
@@ -227,6 +249,21 @@ pub async fn plan_sync(
                 continue;
             }
         };
+        // A remote host with no layers would otherwise receive the whole
+        // catalog — the spec's first critical finding. Refuse it up front,
+        // before the scan: every scanning harness gets the same skipped
+        // plan and the host is never touched over SSH.
+        if refuse_unlayered(
+            &h.alias,
+            resolved.layered,
+            args.allow_unlayered,
+            resolved.catalog.assets.is_empty(),
+        ) {
+            for harness in &scanning {
+                host_plans.push(skipped_plan(&h.alias, harness.id(), UNLAYERED_DETAIL));
+            }
+            continue;
+        }
         // A host with no `host_layers` row must plan a dropped `plugin_ref`
         // exactly as it did before layers existed (`Remove`), not the
         // "reported, not removed" `Noop` that only makes sense once a host
@@ -764,6 +801,71 @@ mod tests {
         assert_eq!(plan.hosts.len(), 2, "{:?}", plan.hosts);
         assert!(
             plan.hosts.iter().all(|h| h.host_alias == "local"),
+            "{:?}",
+            plan.hosts
+        );
+    }
+
+    /// The decision is a pure function: it needs no SSH, no store, no
+    /// catalog. Only a remote (non-`local`), unlayered host with a
+    /// non-empty resolved catalog and `allow_unlayered` off gets refused.
+    #[test]
+    fn refuse_unlayered_only_for_remote_unlayered_non_empty_unless_allowed() {
+        assert!(refuse_unlayered("oci", false, false, false));
+        assert!(!refuse_unlayered("oci", false, true, false), "allowed");
+        assert!(!refuse_unlayered("oci", true, false, false), "layered");
+        assert!(
+            !refuse_unlayered("oci", false, false, true),
+            "empty catalog"
+        );
+        assert!(
+            !refuse_unlayered("local", false, false, false),
+            "local is exempt"
+        );
+    }
+
+    /// `plan_sync` skips an unlayered remote host entirely — every scanning
+    /// harness comes back `skipped` with `UNLAYERED_DETAIL`, and the host is
+    /// never scanned (it never reaches SSH: `SshClient::new()` here has no
+    /// transport wired up, so a real scan attempt would fail loudly instead
+    /// of quietly succeeding).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_sync_skips_an_unlayered_remote_host() {
+        let _lock = super::super::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let repo_dir = tempfile::tempdir().unwrap();
+        let files = one_skill("b\n");
+        load_catalog(
+            repo_dir.path(),
+            &files
+                .iter()
+                .map(|(a, b)| (*a, b.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("oci", Some("oci")).unwrap();
+            s.update_host_probe("oci", true, None, None, 1).unwrap();
+        }
+        let ssh = Arc::new(SshClient::new());
+        let plan = plan_sync(
+            PlanArgs {
+                host_alias: Some("oci".into()),
+                ..PlanArgs::default()
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+        assert!(!plan.hosts.is_empty());
+        assert!(
+            plan.hosts
+                .iter()
+                .all(|h| h.status == "skipped" && h.detail.as_deref() == Some(UNLAYERED_DETAIL)),
             "{:?}",
             plan.hosts
         );

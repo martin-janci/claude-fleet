@@ -148,6 +148,99 @@ async fn catalog_admin_answers_the_master_and_a_granted_full_unbound_client_only
     );
 }
 
+/// Security fix round 1, CRITICAL 1: `import_assets` is `Access::Client`
+/// (a per-host token or any paired client can reach it), and with Task 6's
+/// remote `host_alias` it makes the hub SSH into another host and write into
+/// the catalog. It must answer the master and a granted full unbound client
+/// only, exactly like `catalog_admin` — checked both at the central gate
+/// (`NOT_FOR_HOST_TOKENS`, for a per-host token) and inside the tool body
+/// (`may_admin_catalog`, for an ungranted client, which the central gate
+/// cannot see).
+#[tokio::test]
+async fn import_assets_answers_the_master_and_a_granted_full_unbound_client_only() {
+    let s = Store::open_in_memory().unwrap();
+    let desk = s.insert_client_token("desk", "aa11", "full").unwrap();
+    s.set_client_assets_admin("desk", true).unwrap();
+    let plain = s.insert_client_token("plain", "bb22", "full").unwrap();
+    let t = tools(s);
+
+    async fn import(t: &FleetTools, caller: &Caller) -> Result<CallToolResult, McpError> {
+        enforce_mode(caller, "import_assets")?;
+        enforce_admin(caller, "import_assets")?;
+        t.import_assets(
+            Extension(caller.clone()),
+            Parameters(catalog::ImportArgs {
+                host_alias: "local".into(),
+                dry_run: true,
+                only: vec![],
+            }),
+        )
+        .await
+    }
+
+    let cases: Vec<(&str, Caller, &str)> = vec![
+        // Not `E_FORBIDDEN`: the catalog isn't configured in this fresh
+        // store, so a caller the gate lets through hits that instead — the
+        // point here is that it is never the grant that stops them.
+        ("master", Caller::master(), codes::E_CATALOG_NOT_CONFIGURED),
+        (
+            "granted full client",
+            client(desk.id, TokenMode::Full, None),
+            codes::E_CATALOG_NOT_CONFIGURED,
+        ),
+        (
+            "un-granted client",
+            client(plain.id, TokenMode::Full, None),
+            "E_FORBIDDEN",
+        ),
+        ("per-host token", host("h1"), "E_FORBIDDEN"),
+    ];
+    for (who, caller, want) in &cases {
+        let r = import(&t, caller).await;
+        assert_eq!(code_of(&r), *want, "{who}: {:?}", r.err());
+    }
+    // The per-host token is refused at the central gate before the tool
+    // body ever runs — `import_assets` is not even in its tool list.
+    assert!(
+        !present::visible_to(&host("h1"), "import_assets"),
+        "a per-host token must never see import_assets in its tool list"
+    );
+    // The un-granted client IS refused by the tool itself, not only by a
+    // gate in front of it: calling it directly (skipping `enforce_admin`,
+    // which lets any full client through) still comes back E_FORBIDDEN.
+    let direct = t
+        .import_assets(
+            Extension(client(plain.id, TokenMode::Full, None)),
+            Parameters(catalog::ImportArgs {
+                host_alias: "local".into(),
+                dry_run: true,
+                only: vec![],
+            }),
+        )
+        .await;
+    assert_eq!(code_of(&direct), "E_FORBIDDEN");
+    assert!(
+        direct
+            .unwrap_err()
+            .message
+            .contains("fleet-hub client grant <name> assets"),
+        "the refusal names the operator's remedy"
+    );
+
+    // The grant is read on every call: taken back, the next call is refused.
+    let granted = client(desk.id, TokenMode::Full, None);
+    assert_eq!(
+        code_of(&import(&t, &granted).await),
+        codes::E_CATALOG_NOT_CONFIGURED
+    );
+    t.store
+        .lock()
+        .unwrap()
+        .set_client_assets_admin("desk", false)
+        .unwrap();
+    assert_eq!(code_of(&import(&t, &granted).await), "E_FORBIDDEN");
+}
+
 #[tokio::test]
 async fn catalog_admin_refuses_an_unknown_action_or_malformed_args() {
     let t = tools(Store::open_in_memory().unwrap());

@@ -1043,6 +1043,14 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         fleet_core::service::trackers::default_net(),
         ticks_cancel.clone(),
     );
+    // Assets S1a: rescan stale hosts' assets without anyone pressing Scan.
+    // The hub owns its fleet, so it runs this tick (`catalog.scan_check_secs`,
+    // `0` = off), exactly like the tracker sync above. Stopped with the ticks.
+    let catalog_scan_handle = fleet_core::service::catalog::scan_tick::spawn_catalog_scan_tick(
+        Arc::clone(&store),
+        Arc::clone(&ssh),
+        ticks_cancel.clone(),
+    );
     // Application updates (update design S4): re-read the signed release
     // channel every `update.check_interval_secs`, and record this hub's own
     // build as `hub:self`. Stopped with the ticks.
@@ -1091,6 +1099,9 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     tick_handles.push(ready_handle);
     tick_handles.push(update_handle);
     if let Some(h) = tracker_handle {
+        tick_handles.push(h);
+    }
+    if let Some(h) = catalog_scan_handle {
         tick_handles.push(h);
     }
     await_ticks(tick_handles, TICK_SHUTDOWN_TIMEOUT).await;

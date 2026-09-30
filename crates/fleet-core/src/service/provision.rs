@@ -18,6 +18,11 @@ const SKILL_PATH: &str = "~/.claude/skills/claude-fleet-control/SKILL.md";
 const FRIENDLY_NAME_SKILL: &str = include_str!("../../../../skills/fleet-friendly-name/SKILL.md");
 const FRIENDLY_NAME_SKILL_DIR: &str = "~/.claude/skills/fleet-friendly-name";
 const FRIENDLY_NAME_SKILL_PATH: &str = "~/.claude/skills/fleet-friendly-name/SKILL.md";
+/// Skills fleet provisions on every host. The catalog treats them as fleet
+/// internals: they are never offered for import.
+pub const FLEET_SKILL_NAMES: &[&str] = &["claude-fleet-control", "fleet-friendly-name"];
+/// The `mcpServers` key fleet provisions (it carries the host's token).
+pub const FLEET_MCP_SERVER: &str = "claude-fleet";
 /// Written into each managed skill dir: the fingerprint that put it there.
 /// Says "fleet owns this directory" to a human and to a dotfiles sync
 /// (hosts F2 — both skills were tracked and dirty in `~/dotfiles`).

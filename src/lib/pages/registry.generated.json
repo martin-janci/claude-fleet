@@ -909,6 +909,49 @@
       "danger": {
         "level": "none"
       },
+      "default": "3600",
+      "help": "How often fleet looks for hosts whose asset scan is stale, and rescans them. Under five minutes is raised to five.",
+      "key": "catalog.scan_check_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Asset scan check",
+      "modified": false,
+      "restart": "app",
+      "tags": [],
+      "unit": "minutes",
+      "value": "3600",
+      "zero": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "86400",
+      "help": "A host's assets are rescanned once its last scan is older than this, and every host after the catalog or a sync changes.",
+      "key": "catalog.scan_max_age_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Asset scan age",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "hours",
+      "value": "86400"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "300",
       "help": "How long a fetched ticket description is reused before the tracker is asked again; never longer than the done-tickets retention window.",
       "key": "work.describe_cache_secs",
@@ -1937,6 +1980,19 @@
             }
           ],
           "title": "Workspace repair"
+        },
+        {
+          "items": [
+            {
+              "key": "catalog.scan_check_secs",
+              "type": "field"
+            },
+            {
+              "key": "catalog.scan_max_age_secs",
+              "type": "field"
+            }
+          ],
+          "title": "Assets"
         },
         {
           "advanced": true,

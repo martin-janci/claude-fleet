@@ -19,6 +19,8 @@ export interface AssetInventoryRow {
   host_alias: string; harness: string; kind: string; name: string; state: string;
   catalog_hash: string | null; host_hash: string | null; scanned_at: number;
   managed: boolean;
+  /** Present from hubs with migration 087; absent on older ones. */
+  secret_like?: boolean; fleet_owned?: boolean;
 }
 export interface HostState { host_alias: string; harness: string; state: string }
 export interface Problem { path: string; message: string }
@@ -27,8 +29,27 @@ export interface AssetSummary {
   /** The identifier the asset installs under, when it differs from `name`. */
   install_as?: string;
 }
+/** Assets S1a (Task 3/4): `unmanaged` rows grouped per (kind, name) and
+ *  classified server-side. Optional because older hubs (pre-migration 087)
+ *  omit the key — `identitiesOf` below falls back to grouping client-side. */
+export type IdentityClass = 'normal' | 'fleet_internal' | 'harness_internal' | 'needs_person';
+export interface IdentityHost { host_alias: string; harness: string; host_hash: string | null }
+export interface AssetIdentity {
+  kind: string;
+  name: string;
+  hosts: IdentityHost[];
+  /** Sorted distinct host aliases joined by ',' — the host-set signature. */
+  signature: string;
+  /** Distinct known content hashes across copies (0 when none is known). */
+  variants: number;
+  class: IdentityClass;
+  /** Why a `needs_person` identity needs one. */
+  reason: string | null;
+}
+
 export interface AssetListing {
   head: string; loaded_at: number; assets: AssetSummary[]; unmanaged: AssetInventoryRow[]; problems: Problem[];
+  identities?: AssetIdentity[];
 }
 export interface FileWrite { path: string; bytes: string }
 export interface ConfigMerge { file: string; json_path: string[]; mode: 'set' | 'append_unique' | 'subset'; value: unknown }
@@ -125,8 +146,8 @@ export function getAsset(kind: string, name: string): Promise<Result<AssetDetail
   return invokeCmd<AssetDetail>('catalog_get_asset', { args: { kind, name } });
 }
 
-export function importHost(hostAlias: string, dryRun: boolean): Promise<Result<ImportReport>> {
-  return invokeCmd<ImportReport>('catalog_import_host', { args: { host_alias: hostAlias, dry_run: dryRun } });
+export function importHost(hostAlias: string, dryRun: boolean, only: string[] = []): Promise<Result<ImportReport>> {
+  return invokeCmd<ImportReport>('catalog_import_host', { args: { host_alias: hostAlias, dry_run: dryRun, only } });
 }
 
 export function scanHosts(hostAlias?: string): Promise<Result<HostScanResult[]>> {
@@ -168,6 +189,32 @@ export function stateCounts(hosts: HostState[]): Record<'in_sync' | 'drifted' | 
   const c = { in_sync: 0, drifted: 0, missing: 0, unsupported: 0 };
   for (const h of hosts) if (h.state in c) c[h.state as keyof typeof c] += 1;
   return c;
+}
+
+/** `listing.identities` when the hub sent it (Task 3, migration 087+),
+ *  otherwise group the `unmanaged` rows client-side — same shape, just
+ *  `normal`/`variants: 0` for every identity since drift classification
+ *  needs the host-hash comparison the backend does. */
+export function identitiesOf(listing: AssetListing): AssetIdentity[] {
+  if (listing.identities) return listing.identities;
+  const by = new Map<string, AssetIdentity>();
+  for (const r of listing.unmanaged.filter((r) => r.state === 'unmanaged')) {
+    const key = `${r.kind}\u0000${r.name}`;
+    const id = by.get(key) ?? { kind: r.kind, name: r.name, hosts: [], signature: '', variants: 0, class: 'normal' as IdentityClass, reason: null };
+    id.hosts.push({ host_alias: r.host_alias, harness: r.harness, host_hash: r.host_hash });
+    by.set(key, id);
+  }
+  return [...by.values()]
+    .map((id) => ({ ...id, signature: [...new Set(id.hosts.map((h) => h.host_alias))].sort().join(',') }))
+    .sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name));
+}
+
+/** Every host alias seen across `ids`, `local` first then alphabetical —
+ *  the fixed dot order `HostStrip` renders in. */
+export function hostOrder(ids: AssetIdentity[]): string[] {
+  const all = new Set(ids.flatMap((i) => i.hosts.map((h) => h.host_alias)));
+  const rest = [...all].filter((a) => a !== 'local').sort();
+  return all.has('local') ? ['local', ...rest] : rest;
 }
 
 // ── Sync engine (sub-project 2): plan/apply, secrets, progress. Mirrors
@@ -251,9 +298,14 @@ export const lastSyncRun = writable<SyncRunSummary | null>(null);
  *  in-flight apply. */
 export const syncProgress = writable<SyncProgress | null>(null);
 
-export function planSync(f: { hostAlias?: string; kind?: string; name?: string }): Promise<Result<SyncPlan>> {
+export function planSync(f: { hostAlias?: string; kind?: string; name?: string; allowUnlayered?: boolean }): Promise<Result<SyncPlan>> {
   return invokeCmd<SyncPlan>('catalog_plan_sync', {
-    args: { host_alias: f.hostAlias ?? null, kind: f.kind ?? null, name: f.name ?? null },
+    args: {
+      host_alias: f.hostAlias ?? null,
+      kind: f.kind ?? null,
+      name: f.name ?? null,
+      allow_unlayered: f.allowUnlayered ?? false,
+    },
   });
 }
 

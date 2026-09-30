@@ -393,6 +393,17 @@ fn work_items_has_origin(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 087 (`secret_like` / `fleet_owned`
+/// on `asset_inventory`).
+fn asset_inventory_has_fleet_owned(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('asset_inventory') WHERE name = 'fleet_owned'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 067 (work graph M14.1b, D31).
 fn orgs_has_bound_sees_unassigned(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -937,6 +948,12 @@ const MIGRATIONS: &[Migration] = &[
         version: 86,
         sql: include_str!("../../migrations/086_shared_work_context.sql"),
         already_applied: Some(work_items_has_origin),
+    },
+    // Assets S1a: `secret_like` / `fleet_owned` on `asset_inventory`.
+    Migration {
+        version: 87,
+        sql: include_str!("../../migrations/087_inventory_flags.sql"),
+        already_applied: Some(asset_inventory_has_fleet_owned),
     },
 ];
 

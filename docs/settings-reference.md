@@ -128,6 +128,13 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | `work.auto_tidy` | `false` | on / off | Let the GC sweep act on the allowed tidy reasons by itself, by safe kill or archive only. Off, Tidy up only suggests. An organisation can override it. Asks to confirm. |
 | `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | any of `done_idle`, `pr_merged_idle`, `not_planned` | The tidy reasons auto-tidy may act on. |
 
+## catalog
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `catalog.scan_check_secs` | `3600` | seconds, shown in minutes, `0` = off | How often fleet looks for hosts whose asset scan is stale, and rescans them. Under five minutes is raised to five. Applies after a restart. |
+| `catalog.scan_max_age_secs` | `86400` | seconds, shown in hours | A host's assets are rescanned once its last scan is older than this, and every host after the catalog or a sync changes. |
+
 ## update
 
 | Setting | Default | Range | What it does |

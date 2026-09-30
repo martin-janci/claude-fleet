@@ -22,7 +22,7 @@ use super::layer::{Axis, Layer};
 use super::model::Kind;
 use super::sync::{self, ApplyArgs, PlanArgs};
 use super::validate::{check_layer_name, check_name, check_secret_name};
-use super::ConfigureArgs;
+use super::{ConfigureArgs, ImportArgs};
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::ssh::SshClient;
@@ -131,6 +131,7 @@ admin_calls! {
     "write_layer" => WriteLayer(WriteLayerArgs),
     "delete_layer" => DeleteLayer(LayerRef),
     "inventory" => Inventory,
+    "import_host" => ImportHost(ImportArgs),
     "plan_sync" => PlanSync(PlanArgs),
     "apply_sync" => ApplySync(ApplyArgs),
     "last_sync" => LastSync,
@@ -218,6 +219,10 @@ pub async fn run(
         AdminCall::WriteLayer(a) => json(author::write_layer(&a.layer, store)?),
         AdminCall::DeleteLayer(a) => json(author::delete_layer(&a.name, store)?),
         AdminCall::Inventory => json(super::inventory(store)?),
+        AdminCall::ImportHost(a) => {
+            let token = lock(store)?.get_setting(crate::mcp::SETTING_TOKEN)?;
+            json(super::import_host(a, store, ssh, token.as_deref()).await?)
+        }
         AdminCall::PlanSync(a) => json(sync::plan_sync(a, store, ssh).await?),
         AdminCall::ApplySync(a) => json(sync::apply_sync(a, store, ssh, reg).await?),
         AdminCall::LastSync => json(sync::last_sync(store)?),
@@ -326,10 +331,16 @@ mod tests {
             }),
             AdminCall::DeleteLayer(LayerRef { name: "l".into() }),
             AdminCall::Inventory,
+            AdminCall::ImportHost(ImportArgs {
+                host_alias: "oci".into(),
+                dry_run: true,
+                only: vec![],
+            }),
             AdminCall::PlanSync(PlanArgs {
                 host_alias: Some("h".into()),
                 kind: Some(Kind::Hook),
                 name: None,
+                allow_unlayered: false,
             }),
             AdminCall::ApplySync(ApplyArgs {
                 plan_id: "p".into(),

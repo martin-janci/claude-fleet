@@ -39,15 +39,41 @@ impl FleetTools {
     #[tool(description = "Import a host's Claude config (~/.claude skills, \
         agents, hooks, ~/.claude.json MCP servers, installed plugins) into \
         the catalog working tree as IR assets. Never overwrites; collisions \
-        are reported. Only host_alias `local`.")]
+        are reported. Any host: `local` reads this machine, others are read \
+        over SSH. `only` limits it to `<kind>:<name>` assets. Master or a \
+        client granted `assets`.")]
     pub(super) async fn import_assets(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(args): Parameters<catalog::ImportArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "import_assets",
-            &format!("host_alias={} dry_run={}", args.host_alias, args.dry_run),
+            &format!(
+                "host_alias={} dry_run={} caller={}",
+                args.host_alias,
+                args.dry_run,
+                caller.label()
+            ),
         );
+        // CRITICAL: `import_assets` is `Access::Client` (guard.rs) so a
+        // per-host token or an ungranted paired client can reach this body —
+        // and with a remote `host_alias` it now makes the hub SSH into
+        // another host and write into the catalog. `may_admin_catalog`'s own
+        // doc says a per-host token must never edit the catalog; this is the
+        // same gate `catalog_admin` runs, so the same caller who may drive
+        // that tool is the only one who may drive this one.
+        if !may_admin_catalog(&caller, &self.store)? {
+            return Err(mcp_err(
+                "E_FORBIDDEN",
+                format!(
+                    "import_assets needs the master token or a paired client granted the \
+                     asset catalog ({} refused); on the hub: fleet-hub client grant <name> assets",
+                    caller.label()
+                ),
+                None,
+            ));
+        }
         let token = {
             let s = self
                 .store
@@ -56,7 +82,9 @@ impl FleetTools {
             s.get_setting(crate::mcp::SETTING_TOKEN)
                 .map_err(|e| to_mcp_err(e.into()))?
         };
-        let rep = catalog::import_host(args, &self.store, token.as_deref()).map_err(to_mcp_err)?;
+        let rep = catalog::import_host(args, &self.store, &self.ssh, token.as_deref())
+            .await
+            .map_err(to_mcp_err)?;
         ok_json(&rep)
     }
 
@@ -66,7 +94,9 @@ impl FleetTools {
         plugin_update | noop | blocked) plus a plan_id for apply_sync. \
         plugin_update fires when a pinned plugin's catalog version changes; \
         a host left on the old version stays blocked. orphan: in the host's \
-        fleet manifest, no longer in the catalog. Nothing is written.")]
+        fleet manifest, no longer in the catalog. A remote host with no \
+        layers assigned is skipped (it would otherwise get the whole \
+        catalog) unless allow_unlayered is set. Nothing is written.")]
     pub(super) async fn plan_sync(
         &self,
         Parameters(p): Parameters<PlanSyncParams>,
@@ -88,6 +118,7 @@ impl FleetTools {
             host_alias: p.host_alias,
             kind,
             name: p.name,
+            allow_unlayered: p.allow_unlayered.unwrap_or(false),
         };
         catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
         let plan = catalog::sync::plan_sync(args, &self.store, &self.ssh)

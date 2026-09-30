@@ -62,11 +62,13 @@ impl Store {
         )?;
         for r in rows {
             tx.execute(
-                "INSERT INTO asset_inventory (host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO asset_inventory (host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 rusqlite::params![
                     host_alias, harness, r.kind, r.name, r.state, r.catalog_hash, r.host_hash, r.scanned_at,
-                    if r.managed { 1 } else { 0 }
+                    if r.managed { 1 } else { 0 },
+                    if r.secret_like { 1 } else { 0 },
+                    if r.fleet_owned { 1 } else { 0 },
                 ],
             )?;
         }
@@ -80,7 +82,7 @@ impl Store {
 
     pub fn list_inventory(&self) -> Result<Vec<AssetInventoryRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed
+            "SELECT host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned
              FROM asset_inventory ORDER BY host_alias, harness, kind, name",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -94,8 +96,21 @@ impl Store {
                 host_hash: row.get(6)?,
                 scanned_at: row.get(7)?,
                 managed: row.get::<_, i64>(8)? != 0,
+                secret_like: row.get::<_, i64>(9)? != 0,
+                fleet_owned: row.get::<_, i64>(10)? != 0,
             })
         })?;
+        rows.collect()
+    }
+
+    /// The newest `scanned_at` per host, for hosts with any inventory row.
+    pub fn inventory_last_scans(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, i64>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT host_alias, MAX(scanned_at) FROM asset_inventory GROUP BY host_alias",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         rows.collect()
     }
 
@@ -275,6 +290,8 @@ mod tests {
             host_hash: Some("h".into()),
             scanned_at: 1,
             managed: false,
+            secret_like: false,
+            fleet_owned: false,
         };
         s.replace_host_inventory(
             "local",
@@ -348,6 +365,37 @@ mod tests {
         };
         s.replace_host_inventory("local", "claude", &[row]).unwrap();
         assert!(s.list_inventory().unwrap()[0].managed);
+    }
+
+    #[test]
+    fn inventory_round_trips_flags_and_reports_last_scans() {
+        let s = Store::open_in_memory().unwrap();
+        let row = |host: &str, name: &str, at: i64| AssetInventoryRow {
+            host_alias: host.into(),
+            harness: "claude".into(),
+            kind: "skill".into(),
+            name: name.into(),
+            state: "unmanaged".into(),
+            catalog_hash: None,
+            host_hash: Some("h".into()),
+            scanned_at: at,
+            managed: false,
+            secret_like: true,
+            fleet_owned: true,
+        };
+        s.replace_host_inventory(
+            "local",
+            "claude",
+            &[row("local", "a", 5), row("local", "b", 9)],
+        )
+        .unwrap();
+        s.replace_host_inventory("oci", "claude", &[row("oci", "a", 7)])
+            .unwrap();
+        let got = s.list_inventory().unwrap();
+        assert!(got.iter().all(|r| r.secret_like && r.fleet_owned));
+        let last = s.inventory_last_scans().unwrap();
+        assert_eq!(last.get("local"), Some(&9));
+        assert_eq!(last.get("oci"), Some(&7));
     }
 
     #[test]

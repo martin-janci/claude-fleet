@@ -463,6 +463,12 @@ pub const WORK_AUTO_TIDY_REASONS: &str = "work.auto_tidy_reasons";
 /// never killed, so neither is automatic.
 pub const AUTO_TIDY_REASONS: &[&str] = &["done_idle", "pr_merged_idle", "not_planned"];
 
+// ── asset catalog scan tick (Assets S1a; `service::catalog::scan_tick`) ──
+/// Assets S1a: how often the catalog scan tick checks for stale hosts.
+pub const CATALOG_SCAN_CHECK_SECS: &str = "catalog.scan_check_secs";
+/// A host whose newest inventory row is older than this is rescanned.
+pub const CATALOG_SCAN_MAX_AGE_SECS: &str = "catalog.scan_max_age_secs";
+
 // ── decisions (Jev evaluation, D35-D37; `service::decide`) ──
 /// The kill switch: with it off no decision-model call is ever made. Off by
 /// default; the Settings dialog's "Decisions (Jev)" toggle.
@@ -908,6 +914,25 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Seconds)
     .zero("off")
     .restart(Restart::App),
+    Spec::new(
+        CATALOG_SCAN_CHECK_SECS,
+        "3600",
+        Kind::Secs,
+        "Asset scan check",
+        "How often fleet looks for hosts whose asset scan is stale, and rescans them. Under five minutes is raised to five.",
+    )
+    .unit(Unit::Minutes)
+    .zero("off")
+    .restart(Restart::App),
+    Spec::new(
+        CATALOG_SCAN_MAX_AGE_SECS,
+        "86400",
+        Kind::Secs,
+        "Asset scan age",
+        "A host's assets are rescanned once its last scan is older than this, and every host after the catalog or a sync changes.",
+    )
+    .unit(Unit::Hours)
+    .tags(&[Tag::Advanced]),
     Spec::new(
         WORK_DESCRIBE_CACHE_SECS,
         "300",
