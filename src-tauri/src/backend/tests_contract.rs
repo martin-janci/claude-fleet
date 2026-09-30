@@ -158,6 +158,7 @@ pub(crate) fn sample_host() -> HostRow {
         agent_version: Some("0.3.1".into()),
         provisioned_at: Some(1_725_000_000),
         provision_stale: true,
+        harnesses: Some(vec!["claude".into(), "codex".into()]),
     }
 }
 
