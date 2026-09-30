@@ -6,6 +6,7 @@
 pub mod admin;
 pub mod author;
 pub mod author_session;
+pub mod effective;
 pub mod harness;
 pub mod harness_set;
 pub mod identity;

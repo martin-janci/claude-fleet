@@ -110,6 +110,7 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
                 head: catalog.head.clone(),
                 loaded_at: catalog.loaded_at,
                 layers: Default::default(),
+                origin: catalog.origin.clone(),
             },
             provenance: BTreeMap::new(),
             excluded: BTreeMap::new(),
@@ -191,6 +192,7 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
             loaded_at: catalog.loaded_at,
             // Deliberately empty: a layer must never travel into the planner.
             layers: Default::default(),
+            origin: catalog.origin.clone(),
         },
         provenance,
         excluded,

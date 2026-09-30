@@ -16,7 +16,7 @@
 //! here, check which order (if any) it nests in and make sure nothing
 //! nests store-then-registry.
 
-use super::repo::Catalog;
+use super::repo::{Catalog, CatalogRef};
 use crate::ipc_error::{codes, IpcError};
 use std::collections::BTreeMap;
 use std::sync::{LazyLock, RwLock};
@@ -96,9 +96,89 @@ pub fn clear() -> Result<(), IpcError> {
     Ok(())
 }
 
+/// Take the read lock and pass every loaded catalog, keyed by `catalogs.id`,
+/// to `f`. The lock is held for the duration of `f`: per the module doc,
+/// `f` must never take the store lock (that direction is the one that is
+/// never allowed — registry → store is fine, store → registry never is).
+pub fn with_catalogs<T>(
+    f: impl FnOnce(&BTreeMap<i64, Catalog>) -> Result<T, IpcError>,
+) -> Result<T, IpcError> {
+    let guard = CATALOGS.read().map_err(|_| poisoned())?;
+    f(&guard)
+}
+
+/// Every loaded catalog merged into one borrowing view: personal (`org_id:
+/// None`) first, then the rest ordered by `name`. On a `(kind, name)`
+/// clash the first catalog in that order wins. `head` and `layers` are the
+/// personal catalog's (falling back to the first catalog in order when no
+/// personal catalog is loaded), so a caller that only ever read `head`
+/// before sees exactly what it saw before. `problems` is the concatenation
+/// in the same order. `origin` is filled for every asset in the result, so
+/// `Catalog::origin_of` always answers correctly on it. `None` when the
+/// registry is empty.
+pub fn union_all() -> Result<Option<Catalog>, IpcError> {
+    with_catalogs(|catalogs| {
+        if catalogs.is_empty() {
+            return Ok(None);
+        }
+        let mut ordered: Vec<&Catalog> = catalogs.values().collect();
+        ordered.sort_by(|a, b| match (a.org_id.is_none(), b.org_id.is_none()) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.cmp(&b.name),
+        });
+
+        let head_source = ordered
+            .iter()
+            .find(|c| c.org_id.is_none())
+            .copied()
+            .unwrap_or(ordered[0]);
+
+        let mut merged = Catalog {
+            id: 0,
+            name: String::new(),
+            head: head_source.head.clone(),
+            layers: head_source.layers.clone(),
+            ..Default::default()
+        };
+
+        let mut seen: std::collections::BTreeSet<(super::model::Kind, String)> =
+            std::collections::BTreeSet::new();
+        for cat in ordered {
+            merged.problems.extend(cat.problems.iter().cloned());
+            for asset in &cat.assets {
+                let key = (asset.kind(), asset.header.name.clone());
+                if !seen.insert(key) {
+                    continue;
+                }
+                merged.origin.insert(
+                    format!("{}/{}", asset.kind().as_str(), asset.header.name),
+                    CatalogRef {
+                        id: cat.id,
+                        name: cat.name.clone(),
+                    },
+                );
+                merged.assets.push(asset.clone());
+            }
+        }
+        Ok(Some(merged))
+    })
+}
+
+/// Insert a non-personal (`org_id: Some(_)`) catalog under a chosen id, for
+/// tests that need more than one catalog in the registry — `install_personal`
+/// only ever manages the single `org_id: None` entry, so it cannot be used
+/// to set up the "personal + an org catalog" fixtures `union_all`/
+/// `with_catalogs` need.
+#[cfg(test)]
+pub fn install_for_test(cat: Catalog) -> Result<(), IpcError> {
+    install(cat)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::catalog::model::{Asset, Kind};
     use crate::service::catalog::repo::Catalog;
 
     fn cat(id: i64, name: &str, org: Option<i64>) -> Catalog {
@@ -109,6 +189,14 @@ mod tests {
             head: format!("h{id}"),
             ..Default::default()
         }
+    }
+
+    fn skill(name: &str) -> Asset {
+        Asset::from_yaml(
+            None,
+            &format!("kind: skill\nname: {name}\ndescription: d\n"),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -188,5 +276,54 @@ mod tests {
         install_personal(cat(1, "personal", None)).unwrap();
         assert_eq!(personal().unwrap().unwrap().id, 1);
         clear().unwrap();
+    }
+
+    fn cat_with_skills(id: i64, name: &str, org: Option<i64>, skills: &[&str]) -> Catalog {
+        Catalog {
+            assets: skills.iter().map(|n| skill(n)).collect(),
+            ..cat(id, name, org)
+        }
+    }
+
+    /// `union_all` of `personal` (assets a, b) and `acme` (assets b, c)
+    /// yields a, b (from personal) and c (from acme): on the `b` clash
+    /// personal wins. `origin_of` on the merged catalog answers correctly
+    /// for both the clashing and the non-clashing asset.
+    #[test]
+    fn union_all_merges_catalogs_personal_first_and_records_origin() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        install_personal(cat_with_skills(1, "personal", None, &["a", "b"])).unwrap();
+        install_for_test(cat_with_skills(2, "acme", Some(9), &["b", "c"])).unwrap();
+
+        let merged = union_all().unwrap().expect("something is loaded");
+        let names: Vec<&str> = merged
+            .assets
+            .iter()
+            .map(|a| a.header.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["a", "b", "c"], "{names:?}");
+        assert_eq!(merged.origin_of(Kind::Skill, "a").name, "personal");
+        assert_eq!(merged.origin_of(Kind::Skill, "b").name, "personal");
+        assert_eq!(merged.origin_of(Kind::Skill, "c").name, "acme");
+        assert_eq!(merged.head, "h1", "head is the personal catalog's");
+    }
+
+    /// `with_catalogs` hands the caller the whole registry, keyed by id —
+    /// both a personal and an org catalog must be visible.
+    #[test]
+    fn with_catalogs_sees_every_loaded_catalog() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        install_personal(cat(1, "personal", None)).unwrap();
+        install_for_test(cat(2, "acme", Some(9))).unwrap();
+
+        let ids: Vec<i64> = with_catalogs(|m| Ok(m.keys().copied().collect())).unwrap();
+        assert_eq!(ids, vec![1, 2]);
+    }
+
+    /// An empty registry has nothing to union.
+    #[test]
+    fn union_all_is_none_when_nothing_is_loaded() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        assert!(union_all().unwrap().is_none());
     }
 }
