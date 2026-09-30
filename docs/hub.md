@@ -520,6 +520,13 @@ with the host's existing token; no new token, no `~/.claude.json` rewrite, no
 Claude restart. By hand: `fleet-hub provision [--host <alias>]
 [--content-only]` (the `provision_hosts {host, content_only}` tool).
 
+**Upgrade heads-up (the `ag` launcher).** The fingerprint also covers fleet's
+`ag` launcher, so upgrading to the build that ships it makes every provisioned
+host stale: within about a minute of start the unattended content refresh
+installs `ag` (`~/.local/share/ag`, `~/.local/bin/ag`) and, where the host has
+no `cl` command, a `cl` shim (`claude --yolo`) on every reachable host. To opt
+out, set `provision.install_ag=false` right after upgrading.
+
 **Who owns what on a host.**
 
 | Path on host | Owner | Written by |

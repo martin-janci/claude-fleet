@@ -282,6 +282,11 @@ pub const HEALTH_HOOKS_SILENT_SECS: &str = "health.hooks_silent_secs";
 /// git work tree (a dotfiles checkout, hosts F2). Off: provisioning
 /// refuses such a host with `E_INVALID` (decision B-2).
 pub const PROVISION_FORCE_GIT_TREE: &str = "provision.force_git_tree";
+/// Install fleet's `ag` launcher on every provisioned host (F2): the
+/// embedded tools/ag tree into ~/.local/share/ag and a `cl` command
+/// (`claude --yolo`) into ~/.local/bin. Off: provisioning skips it and
+/// panes launch `claude` directly unless the host already has `ag`.
+pub const PROVISION_INSTALL_AG: &str = "provision.install_ag";
 /// How many resumable lost sessions a batch restore resumes in parallel.
 /// Read by Task 3's restore path via `get_setting` + `settings::resolve`.
 pub const RESTORE_BATCH_SIZE: &str = "restore.batch_size";
@@ -868,6 +873,14 @@ pub const SPECS: &[Spec] = &[
         "Write fleet's skills even when a host's ~/.claude/skills is inside a git work tree, such as a dotfiles checkout. Off: provisioning refuses such a host.",
     )
     .danger("Fleet will write its skills into a folder another git repository tracks.")
+    .tags(&[Tag::Advanced]),
+    Spec::new(
+        PROVISION_INSTALL_AG,
+        "true",
+        Kind::Bool,
+        "Install the ag launcher",
+        "Provisioning installs fleet's ag launcher (~/.local/share/ag) and, when the host has no cl command, a cl shim (claude --yolo) in ~/.local/bin; panes use it when the host has no cl of its own. Off: provisioning leaves ag alone.",
+    )
     .tags(&[Tag::Advanced]),
     Spec::new(
         WORK_RETENTION_JOURNAL_DAYS,

@@ -1214,9 +1214,12 @@ done in this fix wave — tracked here so F2/F3 pick them up instead of re-disco
   containing `*`/`?`/`[...]` can glob-expand against the cwd. Low risk (config is user-authored,
   not attacker-controlled) but worth tightening before the catalog can render `[alias]`/`order`
   from less-trusted sources (F3's `Alias` kind).
-- From F2/F3, per the spec's risk list: an absolute `ag` path + explicit `--yolo` + `AG_FALLBACK`
-  in fleet's pane command (this plan only builds the standalone launcher, not fleet's call site);
-  a static capability list (`ag caps`) instead of inferring support from a driver's exit-3;
-  Codex hook-learned session ids (no `--new-id` equivalent); and an argument-injection lockdown
-  for `[alias]` values once they can be catalog-rendered from a team/library source rather than
-  hand-typed by the machine's own owner.
+- Done in F2 (`feat/fleet-launch-via-ag`): an absolute `ag` path + explicit `--yolo` + a fallback
+  in fleet's pane command — shipped as `CL_FALLBACK` in `crates/fleet-core/src/tmux.rs` (the plan
+  below had called it `AG_FALLBACK`; the code names it after the `cl` command it defines), plus
+  `provision.install_ag` staging `tools/ag` and running `install.sh --alias` on every provisioned
+  host.
+- Still deferred, from F2/F3, per the spec's risk list: a static capability list (`ag caps`)
+  instead of inferring support from a driver's exit-3; Codex hook-learned session ids (no
+  `--new-id` equivalent); and an argument-injection lockdown for `[alias]` values once they can be
+  catalog-rendered from a team/library source rather than hand-typed by the machine's own owner.

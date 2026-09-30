@@ -133,6 +133,10 @@
         {
           "type": "field",
           "key": "provision.force_git_tree"
+        },
+        {
+          "type": "field",
+          "key": "provision.install_ag"
         }
       ]
     }
