@@ -2,18 +2,19 @@
 //! process-global `Option<Catalog>` static. Only `load` (and tests) write
 //! it.
 //!
-//! **Lock order.** This module's lock and the store's (`Mutex<Store>`) must
-//! never be held at the same time in either order — one direction is
+//! **Lock order.** registry then store is allowed — that direction is
 //! already load-bearing (`resolve_preview` → `sync::layers::resolve_for_host`
 //! takes a `with_personal`/registry read lock and, from inside that
-//! closure, the store lock), so anything that took the store lock and then
-//! *also* called into this module while still holding it would be a
-//! lock-order inversion: two callers on the opposite orders can deadlock
-//! each other. `load` used to do exactly that (store guard held across
-//! `install`) and was fixed to release the store guard before touching the
-//! registry — see its comment. When adding a new call site here, check
-//! which order (if any) it nests in and make sure nothing nests the other
-//! way.
+//! closure, briefly takes the store lock). Store then registry is never
+//! allowed: read the store rows first, release the guard, then take the
+//! registry. Taking the store lock and then, while still holding it,
+//! calling into this module would be a lock-order inversion against the
+//! `resolve_preview` direction — two callers on opposite orders can
+//! deadlock each other. `load` used to do exactly that (store guard held
+//! across `install`) and was fixed to release the store guard before
+//! touching the registry — see its comment. When adding a new call site
+//! here, check which order (if any) it nests in and make sure nothing
+//! nests store-then-registry.
 
 use super::repo::Catalog;
 use crate::ipc_error::{codes, IpcError};

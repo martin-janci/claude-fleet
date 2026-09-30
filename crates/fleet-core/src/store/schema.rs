@@ -1282,6 +1282,7 @@ mod tests {
         "tasks",
         "worktree_parent_fingerprints",
         "catalog_config",
+        "catalogs",
         "asset_inventory",
         "catalog_secrets",
         "catalog_secrets_host",

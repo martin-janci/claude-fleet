@@ -199,8 +199,10 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   `fleet-hub catalog set` keep their old shape and now address the
   `personal` row. Loaded catalogs live in `service/catalog/registry.rs`
   (`personal()`, `with_personal`, `get(id)`), which replaces the single
-  process-global `Option<Catalog>`; its lock and the store's must never be
-  held at the same time in either order. Assets carry `scope: private |
+  process-global `Option<Catalog>`; registry then store is allowed (the
+  `resolve_preview` path); store then registry is never allowed — read
+  store rows first, release the guard, then take the registry. Assets
+  carry `scope: private |
   shared` (private by default, omitted from `asset.yaml` when private,
   always present in the JSON API and on `AssetSummary`) — meaningful only in
   the personal catalog, since an org catalog's assets are org-scoped

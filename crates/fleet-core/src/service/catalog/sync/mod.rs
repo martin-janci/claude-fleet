@@ -1197,8 +1197,10 @@ mod tests {
     /// reported `skipped` / `cancelled`, no progress is emitted (there is
     /// no pair about to be applied, and the run never completes), and the
     /// run is still recorded so the history says how far it got.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn apply_sync_skips_every_pair_when_the_token_is_already_cancelled() {
+        let _lock = super::super::lock_registry_for_test();
         let bus = Arc::new(RecordingEventBus::new());
         let store = store_with_local(bus.clone());
         let ssh = Arc::new(SshClient::new());

@@ -56,8 +56,8 @@ left for later.
 
 ## Data model
 
-One migration (the next free number at implementation time, guarded like
-087 wherever it adds columns).
+Each milestone adds the tables it needs (M1: `catalogs`, migration 089;
+M2–M4 as in the Milestones table).
 
 **New tables**
 
@@ -70,9 +70,9 @@ CREATE TABLE catalogs (
   org_id         INTEGER REFERENCES orgs(id) ON DELETE RESTRICT,  -- NULL = personal
   head_commit    TEXT,
   last_loaded_at INTEGER,
-  created_at     INTEGER NOT NULL
+  created_at     INTEGER NOT NULL,
+  CHECK ((name = 'personal') = (org_id IS NULL))
 );
-CREATE UNIQUE INDEX idx_catalogs_personal ON catalogs((org_id IS NULL)) WHERE org_id IS NULL;
 
 CREATE TABLE host_catalogs (          -- explicit admissions (hosts with no org)
   host_alias TEXT    NOT NULL REFERENCES hosts(alias) ON DELETE CASCADE,
@@ -296,10 +296,10 @@ Each ends with `cargo test --workspace`, `pnpm test`, `pnpm check` green.
 
 | M | Contents |
 |---|---|
-| M1 | migration; `CATALOGS` registry and `with_catalog` / `effective_for_host`; `scope` in `asset.yaml`; `personal` backfill |
-| M2 | sync across catalogs: scope boundary, collisions, manifest `catalog`, validation errors |
-| M3 | hub CLI, MCP `catalog` parameter and new actions, per-catalog grants, admissions, verdict table |
-| M4 | changeset engine: store, Bootstrap / New / Drift / Rollout rules, apply / undo / dismiss / reject, `catalog.auto`, `catalog.auto_push` |
+| M1 | migration 089 `catalogs` (+ backfill); `registry.rs` (loaded catalogs by id; personal); `scope` in `asset.yaml` |
+| M2 | `host_layers.catalog_id`, `asset_inventory.catalog_id`, manifest `catalog`, `effective_for_host`, `with_catalog(id, f)`; layers must not override `scope` |
+| M3 | `host_catalogs`, `client_catalog_grants`, `load(id)` / per-catalog `ensure_fresh` |
+| M4 | `changesets`, `changeset_items`, `asset_triage_verdicts` |
 | M5 | shell: `AssetsWorkspace`, rail, Inbox sections, Library, Inspector, footer chips, `JobChip`, `QueryInput`, keyboard, `Badge`, read-only chip |
 | M6 | Layers and Hosts views, admissions UI, `ChangesetCard` (Bootstrap, New, Drift, Rollout), `DiffView`, Settings → Catalogs, QuickSwitcher |
 | M7 | full verification, generated files, `docs/hub.md` catalog section, `CLAUDE.md` |
