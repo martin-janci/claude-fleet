@@ -148,6 +148,32 @@ fn only_wants(only: &[String], kind: Kind, name: &str) -> bool {
             .any(|o| *o == format!("{}:{}", kind.as_str(), slugify(name)))
 }
 
+/// Security fix round 1, IMPORTANT 4 follow-up (S1a review, finding 3):
+/// `only` arrives over the wire as `<kind>:<host identifier>` — e.g. the
+/// per-row Import button sends the raw name as scanned on the host
+/// (`Foo_Bar`, `plugin_superpowers-chrome_chrome`, any uppercase MCP server
+/// key). `only_wants` (above) and the final assembly loop both compare
+/// against the *slugified* catalog name, so a non-kebab `only` entry never
+/// matches anything and silently imports zero assets. Normalizing every
+/// entry to `kind:slugify(name)` exactly once, here, at the single entry
+/// point (`import_claude_only`), keeps every downstream comparison
+/// (`only_wants` for skills/agents/hooks/MCP servers/plugin refs, and the
+/// final loop matching `a.header.name`) working against the same slug form
+/// regardless of what the caller's list looked like. Hooks are unaffected:
+/// `hook_asset_name` already returns a valid catalog name, and `slugify` is
+/// idempotent on one (see its doc comment), so `kind:hook-name` entries
+/// round-trip unchanged. An entry with no `:` isn't a recognised `<kind>:
+/// <name>` pair — pass it through as-is so it deliberately matches nothing
+/// (silent no-op) rather than panicking or guessing at a split.
+fn normalize_only(only: &[String]) -> Vec<String> {
+    only.iter()
+        .map(|o| match o.split_once(':') {
+            Some((kind, name)) => format!("{kind}:{}", slugify(name)),
+            None => o.clone(),
+        })
+        .collect()
+}
+
 /// Whether `original` should become the asset's `install_as`: `Some(original)`
 /// when the catalog slug diverges from the host identifier and that
 /// identifier is itself a valid install name; `None` when they match
@@ -972,6 +998,11 @@ pub fn import_claude_only(
     dry_run: bool,
     only: &[String],
 ) -> Result<ImportReport, IpcError> {
+    // Normalize once, here, so every downstream `only_wants` check and the
+    // final assembly loop compare like-for-like against the slugified
+    // catalog name — see `normalize_only`'s doc comment (S1a review finding 3).
+    let only_normalized = normalize_only(only);
+    let only = &only_normalized[..];
     let mut report = ImportReport {
         created: vec![],
         problems: vec![],
@@ -1946,6 +1977,62 @@ mod tests {
             "{:?}",
             rep.problems
         );
+    }
+
+    /// S1a review finding 3: the per-row Import button sends `only` as
+    /// `<kind>:<raw host identifier>` — never slugified — because that is
+    /// what an unmanaged identity's `name` is. Before `normalize_only`, this
+    /// `only` entry (`mcp_server:Foo_Bar`) never matched the asset's slugged
+    /// name (`foo-bar`) that `only_wants` and the final assembly loop
+    /// compare against, so the import silently created nothing.
+    #[test]
+    fn only_matches_a_non_kebab_host_identifier() {
+        let base = std::env::temp_dir().join(format!(
+            "fleet-import-only-non-kebab-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let claude_dir = base.join("home/.claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_json = base.join("home/.claude.json");
+        fs::write(
+            &claude_json,
+            serde_json::json!({
+                "mcpServers": {
+                    "Foo_Bar": { "type": "stdio", "command": "x" },
+                    "other_server": { "type": "stdio", "command": "y" }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        let src = ImportSources {
+            claude_dir,
+            claude_json,
+        };
+
+        let rep = import_claude_only(
+            &src,
+            &repo,
+            "local",
+            None,
+            false,
+            &["mcp_server:Foo_Bar".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            rep.created,
+            vec![("mcp_server".to_string(), "foo-bar".to_string())],
+            "{:?}",
+            rep.created
+        );
+        let cat = load_dir(&repo).unwrap();
+        assert!(cat.find(Kind::McpServer, "foo-bar").is_some());
+        assert!(cat.find(Kind::McpServer, "other-server").is_none());
     }
 
     #[test]
