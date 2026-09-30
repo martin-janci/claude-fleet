@@ -164,10 +164,11 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 - **Assets S1a — unmanaged inventory** (plan
   `docs/superpowers/plans/2026-09-29-assets-s1a-foundation.md`, spec
   `docs/superpowers/specs/2026-09-29-assets-workspace-design.md`): an
-  unmanaged row keeps its content hash and `secret_like`/`fleet_owned`
-  flags (migration 087); `list_assets { identities: true }` folds every
-  host's copies of a `(kind, name)` into one `AssetIdentity` by host-set
-  signature and classifies it (`service/catalog/identity.rs`).
+  unmanaged row keeps its `host_hash` (content hash) and
+  `secret_like`/`fleet_owned` flags (migration 087); `list_assets` returns
+  `identities`, folding every host's copies of a `(kind, name)` into one
+  `AssetIdentity` by host-set signature and classifying it
+  (`service/catalog/identity.rs`).
   `service/catalog/scan_tick.rs` rescans a host whose inventory is older
   than `catalog.scan_max_age_secs` on a `catalog.scan_check_secs` timer,
   rescans every host after the catalog HEAD or a sync changes, and keeps a
