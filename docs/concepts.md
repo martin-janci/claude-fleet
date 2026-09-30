@@ -133,7 +133,7 @@ agent's `tools` do not apply there (the Codex preview says so). A `${NAME}`
 secret inside a subagent's TOML is substituted as a TOML string value, so
 any characters in the secret are safe there.
 
-*Upgrading to per-host harnesses.* A host fleet has already synced Codex
+*Upgrading to per-host harnesses.* A host that fleet has already synced Codex
 assets to keeps Codex on under *auto* (its manifest names them) and gains
 Codex subagents on its next sync — every catalog agent now also lands in
 `~/.codex/agents/`. To retire Codex there instead, set Codex to `off` in
