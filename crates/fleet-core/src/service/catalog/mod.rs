@@ -15,6 +15,7 @@ pub mod model;
 pub mod propose;
 pub mod repo;
 pub mod resolve;
+pub mod scan_tick;
 pub mod sync;
 pub mod validate;
 

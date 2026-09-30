@@ -1392,6 +1392,36 @@
     },
     {
       "default_widget": "duration",
+      "key": "catalog.scan_check_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Asset scan check",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "catalog.scan_max_age_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Asset scan age",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
       "key": "work.describe_cache_secs",
       "kind": {
         "max": 315360000,

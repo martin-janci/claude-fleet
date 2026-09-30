@@ -22,6 +22,7 @@ use crate::backend::RemoteConfig;
 use crate::bootstrap::mcp::maybe_start_mcp;
 use fleet_core::events::EventBus;
 use fleet_core::service::account_usage::UsageCache;
+use fleet_core::service::catalog::scan_tick::spawn_catalog_scan_tick;
 use fleet_core::service::tick::{spawn_account_usage_tick, spawn_reconcile_tick};
 use fleet_core::service::trackers::sync::spawn_tracker_sync;
 use fleet_core::service::tunnel::TunnelSupervisor;
@@ -146,6 +147,16 @@ impl FleetTasks for RealFleetTasks {
         std::mem::drop(spawn_tracker_sync(
             Arc::clone(&self.store),
             fleet_core::service::trackers::default_net(),
+            tokio_util::sync::CancellationToken::new(),
+        ));
+    }
+
+    /// The catalog scan tick (Assets S1a): `catalog.scan_check_secs`, `0` =
+    /// off. Fleet-owning, like the tracker sync above.
+    fn start_catalog_scan_tick(&self) {
+        std::mem::drop(spawn_catalog_scan_tick(
+            Arc::clone(&self.store),
+            Arc::clone(&self.ssh),
             tokio_util::sync::CancellationToken::new(),
         ));
     }
