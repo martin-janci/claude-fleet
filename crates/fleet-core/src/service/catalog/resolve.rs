@@ -13,6 +13,10 @@ pub struct Provenance {
     pub introduced_by: String,
     /// Every layer that changed its fields, in application order.
     pub overridden_by: Vec<String>,
+    /// The name of the catalog the asset (and so the layer) belongs to.
+    /// `#[serde(default)]`: a hub older than Assets M2 never sends it.
+    #[serde(default)]
+    pub catalog: String,
 }
 
 /// The effective catalog plus why it looks the way it does.
@@ -58,7 +62,10 @@ fn merge_yaml(base: &mut serde_yaml::Value, over: &serde_yaml::Value) {
 /// matrix is computed from the *full* catalog while the plan is computed
 /// from the *resolved* one — a host whose layer moved the asset elsewhere
 /// would report it `missing` and the real directory `unmanaged` forever,
-/// while `apply_sync` managed it at the other identifier. The re-parsed
+/// while `apply_sync` managed it at the other identifier. A `scope`-changing
+/// override is rejected too (Assets M2): `scope` decides whether an asset
+/// may reach an org-bound host at all, and a layer assigned to such a host
+/// must not be able to widen a private asset to shared. The re-parsed
 /// asset is also re-validated with the same `Asset::validate` the loader
 /// uses, so an override cannot smuggle in a value `load_one` would have
 /// rejected at load time.
@@ -78,6 +85,12 @@ fn apply_override(asset: &Asset, over: &serde_yaml::Value) -> Result<Asset, Stri
         return Err(format!(
             "an override may not change an asset's install_as ({:?} to {:?})",
             asset.header.install_as, patched.header.install_as
+        ));
+    }
+    if patched.header.scope != asset.header.scope {
+        return Err(format!(
+            "an override may not change an asset's scope ({:?} to {:?})",
+            asset.header.scope, patched.header.scope
         ));
     }
     let problems = patched.validate();
@@ -138,6 +151,7 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
                 Provenance {
                     introduced_by: layer.name.clone(),
                     overridden_by: Vec::new(),
+                    catalog: catalog.name.clone(),
                 },
             );
         }
@@ -474,5 +488,20 @@ mod tests {
             "{:?}",
             r.catalog.problems
         );
+    }
+
+    #[test]
+    fn an_override_may_not_change_scope() {
+        // `scope` is who may receive the asset; a layer must not be able to
+        // widen a private asset to shared (or narrow a shared one) for the
+        // hosts it is assigned to.
+        let private = skill("a");
+        assert_eq!(
+            private.header.scope,
+            crate::service::catalog::model::Scope::Private
+        );
+        let over: serde_yaml::Value = serde_yaml::from_str("scope: shared\n").unwrap();
+        let err = apply_override(&private, &over).unwrap_err();
+        assert!(err.contains("scope"), "{err}");
     }
 }
