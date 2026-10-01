@@ -61,6 +61,13 @@ pub struct Refusal {
     /// The asset's catalog name (not its install name).
     pub name: String,
     pub reason: String,
+    /// The catalog the refusal is about, when there is exactly one: a scope
+    /// boundary names the catalog whose private asset it refused (always
+    /// `personal` in M2). A cross-catalog collision refuses a member from
+    /// EACH of two or more catalogs, so no single name applies — `None`
+    /// there, same as before this field existed.
+    #[serde(default)]
+    pub catalog: Option<String>,
 }
 
 /// What one host should have, across every catalog it accepts.
@@ -89,9 +96,10 @@ pub struct EffectiveSet {
     /// the same `(kind, name)` key), the second value is prefixed with its
     /// catalog's name to disambiguate; the first is left as-is, so the
     /// common (single-catalog, or no clash) case is byte-for-byte what it
-    /// was before Assets M2. `#[serde(default)]` because `EffectiveSet`
-    /// travels the wire via `Resolution`: a hub older than this field never
-    /// sends it.
+    /// was before Assets M2. `#[serde(default)]`: `EffectiveSet` itself
+    /// never crosses the wire, but `resolve_preview` copies this value into
+    /// `Resolution::excluded`, which does, so a hub older than this field
+    /// never sends it.
     #[serde(default)]
     pub excluded: BTreeMap<String, String>,
     /// `(kind, name)` of every private asset the scope boundary dropped
@@ -103,9 +111,10 @@ pub struct EffectiveSet {
     /// synced from before it had an org (or before Assets M2 at all) must
     /// keep it — the planner suppresses its removal as a manifest orphan the
     /// same way it does for `refused`, and reports a `Noop` with why
-    /// whenever the asset is actually on the host. `#[serde(default)]`
-    /// because `EffectiveSet` travels the wire via `Resolution`: a hub older
-    /// than this field never sends it.
+    /// whenever the asset is actually on the host. `#[serde(default)]`:
+    /// `EffectiveSet` itself never crosses the wire, but `resolve_preview`
+    /// copies this value into `Resolution::withheld`, which does, so a hub
+    /// older than this field never sends it.
     #[serde(default)]
     pub withheld: BTreeSet<(String, String)>,
 }
@@ -239,6 +248,7 @@ fn compose<'r>(
                              org host {host_alias}; mark it shared or remove it from the layer",
                             asset.header.name, cat.name
                         ),
+                        catalog: Some(cat.name.clone()),
                     });
                 } else {
                     // Dropped silently — no `Refusal`, no `Blocked` noise:
@@ -333,6 +343,9 @@ fn compose<'r>(
                 kind: a.kind().as_str().to_string(),
                 name: a.header.name.clone(),
                 reason: reason.clone(),
+                // A collision refuses a member from each of two or more
+                // catalogs; no single catalog name applies.
+                catalog: None,
             });
             dropped.insert(i);
         }
@@ -558,6 +571,7 @@ mod tests {
         assert!(r.reason.contains("private asset \"a\""), "{}", r.reason);
         assert!(r.reason.contains("layer core"), "{}", r.reason);
         assert!(r.reason.contains("mark it shared"), "{}", r.reason);
+        assert_eq!(r.catalog.as_deref(), Some("personal"));
         // Provenance carries the catalog as well as the layer.
         assert_eq!(e.provenance["skill/b"].introduced_by, "core");
         assert_eq!(e.provenance["skill/b"].catalog, "personal");
@@ -590,6 +604,7 @@ mod tests {
                 "{}",
                 r.reason
             );
+            assert_eq!(r.catalog, None, "a collision names no single catalog");
         }
     }
 

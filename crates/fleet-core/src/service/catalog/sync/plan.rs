@@ -442,17 +442,22 @@ pub fn compute_host_plan(
 /// any harness ever saw it — a scope boundary or a cross-catalog collision
 /// (`effective::EffectiveSet::refused`), as opposed to a per-harness render
 /// decision. It carries no files, merges or plan: there is nothing to
-/// render for an asset that never reached the resolved catalog, and it
-/// names no `catalog` for the same reason `action_for`'s `blank()` doesn't
-/// — a refused asset was dropped precisely because which catalog it should
-/// come from is unresolved (a collision) or irrelevant (a scope refusal).
+/// render for an asset that never reached the resolved catalog. `catalog`
+/// names the single catalog a scope-boundary refusal is about
+/// (`Refusal::catalog`); a collision refuses a member from each of two or
+/// more catalogs, so it stays `None` there — unresolved, not irrelevant.
 /// `sync::plan_sync` is the only caller.
-pub(crate) fn blocked_action(kind: Kind, name: &str, reason: String) -> Action {
+pub(crate) fn blocked_action(
+    kind: Kind,
+    name: &str,
+    reason: String,
+    catalog: Option<String>,
+) -> Action {
     Action {
         kind: kind.as_str().to_string(),
         name: name.to_string(),
         op: ActionOp::Blocked,
-        catalog: None,
+        catalog,
         reason: Some(reason),
         files: Vec::new(),
         merges: Vec::new(),

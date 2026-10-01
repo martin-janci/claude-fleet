@@ -248,10 +248,10 @@ impl FleetTools {
     }
 
     #[tool(description = "One host's effective asset set after its role and \
-        contexts resolve, with provenance: the layer that introduced each \
-        asset, the ones that overrode it, and the one that excluded anything \
-        missing. Nothing is written. Requires catalog_configure + \
-        catalog_load in the app.")]
+        contexts resolve: provenance, what was excluded and why, every \
+        refused asset (scope or collision), and every private asset an org \
+        host withheld silently. Nothing is written. Requires \
+        catalog_configure + catalog_load in the app.")]
     pub(super) async fn resolve_preview(
         &self,
         Parameters(p): Parameters<ResolvePreviewParams>,
@@ -281,6 +281,8 @@ impl FleetTools {
         ok_json(&serde_json::json!({
             "provenance": res.provenance,
             "excluded": res.excluded,
+            "refused": res.refused,
+            "withheld": res.withheld,
             "assets": assets,
         }))
     }

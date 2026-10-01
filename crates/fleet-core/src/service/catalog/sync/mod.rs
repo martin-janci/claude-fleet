@@ -318,7 +318,7 @@ pub async fn plan_sync(
         // keep `compute_host_plan` from treating the SAME asset as a
         // manifest orphan (it is refused, not dropped from the catalog: the
         // host's existing copy must be left exactly as it is, not removed).
-        let refused_matched: BTreeMap<(super::model::Kind, String), String> = eff
+        let refused_matched: BTreeMap<(super::model::Kind, String), (String, Option<String>)> = eff
             .refused
             .iter()
             .filter_map(|r| {
@@ -326,9 +326,12 @@ pub async fn plan_sync(
                     .iter()
                     .copied()
                     .find(|k| k.as_str() == r.kind)?;
-                host_filter
-                    .matches(kind, &r.name)
-                    .then(|| ((kind, r.name.clone()), r.reason.clone()))
+                host_filter.matches(kind, &r.name).then(|| {
+                    (
+                        (kind, r.name.clone()),
+                        (r.reason.clone(), r.catalog.clone()),
+                    )
+                })
             })
             .collect();
         // Once per harness this host lists — the refusal is a catalog-level
@@ -336,7 +339,9 @@ pub async fn plan_sync(
         // harness's plan reports it.
         let blocked_for_refusals: Vec<plan::Action> = refused_matched
             .iter()
-            .map(|((kind, name), reason)| plan::blocked_action(*kind, name, reason.clone()))
+            .map(|((kind, name), (reason, catalog))| {
+                plan::blocked_action(*kind, name, reason.clone(), catalog.clone())
+            })
             .collect();
         // Every private asset the scope boundary dropped SILENTLY (an
         // unlayered org host's personal catalog — `effective::compose`

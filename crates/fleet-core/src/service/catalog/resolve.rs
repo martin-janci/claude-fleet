@@ -39,6 +39,17 @@ pub struct Resolution {
     /// hub older than Assets M2 never sends this field.
     #[serde(default)]
     pub refused: Vec<crate::service::catalog::effective::Refusal>,
+    /// Assets M2: `(kind, name)` of every private asset an unlayered org
+    /// host's scope boundary dropped silently
+    /// (`effective::EffectiveSet::withheld`) — never removed if already on
+    /// the host, just not (re)installed. Empty on the single-catalog path;
+    /// `mod::resolve_preview` fills it from `effective::effective_for_host`,
+    /// so an MCP agent or the UI previewing an org-bound host can explain a
+    /// missing private asset instead of reading it as a bug. `#[serde(default)]`
+    /// because `Resolution` travels the wire: a hub older than this field
+    /// never sends it.
+    #[serde(default)]
+    pub withheld: std::collections::BTreeSet<(String, String)>,
 }
 
 /// Deep-merge `over` into `base`: mappings recurse, everything else replaces.
@@ -138,6 +149,7 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
             excluded: BTreeMap::new(),
             layered: false,
             refused: Vec::new(),
+            withheld: Default::default(),
         };
     }
 
@@ -222,6 +234,7 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
         excluded,
         layered: true,
         refused: Vec::new(),
+        withheld: Default::default(),
     }
 }
 

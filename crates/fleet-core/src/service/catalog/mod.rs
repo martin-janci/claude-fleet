@@ -487,6 +487,7 @@ pub fn resolve_preview(
         excluded: eff.excluded,
         layered: eff.layered,
         refused: eff.refused,
+        withheld: eff.withheld,
     })
 }
 
