@@ -91,6 +91,10 @@ Then attack the design, not just the facts:
    is reading `~/.claude/projects/*.jsonl` enough for Fleet to show status, and
    what does Fleet's `claude_agents.rs` / reconcile do with a session it cannot
    see in that listing? This single answer decides whether FP7 is small or large.
+   Already established (spec §16 Q2, 2026-10-01): the rows carry
+   `id, kind, name, pid, sessionId, cwd, startedAt, state, status`, `kind` is
+   only `interactive` or `background`, and nothing marks a Remote Control
+   session — so "listed" alone may not be enough to tell one apart.
 2. **Ownership collisions.** Fleet owns tmux panes and assumes it started what it
    manages. A remote-control server creates sessions Fleet did not start, in
    worktrees Fleet may or may not know about. Find the concrete places this
