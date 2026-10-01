@@ -9058,3 +9058,150 @@ async fn a_host_proposes_a_guide_and_only_a_person_approves_it() {
     );
     assert!(v["guides"].as_array().unwrap().is_empty());
 }
+
+/// An ORG-BOUND trusted device never decides or removes a guide. The `guide`
+/// tool is `Access::Client` so a host's own token can reach catalog/validate/
+/// propose, which means it does NOT get the `Access::Person` gate that keeps
+/// an org-bound client off `set_setting` — the write actions have to say no
+/// themselves. Guides are the fleet-wide settings surface; a client bound to
+/// one org has no business over it.
+#[tokio::test]
+async fn an_org_bound_device_never_decides_or_removes_a_guide() {
+    let (tools, _guards, store) = client_tools();
+    let call = |c: Caller, p: serde_json::Value| {
+        tools.guide(
+            Extension(c),
+            Parameters(serde_json::from_value::<GuideParams>(p).unwrap()),
+        )
+    };
+    let host = host_caller("web-1", TokenMode::Full);
+    let cat = result_json(
+        &call(host.clone(), serde_json::json!({ "action": "catalog" }))
+            .await
+            .unwrap(),
+    );
+    let p = result_json(
+        &call(
+            host,
+            serde_json::json!({ "action": "propose", "spec": cat["example"].clone() }),
+        )
+        .await
+        .expect("a host proposes"),
+    );
+    let id = p["id"].as_i64().unwrap();
+
+    // trusted AND full, so only the org binding can refuse it
+    let bound = org_bound(trusted(client_caller("phone", TokenMode::Full)));
+    let err = call(
+        bound.clone(),
+        serde_json::json!({ "action": "decide", "id": id, "approve": true }),
+    )
+    .await
+    .expect_err("an org-bound device never decides");
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    assert!(
+        err.message.contains("bound to an organisation"),
+        "{}",
+        err.message
+    );
+    // it may still read, and is told it cannot write
+    let listed = result_json(
+        &call(bound.clone(), serde_json::json!({ "action": "list" }))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(listed["can_write"].as_bool(), Some(false));
+    assert!(store.lock().unwrap().guide_proposal(id).unwrap().unwrap().state == "pending");
+
+    // an UNBOUND trusted device of the same shape does decide — the binding
+    // is the only thing that refused above
+    let free = trusted(client_caller("laptop", TokenMode::Full));
+    assert!(
+        call(
+            free,
+            serde_json::json!({ "action": "decide", "id": id, "approve": true })
+        )
+        .await
+        .is_ok(),
+        "an unbound trusted device decides"
+    );
+    let err = call(
+        bound,
+        serde_json::json!({ "action": "remove", "page_id": "guide.cleanup" }),
+    )
+    .await
+    .expect_err("an org-bound device never removes");
+    assert!(err.message.contains("bound to an organisation"), "{}", err.message);
+}
+
+/// The master token proposes AND writes, so without a no-self-approval rule
+/// one control-API caller could `propose` and then `decide { approve: true }`
+/// with no second party — against the feature's stated guarantee that an
+/// agent proposes and only a person approves. A guide proposed from a HOST
+/// session carries that host's detail, so the master still approves those.
+#[tokio::test]
+async fn the_master_does_not_approve_the_guide_it_proposed_itself() {
+    let (tools, _guards, _store) = client_tools();
+    let call = |c: Caller, p: serde_json::Value| {
+        tools.guide(
+            Extension(c),
+            Parameters(serde_json::from_value::<GuideParams>(p).unwrap()),
+        )
+    };
+    let cat = result_json(
+        &call(Caller::master(), serde_json::json!({ "action": "catalog" }))
+            .await
+            .unwrap(),
+    );
+    let example = cat["example"].clone();
+    let p = result_json(
+        &call(
+            Caller::master(),
+            serde_json::json!({ "action": "propose", "spec": example.clone() }),
+        )
+        .await
+        .expect("the master may propose"),
+    );
+    let own = p["id"].as_i64().unwrap();
+    let err = call(
+        Caller::master(),
+        serde_json::json!({ "action": "decide", "id": own, "approve": true }),
+    )
+    .await
+    .expect_err("not its own");
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    assert!(
+        err.message.contains("does not also approve it"),
+        "{}",
+        err.message
+    );
+    // rejecting its own is fine: that throws the proposal away, it does not
+    // put a guide live
+    assert!(
+        call(
+            Caller::master(),
+            serde_json::json!({ "action": "decide", "id": own, "approve": false })
+        )
+        .await
+        .is_ok(),
+        "an actor may withdraw its own proposal"
+    );
+    // and a HOST's proposal is still the master's to approve
+    let hp = result_json(
+        &call(
+            host_caller("web-1", TokenMode::Full),
+            serde_json::json!({ "action": "propose", "spec": example }),
+        )
+        .await
+        .expect("a host proposes"),
+    );
+    assert!(
+        call(
+            Caller::master(),
+            serde_json::json!({ "action": "decide", "id": hp["id"].as_i64().unwrap(), "approve": true })
+        )
+        .await
+        .is_ok(),
+        "the master approves a host's proposal"
+    );
+}

@@ -269,6 +269,29 @@ pub fn decide(s: &Store, id: i64, approve: bool, actor: Actor<'_>) -> Result<Gui
         .filter(|r| r.state == "pending")
         .ok_or_else(|| IpcError::new(codes::E_INVALID, format!("no guide proposal {id} waits")))?;
     let by = actor_text(&actor);
+    // No actor approves its own proposal. The feature's guarantee is "an
+    // agent proposes; only a person approves", but the master token is BOTH a
+    // proposer (`Actor::Agent("control API")`) and a settings writer, so one
+    // control-API caller could `propose` and then `decide { approve: true }`
+    // with no second party. A guide an agent proposed from a HOST session
+    // carries that host's detail, so an operator's master token still
+    // approves it — which is the intended flow.
+    //
+    // Here rather than in the MCP tool so the hub CLI and the desktop are held
+    // to it too.
+    if approve
+        && row.source == actor.word()
+        && row.source_detail.as_deref() == actor.detail()
+        && actor.detail().is_some()
+    {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!(
+                "{by} proposed this guide, so it does not also approve it — a person decides, in \
+                 Settings → Guides or with fleet-hub guides"
+            ),
+        ));
+    }
     if approve {
         let spec: serde_json::Value =
             serde_json::from_str(&row.spec).map_err(|e| invalid(e.to_string()))?;
