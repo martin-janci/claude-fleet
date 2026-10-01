@@ -81,6 +81,16 @@ pub(crate) const AG_FILES: &[(&str, &str)] = &[
 ];
 /// Where provisioning stages [`AG_FILES`] before running their installer.
 const AG_STAGE_DIR: &str = "~/.local/share/fleet/ag-src";
+/// Where the installer puts the ag tree, passed to it EXPLICITLY.
+///
+/// `install.sh` honours a caller-set `AG_HOME`/`AG_BIN_DIR` by design, and
+/// fleet runs it through `bash -lc`, which sources the host's login profile
+/// first — so an `export AG_HOME=...` there would otherwise decide where
+/// fleet installs (and, before the installer's guard was hardened, what it
+/// deleted). Passing both pins the location to the one
+/// `tmux::CL_FALLBACK` reads; `ag_paths_match_the_pane_fallback` ties them.
+const AG_HOME_DIR: &str = "~/.local/share/ag";
+const AG_BIN_DIR: &str = "~/.local/bin";
 /// The alias every provisioned host gets: `cl` = Claude Code without
 /// permission prompts, the same launch fleet's panes use.
 const AG_CL_ALIAS: &str = "cl=claude --yolo";
@@ -698,10 +708,15 @@ fn ag_clear_stage_script() -> String {
 }
 
 /// `bash -lc` body that runs the staged installer (see [`provision_ag`]).
+///
+/// `AG_HOME`/`AG_BIN_DIR` go in the command's own environment so the host's
+/// login profile cannot redirect where fleet installs.
 fn ag_install_script() -> String {
     let stage = remote_path(AG_STAGE_DIR);
     format!(
-        "bash {stage}/install.sh --from {stage} --alias {} </dev/null 2>&1",
+        "env AG_HOME={} AG_BIN_DIR={} bash {stage}/install.sh --from {stage} --alias {} </dev/null 2>&1",
+        remote_path(AG_HOME_DIR),
+        remote_path(AG_BIN_DIR),
         quote(AG_CL_ALIAS)
     )
 }
@@ -2144,8 +2159,24 @@ mod tests {
     fn ag_install_script_is_quoted_and_adds_the_cl_alias() {
         assert_eq!(
             ag_install_script(),
-            "bash \"$HOME\"/'.local/share/fleet/ag-src'/install.sh --from \"$HOME\"/'.local/share/fleet/ag-src' --alias 'cl=claude --yolo' </dev/null 2>&1"
+            "env AG_HOME=\"$HOME\"/'.local/share/ag' AG_BIN_DIR=\"$HOME\"/'.local/bin' bash \"$HOME\"/'.local/share/fleet/ag-src'/install.sh --from \"$HOME\"/'.local/share/fleet/ag-src' --alias 'cl=claude --yolo' </dev/null 2>&1"
         );
+    }
+
+    /// The installer is told where to install, and it is the one place the
+    /// pane's own fallback looks. Two unrelated literals here would mean a
+    /// provisioned host whose panes still fall through to plain `claude`.
+    #[test]
+    fn ag_paths_match_the_pane_fallback() {
+        let home = AG_HOME_DIR.strip_prefix('~').expect("~-relative");
+        assert!(
+            crate::tmux::CL_FALLBACK.contains(&format!("$HOME{home}/ag")),
+            "CL_FALLBACK must probe {AG_HOME_DIR}/ag; it reads: {}",
+            crate::tmux::CL_FALLBACK
+        );
+        // and the installer is told that same path, not left to the profile
+        assert!(ag_install_script().contains(&remote_path(AG_HOME_DIR)));
+        assert!(ag_install_script().contains(&remote_path(AG_BIN_DIR)));
     }
 
     /// A failed install is a warning, never an error: the pane command's
