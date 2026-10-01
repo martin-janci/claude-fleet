@@ -748,6 +748,7 @@ mod tests {
     use super::*;
     use crate::cancel::CancellationRegistry;
     use crate::events::RecordingEventBus;
+    #[cfg(unix)]
     use crate::service::catalog::model::{Asset, Kind};
     use crate::service::catalog::repo;
     use crate::ssh::SshClient;
@@ -983,6 +984,7 @@ mod tests {
     /// via `Asset::from_yaml` rather than `one_skill`'s on-disk YAML: the
     /// refusal path never renders the asset (it never reaches the resolved
     /// catalog), so no body/harness rendering is needed here.
+    #[cfg(unix)]
     fn skill_asset(name: &str, scope: &str) -> Asset {
         Asset::from_yaml(
             Some(Kind::Skill),
@@ -1010,7 +1012,10 @@ mod tests {
     /// acme's `s`, on a host bound to org acme) refuses both copies, and
     /// `plan_sync` turns the refusal into a `Blocked` action carrying
     /// `effective_for_host`'s own reason — proving the refusal actually
-    /// reaches the plan, not just `EffectiveSet` in isolation.
+    /// reaches the plan, not just `EffectiveSet` in isolation. Unix-only like
+    /// its siblings: it plans against the real `local` host, whose harness
+    /// probe finds nothing on the Windows runner.
+    #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_refused_asset_is_a_blocked_action_with_its_reason() {
