@@ -79,6 +79,25 @@ pub async fn run_host_script(
 /// deadlock on a full pipe buffer. Remote: straight to
 /// `SshClient::run_bounded_cancellable`, which kills and reaps the ssh child
 /// itself.
+/// What a host's script may print before fleet refuses its output.
+///
+/// A backstop on the CONTROLLER's side. `REMOTE_SOURCES_SCRIPT` caps an import
+/// dump at 64 MiB of file bytes, but that cap runs ON THE HOST being imported
+/// from — the side `parse_remote_dump` spends its length scrubbing paths
+/// against, and the side that decides whether to honour its own cap at all.
+/// Before this, both transports read the host's output unbounded:
+/// `cmd.output()` locally, `run_with_mux_retry(.., None)` over ssh.
+///
+/// 96 MiB sits above any dump the script itself would produce: base64 inflates
+/// 64 MiB to about 85 MiB, plus a `##FILE <path>` line per file. Reaching this
+/// means the host ignored its own cap.
+///
+/// Read as `+ 1` so an overrun is DETECTED, never silently truncated:
+/// `read_capped` keeps `cap` bytes and drops the rest with no signal, and a
+/// dump cut at a line boundary would otherwise parse as a complete — but
+/// smaller — set of files, which is worse than no cap at all.
+pub const HOST_SCRIPT_MAX_OUTPUT: usize = 96 * 1024 * 1024;
+
 pub async fn run_host_script_with(
     ssh: &Arc<SshClient>,
     host: &str,
@@ -92,23 +111,48 @@ pub async fn run_host_script_with(
             format!("{host}: cancelled"),
         ));
     }
+    let read_cap = HOST_SCRIPT_MAX_OUTPUT.saturating_add(1);
     let out = if host == "local" {
         crate::service::hub::ensure_local_allowed(host)?;
-        let mut cmd = crate::proc::command("bash");
-        cmd.args(["-lc", script]).kill_on_drop(true);
+        // Piped and read through `read_capped`, not `cmd.output()`, which
+        // buffers whatever the script prints with no bound at all.
+        let mut child = crate::proc::command("bash")
+            .args(["-lc", script])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                crate::ipc_error::IpcError::new(codes::E_IO, format!("spawn bash: {e}"))
+            })?;
+        let stdout = tokio::spawn(crate::ssh::read_capped(child.stdout.take(), Some(read_cap)));
+        let stderr = tokio::spawn(crate::ssh::read_capped(child.stderr.take(), Some(read_cap)));
         tokio::select! {
-            res = tokio::time::timeout(wall_clock, cmd.output()) => match res {
-                Ok(out) => out.map_err(|e| {
-                    crate::ipc_error::IpcError::new(codes::E_IO, format!("spawn bash: {e}"))
-                })?,
+            res = tokio::time::timeout(wall_clock, child.wait()) => match res {
+                Ok(status) => {
+                    let status = status.map_err(|e| {
+                        crate::ipc_error::IpcError::new(codes::E_IO, format!("wait bash: {e}"))
+                    })?;
+                    std::process::Output {
+                        status,
+                        stdout: stdout.await.unwrap_or_default(),
+                        stderr: stderr.await.unwrap_or_default(),
+                    }
+                }
                 Err(_) => {
+                    let _ = child.start_kill();
+                    stdout.abort();
+                    stderr.abort();
                     return Err(crate::ipc_error::IpcError::new(
                         codes::E_TIMEOUT,
                         format!("{host}: script did not finish within {}s", wall_clock.as_secs()),
-                    ))
+                    ));
                 }
             },
             _ = token.cancelled() => {
+                let _ = child.start_kill();
+                stdout.abort();
+                stderr.abort();
                 return Err(crate::ipc_error::IpcError::new(
                     codes::E_CANCELLED,
                     format!("{host}: cancelled"),
@@ -117,17 +161,30 @@ pub async fn run_host_script_with(
         }
     } else {
         let quoted = quote(script);
-        ssh.run_bounded_cancellable(
+        ssh.run_bounded_cancellable_capped(
             host,
             &["bash", "-lc", &quoted],
             SCAN_TIMEOUT,
             wall_clock,
             token.clone(),
+            read_cap,
         )
         .await?
     };
     if !out.status.success() {
         return Err(scan_failed(host, &out));
+    }
+    // One byte over the limit means the host printed more than fleet accepts.
+    // Refuse the whole thing: what arrived is a prefix, and a prefix of a dump
+    // is a smaller dump that looks complete.
+    if out.stdout.len() > HOST_SCRIPT_MAX_OUTPUT {
+        return Err(crate::ipc_error::IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{host}: script printed more than {} MiB — refusing a truncated result",
+                HOST_SCRIPT_MAX_OUTPUT / (1024 * 1024)
+            ),
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -1016,6 +1073,53 @@ mod tests {
         assert_eq!(err.code, "E_SCAN");
         assert!(err.message.contains("exited 3"), "{}", err.message);
         assert!(err.message.contains("boom"), "{}", err.message);
+    }
+
+    /// A host that prints more than fleet accepts is refused outright.
+    ///
+    /// The 64 MiB import cap lives in `REMOTE_SOURCES_SCRIPT`, which runs ON
+    /// the host being imported from — so it bounds a cooperative host, not a
+    /// hostile or broken one, while both transports used to read the result
+    /// unbounded. Refusing matters more than capping: `read_capped` truncates
+    /// silently, and a dump cut at a line boundary parses as a complete but
+    /// smaller set of files.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_host_that_prints_past_the_cap_is_refused_not_truncated() {
+        let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
+        // `yes` is cheap and unbounded; the cap is what must stop it.
+        let err = run_host_script_with(
+            &ssh,
+            "local",
+            &format!(
+                "yes 0123456789abcdef | head -c {}",
+                HOST_SCRIPT_MAX_OUTPUT + 4096
+            ),
+            Duration::from_secs(120),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("output past the cap must be refused");
+        assert_eq!(err.code, codes::E_INVALID, "{}", err.message);
+        assert!(
+            err.message.contains("refusing a truncated result"),
+            "{}",
+            err.message
+        );
+
+        // Just under it still comes back whole, so the cap is not merely
+        // refusing everything large.
+        let want = 64 * 1024;
+        let out = run_host_script_with(
+            &ssh,
+            "local",
+            &format!("yes 0123456789abcdef | head -c {want}"),
+            Duration::from_secs(120),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("under the cap");
+        assert_eq!(out.len(), want, "a dump under the cap arrives intact");
     }
 
     /// A cancelled token stops a host script instead of waiting it out, and

@@ -1222,7 +1222,7 @@ mod tests {
         );
         w(
             "home/.claude.json",
-            r#"{"mcpServers":{"claude-fleet":{"type":"http","url":"http://127.0.0.1:4180/mcp","headers":{"Authorization":"Bearer SECRET123"}},"jira":{"type":"stdio","command":"npx","args":["-y","jira"],"env":{"JIRA_TOKEN":"abc"}}},"other":1}"#,
+            r#"{"mcpServers":{"claude-fleet":{"type":"http","url":"http://127.0.0.1:4180/mcp","headers":{"Authorization":"Bearer SECRET123"}},"jira":{"type":"stdio","command":"npx","args":["-y","jira"],"env":{"JIRA_TOKEN":"${JIRA_TOKEN}"}}},"other":1}"#,
         );
         w(
             "home/.claude/plugins/installed_plugins.json",
@@ -1269,6 +1269,103 @@ mod tests {
     }
 
     #[cfg(unix)]
+    /// A LITERAL credential never reaches the catalog.
+    ///
+    /// A catalog is shared — synced to other hosts, and in an org catalog
+    /// visible to other people — so an asset carrying a real token hands it to
+    /// everyone the catalog reaches. The importer flagged these and created the
+    /// asset anyway: `import_converts_every_kind_losslessly` asserted
+    /// `env["JIRA_TOKEN"] == "abc"`, i.e. it pinned the leak as correct
+    /// behaviour under a name that read like fidelity. `Asset::validate` now
+    /// refuses it, which the import loop already honours by skipping the asset
+    /// and recording why.
+    #[test]
+    fn a_literal_secret_is_refused_not_imported_with_a_flag() {
+        let hd = |kind| {
+            header(
+                kind,
+                "leaky",
+                "A leaky asset.".into(),
+                "local",
+                Path::new("/x"),
+                None,
+            )
+        };
+        let secret = |v: &str| -> std::collections::BTreeMap<String, String> {
+            [("Authorization".to_string(), v.to_string())]
+                .into_iter()
+                .collect()
+        };
+
+        // a hook's http headers
+        let hook = |v: &str| Asset {
+            header: hd(Kind::Hook),
+            spec: AssetSpec::Hook {
+                event: "stop".into(),
+                r#match: None,
+                action: HookAction {
+                    kind: "http".into(),
+                    command: None,
+                    url: Some("https://example.invalid/h".into()),
+                    headers: secret(v),
+                    timeout_s: None,
+                },
+            },
+            body: String::new(),
+            resources: vec![],
+        };
+        let problems = hook("Bearer abc123").validate();
+        assert!(
+            problems.iter().any(|p| p.contains("literal secret")),
+            "{problems:?}"
+        );
+        // the same asset with a placeholder is valid
+        assert!(
+            hook("Bearer ${HOOK_TOKEN}").validate().is_empty(),
+            "{:?}",
+            hook("Bearer ${HOOK_TOKEN}").validate()
+        );
+
+        // an mcp server's headers AND its env
+        let mcp = |headers, env| Asset {
+            header: hd(Kind::McpServer),
+            spec: AssetSpec::McpServer {
+                transport: "http".into(),
+                url: Some("https://example.invalid/mcp".into()),
+                headers,
+                command: None,
+                args: vec![],
+                env,
+            },
+            body: String::new(),
+            resources: vec![],
+        };
+        let empty = std::collections::BTreeMap::new();
+        assert!(
+            mcp(secret("Bearer abc123"), empty.clone())
+                .validate()
+                .iter()
+                .any(|p| p.contains("headers.Authorization")),
+            "a literal header secret is refused"
+        );
+        let env_secret: std::collections::BTreeMap<String, String> =
+            [("JIRA_TOKEN".to_string(), "abc".to_string())]
+                .into_iter()
+                .collect();
+        assert!(
+            mcp(empty.clone(), env_secret)
+                .validate()
+                .iter()
+                .any(|p| p.contains("env.JIRA_TOKEN")),
+            "a literal env secret is refused"
+        );
+        // a key that does not name a secret is left alone
+        let plain: std::collections::BTreeMap<String, String> =
+            [("REGION".to_string(), "eu-west-1".to_string())]
+                .into_iter()
+                .collect();
+        assert!(mcp(empty, plain).validate().is_empty());
+    }
     #[test]
     fn import_converts_every_kind_losslessly() {
         let (src, repo) = fixture("full");
@@ -1379,15 +1476,16 @@ mod tests {
             } => {
                 assert_eq!(transport, "stdio");
                 assert_eq!(args, &vec!["-y".to_string(), "jira".to_string()]);
-                assert_eq!(env["JIRA_TOKEN"], "abc");
+                // A `${PLACEHOLDER}` is what a secret-bearing env var looks
+                // like in a catalog; the sync fills it per host. It
+                // round-trips untouched and is not flagged.
+                assert_eq!(env["JIRA_TOKEN"], "${JIRA_TOKEN}");
             }
             _ => panic!(),
         }
         assert!(
-            rep.flagged_secrets
-                .iter()
-                .any(|s| s.contains("jira") && s.contains("JIRA_TOKEN")),
-            "{:?}",
+            rep.flagged_secrets.is_empty(),
+            "a placeholder is not a literal secret: {:?}",
             rep.flagged_secrets
         );
 

@@ -407,6 +407,30 @@ fn merge_header_and_spec(
     Ok(map)
 }
 
+/// A key whose VALUE would be a credential: the same list the importer's
+/// `looks_secret` uses, kept here so every path that validates an asset agrees.
+fn names_a_secret(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    ["token", "secret", "key", "password", "authorization"]
+        .iter()
+        .any(|s| k.contains(s))
+}
+
+/// Every `(key, value)` whose key names a secret and whose value is a LITERAL
+/// rather than a `${PLACEHOLDER}` the sync fills in per host.
+///
+/// A catalog is shared — synced to other hosts, and in an org catalog visible
+/// to other people — so a literal credential in an asset is a credential
+/// handed to everyone the catalog reaches. The importer flagged these and
+/// created the asset anyway; `validate` makes them refuse it, which the import
+/// loop, the author lint and `catalog_admin` all already honour.
+fn literal_secrets<'a>(pairs: impl Iterator<Item = (&'a String, &'a String)>) -> Vec<String> {
+    pairs
+        .filter(|(k, v)| names_a_secret(k) && !v.contains("${") && !v.trim().is_empty())
+        .map(|(k, _)| k.clone())
+        .collect()
+}
+
 impl Asset {
     /// Parse an asset YAML document. `expected` is the kind implied by the
     /// directory the file was found in; a mismatch is an error.
@@ -517,6 +541,11 @@ impl Asset {
                 if !EVENTS.contains(&event.as_str()) {
                     out.push(format!("event '{event}' must be one of {EVENTS:?}"));
                 }
+                for k in literal_secrets(action.headers.iter()) {
+                    out.push(format!(
+                        "action.headers.{k} holds a literal secret: use a ${{PLACEHOLDER}} the sync fills in per host"
+                    ));
+                }
                 match action.kind.as_str() {
                     "command" if is_blank(&action.command) => {
                         out.push("action.command is required for type command".into())
@@ -532,15 +561,31 @@ impl Asset {
                 transport,
                 url,
                 command,
+                headers,
+                env,
                 ..
-            } => match transport.as_str() {
-                "http" if is_blank(url) => out.push("url is required for transport http".into()),
-                "stdio" if is_blank(command) => {
-                    out.push("command is required for transport stdio".into())
+            } => {
+                match transport.as_str() {
+                    "http" if is_blank(url) => {
+                        out.push("url is required for transport http".into())
+                    }
+                    "stdio" if is_blank(command) => {
+                        out.push("command is required for transport stdio".into())
+                    }
+                    "http" | "stdio" => {}
+                    other => out.push(format!("transport '{other}' must be http or stdio")),
                 }
-                "http" | "stdio" => {}
-                other => out.push(format!("transport '{other}' must be http or stdio")),
-            },
+                for k in literal_secrets(headers.iter()) {
+                    out.push(format!(
+                        "headers.{k} holds a literal secret: use a ${{PLACEHOLDER}} the sync fills in per host"
+                    ));
+                }
+                for k in literal_secrets(env.iter()) {
+                    out.push(format!(
+                        "env.{k} holds a literal secret: use a ${{PLACEHOLDER}} the sync fills in per host"
+                    ));
+                }
+            }
             AssetSpec::PluginRef {
                 harness, version, ..
             } => {

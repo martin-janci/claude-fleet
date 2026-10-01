@@ -607,6 +607,44 @@ impl SshClient {
             .await
     }
 
+    /// [`run_bounded_cancellable`] with stdout and stderr each held to
+    /// `max_output` bytes.
+    ///
+    /// For output whose size is decided by the HOST: a script's cap on its own
+    /// printing is the untrusted side's promise, not a bound fleet can rely on.
+    /// `read_capped` drops the excess SILENTLY, so a caller that needs to tell
+    /// "this fitted" from "this was cut" asks for one byte more than it will
+    /// accept and compares the length.
+    ///
+    /// [`run_bounded_cancellable`]: Self::run_bounded_cancellable
+    pub async fn run_bounded_cancellable_capped(
+        &self,
+        host: &str,
+        args: &[&str],
+        connect_timeout: Duration,
+        wall_clock: Duration,
+        token: CancellationToken,
+        max_output: usize,
+    ) -> Result<Output, IpcError> {
+        if let Some(alias) = self.agent_route(host) {
+            return self
+                .agent()
+                .run_bounded_cancellable(&alias, args, connect_timeout, wall_clock, token)
+                .await;
+        }
+        let mux_opts = self.prepare(host, connect_timeout).await;
+        let build = || self.remote_command(host, &mux_opts, args);
+        self.run_with_mux_retry(
+            host,
+            build,
+            wall_clock,
+            Some(token),
+            "E_SSH",
+            Some(max_output),
+        )
+        .await
+    }
+
     /// Same as `run` but races the SSH child against a `CancellationToken`.
     /// When the token fires before the command finishes, the child is sent
     /// SIGKILL via `start_kill` and explicitly `wait`ed so the OS reaps the
@@ -1232,7 +1270,7 @@ pub fn parse_toolchain(stdout: &str) -> Option<HostToolchain> {
 /// Drain `stream` to EOF, keeping at most `cap` bytes (all of them for
 /// `None`). Bytes past the cap are read and dropped so the child keeps
 /// running instead of blocking on a full pipe.
-async fn read_capped<R>(stream: Option<R>, cap: Option<usize>) -> Vec<u8>
+pub(crate) async fn read_capped<R>(stream: Option<R>, cap: Option<usize>) -> Vec<u8>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
