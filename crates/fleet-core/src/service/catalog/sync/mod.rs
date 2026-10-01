@@ -331,14 +331,41 @@ pub async fn plan_sync(
                     .then(|| ((kind, r.name.clone()), r.reason.clone()))
             })
             .collect();
-        let refused_keys: BTreeSet<(super::model::Kind, String)> =
-            refused_matched.keys().cloned().collect();
         // Once per harness this host lists — the refusal is a catalog-level
         // decision, independent of which harness renders it, so every
         // harness's plan reports it.
         let blocked_for_refusals: Vec<plan::Action> = refused_matched
             .iter()
             .map(|((kind, name), reason)| plan::blocked_action(*kind, name, reason.clone()))
+            .collect();
+        // Every private asset the scope boundary dropped SILENTLY (an
+        // unlayered org host's personal catalog — `effective::compose`
+        // records no `Refusal` for this, since keeping only the shared
+        // slice is the default, not a mistake) that this plan's filter
+        // still covers. "Silent" must not mean "destructive": a host that
+        // already has one of these synced (from before it had an org, or
+        // before Assets M2) must keep it exactly as it is, same as a
+        // `refused` asset.
+        let withheld_keys: BTreeSet<(super::model::Kind, String)> = eff
+            .withheld
+            .iter()
+            .filter_map(|(kind_str, name)| {
+                let kind = super::model::Kind::ALL
+                    .iter()
+                    .copied()
+                    .find(|k| k.as_str() == kind_str)?;
+                host_filter
+                    .matches(kind, name)
+                    .then_some((kind, name.clone()))
+            })
+            .collect();
+        // Both `refused` and `withheld` protect the host's existing copy
+        // from `compute_host_plan`'s manifest-orphan `Remove` the same way:
+        // merged into one set so a single lookup there covers either reason.
+        let protected_keys: BTreeSet<(super::model::Kind, String)> = refused_matched
+            .keys()
+            .cloned()
+            .chain(withheld_keys.iter().cloned())
             .collect();
         // Every scanning harness is scanned, even one this host may not
         // serve: the scan is what detects it and reads its manifest.
@@ -363,12 +390,23 @@ pub async fn plan_sync(
                         &manifest,
                         &secrets,
                         &host_filter,
-                        &refused_keys,
+                        &protected_keys,
                     );
                     if gate == HarnessGate::Retiring {
                         hp.detail = Some(harness_set::retiring_detail(harness.id()));
                     } else {
                         hp.actions.extend(blocked_for_refusals.iter().cloned());
+                        // Report, don't just silently keep: a withheld asset
+                        // this harness's manifest already names gets a
+                        // `Noop` saying why it's staying, same spirit as the
+                        // layered-host "plugins are not removed
+                        // automatically" report just below in
+                        // `compute_host_plan`'s own orphans pass.
+                        for (kind, name) in &withheld_keys {
+                            if manifest.assets.contains_key(&Manifest::key(*kind, name)) {
+                                hp.actions.push(plan::withheld_noop(*kind, name));
+                            }
+                        }
                     }
                     host_plans.push(hp);
                 }
@@ -948,6 +986,20 @@ mod tests {
         .unwrap()
     }
 
+    /// A `plugin_ref` with no `scope:` key — defaults to private, same as a
+    /// skill with none.
+    fn plugin_ref_asset(name: &str) -> Asset {
+        Asset::from_yaml(
+            Some(Kind::PluginRef),
+            &format!(
+                "kind: plugin_ref\nname: {name}\ndescription: d\nharness: claude\n\
+                 marketplace: {{ name: mk, source: github, repo: o/r }}\n\
+                 plugin: {name}\nversion: \"latest\"\n"
+            ),
+        )
+        .unwrap()
+    }
+
     /// Assets M2: a cross-catalog collision (personal's shared `s` vs.
     /// acme's `s`, on a host bound to org acme) refuses both copies, and
     /// `plan_sync` turns the refusal into a `Blocked` action carrying
@@ -1128,6 +1180,201 @@ mod tests {
             claude_actions_for_s
         );
         assert_eq!(claude_actions_for_s[0].op, ActionOp::Blocked);
+    }
+
+    /// Fix round 2, item (a): `local` bound to an org, unlayered, with a
+    /// private personal skill already synced (from before it had an org).
+    /// `effective::compose` withholds this asset SILENTLY (no `Refusal`,
+    /// per the controller ruling) — but silent must never mean destructive:
+    /// the plan must not remove it, and must report a `Noop` saying why it
+    /// stays.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn an_org_bound_unlayered_local_host_keeps_a_withheld_skill_already_synced() {
+        let _lock = super::super::lock_registry_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude/.fleet-assets.json"),
+            r#"{"version":1,"updated_at":0,"assets":{"skill/s":
+                {"hash":"h","files":["~/.claude/skills/s/SKILL.md"],"merges":[],"synced_at":0}}}"#,
+        )
+        .unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        // `one_skill` writes no `scope:` key, so "s" defaults to private.
+        let files = one_skill("b\n");
+        load_catalog(
+            repo_dir.path(),
+            &files
+                .iter()
+                .map(|(a, b)| (*a, b.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        {
+            let s = store.lock().unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO orgs (id, name, created_at) VALUES (10, 'acme', 0)",
+                    [],
+                )
+                .unwrap();
+            s.set_host_org("local", Some(10)).unwrap();
+        }
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(
+            PlanArgs {
+                host_alias: Some("local".into()),
+                ..PlanArgs::default()
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            plan.hosts
+                .iter()
+                .all(|h| h.actions.iter().all(|a| a.op != ActionOp::Remove)),
+            "a withheld asset must never be removed: {:?}",
+            plan.hosts
+        );
+        let noop = plan
+            .hosts
+            .iter()
+            .flat_map(|h| &h.actions)
+            .find(|a| a.name == "s" && a.op == ActionOp::Noop)
+            .expect("a Noop reporting the withheld asset");
+        assert_eq!(
+            noop.reason.as_deref(),
+            Some("private; withheld from org host, not removed")
+        );
+    }
+
+    /// Fix round 2, item (b): the same scope-withholding hazard on a REMOTE
+    /// host with `allow_unlayered: true` — `refuse_unlayered` is bypassed
+    /// (by `allow_unlayered`, independent of the item-1 fix), so this proves
+    /// the destructive path stays closed even when the per-host unlayered
+    /// guard itself is turned off. The host is never actually reachable in
+    /// this test (`SshClient::new()` has no transport), so the scan fails
+    /// and the host comes back `skipped` with no actions at all — which is
+    /// itself the point: still no `Remove`, by construction.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn an_org_bound_unlayered_remote_host_with_allow_unlayered_keeps_withheld_assets() {
+        let _lock = super::super::lock_registry_for_test();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let files = one_skill("b\n");
+        load_catalog(
+            repo_dir.path(),
+            &files
+                .iter()
+                .map(|(a, b)| (*a, b.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("oci", Some("oci")).unwrap();
+            s.update_host_probe("oci", true, None, None, 1).unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO orgs (id, name, created_at) VALUES (10, 'acme', 0)",
+                    [],
+                )
+                .unwrap();
+            s.set_host_org("oci", Some(10)).unwrap();
+        }
+        let ssh = Arc::new(SshClient::new());
+        let plan = plan_sync(
+            PlanArgs {
+                host_alias: Some("oci".into()),
+                allow_unlayered: true,
+                ..PlanArgs::default()
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+        assert!(!plan.hosts.is_empty());
+        assert!(
+            plan.hosts
+                .iter()
+                .all(|h| h.actions.iter().all(|a| a.op != ActionOp::Remove)),
+            "{:?}",
+            plan.hosts
+        );
+    }
+
+    /// Fix round 2, item (c): the ordering fix must apply to a `plugin_ref`
+    /// too — without it, an unlayered host's dropped `plugin_ref` orphan
+    /// always planned `Remove` regardless of refusal/withholding (the
+    /// pre-layers backward-compat path), since that check used to run
+    /// before any protection could intervene. A withheld `plugin_ref`
+    /// already in the manifest must be left alone exactly like a withheld
+    /// skill.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn an_org_bound_unlayered_local_host_keeps_a_withheld_plugin_ref_already_synced() {
+        let _lock = super::super::lock_registry_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude/.fleet-assets.json"),
+            r#"{"version":1,"updated_at":0,"assets":{"plugin_ref/sp":
+                {"hash":"h","files":[],"merges":[],"synced_at":0}}}"#,
+        )
+        .unwrap();
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let personal_id = {
+            let s = store.lock().unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO orgs (id, name, created_at) VALUES (10, 'acme', 0)",
+                    [],
+                )
+                .unwrap();
+            s.set_host_org("local", Some(10)).unwrap();
+            s.personal_catalog().unwrap().unwrap().id
+        };
+        super::super::registry::install_personal(repo::Catalog {
+            id: personal_id,
+            name: "personal".into(),
+            org_id: None,
+            // No `scope:` key — defaults to private, same as a skill.
+            assets: vec![plugin_ref_asset("sp")],
+            ..Default::default()
+        })
+        .unwrap();
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(
+            PlanArgs {
+                host_alias: Some("local".into()),
+                ..PlanArgs::default()
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            plan.hosts
+                .iter()
+                .all(|h| h.actions.iter().all(|a| a.op != ActionOp::Remove)),
+            "a withheld plugin_ref must never be removed: {:?}",
+            plan.hosts
+        );
     }
 
     /// A `host_alias` no host row has must fail loudly (`E_NOTFOUND`) instead

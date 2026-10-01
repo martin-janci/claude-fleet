@@ -332,14 +332,18 @@ pub fn compute_host_plan(
     manifest: &Manifest,
     secrets: &BTreeMap<String, String>,
     filter: &PlanFilter,
-    // Assets M2: `(kind, name)` of every asset the EFFECTIVE catalog refused
-    // (a scope boundary or a cross-catalog collision — `sync::plan_sync`
-    // builds this from `effective::EffectiveSet::refused`). Such an asset is
-    // absent from `catalog`, so without this it reads exactly like one the
-    // catalog dropped and `manifest.orphans` schedules its `Remove` — the
-    // opposite of what a refusal means: the host's existing copy, if any,
-    // must be left alone. Empty for every caller outside `plan_sync`.
-    refused: &BTreeSet<(Kind, String)>,
+    // Assets M2: `(kind, name)` of every asset the host's existing copy must
+    // be left alone for, though it is absent from `catalog` — either
+    // because the EFFECTIVE catalog REFUSED it (a scope boundary or a
+    // cross-catalog collision) or because the scope boundary WITHHELD it
+    // silently (an unlayered org host's private personal assets —
+    // `effective::EffectiveSet::refused` and `::withheld` respectively,
+    // merged by `sync::plan_sync`). Without this such an asset reads to
+    // `manifest.orphans` exactly like one the catalog genuinely dropped,
+    // scheduling a `Remove` — destructive either way a refusal or a
+    // withholding must never be. Empty for every caller outside
+    // `plan_sync`.
+    protected: &BTreeSet<(Kind, String)>,
 ) -> HostPlan {
     let mut actions = Vec::new();
     for asset in &catalog.assets {
@@ -367,11 +371,12 @@ pub fn compute_host_plan(
         if !filter.matches(kind, &name) {
             continue;
         }
-        if refused.contains(&(kind, name.clone())) {
-            // Refused, not dropped from the catalog: a `Blocked` action
-            // already says why (`sync::plan_sync` appends it), and removing
-            // the host's existing copy here would make a refusal
-            // destructive — the one thing it must never be.
+        if protected.contains(&(kind, name.clone())) {
+            // Refused or silently withheld, not dropped from the catalog: a
+            // `Blocked` or `Noop` action already says why
+            // (`sync::plan_sync` appends it), and removing the host's
+            // existing copy here would make either destructive — the one
+            // thing neither must ever be.
             continue;
         }
         if kind == Kind::PluginRef && filter.layered {
@@ -449,6 +454,34 @@ pub(crate) fn blocked_action(kind: Kind, name: &str, reason: String) -> Action {
         op: ActionOp::Blocked,
         catalog: None,
         reason: Some(reason),
+        files: Vec::new(),
+        merges: Vec::new(),
+        backup: false,
+        secrets: Vec::new(),
+        missing_secrets: Vec::new(),
+        plan: None,
+        expected: BTreeMap::new(),
+        secret_files: BTreeSet::new(),
+        remove_entry: None,
+        plugin: None,
+    }
+}
+
+/// A `Noop` action reporting why a private asset the scope boundary dropped
+/// SILENTLY (`effective::EffectiveSet::withheld` — an unlayered org host's
+/// personal catalog) is nonetheless staying on the host: it is already
+/// synced there, and withholding it must never mean removing it. Carries no
+/// files, merges or plan, like `blocked_action` — there is nothing to
+/// render for an asset that never reached the resolved catalog.
+/// `sync::plan_sync` is the only caller, and only when the host's manifest
+/// already names the asset (nothing to report otherwise).
+pub(crate) fn withheld_noop(kind: Kind, name: &str) -> Action {
+    Action {
+        kind: kind.as_str().to_string(),
+        name: name.to_string(),
+        op: ActionOp::Noop,
+        catalog: None,
+        reason: Some("private; withheld from org host, not removed".to_string()),
         files: Vec::new(),
         merges: Vec::new(),
         backup: false,

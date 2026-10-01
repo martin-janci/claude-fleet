@@ -94,6 +94,20 @@ pub struct EffectiveSet {
     /// sends it.
     #[serde(default)]
     pub excluded: BTreeMap<String, String>,
+    /// `(kind, name)` of every private asset the scope boundary dropped
+    /// SILENTLY — an org host's unlayered personal catalog, where keeping
+    /// only the shared slice is the default, not a mistake, so nothing goes
+    /// into `refused` (no `Blocked` noise for the common case: that private
+    /// asset was never meant for an org host to begin with). But "silent"
+    /// must not mean "destructive": a host that already has this asset
+    /// synced from before it had an org (or before Assets M2 at all) must
+    /// keep it — the planner suppresses its removal as a manifest orphan the
+    /// same way it does for `refused`, and reports a `Noop` with why
+    /// whenever the asset is actually on the host. `#[serde(default)]`
+    /// because `EffectiveSet` travels the wire via `Resolution`: a hub older
+    /// than this field never sends it.
+    #[serde(default)]
+    pub withheld: BTreeSet<(String, String)>,
 }
 
 /// Compute `host_alias`'s effective catalog.
@@ -173,6 +187,7 @@ fn compose<'r>(
     let mut problems = Vec::new();
     let mut layered = false;
     let mut excluded: BTreeMap<String, String> = BTreeMap::new();
+    let mut withheld: BTreeSet<(String, String)> = BTreeSet::new();
 
     for cat in registry::in_order(catalogs) {
         let accepts = acceptance(host_org, cat.id, cat.org_id, admitted);
@@ -225,6 +240,14 @@ fn compose<'r>(
                             asset.header.name, cat.name
                         ),
                     });
+                } else {
+                    // Dropped silently — no `Refusal`, no `Blocked` noise:
+                    // this is the default, not a mistake. But "silent" must
+                    // never mean "destructive": record it so `plan_sync` can
+                    // keep the host's existing copy, if any, exactly as it
+                    // is (same mechanism as `refused`) rather than removing
+                    // it as a manifest orphan.
+                    withheld.insert((asset.kind().as_str().to_string(), asset.header.name.clone()));
                 }
                 continue;
             }
@@ -344,6 +367,7 @@ fn compose<'r>(
         refused,
         layered,
         excluded,
+        withheld,
     })
 }
 
