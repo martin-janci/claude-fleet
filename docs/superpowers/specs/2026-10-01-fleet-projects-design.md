@@ -175,9 +175,9 @@ it needs a confirming "yes" rather than a debate.
 | P8 | Does the UI rename today's `projects` to "Repository"? | Yes, strings only. No schema or API rename. | open |
 | P9 | Dependencies between tasks in v1? | **No.** Status-and-repository grouping is enough to start. | **agreed** (owner, 2026-10-01) |
 | P10 | Cloud sessions as an execution target? | **Yes**, as its own phase FP6 (§15), with the capability rows F2 verifies. | **agreed** (owner, 2026-10-01) |
-| P11 | Which provider account runs a Project's cloud work? | **The host's.** No account selector; a Project may *require* an account and Fleet refuses a host that does not carry it (§16 Q1). | recommended |
+| P11 | Which provider account runs a Project's cloud work? | **The host's.** No account selector; a Project may *require* an account and Fleet refuses a host that does not carry it (§16 Q1). | **agreed** (owner, 2026-10-01) |
 | P12 | Remote Control as a bridge to native Claude Projects? | **Yes**, as phase FP7. It is the only documented way a native Project thread runs on infrastructure Fleet owns, and the one where Fleet's hooks and assets still apply (§16 Q2). | recommended |
-| P13 | Cross-hub Projects? | **No.** Out of scope with a stated reason; reopened only when two hubs share people (§16 Q3). | recommended |
+| P13 | Cross-hub Projects? | **No.** Out of scope with a stated reason; reopened only when two hubs share people (§16 Q3). | **agreed** (owner, 2026-10-01) |
 | P14 | Rename `projects` → `repositories` in the schema and API? | **Never.** ~3 500 code sites, 100 MCP references and a wire break against fleet-mobile, for no user-visible gain; the 141 UI strings are the whole benefit (§16 Q4). | recommended |
 | P15 | Review the §9 seam before FP0? | **Yes, review; no, don't block.** FP0 lands the `Actor` word now and a subject id additively later (§16 Q5). | recommended |
 
@@ -578,8 +578,9 @@ does.
 ## 16. Open questions — findings and recommendations
 
 Each item states what was checked, what the evidence says, the recommendation,
-and what it costs if the recommendation is wrong. The owner's answers of
-2026-10-01 closed three items (P9, P4, P10); these five are what was left.
+and what it costs if the recommendation is wrong. The owner closed P9, P4 and P10
+on 2026-10-01, then Q1 (P11) and Q3 (P13) on the same day. Q2 and Q5 are out for
+independent verification; Q4 is settled below.
 
 ### Q1 — Which provider account runs a Project's cloud work? → **the host's** (P11)
 
@@ -663,6 +664,11 @@ layer, rather than giving up because the coordinator is closed.
 | Fleet does not start or steer these sessions | they are `reference` in §7; the Project page never offers a Send button for one |
 | Needs a claude.ai subscription on that host | an API-key host is ineligible, and the capability row says so |
 
+**Out for independent verification** (owner, 2026-10-01): the review request is
+`docs/superpowers/reviews/2026-10-01-fleet-projects-q2-remote-control-review-request.md`,
+which asks a second agent to try to break each of the five claims above rather
+than confirm them.
+
 **The one thing to verify first**, and it decides FP7's size: whether
 `claude agents --json` lists the sessions a `remote-control` server serves. If it
 does, Fleet's existing discovery gives status and labels for free and FP7 is
@@ -697,32 +703,101 @@ from a half-built one.
 
 ### Q4 — Rename `projects` → `repositories` in the schema? → **never** (P14)
 
-**What was checked.** The blast radius, counted in this working tree.
+The count of call sites was the weakest part of the argument, because a large
+mechanical rename is a solved problem — a compiler finds every site. What
+actually decides this is the three places where a rename is **not** mechanical.
 
-**Evidence.**
+#### 4a. The wire renames silently rather than failing
 
-| Surface | Occurrences |
+`crates/fleet-core/src/wire_contract.rs` states the hazard in its own words:
+
+> A hub-client desktop deserialises hub tool results straight into the same
+> `fleet-core` row structs the hub serialised them from … that symmetry is a
+> hole: **a renamed optional field does not fail to parse, it silently
+> defaults**.
+
+`project_id` is exactly such a field. Rename it to `repository_id` and an older
+desktop or phone does not error — it parses the row with `project_id: None` and
+**shows every session as belonging to no repository**. A wrong-but-plausible
+screen is the worst failure shape this codebase has, and it is the one a rename
+produces by default.
+
+The mechanism that exists to stop that is `CONTRACT_REVISION`, and its rule
+names this case directly: bump for "a change that **removes or renames a row
+field**, or changes what an existing field means", on any type in
+`src-tauri/src/backend/hub_contract.golden.json`. That golden file pins
+`project_id` in **six** places.
+
+#### 4b. A bump is a forced, coordinated upgrade of three codebases
+
+`src-tauri/src/backend/contract.rs`:
+
+```rust
+pub const MIN_HUB_CONTRACT: u32 = 6;
+pub const MAX_HUB_CONTRACT: u32 = 6;
+```
+
+The desktop accepts **exactly one** revision. Outside that range it "does not
+trust the hub's rows at all rather than risk showing a stuck or lost session as
+healthy". So bumping to 7 means:
+
+- every desktop still on 6 stops trusting the hub the moment the hub upgrades;
+- `compat_json()` (`fleet-hub/src/main.rs`) feeds the release manifest's compat
+  windows, so the bump propagates into the update machinery that S2–S5 just
+  built — the manifest, the channel documents and `fleet-hub compat`;
+- fleet-mobile has to ship in lockstep. It is not incidental there: it calls
+  `list_projects` as a **literal string**, holds its own `ProjectRow`, consumes
+  the `project:updated` event, and its own source comments that a session row
+  "names its project by `project_id` and nothing else — there is no project name
+  anywhere on it … so this list is the only thing that can turn `project_id: 3`
+  into a heading". ~148 occurrences across its shared Kotlin.
+
+That is a release event with a user-visible blackout window, spent entirely on
+vocabulary.
+
+#### 4c. SQL text is not refactored by the compiler
+
+`projects` is named inside **SQL string literals**, which no rename tool
+follows:
+
+- `store/orgs.rs` builds `SESSION_ORG_SQL` with `LEFT JOIN projects op`, and
+  CLAUDE.md records that a test holds that expression **byte-equal** to the
+  trigger body shipped in migration 050. A rename means a new migration that
+  drops and re-creates that trigger, kept in sync with the Rust string, on every
+  existing database.
+- Six migrations name `projects`, and the schema carries 22 triggers and views
+  in total.
+- The rename itself must then replay cleanly over 91 prior migrations in
+  `store::testgen`'s upgrade test, and an older hub opening the renamed database
+  is the downgrade case.
+
+#### 4d. The cheap middle paths do not exist
+
+| Idea | Why it fails |
 |---|---|
-| `project_id` / `project_ids` / `projects` in Rust (`crates/`, `src-tauri/`) | ~2 066 |
-| `project` in the frontend (`src/**/*.ts`, `*.svelte`) | ~1 483 |
-| `add_project` / `list_projects` / `refresh_projects` / `forget_project` in the MCP layer | ~100 |
-| Capitalised "Project" in Svelte markup — the UI strings that actually change | ~141 |
-| `docs/*.md` files mentioning `project` | 14 |
+| `ALTER TABLE projects RENAME TO repositories` + a compatibility view named `projects` | SQLite views are read-only; the code writes to `projects`, so it would need `INSTEAD OF` triggers for every write — more machinery than the rename saves |
+| Rename the Rust types only, keep `#[serde(rename = "project_id")]` | Zero wire risk and zero user benefit: ~1 500 sites of churn so that the code says one word and the wire says another, which is *worse* for the next reader |
+| Rename in new code, leave the old | Two vocabularies in one codebase — the outcome this decision exists to avoid |
+| Ride along with a `CONTRACT_REVISION` bump happening anyway | A ~3 500-site diff would swamp the review of whatever real change it rode with |
 
-So a schema-and-API rename is roughly **3 500 code sites plus a wire break**:
-the MCP tool names are contract, and renaming them breaks a paired fleet-mobile
-and every older hub. The user-visible benefit of all that is the same ~141
-strings that P8 already changes for free.
+#### The decision, and when it would change
 
-**Recommendation.** Never rename the schema or the API. The code keeps
-`projects`, `project_id`, `add_project` and `list_projects` permanently; only
-user-visible strings move to "Repository". Write this down as a convention in
-`CLAUDE.md` when FP0 lands, so the next reader does not re-propose it: *in this
-codebase `projects` means a repository, and `fleet_projects` means a Project.*
+**Never rename the schema, the serialised field names, or the MCP tool names.**
+`projects`, `project_id`, `add_project`, `list_projects`, `refresh_projects` and
+`forget_project` keep their names permanently. Only the ~141 user-visible strings
+move to "Repository" (P8), which costs nothing and delivers the entire benefit.
 
-**If this is wrong.** Nothing is lost that cannot be done later — but it would
-cost a `CONTRACT_REVISION` bump, a mobile release and a migration, which is why
-it needs its own proposal and a reason better than tidiness.
+Write the convention into `CLAUDE.md` when FP0 lands, so it is not re-proposed:
+
+> In this codebase `projects` is a **repository** (owner/repo or an adopted
+> folder) and `fleet_projects` is a **Project** (the coordination unit). The UI
+> calls them "Repository" and "Project". The schema and the wire keep their
+> names — see `2026-10-01-fleet-projects-design.md` §16 Q4.
+
+The one condition that would reopen it: if `projects` had to **change meaning**
+rather than merely be renamed — for instance if a repository stopped being
+`(owner, repo, base_path)`. Then the wire breaks for a real reason, the bump is
+justified on its own, and the rename is a side effect rather than the purpose.
 
 ### Q5 — Review the §9 seam before FP0? → **review, but do not block** (P15)
 
@@ -736,6 +811,12 @@ produces, which is the repo's existing convention in two places:
 nothing; it reuses. A real subject id can then be added **beside** the word as a
 nullable column, with the word kept for history — the same shape migration 086
 used for `origin` (backfill a derived value, read NULL as a default).
+
+**Out for independent verification** (owner, 2026-10-01): the review request is
+`docs/superpowers/reviews/2026-10-01-fleet-projects-q5-permissions-seam-review-request.md`,
+which asks a second agent to judge §9's four requirements against the permissions
+and synchronisation system actually being built, and to say whether the
+"subject id is additive" claim holds.
 
 **Recommendation.** Two separate things, and only one of them is a gate:
 
