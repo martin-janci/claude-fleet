@@ -9,6 +9,7 @@
 -- `sessions_row_version_bump` can already name a column that repair has not
 -- added back, and the rename fails validating it. Copy out, drop, recreate,
 -- copy back: no rename, same result.
+--
 -- Assets M3 (R1): never assume host_layers exists. A database from the
 -- 033/035 collision family can reach this migration without it, and
 -- `repair_skipped_main_migrations` — which recreates it — only runs after

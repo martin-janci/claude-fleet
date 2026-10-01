@@ -298,9 +298,19 @@ impl Store {
 }
 
 impl Store {
-    /// The live client `name`, checked for holding a catalog grant when `on`
-    /// (Rulings R3): a peer hub link, a `readonly` client and a client bound
-    /// to an org are refused. `E_NOTFOUND` when no live client holds it.
+    /// The live-client eligibility predicate shared by every catalog-grant
+    /// check (Rulings R3): `full`, not revoked, bound to no org. Written
+    /// once and reused by [`Self::client_is_assets_admin`],
+    /// [`Self::client_may_admin_catalog`] and [`Self::catalog_grantees`] so
+    /// the three can never drift apart. Assumes the query aliases
+    /// `client_tokens` as `t`.
+    const LIVE_GRANT_ELIGIBLE: &'static str =
+        "t.revoked_at IS NULL AND t.mode = 'full' AND t.org_id IS NULL";
+
+    /// The live client `name`, checked as eligible to hold a catalog grant
+    /// when `on` (Rulings R3): a peer hub link, a `readonly` client and a
+    /// client bound to an org are refused. `E_NOTFOUND` when no live client
+    /// holds it.
     fn grantable_client(
         &self,
         name: &str,
@@ -365,6 +375,25 @@ impl Store {
         Ok(())
     }
 
+    /// Re-fetch the live client `id` after a write that may have changed it,
+    /// or report that it is gone. `name` is only for the error message (the
+    /// caller already has it; passing it avoids a second lookup just to
+    /// phrase the failure). Shared by [`Self::set_client_assets_admin`]'s
+    /// pending-mirror path and [`Self::set_client_catalog_grant`] — both end
+    /// with exactly this reload.
+    fn reload_live_client(
+        &self,
+        id: i64,
+        name: &str,
+    ) -> Result<ClientTokenRow, crate::ipc_error::IpcError> {
+        get_client_token_by_id(&self.conn, id)?.ok_or_else(|| {
+            crate::ipc_error::IpcError::new(
+                codes::E_NOTFOUND,
+                format!("no active client token named '{name}'"),
+            )
+        })
+    }
+
     /// The personal grant (`fleet-hub client grant <name> assets`): a grant
     /// row on `personal` plus its mirror `assets_admin_at` (Rulings R2).
     /// With no personal catalog yet, only the mirror is written; configuring
@@ -379,12 +408,7 @@ impl Store {
         }
         let row = self.grantable_client(name, on)?;
         Self::mirror_personal_grant(&self.conn, row.id, on)?;
-        get_client_token_by_id(&self.conn, row.id)?.ok_or_else(|| {
-            crate::ipc_error::IpcError::new(
-                codes::E_NOTFOUND,
-                format!("no active client token named '{}'", name.trim()),
-            )
-        })
+        self.reload_live_client(row.id, name.trim())
     }
 
     /// Grant (or take back) one catalog to the live client `name` (migration
@@ -418,12 +442,7 @@ impl Store {
             Self::mirror_personal_grant(&tx, row.id, on)?;
         }
         tx.commit()?;
-        get_client_token_by_id(&self.conn, row.id)?.ok_or_else(|| {
-            crate::ipc_error::IpcError::new(
-                codes::E_NOTFOUND,
-                format!("no active client token named '{}'", name.trim()),
-            )
-        })
+        self.reload_live_client(row.id, name.trim())
     }
 
     /// True when the live client `id` may manage the personal catalog: a
@@ -431,12 +450,15 @@ impl Store {
     /// the pending mirror `assets_admin_at` (R2). `full`, not revoked, no org.
     pub fn client_is_assets_admin(&self, id: i64) -> Result<bool, rusqlite::Error> {
         self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM client_tokens t
-               WHERE t.id = ?1 AND t.revoked_at IS NULL AND t.mode = 'full' AND t.org_id IS NULL
-                 AND (EXISTS(SELECT 1 FROM client_catalog_grants g JOIN catalogs c ON c.id = g.catalog_id
-                             WHERE g.client_id = t.id AND c.org_id IS NULL)
-                      OR (t.assets_admin_at IS NOT NULL
-                          AND NOT EXISTS(SELECT 1 FROM catalogs WHERE org_id IS NULL))))",
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM client_tokens t
+                   WHERE t.id = ?1 AND {elig}
+                     AND (EXISTS(SELECT 1 FROM client_catalog_grants g JOIN catalogs c ON c.id = g.catalog_id
+                                 WHERE g.client_id = t.id AND c.org_id IS NULL)
+                          OR (t.assets_admin_at IS NOT NULL
+                              AND NOT EXISTS(SELECT 1 FROM catalogs WHERE org_id IS NULL))))",
+                elig = Self::LIVE_GRANT_ELIGIBLE,
+            ),
             rusqlite::params![id],
             |r| r.get(0),
         )
@@ -450,26 +472,29 @@ impl Store {
         catalog_id: i64,
     ) -> Result<bool, rusqlite::Error> {
         self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM client_tokens t
-               JOIN client_catalog_grants g ON g.client_id = t.id
-               WHERE t.id = ?1 AND g.catalog_id = ?2
-                 AND t.revoked_at IS NULL AND t.mode = 'full' AND t.org_id IS NULL)",
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM client_tokens t
+                   JOIN client_catalog_grants g ON g.client_id = t.id
+                   WHERE t.id = ?1 AND g.catalog_id = ?2 AND {elig})",
+                elig = Self::LIVE_GRANT_ELIGIBLE,
+            ),
             rusqlite::params![id, catalog_id],
             |r| r.get(0),
         )
     }
 
     /// The live clients holding a grant on `catalog_id`, by name. Filters
-    /// with the same eligibility predicate as
-    /// [`Self::client_may_admin_catalog`] (live, `full`, bound to no org):
-    /// this must never list a client that predicate would refuse.
+    /// with the same eligibility predicate (`LIVE_GRANT_ELIGIBLE`) as
+    /// [`Self::client_may_admin_catalog`]: this must never list a client
+    /// that predicate would refuse.
     pub fn catalog_grantees(&self, catalog_id: i64) -> Result<Vec<String>, rusqlite::Error> {
         self.conn
-            .prepare_cached(
+            .prepare_cached(&format!(
                 "SELECT t.name FROM client_tokens t JOIN client_catalog_grants g ON g.client_id = t.id
-                 WHERE g.catalog_id = ?1 AND t.revoked_at IS NULL AND t.mode = 'full' AND t.org_id IS NULL
+                 WHERE g.catalog_id = ?1 AND {elig}
                  ORDER BY t.name",
-            )?
+                elig = Self::LIVE_GRANT_ELIGIBLE,
+            ))?
             .query_map([catalog_id], |r| r.get(0))?
             .collect()
     }
@@ -946,6 +971,10 @@ mod tests {
             "bound: no catalog at all"
         );
         assert!(!s.client_is_assets_admin(desk.id).unwrap());
+        assert!(
+            s.catalog_grantees(acme).unwrap().is_empty(),
+            "bound: not an eligible grantee even though the grant row still exists (PF11)"
+        );
         s.set_client_org("desk", None).unwrap();
 
         s.set_client_catalog_grant("desk", acme, false).unwrap();

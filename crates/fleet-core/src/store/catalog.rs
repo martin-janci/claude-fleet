@@ -70,7 +70,8 @@ impl Store {
         repo_path: &str,
         remote_url: Option<&str>,
     ) -> Result<CatalogConfigRow, rusqlite::Error> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO catalogs (name, repo_path, remote_url, org_id, created_at)
              VALUES ('personal', ?1, ?2, NULL, CAST(strftime('%s','now') AS INTEGER))
              ON CONFLICT(name) DO UPDATE SET repo_path=excluded.repo_path, remote_url=excluded.remote_url,
@@ -79,14 +80,17 @@ impl Store {
         )?;
         // Migration 092 / Rulings R2: a personal grant made while no personal
         // catalog existed waits in `assets_admin_at`; give it its grant row
-        // now that there is a catalog to attach it to. Idempotent.
-        self.conn.execute(
+        // now that there is a catalog to attach it to. Idempotent. Same
+        // transaction as the re-point above: a crash between the two must
+        // never leave a personal catalog with its pending grants unmoved.
+        tx.execute(
             "INSERT OR IGNORE INTO client_catalog_grants (client_id, catalog_id, granted_at)
              SELECT t.id, c.id, t.assets_admin_at
              FROM client_tokens t JOIN catalogs c ON c.org_id IS NULL
              WHERE t.assets_admin_at IS NOT NULL",
             [],
         )?;
+        tx.commit()?;
         Ok(self.get_catalog_config()?.expect("row just written"))
     }
 
