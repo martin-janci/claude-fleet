@@ -61,8 +61,13 @@ pub struct Catalog {
     /// retries a broken catalog once `catalog add` re-points it even when
     /// `head_commit`/`last_loaded_at` stay `NULL` before and after (true of
     /// a catalog that has never successfully loaded). `None` on every
-    /// loaded catalog.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// loaded catalog. Fix round 1, item 4: purely internal bookkeeping for
+    /// `ensure_fresh`'s own freshness check — `#[serde(skip)]`, not
+    /// `#[serde(default)]`, so it never travels the wire at all (in
+    /// particular, never inside `resolve::Resolution`, which nests a
+    /// `Catalog`); deserializing always lands on `Catalog::default()`'s
+    /// `None` regardless of what a peer sends.
+    #[serde(skip)]
     pub load_error_stamp: Option<String>,
 }
 

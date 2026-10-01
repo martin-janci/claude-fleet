@@ -1,6 +1,7 @@
 //! Loaded catalogs, by `catalogs.id`. Assets S1b: replaces the old single
-//! process-global `Option<Catalog>` static. Only `load` (and tests) write
-//! it.
+//! process-global `Option<Catalog>` static. Written by `load_catalog` (via
+//! `load`/`load_all`/`ensure_fresh`), by `ensure_fresh`'s own eviction and
+//! problem-entry installs, and by tests.
 //!
 //! **Lock order.** registry then store is allowed — that direction is
 //! already load-bearing (`resolve_preview` → `sync::layers::resolve_for_host`
@@ -184,9 +185,23 @@ pub fn remove(id: i64) -> Result<(), IpcError> {
 
 /// Drop every org catalog whose id the store no longer has (removed by
 /// another process). The personal entry is `install_personal`'s to manage.
+///
+/// Fix round 1, item 2: checks under a READ lock first, and takes the write
+/// lock only when something is actually stale. `ensure_fresh` calls this on
+/// every pass, so a fleet with no stale org catalog — the common case, and
+/// the whole fleet when there are no org catalogs at all (PF5) — must never
+/// contend for the write lock just to find there is nothing to do.
 pub fn evict_org_catalogs_not_in(
     configured: &std::collections::BTreeSet<i64>,
 ) -> Result<(), IpcError> {
+    let stale = CATALOGS
+        .read()
+        .map_err(|_| poisoned())?
+        .iter()
+        .any(|(id, c)| c.org_id.is_some() && !configured.contains(id));
+    if !stale {
+        return Ok(());
+    }
     CATALOGS
         .write()
         .map_err(|_| poisoned())?
@@ -194,18 +209,34 @@ pub fn evict_org_catalogs_not_in(
     Ok(())
 }
 
-/// Borrow the loaded catalog a store row names: `personal` through
-/// [`with_personal`] (tests install it under id 0), any other by id.
-/// Not loaded, or a problem entry: `E_CATALOG_NOT_CONFIGURED` saying which.
+/// Which registry entry a store row names: personal (`org_id: None`) is
+/// whichever entry in `m` also has `org_id: None` (tests may install it
+/// under any id, 0 by convention), any other row by its own id. Fix round
+/// 1, item 1 (PF14): shared by [`with_catalog_row`] and `ensure_fresh`'s own
+/// freshness check, and Task 4's per-catalog reads will reuse it too.
+pub(crate) fn entry_for<'a>(
+    m: &'a BTreeMap<i64, Catalog>,
+    row: &crate::store::CatalogRow,
+) -> Option<&'a Catalog> {
+    if row.org_id.is_none() {
+        m.values().find(|c| c.org_id.is_none())
+    } else {
+        m.get(&row.id)
+    }
+}
+
+/// Borrow the loaded catalog a store row names: personal or any other, via
+/// [`entry_for`]. Not loaded, or a problem entry: `E_CATALOG_NOT_CONFIGURED`
+/// saying which.
 pub fn with_catalog_row<T>(
     row: &crate::store::CatalogRow,
     f: impl FnOnce(&Catalog) -> Result<T, IpcError>,
 ) -> Result<T, IpcError> {
-    if row.org_id.is_none() {
-        return with_personal(f);
-    }
     let guard = CATALOGS.read().map_err(|_| poisoned())?;
-    match guard.get(&row.id) {
+    if row.org_id.is_none() {
+        debug_assert_at_most_one_personal(&guard);
+    }
+    match entry_for(&guard, row) {
         Some(c) if c.load_error.is_none() => f(c),
         Some(c) => Err(IpcError::new(
             super::E_CATALOG_NOT_CONFIGURED,
@@ -214,6 +245,10 @@ pub fn with_catalog_row<T>(
                 row.name,
                 c.load_error.as_deref().unwrap_or_default()
             ),
+        )),
+        None if row.org_id.is_none() => Err(IpcError::new(
+            super::E_CATALOG_NOT_CONFIGURED,
+            "catalog not loaded; call catalog_load",
         )),
         None => Err(IpcError::new(
             super::E_CATALOG_NOT_CONFIGURED,

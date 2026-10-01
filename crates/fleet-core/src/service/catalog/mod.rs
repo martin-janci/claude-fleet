@@ -144,15 +144,24 @@ pub fn load_catalog(id: i64, pull: bool, store: &Mutex<Store>) -> Result<Catalog
     // Two callers on opposite lock orders can deadlock each other, so each
     // store/registry access below is its own, non-overlapping critical
     // section. See `registry.rs`'s module doc.
-    if row.org_id.is_none() {
-        registry::install_personal(cat)?;
-    } else {
-        registry::install(cat)?;
-    }
+    //
+    // Fix round 1, item 3: the store write happens BEFORE the registry
+    // install, not after. A failure here (`E_SQLITE` from `rusqlite`, or
+    // `E_LOCK` from a poisoned mutex) must propagate without the registry
+    // having changed at all — `ensure_fresh` tells this kind of failure
+    // apart from a genuine load failure (`is_load_failure`) and would
+    // otherwise clobber whatever the registry already held (a good load
+    // from a previous pass, say) with a problem entry over what is really
+    // just a bookkeeping failure.
     {
         let s = lock(store)?;
         s.set_catalog_head_for(row.id, &summary.head, summary.loaded_at)?;
         s.bus_catalog_loaded(&summary);
+    }
+    if row.org_id.is_none() {
+        registry::install_personal(cat)?;
+    } else {
+        registry::install(cat)?;
     }
     Ok(summary)
 }
@@ -183,7 +192,7 @@ pub(crate) fn problem_entry(row: &CatalogRow, err: &IpcError) -> repo::Catalog {
         id: row.id,
         name: row.name.clone(),
         org_id: row.org_id,
-        head: row.head_commit.clone().unwrap_or_default(),
+        head: row.head_commit.as_deref().unwrap_or("").to_string(),
         loaded_at: row.last_loaded_at.unwrap_or(0),
         problems: vec![model::Problem {
             path: row.repo_path.clone(),
@@ -208,13 +217,33 @@ fn problem_stamp(row: &CatalogRow) -> String {
 /// Whether the registry's `entry` is the load the store last recorded.
 fn is_current(entry: &repo::Catalog, row: &CatalogRow) -> bool {
     if entry.load_error.is_some() {
-        entry.head == row.head_commit.clone().unwrap_or_default()
+        entry.head == row.head_commit.as_deref().unwrap_or("")
             && entry.loaded_at == row.last_loaded_at.unwrap_or(0)
             && entry.load_error_stamp.as_deref() == Some(problem_stamp(row).as_str())
     } else {
         row.last_loaded_at == Some(entry.loaded_at)
             && row.head_commit.as_deref() == Some(entry.head.as_str())
     }
+}
+
+/// Fix round 1, item 3: whether `e` came from reading/parsing the catalog's
+/// checkout itself (`ensure_repo`/`pull`/`head`/`load_dir` — `E_CATALOG_GIT`,
+/// `E_CATALOG_PARSE`, or `E_IO` for an unreadable checkout) rather than from
+/// the store or a lock (`E_SQLITE`, `E_LOCK`) or a row that vanished
+/// (`E_NOTFOUND`, a store race between `ensure_fresh`'s own `list_catalogs`
+/// and `load_catalog`'s `get_catalog`). Only a load failure becomes a
+/// problem entry in `ensure_fresh`: a store/lock failure must propagate
+/// instead, because by the time it can happen (after `load_catalog`'s own
+/// repo/parse steps already succeeded) the catalog may be fully loaded and
+/// simply not yet installed — see `load_catalog`'s store-before-registry
+/// ordering — so treating it as a load failure would clobber a good load,
+/// or whatever the registry already held, with a problem entry over what is
+/// really just a bookkeeping failure.
+fn is_load_failure(e: &IpcError) -> bool {
+    matches!(
+        e.code.as_str(),
+        E_CATALOG_GIT | E_CATALOG_PARSE | codes::E_IO
+    )
 }
 
 /// Bring every configured catalog's registry entry up to the store's record
@@ -224,7 +253,8 @@ fn is_current(entry: &repo::Catalog, row: &CatalogRow) -> bool {
 /// notices. An org catalog that cannot load becomes a problem entry and the
 /// others still load; a personal failure is returned, as before (R5), after
 /// the org catalogs were attempted. Org entries the store no longer has are
-/// evicted.
+/// evicted. A store or lock failure (`is_load_failure` false) propagates
+/// immediately instead of becoming a problem entry — see its doc.
 pub fn ensure_fresh(store: &Mutex<Store>) -> Result<(), IpcError> {
     let rows = lock(store)?.list_catalogs()?;
     let configured: BTreeSet<i64> = rows.iter().map(|r| r.id).collect();
@@ -232,12 +262,7 @@ pub fn ensure_fresh(store: &Mutex<Store>) -> Result<(), IpcError> {
     let mut personal_err = None;
     for row in &rows {
         let current = registry::with_catalogs(|m| {
-            let entry = if row.org_id.is_none() {
-                m.values().find(|c| c.org_id.is_none())
-            } else {
-                m.get(&row.id)
-            };
-            Ok(entry.is_some_and(|c| is_current(c, row)))
+            Ok(registry::entry_for(m, row).is_some_and(|c| is_current(c, row)))
         })
         .unwrap_or(false);
         if current {
@@ -246,10 +271,11 @@ pub fn ensure_fresh(store: &Mutex<Store>) -> Result<(), IpcError> {
         match load_catalog(row.id, false, store) {
             Ok(_) => {}
             Err(e) if row.org_id.is_none() => personal_err = Some(e),
-            Err(e) => {
+            Err(e) if is_load_failure(&e) => {
                 tracing::warn!(catalog = %row.name, error = %e.message, "catalog could not be loaded; kept as a problem");
                 registry::install(problem_entry(row, &e))?;
             }
+            Err(e) => return Err(e),
         }
     }
     personal_err.map_or(Ok(()), Err)
@@ -1035,6 +1061,132 @@ mod tests {
             .expect("still in the registry");
         assert!(after.load_error.is_none(), "{:?}", after.load_error);
         assert_eq!(after.assets.len(), 1);
+        registry::clear().unwrap();
+    }
+
+    /// Fix round 1, item 6: the freshness stamp also catches a
+    /// `remote_url`-only change — `repo_path` stays put, but a broken
+    /// catalog that is given a remote it can finally clone from must still
+    /// be retried.
+    #[test]
+    fn ensure_fresh_retries_a_broken_catalog_once_its_remote_url_changes() {
+        let _g = lock_registry_for_test();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        configure(
+            ConfigureArgs {
+                repo_path: repo_with_one_skill("pf13r-personal")
+                    .to_string_lossy()
+                    .into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        let org = acme_org(&store);
+        let broken_path = std::env::temp_dir().join(format!(
+            "fleet-catalog-svc-pf13r-broken-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&broken_path);
+        let broken = store
+            .lock()
+            .unwrap()
+            .upsert_catalog("broken", &broken_path.to_string_lossy(), None, Some(org))
+            .unwrap();
+
+        ensure_fresh(&store).unwrap();
+        assert!(registry::get(broken.id)
+            .unwrap()
+            .unwrap()
+            .load_error
+            .is_some());
+
+        // `repo_path` is untouched; only `remote_url` changes, from `None`
+        // to a clonable local source.
+        let remote = repo_with_one_skill("pf13r-remote");
+        store
+            .lock()
+            .unwrap()
+            .upsert_catalog(
+                "broken",
+                &broken_path.to_string_lossy(),
+                Some(&remote.to_string_lossy()),
+                Some(org),
+            )
+            .unwrap();
+
+        ensure_fresh(&store).unwrap();
+        let after = registry::get(broken.id)
+            .unwrap()
+            .expect("still in the registry");
+        assert!(after.load_error.is_none(), "{:?}", after.load_error);
+        assert_eq!(after.assets.len(), 1);
+        registry::clear().unwrap();
+    }
+
+    /// Fix round 1, item 3: `is_load_failure` is what decides whether
+    /// `ensure_fresh` turns a `load_catalog` failure into a problem entry.
+    /// Only the catalog-checkout codes qualify; a store write failure, a
+    /// poisoned lock, or a row that vanished between `list_catalogs` and
+    /// `get_catalog` must all propagate instead.
+    #[test]
+    fn is_load_failure_only_matches_checkout_codes() {
+        let checkout = |code: &str| is_load_failure(&IpcError::new(code, "x"));
+        assert!(checkout(E_CATALOG_GIT));
+        assert!(checkout(E_CATALOG_PARSE));
+        assert!(checkout(codes::E_IO));
+        assert!(!checkout(codes::E_SQLITE));
+        assert!(!checkout(codes::E_LOCK));
+        assert!(!checkout(codes::E_NOTFOUND));
+    }
+
+    /// Fix round 1, item 3: a failure writing the store's record
+    /// (`set_catalog_head_for`, after the checkout has already parsed fine)
+    /// must propagate out of `ensure_fresh` as-is — never as a problem entry
+    /// — and must leave the registry exactly as it was (here: never
+    /// installed at all, since `load_catalog` now writes the store before
+    /// touching the registry). `PRAGMA query_only` fails every write on the
+    /// store's connection while reads (the row lookup, `list_catalogs`)
+    /// keep working, which reproduces "the checkout loaded fine, but the
+    /// store write failed" without needing to race a second thread.
+    #[test]
+    fn ensure_fresh_propagates_a_store_write_failure_without_a_problem_entry() {
+        let _g = lock_registry_for_test();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        configure(
+            ConfigureArgs {
+                repo_path: repo_with_one_skill("pf3-personal").to_string_lossy().into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        load(false, &store).unwrap();
+        let org = acme_org(&store);
+        let acme = store
+            .lock()
+            .unwrap()
+            .upsert_catalog(
+                "acme",
+                &repo_with_one_skill("pf3-acme").to_string_lossy(),
+                None,
+                Some(org),
+            )
+            .unwrap();
+
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute_batch("PRAGMA query_only = ON;")
+            .unwrap();
+
+        let err = ensure_fresh(&store).unwrap_err();
+        assert_eq!(err.code, codes::E_SQLITE, "{}", err.message);
+        assert!(
+            registry::get(acme.id).unwrap().is_none(),
+            "a store-write failure must not install a problem entry"
+        );
         registry::clear().unwrap();
     }
 
