@@ -955,9 +955,18 @@ pub async fn provision_hosts(
             Ok(warning) => {
                 // A warning is appended: the host still needs (or not) its
                 // Claude restart, whatever else went wrong.
+                // Name the ag launcher only when it actually landed. On the
+                // content-only path the only warning possible IS the ag step's
+                // (`wsl_warning` is raised on the full path alone), so a
+                // warning here means ag did not finish — and listing it as
+                // "refreshed" directly above that warning would contradict it.
                 let done = if scope.content_only {
-                    "skills, CLAUDE.md block, hooks and the ag launcher refreshed \
-                     (no restart needed)"
+                    if warning.is_some() {
+                        "skills, CLAUDE.md block and hooks refreshed (no restart needed)"
+                    } else {
+                        "skills, CLAUDE.md block, hooks and the ag launcher refreshed \
+                         (no restart needed)"
+                    }
                 } else {
                     "restart Claude on this host to load the MCP server"
                 };
@@ -3419,6 +3428,30 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(plain, "restart Claude on this host to load the MCP server");
+
+        // A CLEAN content-only run names the ag launcher, which is the whole
+        // point of saying so: the scope used to read "skills, CLAUDE.md and
+        // hooks only" everywhere although ag is installed too. The degraded
+        // case above must NOT name it, or the detail contradicts the warning
+        // appended right after it.
+        let clean_content = detail(
+            provision_hosts(
+                &store,
+                &clean,
+                &tunnels,
+                &base(),
+                ProvisionScope {
+                    content_only: true,
+                    ..ProvisionScope::default()
+                },
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(
+            clean_content,
+            "skills, CLAUDE.md block, hooks and the ag launcher refreshed (no restart needed)"
+        );
         tunnels.stop_all();
     }
 }
