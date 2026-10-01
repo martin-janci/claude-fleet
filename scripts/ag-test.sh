@@ -333,6 +333,36 @@ env -u AG_CONFIG -u AG_HOME AG_BIN_DIR="relative/bin" HOME="$H6" XDG_CONFIG_HOME
 rc=$?
 if [ $rc = 2 ]; then pass "install: a relative AG_BIN_DIR is rejected (exit 2)"; else fail "install: relative AG_BIN_DIR: exit $rc: $(cat "$ROOT/inst.log")"; fi
 
+# --- installer: AG_HOME is never rm -rf'd unless ag owns it -----------------
+# An ag SOURCE CHECKOUT has `ag` + `drivers/` too, so the old presence test let
+# `rm -rf "$AG_HOME"` destroy a developer's tree — .git and uncommitted work
+# included — while exiting 0. AG_HOME is caller-settable and provisioning runs
+# the installer through `bash -lc`, which sources the host's login profile, so
+# an `export AG_HOME=...` there was enough to aim it.
+run_inst_at() { # $1 home, $2 AG_HOME
+  rm -rf "$1/.local/bin"; mkdir -p "$1/.local/bin"
+  env -u AG_CONFIG AG_HOME="$2" AG_BIN_DIR="$1/.local/bin" HOME="$1" XDG_CONFIG_HOME= \
+    PATH="$FAKE:/usr/bin:/bin" bash "$REPO/tools/ag/install.sh" --from "$REPO/tools/ag" \
+    >"$ROOT/inst.log" 2>&1
+}
+H6b="$ROOT/home6b"; VICTIM="$H6b/dev/ag"
+mkdir -p "$VICTIM/drivers" "$VICTIM/lib" "$VICTIM/.git"
+cp "$REPO/tools/ag/ag" "$VICTIM/ag"; touch "$VICTIM/README.md" "$VICTIM/install.sh" "$VICTIM/.git/HEAD"
+echo "unpushed" >"$VICTIM/MY-WIP.md"
+run_inst_at "$H6b" "$VICTIM"; rc=$?
+if [ $rc = 5 ]; then pass "install: a checkout at \$AG_HOME is refused (exit 5)"; else fail "install: checkout at AG_HOME: exit $rc: $(cat "$ROOT/inst.log")"; fi
+if [ -f "$VICTIM/MY-WIP.md" ] && [ -d "$VICTIM/.git" ]; then pass "install: the checkout's own files and .git survive"; else fail "install: the checkout was destroyed"; fi
+# Fleet's own install carries the marker and is still replaced.
+MANAGED="$H6b/managed/ag"; mkdir -p "$MANAGED/drivers"
+cp "$REPO/tools/ag/ag" "$MANAGED/ag"; touch "$MANAGED/.fleet-managed" "$MANAGED/STALE.txt"
+run_inst_at "$H6b" "$MANAGED"; rc=$?
+if [ $rc = 0 ] && [ ! -e "$MANAGED/STALE.txt" ]; then pass "install: a .fleet-managed tree is still replaced"; else fail "install: managed tree not replaced: exit $rc: $(cat "$ROOT/inst.log")"; fi
+# A clean manual install (only files the installer itself writes) upgrades too.
+MANUAL="$H6b/manual/ag"; mkdir -p "$MANUAL/drivers/old"
+cp "$REPO/tools/ag/ag" "$MANUAL/ag"; touch "$MANUAL/README.md" "$MANUAL/install.sh" "$MANUAL/drivers/old/GONE"
+run_inst_at "$H6b" "$MANUAL"; rc=$?
+if [ $rc = 0 ] && [ ! -e "$MANUAL/drivers/old/GONE" ]; then pass "install: a clean manual install still upgrades"; else fail "install: manual upgrade blocked: exit $rc: $(cat "$ROOT/inst.log")"; fi
+
 # --- installer: a failing `ag shims` does not abort the install -------------
 H5="$ROOT/home5"; mkdir -p "$H5/.local/bin" "$H5/.config/ag"
 printf 'echo mine\n' >"$H5/.local/bin/cl"; chmod 755 "$H5/.local/bin/cl"

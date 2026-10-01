@@ -773,6 +773,22 @@ pub(super) fn settings_writer(caller: &Caller, who: &SettingsWho) -> Result<(), 
             "an agent proposes a settings change (set_setting with propose: true); a person applies it",
             None,
         )),
+        // An ORG-BOUND device never writes the fleet's settings, trusted or
+        // not: the settings surface is fleet-wide, so a client bound to one
+        // org has no business over it. `get_settings` / `set_setting` are
+        // `Access::Person`, which already excludes such a client at the gate
+        // — but an `Access::Client` tool that writes through here (the
+        // `guide` tool, so a host's own token can reach catalog/validate/
+        // propose) reaches this arm instead, and without this check a
+        // trusted org-bound client could approve and remove fleet-wide
+        // guides. `is_person_device` is the one rule for "a person's own
+        // device"; defer to it rather than restating it.
+        SettingsWho::Device(_) if !caller.is_person_device() => Err(mcp_err(
+            "E_FORBIDDEN",
+            "a client bound to an organisation does not change the fleet's settings; \
+             an unbound device of the hub's operator does",
+            None,
+        )),
         SettingsWho::Device(_) if caller.is_trusted_client() && caller.mode == TokenMode::Full => {
             Ok(())
         }

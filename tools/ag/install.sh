@@ -81,10 +81,44 @@ main() {
     return 5
   fi
 
-  # Never delete a directory ag did not create.
-  if [ -e "$AG_HOME" ] && ! { [ -f "$AG_HOME/ag" ] && [ -d "$AG_HOME/drivers" ]; }; then
-    echo "install.sh: $AG_HOME exists and is not an ag install — move it away first" >&2
-    return 5
+  # Never delete a directory ag did not create. `ag` + `drivers/` alone is NOT
+  # enough to prove that: an ag SOURCE CHECKOUT has both, and $AG_HOME is
+  # caller-settable (and fleet runs this through `bash -lc`, so an
+  # `export AG_HOME=...` in the host's login profile reaches it) — so that test
+  # let `rm -rf "$AG_HOME"` below destroy a developer's checkout, .git and
+  # uncommitted work included, while exiting 0.
+  #
+  # Two ways to be ours, and nothing else is:
+  #   - it carries fleet's `.fleet-managed` marker, which `cp -R` copies in
+  #     from the staged source tree; or
+  #   - every entry in it also exists in $FROM, i.e. it holds only the files
+  #     this installer would itself have written. Deriving the set from $FROM
+  #     keeps the rule correct as the ag file set changes, and it preserves the
+  #     manual-install upgrade path for someone who never used fleet.
+  if [ -e "$AG_HOME" ]; then
+    if ! { [ -f "$AG_HOME/ag" ] && [ -d "$AG_HOME/drivers" ]; }; then
+      echo "install.sh: $AG_HOME exists and is not an ag install — move it away first" >&2
+      return 5
+    fi
+    if [ ! -f "$AG_HOME/.fleet-managed" ]; then
+      local stray=
+      local entry base
+      for entry in "$AG_HOME"/* "$AG_HOME"/.[!.]* "$AG_HOME"/..?*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        base=${entry##*/}
+        [ "$base" = ".fleet-managed" ] && continue
+        if [ ! -e "$FROM/$base" ] && [ ! -L "$FROM/$base" ]; then
+          stray=$base
+          break
+        fi
+      done
+      if [ -n "$stray" ]; then
+        echo "install.sh: $AG_HOME holds $stray, which ag did not install — refusing to replace it." >&2
+        echo "install.sh: that looks like your own checkout or directory. Move it aside, or set" >&2
+        echo "install.sh: AG_HOME to a path ag may own." >&2
+        return 5
+      fi
+    fi
   fi
   mkdir -p "$(dirname "$AG_HOME")" "$AG_BIN_DIR"
   rm -rf "$AG_HOME.new"

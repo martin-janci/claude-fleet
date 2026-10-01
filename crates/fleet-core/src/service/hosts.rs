@@ -835,6 +835,7 @@ mod tests {
             agent_version: None,
             provisioned_at: None,
             provision_stale: false,
+            provision_warning: None,
             harnesses: None,
         }
     }

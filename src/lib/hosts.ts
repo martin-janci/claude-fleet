@@ -38,6 +38,10 @@ export interface HostRow {
   /** Harnesses the asset catalog syncs here (multi-harness F3a): null or absent
    *  = auto (Claude, plus Codex where a scan finds it); a list always holds claude. */
   harnesses?: string[] | null;
+  /** What the last provisioning warned about, when it delivered the content but
+   *  degraded part way (the ag launcher did not install, say). Cleared by the
+   *  next clean run; absent from an older hub. */
+  provision_warning?: string | null;
 }
 
 /** The volatile half of a host row, as `host:pinged` carries it. */

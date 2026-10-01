@@ -524,6 +524,46 @@ impl Store {
         Ok(())
     }
 
+    /// Record how the last provisioning went, beyond "it ran".
+    ///
+    /// `warning: None` is a clean run: the fingerprint `set_host_provisioned`
+    /// just stamped stands, and any previous warning is cleared.
+    ///
+    /// `warning: Some(_)` keeps the text, so it survives the call that
+    /// produced it and can reach `fleet_health` and the host's Attention row.
+    ///
+    /// `owed_retry` is a SEPARATE question from whether there is a warning,
+    /// and the two must not be conflated. It forgets the fingerprint, so
+    /// `HostRow::provision_stale` (`provisioned && fingerprint != current`)
+    /// turns true and `spawn_reprovision_stale` picks the host up again.
+    /// Set it for a step that MIGHT succeed next time — a failed `ag`
+    /// install. Do NOT set it for a warning about a persistent condition of
+    /// the host itself, such as WSL needing mirrored networking: that recurs
+    /// until the operator changes their WSL config, so retrying would leave
+    /// the host forever stale and re-provisioned on every tick. Such a
+    /// warning is still worth keeping — it just is not a reason to retry.
+    ///
+    /// `provisioned` / `provisioned_at` are left alone either way: the
+    /// content WAS delivered.
+    pub fn record_host_provision_outcome(
+        &self,
+        alias: &str,
+        warning: Option<&str>,
+        owed_retry: bool,
+    ) -> Result<(), rusqlite::Error> {
+        if owed_retry {
+            self.conn.execute(
+                "UPDATE hosts SET provision_fingerprint=NULL WHERE alias=?1",
+                rusqlite::params![alias],
+            )?;
+        }
+        self.conn.execute(
+            "UPDATE hosts SET provision_warning=?1 WHERE alias=?2",
+            rusqlite::params![warning, alias],
+        )?;
+        Ok(())
+    }
+
     /// Re-home everything keyed on `from` under `into` in ONE transaction,
     /// then delete the `from` host row (data-sync F2/F5: the `local` → `mac`
     /// rename left 249 worktree rows and 6 duplicate agent rows on a hidden
