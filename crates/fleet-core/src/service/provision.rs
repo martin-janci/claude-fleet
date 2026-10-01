@@ -330,19 +330,22 @@ pub async fn provision_content_only(
     } else {
         None
     };
-    mark_provisioned(store, host, warning.is_some());
+    // the ag step is retryable, so a warning from it is owed another pass
+    mark_provisioned(store, host, warning.as_deref(), warning.is_some());
     Ok(warning)
 }
 
-/// Record a finished provisioning: provisioned either way, but a DEGRADED run
-/// keeps no fingerprint, so it reads `provision_stale` and is picked up again
-/// instead of being recorded as delivered.
-fn mark_provisioned(store: &Mutex<Store>, host: &str, degraded: bool) {
+/// Record a finished provisioning: provisioned either way, with the warning
+/// kept so the reason survives the call and reaches `fleet_health` and
+/// Attention, and the fingerprint forgotten when the run is owed a RETRY, so
+/// it reads `provision_stale` instead of being recorded as delivered.
+///
+/// `owed_retry` is deliberately not `warning.is_some()` — see
+/// `Store::record_host_provision_outcome`.
+fn mark_provisioned(store: &Mutex<Store>, host: &str, warning: Option<&str>, owed_retry: bool) {
     if let Ok(s) = store.lock() {
         let _ = s.set_host_provisioned(host, true);
-        if degraded {
-            let _ = s.clear_host_provision_fingerprint(host);
-        }
+        let _ = s.record_host_provision_outcome(host, warning, owed_retry);
     }
 }
 
@@ -669,12 +672,13 @@ pub async fn provision_host_with_token(
     // which recurs on every provisioning until the operator changes their WSL
     // config — clearing the fingerprint for it would leave that host forever
     // `provision_stale` and re-provisioned on every tick.
-    let degraded = ag_warning.is_some();
+    let owed_retry = ag_warning.is_some();
     let warning = match (wsl_warning, ag_warning) {
         (Some(a), Some(b)) => Some(format!("{a}; {b}")),
         (a, b) => a.or(b),
     };
-    mark_provisioned(store, host, degraded);
+    // Both warnings are KEPT; only the ag one is owed a retry.
+    mark_provisioned(store, host, warning.as_deref(), owed_retry);
     Ok(warning)
 }
 
@@ -3134,6 +3138,39 @@ mod tests {
             row.provisioned_at.is_some(),
             "the content WAS delivered: provisioned_at still stands"
         );
+        // and the REASON survives the call that produced it, so it can reach
+        // fleet_health and the host's Attention row
+        assert_eq!(
+            row.provision_warning.as_deref(),
+            Some(warning.as_str()),
+            "the warning is kept on the host, not just returned"
+        );
+        let health = crate::service::health::hosts_health(
+            &[row.clone()],
+            &[],
+            &crate::service::health::HostHealthThresholds {
+                disk_low_pct: 90,
+                claude_max_behind: 1,
+                hooks_silent_secs: 3600,
+            },
+            &[],
+            "0.0.0",
+            crate::store::now_unix(),
+        );
+        assert_eq!(
+            health[0].provision_warning.as_deref(),
+            Some(warning.as_str()),
+            "fleet_health carries it"
+        );
+
+        // A clean re-run clears it: the warning is about the LAST run.
+        let ok = fresh_host();
+        provision_content_only(&store, &ok, "h1", &base())
+            .await
+            .unwrap();
+        let row = store.lock().unwrap().get_host_row("h1").unwrap().unwrap();
+        assert_eq!(row.provision_warning, None, "a clean run clears the warning");
+        assert!(!row.provision_stale, "and re-stamps the fingerprint");
     }
 
     /// M11d: a full provisioning whose installer exits non-zero is

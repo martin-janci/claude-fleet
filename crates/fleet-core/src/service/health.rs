@@ -173,6 +173,13 @@ pub struct HostHealthRow {
     /// Reachable, has a live non-external session, and no hook from its
     /// token within `hooks_silent_secs`.
     pub hooks_silent: bool,
+    /// What the last provisioning warned about, when it delivered the content
+    /// but degraded part way (migration 091) — the `ag` launcher did not
+    /// install, say. `None` is a clean last run. Before this the reason was a
+    /// single `tracing::warn!` on the unattended path, so a fleet could carry
+    /// a degraded host indefinitely with nothing saying why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provision_warning: Option<String>,
 }
 
 /// The `health.*` thresholds [`hosts_health`] judges against.
@@ -273,6 +280,7 @@ pub fn hosts_health(
                     && has_live_session
                     && h.last_hook_at
                         .is_none_or(|at| now - at > t.hooks_silent_secs),
+                provision_warning: h.provision_warning.clone(),
             }
         })
         .collect()
@@ -1031,6 +1039,7 @@ mod tests {
             agent_version: None,
             provisioned_at: None,
             provision_stale: false,
+            provision_warning: None,
             harnesses: None,
         }
     }

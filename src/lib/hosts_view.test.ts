@@ -201,6 +201,33 @@ describe('host health helpers', () => {
     expect(versionAge(host('bare', { claude_version_at: null }), NOW)).toBe('never checked');
   });
 
+  it('a degraded provisioning names its reason, outranking the generic provision_stale', () => {
+    const base = {
+      hasToken: true,
+      tokensLoaded: true,
+      hook: { state: 'seen' as const, lastAt: NOW },
+      sessionCount: 1,
+      newestClaude: '2.1.145',
+      now: NOW,
+      versionMaxAgeSecs: 86400,
+      diskLowPct: 90,
+      hubVersion: '0.3.1',
+    };
+    // A degraded run clears the fingerprint, so the host is ALSO provision_stale.
+    // Saying "provisioned with an older fleet" would be the wrong reason.
+    const degraded = host('htz', {
+      provision_stale: true,
+      provision_warning: 'ag launcher not installed: install.sh exited 5',
+    });
+    const a = hostAttention({ ...base, host: degraded });
+    expect(a?.kind).toBe('provision_warning');
+    expect(a?.title).toContain('ag launcher not installed');
+    // stale with no warning is still the generic one
+    expect(hostAttention({ ...base, host: host('oci', { provision_stale: true }) })?.kind).toBe('provision_stale');
+    // and a clean host earns no mark at all
+    expect(hostAttention({ ...base, host: host('ok', {}) })).toBeNull();
+  });
+
   it('disk_low outranks claude_old; agent_old fires when the agent is older than the hub version', () => {
     const base = {
       hasToken: true,

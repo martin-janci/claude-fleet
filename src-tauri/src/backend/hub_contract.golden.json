@@ -328,6 +328,7 @@
       "mem_avail_kb",
       "org_id",
       "provision_stale",
+      "provision_warning",
       "provisioned",
       "provisioned_at",
       "reachable",

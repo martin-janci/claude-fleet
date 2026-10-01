@@ -415,6 +415,16 @@ fn hosts_has_harnesses(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 091.
+fn hosts_has_provision_warning(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'provision_warning'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 067 (work graph M14.1b, D31).
 fn orgs_has_bound_sees_unassigned(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -979,6 +989,14 @@ const MIGRATIONS: &[Migration] = &[
     // Assets S1b M1: `catalogs`, backfilled from `catalog_config` as
     // `personal`. CREATE IF NOT EXISTS + INSERT OR IGNORE: safe to re-run.
     Migration::plain(90, include_str!("../../migrations/090_catalogs.sql")),
+    // The warning a degraded provisioning left behind, so it survives the
+    // call that produced it. ADD COLUMN is not idempotent: the same guard
+    // 087 and 089 use.
+    Migration {
+        version: 91,
+        sql: include_str!("../../migrations/091_host_provision_warning.sql"),
+        already_applied: Some(hosts_has_provision_warning),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -4004,6 +4022,35 @@ mod tests {
         assert_eq!(v, None, "an existing host starts on auto");
         s.conn
             .execute_batch("DELETE FROM schema_version WHERE version >= 89;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_091_adds_the_provision_warning_as_none_and_is_safe_to_rerun() {
+        let s = store_at_version(90);
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias, reachable, provisioned) VALUES ('h', 1, 1);",
+            )
+            .unwrap();
+        assert!(!hosts_has_provision_warning(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(hosts_has_provision_warning(&s.conn).unwrap());
+        let v: Option<String> = s
+            .conn
+            .query_row(
+                "SELECT provision_warning FROM hosts WHERE alias = 'h'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, None, "an existing host carries no warning");
+        // the ADD COLUMN is not idempotent, so a re-run must be guarded
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 91;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);

@@ -875,6 +875,14 @@ pub struct HostRow {
     /// omits it.
     #[serde(default)]
     pub harnesses: Option<Vec<String>>,
+    /// What the last provisioning warned about, when it delivered the content
+    /// but degraded part way — the `ag` launcher did not install, say
+    /// (migration 091). Cleared by the next clean run; `None` is "nothing
+    /// wrong with the last run". Returned to the caller AND kept here,
+    /// because the call that produced it is long gone by the time an operator
+    /// looks. Per-field default: an older hub omits it.
+    #[serde(default)]
+    pub provision_warning: Option<String>,
 }
 
 /// The volatile half of a host row, as `host:pinged` carries it (host
@@ -929,7 +937,7 @@ pub(super) const HOST_COLUMNS: &str =
      last_pinged_at, account_uuid, provisioned, transport, org_id, claude_version_at, \
      disk_home_free_kb, disk_home_total_kb, disk_tmp_free_kb, load_1m, mem_avail_kb, \
      uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint, \
-     harnesses";
+     harnesses, provision_warning";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -967,6 +975,9 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         harnesses: row
             .get::<_, Option<String>>(23)?
             .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()),
+        // Migration 091: what the last provisioning warned about, if it
+        // degraded. Cleared by the next clean run.
+        provision_warning: row.get(24)?,
     })
 }
 
