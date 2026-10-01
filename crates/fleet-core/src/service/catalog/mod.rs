@@ -263,9 +263,39 @@ pub fn inventory(store: &Mutex<Store>) -> Result<Vec<AssetInventoryRow>, IpcErro
     Ok(lock(store)?.list_inventory()?)
 }
 
+/// Inventory rows, minus those belonging to a HIDDEN host.
+///
+/// `asset_inventory` is keyed by alias with no foreign key, so a host's last
+/// scan outlived the host: a retired alias went on contributing copies,
+/// host-strip dots, `variants` and a `needs_person` class no rescan could
+/// clear, because nothing would ever revisit that host to correct them. A
+/// deliberately removed host is now cleared at the source
+/// (`Store::delete_host`); what that cannot cover is a host still present but
+/// HIDDEN, which reconcile skips — so its scan is frozen at whatever it last
+/// saw.
+///
+/// Deliberately NOT "every row whose host is in `list_hosts`": a host row is
+/// not a precondition for being scanned, and `local` in particular is only
+/// registered once a project is added, so requiring presence would hide a
+/// fresh install's own assets. Absence here means "never registered", which is
+/// current, not stale.
+fn rows_for_shown_hosts(store: &Mutex<Store>) -> Result<Vec<AssetInventoryRow>, IpcError> {
+    let rows = inventory(store)?;
+    let hidden: std::collections::HashSet<String> = lock(store)?
+        .list_hosts()?
+        .into_iter()
+        .filter(|h| h.hidden)
+        .map(|h| h.alias)
+        .collect();
+    Ok(rows
+        .into_iter()
+        .filter(|r| !hidden.contains(&r.host_alias))
+        .collect())
+}
+
 pub fn list_assets(store: &Mutex<Store>) -> Result<AssetListing, IpcError> {
     require_config(store)?;
-    let rows = inventory(store)?;
+    let rows = rows_for_shown_hosts(store)?;
     let identities = identity::group_identities(&rows);
     with_catalog(|cat| {
         Ok(AssetListing {
@@ -844,6 +874,75 @@ mod tests {
             list_assets(&store).unwrap_err().code,
             E_CATALOG_NOT_CONFIGURED
         );
+    }
+
+    /// A HIDDEN host's frozen scan is left out of the Assets list.
+    ///
+    /// Reconcile skips a hidden host, so its inventory is stuck at whatever it
+    /// last saw — and before this it still contributed copies, host-strip dots
+    /// and a `needs_person` class nothing could clear. A host that is simply
+    /// not registered is NOT filtered: `local` is only registered once a
+    /// project is added, so requiring a host row would hide a fresh install's
+    /// own assets.
+    #[test]
+    fn list_assets_leaves_out_a_hidden_hosts_frozen_scan() {
+        let _g = lock_registry_for_test();
+        let root = repo_with_one_skill("hidden");
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        configure(
+            ConfigureArgs {
+                repo_path: root.to_string_lossy().into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        load(false, &store).unwrap();
+        let row = |host: &str| crate::store::AssetInventoryRow {
+            host_alias: host.into(),
+            harness: "claude".into(),
+            kind: "skill".into(),
+            // `repo_with_one_skill` names its asset `s`; the inventory row has
+            // to name the same asset for `host_states` to group it.
+            name: "s".into(),
+            state: "installed".into(),
+            scanned_at: 1,
+            managed: true,
+            ..Default::default()
+        };
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("retired", Some("retired")).unwrap();
+            s.replace_host_inventory("retired", "claude", &[row("retired")])
+                .unwrap();
+            // `local` is NOT registered here, exactly as on a fresh install
+            s.replace_host_inventory("local", "claude", &[row("local")])
+                .unwrap();
+        }
+
+        // both show while the host is visible
+        let hosts = |l: &AssetListing| {
+            let mut h: Vec<String> = l.assets[0]
+                .hosts
+                .iter()
+                .map(|x| x.host_alias.clone())
+                .collect();
+            h.sort();
+            h
+        };
+        assert_eq!(
+            hosts(&list_assets(&store).unwrap()),
+            vec!["local", "retired"]
+        );
+
+        store
+            .lock()
+            .unwrap()
+            .set_host_hidden("retired", true)
+            .unwrap();
+
+        // the hidden host drops out; the unregistered `local` stays
+        assert_eq!(hosts(&list_assets(&store).unwrap()), vec!["local"]);
     }
 
     #[test]

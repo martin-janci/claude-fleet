@@ -407,6 +407,37 @@ fn merge_header_and_spec(
     Ok(map)
 }
 
+/// The literal credential in a COMMAND string, if any — `token=abc`,
+/// `Bearer abc`, `--api-key abc`.
+///
+/// A key/value map is not the only place a secret rides into a catalog: a
+/// legacy fleet hook is itself a command (`curl … /hook?token=<TOKEN>`), which
+/// is exactly the field the importer's own `scrub_token`/`looks_secret` pair
+/// never looked at. Returns the fragment that names it, for the message.
+fn command_literal_secret(cmd: &str) -> Option<String> {
+    let low = cmd.to_ascii_lowercase();
+    for needle in [
+        "token=",
+        "secret=",
+        "password=",
+        "apikey=",
+        "api_key=",
+        "bearer ",
+    ] {
+        let mut from = 0usize;
+        while let Some(rel) = low[from..].find(needle) {
+            let at = from + rel + needle.len();
+            let rest = cmd[at..].trim_start_matches(['"', '\'', ' ']);
+            // `${NAME}` is the form a catalog carries; anything else is literal.
+            if !rest.starts_with("${") && !rest.is_empty() {
+                return Some(needle.trim_end_matches(['=', ' ']).to_string());
+            }
+            from = at;
+        }
+    }
+    None
+}
+
 /// A key whose VALUE would be a credential: the same list the importer's
 /// `looks_secret` uses, kept here so every path that validates an asset agrees.
 fn names_a_secret(key: &str) -> bool {
@@ -544,6 +575,11 @@ impl Asset {
                 for k in literal_secrets(action.headers.iter()) {
                     out.push(format!(
                         "action.headers.{k} holds a literal secret: use a ${{PLACEHOLDER}} the sync fills in per host"
+                    ));
+                }
+                if let Some(frag) = action.command.as_deref().and_then(command_literal_secret) {
+                    out.push(format!(
+                        "action.command holds a literal secret ({frag}): use a ${{PLACEHOLDER}} the sync fills in per host"
                     ));
                 }
                 match action.kind.as_str() {
@@ -989,6 +1025,49 @@ version: "6.3.0"
         let plain_json = serde_json::to_value(&plain).unwrap();
         assert!(!plain_json.as_object().unwrap().contains_key("install_as"));
         assert_eq!(plain.install_name(), plain.header.name);
+    }
+
+    /// A credential in a COMMAND string is refused too.
+    ///
+    /// A key/value map is not the only way one travels: a legacy fleet hook is
+    /// itself `curl … /hook?token=<TOKEN>`, the one field the importer's
+    /// `scrub_token`/`looks_secret` pair never inspected — which is what made
+    /// the stated reason for exempting a `local` import from
+    /// `scrub_fleet_entries` ("every value `scrub_token` touches already
+    /// redacts") false.
+    #[test]
+    fn a_literal_secret_in_a_command_is_refused() {
+        // the real shape, from fleet's own pre-Track-B hook
+        assert_eq!(
+            command_literal_secret("curl -s -X POST http://127.0.0.1:4180/hook?token=abc123"),
+            Some("token".into())
+        );
+        assert_eq!(
+            command_literal_secret("curl -H 'Authorization: Bearer sk-live-xyz' https://x/y"),
+            Some("bearer".into())
+        );
+        assert_eq!(
+            command_literal_secret("mytool --api_key=deadbeef run"),
+            Some("api_key".into())
+        );
+        // a placeholder is the catalog's own form, in every quoting style
+        assert_eq!(
+            command_literal_secret("curl http://h/hook?token=${FLEET_MCP_TOKEN}"),
+            None
+        );
+        assert_eq!(
+            command_literal_secret("curl -H \"Authorization: Bearer ${TOK}\" https://x"),
+            None
+        );
+        assert_eq!(
+            command_literal_secret("curl -H 'Bearer ${TOK}' https://x"),
+            None
+        );
+        // and an ordinary command is left alone
+        assert_eq!(command_literal_secret("echo hello && jq .foo"), None);
+        assert_eq!(command_literal_secret(""), None);
+        // a trailing `token=` with nothing after it is not a secret
+        assert_eq!(command_literal_secret("curl http://h/hook?token="), None);
     }
 
     #[test]

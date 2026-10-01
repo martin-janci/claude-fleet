@@ -793,6 +793,14 @@ impl Store {
             "DELETE FROM host_layers WHERE host_alias=?1",
             rusqlite::params![alias],
         )?;
+        // And its last asset scan. `asset_inventory` is keyed by alias with no
+        // FK, so these rows outlived the host and no rescan could ever revisit
+        // them: the Assets list went on counting a retired alias's copies, its
+        // host-strip dot and a `needs_person` class nothing could clear.
+        tx.execute(
+            "DELETE FROM asset_inventory WHERE host_alias=?1",
+            rusqlite::params![alias],
+        )?;
         tx.execute("DELETE FROM hosts WHERE alias=?1", rusqlite::params![alias])?;
         // A removed host's control-API token must stop authenticating.
         tx.execute(
@@ -1454,6 +1462,45 @@ mod tests {
     /// (migration 033) with no `ON DELETE` clause, so a host carrying a
     /// layer assignment must have its `host_layers` rows cleaned up before
     /// the `hosts` row goes, or `DELETE FROM hosts` trips the constraint.
+    /// A removed host's last asset scan goes with it.
+    ///
+    /// `asset_inventory` is keyed by alias with no foreign key, so these rows
+    /// outlived their host and nothing could ever revisit them: the Assets list
+    /// went on counting a retired alias's copies, its host-strip dot and a
+    /// `needs_person` class no rescan could clear.
+    #[test]
+    fn delete_host_removes_its_asset_inventory() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_catalog_config("/p", None).unwrap();
+        s.insert_host("gone", Some("gone")).unwrap();
+        s.insert_host("stays", Some("stays")).unwrap();
+        let row = |host: &str| crate::store::AssetInventoryRow {
+            host_alias: host.into(),
+            harness: "claude".into(),
+            kind: "skill".into(),
+            name: "worktree".into(),
+            state: "installed".into(),
+            catalog_hash: Some("c".into()),
+            host_hash: Some("h".into()),
+            scanned_at: 1,
+            managed: true,
+            secret_like: false,
+            fleet_owned: false,
+            catalog_id: None,
+        };
+        s.replace_host_inventory("gone", "claude", &[row("gone")])
+            .unwrap();
+        s.replace_host_inventory("stays", "claude", &[row("stays")])
+            .unwrap();
+        assert_eq!(s.list_inventory().unwrap().len(), 2);
+
+        s.delete_host("gone").unwrap();
+
+        let left = s.list_inventory().unwrap();
+        assert_eq!(left.len(), 1, "only the surviving host's rows remain");
+        assert_eq!(left[0].host_alias, "stays");
+    }
+
     #[test]
     fn delete_host_removes_its_layer_assignment() {
         let s = Store::open_in_memory().unwrap();

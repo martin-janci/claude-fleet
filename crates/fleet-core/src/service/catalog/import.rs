@@ -573,7 +573,18 @@ fn import_hooks(
                     r#match: tool.map(|t| HookMatch { tool: t }),
                     action: HookAction {
                         kind,
-                        command: h.get("command").and_then(Value::as_str).map(String::from),
+                        // Scrubbed like every other imported value. A legacy
+                        // fleet hook IS a command string
+                        // (`curl … /hook?token=<TOKEN>`), so this is the one
+                        // field that carries the token — and the rationale for
+                        // exempting `local` from `scrub_fleet_entries` ("every
+                        // value `scrub_token` touches already redacts") was
+                        // false precisely here.
+                        command: h.get("command").and_then(Value::as_str).map(|c| {
+                            let mut c = c.to_string();
+                            scrub_token(&mut c, fleet_token);
+                            c
+                        }),
                         url,
                         headers,
                         timeout_s: h.get("timeout").and_then(Value::as_u64),
