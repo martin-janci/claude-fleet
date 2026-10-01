@@ -4,6 +4,51 @@ You are reviewing a claim made by another agent. **Your job is to try to break i
 not to confirm it. If it survives, say so plainly; if it does not, say exactly which
 part fails and what the evidence is. Do not be agreeable.
 
+## Before you start — where everything is
+
+The spec under review is **not on `main`**. It lives only on a feature branch, so a
+fresh clone of the default branch will not contain it.
+
+| What | Where |
+|---|---|
+| Repository | `martin-janci/claude-fleet` |
+| Branch holding the spec | `claude/youthful-heisenberg-lnexvr` — read its **head**, not a pinned commit |
+| The spec | [docs/superpowers/specs/2026-10-01-fleet-projects-design.md](https://github.com/martin-janci/claude-fleet/blob/claude/youthful-heisenberg-lnexvr/docs/superpowers/specs/2026-10-01-fleet-projects-design.md) |
+| This review request | `docs/superpowers/reviews/` on the same branch |
+
+To get it:
+
+```bash
+git clone --branch claude/youthful-heisenberg-lnexvr https://github.com/martin-janci/claude-fleet.git
+# or, in an existing clone:
+git fetch origin claude/youthful-heisenberg-lnexvr && git checkout claude/youthful-heisenberg-lnexvr
+```
+
+If you cannot clone, read the files through the GitHub API or the blob URL above.
+Should that URL 404 because the branch name contains slashes, use a commit form
+instead: `.../blob/<sha>/<path>`, taking `<sha>` from the branch head (it was
+`2b2b7138` when this request was written, and the spec may have moved forward
+since — prefer the head).
+
+**Which files are where** — this matters, because two of the documents named below
+are also not on `main`:
+
+- Everything under `crates/`, `src-tauri/`, `tools/`, `CLAUDE.md`, and every
+  `docs/superpowers/specs/2026-09-*` document **is on `main`** and also on this
+  branch. Reading them from either is fine.
+- `docs/superpowers/specs/2026-10-01-fleet-projects-design.md` and the review
+  requests exist **only on `claude/youthful-heisenberg-lnexvr`**.
+- `docs/superpowers/plans/2026-09-30-assets-m2-sync.md` and
+  `crates/fleet-core/migrations/091_catalog_ids.sql` exist **only on the branch
+  `feat/assets-m2-sync`**, which is open pull request
+  [martin-janci/claude-fleet#416](https://github.com/martin-janci/claude-fleet/pull/416).
+  Read them from that branch or from the pull request.
+
+If the repository is unreachable to you entirely, say so rather than guessing —
+but note that the vendor-documentation half of this check (the claims about what
+the Claude Code CLI and its docs do or do not support) stands on its own and can
+still be answered.
+
 ## Context you need
 
 The repository `martin-janci/claude-fleet` is a Tauri desktop app + `fleet-hub`
