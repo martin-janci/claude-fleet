@@ -8,6 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.4.5] - 2026-09-30
+
+### Added
+- **catalog:** assets carry scope: private | shared (private by default)
+- **catalog:** a catalogs table under the existing config API (migration 089)
+- **catalog:** render agents as Codex subagents in ~/.codex/agents
+- **ui:** Codex auto / on / off in Host detail
+- **mcp:** set_host_harnesses chooses a host's Codex sync (auto / on / off)
+- **catalog:** plan and inventory Codex only where the host has it
+- **catalog:** detect Codex in its scan and gate harnesses per host
+- **store:** hosts.harnesses, a per-host harness choice (migration 088)
+
+### Changed
+- **catalog:** a registry of loaded catalogs replaces the CATALOG global
+
+### Fixed
+- **catalog:** registry test lock, the real lock-order rule, spec milestones
+- **catalog:** no store-then-registry lock nesting; one personal entry; borrow, don't clone
+- **catalog:** lint and render polish for Codex subagents
+- **catalog:** a harness change drops parked plans and owes a rescan
+- **catalog:** detect Codex only from evidence fleet never writes
+- **catalog:** substitute secrets into TOML files as TOML strings
+- **catalog:** codex agent extra cannot override name, description, instructions or model
+
+### Documentation
+- the catalogs table, the registry and scope
+- fix a sentence in the Codex upgrade note
+- Codex upgrade note; spec notes on tier map and catalog sources
+- **plan:** drop a local build path from the F3ab plan
+- **assets:** the M1 plan — catalogs table, registry, scope
+- per-host harness set and Codex subagents (F3a, F3b)
+- **assets:** the S1b + S2 design — catalogs, scopes, changesets and the workspace shell
 ## [0.4.4] - 2026-09-30
 
 ### Added
@@ -2396,6 +2428,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.4.5]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.5
 [0.4.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.4
 [0.4.3]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.3
 [0.4.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.2
