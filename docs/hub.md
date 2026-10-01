@@ -2216,7 +2216,8 @@ sets it in its Assets tab; on a hub, set it with `fleet-hub catalog`. A
 running hub is not needed, and does not need a restart: it picks the change
 up at its next catalog call (on a paired client, Assets → Refresh).
 `catalog set` always configures the personal catalog; per-org catalogs
-arrive later (S1b M3).
+arrive later (S1b M3). A host bound to an org receives only the `shared`
+assets of the personal catalog.
 
 ```bash
 # Docker: keep the checkout on the data volume so it survives the container.
