@@ -2219,6 +2219,14 @@ up at its next catalog call (on a paired client, Assets → Refresh).
 arrive later (S1b M3). A host bound to an org receives only the `shared`
 assets of the personal catalog.
 
+**Upgrade note.** An asset's `scope` defaults to `private`: once a host is
+bound to an org, it stops receiving creates and updates for assets that are
+still `private` — only `shared` ones sync to it. To share an asset, add
+`scope: shared` to its `asset.yaml`. Copies already installed on an org-bound
+host from before this change are kept, never removed; Sync reports them
+(`Blocked` on a layered host, `Noop` on an unlayered one) instead of
+uninstalling anything.
+
 ```bash
 # Docker: keep the checkout on the data volume so it survives the container.
 docker compose exec fleet-hub fleet-hub catalog set /var/lib/fleet-hub/agent-assets \
