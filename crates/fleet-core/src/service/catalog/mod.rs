@@ -6,6 +6,7 @@
 pub mod admin;
 pub mod author;
 pub mod author_session;
+pub mod catalogs;
 pub mod effective;
 pub mod harness;
 pub mod harness_set;
@@ -239,7 +240,7 @@ fn is_current(entry: &repo::Catalog, row: &CatalogRow) -> bool {
 /// ordering — so treating it as a load failure would clobber a good load,
 /// or whatever the registry already held, with a problem entry over what is
 /// really just a bookkeeping failure.
-fn is_load_failure(e: &IpcError) -> bool {
+pub(crate) fn is_load_failure(e: &IpcError) -> bool {
     matches!(
         e.code.as_str(),
         E_CATALOG_GIT | E_CATALOG_PARSE | codes::E_IO
@@ -523,22 +524,38 @@ pub struct LayerListing {
     pub hosts: Vec<crate::store::HostLayerRow>,
 }
 
-pub fn list_layers(store: &Mutex<Store>) -> Result<LayerListing, IpcError> {
-    // Only active rows are part of an assignment — the same rule
-    // `get_host_layers` (and therefore resolution) applies. The store call
-    // stays "all rows" because callers such as `delete_host`'s checks need
-    // exactly that.
+/// One catalog's layer definitions plus every host's active assignment IN
+/// THAT CATALOG (M2 carry 7: the rows of other catalogs no longer appear
+/// next to definitions they do not belong to). Only active rows are part of
+/// an assignment — the same rule `get_host_layers` (and therefore
+/// resolution) applies. The store call stays "all rows" because callers
+/// such as `delete_host`'s checks need exactly that.
+pub fn list_layers_for(row: &CatalogRow, store: &Mutex<Store>) -> Result<LayerListing, IpcError> {
     let hosts: Vec<_> = lock(store)?
         .list_all_host_layers()?
         .into_iter()
-        .filter(|r| r.active)
+        .filter(|r| r.active && r.catalog_id == row.id)
         .collect();
-    with_catalog(|cat| {
+    registry::with_catalog_row(row, |cat| {
         Ok(LayerListing {
             layers: cat.layers.iter().cloned().collect(),
             hosts,
         })
     })
+}
+
+/// The personal catalog's layers and assignments.
+pub fn list_layers(store: &Mutex<Store>) -> Result<LayerListing, IpcError> {
+    let personal = lock(store)?.personal_catalog()?;
+    match personal {
+        Some(row) => list_layers_for(&row, store),
+        None => with_catalog(|cat| {
+            Ok(LayerListing {
+                layers: cat.layers.iter().cloned().collect(),
+                hosts: Vec::new(),
+            })
+        }),
+    }
 }
 
 /// `host_alias` must be a registered host. Without this check, a typo'd
@@ -635,11 +652,13 @@ fn check_no_name_collision(role: Option<&str>, contexts: &[&str]) -> Result<(), 
     Ok(())
 }
 
-/// Replace a host's layer assignment wholesale: one optional role plus
-/// contexts in application order. Edits fleet state only; catalog files are
-/// never written. Returns the host's new assignment.
-pub fn set_host_layers(
+/// Replace a host's assignment in one catalog: one optional role plus
+/// contexts in application order, checked against THAT catalog's layer
+/// definitions. Edits fleet state only; catalog files are never written.
+/// Answers the host's rows in that catalog only (M2 carry 7).
+pub fn set_host_layers_for(
     host_alias: &str,
+    row: &CatalogRow,
     role: Option<&str>,
     contexts: &[&str],
     store: &Mutex<Store>,
@@ -647,7 +666,7 @@ pub fn set_host_layers(
     crate::validate::host_alias(host_alias)?;
     require_host_exists(store, host_alias)?;
     check_no_name_collision(role, contexts)?;
-    with_catalog(|cat| {
+    registry::with_catalog_row(row, |cat| {
         if let Some(r) = role {
             check_layer_axis(cat, r, layer::Axis::Role)?;
         }
@@ -657,8 +676,25 @@ pub fn set_host_layers(
         Ok(())
     })?;
     let s = lock(store)?;
-    s.set_host_layers(host_alias, role, contexts)?;
-    Ok(s.get_host_layers(host_alias)?)
+    s.set_host_layers_for(host_alias, row.id, role, contexts)?;
+    Ok(s.get_host_layers_for(host_alias, row.id)?)
+}
+
+/// [`set_host_layers_for`] in the personal catalog — the desktop's command.
+/// The host is validated once, by [`set_host_layers_for`] (PF14).
+pub fn set_host_layers(
+    host_alias: &str,
+    role: Option<&str>,
+    contexts: &[&str],
+    store: &Mutex<Store>,
+) -> Result<Vec<crate::store::HostLayerRow>, IpcError> {
+    let row = lock(store)?.personal_catalog()?.ok_or_else(|| {
+        IpcError::new(
+            E_CATALOG_NOT_CONFIGURED,
+            "catalog not loaded; call catalog_load",
+        )
+    })?;
+    set_host_layers_for(host_alias, &row, role, contexts, store)
 }
 
 #[cfg(test)]
@@ -1723,6 +1759,62 @@ mod tests {
             "'other' is not a member of any assigned layer"
         );
         assert_eq!(resolved.provenance["skill/s"].introduced_by, "core");
+    }
+
+    /// Assets M3 (M2 carry 7): layers are listed and assigned per catalog —
+    /// personal's listing no longer shows another catalog's rows, and an
+    /// assignment answers with the rows of the catalog it was made in.
+    #[test]
+    fn layers_are_listed_and_assigned_per_catalog() {
+        let _g = lock_registry_for_test();
+        let store = configured_store_with_layers("m3-layers");
+        let org = store.lock().unwrap().add_org("acme", None, false).unwrap();
+        let acme = store
+            .lock()
+            .unwrap()
+            .upsert_catalog(
+                "acme",
+                &repo_with_layers("m3-layers-acme").to_string_lossy(),
+                None,
+                Some(org.id),
+            )
+            .unwrap();
+        load_catalog(acme.id, false, &store).unwrap();
+
+        let personal_rows = set_host_layers("local", Some("core"), &[], &store).unwrap();
+        assert_eq!(personal_rows.len(), 1);
+        let rows = set_host_layers_for("local", &acme, Some("core"), &["extra"], &store).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.catalog_id == acme.id), "{rows:?}");
+
+        assert_eq!(list_layers(&store).unwrap().hosts.len(), 1);
+        let listing = list_layers_for(&acme, &store).unwrap();
+        assert_eq!((listing.hosts.len(), listing.layers.len()), (2, 2));
+        assert_eq!(
+            set_host_layers_for("local", &acme, Some("extra"), &[], &store)
+                .unwrap_err()
+                .code,
+            codes::E_INVALID,
+            "the axis is checked against THAT catalog's layers"
+        );
+        registry::clear().unwrap();
+    }
+
+    #[test]
+    fn an_unloaded_org_catalog_has_no_layers_to_list() {
+        let _g = lock_registry_for_test();
+        let store = configured_store_with_layers("m3-unloaded");
+        let org = store.lock().unwrap().add_org("acme", None, false).unwrap();
+        let acme = store
+            .lock()
+            .unwrap()
+            .upsert_catalog("acme", "/nowhere", None, Some(org.id))
+            .unwrap();
+        assert_eq!(
+            list_layers_for(&acme, &store).unwrap_err().code,
+            E_CATALOG_NOT_CONFIGURED
+        );
+        registry::clear().unwrap();
     }
 
     /// Fix round 1, item 3 (controller ruling): `resolve_preview` is built
