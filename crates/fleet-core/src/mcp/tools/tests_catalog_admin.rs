@@ -242,7 +242,11 @@ async fn import_assets_answers_the_master_and_a_granted_full_unbound_client_only
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn catalog_admin_refuses_an_unknown_action_or_malformed_args() {
+    // PF5: this reaches `ensure_fresh`, which now touches the process-global
+    // registry (an eviction pass) even with nothing configured.
+    let _g = crate::service::catalog::lock_registry_for_test();
     let t = tools(Store::open_in_memory().unwrap());
     let m = Caller::master();
     let r = call(&t, &m, "rm_rf", None, None).await;
@@ -385,7 +389,12 @@ fn the_action_param_names_every_admin_call() {
 /// choice; `catalog_admin` reaches the same function (the way a granted
 /// desktop does); a per-host token is refused.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn set_host_harnesses_sets_normalises_and_clears() {
+    // PF5: the `catalog_admin` call below reaches `ensure_fresh`, which now
+    // touches the process-global registry (an eviction pass) even with
+    // nothing configured.
+    let _g = crate::service::catalog::lock_registry_for_test();
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("local").unwrap();
     let t = tools(s);

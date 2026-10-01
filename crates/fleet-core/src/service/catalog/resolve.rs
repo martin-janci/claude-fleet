@@ -144,6 +144,8 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
                 loaded_at: catalog.loaded_at,
                 layers: Default::default(),
                 origin: catalog.origin.clone(),
+                load_error: catalog.load_error.clone(),
+                load_error_stamp: catalog.load_error_stamp.clone(),
             },
             provenance: BTreeMap::new(),
             excluded: BTreeMap::new(),
@@ -229,6 +231,8 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
             // Deliberately empty: a layer must never travel into the planner.
             layers: Default::default(),
             origin: catalog.origin.clone(),
+            load_error: catalog.load_error.clone(),
+            load_error_stamp: catalog.load_error_stamp.clone(),
         },
         provenance,
         excluded,

@@ -49,6 +49,21 @@ pub struct Catalog {
     /// Assets M2 never sends this field.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub origin: BTreeMap<String, CatalogRef>,
+    /// Assets M3: why this catalog could not be loaded — a registry *problem
+    /// entry* (no assets, one `Problem`), kept so the other catalogs still
+    /// load (spec, Runtime) and so a sync never reads its absence as "every
+    /// asset dropped" (Rulings R5, R6). `None` on every loaded catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_error: Option<String>,
+    /// Assets M3 (PF13): the store row's `repo_path`+`remote_url` this
+    /// problem entry was stamped against (NUL-joined; never shown to a
+    /// user — display uses `problems[0].path`/`message`), so `ensure_fresh`
+    /// retries a broken catalog once `catalog add` re-points it even when
+    /// `head_commit`/`last_loaded_at` stay `NULL` before and after (true of
+    /// a catalog that has never successfully loaded). `None` on every
+    /// loaded catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_error_stamp: Option<String>,
 }
 
 impl Catalog {

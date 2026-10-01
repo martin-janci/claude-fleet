@@ -121,51 +121,118 @@ pub fn in_order(catalogs: &BTreeMap<i64, Catalog>) -> Vec<&Catalog> {
     ordered
 }
 
+/// [`union_all`] over a given map, for a caller that took a [`snapshot`].
+/// `head` and `layers` are the personal catalog's, so a caller that only
+/// ever read `head` before sees exactly what it saw before. `problems` is
+/// the concatenation in composition order. `origin` is filled for every
+/// asset in the result, so `Catalog::origin_of` always answers correctly on
+/// it. `None` when no personal catalog is loaded — personal always loads
+/// first, so a map without one is "not loaded", the same answer
+/// `with_personal` gives.
+pub fn union_of(catalogs: &BTreeMap<i64, Catalog>) -> Option<Catalog> {
+    let personal = catalogs.values().find(|c| c.org_id.is_none())?;
+    let ordered = in_order(catalogs);
+    let mut merged = Catalog {
+        id: 0,
+        name: String::new(),
+        head: personal.head.clone(),
+        layers: personal.layers.clone(),
+        ..Default::default()
+    };
+    let mut seen: std::collections::BTreeSet<(super::model::Kind, String)> =
+        std::collections::BTreeSet::new();
+    for cat in ordered {
+        merged.problems.extend(cat.problems.iter().cloned());
+        for asset in &cat.assets {
+            let key = (asset.kind(), asset.header.name.clone());
+            if !seen.insert(key) {
+                continue;
+            }
+            merged.origin.insert(
+                format!("{}/{}", asset.kind().as_str(), asset.header.name),
+                CatalogRef {
+                    id: cat.id,
+                    name: cat.name.clone(),
+                },
+            );
+            merged.assets.push(asset.clone());
+        }
+    }
+    Some(merged)
+}
+
 /// Every loaded catalog merged into one borrowing view: personal (`org_id:
 /// None`) first, then the rest ordered by `name`. On a `(kind, name)`
-/// clash the first catalog in that order wins. `head` and `layers` are the
-/// personal catalog's, so a caller that only ever read `head` before sees
-/// exactly what it saw before. `problems` is the concatenation in the same
-/// order. `origin` is filled for every asset in the result, so
-/// `Catalog::origin_of` always answers correctly on it. `None` when no
-/// personal catalog is loaded — personal always loads first, so a registry
-/// without one is "not loaded", the same answer `with_personal` gives.
+/// clash the first catalog in that order wins. `None` when no personal
+/// catalog is loaded — personal always loads first, so a registry without
+/// one is "not loaded", the same answer `with_personal` gives.
 pub fn union_all() -> Result<Option<Catalog>, IpcError> {
-    with_catalogs(|catalogs| {
-        let Some(personal) = catalogs.values().find(|c| c.org_id.is_none()) else {
-            return Ok(None);
-        };
-        let ordered = in_order(catalogs);
+    with_catalogs(|catalogs| Ok(union_of(catalogs)))
+}
 
-        let mut merged = Catalog {
-            id: 0,
-            name: String::new(),
-            head: personal.head.clone(),
-            layers: personal.layers.clone(),
-            ..Default::default()
-        };
+/// Every loaded catalog, cloned out of the lock: one consistent view for a
+/// caller that reads the registry more than once (`plan_sync`, Rulings R9).
+pub fn snapshot() -> Result<BTreeMap<i64, Catalog>, IpcError> {
+    with_catalogs(|catalogs| Ok(catalogs.clone()))
+}
 
-        let mut seen: std::collections::BTreeSet<(super::model::Kind, String)> =
-            std::collections::BTreeSet::new();
-        for cat in ordered {
-            merged.problems.extend(cat.problems.iter().cloned());
-            for asset in &cat.assets {
-                let key = (asset.kind(), asset.header.name.clone());
-                if !seen.insert(key) {
-                    continue;
-                }
-                merged.origin.insert(
-                    format!("{}/{}", asset.kind().as_str(), asset.header.name),
-                    CatalogRef {
-                        id: cat.id,
-                        name: cat.name.clone(),
-                    },
-                );
-                merged.assets.push(asset.clone());
-            }
-        }
-        Ok(Some(merged))
-    })
+/// Drop one catalog (`catalog remove`).
+pub fn remove(id: i64) -> Result<(), IpcError> {
+    CATALOGS.write().map_err(|_| poisoned())?.remove(&id);
+    Ok(())
+}
+
+/// Drop every org catalog whose id the store no longer has (removed by
+/// another process). The personal entry is `install_personal`'s to manage.
+pub fn evict_org_catalogs_not_in(
+    configured: &std::collections::BTreeSet<i64>,
+) -> Result<(), IpcError> {
+    CATALOGS
+        .write()
+        .map_err(|_| poisoned())?
+        .retain(|id, c| c.org_id.is_none() || configured.contains(id));
+    Ok(())
+}
+
+/// Borrow the loaded catalog a store row names: `personal` through
+/// [`with_personal`] (tests install it under id 0), any other by id.
+/// Not loaded, or a problem entry: `E_CATALOG_NOT_CONFIGURED` saying which.
+pub fn with_catalog_row<T>(
+    row: &crate::store::CatalogRow,
+    f: impl FnOnce(&Catalog) -> Result<T, IpcError>,
+) -> Result<T, IpcError> {
+    if row.org_id.is_none() {
+        return with_personal(f);
+    }
+    let guard = CATALOGS.read().map_err(|_| poisoned())?;
+    match guard.get(&row.id) {
+        Some(c) if c.load_error.is_none() => f(c),
+        Some(c) => Err(IpcError::new(
+            super::E_CATALOG_NOT_CONFIGURED,
+            format!(
+                "catalog {} failed to load: {}",
+                row.name,
+                c.load_error.as_deref().unwrap_or_default()
+            ),
+        )),
+        None => Err(IpcError::new(
+            super::E_CATALOG_NOT_CONFIGURED,
+            format!(
+                "catalog {} is not loaded; load it (catalog: {})",
+                row.name, row.name
+            ),
+        )),
+    }
+}
+
+/// `name=head` of every loaded catalog in composition order: what the scan
+/// tick compares to decide that a catalog moved.
+pub fn heads_key(catalogs: &BTreeMap<i64, Catalog>) -> String {
+    in_order(catalogs)
+        .iter()
+        .map(|c| format!("{}={}", c.name, c.head))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Insert a non-personal (`org_id: Some(_)`) catalog under a chosen id, for
@@ -339,5 +406,17 @@ mod tests {
         let _g = crate::service::catalog::lock_registry_for_test();
         install_for_test(cat_with_skills(2, "acme", Some(9), &["c"])).unwrap();
         assert!(union_all().unwrap().is_none());
+    }
+
+    /// Assets M3: the scan tick rescans when ANY loaded catalog's HEAD moves.
+    #[test]
+    fn heads_key_changes_when_any_catalogs_head_does() {
+        let mut m = BTreeMap::new();
+        m.insert(1, cat(1, "personal", None));
+        m.insert(2, cat(2, "acme", Some(9)));
+        let before = heads_key(&m);
+        assert!(before.starts_with("personal=h1"), "{before}");
+        m.get_mut(&2).unwrap().head = "moved".into();
+        assert_ne!(heads_key(&m), before);
     }
 }

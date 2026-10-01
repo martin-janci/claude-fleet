@@ -126,12 +126,18 @@ pub fn spawn_catalog_scan_tick(
                 _ = token.cancelled() => break,
                 _ = ticker.tick() => {}
             }
-            // A borrow via `with_personal` rather than `personal()`'s full
-            // clone: only the `head` string needs to leave the closure,
-            // not the whole catalog (assets, resources and all). Nothing
-            // loaded, or the registry lock poisoned, both `continue` —
-            // this tick just has nothing to compare against yet.
-            let head = match super::registry::with_personal(|c| Ok(c.head.clone())) {
+            // Assets M3: every loaded catalog's HEAD, not just personal's — an
+            // org catalog that moves must rescan too. Nothing loaded (no
+            // personal), or the lock poisoned: nothing to compare yet.
+            let head = match super::registry::with_catalogs(|m| {
+                if !m.values().any(|c| c.org_id.is_none()) {
+                    return Err(crate::ipc_error::IpcError::new(
+                        super::E_CATALOG_NOT_CONFIGURED,
+                        "catalog not loaded",
+                    ));
+                }
+                Ok(super::registry::heads_key(m))
+            }) {
                 Ok(head) => head,
                 Err(_) => continue,
             };
