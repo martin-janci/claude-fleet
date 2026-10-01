@@ -11,6 +11,7 @@ use crate::service::catalog::resolve::Provenance;
 use crate::service::catalog::sync::layers::resolve_rows;
 use crate::store::{HostLayerRow, Store};
 use serde::{Deserialize, Serialize};
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
@@ -80,6 +81,19 @@ pub struct EffectiveSet {
     pub refused: Vec<Refusal>,
     /// Whether any accepted catalog has layers assigned on this host.
     pub layered: bool,
+    /// `<kind>/<name>` → the layer that excluded it, merged across every
+    /// accepted catalog's own `resolve()` — `resolve_preview`'s "why is this
+    /// gone" (`Resolution::excluded`). On the single-catalog path this is
+    /// exactly what `resolve_for_host` would answer. On the rare cross-
+    /// catalog clash (two different catalogs each exclude an asset sharing
+    /// the same `(kind, name)` key), the second value is prefixed with its
+    /// catalog's name to disambiguate; the first is left as-is, so the
+    /// common (single-catalog, or no clash) case is byte-for-byte what it
+    /// was before Assets M2. `#[serde(default)]` because `EffectiveSet`
+    /// travels the wire via `Resolution`: a hub older than this field never
+    /// sends it.
+    #[serde(default)]
+    pub excluded: BTreeMap<String, String>,
 }
 
 /// Compute `host_alias`'s effective catalog.
@@ -158,6 +172,7 @@ fn compose<'r>(
     let mut refused: Vec<Refusal> = Vec::new();
     let mut problems = Vec::new();
     let mut layered = false;
+    let mut excluded: BTreeMap<String, String> = BTreeMap::new();
 
     for cat in registry::in_order(catalogs) {
         let accepts = acceptance(host_org, cat.id, cat.org_id, admitted);
@@ -167,6 +182,23 @@ fn compose<'r>(
         let res = resolve_rows(cat, host_alias, rows_for(cat))?;
         layered |= res.layered;
         problems.extend(res.catalog.problems);
+        // Merged in composition order: a key can only repeat here if TWO
+        // different catalogs each exclude an asset of the same `(kind,
+        // name)` — within one catalog's own `resolve()`, `excluded`'s keys
+        // are already unique. Prefix the second (and only the second) value
+        // with its catalog's name so the clash is distinguishable; the
+        // common case (one catalog, or no shared key) stays exactly the
+        // plain layer name `resolve_for_host` would give.
+        for (key, layer_name) in res.excluded {
+            match excluded.entry(key) {
+                Entry::Occupied(mut e) => {
+                    e.insert(format!("{}: {layer_name}", cat.name));
+                }
+                Entry::Vacant(e) => {
+                    e.insert(layer_name);
+                }
+            }
+        }
         let from = CatalogRef {
             id: cat.id,
             name: cat.name.clone(),
@@ -311,6 +343,7 @@ fn compose<'r>(
         provenance,
         refused,
         layered,
+        excluded,
     })
 }
 
@@ -688,5 +721,13 @@ mod tests {
             r.provenance.keys().collect::<Vec<_>>()
         );
         assert!(e.refused.is_empty(), "{:?}", e.refused);
+        // `excluded` ("why is this gone") must match too: `workstation`
+        // excludes `skill/b`, and on this single-catalog path `compose`'s
+        // merge introduces no clash to prefix away.
+        assert_eq!(e.excluded, r.excluded);
+        assert_eq!(
+            e.excluded.get("skill/b").map(String::as_str),
+            Some("workstation")
+        );
     }
 }

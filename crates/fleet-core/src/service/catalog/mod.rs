@@ -468,13 +468,12 @@ fn require_host_exists(store: &Mutex<Store>, host_alias: &str) -> Result<(), Ipc
 /// Assets M2: built from [`effective::effective_for_host`] rather than the
 /// single-catalog `sync::layers::resolve_for_host`, so the preview reflects
 /// every catalog the host accepts (its org catalog, and the shared slice of
-/// personal), not personal alone — and `refused` surfaces a scope boundary
-/// or a cross-catalog collision the same way `plan_sync` does. `excluded`
-/// stays empty on this path: it names a *layer's own* exclusion, which is
-/// per-catalog information `effective_for_host`'s composition does not
-/// carry through (unlike `sync::layers::resolve_for_host`'s direct
-/// single-catalog `resolve()` call). `Resolution`'s shape is unchanged
-/// otherwise, so a personal-only host previews exactly as before.
+/// personal), not personal alone — `refused` surfaces a scope boundary or a
+/// cross-catalog collision the same way `plan_sync` does, and `excluded`
+/// (merged across every accepted catalog by `effective::compose`) is exactly
+/// what `sync::layers::resolve_for_host` would answer on the single-catalog
+/// path. `Resolution`'s shape is unchanged otherwise, so a personal-only
+/// host previews exactly as before.
 pub fn resolve_preview(
     host_alias: &str,
     store: &Mutex<Store>,
@@ -485,7 +484,7 @@ pub fn resolve_preview(
     Ok(resolve::Resolution {
         catalog: eff.catalog,
         provenance: eff.provenance,
-        excluded: std::collections::BTreeMap::new(),
+        excluded: eff.excluded,
         layered: eff.layered,
         refused: eff.refused,
     })
@@ -1289,6 +1288,82 @@ mod tests {
             "'other' is not a member of any assigned layer"
         );
         assert_eq!(resolved.provenance["skill/s"].introduced_by, "core");
+    }
+
+    /// Fix round 1, item 3 (controller ruling): `resolve_preview` is built
+    /// from `effective::effective_for_host`, whose `compose` must keep
+    /// `Resolution::excluded` ("why is this gone") alive rather than
+    /// dropping it — on the single-catalog (personal-only) path it must
+    /// equal exactly what `sync::layers::resolve_for_host` answers.
+    #[test]
+    fn resolve_preview_excluded_matches_resolve_for_host() {
+        let _g = lock_registry_for_test();
+        let root = std::env::temp_dir().join(format!(
+            "fleet-catalog-svc-rp-excluded-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("skills/s")).unwrap();
+        std::fs::create_dir_all(root.join("skills/other")).unwrap();
+        std::fs::create_dir_all(root.join("layers")).unwrap();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::write(
+            root.join("skills/s/asset.yaml"),
+            "kind: skill\nname: s\ndescription: d\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("skills/s/body.md"), "b\n").unwrap();
+        std::fs::write(
+            root.join("skills/other/asset.yaml"),
+            "kind: skill\nname: other\ndescription: d\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("skills/other/body.md"), "b\n").unwrap();
+        // A role that both names a member and excludes a DIFFERENT asset —
+        // `resolve()` records an `excluded` entry for a key regardless of
+        // whether it was ever a member, so "other" need not be included
+        // anywhere first.
+        std::fs::write(
+            root.join("layers/core.yaml"),
+            "kind: layer\nname: core\naxis: role\nmembers:\n  - skill/s\n\
+             exclude:\n  - skill/other\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        store.lock().unwrap().upsert_host("local").unwrap();
+        configure(
+            ConfigureArgs {
+                repo_path: root.to_string_lossy().into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        load(false, &store).unwrap();
+        set_host_layers("local", Some("core"), &[], &store).unwrap();
+
+        let preview = resolve_preview("local", &store).unwrap();
+        let personal = registry::personal().unwrap().unwrap();
+        let direct = sync::layers::resolve_for_host(&store, &personal, "local").unwrap();
+        assert_eq!(preview.excluded, direct.excluded);
+        assert_eq!(
+            preview.excluded.get("skill/other").map(String::as_str),
+            Some("core")
+        );
     }
 
     /// `import_host` is `async` now (Task 6: a remote alias needs to SSH in

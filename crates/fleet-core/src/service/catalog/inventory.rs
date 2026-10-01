@@ -369,8 +369,16 @@ pub fn compute_states(
             // catalog (no `origin` entries), so a personal-only fleet still
             // stamps the personal catalog's own id — never `None` for a
             // catalog asset, restoring what the migration 091 backfill set
-            // and every rescan since had been silently erasing.
-            catalog_id: Some(catalog.origin_of(asset.kind(), &asset.header.name).id),
+            // and every rescan since had been silently erasing. `.filter(|&i|
+            // i > 0)`: id `0` is the registry's "stands for personal"
+            // convention for a hand-built catalog that was never actually
+            // installed under the store's real id (see `registry.rs`) — it
+            // names no real `catalogs` row, so stamping it would just be a
+            // different spelling of the FK hazard `replace_host_inventory`'s
+            // own `SELECT`-guarded insert defends against; `None` here is
+            // honest about "the real id is not known".
+            catalog_id: Some(catalog.origin_of(asset.kind(), &asset.header.name).id)
+                .filter(|&id| id > 0),
             ..Default::default()
         };
         let rendered = match harness.render(asset) {

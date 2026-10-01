@@ -323,6 +323,7 @@ fn expected_for<'a>(
 /// `action.plan`'s hash, not the raw `Harness::render` output's. A rotated
 /// secret therefore reads as `Update` (the host's bytes really must change),
 /// not as a host edit.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_host_plan(
     catalog: &Catalog,
     harness: &dyn Harness,
@@ -331,6 +332,14 @@ pub fn compute_host_plan(
     manifest: &Manifest,
     secrets: &BTreeMap<String, String>,
     filter: &PlanFilter,
+    // Assets M2: `(kind, name)` of every asset the EFFECTIVE catalog refused
+    // (a scope boundary or a cross-catalog collision — `sync::plan_sync`
+    // builds this from `effective::EffectiveSet::refused`). Such an asset is
+    // absent from `catalog`, so without this it reads exactly like one the
+    // catalog dropped and `manifest.orphans` schedules its `Remove` — the
+    // opposite of what a refusal means: the host's existing copy, if any,
+    // must be left alone. Empty for every caller outside `plan_sync`.
+    refused: &BTreeSet<(Kind, String)>,
 ) -> HostPlan {
     let mut actions = Vec::new();
     for asset in &catalog.assets {
@@ -356,6 +365,13 @@ pub fn compute_host_plan(
             continue;
         };
         if !filter.matches(kind, &name) {
+            continue;
+        }
+        if refused.contains(&(kind, name.clone())) {
+            // Refused, not dropped from the catalog: a `Blocked` action
+            // already says why (`sync::plan_sync` appends it), and removing
+            // the host's existing copy here would make a refusal
+            // destructive — the one thing it must never be.
             continue;
         }
         if kind == Kind::PluginRef && filter.layered {
@@ -988,6 +1004,7 @@ mod tests {
             manifest,
             values,
             &PlanFilter::default(),
+            &BTreeSet::new(),
         )
     }
 
@@ -1597,6 +1614,7 @@ mod tests {
                 layered: true,
                 ..Default::default()
             },
+            &BTreeSet::new(),
         );
         let a = act(&hp, "graphify");
         assert_eq!(a.op, ActionOp::Noop);
@@ -1675,6 +1693,7 @@ mod tests {
             &manifest,
             &secrets_map(),
             &filter,
+            &BTreeSet::new(),
         );
         assert_eq!(hp.actions.len(), 1);
         assert_eq!(hp.actions[0].name, "s");
@@ -1691,6 +1710,7 @@ mod tests {
             &manifest,
             &secrets_map(),
             &filter,
+            &BTreeSet::new(),
         );
         assert_eq!(hp.actions.len(), 1);
         assert_eq!(hp.actions[0].name, "fleet");

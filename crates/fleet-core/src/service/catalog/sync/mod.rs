@@ -276,11 +276,20 @@ pub async fn plan_sync(
         // catalog — the spec's first critical finding. Refuse it up front,
         // before the scan: every listed harness gets the same skipped
         // plan and the host is never touched over SSH.
+        //
+        // The emptiness check is against the WHOLE loaded (union) catalog,
+        // never `eff.catalog`: an org-bound host's effective catalog can be
+        // empty purely because the scope boundary dropped every (private)
+        // asset an unlayered personal catalog would otherwise hand it — that
+        // is exactly the case this guard exists to catch, not a reason to
+        // let it through. Treating that as "nothing to refuse" would plan
+        // this host against an empty catalog, and every entry its manifest
+        // already names would read as an orphan and get removed.
         if refuse_unlayered(
             &h.alias,
             eff.layered,
             args.allow_unlayered,
-            eff.catalog.assets.is_empty(),
+            catalog.assets.is_empty(),
         ) {
             for harness in &listed {
                 host_plans.push(skipped_plan(&h.alias, harness.id(), UNLAYERED_DETAIL));
@@ -300,10 +309,16 @@ pub async fn plan_sync(
         };
         // Every asset the effective catalog refused (a scope boundary or a
         // cross-catalog collision) that this plan's `kind`/`name` filter
-        // still covers becomes a `Blocked` action, once per harness this
-        // host lists — the refusal is a catalog-level decision, independent
-        // of which harness renders it, so every harness's plan reports it.
-        let blocked_for_refusals: Vec<plan::Action> = eff
+        // still covers, resolved to its `Kind` and deduplicated by
+        // `(kind, name)` — a collision refuses EVERY colliding copy
+        // (`effective::compose`), so a two-catalog clash on the same name
+        // produces two `Refusal` entries sharing one key and the same
+        // reason text; collecting into a map rather than a `Vec` keeps
+        // exactly one. Reused both for the `Blocked` action below and to
+        // keep `compute_host_plan` from treating the SAME asset as a
+        // manifest orphan (it is refused, not dropped from the catalog: the
+        // host's existing copy must be left exactly as it is, not removed).
+        let refused_matched: BTreeMap<(super::model::Kind, String), String> = eff
             .refused
             .iter()
             .filter_map(|r| {
@@ -313,8 +328,17 @@ pub async fn plan_sync(
                     .find(|k| k.as_str() == r.kind)?;
                 host_filter
                     .matches(kind, &r.name)
-                    .then(|| plan::blocked_action(kind, &r.name, r.reason.clone()))
+                    .then(|| ((kind, r.name.clone()), r.reason.clone()))
             })
+            .collect();
+        let refused_keys: BTreeSet<(super::model::Kind, String)> =
+            refused_matched.keys().cloned().collect();
+        // Once per harness this host lists — the refusal is a catalog-level
+        // decision, independent of which harness renders it, so every
+        // harness's plan reports it.
+        let blocked_for_refusals: Vec<plan::Action> = refused_matched
+            .iter()
+            .map(|((kind, name), reason)| plan::blocked_action(*kind, name, reason.clone()))
             .collect();
         // Every scanning harness is scanned, even one this host may not
         // serve: the scan is what detects it and reads its manifest.
@@ -339,6 +363,7 @@ pub async fn plan_sync(
                         &manifest,
                         &secrets,
                         &host_filter,
+                        &refused_keys,
                     );
                     if gate == HarnessGate::Retiring {
                         hp.detail = Some(harness_set::retiring_detail(harness.id()));
@@ -1011,6 +1036,100 @@ mod tests {
         );
     }
 
+    /// Fix round 1, item 2: a refused asset is absent from `eff.catalog`, so
+    /// without a fix it reads to `compute_host_plan` exactly like one the
+    /// catalog dropped — `manifest.orphans` schedules its `Remove` right
+    /// alongside the `Blocked` action the refusal itself produces, and
+    /// `apply_sync` would delete the host's existing (perfectly fine) copy.
+    /// Pre-seeds `local`'s manifest with `skill/s` (as an earlier sync would
+    /// have left it) before `s` collides across catalogs: the plan must
+    /// carry exactly the one `Blocked` action, never a `Remove`.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_refused_asset_already_synced_is_blocked_not_removed() {
+        let _lock = super::super::lock_registry_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude/.fleet-assets.json"),
+            r#"{"version":1,"updated_at":0,"assets":{"skill/s":
+                {"hash":"h","files":["~/.claude/skills/s/SKILL.md"],"merges":[],"synced_at":0}}}"#,
+        )
+        .unwrap();
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let (personal_id, acme_id): (i64, i64) = {
+            let s = store.lock().unwrap();
+            let personal_id = s.personal_catalog().unwrap().unwrap().id;
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO orgs (id, name, created_at) VALUES (10, 'acme', 0)",
+                    [],
+                )
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO catalogs (name, repo_path, org_id, created_at) \
+                     VALUES ('acme', '/a', 10, 0)",
+                    [],
+                )
+                .unwrap();
+            let acme_id: i64 = s
+                .conn_ref()
+                .query_row("SELECT id FROM catalogs WHERE name='acme'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            s.set_host_org("local", Some(10)).unwrap();
+            (personal_id, acme_id)
+        };
+        super::super::registry::install_personal(repo::Catalog {
+            id: personal_id,
+            name: "personal".into(),
+            org_id: None,
+            assets: vec![skill_asset("s", "shared")],
+            ..Default::default()
+        })
+        .unwrap();
+        super::super::registry::install_for_test(repo::Catalog {
+            id: acme_id,
+            name: "acme".into(),
+            org_id: Some(10),
+            assets: vec![skill_asset("s", "private")],
+            ..Default::default()
+        })
+        .unwrap();
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(
+            PlanArgs {
+                host_alias: Some("local".into()),
+                ..PlanArgs::default()
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+
+        let claude_actions_for_s: Vec<&plan::Action> = plan
+            .hosts
+            .iter()
+            .filter(|h| h.harness == "claude")
+            .flat_map(|h| &h.actions)
+            .filter(|a| a.name == "s")
+            .collect();
+        assert_eq!(
+            claude_actions_for_s.len(),
+            1,
+            "exactly one action for the refused, already-synced asset: {:?}",
+            claude_actions_for_s
+        );
+        assert_eq!(claude_actions_for_s[0].op, ActionOp::Blocked);
+    }
+
     /// A `host_alias` no host row has must fail loudly (`E_NOTFOUND`) instead
     /// of silently returning an empty plan.
     #[allow(clippy::await_holding_lock)]
@@ -1144,6 +1263,70 @@ mod tests {
                 .iter()
                 .all(|h| h.status == "skipped" && h.detail.as_deref() == Some(UNLAYERED_DETAIL)),
             "{:?}",
+            plan.hosts
+        );
+    }
+
+    /// Fix round 1, item 1: the unlayered guard's emptiness check must use
+    /// the WHOLE loaded (union) catalog, never `eff.catalog`. An org-bound
+    /// remote host with no layers and an all-private personal catalog is
+    /// exactly the case `effective::compose`'s scope boundary empties
+    /// `eff.catalog` for (SharedOnly acceptance, nothing shared to keep) —
+    /// but the catalog itself is very much non-empty, and this is exactly
+    /// the hazard the guard exists to catch: without this fix the host would
+    /// be planned against an empty catalog and every manifest entry it
+    /// already has would read as an orphan and get removed.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_sync_skips_an_org_bound_unlayered_host_even_when_scope_empties_it() {
+        let _lock = super::super::lock_registry_for_test();
+        let repo_dir = tempfile::tempdir().unwrap();
+        // `one_skill` writes no `scope:` key, so "s" defaults to private.
+        let files = one_skill("b\n");
+        load_catalog(
+            repo_dir.path(),
+            &files
+                .iter()
+                .map(|(a, b)| (*a, b.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("oci", Some("oci")).unwrap();
+            s.update_host_probe("oci", true, None, None, 1).unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO orgs (id, name, created_at) VALUES (10, 'acme', 0)",
+                    [],
+                )
+                .unwrap();
+            s.set_host_org("oci", Some(10)).unwrap();
+        }
+        let ssh = Arc::new(SshClient::new());
+        let plan = plan_sync(
+            PlanArgs {
+                host_alias: Some("oci".into()),
+                ..PlanArgs::default()
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+        assert!(!plan.hosts.is_empty());
+        assert!(
+            plan.hosts
+                .iter()
+                .all(|h| h.status == "skipped" && h.detail.as_deref() == Some(UNLAYERED_DETAIL)),
+            "{:?}",
+            plan.hosts
+        );
+        assert!(
+            plan.hosts
+                .iter()
+                .all(|h| h.actions.iter().all(|a| a.op != ActionOp::Remove)),
+            "a skipped host carries no actions at all, Remove included: {:?}",
             plan.hosts
         );
     }

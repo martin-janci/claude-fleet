@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 /// config merges (as `ManifestMerge`, so the value itself is never kept
 /// around — only its hash), the overall `RenderPlan` hash it came from, and
 /// when it was last synced.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManifestEntry {
     pub hash: String,
     pub files: Vec<String>,
@@ -34,6 +34,23 @@ pub struct ManifestEntry {
 
 fn personal() -> String {
     "personal".into()
+}
+
+/// Manual, not derived: `catalog` defaults to `"personal"`, consistent with
+/// the field's own `#[serde(default = "personal")]` rather than the
+/// `String`-derived `""` a `#[derive(Default)]` would give it. A test (or
+/// any other caller) building an entry with `..Default::default()` gets the
+/// same catalog a deserialised pre-Assets-M2 manifest would.
+impl Default for ManifestEntry {
+    fn default() -> Self {
+        ManifestEntry {
+            hash: String::new(),
+            files: Vec::new(),
+            merges: Vec::new(),
+            synced_at: 0,
+            catalog: personal(),
+        }
+    }
 }
 
 /// The manifest file itself: every managed asset keyed by `Manifest::key`.
@@ -294,6 +311,17 @@ mod tests {
         let entry: ManifestEntry =
             serde_json::from_str(r#"{"hash":"h","files":[],"merges":[],"synced_at":1}"#).unwrap();
         assert_eq!(entry.catalog, "personal");
+    }
+
+    /// `Default` is implemented by hand, not derived: a `String`-derived
+    /// default would give `catalog: ""`, inconsistent with the field's own
+    /// `#[serde(default = "personal")]` — a caller building an entry with
+    /// `..Default::default()` (as plenty of tests across the sync module
+    /// do) must see the same `"personal"` a deserialised pre-Assets-M2
+    /// manifest reads as.
+    #[test]
+    fn default_catalog_matches_the_serde_default() {
+        assert_eq!(ManifestEntry::default().catalog, "personal");
     }
 
     #[test]
