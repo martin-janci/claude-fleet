@@ -1,9 +1,10 @@
 # Fleet Projects (shared coordination units) — design
 
 **Date:** 2026-10-01
-**Status:** draft for review. Nothing is built. §3's decision rows marked
-*open* still need the owner's "yes"; the rows marked *agreed* were answered on
-2026-10-01 and are settled.
+**Status:** draft for review. Nothing is built. §3's rows marked *agreed* were
+answered by the owner on 2026-10-01. The rows marked *recommended* carry a
+reasoned recommendation and the cost of being wrong (§16); the rows marked
+*open* are forced by §2's findings and need only a confirming "yes".
 **Input:** the owner's conversation of 2026-10-01 (requirements, boundaries and
 vocabulary in §1 and §4), and their three answers of the same day (§3).
 **Builds on:** orgs (migration 050), the work graph
@@ -84,9 +85,9 @@ From `cli-reference` and `claude-code-on-the-web`, read 2026-10-01:
 |---|---|---|
 | Several repositories in one session | `--add-dir`, `permissions.additionalDirectories` | the per-session half of R1 |
 | Standing instructions | `CLAUDE.md` / `AGENTS.md` per repo; `--append-system-prompt-file`; `--settings` | §6 |
-| Create a cloud session | `claude --cloud "task"` — **one repository at a time**, clones the cwd's GitHub remote at the current branch | P6 (§15) |
-| Steer a cloud session | `claude -p "msg" --cloud <session-id>`, with `--output-format json` → `{ok, session_id, url}` | P6 |
-| Land a cloud session locally | `claude --teleport <session-id>` — needs a clean tree, the same repo, the branch pushed, the same account | P6: how a cloud session becomes Fleet-owned |
+| Create a cloud session | `claude --cloud "task"` — **one repository at a time**, clones the cwd's GitHub remote at the current branch | FP6 (§15) |
+| Steer a cloud session | `claude -p "msg" --cloud <session-id>`, with `--output-format json` → `{ok, session_id, url}` | FP6 |
+| Land a cloud session locally | `claude --teleport <session-id>` — needs a clean tree, the same repo, the branch pushed, the same account | FP6: how a cloud session becomes Fleet-owned |
 | A provider thread in a Fleet folder | `claude remote-control` (server mode) | §16 Q2 |
 | Worktree isolation | `--worktree`, `--tmux` | already used |
 
@@ -158,6 +159,10 @@ a link, and a hub never re-forwards. No replication of orgs, work or catalogs.
 
 ## 3. Decisions
 
+*agreed* = the owner decided it. *recommended* = this spec recommends it and §16
+says why, what it costs if wrong, and what to verify. *open* = forced by §2, so
+it needs a confirming "yes" rather than a debate.
+
 | # | Question | Decision | State |
 |---|---|---|---|
 | P1 | Does Fleet own the Project, with a provider project only ever a connection? | Yes. F1 leaves no alternative. | open |
@@ -169,7 +174,12 @@ a link, and a hub never re-forwards. No replication of orgs, work or catalogs.
 | P7 | Does a Project's context ride the catalog? | Both: assets as a context-axis layer in a catalog; the per-session header on the existing hook budget. | open |
 | P8 | Does the UI rename today's `projects` to "Repository"? | Yes, strings only. No schema or API rename. | open |
 | P9 | Dependencies between tasks in v1? | **No.** Status-and-repository grouping is enough to start. | **agreed** (owner, 2026-10-01) |
-| P10 | Cloud sessions as an execution target? | **Yes**, as its own phase P6 (§15), with the capability rows F2 verifies. | **agreed** (owner, 2026-10-01) |
+| P10 | Cloud sessions as an execution target? | **Yes**, as its own phase FP6 (§15), with the capability rows F2 verifies. | **agreed** (owner, 2026-10-01) |
+| P11 | Which provider account runs a Project's cloud work? | **The host's.** No account selector; a Project may *require* an account and Fleet refuses a host that does not carry it (§16 Q1). | recommended |
+| P12 | Remote Control as a bridge to native Claude Projects? | **Yes**, as phase FP7. It is the only documented way a native Project thread runs on infrastructure Fleet owns, and the one where Fleet's hooks and assets still apply (§16 Q2). | recommended |
+| P13 | Cross-hub Projects? | **No.** Out of scope with a stated reason; reopened only when two hubs share people (§16 Q3). | recommended |
+| P14 | Rename `projects` → `repositories` in the schema and API? | **Never.** ~3 500 code sites, 100 MCP references and a wire break against fleet-mobile, for no user-visible gain; the 141 UI strings are the whole benefit (§16 Q4). | recommended |
+| P15 | Review the §9 seam before FP0? | **Yes, review; no, don't block.** FP0 lands the `Actor` word now and a subject id additively later (§16 Q5). | recommended |
 
 ## 4. Vocabulary
 
@@ -216,6 +226,8 @@ CREATE TABLE IF NOT EXISTS fleet_projects (
   created_at  INTEGER NOT NULL,
   updated_at  INTEGER NOT NULL,
   updated_by  TEXT,                                -- service::settings::Actor's word
+  cloud_account_uuid TEXT REFERENCES accounts(uuid) ON DELETE SET NULL,
+                                                   -- P11: cloud work runs only on a host carrying this account
   version     INTEGER NOT NULL DEFAULT 1           -- compare-and-set, as work_links
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_fleet_projects_name
@@ -323,21 +335,21 @@ rather than starting a second one. `project_capabilities` is **computed, never
 stored**, from (harness, provider, connection mode), and served on the Project
 page and by the MCP read.
 
-| Capability | Claude Code (host session) | Claude cloud session | Codex | Verdict |
-|---|---|---|---|---|
-| Several repositories in one session | native (`--add-dir`) | **no** — `--cloud` is one repository at a time | per-harness flag | native where present; else one session per repo |
-| Standing instructions | native | native from the repo's `CLAUDE.md` | `AGENTS.md`, 32 KiB cap | **native**, rendered by the catalog |
-| Start work | Fleet owns the pane | `claude --cloud "task"` | Fleet owns the pane | **controlled** (cloud: see §15 P6's open item) |
-| Steer / follow up | Fleet owns the pane | `claude -p --cloud <id> --output-format json` | Fleet owns the pane | **controlled** |
-| Status, transcript, usage | native (hooks, pane-intel, `~/.claude/projects`) | **none from the CLI** | partial | cloud: **gap**, until it is teleported |
-| Bring the session to a host | n/a | `claude --teleport <id>` | n/a | **assisted**: after it, the session is an ordinary Fleet session |
-| Diff, PR creation | Fleet + the PR probe | claude.ai/code only | Fleet | cloud: **gap** |
-| Cross-session project memory | none | none | none | **substituted** (journal, handover, §6) |
-| Project membership / sharing | none (one user, F1) | Pro/Max: Private or Public only; Team visibility needs Team/Enterprise | none | **substituted** (§9), and a real constraint on R2 |
-| Parallel threads under one goal | native inside a provider Project Fleet cannot drive | n/a | none | **substituted** (Fleet sessions, `dispatch_task`) |
-| Cross-repo task coordination | none | none | none | **substituted** (§8) |
-| Native provider Project, driven by Fleet | **unavailable** (F1) | n/a | n/a | **gap** — shown, never faked |
-| Rewind, fork, move | native | **no** | no | capability-gated, as F5 defines |
+| Capability | Claude Code (host session) | Claude cloud session | Claude via Remote Control on a Fleet host | Codex | Verdict |
+|---|---|---|---|---|---|
+| Several repositories in one session | native (`--add-dir`) | **no** — `--cloud` is one repository at a time | native (it is local Claude Code) | per-harness flag | native where present; else one session per repo |
+| Standing instructions | native | native from the repo's `CLAUDE.md` | native, **plus Fleet's catalog assets and hooks** | `AGENTS.md`, 32 KiB cap | **native**, rendered by the catalog |
+| Start work | Fleet owns the pane | `claude --cloud "task"` | **the person starts it from claude.ai**; Fleet only provisions the server | Fleet owns the pane | mixed — see the modes below |
+| Steer / follow up | Fleet owns the pane | `claude -p --cloud <id> --output-format json` | from claude.ai or the Claude app, not from Fleet | Fleet owns the pane | **controlled** on a pane; `reference` on a Remote Control thread |
+| Status, transcript, usage | native (hooks, pane-intel, `~/.claude/projects`) | **none from the CLI** | the transcript is on the host; status likely through `claude agents --json` (**to verify**, §16 Q2) | partial | cloud: **gap**; Remote Control: probably observable |
+| Bring the session to a host | n/a | `claude --teleport <id>` | it already runs on the host | n/a | **assisted** (cloud); inherent (Remote Control) |
+| Diff, PR creation | Fleet + the PR probe | claude.ai/code only | the branch is on the host, so Fleet's PR probe sees it | Fleet | cloud: **gap**; Remote Control: native |
+| Cross-session project memory | none | none | Fleet's journal applies (its hooks run) | none | **substituted** (journal, handover, §6) |
+| Project membership / sharing | none (one user, F1) | Pro/Max: Private or Public only; Team visibility needs Team/Enterprise | none — the native Project is still one user's | none | **substituted** (§9), and a real constraint on R2 |
+| Parallel threads under one goal | native inside a provider Project Fleet cannot drive | n/a | **native, on Fleet's own machine** (`--spawn worktree`, `--capacity N`) | none | native at the infrastructure layer; **substituted** for coordination |
+| Cross-repo task coordination | none | none | none | none | **substituted** (§8) |
+| Native provider Project, driven by Fleet | **unavailable** (F1) | n/a | **unavailable** — Fleet hosts the execution, never the coordination | n/a | **gap** — shown, never faked |
+| Rewind, fork, move | native | **no** | the transcript is local, so possibly yes (**to verify**) | no | capability-gated, as F5 defines |
 
 Three connection modes, and `controlled` is claimed only where F2 names the
 interface:
@@ -431,7 +443,7 @@ command name**, then `REGEN_HUB_VERDICTS=1`, then — for a `LocalOnly` command
 the UI can reach — a `REASONS` entry or an allowlist line in
 `src/lib/hub_verdicts.test.ts`. Expected: all `Routed` (a Project is hub state,
 like work), except anything that writes a local file (a connection export) and
-P6's cloud actions, which run a CLI on a host and are `Routed` through the
+FP6's cloud actions, which run a CLI on a host and are `Routed` through the
 host's own path.
 
 **Events.** One row-event kind, `project`, ids only, added to
@@ -444,7 +456,7 @@ stream. `projects:changed` joins `work:changed` in the frontend's re-read tick.
 `E_INVALID "unknown tool"`, which the desktop shows as a capability gap.
 
 **Settings.** `projects.session_header` (bool, off), `projects.header_max_chars`
-(800), and P6's `projects.cloud_execution` (bool, off). Each needs a `SPECS`
+(800), and FP6's `projects.cloud_execution` (bool, off). Each needs a `SPECS`
 row with full metadata, a home on a page (`every_setting_has_one_home`), and
 `REGEN_SETTINGS_DOCS=1`.
 
@@ -505,7 +517,7 @@ catalog, or keep a second copy of a repository's `CLAUDE.md`.
 | Two designs for permissions diverge | §9's four seam requirements are written down before either side builds, and v1 ships with membership simply absent rather than guessed. |
 | AI creates more process than value | No dependency graph (P9). An agent may add a `memory` note, never instructions. The session header is off by default and capped at 800 chars. |
 | A convincing capability claim without a working interface | §7's three modes, `checked_at` on every connection, and `controlled` only where F2 names the interface. |
-| Cloud execution silently loses work | P6's constraints are stated in the UI: one repo per cloud session, no Fleet-side status, the VM reclaimed on inactivity, rate limits shared with the account. |
+| Cloud execution silently loses work | FP6's constraints are stated in the UI: one repo per cloud session, no Fleet-side status, the VM reclaimed on inactivity, rate limits shared with the account. |
 | Context bloats every session | One cap, dropped whole rather than truncated; measured before the setting goes on. |
 | The vocabulary change confuses existing users | Strings only (P8); every id, tool name and column keeps its name. |
 
@@ -528,7 +540,7 @@ catalog, or keep a second copy of a repository's `CLAUDE.md`.
   a collision between a Project layer and another catalog blocked both ways.
 - **Coordination:** a Project's `project_ids` default on start; the Work view
   grouped by Project; a tracker item placed in a Project staying read-only.
-- **Cloud (P6):** the argv for `--cloud` and `-p --cloud <id>` against a stub
+- **Cloud (FP6):** the argv for `--cloud` and `-p --cloud <id>` against a stub
   `claude`; the json parse of `{ok, session_id, url}`; a teleport refused on a
   dirty tree; no capability claimed that F2 does not name.
 - **Isolation matrix:** every new action.
@@ -544,45 +556,223 @@ catalog, or keep a second copy of a repository's `CLAUDE.md`.
 
 | Phase | Deliverable | Exit criterion |
 |---|---|---|
-| **P0 Model** | migration 092, `service/projects/`, the `project` tool, desktop commands + verdicts, events, isolation rows | a Project with repos exists on a hub and reads back correctly under every access class |
-| **P1 Context** | context rows, Path A header behind `projects.session_header`, the measurement run | a session on a Project's repo starts with the header when on, byte-identically without it when off |
-| **P2 Capabilities** | the computed matrix, the `reference` connection, the UI panel, the "Repository" strings | the Project page states every capability as native / Fleet / not available, with its date |
-| **P3 Coordination** | `place_task`, Project grouping in the Work view, `project_ids` default on start | starting from a Project opens the right repos, and its tasks group under it |
-| **P4 Project assets** | the context-axis layer per Project through M2's per-catalog API; the catalog `Instructions` kind | one sync delivers a Project's skills and instructions to its hosts for Claude and Codex, and a scope refusal shows its reason |
-| **P5 Non-Claude harnesses** | per-harness capability rows as multi-harness F5/F6 land | a Codex session in a Project shows the same Project with its gaps named |
-| **P6 Cloud execution** | `projects.cloud_execution` (off); start a Project task as a cloud session on a Project host (`claude --cloud`), steer it (`-p --cloud <id>`), record it as a `cloud_session` connection, and land it with `claude --teleport` | a task starts in the cloud from a Project, is steered from Fleet, and teleports into a Fleet session on a host — with the status and diff gaps shown, not faked |
+| **FP0 Model** | migration 092, `service/projects/`, the `project` tool, desktop commands + verdicts, events, isolation rows | a Project with repos exists on a hub and reads back correctly under every access class |
+| **FP1 Context** | context rows, Path A header behind `projects.session_header`, the measurement run | a session on a Project's repo starts with the header when on, byte-identically without it when off |
+| **FP2 Capabilities** | the computed matrix, the `reference` connection, the UI panel, the "Repository" strings | the Project page states every capability as native / Fleet / not available, with its date |
+| **FP3 Coordination** | `place_task`, Project grouping in the Work view, `project_ids` default on start | starting from a Project opens the right repos, and its tasks group under it |
+| **FP4 Project assets** | the context-axis layer per Project through M2's per-catalog API; the catalog `Instructions` kind | one sync delivers a Project's skills and instructions to its hosts for Claude and Codex, and a scope refusal shows its reason |
+| **FP5 Non-Claude harnesses** | per-harness capability rows as multi-harness F5/F6 land | a Codex session in a Project shows the same Project with its gaps named |
+| **FP6 Cloud execution** | `projects.cloud_execution` (off); start a Project task as a cloud session on a Project host (`claude --cloud`), steer it (`-p --cloud <id>`), record it as a `cloud_session` connection, and land it with `claude --teleport` | a task starts in the cloud from a Project, is steered from Fleet, and teleports into a Fleet session on a host — with the status and diff gaps shown, not faked |
+| **FP7 Remote Control host** | `projects.remote_control` (off); provision and supervise `claude remote-control --spawn worktree --capacity N` on a Project host, link the sessions it serves to the Project, and show the native Project it serves as a `reference` connection | a thread the owner starts in a native Claude Project runs in a Fleet worktree on a Fleet host, with Fleet's catalog assets, hooks and project header applied, and appears on the Project page |
 
-P0 → P1 → P2 is the critical path to R7. P4 depends on assets M2 (PR #416) and
-on multi-harness F3 item 1; P5 on multi-harness F5; P6 is independent of P4/P5
-and can run after P3.
+FP0 → FP1 → FP2 is the critical path to R7. FP4 depends on assets M2 (PR #416)
+and on multi-harness F3 item 1; FP5 on multi-harness F5. FP6 and FP7 are
+independent of FP4/FP5 and can run after FP3, in either order — **FP7 delivers
+more of R6 than FP6** (§16 Q2), so if only one is built, build FP7.
 
-**P6's open implementation item.** `claude -p --cloud <id>` documents
-`--output-format json`; **`claude --cloud "task"` (creation) is documented only
-as printing a live checklist**, so how Fleet captures the new session id must be
-verified against the installed CLI before P6 is planned — if there is no
-machine-readable form, creation is `assisted` (a person copies the id), not
-`controlled`, and §7's row changes accordingly.
+**FP6 is specified at the lower claim.** Creating a cloud session is `assisted`
+until someone verifies that `claude --cloud` can emit a machine-readable session
+id; §16's last item has the one command that settles it and what changes if it
+does.
 
-## 16. Open questions
+## 16. Open questions — findings and recommendations
 
-Answered on 2026-10-01: dependencies out of v1 (P9), permissions deferred to
-the parallel system (P4), cloud sessions as their own phase (P10).
+Each item states what was checked, what the evidence says, the recommendation,
+and what it costs if the recommendation is wrong. The owner's answers of
+2026-10-01 closed three items (P9, P4, P10); these five are what was left.
 
-1. **Which account creates a cloud session.** A cloud session belongs to the
-   Claude account that started it, shares that account's rate limits, and on
-   Pro/Max is *Private* or *Public* with no team visibility (F2, §7). So a
-   Project's cloud work is visible to one person unless the account is on
-   Team/Enterprise. Is per-host account selection (`hosts.account_uuid`) the
-   right rule, or should a Project name the account it uses?
-2. **Remote Control as a bridge.** Fleet could run `claude remote-control` on a
-   host so a native Claude Project thread lands in a Fleet-managed folder. It
-   gives a native project a Fleet workspace, but Fleet would not own the
-   session. Explore, or leave?
-3. **Cross-hub Projects.** Never confirmed as a requirement, and federation
-   replicates no state (F6). Confirm out of scope, or open it as its own cycle?
-4. **Where the vocabulary lands.** This spec renames UI strings only (P8). Is a
-   later schema rename (`projects` → `repositories`) wanted at all, or does the
-   code keep its names permanently?
-5. **The seam's shape.** §9's four requirements are what Projects needs from the
-   parallel permissions system. Should they be reviewed against that design
-   before P0 starts, so the attribution columns land in their final shape?
+### Q1 — Which provider account runs a Project's cloud work? → **the host's** (P11)
+
+**What was checked.** How a Fleet session acquires an account, and what a cloud
+session inherits from the account that starts it.
+
+**Evidence.**
+
+- Fleet **observes** an account, it never chooses one. `hosts.account_uuid` is
+  captured by the reconcile probe from the host's own Claude login
+  (`sessions/reconcile.rs`), and a session keeps the value it was created with.
+  There is no account selector anywhere: the only write is
+  `set_account_nickname`. One host carries one Claude login.
+- A cloud session belongs to the account that started it, shares that account's
+  rate limits, and on Pro/Max is *Private* or *Public* — **Team visibility needs
+  Team or Enterprise** (`claude-code-on-the-web`, read 2026-10-01). It also
+  needs claude.ai subscription auth and the org's `allow_remote_sessions`
+  policy; a host authenticated with an API key cannot start one at all.
+
+**Recommendation.** Do **not** add a per-session or per-Project account
+selector. The host is already Fleet's account boundary; a selector would be a
+second source of truth and would force Fleet to switch `~/.claude.json` logins —
+credential juggling Fleet deliberately avoids (it never stores token values, and
+`agent-creds` is the owner's separate tool).
+
+Instead, a Project may state a **requirement**: `fleet_projects.cloud_account_uuid`
+(§5). When cloud work starts, Fleet picks among the Project's hosts one whose
+`hosts.account_uuid` matches, and otherwise refuses with the reason — "no host
+in this Project carries account <nickname>". With the column NULL, any Project
+host may run it.
+
+The visibility limit is a **product fact to display, not a problem to solve**:
+the capability panel says "a cloud session is visible only to the account that
+started it (Pro/Max)". That is a real constraint on R2, and hiding it would be
+exactly the kind of claim §7 exists to prevent.
+
+**If this is wrong.** The column is nullable and additive; adding a selector
+later costs one more field and the credential work, which this decision only
+defers.
+
+### Q2 — Remote Control as a bridge? → **yes, as phase FP7, and it beats FP6** (P12)
+
+**What was checked.** The whole of `remote-control`, read 2026-10-01, against
+Fleet's architecture.
+
+**Evidence, and why it is stronger than expected.**
+
+- `claude remote-control` is a **server-mode process**: no interactive session,
+  multiple concurrent sessions from one process, `--capacity N` (default 32).
+- **`--spawn worktree` gives each on-demand session its own git worktree.** That
+  is Fleet's own model for parallel work.
+- The docs say, in the limitations: "To keep a session running on a remote
+  machine after you disconnect from SSH, start it inside `tmux` or `screen`."
+  **Fleet's architecture is precisely tmux over SSH.**
+- The flag table says a session the server starts "for one of your project
+  threads" follows the server's Chrome setting — i.e. **server mode is how a
+  native Claude Project thread executes on a machine you control.**
+- Because such a thread *is* local Claude Code on that host, it gets Fleet's
+  whole context layer: the catalog's assets, Fleet's hooks, the repository's
+  `CLAUDE.md`, and the §6 project header. A **cloud** thread gets none of that.
+- Fleet already has somewhere to put these sessions: `kind='external'` rows,
+  parsed from `claude agents --json` (`claude_agents.rs`), for "an interactive
+  Claude session running outside fleet".
+
+**Recommendation.** Build it, as phase FP7, and treat it as the **more valuable**
+of the two execution bridges. It converts F1's flat "gap" into a real partial
+win: Fleet still cannot drive the coordination of a native Project, but it owns
+the machine, the folder, the worktree, the assets and the hooks its threads run
+in — which is R6's actual request ("use the native capability where it is
+available and controllable; supply the rest") applied at the infrastructure
+layer, rather than giving up because the coordinator is closed.
+
+**Constraints that must be designed for, not discovered.**
+
+| Constraint | What FP7 must do |
+|---|---|
+| A one-time interactive `Enable Remote Control? (y/n)` on first run | a provisioning step, not a session start; a host is "remote-control ready" or it is not |
+| A global `claude` flag before `remote-control` is **refused** when dropping it would change what the sessions can do (e.g. `--settings`) | the `ag` launcher must not wrap this command the way it wraps a session; FP7 names the exact argv |
+| Server mode exits after roughly 10 minutes of network outage | Fleet supervises and restarts it, the way it supervises a pane; the Project page shows the server as up or down |
+| Sessions belong to the host's account | the same rule as Q1, same refusal |
+| Fleet does not start or steer these sessions | they are `reference` in §7; the Project page never offers a Send button for one |
+| Needs a claude.ai subscription on that host | an API-key host is ineligible, and the capability row says so |
+
+**The one thing to verify first**, and it decides FP7's size: whether
+`claude agents --json` lists the sessions a `remote-control` server serves. If it
+does, Fleet's existing discovery gives status and labels for free and FP7 is
+small. If it does not, FP7 needs its own observation path (the transcript under
+`~/.claude/projects` is still there), and is perhaps twice the work. Check it on
+one host before planning.
+
+**If this is wrong.** The cost is bounded: a provisioning step and a supervised
+process. Nothing in FP0–FP5 depends on it.
+
+### Q3 — Cross-hub Projects? → **out of scope** (P13)
+
+**What was checked.** What hub↔hub federation actually replicates.
+
+**Evidence.** `2026-09-24-hub-federation-design.md`'s non-goals: only `session`
+addresses cross a link, a hub never re-forwards (no A→B→C), there is no peer
+discovery, and revocation is the only remedy for a misbehaving peer. No org,
+work, catalog or settings state replicates. A shared Project across two hubs
+would therefore need a replication layer with conflict resolution for every
+table in §5 — and the permissions and synchronisation system now in development
+would have to span hubs before a Project could.
+
+**Recommendation.** Closed as out of scope, with the reason written down rather
+than left as a silence: a Project coordinates work inside one fleet, and two
+hubs are two fleets. Reopen it only when there is a concrete case — two hubs
+that share the same people — and then as its own cycle, after the permissions
+system has an answer for cross-hub identity.
+
+**If this is wrong.** Nothing in §5 blocks it: every table is hub-local and
+additive, so a later replication cycle starts from a clean model rather than
+from a half-built one.
+
+### Q4 — Rename `projects` → `repositories` in the schema? → **never** (P14)
+
+**What was checked.** The blast radius, counted in this working tree.
+
+**Evidence.**
+
+| Surface | Occurrences |
+|---|---|
+| `project_id` / `project_ids` / `projects` in Rust (`crates/`, `src-tauri/`) | ~2 066 |
+| `project` in the frontend (`src/**/*.ts`, `*.svelte`) | ~1 483 |
+| `add_project` / `list_projects` / `refresh_projects` / `forget_project` in the MCP layer | ~100 |
+| Capitalised "Project" in Svelte markup — the UI strings that actually change | ~141 |
+| `docs/*.md` files mentioning `project` | 14 |
+
+So a schema-and-API rename is roughly **3 500 code sites plus a wire break**:
+the MCP tool names are contract, and renaming them breaks a paired fleet-mobile
+and every older hub. The user-visible benefit of all that is the same ~141
+strings that P8 already changes for free.
+
+**Recommendation.** Never rename the schema or the API. The code keeps
+`projects`, `project_id`, `add_project` and `list_projects` permanently; only
+user-visible strings move to "Repository". Write this down as a convention in
+`CLAUDE.md` when FP0 lands, so the next reader does not re-propose it: *in this
+codebase `projects` means a repository, and `fleet_projects` means a Project.*
+
+**If this is wrong.** Nothing is lost that cannot be done later — but it would
+cost a `CONTRACT_REVISION` bump, a mobile release and a migration, which is why
+it needs its own proposal and a reason better than tidiness.
+
+### Q5 — Review the §9 seam before FP0? → **review, but do not block** (P15)
+
+**What was checked.** What FP0 would have to commit to, and whether it can be
+made additive.
+
+**Evidence.** The attribution columns (`fleet_projects.updated_by`,
+`fleet_project_context.author`) hold the word `service::settings::Actor` already
+produces, which is the repo's existing convention in two places:
+`settings::set_by`'s audit and `work_placements.updated_by`. So P0 invents
+nothing; it reuses. A real subject id can then be added **beside** the word as a
+nullable column, with the word kept for history — the same shape migration 086
+used for `origin` (backfill a derived value, read NULL as a default).
+
+**Recommendation.** Two separate things, and only one of them is a gate:
+
+1. **Send §9's four requirements to the permissions design now**, as a review
+   item, before FP0 writes its first column. That is cheap, and it is the only
+   way the two designs agree on the *shape* of a subject rather than discovering
+   a mismatch later. The fourth requirement matters most: whether the sync
+   side's `client_catalog_grants` (assets M3) is the same mechanism as a
+   Project's membership, since a Project's assets ride a catalog (§12).
+2. **Do not block FP0 on the answer.** FP0 lands the `Actor` word, and the
+   subject id is additive.
+
+**If this is wrong** — if the permissions system defines a subject that cannot
+be reconciled with the `Actor` word — the cost is one backfill migration over
+two columns in tables that are new and small. That is a far smaller risk than
+stalling FP0 behind another design's schedule.
+
+### Still unverified, and why it is not a decision
+
+**Can Fleet capture a new cloud session's id?** `claude -p --cloud <id>`
+documents `--output-format json` → `{ok, session_id, url}`. Creation
+(`claude --cloud "task"`) is documented only as printing a live checklist, and
+the CLI's own help confirms the shape `--cloud [description|session_id|url]`
+without naming an output format. **This could not be verified from this
+session**: running `claude --cloud` is a real transaction against the owner's
+account, and the attempt was correctly refused; this container is also
+authenticated with an API key, which cannot create cloud sessions at all.
+
+So FP6 is specified at the **lower** claim: creation is `assisted` (a person
+pastes the id), not `controlled`. To upgrade it, run this once on a machine
+signed in with the claude.ai account, in a throwaway repository, and keep the
+session it creates:
+
+```bash
+claude --cloud "print the repository name and stop" --output-format json
+```
+
+If that prints a parseable `session_id`, creation becomes `controlled`, §7's
+"Start work" row changes, and FP6 can start a cloud session without a person in
+the loop. If it does not, FP6 ships as specified and loses nothing else.
