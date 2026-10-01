@@ -1574,18 +1574,39 @@ mod tests {
         );
     }
 
-    /// Fix round 2, item (b): the same scope-withholding hazard on a REMOTE
-    /// host with `allow_unlayered: true` — `refuse_unlayered` is bypassed
-    /// (by `allow_unlayered`, independent of the item-1 fix), so this proves
-    /// the destructive path stays closed even when the per-host unlayered
-    /// guard itself is turned off. The host is never actually reachable in
-    /// this test (`SshClient::new()` has no transport), so the scan fails
-    /// and the host comes back `skipped` with no actions at all — which is
-    /// itself the point: still no `Remove`, by construction.
+    /// A fake `ssh` that runs the remote command locally: everything up to
+    /// `-- <host>` is dropped and the rest goes to `sh -c`, which re-parses it
+    /// exactly as the remote login shell would (`bash -lc '<script>'`).
+    #[cfg(unix)]
+    fn ssh_running_locally(dir: &std::path::Path) -> Arc<SshClient> {
+        use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
+        let bin = write_exec(
+            dir,
+            "ssh",
+            &format!(
+                "#!/bin/sh\n{PROBE_GUARD}\
+                 case \"$*\" in *'-O check'*|*'-O exit'*) exit 0;; esac\n\
+                 while [ \"$#\" -gt 0 ] && [ \"$1\" != \"--\" ]; do shift; done\n\
+                 shift 2\n\
+                 exec sh -c \"$*\"\n"
+            ),
+        );
+        Arc::new(SshClient::with_ssh_binary(bin))
+    }
+
+    /// Fix round 2, item (b) — no longer vacuous (Rulings R20): a REMOTE
+    /// org-bound unlayered host planned with `allow_unlayered` is really
+    /// scanned (fake `ssh`, temp `HOME`), and its already-synced private
+    /// skill is kept with the withheld `Noop`, never removed.
+    #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn an_org_bound_unlayered_remote_host_with_allow_unlayered_keeps_withheld_assets() {
         let _lock = super::super::lock_registry_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        seed_manifest(home.path(), &[("skill/s", "personal")]);
         let repo_dir = tempfile::tempdir().unwrap();
         let files = one_skill("b\n");
         load_catalog(
@@ -1608,7 +1629,8 @@ mod tests {
                 .unwrap();
             s.set_host_org("oci", Some(10)).unwrap();
         }
-        let ssh = Arc::new(SshClient::new());
+        let bin_dir = tempfile::tempdir().unwrap();
+        let ssh = ssh_running_locally(bin_dir.path());
         let plan = plan_sync(
             PlanArgs {
                 host_alias: Some("oci".into()),
@@ -1620,13 +1642,23 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!plan.hosts.is_empty());
-        assert!(
-            plan.hosts
-                .iter()
-                .all(|h| h.actions.iter().all(|a| a.op != ActionOp::Remove)),
-            "{:?}",
-            plan.hosts
+        let claude: Vec<&HostPlan> = plan
+            .hosts
+            .iter()
+            .filter(|h| h.harness == "claude")
+            .collect();
+        assert_eq!(claude.len(), 1, "{:?}", plan.hosts);
+        assert_eq!(
+            claude[0].status, "planned",
+            "really scanned: {:?}",
+            claude[0].detail
+        );
+        assert!(no_remove(&plan), "{:?}", plan.hosts);
+        let s = claude_actions(&plan, "oci", "s");
+        assert_eq!(s.len(), 1, "{s:?}");
+        assert_eq!(
+            s[0].reason.as_deref(),
+            Some("private; withheld from org host, not removed")
         );
     }
 
