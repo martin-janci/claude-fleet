@@ -86,11 +86,16 @@ inferring.
 
 Then attack the design, not just the facts:
 
-1. **The observation question.** Does `claude agents --json` actually list the
-   sessions a `claude remote-control` server serves? If not, what is left —
-   is reading `~/.claude/projects/*.jsonl` enough for Fleet to show status, and
-   what does Fleet's `claude_agents.rs` / reconcile do with a session it cannot
-   see in that listing? This single answer decides whether FP7 is small or large.
+1. **The observation question — the most important one in this review.** Does
+   `claude agents --json` actually list the sessions a `claude remote-control`
+   server serves? If not, what is left — is reading `~/.claude/projects/*.jsonl`
+   enough for Fleet to show status, and what does Fleet's `claude_agents.rs` /
+   reconcile do with a session it cannot see in that listing?
+   This answer is load-bearing **twice**: it decides whether Fleet can show the
+   thread's status, and — per the claim-4 correction in point 5 — whether the
+   thread can receive a Project's context at all, since that is delivered against
+   a `SessionRow` that only exists if the listing produced one. If the answer is
+   no, say plainly that decision P12 ("FP7 beats FP6") should change.
 2. **Ownership collisions.** Fleet owns tmux panes and assumes it started what it
    manages. A remote-control server creates sessions Fleet did not start, in
    worktrees Fleet may or may not know about. Find the concrete places this
@@ -105,12 +110,25 @@ Then attack the design, not just the facts:
    wrap flags in a way that would make `ag claude remote-control` refuse to start?
 4. **Supervision.** Server mode exits after roughly 10 minutes of network outage.
    Does Fleet have a supervision path that would restart it, or is that new work?
-5. **Is claim 4 actually true?** Verify that a session served by the remote-control
-   server really does load that host's hooks, settings and `CLAUDE.md` — and in
-   particular whether Fleet's HTTP hooks (`X-Fleet-Pane`, see
-   `crates/fleet-core/src/service/hooks.rs` and `hooks_install.rs`) can attribute
-   such a session, given it has **no Fleet pane**. If Fleet cannot attribute it,
-   claim 4 is weaker than stated and the spec is wrong.
+5. **Claim 4 is already known to be partly wrong — confirm or extend the
+   correction.** The spec's §16 Q2 now carries a correction found before this
+   request went out, and your job is to check it rather than rediscover it:
+   Fleet's hooks are installed **user-level** in the host's
+   `~/.claude/settings.json` (`hooks_install.rs`), so they do fire for a
+   Remote Control thread; but Fleet's *row-keyed* context (the mail, the handover
+   brief, the §6 project header) only reaches it once an `external` row exists,
+   and `X-Fleet-Pane` is `$TMUX_PANE`, which `resolve_hook_row`
+   (`crates/fleet-core/src/service/hooks.rs`) tries **before** the session id — so
+   a server sharing a pane with a Fleet session misattributes every one of its
+   sessions' hooks to that row.
+   Verify that reading of `resolve_hook_row`, `rebind_eligible`,
+   `find_session_by_pane` and `agent_row_name`. Then push further: is the proposed
+   mitigation (the server in its own tmux session) actually sufficient, or does
+   something else — `reconcile`, `trusted_status`, `pane_working_at`, the
+   stale-working veto, conversation tracking — still cross the wires? Is there a
+   case where `rebind_eligible` *does* let the row's id move (an awaiting-rebind
+   row, a stopped row, an ended conversation, a `SessionStart(clear)`) and a
+   Remote Control session could therefore capture a Fleet row's identity?
 6. **The comparison.** Is "FP7 beats FP6" defensible, or does it depend on the
    operator already using native Claude Projects — which are Pro/Max only, one
    user, and unshareable? Argue the other side.

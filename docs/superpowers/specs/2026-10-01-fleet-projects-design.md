@@ -338,13 +338,13 @@ page and by the MCP read.
 | Capability | Claude Code (host session) | Claude cloud session | Claude via Remote Control on a Fleet host | Codex | Verdict |
 |---|---|---|---|---|---|
 | Several repositories in one session | native (`--add-dir`) | **no** — `--cloud` is one repository at a time | native (it is local Claude Code) | per-harness flag | native where present; else one session per repo |
-| Standing instructions | native | native from the repo's `CLAUDE.md` | native, **plus Fleet's catalog assets and hooks** | `AGENTS.md`, 32 KiB cap | **native**, rendered by the catalog |
+| Standing instructions | native | native from the repo's `CLAUDE.md` | native, plus Fleet's catalog assets and its hooks (both are files on that host) | `AGENTS.md`, 32 KiB cap | **native**, rendered by the catalog |
 | Start work | Fleet owns the pane | `claude --cloud "task"` | **the person starts it from claude.ai**; Fleet only provisions the server | Fleet owns the pane | mixed — see the modes below |
 | Steer / follow up | Fleet owns the pane | `claude -p --cloud <id> --output-format json` | from claude.ai or the Claude app, not from Fleet | Fleet owns the pane | **controlled** on a pane; `reference` on a Remote Control thread |
 | Status, transcript, usage | native (hooks, pane-intel, `~/.claude/projects`) | **none from the CLI** | the transcript is on the host; status likely through `claude agents --json` (**to verify**, §16 Q2) | partial | cloud: **gap**; Remote Control: probably observable |
 | Bring the session to a host | n/a | `claude --teleport <id>` | it already runs on the host | n/a | **assisted** (cloud); inherent (Remote Control) |
 | Diff, PR creation | Fleet + the PR probe | claude.ai/code only | the branch is on the host, so Fleet's PR probe sees it | Fleet | cloud: **gap**; Remote Control: native |
-| Cross-session project memory | none | none | Fleet's journal applies (its hooks run) | none | **substituted** (journal, handover, §6) |
+| Cross-session project memory | none | none | only once an `external` row exists for the thread (§16 Q2 correction) | none | **substituted** (journal, handover, §6) |
 | Project membership / sharing | none (one user, F1) | Pro/Max: Private or Public only; Team visibility needs Team/Enterprise | none — the native Project is still one user's | none | **substituted** (§9), and a real constraint on R2 |
 | Parallel threads under one goal | native inside a provider Project Fleet cannot drive | n/a | **native, on Fleet's own machine** (`--spawn worktree`, `--capacity N`) | none | native at the infrastructure layer; **substituted** for coordination |
 | Cross-repo task coordination | none | none | none | none | **substituted** (§8) |
@@ -517,6 +517,7 @@ catalog, or keep a second copy of a repository's `CLAUDE.md`.
 | Two designs for permissions diverge | §9's four seam requirements are written down before either side builds, and v1 ships with membership simply absent rather than guessed. |
 | AI creates more process than value | No dependency graph (P9). An agent may add a `memory` note, never instructions. The session header is off by default and capped at 800 chars. |
 | A convincing capability claim without a working interface | §7's three modes, `checked_at` on every connection, and `controlled` only where F2 names the interface. |
+| A Remote Control server is mistaken for a Fleet session | FP7 runs the server in its own tmux session, never a Fleet session pane, so `resolve_hook_row` cannot match it by pane (§16 Q2 correction) |
 | Cloud execution silently loses work | FP6's constraints are stated in the UI: one repo per cloud session, no Fleet-side status, the VM reclaimed on inactivity, rate limits shared with the account. |
 | Context bloats every session | One cap, dropped whole rather than truncated; measured before the setting goes on. |
 | The vocabulary change confuses existing users | Strings only (P8); every id, tool name and column keeps its name. |
@@ -663,6 +664,29 @@ layer, rather than giving up because the coordinator is closed.
 | Sessions belong to the host's account | the same rule as Q1, same refusal |
 | Fleet does not start or steer these sessions | they are `reference` in §7; the Project page never offers a Send button for one |
 | Needs a claude.ai subscription on that host | an API-key host is ineligible, and the capability row says so |
+
+**Correction to claim 4, found while writing the review request (2026-10-01).**
+Claim 4 said a Remote Control thread gets "Fleet's whole context layer". That is
+**too strong**, and the difference matters for FP7's design. Checked in the code:
+
+| Layer | Does it reach a Remote Control thread? |
+|---|---|
+| The catalog's assets, the repository's `CLAUDE.md`, and Fleet's own hooks | **Yes, immediately.** `hooks_install.rs` merges Fleet's hooks into the host's **`~/.claude/settings.json`** — user-level, per host, not per session. Every Claude Code process on that host fires them, including one a Remote Control server starts. |
+| Fleet's row-keyed context — the mail, the M2 handover brief, §6's project header | **Only after** a reconcile pass has created an `external` row for the thread. Those payloads are delivered against a `SessionRow`, and `resolve_hook_row`'s step 2 (`claude_session_id = payload.session_id`, host-checked) can reach an `external` row, because such a row carries the real id from `claude agents --json` (`tmux_name` is `bg:<claude session id>`). Before that row exists, the hook resolves to nothing and is a no-op. |
+| Pane attribution (`X-Fleet-Pane`) | **No — and it is a hazard.** The header is `$TMUX_PANE`, and `resolve_hook_row` tries **the pane first**, before the session id. A Remote Control server's sessions inherit its environment, so if the server runs in a pane Fleet has a row for, every hook from **all** of its sessions resolves to that one Fleet row (`ResolvedBy::Pane`) — the case the code itself warns about: "a pane match says only which pane sent the hook, not that the payload's conversation is the row's". `rebind_eligible` stops the row's id from moving on a plain `SessionStart`, so this is misattribution of activity rather than a stolen identity, but it is still wrong. |
+
+**Two consequences for FP7.**
+
+1. **The server gets its own tmux session, never a Fleet session pane.** Then
+   `find_session_by_pane` misses, step 1 is skipped, and attribution happens by
+   session id, as it should. This is compatible with the vendor docs' advice to
+   run it under `tmux`/`screen` — it just must not be *Fleet's* pane.
+2. **`claude agents --json` is now load-bearing twice.** It decides not only
+   whether Fleet can show status (the original question) but whether a Remote
+   Control thread can receive a Project's context at all. If that listing does
+   not include these sessions, FP7 delivers assets and hooks but **not** the
+   project header — which removes much of its advantage over FP6 and should
+   change P12.
 
 **Out for independent verification** (owner, 2026-10-01): the review request is
 `docs/superpowers/reviews/2026-10-01-fleet-projects-q2-remote-control-review-request.md`,
