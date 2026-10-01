@@ -993,6 +993,7 @@ mod tests {
 
     /// A `plugin_ref` with no `scope:` key — defaults to private, same as a
     /// skill with none.
+    #[cfg(unix)]
     fn plugin_ref_asset(name: &str) -> Asset {
         Asset::from_yaml(
             Some(Kind::PluginRef),
