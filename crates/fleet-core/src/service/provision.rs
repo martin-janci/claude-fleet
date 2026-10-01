@@ -3146,7 +3146,7 @@ mod tests {
             "the warning is kept on the host, not just returned"
         );
         let health = crate::service::health::hosts_health(
-            &[row.clone()],
+            std::slice::from_ref(&row),
             &[],
             &crate::service::health::HostHealthThresholds {
                 disk_low_pct: 90,
