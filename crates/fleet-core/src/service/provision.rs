@@ -704,8 +704,11 @@ pub async fn provision_tmux_clipboard(ssh: &dyn SshExec, host: &str) -> Result<(
 /// (it carries [`MANAGED_MARKER`]), so a file dropped from tools/ag does
 /// not linger there and get copied into the install.
 fn ag_clear_stage_script() -> String {
+    // `2>&1` so a failure arrives on ONE stream, like the installer's body: the
+    // login profile this runs under writes to stderr too, and `output_tail`
+    // reads stdout unless it is blank.
     format!(
-        "if [ -f {} ]; then rm -r {}; fi",
+        "if [ -f {} ]; then rm -r {}; fi 2>&1",
         remote_path(&format!("{AG_STAGE_DIR}/{MANAGED_MARKER}")),
         remote_path(AG_STAGE_DIR)
     )
@@ -742,20 +745,58 @@ fn install_ag(store: &Mutex<Store>) -> bool {
 /// Optional by design — `None` when installed, otherwise a warning and
 /// provisioning carries on: the pane command's fallback still reaches
 /// plain `claude` (see `tmux::CL_FALLBACK`).
+/// How much of a remote command's output a warning carries.
+const WARNING_MAX_CHARS: usize = 300;
+
+/// The useful tail of a remote command's output, for a warning.
+///
+/// Two rules, both learned from what the three hand-rolled versions of this got
+/// wrong:
+///
+///  - take the LAST lines, never the first N characters. These bodies run under
+///    `bash -lc`, which sources the host's login profile first, so its banners
+///    and warnings reach the stream BEFORE anything the command itself did —
+///    `.chars().take(300)` on a chatty profile is all profile and no diagnosis.
+///  - read ONE stream. A body ending in `2>&1` has merged everything onto
+///    stdout, and ssh's own noise arrives on stderr; concatenating the two put
+///    that noise after the real output, where it won the tail. stdout is the
+///    stream unless it is blank, which only happens when the body did not
+///    redirect (or never ran).
+fn output_tail(stdout: &[u8], stderr: &[u8], lines: usize) -> String {
+    let on_stdout = String::from_utf8_lossy(stdout);
+    let text = if on_stdout.trim().is_empty() {
+        String::from_utf8_lossy(stderr)
+    } else {
+        on_stdout
+    };
+    let kept: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    kept[kept.len().saturating_sub(lines)..]
+        .join(" | ")
+        .chars()
+        .take(WARNING_MAX_CHARS)
+        .collect()
+}
+
+/// An `IpcError` message in a warning: capped like any other remote text, since
+/// it carries a host's stderr verbatim and `SshExec::run` sets no output limit.
+fn capped(message: &str) -> String {
+    message.chars().take(WARNING_MAX_CHARS).collect()
+}
+
 pub async fn provision_ag(ssh: &dyn SshExec, host: &str) -> Option<String> {
     match crate::ssh::run_shell(ssh, host, &ag_clear_stage_script(), PROVISION_TIMEOUT).await {
         Ok(out) if out.status.success() => {}
         Ok(out) => {
             return Some(format!(
                 "ag launcher not installed: cannot clear the old stage: {}",
-                String::from_utf8_lossy(&out.stderr)
-                    .trim()
-                    .chars()
-                    .take(300)
-                    .collect::<String>()
+                output_tail(&out.stdout, &out.stderr, 3)
             ))
         }
-        Err(e) => return Some(format!("ag launcher not installed: {}", e.message)),
+        Err(e) => return Some(format!("ag launcher not installed: {}", capped(&e.message))),
     }
     let files = AG_FILES.iter().map(|(rel, body)| {
         let dir = match rel.rsplit_once('/') {
@@ -771,28 +812,30 @@ pub async fn provision_ag(ssh: &dyn SshExec, host: &str) -> Option<String> {
     );
     for (dir, path, body) in files.chain(std::iter::once(marker)) {
         if let Err(e) = write_host_file(ssh, host, &dir, &path, &body).await {
-            return Some(format!("ag launcher not installed: {}", e.message));
+            return Some(format!("ag launcher not installed: {}", capped(&e.message)));
         }
     }
     match crate::ssh::run_shell(ssh, host, &ag_install_script(), AG_INSTALL_TIMEOUT).await {
         Ok(out) if out.status.success() => None,
-        Ok(out) => {
-            let text = format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            let tail: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-            let tail = tail[tail.len().saturating_sub(3)..].join(" | ");
-            Some(format!(
-                "ag launcher not installed (install.sh exit {}): {}",
-                out.status
-                    .code()
-                    .map_or_else(|| "signal".to_string(), |c| c.to_string()),
-                tail.chars().take(300).collect::<String>()
-            ))
-        }
-        Err(e) => Some(format!("ag launcher not installed: {}", e.message)),
+        // "incomplete", not "not installed": `install.sh` exits 5 from several
+        // points AFTER it has copied the tree — a foreign `ag` already on
+        // $AG_BIN_DIR, an $AG_HOME it may not own, a failing `ag shims` — and
+        // `scripts/ag-test.sh` asserts the tree still lands in the first of
+        // those. Saying "not installed" there sends an operator looking for a
+        // missing directory that is in fact present.
+        Ok(out) => Some(format!(
+            "ag launcher install incomplete (install.sh exit {}): {}",
+            out.status
+                .code()
+                .map_or_else(|| "signal".to_string(), |c| c.to_string()),
+            output_tail(&out.stdout, &out.stderr, 3)
+        )),
+        // The installer may have finished before the connection broke, so this
+        // is "incomplete" too — what reached the host is unknown.
+        Err(e) => Some(format!(
+            "ag launcher install incomplete: {}",
+            capped(&e.message)
+        )),
     }
 }
 
@@ -2151,11 +2194,91 @@ mod tests {
         assert_quoting_invariants(&calls);
     }
 
+    /// The two rules `output_tail` exists for, each the opposite of what a
+    /// hand-rolled version did.
+    #[test]
+    fn output_tail_takes_the_end_of_one_stream_not_the_start_of_two() {
+        // A login profile writes first and the real error last, so the FIRST
+        // 300 characters are all profile. Build one that overflows the cap.
+        let noise = "mesg: ttyname failed: Inappropriate ioctl for device\n".repeat(12);
+        let merged = format!("{noise}rm: cannot remove '/x': Permission denied");
+        let got = output_tail(merged.as_bytes(), b"", 3);
+        assert!(
+            got.contains("Permission denied"),
+            "the diagnosis must survive the cap: {got}"
+        );
+        assert!(got.len() <= WARNING_MAX_CHARS * 4, "capped: {got}");
+
+        // A body ending in `2>&1` puts everything on stdout; ssh's own noise on
+        // stderr must not win the tail by being concatenated after it.
+        let got = output_tail(
+            b"install.sh: real failure here",
+            b"ssh: connection noise",
+            3,
+        );
+        assert_eq!(got, "install.sh: real failure here");
+
+        // stderr is read only when stdout is blank — a body that did not
+        // redirect, or never ran.
+        assert_eq!(
+            output_tail(b"   \n", b"only on stderr", 3),
+            "only on stderr"
+        );
+
+        // Fewer lines than asked for is not a panic.
+        assert_eq!(output_tail(b"one", b"", 3), "one");
+        assert_eq!(output_tail(b"", b"", 3), "");
+        // Blank lines are dropped, and the last three join in order.
+        assert_eq!(output_tail(b"a\n\nb\n   \nc\nd\n", b"", 3), "b | c | d");
+    }
+
+    /// `capped` holds a host's own stderr to the same limit: `IpcError::message`
+    /// carries it verbatim and `SshExec::run` sets no output limit.
+    #[test]
+    fn capped_bounds_a_host_supplied_message() {
+        let long = "x".repeat(WARNING_MAX_CHARS * 3);
+        assert_eq!(capped(&long).chars().count(), WARNING_MAX_CHARS);
+        assert_eq!(capped("short"), "short");
+    }
+
+    /// The clear-stage step failing means NOTHING was installed, so that arm
+    /// keeps saying "not installed" — and its diagnosis comes from the tail,
+    /// not the head, of a stream the login profile wrote to first.
+    #[tokio::test]
+    async fn a_failing_clear_stage_says_not_installed_and_keeps_the_real_error() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+        let fake: FakeSsh = fresh_host();
+        let noise = "mesg: ttyname failed: Inappropriate ioctl for device\n".repeat(12);
+        fake.on(
+            Match::script(&ag_clear_stage_script()),
+            Reply::fail(1, &format!("{noise}rm: cannot remove: Permission denied")),
+        );
+        let warning = provision_ag(&fake, "h1").await.expect("a warning");
+        assert!(
+            warning.starts_with("ag launcher not installed: cannot clear the old stage:"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("Permission denied"),
+            "the real error, not the profile's banners: {warning}"
+        );
+        // and nothing was staged or installed after the refusal
+        let steps: Vec<String> = fake
+            .calls()
+            .iter()
+            .map(|c| c.command().to_string())
+            .collect();
+        assert!(
+            !steps.iter().any(|c| c.contains("install.sh")),
+            "the installer must not run: {steps:?}"
+        );
+    }
+
     #[test]
     fn ag_clear_stage_script_removes_only_a_fleet_managed_stage() {
         assert_eq!(
             ag_clear_stage_script(),
-            "if [ -f \"$HOME\"/'.local/share/fleet/ag-src/.fleet-managed' ]; then rm -r \"$HOME\"/'.local/share/fleet/ag-src'; fi"
+            "if [ -f \"$HOME\"/'.local/share/fleet/ag-src/.fleet-managed' ]; then rm -r \"$HOME\"/'.local/share/fleet/ag-src'; fi 2>&1"
         );
     }
 
@@ -2197,7 +2320,7 @@ mod tests {
         );
         let warning = provision_ag(&fake, "h1").await.expect("a warning");
         assert!(
-            warning.starts_with("ag launcher not installed"),
+            warning.starts_with("ag launcher install incomplete"),
             "{warning}"
         );
         assert!(warning.contains("exit 5"), "{warning}");
@@ -3125,7 +3248,7 @@ mod tests {
             .unwrap()
             .expect("an ag warning");
         assert!(
-            warning.starts_with("ag launcher not installed"),
+            warning.starts_with("ag launcher install incomplete"),
             "{warning}"
         );
         let row = store.lock().unwrap().get_host_row("h1").unwrap().unwrap();
@@ -3189,7 +3312,7 @@ mod tests {
             .unwrap()
             .expect("an ag warning");
         assert!(
-            warning.starts_with("ag launcher not installed"),
+            warning.starts_with("ag launcher install incomplete"),
             "{warning}"
         );
         assert!(
@@ -3227,7 +3350,7 @@ mod tests {
         crate::wsl::set_for_tests(Vec::new());
         assert!(
             warning.starts_with(&format!(
-                "{WSL_HOOKS_UNREACHABLE}; ag launcher not installed"
+                "{WSL_HOOKS_UNREACHABLE}; ag launcher install incomplete"
             )),
             "{warning}"
         );
@@ -3260,7 +3383,7 @@ mod tests {
         );
         assert!(
             full.starts_with(
-                "restart Claude on this host to load the MCP server; ag launcher not installed"
+                "restart Claude on this host to load the MCP server; ag launcher install incomplete"
             ),
             "{full}"
         );
@@ -3282,7 +3405,7 @@ mod tests {
         assert!(
             content.starts_with(
                 "skills, CLAUDE.md block and hooks refreshed (no restart needed); \
-                 ag launcher not installed"
+                 ag launcher install incomplete"
             ),
             "{content}"
         );

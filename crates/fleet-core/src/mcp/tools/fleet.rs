@@ -310,7 +310,8 @@ impl FleetTools {
         (per-host bearer token) into every reachable host's ~/.claude.json \
         (a reverse SSH tunnel when the hub is loopback-only). Returns \
         per-host status; each host must restart Claude to load it. host: \
-        one alias; content_only: skills, CLAUDE.md and hooks only, no token.")]
+        one alias; content_only: skills, CLAUDE.md, hooks and the ag launcher \
+        only, reusing the host's existing token.")]
     pub(super) async fn provision_hosts(
         &self,
         Parameters(p): Parameters<ProvisionHostsParams>,

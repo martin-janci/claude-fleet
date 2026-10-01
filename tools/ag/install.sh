@@ -141,6 +141,23 @@ main() {
       return 5
     fi
   else
+    # Never shadow an `ag` the user already has ELSEWHERE on PATH either — the
+    # Silver Searcher is the common one. The alias arm below makes exactly this
+    # check with `command -v`; this arm only looked at $AG_BIN_DIR, so a fresh
+    # install would drop a symlink that either shadows their search tool (when
+    # $AG_BIN_DIR sorts earlier on PATH) or never runs (when it sorts later) —
+    # silently, either way.
+    #
+    # Refusing costs fleet nothing: the tree is installed and `tmux::CL_FALLBACK`
+    # invokes $AG_HOME/ag by absolute path, so panes still launch through it.
+    local found_ag
+    found_ag=$(command -v ag 2>/dev/null || true)
+    if [ -n "$found_ag" ] && ! [ "$found_ag" -ef "$AG_HOME/ag" ]; then
+      echo "install.sh: ag is already a command ($found_ag) — kept yours, no symlink made." >&2
+      echo "install.sh: fleet still uses $AG_HOME/ag directly. To put ag on PATH, move theirs" >&2
+      echo "install.sh: aside or set AG_BIN_DIR to a directory earlier on PATH." >&2
+      return 5
+    fi
     ln -sfn "$AG_HOME/ag" "$bin_ag"
   fi
 

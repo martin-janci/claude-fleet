@@ -2079,17 +2079,28 @@ with `set_setting` (master token; `get_settings` reads them all). It
 reaches only the settings registry, never the `hub.*` and `mcp.*` values
 in this table.
 
-**Proposed settings and their history** (declarative pages P5). An agent
-that should not change a setting on its own proposes it instead:
+**Settings on the hub machine** (declarative pages P5). Read and change a
+setting from the console, and review what an agent proposed. An agent that
+should not change a setting on its own proposes it instead:
 `set_setting { key, value, propose: true, why }` stores a proposal and
-writes nothing. On the hub machine, the operator reviews them:
+writes nothing.
 
 ```bash
+fleet-hub settings get                        # every registered key = value
+fleet-hub settings get provision.install_ag [--json]
+fleet-hub settings set provision.install_ag false   # the opt-outs these guides document
 fleet-hub settings proposals            # key: now → proposed (who), and why
 fleet-hub settings apply 4 7            # apply by id
 fleet-hub settings reject 5             # reject by id
 fleet-hub settings history work.recent_days [--limit N] [--json]
 ```
+
+`set` is validated like any other write and recorded in the audit trail
+(`settings history <key>`) with actor `person`. A key another subsystem owns
+is refused and names where it is changed instead — `hub.*` on `fleet-hub
+serve`'s own flags, `mcp.*` in Settings → Control API. The hub reads settings
+on use, so a change applies at once; a key read at launch says so, and needs
+`fleet-hub serve` restarted.
 
 **Guides a session proposes** (declarative pages, layout `guide`). A
 Claude session on a host — with the `fleet-guides` skill from

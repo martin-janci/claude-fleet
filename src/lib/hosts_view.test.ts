@@ -217,11 +217,11 @@ describe('host health helpers', () => {
     // Saying "provisioned with an older fleet" would be the wrong reason.
     const degraded = host('htz', {
       provision_stale: true,
-      provision_warning: 'ag launcher not installed: install.sh exited 5',
+      provision_warning: 'ag launcher install incomplete (install.sh exit 5): /home/h/.local/bin/ag exists',
     });
     const a = hostAttention({ ...base, host: degraded });
     expect(a?.kind).toBe('provision_warning');
-    expect(a?.title).toContain('ag launcher not installed');
+    expect(a?.title).toContain('ag launcher install incomplete');
     // stale with no warning is still the generic one
     expect(hostAttention({ ...base, host: host('oci', { provision_stale: true }) })?.kind).toBe('provision_stale');
     // and a clean host earns no mark at all

@@ -333,6 +333,33 @@ env -u AG_CONFIG -u AG_HOME AG_BIN_DIR="relative/bin" HOME="$H6" XDG_CONFIG_HOME
 rc=$?
 if [ $rc = 2 ]; then pass "install: a relative AG_BIN_DIR is rejected (exit 2)"; else fail "install: relative AG_BIN_DIR: exit $rc: $(cat "$ROOT/inst.log")"; fi
 
+# --- installer: never shadow an ag already on PATH --------------------------
+# The alias arm checks `command -v`; the symlink arm did not, so a fresh install
+# dropped $AG_BIN_DIR/ag next to (say) the Silver Searcher — shadowing it, or
+# being shadowed by it, with nothing said either way.
+H6c="$ROOT/home6c"; mkdir -p "$H6c" "$ROOT/foreignbin"
+printf '#!/bin/sh\necho "the silver searcher"\n' >"$ROOT/foreignbin/ag"; chmod 755 "$ROOT/foreignbin/ag"
+env -u AG_CONFIG -u AG_HOME -u AG_BIN_DIR HOME="$H6c" XDG_CONFIG_HOME= \
+  PATH="$ROOT/foreignbin:$FAKE:/usr/bin:/bin" bash "$REPO/tools/ag/install.sh" --from "$REPO/tools/ag" \
+  >"$ROOT/inst.log" 2>&1
+rc=$?
+if [ $rc = 5 ]; then pass "install: a foreign ag elsewhere on PATH is not shadowed (exit 5)"; else fail "install: foreign ag on PATH: exit $rc: $(cat "$ROOT/inst.log")"; fi
+if [ ! -e "$H6c/.local/bin/ag" ]; then pass "install: no symlink is made over a foreign ag on PATH"; else fail "install: symlink made despite a foreign ag on PATH"; fi
+if [ "$(cat "$ROOT/foreignbin/ag")" = "$(printf '#!/bin/sh\necho "the silver searcher"')" ]; then pass "install: the foreign ag on PATH is untouched"; else fail "install: the foreign ag was modified"; fi
+# Refusing costs fleet nothing: the tree is installed, and CL_FALLBACK runs it
+# by absolute path.
+if [ -x "$H6c/.local/share/ag/ag" ]; then pass "install: the tree is still installed, so \$AG_HOME/ag still works"; else fail "install: tree missing after the PATH refusal"; fi
+if grep -q "kept yours" "$ROOT/inst.log"; then pass "install: says it kept the user's ag"; else fail "install: no kept-yours message: $(cat "$ROOT/inst.log")"; fi
+# Our OWN ag on PATH is not foreign: a re-run is still idempotent.
+env -u AG_CONFIG -u AG_HOME -u AG_BIN_DIR HOME="$H6c" XDG_CONFIG_HOME= \
+  PATH="$FAKE:/usr/bin:/bin" bash "$REPO/tools/ag/install.sh" --from "$REPO/tools/ag" >"$ROOT/inst.log" 2>&1
+rc=$?
+if [ $rc = 0 ] && [ -L "$H6c/.local/bin/ag" ]; then pass "install: with no foreign ag on PATH the symlink is made"; else fail "install: clean install blocked: exit $rc: $(cat "$ROOT/inst.log")"; fi
+env -u AG_CONFIG -u AG_HOME -u AG_BIN_DIR HOME="$H6c" XDG_CONFIG_HOME= \
+  PATH="$H6c/.local/bin:$FAKE:/usr/bin:/bin" bash "$REPO/tools/ag/install.sh" --from "$REPO/tools/ag" >"$ROOT/inst.log" 2>&1
+rc=$?
+if [ $rc = 0 ]; then pass "install: ag's own symlink on PATH is not treated as foreign (re-run)"; else fail "install: re-run with our ag on PATH: exit $rc: $(cat "$ROOT/inst.log")"; fi
+
 # --- installer: AG_HOME is never rm -rf'd unless ag owns it -----------------
 # An ag SOURCE CHECKOUT has `ag` + `drivers/` too, so the old presence test let
 # `rm -rf "$AG_HOME"` destroy a developer's tree — .git and uncommitted work

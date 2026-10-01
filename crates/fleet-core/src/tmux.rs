@@ -1225,7 +1225,7 @@ pub(crate) fn scrollback_start(lines: u32) -> String {
 /// `claude --dangerously-skip-permissions`. All three take the same flags
 /// (`--resume`, `--session-id`, `--continue`, `--name`, `--model`,
 /// `--effort`), so the chain below is identical whichever one runs.
-pub(crate) const CL_FALLBACK: &str = r#"if ! command -v cl >/dev/null 2>&1; then if [ -x "$HOME/.local/share/ag/ag" ]; then cl() { "$HOME/.local/share/ag/ag" claude --yolo "$@"; }; else cl() { claude --dangerously-skip-permissions "$@"; }; fi; fi;"#;
+pub(crate) const CL_FALLBACK: &str = r#"if ! command -v cl >/dev/null 2>&1; then if [ -x "$HOME/.local/share/ag/ag" ] && [ -d "$HOME/.local/share/ag/drivers" ] && [ -d "$HOME/.local/share/ag/lib" ]; then cl() { "$HOME/.local/share/ag/ag" claude --yolo "$@"; }; else cl() { claude --dangerously-skip-permissions "$@"; }; fi; fi;"#;
 
 /// The pane command for a Claude ("work"/"review") session. With a known
 /// session id: resume it, else create it under that id, else a bare `cl` — an
@@ -1958,6 +1958,19 @@ mod tests {
     /// has to reach `--session-id`.
     #[cfg(unix)]
     fn run_pane_command_opts(shell: &str, cmd: &str, with_cl: bool, with_ag: bool) -> Vec<String> {
+        run_pane_command_ag(shell, cmd, with_cl, with_ag, true)
+    }
+
+    /// `complete_ag` false stages a HALF-INSTALLED tree: the launcher is there
+    /// and executable, but `drivers/` and `lib/` are not, which is what a
+    /// provisioning whose installer exited part way leaves behind.
+    fn run_pane_command_ag(
+        shell: &str,
+        cmd: &str,
+        with_cl: bool,
+        with_ag: bool,
+        complete_ag: bool,
+    ) -> Vec<String> {
         use super::fake_exec::{write_exec, PROBE_GUARD};
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("argv.log");
@@ -1987,7 +2000,16 @@ mod tests {
         }
         if with_ag {
             let ag_dir = dir.path().join(".local/share/ag");
-            std::fs::create_dir_all(&ag_dir).unwrap();
+            // A COMPLETE tree: `CL_FALLBACK` requires `drivers/` and `lib/`
+            // beside the launcher, because an `ag` without them is executable
+            // but cannot run anything — measured: no `lib/` exits 127, no
+            // `drivers/` exits 4 with "no agent CLI found".
+            if complete_ag {
+                std::fs::create_dir_all(ag_dir.join("drivers")).unwrap();
+                std::fs::create_dir_all(ag_dir.join("lib")).unwrap();
+            } else {
+                std::fs::create_dir_all(&ag_dir).unwrap();
+            }
             write_exec(
                 &ag_dir,
                 "ag",
@@ -2102,6 +2124,38 @@ mod tests {
                 argv,
                 vec!["ag claude --yolo --continue --name dev-x".to_string()],
                 "{shell}"
+            );
+        }
+    }
+
+    /// A HALF-INSTALLED ag is not used: the pane falls through to plain
+    /// `claude`, as it does on a host with no ag at all.
+    ///
+    /// `[ -x .../ag ]` alone was the test, and it passes for a tree whose
+    /// `drivers/` or `lib/` never arrived — measured, such a tree exits 127
+    /// (no `lib/`) or 4, "no agent CLI found" (no `drivers/`). So every pane on
+    /// a host whose installer stopped part way would have launched a `cl` that
+    /// could not start Claude, instead of the working fallback. `install.sh`
+    /// can exit non-zero after copying the tree, so this is reachable.
+    #[cfg(unix)]
+    #[test]
+    fn pane_command_ignores_a_half_installed_ag() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        for shell in available_shells() {
+            let argv = run_pane_command_ag(
+                shell,
+                &pane_command_for(Some(id), "dev-x"),
+                false,
+                true,
+                false,
+            );
+            assert_eq!(
+                argv,
+                vec![
+                    format!("claude --dangerously-skip-permissions --resume {id} --name dev-x"),
+                    format!("claude --dangerously-skip-permissions --session-id {id} --name dev-x"),
+                ],
+                "a tree with no drivers/ or lib/ must not be used: {shell}"
             );
         }
     }

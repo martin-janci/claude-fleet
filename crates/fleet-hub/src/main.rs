@@ -243,7 +243,8 @@ enum Cmd {
         /// One host; every active host when omitted.
         #[arg(long)]
         host: Option<String>,
-        /// Skills, CLAUDE.md block and hooks only (no token, no ~/.claude.json).
+        /// Skills, CLAUDE.md block, hooks and the ag launcher only — reuses the
+        /// host's token, never rewrites ~/.claude.json.
         #[arg(long)]
         content_only: bool,
         #[command(flatten)]

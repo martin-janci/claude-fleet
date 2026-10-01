@@ -1,7 +1,15 @@
-//! `fleet-hub settings …` — the hub operator's review of settings proposals
-//! (declarative pages P5, design D-P4). An agent proposes a change over the
-//! control API (`set_setting { propose: true }`); the operator applies or
-//! rejects it here, and reads a setting's history.
+//! `fleet-hub settings …` — the hub operator's settings: read one or every
+//! value, change one, and review what an agent proposed (declarative pages
+//! P5, design D-P4). An agent proposes a change over the control API
+//! (`set_setting { propose: true }`); the operator applies or rejects it here,
+//! reads a setting's history, and sets a value outright.
+//!
+//! `set` exists because a headless hub otherwise had no way to perform the
+//! opt-outs the guides document: the write surface was the desktop's Settings
+//! or a trusted paired device (P6), neither of which an operator at the hub's
+//! console has. It goes through `settings::set_by`, so a key another subsystem
+//! owns (`hub.*`, `mcp.*` — `Spec::owned_by`, D-P7) is refused here exactly as
+//! everywhere else.
 //!
 //! Reads and writes `state.db` directly, as the person at the hub's
 //! console: an applied proposal is recorded with actor `person`. The hub
@@ -12,7 +20,7 @@ use crate::config::{self, HubOptions};
 use crate::out;
 use crate::serve;
 use clap::Subcommand;
-use fleet_core::service::settings_review;
+use fleet_core::service::{settings, settings_review};
 use fleet_core::store::Store;
 use std::collections::HashMap;
 use std::process::ExitCode;
@@ -36,6 +44,20 @@ pub enum SettingsCmd {
         #[arg(required = true)]
         ids: Vec<i64>,
     },
+    /// Print a setting's effective value, or every registered setting.
+    Get {
+        /// The key. Omitted: every registered key, one `key = value` a line.
+        key: Option<String>,
+        /// Print the answer as JSON instead of lines.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change a setting, as the person at this console.
+    ///
+    /// Validated like any other write, and recorded in the audit trail
+    /// (`settings history <key>`) with actor `person`. A key another
+    /// subsystem owns is refused, naming where it is changed instead.
+    Set { key: String, value: String },
     /// A setting's writes, newest first: when, who, before → after.
     History {
         key: String,
@@ -94,6 +116,56 @@ pub fn run(
         }
         SettingsCmd::Apply { ids } => report(settings_review::decide(&s, &ids, &[])),
         SettingsCmd::Reject { ids } => report(settings_review::decide(&s, &[], &ids)),
+        SettingsCmd::Get { key, json } => {
+            match key {
+                Some(k) => {
+                    let spec = settings::spec(&k).ok_or_else(|| {
+                        format!("{k} is not a registered setting (try: settings get)")
+                    })?;
+                    let v = settings::effective_value(&s, &k).unwrap_or_default();
+                    if json {
+                        out::line(
+                            &serde_json::to_string_pretty(&spec.describe(v))
+                                .map_err(|e| e.to_string())?,
+                        );
+                    } else {
+                        out::line(&format!("{k} = {}", shown(&v)));
+                    }
+                }
+                None => {
+                    let all = settings::describe(&s);
+                    if json {
+                        out::line(&serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?);
+                    } else {
+                        for d in &all {
+                            out::line(&format!("{} = {}", d.key, shown(&d.value)));
+                        }
+                    }
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        SettingsCmd::Set { key, value } => {
+            let spec = settings::spec(&key)
+                .ok_or_else(|| format!("{key} is not a registered setting (try: settings get)"))?;
+            let before = settings::effective_value(&s, &key).unwrap_or_default();
+            settings::set_by(&s, &key, &value, settings::Actor::Person, None)
+                .map_err(|e| e.message)?;
+            let after = settings::effective_value(&s, &key).unwrap_or_default();
+            out::line(&format!("{key}: {} → {}", shown(&before), shown(&after)));
+            // The hub reads settings on use, so most apply at once; say so when
+            // this one does not, rather than leaving the operator to wonder.
+            match spec.restart {
+                settings::Restart::App => out::line(
+                    "This setting is read at launch: restart fleet-hub serve to apply it.",
+                ),
+                settings::Restart::Hooks => out::line(
+                    "This setting applies when the Claude Code hooks are next installed on a host.",
+                ),
+                settings::Restart::None => {}
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         SettingsCmd::History { key, limit, json } => {
             let rows = settings_review::history(&s, &key, limit).map_err(|e| e.message)?;
             if json {
