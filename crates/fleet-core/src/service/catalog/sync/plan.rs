@@ -297,10 +297,15 @@ fn expected_for<'a>(
 ///    the manifest does not name it at all.
 /// 5. `expected` records the scanned hash of every planned file and every
 ///    merged config file (`None` when the scan did not see it).
-/// 6. `manifest.orphans(catalog)` ⇒ `Remove`, with `files`/`merges`/
-///    `remove_entry` taken from the manifest entry. A manifest key
+/// 6. `manifest.orphans(catalog, keep.speaks_for)` ⇒ `Remove`, with
+///    `files`/`merges`/`remove_entry` taken from the manifest entry — only
+///    for an entry whose own catalog speaks for this host. A manifest key
 ///    `Manifest::split_key` cannot parse is skipped (it names no kind, so
-///    there is nothing to filter or display it as) and logged.
+///    there is nothing to filter or display it as) and logged. An entry
+///    absent from `catalog` whose catalog does NOT speak for this host (not
+///    loaded, failed to load, no longer accepted, not configured —
+///    `manifest.held`) is kept: a `Noop` naming its catalog and why
+///    (Assets M3, Rulings R6; spec: no automatic remove).
 /// 7. `backup` is true whenever something that exists on the host right now
 ///    would be replaced (`Update`/`Overwrite`) or deleted (`Remove`) — a
 ///    planned file that is already there, or, for a merge-only asset, a
@@ -332,18 +337,9 @@ pub fn compute_host_plan(
     manifest: &Manifest,
     secrets: &BTreeMap<String, String>,
     filter: &PlanFilter,
-    // Assets M2: `(kind, name)` of every asset the host's existing copy must
-    // be left alone for, though it is absent from `catalog` — either
-    // because the EFFECTIVE catalog REFUSED it (a scope boundary or a
-    // cross-catalog collision) or because the scope boundary WITHHELD it
-    // silently (an unlayered org host's private personal assets —
-    // `effective::EffectiveSet::refused` and `::withheld` respectively,
-    // merged by `sync::plan_sync`). Without this such an asset reads to
-    // `manifest.orphans` exactly like one the catalog genuinely dropped,
-    // scheduling a `Remove` — destructive either way a refusal or a
-    // withholding must never be. Empty for every caller outside
-    // `plan_sync`.
-    protected: &BTreeSet<(Kind, String)>,
+    // What the orphan pass must leave on the host (see `KeepRules`).
+    // `KeepRules::default()` for every caller outside `plan_sync`.
+    keep: &KeepRules,
 ) -> HostPlan {
     let mut actions = Vec::new();
     for asset in &catalog.assets {
@@ -359,7 +355,7 @@ pub fn compute_host_plan(
         action.catalog = Some(catalog.origin_of(asset.kind(), &asset.header.name).name);
         actions.push(action);
     }
-    for (key, entry) in manifest.orphans(catalog) {
+    for (key, entry) in manifest.orphans(catalog, keep.speaks_for.as_ref()) {
         let Some((kind, name)) = Manifest::split_key(key) else {
             tracing::warn!(
                 key,
@@ -371,7 +367,7 @@ pub fn compute_host_plan(
         if !filter.matches(kind, &name) {
             continue;
         }
-        if protected.contains(&(kind, name.clone())) {
+        if keep.protected.contains(&(kind, name.clone())) {
             // Refused or silently withheld, not dropped from the catalog: a
             // `Blocked` or `Noop` action already says why
             // (`sync::plan_sync` appends it), and removing the host's
@@ -380,29 +376,17 @@ pub fn compute_host_plan(
             continue;
         }
         if kind == Kind::PluginRef && filter.layered {
-            actions.push(Action {
-                kind: kind.as_str().to_string(),
-                name: name.clone(),
-                op: ActionOp::Noop,
+            actions.push(bare_action(
+                kind,
+                &name,
+                ActionOp::Noop,
                 // Not a catalog asset any more — this is exactly the entry
                 // the catalog dropped — so it names no catalog.
-                catalog: None,
-                reason: Some(
-                    "no longer in this host's effective catalog; plugins are not removed \
-                     automatically"
-                        .to_string(),
-                ),
-                files: Vec::new(),
-                merges: Vec::new(),
-                backup: false,
-                secrets: Vec::new(),
-                missing_secrets: Vec::new(),
-                plan: None,
-                expected: BTreeMap::new(),
-                secret_files: BTreeSet::new(),
-                remove_entry: None,
-                plugin: None,
-            });
+                None,
+                "no longer in this host's effective catalog; plugins are not removed \
+                 automatically"
+                    .to_string(),
+            ));
             continue;
         }
         actions.push(Action {
@@ -427,6 +411,25 @@ pub fn compute_host_plan(
             plugin: None,
         });
     }
+    // Assets M3 (R6): an entry whose catalog does not speak for this host —
+    // not loaded, failed to load, no longer accepted, not configured — is
+    // kept and reported, never removed (spec: no automatic remove).
+    if let Some(speaks) = keep.speaks_for.as_ref() {
+        for (key, entry) in manifest.held(catalog, speaks) {
+            let Some((kind, name)) = Manifest::split_key(key) else {
+                continue;
+            };
+            if !filter.matches(kind, &name) || keep.protected.contains(&(kind, name.clone())) {
+                continue;
+            }
+            actions.push(held_noop(
+                kind,
+                &name,
+                &entry.catalog,
+                keep.held_reason(&entry.catalog),
+            ));
+        }
+    }
     HostPlan {
         host_alias: host_alias.to_string(),
         harness: harness.id().to_string(),
@@ -436,6 +439,78 @@ pub fn compute_host_plan(
         snapshot: snap.clone(),
         manifest: manifest.clone(),
     }
+}
+
+/// What `compute_host_plan`'s orphan pass must leave on the host (Assets
+/// M2 + M3). `Default` keeps nothing extra and lets every catalog speak —
+/// what every caller outside `plan_sync` wants.
+#[derive(Debug, Clone, Default)]
+pub struct KeepRules {
+    /// `(kind, name)` of every asset the host's existing copy must be left
+    /// alone for, though it is absent from `catalog` (M2): the EFFECTIVE
+    /// catalog REFUSED it (a scope boundary or a cross-catalog collision) or
+    /// the scope boundary WITHHELD it silently (an unlayered org host's
+    /// private personal assets) — `effective::EffectiveSet::refused` and
+    /// `::withheld`, merged by `sync::plan_sync`, which reports each itself.
+    /// Without this such an asset reads to `manifest.orphans` exactly like
+    /// one the catalog genuinely dropped, scheduling a `Remove`.
+    pub protected: BTreeSet<(Kind, String)>,
+    /// The catalogs that speak for this host (`EffectiveSet::speaks_for`);
+    /// `None` = all. An orphan `Remove` is planned only for an entry of one.
+    pub speaks_for: Option<BTreeSet<String>>,
+    /// Catalog → why its entries are kept (`EffectiveSet::held_back_for`).
+    pub held_back: BTreeMap<String, String>,
+}
+
+impl KeepRules {
+    fn held_reason(&self, catalog: &str) -> String {
+        self.held_back.get(catalog).cloned().unwrap_or_else(|| {
+            format!(
+                "catalog {catalog} is not configured on this fleet; its assets are kept, not removed"
+            )
+        })
+    }
+}
+
+/// An action that carries no files, merges or plan — there is nothing to
+/// render for an asset that never reached the resolved catalog. Shared by
+/// [`blocked_action`], [`withheld_noop`] and [`held_noop`].
+fn bare_action(
+    kind: Kind,
+    name: &str,
+    op: ActionOp,
+    catalog: Option<String>,
+    reason: String,
+) -> Action {
+    Action {
+        kind: kind.as_str().to_string(),
+        name: name.to_string(),
+        op,
+        catalog,
+        reason: Some(reason),
+        files: Vec::new(),
+        merges: Vec::new(),
+        backup: false,
+        secrets: Vec::new(),
+        missing_secrets: Vec::new(),
+        plan: None,
+        expected: BTreeMap::new(),
+        secret_files: BTreeSet::new(),
+        remove_entry: None,
+        plugin: None,
+    }
+}
+
+/// A `Noop` for a manifest entry whose catalog does not speak for this host
+/// (Assets M3, R6): kept, never removed, with `reason` saying why.
+pub(crate) fn held_noop(kind: Kind, name: &str, catalog: &str, reason: String) -> Action {
+    bare_action(
+        kind,
+        name,
+        ActionOp::Noop,
+        Some(catalog.to_string()),
+        reason,
+    )
 }
 
 /// A `Blocked` action for an asset the *effective catalog* refused before
@@ -453,23 +528,7 @@ pub(crate) fn blocked_action(
     reason: String,
     catalog: Option<String>,
 ) -> Action {
-    Action {
-        kind: kind.as_str().to_string(),
-        name: name.to_string(),
-        op: ActionOp::Blocked,
-        catalog,
-        reason: Some(reason),
-        files: Vec::new(),
-        merges: Vec::new(),
-        backup: false,
-        secrets: Vec::new(),
-        missing_secrets: Vec::new(),
-        plan: None,
-        expected: BTreeMap::new(),
-        secret_files: BTreeSet::new(),
-        remove_entry: None,
-        plugin: None,
-    }
+    bare_action(kind, name, ActionOp::Blocked, catalog, reason)
 }
 
 /// A `Noop` action reporting why a private asset the scope boundary dropped
@@ -481,23 +540,13 @@ pub(crate) fn blocked_action(
 /// `sync::plan_sync` is the only caller, and only when the host's manifest
 /// already names the asset (nothing to report otherwise).
 pub(crate) fn withheld_noop(kind: Kind, name: &str) -> Action {
-    Action {
-        kind: kind.as_str().to_string(),
-        name: name.to_string(),
-        op: ActionOp::Noop,
-        catalog: None,
-        reason: Some("private; withheld from org host, not removed".to_string()),
-        files: Vec::new(),
-        merges: Vec::new(),
-        backup: false,
-        secrets: Vec::new(),
-        missing_secrets: Vec::new(),
-        plan: None,
-        expected: BTreeMap::new(),
-        secret_files: BTreeSet::new(),
-        remove_entry: None,
-        plugin: None,
-    }
+    bare_action(
+        kind,
+        name,
+        ActionOp::Noop,
+        None,
+        "private; withheld from org host, not removed".to_string(),
+    )
 }
 
 fn action_for(
@@ -1042,7 +1091,7 @@ mod tests {
             manifest,
             values,
             &PlanFilter::default(),
-            &BTreeSet::new(),
+            &KeepRules::default(),
         )
     }
 
@@ -1652,7 +1701,7 @@ mod tests {
                 layered: true,
                 ..Default::default()
             },
-            &BTreeSet::new(),
+            &KeepRules::default(),
         );
         let a = act(&hp, "graphify");
         assert_eq!(a.op, ActionOp::Noop);
@@ -1731,7 +1780,7 @@ mod tests {
             &manifest,
             &secrets_map(),
             &filter,
-            &BTreeSet::new(),
+            &KeepRules::default(),
         );
         assert_eq!(hp.actions.len(), 1);
         assert_eq!(hp.actions[0].name, "s");
@@ -1748,10 +1797,108 @@ mod tests {
             &manifest,
             &secrets_map(),
             &filter,
-            &BTreeSet::new(),
+            &KeepRules::default(),
         );
         assert_eq!(hp.actions.len(), 1);
         assert_eq!(hp.actions[0].name, "fleet");
+    }
+
+    /// R6: personal still speaks — its dropped asset is removed as before —
+    /// while an entry of a held-back catalog, or of one that is not
+    /// configured at all, is kept with a `Noop` naming its catalog and why.
+    #[test]
+    fn an_orphan_whose_catalog_does_not_speak_is_kept_with_a_noop() {
+        let mut manifest = manifest_with(&[]);
+        manifest.assets.insert(
+            "skill/gone".into(),
+            ManifestEntry {
+                files: vec!["~/.claude/skills/gone/SKILL.md".into()],
+                ..Default::default()
+            },
+        );
+        for (name, catalog) in [
+            ("theirs", "acme"),
+            ("lost", "removed-one"),
+            ("other", "acme"),
+        ] {
+            manifest.assets.insert(
+                format!("skill/{name}"),
+                ManifestEntry {
+                    catalog: catalog.into(),
+                    ..Default::default()
+                },
+            );
+        }
+        let keep = KeepRules {
+            // A protected key is reported by `plan_sync` itself: no second
+            // action here.
+            protected: BTreeSet::from([(Kind::Skill, "other".to_string())]),
+            speaks_for: Some(BTreeSet::from(["personal".to_string()])),
+            held_back: BTreeMap::from([(
+                "acme".to_string(),
+                "catalog acme is not accepted by this host; its assets are kept, not removed"
+                    .to_string(),
+            )]),
+        };
+        let hp = compute_host_plan(
+            &Catalog::default(),
+            &Claude,
+            "local",
+            &HostSnapshot::default(),
+            &manifest,
+            &secrets_map(),
+            &PlanFilter::default(),
+            &keep,
+        );
+        assert_eq!(act(&hp, "gone").op, ActionOp::Remove);
+        let theirs = act(&hp, "theirs");
+        assert_eq!(theirs.op, ActionOp::Noop);
+        assert_eq!(theirs.catalog.as_deref(), Some("acme"));
+        assert!(theirs.reason.as_deref().unwrap().contains("not accepted"));
+        assert!(theirs.remove_entry.is_none() && theirs.files.is_empty());
+        let lost = act(&hp, "lost");
+        assert_eq!(lost.op, ActionOp::Noop);
+        assert_eq!(lost.catalog.as_deref(), Some("removed-one"));
+        assert!(lost
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("is not configured"));
+        assert!(
+            hp.actions.iter().all(|a| a.name != "other"),
+            "{:?}",
+            hp.actions
+        );
+        assert_eq!(
+            hp.actions
+                .iter()
+                .filter(|a| a.op == ActionOp::Remove)
+                .count(),
+            1
+        );
+
+        // A name filter narrows the held entries too.
+        let filter = PlanFilter {
+            name: Some("theirs".into()),
+            ..Default::default()
+        };
+        let hp = compute_host_plan(
+            &Catalog::default(),
+            &Claude,
+            "local",
+            &HostSnapshot::default(),
+            &manifest,
+            &secrets_map(),
+            &filter,
+            &keep,
+        );
+        assert_eq!(
+            hp.actions
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["theirs"]
+        );
     }
 
     #[test]

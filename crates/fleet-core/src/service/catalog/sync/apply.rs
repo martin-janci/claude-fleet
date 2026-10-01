@@ -1556,7 +1556,7 @@ mod tests {
             &Manifest::default(),
             &BTreeMap::new(),
             &PlanFilter::default(),
-            &BTreeSet::new(),
+            &plan::KeepRules::default(),
         );
         assert_eq!(hp.actions[0].op, ActionOp::PluginInstall);
         assert!(
@@ -1583,7 +1583,7 @@ mod tests {
             &Manifest::default(),
             &BTreeMap::new(),
             &PlanFilter::default(),
-            &BTreeSet::new(),
+            &plan::KeepRules::default(),
         );
         assert_eq!(hp.actions[0].op, ActionOp::Adopt);
         let manifest = build_manifest(&hp, &work, 1_000).expect("adopt writes an entry");
@@ -1606,7 +1606,7 @@ mod tests {
             &Manifest::default(),
             &BTreeMap::new(),
             &PlanFilter::default(),
-            &BTreeSet::new(),
+            &plan::KeepRules::default(),
         );
         assert_eq!(hp.actions[0].op, ActionOp::PluginUpdate);
         let manifest = build_manifest(&hp, &work, 1_000).expect("update writes an entry");
@@ -1726,7 +1726,7 @@ mod tests {
             &manifest,
             secrets,
             &PlanFilter::default(),
-            &BTreeSet::new(),
+            &plan::KeepRules::default(),
         )
     }
 
@@ -2336,7 +2336,7 @@ mod tests {
             &manifest,
             &BTreeMap::new(),
             &PlanFilter::default(),
-            &BTreeSet::new(),
+            &plan::KeepRules::default(),
         )
     }
 
