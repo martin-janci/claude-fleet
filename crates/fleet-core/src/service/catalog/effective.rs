@@ -2,6 +2,11 @@
 //! host accepts ([`acceptance`]), and what it should end up with once
 //! every accepted catalog is resolved for it, the scope boundary applied
 //! and collisions between catalogs refused ([`effective_for_host`]).
+//!
+//! Assets M3: admissions are read from `host_catalogs`, so a host with no
+//! org also takes every org catalog admitted on it; and the set says which
+//! catalogs speak for the host (`speaks_for`) and why the others' assets
+//! are kept rather than removed (`held_back`, Rulings R6/R7).
 
 use crate::ipc_error::{lock, IpcError};
 use crate::service::catalog::model::{Asset, Kind, Scope};
@@ -9,7 +14,7 @@ use crate::service::catalog::registry;
 use crate::service::catalog::repo::{Catalog, CatalogRef};
 use crate::service::catalog::resolve::Provenance;
 use crate::service::catalog::sync::layers::resolve_rows;
-use crate::store::{HostLayerRow, Store};
+use crate::store::{CatalogRow, HostLayerRow, Store};
 use serde::{Deserialize, Serialize};
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -28,8 +33,8 @@ pub enum Acceptance {
 }
 
 /// What a host with `host_org` may take from a catalog owned by
-/// `catalog_org` (`None` = personal), given the host's admissions (M3;
-/// always empty in M2).
+/// `catalog_org` (`None` = personal), given the host's admissions
+/// (`host_catalogs`, Assets M3).
 ///
 /// - personal catalog: a host with no org gets `All`; a host with an org
 ///   gets `SharedOnly`.
@@ -117,51 +122,170 @@ pub struct EffectiveSet {
     /// older than this field never sends it.
     #[serde(default)]
     pub withheld: BTreeSet<(String, String)>,
+    /// Assets M3: the catalogs composed for this host — accepted, loaded and
+    /// resolved. A manifest entry may be removed as an orphan only when its
+    /// catalog is one of these (Rulings R6). `personal` is always named
+    /// "personal". Never crosses the wire; `#[serde(default)]` for symmetry.
+    #[serde(default)]
+    pub speaks_for: BTreeSet<String>,
+    /// Assets M3: catalog → why its manifest entries on this host are kept
+    /// rather than removed: not loaded, failed to load, or not resolvable
+    /// for this host (R6, R7) — for a catalog the host accepts — or not
+    /// accepted any more although the host still has an admission for it.
+    /// Never a catalog the host has no tie to (PF10: `resolve_preview`,
+    /// which any client may call, copies this into `Resolution::held_back`,
+    /// so it must not list other orgs' catalogs).
+    #[serde(default)]
+    pub held_back: BTreeMap<String, String>,
+    /// Assets M3: every configured or loaded catalog this host does not
+    /// accept and has no admission for. NEVER serialized (it names other
+    /// orgs' catalogs): `plan_sync` uses it, through [`Self::held_back_for`],
+    /// only for catalogs the host's own manifest names.
+    #[serde(skip)]
+    pub not_accepted: BTreeSet<String>,
 }
 
-/// Compute `host_alias`'s effective catalog.
+impl EffectiveSet {
+    /// `held_back` plus, for each catalog in `named` (the catalogs the
+    /// host's own manifest entries name) that this host does not accept,
+    /// the generic reason. A name the fleet does not know at all is left
+    /// out: the planner's "not configured" fallback covers it.
+    pub fn held_back_for<'a>(
+        &self,
+        named: impl IntoIterator<Item = &'a str>,
+    ) -> BTreeMap<String, String> {
+        let mut out = self.held_back.clone();
+        for name in named {
+            if self.not_accepted.contains(name) && !out.contains_key(name) {
+                out.insert(
+                    name.to_string(),
+                    format!(
+                        "catalog {name} is not accepted by this host; its assets are kept, \
+                         not removed"
+                    ),
+                );
+            }
+        }
+        out
+    }
+}
+
+/// `personal` is always named "personal", whatever a hand-built catalog
+/// says (schema CHECK: the no-org catalog's name IS "personal"), so a
+/// manifest entry's default catalog always matches it.
+fn label_of(org_id: Option<i64>, name: &str) -> String {
+    if org_id.is_none() {
+        "personal".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+/// Everything the store says about one host, read under one guard.
+struct StorePhase {
+    host_org: Option<i64>,
+    personal_id: Option<i64>,
+    configured: Vec<CatalogRow>,
+    admitted: Vec<i64>,
+    rows_by_catalog: BTreeMap<i64, Vec<HostLayerRow>>,
+}
+
+fn read_store(store: &Mutex<Store>, host_alias: &str) -> Result<StorePhase, IpcError> {
+    let s = lock(store)?;
+    let host_org = s.host_org(host_alias)?;
+    let configured = s.list_catalogs()?;
+    let admitted = s.host_admissions(host_alias)?;
+    let mut personal_id = None;
+    let mut rows_by_catalog = BTreeMap::new();
+    for c in &configured {
+        if c.org_id.is_none() {
+            personal_id = Some(c.id);
+        }
+        rows_by_catalog.insert(c.id, s.get_host_layers_for(host_alias, c.id)?);
+    }
+    Ok(StorePhase {
+        host_org,
+        personal_id,
+        configured,
+        admitted,
+        rows_by_catalog,
+    })
+}
+
+fn compose_from(
+    catalogs: &BTreeMap<i64, Catalog>,
+    host_alias: &str,
+    st: &StorePhase,
+) -> Result<EffectiveSet, IpcError> {
+    compose(
+        catalogs,
+        &st.configured,
+        host_alias,
+        st.host_org,
+        &st.admitted,
+        |cat: &Catalog| {
+            // A hand-built catalog with id 0 stands for the personal one.
+            let id = if cat.id == 0 && cat.org_id.is_none() {
+                st.personal_id
+            } else {
+                Some(cat.id)
+            };
+            id.and_then(|id| st.rows_by_catalog.get(&id))
+                .map(Vec::as_slice)
+                .unwrap_or(&[])
+        },
+    )
+}
+
+/// Compute `host_alias`'s effective catalog against the live registry.
 ///
-/// **Lock order.** All store reads (the host's org, the catalog rows, and
-/// every catalog's layer rows for this host) happen under ONE store guard
-/// that is dropped before the registry is taken; the registry closure never
-/// touches the store. Store → registry is never allowed (see `registry`).
-///
-/// Admissions (`host_catalogs`) arrive in M3: here every host's admission
-/// list is empty, so a host with no org accepts only personal.
+/// **Lock order.** All store reads (the host's org, the catalog rows, its
+/// admissions and every catalog's layer rows for this host) happen under
+/// ONE store guard that is dropped before the registry is taken; the
+/// registry closure never touches the store. Store → registry is never
+/// allowed (see `registry`).
 pub fn effective_for_host(
     store: &Mutex<Store>,
     host_alias: &str,
 ) -> Result<EffectiveSet, IpcError> {
-    // Store phase — one guard, dropped at the end of this block.
-    let (host_org, personal_id, rows_by_catalog) = {
-        let s = lock(store)?;
-        let host_org = s.host_org(host_alias)?;
-        let mut personal_id = None;
-        let mut rows = BTreeMap::new();
-        for c in s.list_catalogs()? {
-            if c.org_id.is_none() {
-                personal_id = Some(c.id);
-            }
-            rows.insert(c.id, s.get_host_layers_for(host_alias, c.id)?);
-        }
-        (host_org, personal_id, rows)
-    };
-    let admitted: &[i64] = &[];
+    let st = read_store(store, host_alias)?;
+    registry::with_catalogs(|catalogs| compose_from(catalogs, host_alias, &st))
+}
 
-    // Registry phase — no store access from here on.
-    registry::with_catalogs(|catalogs| {
-        compose(catalogs, host_alias, host_org, admitted, |cat: &Catalog| {
-            // A hand-built catalog with id 0 stands for the personal one.
-            let id = if cat.id == 0 && cat.org_id.is_none() {
-                personal_id
-            } else {
-                Some(cat.id)
-            };
-            id.and_then(|id| rows_by_catalog.get(&id))
-                .map(Vec::as_slice)
-                .unwrap_or(&[])
-        })
-    })
+/// [`effective_for_host`] against a snapshot the caller already took
+/// (`registry::snapshot`), so `plan_sync` scans and plans one view (R9).
+pub fn effective_for_host_in(
+    store: &Mutex<Store>,
+    host_alias: &str,
+    catalogs: &BTreeMap<i64, Catalog>,
+) -> Result<EffectiveSet, IpcError> {
+    let st = read_store(store, host_alias)?;
+    compose_from(catalogs, host_alias, &st)
+}
+
+/// Record a catalog this host does not accept. PF10: a reason goes into
+/// `held_back` only when the host has an admission for it — the one refusal
+/// whose cause is known here (R4: admissions are made on hosts with no org,
+/// so this host has joined an org since). Any other refusal is only noted in
+/// `not_accepted`, which never leaves the process.
+fn refuse(
+    held_back: &mut BTreeMap<String, String>,
+    not_accepted: &mut BTreeSet<String>,
+    admitted: &[i64],
+    host_alias: &str,
+    label: String,
+    id: i64,
+) {
+    if admitted.contains(&id) {
+        let reason = format!(
+            "catalog {label} is not accepted by host {host_alias}: it was admitted while the \
+             host had no org, and the host has since joined an org (an admission never \
+             crosses orgs); its assets are kept, not removed"
+        );
+        held_back.insert(label, reason);
+    } else {
+        not_accepted.insert(label);
+    }
 }
 
 /// One asset collected from one accepted catalog, before collisions.
@@ -176,9 +300,10 @@ fn key_of(asset: &Asset) -> String {
 }
 
 /// The pure half of [`effective_for_host`]: everything the store had to say
-/// is already in `host_org` and `rows_for`.
+/// is already in `configured`, `host_org`, `admitted` and `rows_for`.
 fn compose<'r>(
     catalogs: &BTreeMap<i64, Catalog>,
+    configured: &[CatalogRow],
     host_alias: &str,
     host_org: Option<i64>,
     admitted: &[i64],
@@ -197,13 +322,49 @@ fn compose<'r>(
     let mut layered = false;
     let mut excluded: BTreeMap<String, String> = BTreeMap::new();
     let mut withheld: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut speaks_for: BTreeSet<String> = BTreeSet::new();
+    let mut held_back: BTreeMap<String, String> = BTreeMap::new();
+    let mut not_accepted: BTreeSet<String> = BTreeSet::new();
 
     for cat in registry::in_order(catalogs) {
+        let label = label_of(cat.org_id, &cat.name);
         let accepts = acceptance(host_org, cat.id, cat.org_id, admitted);
         if accepts == Acceptance::No {
+            refuse(
+                &mut held_back,
+                &mut not_accepted,
+                admitted,
+                host_alias,
+                label,
+                cat.id,
+            );
             continue;
         }
-        let res = resolve_rows(cat, host_alias, rows_for(cat))?;
+        if let Some(err) = &cat.load_error {
+            held_back.insert(
+                label.clone(),
+                format!("catalog {label} failed to load ({err}); its assets are kept, not removed"),
+            );
+            continue;
+        }
+        let res = match resolve_rows(cat, host_alias, rows_for(cat)) {
+            Ok(res) => res,
+            // Rulings R7: an org catalog that cannot resolve for this host is
+            // held back for it; personal keeps failing the host (M1/M2).
+            Err(e) if cat.org_id.is_some() => {
+                held_back.insert(
+                    label.clone(),
+                    format!(
+                        "catalog {label} cannot resolve for {host_alias}: {}; its assets are \
+                         kept, not removed",
+                        e.message
+                    ),
+                );
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        speaks_for.insert(label);
         layered |= res.layered;
         problems.extend(res.catalog.problems);
         // Merged in composition order: a key can only repeat here if TWO
@@ -266,6 +427,34 @@ fn compose<'r>(
                 from: from.clone(),
                 provenance,
             });
+        }
+    }
+
+    // A configured catalog the registry does not hold at all (not loaded
+    // yet, or evicted): accepted → held back as not loaded; otherwise only
+    // `not_accepted` (PF10), like a loaded one.
+    for row in configured {
+        let label = label_of(row.org_id, &row.name);
+        if speaks_for.contains(&label)
+            || held_back.contains_key(&label)
+            || not_accepted.contains(&label)
+        {
+            continue;
+        }
+        if acceptance(host_org, row.id, row.org_id, admitted) == Acceptance::No {
+            refuse(
+                &mut held_back,
+                &mut not_accepted,
+                admitted,
+                host_alias,
+                label,
+                row.id,
+            );
+        } else {
+            held_back.insert(
+                label.clone(),
+                format!("catalog {label} is not loaded; its assets are kept, not removed"),
+            );
         }
     }
 
@@ -381,6 +570,9 @@ fn compose<'r>(
         layered,
         excluded,
         withheld,
+        speaks_for,
+        held_back,
+        not_accepted,
     })
 }
 
@@ -768,5 +960,214 @@ mod tests {
             e.excluded.get("skill/b").map(String::as_str),
             Some("workstation")
         );
+    }
+
+    // ---- Assets M3: admissions, speaks_for, held_back --------------------
+
+    /// Spec, Testing: a no-org host receives an org asset only when admitted.
+    /// Before the admission, `acme` is not in `held_back` at all (PF10: the
+    /// host has no tie to it — `plan_sync` adds "not accepted" only for a
+    /// catalog the host's own manifest names).
+    #[test]
+    fn a_no_org_host_takes_an_org_catalog_only_when_admitted() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        let (store, personal, acme) = seeded_store();
+        registry::install_personal(personal_cat(
+            personal,
+            vec![skill("a", "private")],
+            LayerSet::default(),
+        ))
+        .unwrap();
+        registry::install_for_test(acme_cat(acme, vec![skill("c", "private")])).unwrap();
+
+        let before = effective_for_host(&store, "h").unwrap();
+        assert_eq!(names(&before), vec!["a"]);
+        assert!(
+            !before.held_back.contains_key("acme"),
+            "{:?}",
+            before.held_back
+        );
+        assert!(
+            before.not_accepted.contains("acme"),
+            "{:?}",
+            before.not_accepted
+        );
+        assert_eq!(before.speaks_for, BTreeSet::from(["personal".to_string()]));
+
+        store.lock().unwrap().admit_host_catalog("h", acme).unwrap();
+        let after = effective_for_host(&store, "h").unwrap();
+        assert_eq!(names(&after), vec!["a", "c"]);
+        assert_eq!(after.catalog.origin_of(Kind::Skill, "c").name, "acme");
+        assert!(after.held_back.is_empty(), "{:?}", after.held_back);
+        assert!(after.not_accepted.is_empty(), "{:?}", after.not_accepted);
+        assert_eq!(
+            after.speaks_for,
+            BTreeSet::from(["acme".to_string(), "personal".to_string()])
+        );
+    }
+
+    /// An admission left behind when the host joined another org never
+    /// crosses orgs (R4). The admission row ties the host to `acme`, and it
+    /// says what happened, so the reason names it (PF10: "org changed" only
+    /// when actually known).
+    #[test]
+    fn an_admission_never_reaches_a_host_bound_to_an_org() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        let (store, personal, acme) = seeded_store();
+        {
+            let s = store.lock().unwrap();
+            s.admit_host_catalog("h", acme).unwrap();
+            s.set_host_org("h", Some(ORG_11)).unwrap();
+        }
+        registry::install_personal(personal_cat(personal, vec![], LayerSet::default())).unwrap();
+        registry::install_for_test(acme_cat(acme, vec![skill("c", "shared")])).unwrap();
+        let e = effective_for_host(&store, "h").unwrap();
+        assert!(!names(&e).contains(&"c"), "{:?}", names(&e));
+        let why = &e.held_back["acme"];
+        assert!(why.contains("not accepted"), "{why}");
+        assert!(why.contains("joined an org"), "{why}");
+        assert!(!e.speaks_for.contains("acme"), "{:?}", e.speaks_for);
+    }
+
+    /// PF10: `resolve_preview` (any client may call it) copies `held_back`;
+    /// an org-bound host's must never name another org's catalog it has no
+    /// tie to — neither a loaded one nor a configured-but-unloaded one.
+    #[test]
+    fn an_org_bound_hosts_held_back_never_names_an_unrelated_orgs_catalog() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        let (store, personal, acme) = seeded_store();
+        {
+            let s = store.lock().unwrap();
+            s.set_host_org("h", Some(ORG_11)).unwrap();
+            s.upsert_catalog("beta", "/b", None, Some(ORG_10)).unwrap();
+        }
+        registry::install_personal(personal_cat(
+            personal,
+            vec![skill("b", "shared")],
+            LayerSet::default(),
+        ))
+        .unwrap();
+        registry::install_for_test(acme_cat(acme, vec![skill("c", "shared")])).unwrap();
+        let e = effective_for_host(&store, "h").unwrap();
+        assert_eq!(names(&e), vec!["b"]);
+        assert!(e.held_back.is_empty(), "{:?}", e.held_back);
+        assert_eq!(e.speaks_for, BTreeSet::from(["personal".to_string()]));
+        // Never serialized: `plan_sync` uses it only for the host's own
+        // manifest entries.
+        let wire = serde_json::to_string(&e).unwrap();
+        assert!(!wire.contains("acme") && !wire.contains("beta"), "{wire}");
+    }
+
+    /// M2 carry 1: a configured org catalog that is not loaded, or failed to
+    /// load, never speaks for the host — its entries are held back.
+    #[test]
+    fn a_configured_catalog_that_is_not_loaded_or_failed_is_held_back() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        let (store, personal, _acme) = seeded_store();
+        let beta = {
+            let s = store.lock().unwrap();
+            s.set_host_org("h", Some(ORG_10)).unwrap();
+            s.upsert_catalog("beta", "/b", None, Some(ORG_10))
+                .unwrap()
+                .id
+        };
+        registry::install_personal(personal_cat(
+            personal,
+            vec![skill("b", "shared")],
+            LayerSet::default(),
+        ))
+        .unwrap();
+        registry::install_for_test(Catalog {
+            id: beta,
+            name: "beta".into(),
+            org_id: Some(ORG_10),
+            load_error: Some("boom".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let e = effective_for_host(&store, "h").unwrap();
+        assert_eq!(names(&e), vec!["b"]);
+        assert!(
+            e.held_back["acme"].contains("is not loaded"),
+            "{:?}",
+            e.held_back
+        );
+        assert!(
+            e.held_back["beta"].contains("failed to load (boom)"),
+            "{:?}",
+            e.held_back
+        );
+        assert_eq!(e.speaks_for, BTreeSet::from(["personal".to_string()]));
+    }
+
+    /// Rulings R7: an org catalog whose layers do not resolve for this host is
+    /// held back for it, not fatal to the whole host.
+    #[test]
+    fn an_org_catalog_that_cannot_resolve_for_a_host_is_held_back_not_fatal() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        let (store, personal, acme) = seeded_store();
+        {
+            let s = store.lock().unwrap();
+            s.set_host_org("h", Some(ORG_10)).unwrap();
+            s.set_host_layers_for("h", acme, Some("ghost"), &[])
+                .unwrap();
+        }
+        registry::install_personal(personal_cat(
+            personal,
+            vec![skill("b", "shared")],
+            LayerSet::default(),
+        ))
+        .unwrap();
+        registry::install_for_test(acme_cat(acme, vec![skill("c", "private")])).unwrap();
+        let e = effective_for_host(&store, "h").unwrap();
+        assert_eq!(names(&e), vec!["b"]);
+        assert!(
+            e.held_back["acme"].contains("cannot resolve"),
+            "{:?}",
+            e.held_back
+        );
+    }
+
+    /// Rulings R9: `effective_for_host_in` composes the map it is given, not
+    /// the live registry, so plan and scan read one snapshot.
+    #[test]
+    fn effective_for_host_in_composes_the_snapshot_it_is_given() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        let (store, personal, _acme) = seeded_store();
+        registry::install_personal(personal_cat(
+            personal,
+            vec![skill("live", "private")],
+            LayerSet::default(),
+        ))
+        .unwrap();
+        let snapshot = BTreeMap::from([(
+            personal,
+            personal_cat(
+                personal,
+                vec![skill("snap", "private")],
+                LayerSet::default(),
+            ),
+        )]);
+        let e = effective_for_host_in(&store, "h", &snapshot).unwrap();
+        assert_eq!(names(&e), vec!["snap"]);
+    }
+
+    /// PF10 at the plan: a catalog the host's manifest names but the host
+    /// does not accept gets the generic reason; one the fleet has never
+    /// heard of is left to the planner's "not configured" fallback.
+    #[test]
+    fn held_back_for_adds_the_generic_reason_only_for_named_catalogs() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        let (store, personal, acme) = seeded_store();
+        registry::install_personal(personal_cat(personal, vec![], LayerSet::default())).unwrap();
+        registry::install_for_test(acme_cat(acme, vec![])).unwrap();
+        let e = effective_for_host(&store, "h").unwrap();
+        let held = e.held_back_for(["acme", "personal", "nowhere"]);
+        assert_eq!(held.keys().collect::<Vec<_>>(), vec!["acme"]);
+        assert!(
+            held["acme"].contains("not accepted by this host"),
+            "{held:?}"
+        );
+        assert!(e.held_back_for([]).is_empty());
     }
 }

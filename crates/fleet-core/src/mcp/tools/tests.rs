@@ -3430,8 +3430,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// (`set_host_harnesses` and its `catalog_admin` action). Measured at
     /// 69,306 on 2026-09-30 after declarative pages' `guide` tool (a host's
     /// session proposes a guide, +787 bytes). Measured at 69,996 on 2026-09-30
-    /// with both merged.
-    const BUDGET_BYTES: usize = 70_096;
+    /// with both merged. Measured at 70,039 on 2026-10-01 after Assets M3
+    /// Task 3 (`resolve_preview` names each held-back catalog, +33 bytes).
+    const BUDGET_BYTES: usize = 70_139;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

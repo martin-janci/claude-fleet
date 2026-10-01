@@ -582,6 +582,7 @@ pub fn resolve_preview(
         layered: eff.layered,
         refused: eff.refused,
         withheld: eff.withheld,
+        held_back: eff.held_back,
     })
 }
 

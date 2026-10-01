@@ -385,7 +385,7 @@ Parameters: `action`, `confirm_nonce`, `session_id`
 
 ### `resolve_preview`
 
-One host's effective asset set after its role and contexts resolve: provenance, what was excluded and why, every refused asset (scope or collision), and every private asset an org host withheld silently. Nothing is written. Requires catalog_configure + catalog_load in the app.
+One host's effective asset set after its role and contexts resolve: provenance, what was excluded and why, every refused asset (scope or collision), every private asset an org host withheld silently, and each held-back catalog with why. Nothing is written. Requires catalog_configure + catalog_load in the app.
 
 Parameters: `host_alias`
 

@@ -50,6 +50,13 @@ pub struct Resolution {
     /// never sends it.
     #[serde(default)]
     pub withheld: std::collections::BTreeSet<(String, String)>,
+    /// Assets M3: catalog → why its assets on this host are kept but no
+    /// longer managed (`effective::EffectiveSet::held_back`: not loaded,
+    /// failed to load, cannot resolve, or an admission that no longer
+    /// applies). Never a catalog the host has no tie to (PF10). Empty on the
+    /// single-catalog path. `#[serde(default)]`: travels the wire.
+    #[serde(default)]
+    pub held_back: BTreeMap<String, String>,
 }
 
 /// Deep-merge `over` into `base`: mappings recurse, everything else replaces.
@@ -152,6 +159,7 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
             layered: false,
             refused: Vec::new(),
             withheld: Default::default(),
+            held_back: BTreeMap::new(),
         };
     }
 
@@ -239,6 +247,7 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
         layered: true,
         refused: Vec::new(),
         withheld: Default::default(),
+        held_back: BTreeMap::new(),
     }
 }
 

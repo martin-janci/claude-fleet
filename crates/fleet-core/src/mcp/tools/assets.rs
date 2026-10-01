@@ -249,8 +249,9 @@ impl FleetTools {
 
     #[tool(description = "One host's effective asset set after its role and \
         contexts resolve: provenance, what was excluded and why, every \
-        refused asset (scope or collision), and every private asset an org \
-        host withheld silently. Nothing is written. Requires \
+        refused asset (scope or collision), every private asset an org \
+        host withheld silently, and each held-back catalog with why. \
+        Nothing is written. Requires \
         catalog_configure + catalog_load in the app.")]
     pub(super) async fn resolve_preview(
         &self,
@@ -283,6 +284,7 @@ impl FleetTools {
             "excluded": res.excluded,
             "refused": res.refused,
             "withheld": res.withheld,
+            "held_back": res.held_back,
             "assets": assets,
         }))
     }
