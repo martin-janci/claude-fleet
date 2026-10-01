@@ -564,7 +564,13 @@ pub fn list_layers(store: &Mutex<Store>) -> Result<LayerListing, IpcError> {
 /// treats "no assignment rows" as "no layering" for backward compatibility
 /// and cannot tell a nonexistent host from an unassigned one.
 fn require_host_exists(store: &Mutex<Store>, host_alias: &str) -> Result<(), IpcError> {
-    match lock(store)?.get_host_row(host_alias)? {
+    require_host(&*lock(store)?, host_alias)
+}
+
+/// [`require_host_exists`] under a guard the caller already holds
+/// (`catalogs::admit`/`unadmit`).
+pub(crate) fn require_host(s: &Store, host_alias: &str) -> Result<(), IpcError> {
+    match s.get_host_row(host_alias)? {
         Some(_) => Ok(()),
         None => Err(IpcError::new(
             codes::E_NOTFOUND,

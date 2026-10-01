@@ -537,13 +537,19 @@ pub fn lint(
 pub fn lint_all(catalog: &Catalog, root: &Path) -> LintAll {
     let names = secrets_example_names(root);
     let exists = root.join(SECRETS_EXAMPLE).exists();
+    lint_all_with(catalog, &names, exists)
+}
+
+/// [`lint_all`] with `secrets.example` already read, so a caller borrowing
+/// the registry ([`lint_everything`]) does no file I/O under its read lock.
+fn lint_all_with(catalog: &Catalog, names: &[String], exists: bool) -> LintAll {
     let assets: Vec<AssetLint> = catalog
         .assets
         .iter()
         .map(|a| AssetLint {
             kind: a.kind().as_str().to_string(),
             name: a.header.name.clone(),
-            report: lint(a, catalog, &names, exists),
+            report: lint(a, catalog, names, exists),
         })
         .collect();
     LintAll {
@@ -1016,10 +1022,12 @@ pub fn lint_asset(args: AssetRef, store: &Mutex<Store>) -> Result<LintReport, Ip
 /// registry (R16); an unloaded catalog lints against an empty one.
 pub fn lint_everything(store: &Mutex<Store>) -> Result<LintAll, IpcError> {
     let root = repo_root(store)?;
-    match registry::with_personal(|c| Ok(lint_all(c, &root))) {
+    let names = secrets_example_names(&root);
+    let exists = root.join(SECRETS_EXAMPLE).exists();
+    match registry::with_personal(|c| Ok(lint_all_with(c, &names, exists))) {
         Ok(all) => Ok(all),
         Err(e) if e.code == super::E_CATALOG_NOT_CONFIGURED => {
-            Ok(lint_all(&Catalog::default(), &root))
+            Ok(lint_all_with(&Catalog::default(), &names, exists))
         }
         Err(e) => Err(e),
     }

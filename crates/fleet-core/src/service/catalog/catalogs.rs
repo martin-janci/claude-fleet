@@ -113,33 +113,22 @@ pub fn list_catalogs(store: &Mutex<Store>) -> Result<Vec<CatalogStatus>, IpcErro
     })
 }
 
-/// The owning org's id for an add: `None` for `personal` (which takes no
-/// `--org`), the named org (case-insensitively) for every other catalog.
-fn owner_for(name: &str, org: Option<&str>, s: &Store) -> Result<Option<i64>, IpcError> {
-    match (name, org) {
-        (PERSONAL, None) => Ok(None),
-        (PERSONAL, Some(_)) => Err(IpcError::new(
-            codes::E_INVALID,
-            "the personal catalog belongs to no org; drop --org",
-        )),
-        (name, None) => Err(IpcError::new(
-            codes::E_INVALID,
-            format!("catalog {name} needs --org: only `personal` belongs to no org"),
-        )),
-        (_, Some(org)) => Ok(Some(
-            s.list_orgs()?
-                .into_iter()
-                .find(|o| o.name.eq_ignore_ascii_case(org))
-                .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no org named {org}")))?
-                .id,
-        )),
-    }
+/// The org named by `catalog add --org` (case-insensitively) as its id;
+/// `None` when none is named. Who may own which catalog is
+/// `Store::check_catalog_owner`'s.
+fn org_id_named(org: Option<&str>, s: &Store) -> Result<Option<i64>, IpcError> {
+    let Some(org) = org else { return Ok(None) };
+    s.list_orgs()?
+        .into_iter()
+        .find(|o| o.name.eq_ignore_ascii_case(org))
+        .map(|o| Some(o.id))
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no org named {org}")))
 }
 
 /// Add a catalog (or re-point one, R12), then load it. Every precondition
-/// `upsert_catalog` would refuse on — the owner, and an existing catalog
-/// never changing org — is checked first (PF18), so a refused call has no
-/// side effect on disk; then the checkout must be there or clonable from
+/// `upsert_catalog` would refuse on — the org exists, and
+/// `Store::check_catalog_owner` — is checked first (PF18), so a refused
+/// call has no side effect on disk; then the checkout must be there or clonable from
 /// `remote_url` before anything is recorded. An org catalog that then fails
 /// to parse is kept as a problem entry (R5) and reported as `state:
 /// problem`; `personal` failing is an error, as `catalog set` has always
@@ -161,18 +150,8 @@ pub fn add_catalog(args: AddCatalogArgs, store: &Mutex<Store>) -> Result<Catalog
     let org = args.org.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let org_id = {
         let s = lock(store)?;
-        let org_id = owner_for(&args.name, org, &s)?;
-        if let Some(existing) = s.get_catalog_by_name(&args.name)? {
-            if existing.org_id != org_id {
-                return Err(IpcError::new(
-                    codes::E_INVALID,
-                    format!(
-                        "catalog {} belongs to another org; remove it and add it again to move it",
-                        args.name
-                    ),
-                ));
-            }
-        }
+        let org_id = org_id_named(org, &s)?;
+        s.check_catalog_owner(&args.name, org_id)?;
         org_id
     };
     repo::ensure_repo(std::path::Path::new(&path), remote)?;
@@ -199,12 +178,7 @@ pub fn remove_catalog(name: &str, store: &Mutex<Store>) -> Result<CatalogRemoval
 /// registered host, and the catalog it names.
 fn host_and_catalog(s: &Store, host_alias: &str, catalog: &str) -> Result<CatalogRow, IpcError> {
     crate::validate::host_alias(host_alias)?;
-    if s.get_host_row(host_alias)?.is_none() {
-        return Err(IpcError::new(
-            codes::E_NOTFOUND,
-            format!("host {host_alias} not found"),
-        ));
-    }
+    super::require_host(s, host_alias)?;
     s.get_catalog_by_name(catalog)?
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no catalog named {catalog}")))
 }
@@ -234,7 +208,10 @@ pub fn admit(
              assets with one); only an org catalog is admitted",
         ));
     }
-    if let Some(org) = s.host_org(host_alias)? {
+    if let Some(org_id) = s.host_org(host_alias)? {
+        let org = s
+            .get_org(org_id)?
+            .map_or_else(|| org_id.to_string(), |o| o.name);
         return Err(IpcError::new(
             codes::E_INVALID,
             format!(
@@ -448,10 +425,12 @@ mod tests {
         );
         let org = store.lock().unwrap().list_orgs().unwrap()[0].id;
         store.lock().unwrap().set_host_org("h", Some(org)).unwrap();
-        assert_eq!(
-            admit("h", "acme", &store).unwrap_err().code,
-            codes::E_INVALID,
-            "R4: no org only"
+        let err = admit("h", "acme", &store).unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID, "R4: no org only");
+        assert!(
+            err.message.contains("is in org acme:"),
+            "the refusal names the org: {}",
+            err.message
         );
         assert_eq!(
             remove_catalog("personal", &store).unwrap_err().code,
@@ -499,6 +478,65 @@ mod tests {
             row.repo_path,
             origin.to_string_lossy(),
             "still where it was"
+        );
+        registry::clear().unwrap();
+    }
+
+    /// Re-pointing an org catalog through `add_catalog` with its own org is
+    /// allowed (R12): the row keeps its id and moves to the new checkout,
+    /// which is what gets loaded.
+    #[test]
+    fn re_pointing_an_org_catalog_in_its_own_org_moves_it() {
+        let _g = lock_registry_for_test();
+        let store = store_with_org();
+        let first = add_catalog(
+            add("acme", &git_repo("repoint-a", 1, &["a"]), Some("acme")),
+            &store,
+        )
+        .unwrap();
+        let second_repo = git_repo("repoint-b", 1, &["b", "c"]);
+        let second = add_catalog(add("acme", &second_repo, Some("acme")), &store).unwrap();
+        assert_eq!(second.id, first.id, "the same catalog, re-pointed");
+        assert_eq!(second.repo_path, second_repo.to_string_lossy());
+        assert_eq!((second.state.as_str(), second.asset_count), ("loaded", 2));
+        registry::clear().unwrap();
+    }
+
+    /// Only a checkout failure becomes a problem entry (R5, as in
+    /// `ensure_fresh`): a store failure while recording the load — here a
+    /// trigger refusing the HEAD write that follows a clean parse —
+    /// propagates, and nothing is installed in the registry. A trigger rather
+    /// than `PRAGMA query_only` because the upsert before the load must
+    /// still succeed for the load path to be reached at all.
+    #[test]
+    fn a_store_failure_while_loading_propagates_without_a_problem_entry() {
+        let _g = lock_registry_for_test();
+        let store = store_with_org();
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute_batch(
+                "CREATE TRIGGER refuse_head BEFORE UPDATE OF head_commit ON catalogs \
+                 WHEN NEW.head_commit IS NOT NULL BEGIN SELECT RAISE(ABORT, 'no head'); END;",
+            )
+            .unwrap();
+        let err = add_catalog(
+            add("acme", &git_repo("store-fail", 1, &["a"]), Some("acme")),
+            &store,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_SQLITE, "{}", err.message);
+        let id = store
+            .lock()
+            .unwrap()
+            .get_catalog_by_name("acme")
+            .unwrap()
+            .unwrap()
+            .id;
+        assert!(
+            registry::get(id).unwrap().is_none(),
+            "a store failure must not install a problem entry"
         );
         registry::clear().unwrap();
     }

@@ -105,10 +105,43 @@ impl Store {
             .optional()
     }
 
+    /// Who may own catalog `name`: `personal` and only `personal` has no
+    /// org (the table's CHECK, said in words), and an existing catalog never
+    /// changes owner — that is a remove and an add. Read-only, so a caller
+    /// with side effects of its own (`catalogs::add_catalog`'s clone) can
+    /// refuse before taking them (PF18); [`Self::upsert_catalog`] runs it
+    /// again as its own backstop. Whether a NEW catalog's org exists is
+    /// `upsert_catalog`'s check.
+    pub fn check_catalog_owner(
+        &self,
+        name: &str,
+        org_id: Option<i64>,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        use crate::ipc_error::{codes, IpcError};
+        match (name == "personal", org_id) {
+            (true, Some(_)) => Err(IpcError::new(
+                codes::E_INVALID,
+                "the personal catalog belongs to no org",
+            )),
+            (false, None) => Err(IpcError::new(
+                codes::E_INVALID,
+                format!("catalog {name} needs an org: only `personal` belongs to none"),
+            )),
+            _ => match self.get_catalog_by_name(name)? {
+                Some(existing) if existing.org_id != org_id => Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!(
+                        "catalog {name} belongs to another org; remove it and add it again to move it"
+                    ),
+                )),
+                _ => Ok(()),
+            },
+        }
+    }
+
     /// Add a catalog, or re-point an existing one (`repo_path`, `remote_url`;
-    /// the load record is cleared, as `set_catalog_config` does). `personal`
-    /// and only `personal` has no org (the table's CHECK, said in words), and
-    /// an existing catalog never changes owner: that is a remove and an add.
+    /// the load record is cleared, as `set_catalog_config` does). The owner
+    /// rules are [`Self::check_catalog_owner`]'s.
     pub fn upsert_catalog(
         &self,
         name: &str,
@@ -117,31 +150,12 @@ impl Store {
         org_id: Option<i64>,
     ) -> Result<CatalogRow, crate::ipc_error::IpcError> {
         use crate::ipc_error::{codes, IpcError};
-        match (name == "personal", org_id) {
-            (true, Some(_)) => {
-                return Err(IpcError::new(
-                    codes::E_INVALID,
-                    "the personal catalog belongs to no org",
-                ))
-            }
-            (false, None) => {
-                return Err(IpcError::new(
-                    codes::E_INVALID,
-                    format!("catalog {name} needs an org: only `personal` belongs to none"),
-                ))
-            }
-            (true, None) => {
+        self.check_catalog_owner(name, org_id)?;
+        match org_id {
+            None => {
                 self.set_catalog_config(repo_path, remote_url)?;
             }
-            (false, Some(org)) => match self.get_catalog_by_name(name)? {
-                Some(existing) if existing.org_id != Some(org) => {
-                    return Err(IpcError::new(
-                        codes::E_INVALID,
-                        format!(
-                            "catalog {name} belongs to another org; remove it and add it again to move it"
-                        ),
-                    ))
-                }
+            Some(org) => match self.get_catalog_by_name(name)? {
                 Some(existing) => {
                     self.conn.execute(
                         "UPDATE catalogs SET repo_path = ?2, remote_url = ?3, \
