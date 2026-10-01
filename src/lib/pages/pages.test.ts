@@ -73,6 +73,40 @@ describe('search and the page tree', () => {
     expect(searchSettings('', bundle.pages, descs, defaults)).toEqual([]);
   });
 
+  it('a guide naming a settled setting does not make search return it twice', () => {
+    // SettingsNav renders `{#each hits as h (h.key)}`, so two hits with one
+    // key is a Svelte duplicate-key error, not a cosmetic repeat. $allPages is
+    // the compiled pages PLUS every live guide, and a guide names settings
+    // that already have a home — so one approved guide was enough to throw.
+    const home = searchSettings('auto-tidy', bundle.pages, descs, defaults).find(
+      (h) => h.key === 'work.auto_tidy',
+    )!;
+    const guide: (typeof bundle.pages)[number] = {
+      spec: '{}',
+      id: 'guide.tidy',
+      title: 'Tidy up your fleet',
+      layout: 'guide',
+      sections: [
+        {
+          title: 'Turn auto-tidy on',
+          items: [{ type: 'field', key: 'work.auto_tidy' }],
+        },
+      ],
+    } as (typeof bundle.pages)[number];
+    const withGuide = [...bundle.pages, guide];
+    const hits = searchSettings('auto-tidy', withGuide, descs, defaults);
+    const keys = hits.map((h) => h.key);
+    expect(new Set(keys).size).toBe(keys.length);
+    // and the one kept is the setting's real home, not the guide
+    expect(hits.find((h) => h.key === 'work.auto_tidy')!.page).toBe(home.page);
+
+    // a setting whose own page does not match the query, named only by a
+    // guide whose SECTION title does, is still findable through the guide
+    // (the haystack is label/key/help/tags plus the section title)
+    const viaGuide = searchSettings('turn auto-tidy on', withGuide, descs, defaults);
+    expect(viaGuide.map((h) => h.page)).toContain('guide.tidy');
+  });
+
   it('@modified lists only what is off its default; @tag filters by tag', () => {
     const values = { ...defaults, 'gc.enabled': 'true' };
     expect(searchSettings('@modified', bundle.pages, descs, values).map((h) => h.key)).toEqual(['gc.enabled']);
