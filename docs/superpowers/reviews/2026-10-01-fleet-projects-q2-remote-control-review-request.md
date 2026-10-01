@@ -96,6 +96,12 @@ Then attack the design, not just the facts:
    thread can receive a Project's context at all, since that is delivered against
    a `SessionRow` that only exists if the listing produced one. If the answer is
    no, say plainly that decision P12 ("FP7 beats FP6") should change.
+   Already established by a run on the owner's machine (spec §16, 2026-10-01):
+   the rows carry `id, kind, name, pid, sessionId, cwd, startedAt, state, status`,
+   `kind` is only `interactive` or `background`, and **nothing marks a Remote
+   Control session** — so "listed" alone may not be enough to tell one apart, and
+   you should say how Fleet could distinguish them (pid? cwd? the server's own
+   pid as parent?).
 2. **Ownership collisions.** Fleet owns tmux panes and assumes it started what it
    manages. A remote-control server creates sessions Fleet did not start, in
    worktrees Fleet may or may not know about. Find the concrete places this

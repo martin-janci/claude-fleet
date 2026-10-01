@@ -85,8 +85,9 @@ From `cli-reference` and `claude-code-on-the-web`, read 2026-10-01:
 |---|---|---|
 | Several repositories in one session | `--add-dir`, `permissions.additionalDirectories` | the per-session half of R1 |
 | Standing instructions | `CLAUDE.md` / `AGENTS.md` per repo; `--append-system-prompt-file`; `--settings` | §6 |
-| Create a cloud session | `claude --cloud "task"` — **one repository at a time**, clones the cwd's GitHub remote at the current branch | FP6 (§15) |
-| Steer a cloud session | `claude -p "msg" --cloud <session-id>`, with `--output-format json` → `{ok, session_id, url}` | FP6 |
+| Create a cloud session | `claude --cloud "task"` — **one repository at a time**, clones the cwd's GitHub remote at the current branch. **Needs a TTY** (run, 2026-10-01: refused with `--print` and with piped stdout); prints the session id and exits 0 (§16, last item) | FP6 (§15), run in a Fleet pane |
+| Create a cloud session on your own infrastructure | `claude --cloud "task" --environment <ccpool_…>` — "a new cloud session that runs on the given self-hosted environment" (CLI help, 2.1.285; not run) | not used; noted in §16 Q2 |
+| Steer a cloud session | `claude -p "msg" --cloud <session-id>`, with `--output-format json` → `{ok, session_id, url}` — a delivery ack, **not** the reply (run, 2026-10-01) | FP6 |
 | Land a cloud session locally | `claude --teleport <session-id>` — needs a clean tree, the same repo, the branch pushed, the same account | FP6: how a cloud session becomes Fleet-owned |
 | A provider thread in a Fleet folder | `claude remote-control` (server mode) | §16 Q2 |
 | Worktree isolation | `--worktree`, `--tmux` | already used |
@@ -339,9 +340,9 @@ page and by the MCP read.
 |---|---|---|---|---|---|
 | Several repositories in one session | native (`--add-dir`) | **no** — `--cloud` is one repository at a time | native (it is local Claude Code) | per-harness flag | native where present; else one session per repo |
 | Standing instructions | native | native from the repo's `CLAUDE.md` | native, plus Fleet's catalog assets and its hooks (both are files on that host) | `AGENTS.md`, 32 KiB cap | **native**, rendered by the catalog |
-| Start work | Fleet owns the pane | `claude --cloud "task"` | **the person starts it from claude.ai**; Fleet only provisions the server | Fleet owns the pane | mixed — see the modes below |
-| Steer / follow up | Fleet owns the pane | `claude -p --cloud <id> --output-format json` | from claude.ai or the Claude app, not from Fleet | Fleet owns the pane | **controlled** on a pane; `reference` on a Remote Control thread |
-| Status, transcript, usage | native (hooks, pane-intel, `~/.claude/projects`) | **none from the CLI** | the transcript is on the host; status likely through `claude agents --json` (**to verify**, §16 Q2) | partial | cloud: **gap**; Remote Control: probably observable |
+| Start work | Fleet owns the pane | `claude --cloud "task"` in a Fleet pane (it needs a TTY); the id is read from the pane | **the person starts it from claude.ai**; Fleet only provisions the server | Fleet owns the pane | mixed — see the modes below |
+| Steer / follow up | Fleet owns the pane | `claude -p --cloud <id> --output-format json` — delivery only, the reply is not returned | from claude.ai or the Claude app, not from Fleet | Fleet owns the pane | **controlled** on a pane; `reference` on a Remote Control thread |
+| Status, transcript, usage | native (hooks, pane-intel, `~/.claude/projects`) | **none from the CLI** — the steer ack carries no reply either | the transcript is on the host; status likely through `claude agents --json` (**to verify**, §16 Q2) | partial | cloud: **gap**; Remote Control: probably observable |
 | Bring the session to a host | n/a | `claude --teleport <id>` | it already runs on the host | n/a | **assisted** (cloud); inherent (Remote Control) |
 | Diff, PR creation | Fleet + the PR probe | claude.ai/code only | the branch is on the host, so Fleet's PR probe sees it | Fleet | cloud: **gap**; Remote Control: native |
 | Cross-session project memory | none | none | only once an `external` row exists for the thread (§16 Q2 correction) | none | **substituted** (journal, handover, §6) |
@@ -358,7 +359,9 @@ interface:
   for a person to paste. The only mode a native Claude Project gets (P2).
 - `assisted` — Fleet prepares an action a person confirms (`--teleport`).
 - `controlled` — Fleet drives it through a supported interface (`--cloud`
-  create and follow-up).
+  create in a pane and `-p --cloud` follow-up, both run 2026-10-01). It means
+  Fleet can *act*; it does not mean Fleet can *see* — a cloud session is
+  `controlled` and still has the status gap.
 
 A gap is a first-class row in the UI with its reason and its `checked_at` date,
 so "there is no interface, checked 2026-10-01" is visible rather than
@@ -542,7 +545,9 @@ catalog, or keep a second copy of a repository's `CLAUDE.md`.
 - **Coordination:** a Project's `project_ids` default on start; the Work view
   grouped by Project; a tracker item placed in a Project staying read-only.
 - **Cloud (FP6):** the argv for `--cloud` and `-p --cloud <id>` against a stub
-  `claude`; the json parse of `{ok, session_id, url}`; a teleport refused on a
+  `claude`; the session id parsed from a captured pane (the three lines §16
+  quotes, plus a pane that never prints them and one stuck on the trust
+  prompt); the json parse of `{ok, session_id, url}`; a teleport refused on a
   dirty tree; no capability claimed that F2 does not name.
 - **Isolation matrix:** every new action.
 - **Frontend (vitest):** the Projects list and page; the capability panel's
@@ -568,13 +573,24 @@ catalog, or keep a second copy of a repository's `CLAUDE.md`.
 
 FP0 → FP1 → FP2 is the critical path to R7. FP4 depends on assets M2 (PR #416)
 and on multi-harness F3 item 1; FP5 on multi-harness F5. FP6 and FP7 are
-independent of FP4/FP5 and can run after FP3, in either order — **FP7 delivers
-more of R6 than FP6** (§16 Q2), so if only one is built, build FP7.
+independent of FP4/FP5 and can run after FP3, in either order.
 
-**FP6 is specified at the lower claim.** Creating a cloud session is `assisted`
-until someone verifies that `claude --cloud` can emit a machine-readable session
-id; §16's last item has the one command that settles it and what changes if it
-does.
+**Which of FP6 and FP7 to build first is no longer settled**, and two findings of
+2026-10-01 moved it in opposite directions. FP6 gained ground: creating a cloud
+session turned out to be `controlled`, not `assisted` (below). FP7 lost some: its
+advantage was that Fleet's whole context layer applies, and only part of it does —
+the assets and hooks reach a thread immediately, but the §6 project header reaches
+it only once an `external` row exists, which depends on an unanswered question
+(§16 Q2's correction). **So the order follows one check:** if `claude agents --json`
+lists a Remote Control server's sessions, FP7 still delivers more of R6 and goes
+first; if it does not, FP6 is the better first build and P12 should be revisited.
+
+**FP6's creation is `controlled`, through a pane.** `claude --cloud` refuses
+`--print` and a non-TTY stdout, but run in a tmux pane it prints the session id
+and exits; Fleet owns the pane, so it starts the cloud session and reads the id
+off the screen without a person in the loop (verified 2026-10-01, §16's last
+item). What FP6 still cannot do is read the session's replies: that gap is
+unchanged.
 
 ## 16. Open questions — findings and recommendations
 
@@ -699,6 +715,22 @@ does, Fleet's existing discovery gives status and labels for free and FP7 is
 small. If it does not, FP7 needs its own observation path (the transcript under
 `~/.claude/projects` is still there), and is perhaps twice the work. Check it on
 one host before planning.
+
+What is known so far (run on the owner's Mac, CLI 2.1.285, 2026-10-01, with no
+remote-control server running): `claude agents --json` is documented as "active
+sessions (interactive and background)", and its rows carry exactly `id, kind,
+name, pid, sessionId, cwd, startedAt, state, status`, with `kind` only ever
+`interactive` or `background`. There is **no field that marks a Remote Control
+session**, so even if the server's sessions are listed, Fleet could tell them
+from an ordinary interactive session only by `pid` ancestry or `cwd` (the
+server's worktree root). Whether they are listed at all still needs one
+`claude remote-control` run.
+
+**A third option §7 does not have a column for.** `--cloud --environment
+<ccpool_…>` creates a cloud session that "runs on the given self-hosted
+environment". If that environment can be a Fleet host, it is FP6's interface
+(`controlled` create and steer) on FP7's machine (Fleet's assets and hooks).
+Unread beyond the CLI help; worth one look before FP6 or FP7 is planned.
 
 **If this is wrong.** The cost is bounded: a provisioning step and a supervised
 process. Nothing in FP0–FP5 depends on it.
@@ -858,26 +890,47 @@ be reconciled with the `Actor` word — the cost is one backfill migration over
 two columns in tables that are new and small. That is a far smaller risk than
 stalling FP0 behind another design's schedule.
 
-### Still unverified, and why it is not a decision
+### Verified: Fleet can capture a new cloud session's id
 
-**Can Fleet capture a new cloud session's id?** `claude -p --cloud <id>`
-documents `--output-format json` → `{ok, session_id, url}`. Creation
-(`claude --cloud "task"`) is documented only as printing a live checklist, and
-the CLI's own help confirms the shape `--cloud [description|session_id|url]`
-without naming an output format. **This could not be verified from this
-session**: running `claude --cloud` is a real transaction against the owner's
-account, and the attempt was correctly refused; this container is also
-authenticated with an API key, which cannot create cloud sessions at all.
+**The question.** Can Fleet start a cloud session and learn its id without a
+person pasting it? The earlier draft could not run `claude --cloud` (a real
+transaction against the owner's account; that container was also API-key
+authenticated) and proposed `claude --cloud "…" --output-format json`.
 
-So FP6 is specified at the **lower** claim: creation is `assisted` (a person
-pastes the id), not `controlled`. To upgrade it, run this once on a machine
-signed in with the claude.ai account, in a throwaway repository, and keep the
-session it creates:
+**What was run**, on the owner's Mac, signed in with the claude.ai account,
+Claude Code 2.1.285, 2026-10-01, in an empty non-git scratch directory:
 
-```bash
-claude --cloud "print the repository name and stop" --output-format json
+| Invocation | Result |
+|---|---|
+| `claude -p --cloud "…" --output-format json` | refused, exit 1: "--cloud cannot be combined with --print. Starting a new cloud session with --cloud is interactive only" |
+| `claude --cloud "…"` with stdout redirected | refused, exit 1: "--cloud requires an interactive terminal. Non-interactive invocations (piped stdout, …) run locally and would silently ignore --cloud" |
+| `claude --cloud "…"` in a detached tmux pane | the folder trust prompt first (new folder); after it, the pane shows the three lines below and the process **exits 0** on its own |
+| `claude -p "…" --cloud <id> --output-format json` | exit 0, `{"ok":true,"session_id":"session_…","url":"https://claude.ai/code/session_…?from=cli&m=0"}` — no reply text |
+
+The pane output of a successful create:
+
+```text
+Created cloud session: <title>
+View: https://claude.ai/code/session_<id>?from=cli&m=0
+Resume with: claude --teleport session_<id>
 ```
 
-If that prints a parseable `session_id`, creation becomes `controlled`, §7's
-"Start work" row changes, and FP6 can start a cloud session without a person in
-the loop. If it does not, FP6 ships as specified and loses nothing else.
+**So the proposed command was wrong** (`--output-format` needs `--print`, which
+`--cloud` refuses), and **the answer is still yes**: creation needs a TTY, and a
+Fleet pane is one. FP6 runs `claude --cloud "task"` in a pane it owns, waits
+for the process to exit, and parses `session_[A-Za-z0-9]+` from the
+`Resume with:` line. Creation is `controlled` (§7, §15).
+
+**What this does not settle.**
+
+- The trust prompt appears in a folder the host has not trusted. A Project
+  repo on a Fleet host normally is trusted; where it is not, the pane shows
+  `stuck_kind = trust_prompt` and FP6 refuses rather than answering it.
+- The test ran outside a git repository and still created a session, though F2
+  says creation clones the cwd's GitHub remote. Its title came out as a generic
+  "Session description"; whether the task text reached the session as its
+  first prompt was not checked. FP6's plan must check it in a real repo.
+- Reading a cloud session's replies is still a gap: the steer ack is delivery
+  only, and `--teleport` (not run) is the one way back.
+
+The test sessions were left on the account (claude.ai/code), not deleted.
