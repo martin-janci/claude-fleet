@@ -121,14 +121,21 @@ impl Store {
             rusqlite::params![host_alias, harness],
         )?;
         for r in rows {
+            // `catalog_id` is looked up through a subquery rather than bound
+            // directly: an id that names no row in `catalogs` (stale —
+            // e.g. the catalog it pointed to was unloaded or dropped
+            // between scans) resolves to `NULL` instead of failing the
+            // foreign key, which would otherwise roll back and lose this
+            // host's ENTIRE inventory over one row's stale reference.
             tx.execute(
-                "INSERT INTO asset_inventory (host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO asset_inventory (host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned, catalog_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, (SELECT id FROM catalogs WHERE id = ?12))",
                 rusqlite::params![
                     host_alias, harness, r.kind, r.name, r.state, r.catalog_hash, r.host_hash, r.scanned_at,
                     if r.managed { 1 } else { 0 },
                     if r.secret_like { 1 } else { 0 },
                     if r.fleet_owned { 1 } else { 0 },
+                    r.catalog_id,
                 ],
             )?;
         }
@@ -142,7 +149,7 @@ impl Store {
 
     pub fn list_inventory(&self) -> Result<Vec<AssetInventoryRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned
+            "SELECT host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned, catalog_id
              FROM asset_inventory ORDER BY host_alias, harness, kind, name",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -158,6 +165,7 @@ impl Store {
                 managed: row.get::<_, i64>(8)? != 0,
                 secret_like: row.get::<_, i64>(9)? != 0,
                 fleet_owned: row.get::<_, i64>(10)? != 0,
+                catalog_id: row.get(11)?,
             })
         })?;
         rows.collect()
@@ -391,6 +399,7 @@ mod tests {
             managed: false,
             secret_like: false,
             fleet_owned: false,
+            catalog_id: None,
         };
         s.replace_host_inventory(
             "local",
@@ -422,6 +431,35 @@ mod tests {
         assert!(all
             .iter()
             .any(|r| r.host_alias == "mefistos" && r.name == "z"));
+    }
+
+    /// `catalog_id` (Assets M2) is a real foreign key into `catalogs(id)`,
+    /// but a stale or hand-built id that names no row there must not fail
+    /// the whole insert — a scan's row for ONE asset must never roll back
+    /// every other row the same scan computed for that host.
+    #[test]
+    fn replace_host_inventory_stores_null_for_an_unknown_catalog_id() {
+        let s = Store::open_in_memory().expect("open");
+        let row = AssetInventoryRow {
+            host_alias: "local".into(),
+            harness: "claude".into(),
+            kind: "skill".into(),
+            name: "a".into(),
+            state: "in_sync".into(),
+            catalog_hash: Some("c".into()),
+            host_hash: Some("h".into()),
+            scanned_at: 1,
+            managed: true,
+            secret_like: false,
+            fleet_owned: false,
+            // No `catalogs` row has this id — not even the personal one,
+            // since nothing was configured.
+            catalog_id: Some(999_999),
+        };
+        s.replace_host_inventory("local", "claude", &[row]).unwrap();
+        let rows = s.list_inventory().unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].catalog_id, None);
     }
 
     #[test]
@@ -481,6 +519,7 @@ mod tests {
             managed: false,
             secret_like: true,
             fleet_owned: true,
+            catalog_id: None,
         };
         s.replace_host_inventory(
             "local",

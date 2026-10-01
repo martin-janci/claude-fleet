@@ -90,6 +90,14 @@ pub struct Action {
     pub kind: String,
     pub name: String,
     pub op: ActionOp,
+    /// Which catalog this asset came from (Assets M2), e.g. `"personal"`.
+    /// `None` for an action that names no catalog asset (a `Remove` for a
+    /// manifest orphan, or a `Blocked` for a refusal the effective catalog
+    /// made before any harness ever saw the asset). `#[serde(default)]`
+    /// because `Action` travels the wire (`sync_plan`'s answer): a hub older
+    /// than Assets M2 never sends this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
     /// Why, for `Blocked`/`Overwrite`/plugin ops.
     pub reason: Option<String>,
     /// Display: file paths this action would write (or delete).
@@ -188,7 +196,10 @@ pub struct PlanFilter {
 }
 
 impl PlanFilter {
-    fn matches(&self, kind: Kind, name: &str) -> bool {
+    /// `pub(crate)`: `sync::plan_sync` (in the parent `sync` module) uses it
+    /// too, to decide which of `EffectiveSet::refused` this host's plan
+    /// should turn into a `Blocked` action.
+    pub(crate) fn matches(&self, kind: Kind, name: &str) -> bool {
         self.kind.is_none_or(|k| k == kind) && self.name.as_deref().is_none_or(|n| n == name)
     }
 }
@@ -312,6 +323,7 @@ fn expected_for<'a>(
 /// `action.plan`'s hash, not the raw `Harness::render` output's. A rotated
 /// secret therefore reads as `Update` (the host's bytes really must change),
 /// not as a host edit.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_host_plan(
     catalog: &Catalog,
     harness: &dyn Harness,
@@ -320,13 +332,32 @@ pub fn compute_host_plan(
     manifest: &Manifest,
     secrets: &BTreeMap<String, String>,
     filter: &PlanFilter,
+    // Assets M2: `(kind, name)` of every asset the host's existing copy must
+    // be left alone for, though it is absent from `catalog` — either
+    // because the EFFECTIVE catalog REFUSED it (a scope boundary or a
+    // cross-catalog collision) or because the scope boundary WITHHELD it
+    // silently (an unlayered org host's private personal assets —
+    // `effective::EffectiveSet::refused` and `::withheld` respectively,
+    // merged by `sync::plan_sync`). Without this such an asset reads to
+    // `manifest.orphans` exactly like one the catalog genuinely dropped,
+    // scheduling a `Remove` — destructive either way a refusal or a
+    // withholding must never be. Empty for every caller outside
+    // `plan_sync`.
+    protected: &BTreeSet<(Kind, String)>,
 ) -> HostPlan {
     let mut actions = Vec::new();
     for asset in &catalog.assets {
         if !filter.matches(asset.kind(), &asset.header.name) {
             continue;
         }
-        actions.push(action_for(harness, asset, snap, manifest, secrets));
+        let mut action = action_for(harness, asset, snap, manifest, secrets);
+        // Assets M2: every action for a catalog asset says which catalog it
+        // came from. `catalog` here is the host's resolved (`eff.catalog`)
+        // catalog, so `origin_of` answers correctly for a union of several
+        // catalogs as well as for the single-catalog case (where it falls
+        // back to `catalog` itself, e.g. "personal").
+        action.catalog = Some(catalog.origin_of(asset.kind(), &asset.header.name).name);
+        actions.push(action);
     }
     for (key, entry) in manifest.orphans(catalog) {
         let Some((kind, name)) = Manifest::split_key(key) else {
@@ -340,11 +371,22 @@ pub fn compute_host_plan(
         if !filter.matches(kind, &name) {
             continue;
         }
+        if protected.contains(&(kind, name.clone())) {
+            // Refused or silently withheld, not dropped from the catalog: a
+            // `Blocked` or `Noop` action already says why
+            // (`sync::plan_sync` appends it), and removing the host's
+            // existing copy here would make either destructive — the one
+            // thing neither must ever be.
+            continue;
+        }
         if kind == Kind::PluginRef && filter.layered {
             actions.push(Action {
                 kind: kind.as_str().to_string(),
                 name: name.clone(),
                 op: ActionOp::Noop,
+                // Not a catalog asset any more — this is exactly the entry
+                // the catalog dropped — so it names no catalog.
+                catalog: None,
                 reason: Some(
                     "no longer in this host's effective catalog; plugins are not removed \
                      automatically"
@@ -367,6 +409,7 @@ pub fn compute_host_plan(
             kind: kind.as_str().to_string(),
             name,
             op: ActionOp::Remove,
+            catalog: None,
             reason: Some("no longer in the catalog".into()),
             files: entry.files.clone(),
             merges: merge_labels(entry.merges.iter().map(|m| (&m.file, &m.json_path))),
@@ -395,6 +438,68 @@ pub fn compute_host_plan(
     }
 }
 
+/// A `Blocked` action for an asset the *effective catalog* refused before
+/// any harness ever saw it — a scope boundary or a cross-catalog collision
+/// (`effective::EffectiveSet::refused`), as opposed to a per-harness render
+/// decision. It carries no files, merges or plan: there is nothing to
+/// render for an asset that never reached the resolved catalog. `catalog`
+/// names the single catalog a scope-boundary refusal is about
+/// (`Refusal::catalog`); a collision refuses a member from each of two or
+/// more catalogs, so it stays `None` there — unresolved, not irrelevant.
+/// `sync::plan_sync` is the only caller.
+pub(crate) fn blocked_action(
+    kind: Kind,
+    name: &str,
+    reason: String,
+    catalog: Option<String>,
+) -> Action {
+    Action {
+        kind: kind.as_str().to_string(),
+        name: name.to_string(),
+        op: ActionOp::Blocked,
+        catalog,
+        reason: Some(reason),
+        files: Vec::new(),
+        merges: Vec::new(),
+        backup: false,
+        secrets: Vec::new(),
+        missing_secrets: Vec::new(),
+        plan: None,
+        expected: BTreeMap::new(),
+        secret_files: BTreeSet::new(),
+        remove_entry: None,
+        plugin: None,
+    }
+}
+
+/// A `Noop` action reporting why a private asset the scope boundary dropped
+/// SILENTLY (`effective::EffectiveSet::withheld` — an unlayered org host's
+/// personal catalog) is nonetheless staying on the host: it is already
+/// synced there, and withholding it must never mean removing it. Carries no
+/// files, merges or plan, like `blocked_action` — there is nothing to
+/// render for an asset that never reached the resolved catalog.
+/// `sync::plan_sync` is the only caller, and only when the host's manifest
+/// already names the asset (nothing to report otherwise).
+pub(crate) fn withheld_noop(kind: Kind, name: &str) -> Action {
+    Action {
+        kind: kind.as_str().to_string(),
+        name: name.to_string(),
+        op: ActionOp::Noop,
+        catalog: None,
+        reason: Some("private; withheld from org host, not removed".to_string()),
+        files: Vec::new(),
+        merges: Vec::new(),
+        backup: false,
+        secrets: Vec::new(),
+        missing_secrets: Vec::new(),
+        plan: None,
+        expected: BTreeMap::new(),
+        secret_files: BTreeSet::new(),
+        remove_entry: None,
+        plugin: None,
+    }
+}
+
 fn action_for(
     harness: &dyn Harness,
     asset: &Asset,
@@ -409,6 +514,10 @@ fn action_for(
         kind: kind.as_str().to_string(),
         name: name.clone(),
         op: ActionOp::Noop,
+        // The caller (`compute_host_plan`) stamps the real value once this
+        // action comes back — it alone knows which resolved catalog is
+        // being planned.
+        catalog: None,
         reason: None,
         files: Vec::new(),
         merges: Vec::new(),
@@ -933,6 +1042,7 @@ mod tests {
             manifest,
             values,
             &PlanFilter::default(),
+            &BTreeSet::new(),
         )
     }
 
@@ -1037,7 +1147,7 @@ mod tests {
         };
         manifest.assets.insert(
             "skill/foo-bar".into(),
-            Manifest::entry_for(&old_plan.hash(), &old_plan, 0),
+            Manifest::entry_for(&old_plan.hash(), &old_plan, 0, "personal"),
         );
 
         let hp = plan_for(
@@ -1063,7 +1173,7 @@ mod tests {
         };
         manifest.assets.insert(
             "skill/foo-bar".into(),
-            Manifest::entry_for(&new_plan.hash(), &new_plan, 0),
+            Manifest::entry_for(&new_plan.hash(), &new_plan, 0, "personal"),
         );
         let mut snap = HostSnapshot::default();
         satisfy(&mut snap, &new_plan);
@@ -1487,6 +1597,7 @@ mod tests {
                     value_hash: "vh".into(),
                 }],
                 synced_at: 1,
+                catalog: "personal".into(),
             },
         );
         // A key nothing can parse is skipped rather than half-planned.
@@ -1541,6 +1652,7 @@ mod tests {
                 layered: true,
                 ..Default::default()
             },
+            &BTreeSet::new(),
         );
         let a = act(&hp, "graphify");
         assert_eq!(a.op, ActionOp::Noop);
@@ -1619,6 +1731,7 @@ mod tests {
             &manifest,
             &secrets_map(),
             &filter,
+            &BTreeSet::new(),
         );
         assert_eq!(hp.actions.len(), 1);
         assert_eq!(hp.actions[0].name, "s");
@@ -1635,6 +1748,7 @@ mod tests {
             &manifest,
             &secrets_map(),
             &filter,
+            &BTreeSet::new(),
         );
         assert_eq!(hp.actions.len(), 1);
         assert_eq!(hp.actions[0].name, "fleet");

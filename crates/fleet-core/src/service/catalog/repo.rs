@@ -6,10 +6,18 @@ use super::{E_ASSET_EXISTS, E_ASSET_NOT_FOUND, E_CATALOG_GIT, E_CATALOG_PARSE};
 use crate::ipc_error::codes::E_INVALID;
 use crate::ipc_error::IpcError;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u64 = 1;
+
+/// A pointer to the catalog an asset actually came from, on a composed
+/// (effective / union) catalog — see `Catalog::origin`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogRef {
+    pub id: i64,
+    pub name: String,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Catalog {
@@ -34,6 +42,13 @@ pub struct Catalog {
     /// Layer definitions from `layers/*.yaml`. Empty ⇒ no layering, and
     /// every host resolves to the whole catalog (backward compatibility).
     pub layers: crate::service::catalog::layer::LayerSet,
+    /// `<kind>/<name>` → the catalog that asset came from, on a composed
+    /// (effective / union) catalog. Empty on a catalog loaded from one repo:
+    /// then every asset is from `self`. `#[serde(default)]` because `Catalog`
+    /// travels the wire nested in `resolve::Resolution`: a hub older than
+    /// Assets M2 never sends this field.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub origin: BTreeMap<String, CatalogRef>,
 }
 
 impl Catalog {
@@ -41,6 +56,19 @@ impl Catalog {
         self.assets
             .iter()
             .find(|a| a.kind() == kind && a.header.name == name)
+    }
+
+    /// Which catalog `kind/name` came from: `origin`, else this catalog
+    /// itself (a catalog loaded straight from one repo has no `origin`
+    /// entries — every asset on it is its own).
+    pub fn origin_of(&self, kind: Kind, name: &str) -> CatalogRef {
+        self.origin
+            .get(&format!("{}/{name}", kind.as_str()))
+            .cloned()
+            .unwrap_or_else(|| CatalogRef {
+                id: self.id,
+                name: self.name.clone(),
+            })
     }
 }
 

@@ -18,12 +18,39 @@ use std::collections::BTreeMap;
 /// config merges (as `ManifestMerge`, so the value itself is never kept
 /// around — only its hash), the overall `RenderPlan` hash it came from, and
 /// when it was last synced.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManifestEntry {
     pub hash: String,
     pub files: Vec<String>,
     pub merges: Vec<ManifestMerge>,
     pub synced_at: i64,
+    /// Which catalog this asset was applied from (Assets M2). An old
+    /// manifest written before this field existed has none on disk, so it
+    /// reads as `"personal"` — every host synced before Assets M2 could only
+    /// ever have gotten its assets from the personal catalog.
+    #[serde(default = "personal")]
+    pub catalog: String,
+}
+
+fn personal() -> String {
+    "personal".into()
+}
+
+/// Manual, not derived: `catalog` defaults to `"personal"`, consistent with
+/// the field's own `#[serde(default = "personal")]` rather than the
+/// `String`-derived `""` a `#[derive(Default)]` would give it. A test (or
+/// any other caller) building an entry with `..Default::default()` gets the
+/// same catalog a deserialised pre-Assets-M2 manifest would.
+impl Default for ManifestEntry {
+    fn default() -> Self {
+        ManifestEntry {
+            hash: String::new(),
+            files: Vec::new(),
+            merges: Vec::new(),
+            synced_at: 0,
+            catalog: personal(),
+        }
+    }
 }
 
 /// The manifest file itself: every managed asset keyed by `Manifest::key`.
@@ -73,9 +100,10 @@ impl Manifest {
 
     /// Build the entry to record for a just-applied `plan`: `hash` is the
     /// plan's overall content hash (see `RenderPlan::hash`), `files` are
-    /// the paths it wrote, and `merges` hash the (already-substituted)
-    /// merge values rather than keeping them.
-    pub fn entry_for(hash: &str, plan: &RenderPlan, now: i64) -> ManifestEntry {
+    /// the paths it wrote, `merges` hash the (already-substituted) merge
+    /// values rather than keeping them, and `catalog` is the name of the
+    /// catalog the applied action's asset came from (`Action::catalog`).
+    pub fn entry_for(hash: &str, plan: &RenderPlan, now: i64, catalog: &str) -> ManifestEntry {
         ManifestEntry {
             hash: hash.to_string(),
             files: plan.files.iter().map(|f| f.path.clone()).collect(),
@@ -90,6 +118,7 @@ impl Manifest {
                 })
                 .collect(),
             synced_at: now,
+            catalog: catalog.to_string(),
         }
     }
 
@@ -174,6 +203,7 @@ mod tests {
                     value_hash: "deadbeef".into(),
                 }],
                 synced_at: 100,
+                catalog: "personal".into(),
             },
         );
         let json = m.to_json();
@@ -241,7 +271,7 @@ mod tests {
             mode: MergeMode::Set,
             value: value.clone(),
         });
-        let entry = Manifest::entry_for("planhash", &plan, 123);
+        let entry = Manifest::entry_for("planhash", &plan, 123, "personal");
         assert_eq!(entry.hash, "planhash");
         assert_eq!(
             entry.files,
@@ -255,6 +285,43 @@ mod tests {
             entry.merges[0].value_hash,
             value_hash(&json!({"token": "${SECRET}"}))
         );
+    }
+
+    /// `entry_for` records whichever catalog name it is given — the applier
+    /// passes `Action::catalog` (Assets M2), so a plugin/asset applied from
+    /// an org catalog is recorded as such rather than silently as
+    /// `"personal"`.
+    #[test]
+    fn entry_for_records_the_catalog_it_is_given() {
+        let mut plan = RenderPlan::default();
+        plan.files.push(FileWrite {
+            path: "~/.claude/skills/s/SKILL.md".into(),
+            bytes: b"body".to_vec(),
+        });
+        let entry = Manifest::entry_for("h", &plan, 1, "acme");
+        assert_eq!(entry.catalog, "acme");
+    }
+
+    /// An old manifest, written before Assets M2 added `catalog` to the
+    /// entry, has no such field on disk. It must still deserialise —
+    /// every host synced before Assets M2 could only ever have gotten its
+    /// assets from the personal catalog, so that is what it reads as.
+    #[test]
+    fn an_entry_with_no_catalog_field_deserialises_as_personal() {
+        let entry: ManifestEntry =
+            serde_json::from_str(r#"{"hash":"h","files":[],"merges":[],"synced_at":1}"#).unwrap();
+        assert_eq!(entry.catalog, "personal");
+    }
+
+    /// `Default` is implemented by hand, not derived: a `String`-derived
+    /// default would give `catalog: ""`, inconsistent with the field's own
+    /// `#[serde(default = "personal")]` — a caller building an entry with
+    /// `..Default::default()` (as plenty of tests across the sync module
+    /// do) must see the same `"personal"` a deserialised pre-Assets-M2
+    /// manifest reads as.
+    #[test]
+    fn default_catalog_matches_the_serde_default() {
+        assert_eq!(ManifestEntry::default().catalog, "personal");
     }
 
     #[test]

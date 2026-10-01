@@ -25,6 +25,7 @@ pub mod manifest;
 pub mod plan;
 pub mod secrets;
 
+use super::effective;
 use super::harness_set::{self, gated_catalog, harness_gate, HarnessFacts, HarnessGate};
 use crate::cancel::{CancelGuard, CancellationRegistry};
 use crate::events::SyncProgress;
@@ -96,10 +97,13 @@ pub struct SyncRunSummary {
     pub hosts: Vec<HostSyncResult>,
 }
 
-/// The loaded personal catalog, cloned out of the registry so nothing holds
-/// its lock across an await.
+/// Every loaded catalog, merged (Assets M2: `registry::union_all`), cloned
+/// out of the registry so nothing holds its lock across an await. This is
+/// the FULL catalog a scan diffs against — never the host-resolved one
+/// (`effective::effective_for_host`'s `eff.catalog`), which is what a host
+/// is supposed to have, not what its drift is measured against.
 fn catalog() -> Result<super::repo::Catalog, IpcError> {
-    super::registry::personal()?.ok_or_else(|| {
+    super::registry::union_all()?.ok_or_else(|| {
         IpcError::new(
             super::E_CATALOG_NOT_CONFIGURED,
             "catalog not loaded; call catalog_load",
@@ -252,11 +256,14 @@ pub async fn plan_sync(
                 continue;
             }
         };
-        // Resolve the host's layers ONCE per host, before its harnesses are
-        // planned. The scan below still uses the FULL catalog: inventory is
-        // about the whole catalog's drift, while the PLAN is about what this
-        // host is supposed to have.
-        let resolved = match layers::resolve_for_host(store, &catalog, &h.alias) {
+        // Resolve the host's EFFECTIVE catalog ONCE per host, before its
+        // harnesses are planned: every catalog it accepts, resolved for it,
+        // the scope boundary applied and cross-catalog collisions refused
+        // (Assets M2). It does its own store-then-registry ordering, so this
+        // is called with no store guard held. The scan below still uses the
+        // FULL (union) catalog: inventory is about the whole catalog's
+        // drift, while the PLAN is about what this host is supposed to have.
+        let eff = match effective::effective_for_host(store, &h.alias) {
             Ok(r) => r,
             Err(e) => {
                 for harness in &listed {
@@ -269,11 +276,20 @@ pub async fn plan_sync(
         // catalog — the spec's first critical finding. Refuse it up front,
         // before the scan: every listed harness gets the same skipped
         // plan and the host is never touched over SSH.
+        //
+        // The emptiness check is against the WHOLE loaded (union) catalog,
+        // never `eff.catalog`: an org-bound host's effective catalog can be
+        // empty purely because the scope boundary dropped every (private)
+        // asset an unlayered personal catalog would otherwise hand it — that
+        // is exactly the case this guard exists to catch, not a reason to
+        // let it through. Treating that as "nothing to refuse" would plan
+        // this host against an empty catalog, and every entry its manifest
+        // already names would read as an orphan and get removed.
         if refuse_unlayered(
             &h.alias,
-            resolved.layered,
+            eff.layered,
             args.allow_unlayered,
-            resolved.catalog.assets.is_empty(),
+            catalog.assets.is_empty(),
         ) {
             for harness in &listed {
                 host_plans.push(skipped_plan(&h.alias, harness.id(), UNLAYERED_DETAIL));
@@ -283,14 +299,79 @@ pub async fn plan_sync(
         // A host with no `host_layers` row must plan a dropped `plugin_ref`
         // exactly as it did before layers existed (`Remove`), not the
         // "reported, not removed" `Noop` that only makes sense once a host
-        // opts into layers. `resolved.layered` answers that from the same
-        // read `resolve_for_host` already made — a second read would be a
+        // opts into layers. `eff.layered` answers that from the same read
+        // `effective_for_host` already made — a second read would be a
         // second failure path, and one that used to abort the whole plan
         // instead of skipping just this host.
         let host_filter = PlanFilter {
-            layered: resolved.layered,
+            layered: eff.layered,
             ..filter.clone()
         };
+        // Every asset the effective catalog refused (a scope boundary or a
+        // cross-catalog collision) that this plan's `kind`/`name` filter
+        // still covers, resolved to its `Kind` and deduplicated by
+        // `(kind, name)` — a collision refuses EVERY colliding copy
+        // (`effective::compose`), so a two-catalog clash on the same name
+        // produces two `Refusal` entries sharing one key and the same
+        // reason text; collecting into a map rather than a `Vec` keeps
+        // exactly one. Reused both for the `Blocked` action below and to
+        // keep `compute_host_plan` from treating the SAME asset as a
+        // manifest orphan (it is refused, not dropped from the catalog: the
+        // host's existing copy must be left exactly as it is, not removed).
+        let refused_matched: BTreeMap<(super::model::Kind, String), (String, Option<String>)> = eff
+            .refused
+            .iter()
+            .filter_map(|r| {
+                let kind = super::model::Kind::ALL
+                    .iter()
+                    .copied()
+                    .find(|k| k.as_str() == r.kind)?;
+                host_filter.matches(kind, &r.name).then(|| {
+                    (
+                        (kind, r.name.clone()),
+                        (r.reason.clone(), r.catalog.clone()),
+                    )
+                })
+            })
+            .collect();
+        // Once per harness this host lists — the refusal is a catalog-level
+        // decision, independent of which harness renders it, so every
+        // harness's plan reports it.
+        let blocked_for_refusals: Vec<plan::Action> = refused_matched
+            .iter()
+            .map(|((kind, name), (reason, catalog))| {
+                plan::blocked_action(*kind, name, reason.clone(), catalog.clone())
+            })
+            .collect();
+        // Every private asset the scope boundary dropped SILENTLY (an
+        // unlayered org host's personal catalog — `effective::compose`
+        // records no `Refusal` for this, since keeping only the shared
+        // slice is the default, not a mistake) that this plan's filter
+        // still covers. "Silent" must not mean "destructive": a host that
+        // already has one of these synced (from before it had an org, or
+        // before Assets M2) must keep it exactly as it is, same as a
+        // `refused` asset.
+        let withheld_keys: BTreeSet<(super::model::Kind, String)> = eff
+            .withheld
+            .iter()
+            .filter_map(|(kind_str, name)| {
+                let kind = super::model::Kind::ALL
+                    .iter()
+                    .copied()
+                    .find(|k| k.as_str() == kind_str)?;
+                host_filter
+                    .matches(kind, name)
+                    .then_some((kind, name.clone()))
+            })
+            .collect();
+        // Both `refused` and `withheld` protect the host's existing copy
+        // from `compute_host_plan`'s manifest-orphan `Remove` the same way:
+        // merged into one set so a single lookup there covers either reason.
+        let protected_keys: BTreeSet<(super::model::Kind, String)> = refused_matched
+            .keys()
+            .cloned()
+            .chain(withheld_keys.iter().cloned())
+            .collect();
         // Every scanning harness is scanned, even one this host may not
         // serve: the scan is what detects it and reads its manifest.
         for harness in &scanning {
@@ -303,7 +384,7 @@ pub async fn plan_sync(
                 Ok((snap, manifest, gate)) => {
                     // `Off` plans nothing; `Retiring` plans against an empty
                     // catalog, so only removals of fleet's own installs remain.
-                    let Some(planned) = gated_catalog(gate, &resolved.catalog) else {
+                    let Some(planned) = gated_catalog(gate, &eff.catalog) else {
                         continue;
                     };
                     let mut hp = plan::compute_host_plan(
@@ -314,9 +395,23 @@ pub async fn plan_sync(
                         &manifest,
                         &secrets,
                         &host_filter,
+                        &protected_keys,
                     );
                     if gate == HarnessGate::Retiring {
                         hp.detail = Some(harness_set::retiring_detail(harness.id()));
+                    } else {
+                        hp.actions.extend(blocked_for_refusals.iter().cloned());
+                        // Report, don't just silently keep: a withheld asset
+                        // this harness's manifest already names gets a
+                        // `Noop` saying why it's staying, same spirit as the
+                        // layered-host "plugins are not removed
+                        // automatically" report just below in
+                        // `compute_host_plan`'s own orphans pass.
+                        for (kind, name) in &withheld_keys {
+                            if manifest.assets.contains_key(&Manifest::key(*kind, name)) {
+                                hp.actions.push(plan::withheld_noop(*kind, name));
+                            }
+                        }
                     }
                     host_plans.push(hp);
                 }
@@ -653,6 +748,8 @@ mod tests {
     use super::*;
     use crate::cancel::CancellationRegistry;
     use crate::events::RecordingEventBus;
+    #[cfg(unix)]
+    use crate::service::catalog::model::{Asset, Kind};
     use crate::service::catalog::repo;
     use crate::ssh::SshClient;
     use crate::store::Store;
@@ -678,7 +775,14 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
         }
-        let cat = repo::load_dir(root).unwrap();
+        let mut cat = repo::load_dir(root).unwrap();
+        // `repo::load_dir` alone leaves `name` at its `Default` (`""`): real
+        // catalogs get their name from the store's `catalogs` row (`load`),
+        // which these tests bypass. Naming it "personal" here is what every
+        // test in this module has implicitly meant by "the catalog" all
+        // along, and it is now observable: `Action::catalog` (Assets M2)
+        // reports it on every action.
+        cat.name = "personal".into();
         super::super::registry::install(cat).unwrap();
     }
 
@@ -727,6 +831,7 @@ mod tests {
             kind: "skill".into(),
             name: "s".into(),
             op: ActionOp::Create,
+            catalog: Some("personal".into()),
             reason: None,
             files: vec!["~/.claude/skills/s/SKILL.md".into()],
             merges: Vec::new(),
@@ -756,6 +861,30 @@ mod tests {
                 Some(&["claude".to_string(), "codex".to_string()][..]),
             )
             .unwrap();
+            // `set_host_layers` now targets the personal catalog.
+            s.set_catalog_config("/p", None).unwrap();
+            // Every caller here calls `load_catalog` BEFORE this function,
+            // when no store (and so no real catalog id) exists yet —
+            // `load_catalog` installs it under the registry's "id 0 stands
+            // for personal" convention instead. That convention is fine for
+            // resolving `host_layers` rows, but `asset_inventory.catalog_id`
+            // (Assets M2) is a real foreign key into `catalogs(id)`, and
+            // `compute_states` now stamps it from the registry catalog's own
+            // id: a scan would fail its (silently swallowed) insert with no
+            // `catalogs` row `0` to reference. Production's `load` always
+            // stamps the store's real personal id before installing
+            // (`cat.id = personal.id`); reconcile the same way here, now
+            // that the store row exists to read it from.
+            if let Ok(Some(cat)) = super::super::registry::personal() {
+                if cat.id == 0 {
+                    let real_id = s.personal_catalog().unwrap().unwrap().id;
+                    super::super::registry::install_personal(super::super::repo::Catalog {
+                        id: real_id,
+                        ..cat
+                    })
+                    .unwrap();
+                }
+            }
         }
         store
     }
@@ -821,6 +950,441 @@ mod tests {
         assert!(
             plan::registry_take(&plan.id).is_none(),
             "a plan is applied at most once"
+        );
+    }
+
+    /// Assets M2: every action `compute_host_plan` produces for a catalog
+    /// asset says which catalog it came from. With only the personal
+    /// catalog loaded and no layer assignment, that is `"personal"` for
+    /// everything the plan touches — the personal-only equivalence the
+    /// controller notes require, plus the one new field.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_records_each_actions_catalog() {
+        let _lock = super::super::lock_registry_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        let _repo = load_one_skill();
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(PlanArgs::default(), &store, &ssh).await.unwrap();
+        let create = plan
+            .hosts
+            .iter()
+            .flat_map(|h| &h.actions)
+            .find(|a| a.name == "s" && a.op == ActionOp::Create)
+            .expect("a create action for s");
+        assert_eq!(create.catalog.as_deref(), Some("personal"));
+    }
+
+    /// One skill named `s`, scoped `shared` — as `skill_asset` returns it
+    /// via `Asset::from_yaml` rather than `one_skill`'s on-disk YAML: the
+    /// refusal path never renders the asset (it never reaches the resolved
+    /// catalog), so no body/harness rendering is needed here.
+    #[cfg(unix)]
+    fn skill_asset(name: &str, scope: &str) -> Asset {
+        Asset::from_yaml(
+            Some(Kind::Skill),
+            &format!("kind: skill\nname: {name}\ndescription: d\nscope: {scope}\n"),
+        )
+        .unwrap()
+    }
+
+    /// A `plugin_ref` with no `scope:` key — defaults to private, same as a
+    /// skill with none.
+    #[cfg(unix)]
+    fn plugin_ref_asset(name: &str) -> Asset {
+        Asset::from_yaml(
+            Some(Kind::PluginRef),
+            &format!(
+                "kind: plugin_ref\nname: {name}\ndescription: d\nharness: claude\n\
+                 marketplace: {{ name: mk, source: github, repo: o/r }}\n\
+                 plugin: {name}\nversion: \"latest\"\n"
+            ),
+        )
+        .unwrap()
+    }
+
+    /// Assets M2: a cross-catalog collision (personal's shared `s` vs.
+    /// acme's `s`, on a host bound to org acme) refuses both copies, and
+    /// `plan_sync` turns the refusal into a `Blocked` action carrying
+    /// `effective_for_host`'s own reason — proving the refusal actually
+    /// reaches the plan, not just `EffectiveSet` in isolation. Unix-only like
+    /// its siblings: it plans against the real `local` host, whose harness
+    /// probe finds nothing on the Windows runner.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_refused_asset_is_a_blocked_action_with_its_reason() {
+        let _lock = super::super::lock_registry_for_test();
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let (personal_id, acme_id): (i64, i64) = {
+            let s = store.lock().unwrap();
+            let personal_id = s.personal_catalog().unwrap().unwrap().id;
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO orgs (id, name, created_at) VALUES (10, 'acme', 0)",
+                    [],
+                )
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO catalogs (name, repo_path, org_id, created_at) \
+                     VALUES ('acme', '/a', 10, 0)",
+                    [],
+                )
+                .unwrap();
+            let acme_id: i64 = s
+                .conn_ref()
+                .query_row("SELECT id FROM catalogs WHERE name='acme'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            // Org-bound: `local`'s only acceptable catalogs are acme (its
+            // own org) and the SHARED slice of personal.
+            s.set_host_org("local", Some(10)).unwrap();
+            (personal_id, acme_id)
+        };
+        // Real store-issued ids, not the registry's "id 0 stands for
+        // personal" convention: `plan_sync` also scans the FULL (union)
+        // catalog for inventory, and `compute_states` now stamps
+        // `catalog_id` — a real foreign key into `catalogs(id)` — from
+        // whichever id the registry catalog carries.
+        super::super::registry::install_personal(repo::Catalog {
+            id: personal_id,
+            name: "personal".into(),
+            org_id: None,
+            assets: vec![skill_asset("s", "shared")],
+            ..Default::default()
+        })
+        .unwrap();
+        super::super::registry::install_for_test(repo::Catalog {
+            id: acme_id,
+            name: "acme".into(),
+            org_id: Some(10),
+            assets: vec![skill_asset("s", "private")],
+            ..Default::default()
+        })
+        .unwrap();
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(
+            PlanArgs {
+                host_alias: Some("local".into()),
+                ..PlanArgs::default()
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+
+        let blocked = plan
+            .hosts
+            .iter()
+            .flat_map(|h| &h.actions)
+            .find(|a| a.name == "s" && a.op == ActionOp::Blocked)
+            .expect("a blocked action for the refused asset");
+        assert!(
+            blocked
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("conflict: personal/s vs acme/s"),
+            "{:?}",
+            blocked.reason
+        );
+    }
+
+    /// Fix round 1, item 2: a refused asset is absent from `eff.catalog`, so
+    /// without a fix it reads to `compute_host_plan` exactly like one the
+    /// catalog dropped — `manifest.orphans` schedules its `Remove` right
+    /// alongside the `Blocked` action the refusal itself produces, and
+    /// `apply_sync` would delete the host's existing (perfectly fine) copy.
+    /// Pre-seeds `local`'s manifest with `skill/s` (as an earlier sync would
+    /// have left it) before `s` collides across catalogs: the plan must
+    /// carry exactly the one `Blocked` action, never a `Remove`.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_refused_asset_already_synced_is_blocked_not_removed() {
+        let _lock = super::super::lock_registry_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude/.fleet-assets.json"),
+            r#"{"version":1,"updated_at":0,"assets":{"skill/s":
+                {"hash":"h","files":["~/.claude/skills/s/SKILL.md"],"merges":[],"synced_at":0}}}"#,
+        )
+        .unwrap();
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let (personal_id, acme_id): (i64, i64) = {
+            let s = store.lock().unwrap();
+            let personal_id = s.personal_catalog().unwrap().unwrap().id;
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO orgs (id, name, created_at) VALUES (10, 'acme', 0)",
+                    [],
+                )
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO catalogs (name, repo_path, org_id, created_at) \
+                     VALUES ('acme', '/a', 10, 0)",
+                    [],
+                )
+                .unwrap();
+            let acme_id: i64 = s
+                .conn_ref()
+                .query_row("SELECT id FROM catalogs WHERE name='acme'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            s.set_host_org("local", Some(10)).unwrap();
+            (personal_id, acme_id)
+        };
+        super::super::registry::install_personal(repo::Catalog {
+            id: personal_id,
+            name: "personal".into(),
+            org_id: None,
+            assets: vec![skill_asset("s", "shared")],
+            ..Default::default()
+        })
+        .unwrap();
+        super::super::registry::install_for_test(repo::Catalog {
+            id: acme_id,
+            name: "acme".into(),
+            org_id: Some(10),
+            assets: vec![skill_asset("s", "private")],
+            ..Default::default()
+        })
+        .unwrap();
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(
+            PlanArgs {
+                host_alias: Some("local".into()),
+                ..PlanArgs::default()
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+
+        let claude_actions_for_s: Vec<&plan::Action> = plan
+            .hosts
+            .iter()
+            .filter(|h| h.harness == "claude")
+            .flat_map(|h| &h.actions)
+            .filter(|a| a.name == "s")
+            .collect();
+        assert_eq!(
+            claude_actions_for_s.len(),
+            1,
+            "exactly one action for the refused, already-synced asset: {:?}",
+            claude_actions_for_s
+        );
+        assert_eq!(claude_actions_for_s[0].op, ActionOp::Blocked);
+    }
+
+    /// Fix round 2, item (a): `local` bound to an org, unlayered, with a
+    /// private personal skill already synced (from before it had an org).
+    /// `effective::compose` withholds this asset SILENTLY (no `Refusal`,
+    /// per the controller ruling) — but silent must never mean destructive:
+    /// the plan must not remove it, and must report a `Noop` saying why it
+    /// stays.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn an_org_bound_unlayered_local_host_keeps_a_withheld_skill_already_synced() {
+        let _lock = super::super::lock_registry_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude/.fleet-assets.json"),
+            r#"{"version":1,"updated_at":0,"assets":{"skill/s":
+                {"hash":"h","files":["~/.claude/skills/s/SKILL.md"],"merges":[],"synced_at":0}}}"#,
+        )
+        .unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        // `one_skill` writes no `scope:` key, so "s" defaults to private.
+        let files = one_skill("b\n");
+        load_catalog(
+            repo_dir.path(),
+            &files
+                .iter()
+                .map(|(a, b)| (*a, b.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        {
+            let s = store.lock().unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO orgs (id, name, created_at) VALUES (10, 'acme', 0)",
+                    [],
+                )
+                .unwrap();
+            s.set_host_org("local", Some(10)).unwrap();
+        }
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(
+            PlanArgs {
+                host_alias: Some("local".into()),
+                ..PlanArgs::default()
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            plan.hosts
+                .iter()
+                .all(|h| h.actions.iter().all(|a| a.op != ActionOp::Remove)),
+            "a withheld asset must never be removed: {:?}",
+            plan.hosts
+        );
+        let noop = plan
+            .hosts
+            .iter()
+            .flat_map(|h| &h.actions)
+            .find(|a| a.name == "s" && a.op == ActionOp::Noop)
+            .expect("a Noop reporting the withheld asset");
+        assert_eq!(
+            noop.reason.as_deref(),
+            Some("private; withheld from org host, not removed")
+        );
+    }
+
+    /// Fix round 2, item (b): the same scope-withholding hazard on a REMOTE
+    /// host with `allow_unlayered: true` — `refuse_unlayered` is bypassed
+    /// (by `allow_unlayered`, independent of the item-1 fix), so this proves
+    /// the destructive path stays closed even when the per-host unlayered
+    /// guard itself is turned off. The host is never actually reachable in
+    /// this test (`SshClient::new()` has no transport), so the scan fails
+    /// and the host comes back `skipped` with no actions at all — which is
+    /// itself the point: still no `Remove`, by construction.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn an_org_bound_unlayered_remote_host_with_allow_unlayered_keeps_withheld_assets() {
+        let _lock = super::super::lock_registry_for_test();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let files = one_skill("b\n");
+        load_catalog(
+            repo_dir.path(),
+            &files
+                .iter()
+                .map(|(a, b)| (*a, b.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("oci", Some("oci")).unwrap();
+            s.update_host_probe("oci", true, None, None, 1).unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO orgs (id, name, created_at) VALUES (10, 'acme', 0)",
+                    [],
+                )
+                .unwrap();
+            s.set_host_org("oci", Some(10)).unwrap();
+        }
+        let ssh = Arc::new(SshClient::new());
+        let plan = plan_sync(
+            PlanArgs {
+                host_alias: Some("oci".into()),
+                allow_unlayered: true,
+                ..PlanArgs::default()
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+        assert!(!plan.hosts.is_empty());
+        assert!(
+            plan.hosts
+                .iter()
+                .all(|h| h.actions.iter().all(|a| a.op != ActionOp::Remove)),
+            "{:?}",
+            plan.hosts
+        );
+    }
+
+    /// Fix round 2, item (c): the ordering fix must apply to a `plugin_ref`
+    /// too — without it, an unlayered host's dropped `plugin_ref` orphan
+    /// always planned `Remove` regardless of refusal/withholding (the
+    /// pre-layers backward-compat path), since that check used to run
+    /// before any protection could intervene. A withheld `plugin_ref`
+    /// already in the manifest must be left alone exactly like a withheld
+    /// skill.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn an_org_bound_unlayered_local_host_keeps_a_withheld_plugin_ref_already_synced() {
+        let _lock = super::super::lock_registry_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(
+            home.path().join(".claude/.fleet-assets.json"),
+            r#"{"version":1,"updated_at":0,"assets":{"plugin_ref/sp":
+                {"hash":"h","files":[],"merges":[],"synced_at":0}}}"#,
+        )
+        .unwrap();
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let personal_id = {
+            let s = store.lock().unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO orgs (id, name, created_at) VALUES (10, 'acme', 0)",
+                    [],
+                )
+                .unwrap();
+            s.set_host_org("local", Some(10)).unwrap();
+            s.personal_catalog().unwrap().unwrap().id
+        };
+        super::super::registry::install_personal(repo::Catalog {
+            id: personal_id,
+            name: "personal".into(),
+            org_id: None,
+            // No `scope:` key — defaults to private, same as a skill.
+            assets: vec![plugin_ref_asset("sp")],
+            ..Default::default()
+        })
+        .unwrap();
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(
+            PlanArgs {
+                host_alias: Some("local".into()),
+                ..PlanArgs::default()
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            plan.hosts
+                .iter()
+                .all(|h| h.actions.iter().all(|a| a.op != ActionOp::Remove)),
+            "a withheld plugin_ref must never be removed: {:?}",
+            plan.hosts
         );
     }
 
@@ -957,6 +1521,70 @@ mod tests {
                 .iter()
                 .all(|h| h.status == "skipped" && h.detail.as_deref() == Some(UNLAYERED_DETAIL)),
             "{:?}",
+            plan.hosts
+        );
+    }
+
+    /// Fix round 1, item 1: the unlayered guard's emptiness check must use
+    /// the WHOLE loaded (union) catalog, never `eff.catalog`. An org-bound
+    /// remote host with no layers and an all-private personal catalog is
+    /// exactly the case `effective::compose`'s scope boundary empties
+    /// `eff.catalog` for (SharedOnly acceptance, nothing shared to keep) —
+    /// but the catalog itself is very much non-empty, and this is exactly
+    /// the hazard the guard exists to catch: without this fix the host would
+    /// be planned against an empty catalog and every manifest entry it
+    /// already has would read as an orphan and get removed.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_sync_skips_an_org_bound_unlayered_host_even_when_scope_empties_it() {
+        let _lock = super::super::lock_registry_for_test();
+        let repo_dir = tempfile::tempdir().unwrap();
+        // `one_skill` writes no `scope:` key, so "s" defaults to private.
+        let files = one_skill("b\n");
+        load_catalog(
+            repo_dir.path(),
+            &files
+                .iter()
+                .map(|(a, b)| (*a, b.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("oci", Some("oci")).unwrap();
+            s.update_host_probe("oci", true, None, None, 1).unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO orgs (id, name, created_at) VALUES (10, 'acme', 0)",
+                    [],
+                )
+                .unwrap();
+            s.set_host_org("oci", Some(10)).unwrap();
+        }
+        let ssh = Arc::new(SshClient::new());
+        let plan = plan_sync(
+            PlanArgs {
+                host_alias: Some("oci".into()),
+                ..PlanArgs::default()
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+        assert!(!plan.hosts.is_empty());
+        assert!(
+            plan.hosts
+                .iter()
+                .all(|h| h.status == "skipped" && h.detail.as_deref() == Some(UNLAYERED_DETAIL)),
+            "{:?}",
+            plan.hosts
+        );
+        assert!(
+            plan.hosts
+                .iter()
+                .all(|h| h.actions.iter().all(|a| a.op != ActionOp::Remove)),
+            "a skipped host carries no actions at all, Remove included: {:?}",
             plan.hosts
         );
     }

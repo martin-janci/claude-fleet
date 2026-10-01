@@ -13,6 +13,10 @@ pub struct Provenance {
     pub introduced_by: String,
     /// Every layer that changed its fields, in application order.
     pub overridden_by: Vec<String>,
+    /// The name of the catalog the asset (and so the layer) belongs to.
+    /// `#[serde(default)]`: a hub older than Assets M2 never sends it.
+    #[serde(default)]
+    pub catalog: String,
 }
 
 /// The effective catalog plus why it looks the way it does.
@@ -26,6 +30,26 @@ pub struct Resolution {
     /// Whether ANY layer applied. False only on the no-layering path, which
     /// every host without a `host_layers` row takes.
     pub layered: bool,
+    /// Assets M2: assets that would have gone to this host but a scope
+    /// boundary or a cross-catalog collision refused
+    /// (`effective::EffectiveSet::refused`). Empty on the single-catalog
+    /// path `resolve()` itself takes; `mod::resolve_preview` fills it from
+    /// `effective::effective_for_host`. `#[serde(default)]` because
+    /// `Resolution` travels the wire (`catalog_resolve_preview`'s answer): a
+    /// hub older than Assets M2 never sends this field.
+    #[serde(default)]
+    pub refused: Vec<crate::service::catalog::effective::Refusal>,
+    /// Assets M2: `(kind, name)` of every private asset an unlayered org
+    /// host's scope boundary dropped silently
+    /// (`effective::EffectiveSet::withheld`) — never removed if already on
+    /// the host, just not (re)installed. Empty on the single-catalog path;
+    /// `mod::resolve_preview` fills it from `effective::effective_for_host`,
+    /// so an MCP agent or the UI previewing an org-bound host can explain a
+    /// missing private asset instead of reading it as a bug. `#[serde(default)]`
+    /// because `Resolution` travels the wire: a hub older than this field
+    /// never sends it.
+    #[serde(default)]
+    pub withheld: std::collections::BTreeSet<(String, String)>,
 }
 
 /// Deep-merge `over` into `base`: mappings recurse, everything else replaces.
@@ -58,7 +82,10 @@ fn merge_yaml(base: &mut serde_yaml::Value, over: &serde_yaml::Value) {
 /// matrix is computed from the *full* catalog while the plan is computed
 /// from the *resolved* one — a host whose layer moved the asset elsewhere
 /// would report it `missing` and the real directory `unmanaged` forever,
-/// while `apply_sync` managed it at the other identifier. The re-parsed
+/// while `apply_sync` managed it at the other identifier. A `scope`-changing
+/// override is rejected too (Assets M2): `scope` decides whether an asset
+/// may reach an org-bound host at all, and a layer assigned to such a host
+/// must not be able to widen a private asset to shared. The re-parsed
 /// asset is also re-validated with the same `Asset::validate` the loader
 /// uses, so an override cannot smuggle in a value `load_one` would have
 /// rejected at load time.
@@ -78,6 +105,12 @@ fn apply_override(asset: &Asset, over: &serde_yaml::Value) -> Result<Asset, Stri
         return Err(format!(
             "an override may not change an asset's install_as ({:?} to {:?})",
             asset.header.install_as, patched.header.install_as
+        ));
+    }
+    if patched.header.scope != asset.header.scope {
+        return Err(format!(
+            "an override may not change an asset's scope ({:?} to {:?})",
+            asset.header.scope, patched.header.scope
         ));
     }
     let problems = patched.validate();
@@ -110,10 +143,13 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
                 head: catalog.head.clone(),
                 loaded_at: catalog.loaded_at,
                 layers: Default::default(),
+                origin: catalog.origin.clone(),
             },
             provenance: BTreeMap::new(),
             excluded: BTreeMap::new(),
             layered: false,
+            refused: Vec::new(),
+            withheld: Default::default(),
         };
     }
 
@@ -137,6 +173,7 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
                 Provenance {
                     introduced_by: layer.name.clone(),
                     overridden_by: Vec::new(),
+                    catalog: catalog.name.clone(),
                 },
             );
         }
@@ -191,10 +228,13 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
             loaded_at: catalog.loaded_at,
             // Deliberately empty: a layer must never travel into the planner.
             layers: Default::default(),
+            origin: catalog.origin.clone(),
         },
         provenance,
         excluded,
         layered: true,
+        refused: Vec::new(),
+        withheld: Default::default(),
     }
 }
 
@@ -472,5 +512,20 @@ mod tests {
             "{:?}",
             r.catalog.problems
         );
+    }
+
+    #[test]
+    fn an_override_may_not_change_scope() {
+        // `scope` is who may receive the asset; a layer must not be able to
+        // widen a private asset to shared (or narrow a shared one) for the
+        // hosts it is assigned to.
+        let private = skill("a");
+        assert_eq!(
+            private.header.scope,
+            crate::service::catalog::model::Scope::Private
+        );
+        let over: serde_yaml::Value = serde_yaml::from_str("scope: shared\n").unwrap();
+        let err = apply_override(&private, &over).unwrap_err();
+        assert!(err.contains("scope"), "{err}");
     }
 }

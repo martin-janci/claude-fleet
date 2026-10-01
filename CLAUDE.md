@@ -219,6 +219,32 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   always present in the JSON API and on `AssetSummary`) — meaningful only in
   the personal catalog, since an org catalog's assets are org-scoped
   regardless.
+- **Assets M2 — sync across catalogs** (plan
+  `docs/superpowers/plans/2026-09-30-assets-m2-sync.md`): migration 091 puts
+  `catalog_id` on `host_layers` and `asset_inventory` (an unknown id reads
+  as `NULL`), so a host's layer assignments and scanned inventory are each
+  pinned to one catalog. `service/catalog/effective.rs` decides, per host,
+  what it should end up with: `acceptance(host_org, catalog_id, catalog_org,
+  admitted)` returns `No` / `SharedOnly` / `All` (admissions arrive in M3;
+  empty here, so an org-bound host gets only the `shared` slice of
+  `personal`), and `effective_for_host(store, host)` composes an
+  `EffectiveSet` — reading every store row under one guard first, then the
+  registry, since store → registry is never allowed. Within that set, the
+  scope boundary and a `(kind, name)`/`(kind, install_name)` collision
+  between catalogs are never silent destructive removals: each becomes a
+  per-asset `Blocked` action carrying a reason (collision:
+  `conflict: <catA>/<name> vs <catB>/<name> — use install_as or move one`),
+  and a refused asset never gets an orphan `Remove`. An org-bound host that
+  already has a private personal asset keeps it — `withheld` reports it as
+  a `Noop` ("private; withheld from org host, not removed") instead of
+  dropping it. `Action.catalog` and `ManifestEntry.catalog` record which
+  catalog an asset came from (an old manifest with no field reads as
+  `"personal"`); `compute_states` stamps `asset_inventory.catalog_id` from
+  the same source. Scans compose every loaded catalog via
+  `registry::union_all`, and the unlayered guard (`refuse_unlayered`) checks
+  against that same union, not just `personal`. `apply_override` rejects a
+  layer that tries to change an asset's `scope`, since scope is what decides
+  who may receive it.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. Only one PTY is attached at a time.
