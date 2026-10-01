@@ -467,7 +467,12 @@ fn keep_removal(rm: &ManifestMerge, adds: &[ConfigMerge]) -> bool {
 /// needs in order to uninstall it, and — via `merge_value`'s hash — which
 /// catalog pin fleet last applied, so the next plan can tell a pin change
 /// from a CLI that landed on the wrong version (see `plan::plugin_op`).
-fn plugin_entry(target: &PluginTarget, merge_value: &serde_json::Value, now: i64) -> ManifestEntry {
+fn plugin_entry(
+    target: &PluginTarget,
+    merge_value: &serde_json::Value,
+    now: i64,
+    catalog: &str,
+) -> ManifestEntry {
     ManifestEntry {
         hash: String::new(),
         files: Vec::new(),
@@ -481,6 +486,7 @@ fn plugin_entry(target: &PluginTarget, merge_value: &serde_json::Value, now: i64
             value_hash: value_hash(merge_value),
         }],
         synced_at: now,
+        catalog: catalog.to_string(),
     }
 }
 
@@ -1255,6 +1261,11 @@ fn build_manifest(plan: &HostPlan, work: &[Work], now: i64) -> Option<Manifest> 
             continue;
         }
         let key = manifest_key(action);
+        // Assets M2: an action that names no catalog (a `Remove` for a
+        // manifest orphan never reaches this match arm at all, since that
+        // op is handled separately above) falls back to `"personal"` — the
+        // only catalog a build older than Assets M2 could ever plan from.
+        let catalog = action.catalog.as_deref().unwrap_or("personal");
         match action.op {
             ActionOp::Remove => {
                 changed |= manifest.assets.remove(&key).is_some();
@@ -1276,11 +1287,14 @@ fn build_manifest(plan: &HostPlan, work: &[Work], now: i64) -> Option<Manifest> 
                             .and_then(|p| p.inner().merges.first())
                             .map(|m| m.value.clone())
                             .unwrap_or_else(|| plugin_fallback_value(target));
-                        plugin_entry(target, &merge_value, now)
+                        plugin_entry(target, &merge_value, now, catalog)
                     }
-                    (None, Some(secret_plan)) => {
-                        Manifest::entry_for(&secret_plan.inner().hash(), secret_plan.inner(), now)
-                    }
+                    (None, Some(secret_plan)) => Manifest::entry_for(
+                        &secret_plan.inner().hash(),
+                        secret_plan.inner(),
+                        now,
+                        catalog,
+                    ),
                     (None, None) => continue,
                 };
                 changed |= manifest.assets.get(&key) != Some(&entry);
@@ -1542,6 +1556,7 @@ mod tests {
             &Manifest::default(),
             &BTreeMap::new(),
             &PlanFilter::default(),
+            &BTreeSet::new(),
         );
         assert_eq!(hp.actions[0].op, ActionOp::PluginInstall);
         assert!(
@@ -1568,6 +1583,7 @@ mod tests {
             &Manifest::default(),
             &BTreeMap::new(),
             &PlanFilter::default(),
+            &BTreeSet::new(),
         );
         assert_eq!(hp.actions[0].op, ActionOp::Adopt);
         let manifest = build_manifest(&hp, &work, 1_000).expect("adopt writes an entry");
@@ -1590,6 +1606,7 @@ mod tests {
             &Manifest::default(),
             &BTreeMap::new(),
             &PlanFilter::default(),
+            &BTreeSet::new(),
         );
         assert_eq!(hp.actions[0].op, ActionOp::PluginUpdate);
         let manifest = build_manifest(&hp, &work, 1_000).expect("update writes an entry");
@@ -1709,6 +1726,7 @@ mod tests {
             &manifest,
             secrets,
             &PlanFilter::default(),
+            &BTreeSet::new(),
         )
     }
 
@@ -2240,6 +2258,7 @@ mod tests {
             kind: "skill".into(),
             name: "s".into(),
             op: ActionOp::Update,
+            catalog: Some("personal".into()),
             reason: None,
             files: vec!["~/.claude/skills/s/SKILL.md".into()],
             merges: Vec::new(),
@@ -2260,6 +2279,7 @@ mod tests {
                 ],
                 merges: Vec::new(),
                 synced_at: 1,
+                catalog: "personal".into(),
             }),
             plugin: None,
         };
@@ -2316,6 +2336,7 @@ mod tests {
             &manifest,
             &BTreeMap::new(),
             &PlanFilter::default(),
+            &BTreeSet::new(),
         )
     }
 
@@ -2413,6 +2434,7 @@ mod tests {
             kind: "skill".into(),
             name: "evil".into(),
             op: ActionOp::Create,
+            catalog: Some("personal".into()),
             reason: None,
             files: vec![rendered.files[0].path.clone()],
             merges: Vec::new(),
@@ -2497,6 +2519,7 @@ mod tests {
                 kind: "skill".into(),
                 name: "s".into(),
                 op: ActionOp::Create,
+                catalog: Some("personal".into()),
                 reason: None,
                 files: vec!["~/.claude/skills/s/SKILL.md".into()],
                 merges: Vec::new(),

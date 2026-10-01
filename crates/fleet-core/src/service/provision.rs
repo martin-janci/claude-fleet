@@ -3169,7 +3169,10 @@ mod tests {
             .await
             .unwrap();
         let row = store.lock().unwrap().get_host_row("h1").unwrap().unwrap();
-        assert_eq!(row.provision_warning, None, "a clean run clears the warning");
+        assert_eq!(
+            row.provision_warning, None,
+            "a clean run clears the warning"
+        );
         assert!(!row.provision_stale, "and re-stamps the fingerprint");
     }
 

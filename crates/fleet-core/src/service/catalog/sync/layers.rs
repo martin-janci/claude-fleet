@@ -1,19 +1,34 @@
 //! Bridge between a host's stored layer assignment and the pure resolver.
 
 use crate::ipc_error::codes;
+#[cfg(test)]
 use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::service::catalog::repo::Catalog;
 use crate::service::catalog::resolve::{resolve, Resolution};
+use crate::store::HostLayerRow;
+#[cfg(test)]
 use crate::store::Store;
+#[cfg(test)]
 use std::sync::Mutex;
 
-/// Read `host_alias`'s stored assignment and resolve the catalog for it.
+/// Read `host_alias`'s stored assignment in `catalog` and resolve the
+/// catalog for it.
 ///
-/// No assignment ⇒ the whole catalog (the pre-layers behaviour). An
-/// assignment naming a layer the catalog does not define is an ERROR rather
-/// than a silent fall-back to the whole catalog: syncing everything to a host
-/// the user meant to restrict is the worse failure.
+/// Only the rows of `catalog.id` are read (Assets M2: assignments are per
+/// catalog). A hand-built catalog with id 0 stands for the personal one.
+/// Takes the store lock briefly; callers inside a registry closure are
+/// fine (registry → store is the allowed order).
+///
+/// This is the single-catalog M1 compatibility API: `resolve_preview` and
+/// `plan_sync` moved to `effective::effective_for_host` (Assets M2), which
+/// resolves every catalog a host accepts, not just one. Nothing in
+/// production calls this any more — it is `#[cfg(test)]` so a future
+/// caller does not take the single-catalog path by mistake — and it
+/// survives only as the independent baseline several tests check
+/// `effective_for_host` against on the personal-only path, where the two
+/// must agree exactly.
+#[cfg(test)]
 pub fn resolve_for_host(
     store: &Mutex<Store>,
     catalog: &Catalog,
@@ -21,8 +36,31 @@ pub fn resolve_for_host(
 ) -> Result<Resolution, IpcError> {
     let rows = {
         let s = lock(store)?;
-        s.get_host_layers(host_alias)?
+        let id = if catalog.id == 0 {
+            s.personal_catalog()?.map(|c| c.id)
+        } else {
+            Some(catalog.id)
+        };
+        match id {
+            Some(id) => s.get_host_layers_for(host_alias, id)?,
+            None => Vec::new(),
+        }
     };
+    resolve_rows(catalog, host_alias, &rows)
+}
+
+/// Resolve `catalog` for `host_alias` from that host's assignment rows in
+/// this catalog.
+///
+/// No rows ⇒ the whole catalog (the pre-layers behaviour). A row naming a
+/// layer the catalog does not define is an ERROR rather than a silent
+/// fall-back to the whole catalog: syncing everything to a host the user
+/// meant to restrict is the worse failure.
+pub fn resolve_rows(
+    catalog: &Catalog,
+    host_alias: &str,
+    rows: &[HostLayerRow],
+) -> Result<Resolution, IpcError> {
     if rows.is_empty() {
         return Ok(resolve(catalog, &[], &[]));
     }
@@ -96,9 +134,11 @@ mod tests {
     use std::sync::Mutex;
 
     /// FKs are ON, so `local` must exist before an assignment references it.
+    /// `set_host_layers` now also needs a personal catalog to target.
     fn store_with_local() -> Store {
         let s = Store::open_in_memory().expect("open");
         s.upsert_host("local").expect("host");
+        s.set_catalog_config("/p", None).expect("personal catalog");
         s
     }
 
@@ -249,11 +289,12 @@ mod tests {
         let store = Mutex::new(store_with_local());
         {
             let s = store.lock().unwrap();
+            let personal = s.personal_catalog().unwrap().unwrap().id;
             s.conn_ref()
                 .execute(
-                    "INSERT INTO host_layers (host_alias, layer_name, axis, position, active) \
-                     VALUES ('local', 'core', 'bogus', 0, 1)",
-                    [],
+                    "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis, position, active) \
+                     VALUES ('local', ?1, 'core', 'bogus', 0, 1)",
+                    [personal],
                 )
                 .unwrap();
         }
@@ -269,15 +310,51 @@ mod tests {
         {
             let s = store.lock().unwrap();
             s.set_host_layers("local", Some("core"), &[]).unwrap();
+            let personal = s.personal_catalog().unwrap().unwrap().id;
             s.conn_ref()
                 .execute(
-                    "INSERT INTO host_layers (host_alias, layer_name, axis, position, active) \
-                     VALUES ('local', 'extra', 'bogus', 0, 1)",
-                    [],
+                    "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis, position, active) \
+                     VALUES ('local', ?1, 'extra', 'bogus', 0, 1)",
+                    [personal],
                 )
                 .unwrap();
         }
         let err = resolve_for_host(&store, &cat(), "local").unwrap_err();
         assert!(err.message.contains("bogus"), "{}", err.message);
+    }
+
+    /// `resolve_for_host` reads only the rows of the catalog it resolves:
+    /// a role this host holds in ANOTHER catalog must not restrict (or, as
+    /// an unknown layer name here, fail) this one.
+    #[test]
+    fn rows_of_another_catalog_do_not_restrict_this_one() {
+        let store = Mutex::new(store_with_local());
+        {
+            let s = store.lock().unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO orgs (id, name, created_at) VALUES (10, 'acme', 0)",
+                    [],
+                )
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO catalogs (name, repo_path, org_id, created_at) VALUES ('acme', '/a', 10, 0)",
+                    [],
+                )
+                .unwrap();
+            let acme: i64 = s
+                .conn_ref()
+                .query_row("SELECT id FROM catalogs WHERE name='acme'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            s.set_host_layers_for("local", acme, Some("ops"), &[])
+                .unwrap();
+        }
+        // `cat()` has id 0: the personal catalog, which has no rows here.
+        let r = resolve_for_host(&store, &cat(), "local").unwrap();
+        assert!(!r.layered);
+        assert_eq!(names(&r), vec!["a", "b", "c", "d", "e", "f"]);
     }
 }

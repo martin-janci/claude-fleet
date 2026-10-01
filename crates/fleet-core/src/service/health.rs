@@ -174,7 +174,7 @@ pub struct HostHealthRow {
     /// token within `hooks_silent_secs`.
     pub hooks_silent: bool,
     /// What the last provisioning warned about, when it delivered the content
-    /// but degraded part way (migration 091) — the `ag` launcher did not
+    /// but degraded part way (migration 092) — the `ag` launcher did not
     /// install, say. `None` is a clean last run. Before this the reason was a
     /// single `tracing::warn!` on the unattended path, so a fleet could carry
     /// a degraded host indefinitely with nothing saying why.

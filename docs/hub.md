@@ -2216,7 +2216,16 @@ sets it in its Assets tab; on a hub, set it with `fleet-hub catalog`. A
 running hub is not needed, and does not need a restart: it picks the change
 up at its next catalog call (on a paired client, Assets → Refresh).
 `catalog set` always configures the personal catalog; per-org catalogs
-arrive later (S1b M3).
+arrive later (S1b M3). A host bound to an org receives only the `shared`
+assets of the personal catalog.
+
+**Upgrade note.** An asset's `scope` defaults to `private`: once a host is
+bound to an org, it stops receiving creates and updates for assets that are
+still `private` — only `shared` ones sync to it. To share an asset, add
+`scope: shared` to its `asset.yaml`. Copies already installed on an org-bound
+host from before this change are kept, never removed; Sync reports them
+(`Blocked` on a layered host, `Noop` on an unlayered one) instead of
+uninstalling anything.
 
 ```bash
 # Docker: keep the checkout on the data volume so it survives the container.

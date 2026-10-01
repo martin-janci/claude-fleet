@@ -9111,7 +9111,16 @@ async fn an_org_bound_device_never_decides_or_removes_a_guide() {
             .unwrap(),
     );
     assert_eq!(listed["can_write"].as_bool(), Some(false));
-    assert!(store.lock().unwrap().guide_proposal(id).unwrap().unwrap().state == "pending");
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .guide_proposal(id)
+            .unwrap()
+            .unwrap()
+            .state
+            == "pending"
+    );
 
     // an UNBOUND trusted device of the same shape does decide — the binding
     // is the only thing that refused above
@@ -9131,7 +9140,11 @@ async fn an_org_bound_device_never_decides_or_removes_a_guide() {
     )
     .await
     .expect_err("an org-bound device never removes");
-    assert!(err.message.contains("bound to an organisation"), "{}", err.message);
+    assert!(
+        err.message.contains("bound to an organisation"),
+        "{}",
+        err.message
+    );
 }
 
 /// The master token proposes AND writes, so without a no-self-approval rule

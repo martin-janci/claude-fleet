@@ -14,4 +14,4 @@
 -- ADD COLUMN is not idempotent: guarded in schema.rs.
 ALTER TABLE hosts ADD COLUMN provision_warning TEXT;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (91);
+INSERT OR IGNORE INTO schema_version (version) VALUES (92);
