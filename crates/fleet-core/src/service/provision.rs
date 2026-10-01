@@ -320,10 +320,20 @@ pub async fn provision_content_only(
     } else {
         None
     };
+    mark_provisioned(store, host, warning.is_some());
+    Ok(warning)
+}
+
+/// Record a finished provisioning: provisioned either way, but a DEGRADED run
+/// keeps no fingerprint, so it reads `provision_stale` and is picked up again
+/// instead of being recorded as delivered.
+fn mark_provisioned(store: &Mutex<Store>, host: &str, degraded: bool) {
     if let Ok(s) = store.lock() {
         let _ = s.set_host_provisioned(host, true);
+        if degraded {
+            let _ = s.clear_host_provision_fingerprint(host);
+        }
     }
-    Ok(warning)
 }
 
 /// Refresh every reachable, non-hidden host whose stored fingerprint is
@@ -644,13 +654,17 @@ pub async fn provision_host_with_token(
     } else {
         None
     };
+    // Only the `ag` outcome marks the run degraded. `wsl_warning` reports a
+    // persistent environment condition (WSL mirrored networking is needed),
+    // which recurs on every provisioning until the operator changes their WSL
+    // config — clearing the fingerprint for it would leave that host forever
+    // `provision_stale` and re-provisioned on every tick.
+    let degraded = ag_warning.is_some();
     let warning = match (wsl_warning, ag_warning) {
         (Some(a), Some(b)) => Some(format!("{a}; {b}")),
         (a, b) => a.or(b),
     };
-    if let Ok(s) = store.lock() {
-        let _ = s.set_host_provisioned(host, true);
-    }
+    mark_provisioned(store, host, degraded);
     Ok(warning)
 }
 
@@ -3050,7 +3064,10 @@ mod tests {
     }
 
     /// M11b: a content-only refresh whose ag install fails is still a
-    /// refresh — the warning comes back and the host is provisioned.
+    /// refresh — the warning comes back and the host is provisioned — but it
+    /// keeps NO fingerprint, so it reads `provision_stale` and is retried.
+    /// Stamping this build's fingerprint here would record a degraded run as
+    /// delivered: permanent, invisible, and a no-op to re-enable.
     #[tokio::test]
     async fn provision_content_only_returns_the_ag_warning_and_still_marks_provisioned() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
@@ -3078,7 +3095,14 @@ mod tests {
         );
         let row = store.lock().unwrap().get_host_row("h1").unwrap().unwrap();
         assert!(row.provisioned);
-        assert!(!row.provision_stale);
+        assert!(
+            row.provision_stale,
+            "a degraded ag step keeps no fingerprint, so the host is owed a retry"
+        );
+        assert!(
+            row.provisioned_at.is_some(),
+            "the content WAS delivered: provisioned_at still stands"
+        );
     }
 
     /// M11d: a full provisioning whose installer exits non-zero is

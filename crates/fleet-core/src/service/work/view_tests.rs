@@ -8,7 +8,7 @@
 use super::*;
 use crate::service::work::structure::{self, RuleInput};
 use crate::service::work::{work_link, WorkLinkArgs};
-use crate::store::{RuleConditions, TrackerConfig, TrackerItemWrite, WorkTarget};
+use crate::store::{NativeItem, RuleConditions, TrackerConfig, TrackerItemWrite, WorkTarget};
 
 struct W {
     st: Mutex<Store>,
@@ -654,24 +654,73 @@ fn a_bare_key_bound_by_a_sync_still_opens() {
 }
 
 /// The in-memory org rule is the store's (`Store::item_org`).
+///
+/// Covers the native-subtask fallback too: `insert_native` writes no
+/// `org_id`, so a subtask's org is its PARENT's — under a tracker parent the
+/// tracker's org, under a native parent that parent's own. Before that
+/// fallback existed every native subtask read as unassigned and the org gates
+/// on a start passed everything.
 #[test]
 fn the_graph_and_the_store_agree_on_item_orgs() {
     let w = world();
-    let local = {
+    let (local, under_tracker, under_local, orphan) = {
         let s = w.st.lock().unwrap();
         let (it, _) = s.name_session_work(w.s1, None, "Unkeyed").unwrap();
         s.seed_local_item_org(it.id, Some(w.org_b));
-        it.id
+        // a native subtask of the org_a tracker item t1
+        let under_tracker = s
+            .create_native_item(&NativeItem {
+                title: "Subtask of a tracker ticket",
+                parent_id: Some(w.t1),
+                project_id: None,
+                notes: None,
+            })
+            .unwrap();
+        // a native subtask of the org_b local item
+        let under_local = s
+            .create_native_item(&NativeItem {
+                title: "Subtask of a local item",
+                parent_id: Some(it.id),
+                project_id: None,
+                notes: None,
+            })
+            .unwrap();
+        // a top-level native item with no org anywhere: still None
+        let orphan = s
+            .create_native_item(&NativeItem {
+                title: "Top-level, no org",
+                parent_id: None,
+                project_id: None,
+                notes: None,
+            })
+            .unwrap();
+        (it.id, under_tracker.id, under_local.id, orphan.id)
     };
     let s = w.st.lock().unwrap();
     let g = Graph::load(&s, &OrgScope::All).unwrap();
-    for id in [w.t1, w.t2, w.t3, local] {
+    for id in [w.t1, w.t2, w.t3, local, under_tracker, under_local, orphan] {
         assert_eq!(
             g.item_org(&g.items[&id]),
             s.item_org(id).unwrap(),
             "item {id}"
         );
     }
+    // and the fallback resolves to the parent's org, not to None
+    assert_eq!(
+        s.item_org(under_tracker).unwrap(),
+        Some(w.org_a),
+        "a subtask of a tracker ticket is in the tracker's org"
+    );
+    assert_eq!(
+        s.item_org(under_local).unwrap(),
+        Some(w.org_b),
+        "a subtask of a local item is in that item's org"
+    );
+    assert_eq!(
+        s.item_org(orphan).unwrap(),
+        None,
+        "a top-level native item with no org is still unassigned"
+    );
 }
 
 /// Writes the real wire shapes of every Work view read to

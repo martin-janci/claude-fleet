@@ -524,6 +524,23 @@ impl Store {
         Ok(())
     }
 
+    /// Forget a host's provisioning fingerprint while leaving it provisioned.
+    ///
+    /// For a run that DELIVERED the content but degraded part way — the `ag`
+    /// launcher did not install, say. `HostRow::provision_stale` is
+    /// `provisioned && fingerprint != current`, so a NULL fingerprint on a
+    /// provisioned host reads as stale and `spawn_reprovision_stale` picks the
+    /// host up again. Stamping this build's fingerprint instead would record a
+    /// degraded run as delivered, making a transient failure permanent and
+    /// invisible.
+    pub fn clear_host_provision_fingerprint(&self, alias: &str) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE hosts SET provision_fingerprint=NULL WHERE alias=?1",
+            rusqlite::params![alias],
+        )?;
+        Ok(())
+    }
+
     /// Re-home everything keyed on `from` under `into` in ONE transaction,
     /// then delete the `from` host row (data-sync F2/F5: the `local` → `mac`
     /// rename left 249 worktree rows and 6 duplicate agent rows on a hidden
