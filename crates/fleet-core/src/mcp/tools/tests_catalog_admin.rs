@@ -41,6 +41,18 @@ fn host(alias: &str) -> Caller {
 
 /// One `catalog_admin` call through the gates `call_tool` runs first. `Ok`
 /// is the result; `Err` is the error message, which starts with its code.
+async fn call_with(
+    t: &FleetTools,
+    caller: &Caller,
+    p: CatalogAdminParams,
+) -> Result<CallToolResult, McpError> {
+    enforce_mode(caller, "catalog_admin")?;
+    enforce_admin(caller, "catalog_admin")?;
+    t.catalog_admin(Extension(caller.clone()), Parameters(p))
+        .await
+}
+
+/// [`call_with`] on the default (personal) catalog.
 async fn call(
     t: &FleetTools,
     caller: &Caller,
@@ -48,17 +60,30 @@ async fn call(
     args: Option<Value>,
     confirm_nonce: Option<String>,
 ) -> Result<CallToolResult, McpError> {
-    enforce_mode(caller, "catalog_admin")?;
-    enforce_admin(caller, "catalog_admin")?;
-    t.catalog_admin(
-        Extension(caller.clone()),
-        Parameters(CatalogAdminParams {
-            action: action.into(),
-            args,
-            confirm_nonce,
-        }),
-    )
-    .await
+    let p = CatalogAdminParams {
+        action: action.into(),
+        args,
+        confirm_nonce,
+        catalog: None,
+    };
+    call_with(t, caller, p).await
+}
+
+/// [`call_with`] with the tool's `catalog` parameter.
+async fn call_on(
+    t: &FleetTools,
+    caller: &Caller,
+    action: &str,
+    args: Option<Value>,
+    catalog: Option<&str>,
+) -> Result<CallToolResult, McpError> {
+    let p = CatalogAdminParams {
+        action: action.into(),
+        args,
+        confirm_nonce: None,
+        catalog: catalog.map(String::from),
+    };
+    call_with(t, caller, p).await
 }
 
 fn code_of(r: &Result<CallToolResult, McpError>) -> String {
@@ -121,6 +146,7 @@ async fn catalog_admin_answers_the_master_and_a_granted_full_unbound_client_only
                 action: "config".into(),
                 args: None,
                 confirm_nonce: None,
+                catalog: None,
             }),
         )
         .await;
@@ -328,8 +354,9 @@ fn catalog_admin_apply_sync_drops_the_callers_call_id() {
 /// Which calls `prepare_admin_call` refreshes the catalog for. With a
 /// configured catalog that cannot load (no checkout, no remote), a call that
 /// runs `ensure_fresh` fails there, and one that does not passes: config /
-/// configure / load, and `apply_sync`, which applies a plan already computed
-/// exactly as the `apply_sync` tool does.
+/// configure / load, the catalog-set calls (Assets M3), and `apply_sync`,
+/// which applies a plan already computed exactly as the `apply_sync` tool
+/// does.
 #[test]
 fn catalog_admin_refreshes_the_catalog_for_every_call_but_config_load_and_apply_sync() {
     let _g = crate::service::catalog::lock_registry_for_test();
@@ -349,6 +376,11 @@ fn catalog_admin_refreshes_the_catalog_for_every_call_but_config_load_and_apply_
             "action": "apply_sync",
             "args": { "plan_id": "p", "force_partial": false },
         }),
+        json!({ "action": "list_catalogs" }),
+        json!({ "action": "add_catalog", "args": { "name": "a", "repo_path": "/a" } }),
+        json!({ "action": "remove_catalog", "args": { "name": "a" } }),
+        json!({ "action": "admit_catalog", "args": { "host_alias": "h", "catalog": "a" } }),
+        json!({ "action": "unadmit_catalog", "args": { "host_alias": "h", "catalog": "a" } }),
     ] {
         assert!(prepare(wire.clone()).is_ok(), "no refresh for {wire}");
     }
@@ -449,4 +481,206 @@ async fn set_host_harnesses_sets_normalises_and_clears() {
 
     let err = enforce_admin(&host("local"), "set_host_harnesses").unwrap_err();
     assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+}
+
+/// `personal` and an `acme` org catalog (neither loadable), host `h` with no
+/// org; `desk` holds personal, `ops` holds acme, `plain` holds nothing.
+/// Returns `(store, desk_id, ops_id, plain_id, acme_id)`.
+fn two_catalog_store() -> (Store, i64, i64, i64, i64) {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    s.set_catalog_config("/nonexistent/m3-personal", None)
+        .unwrap();
+    let org = s.add_org("acme", None, false).unwrap();
+    let acme = s
+        .upsert_catalog("acme", "/nonexistent/m3-acme", None, Some(org.id))
+        .unwrap();
+    let desk = s.insert_client_token("desk", "aa11", "full").unwrap();
+    s.set_client_assets_admin("desk", true).unwrap();
+    let ops = s.insert_client_token("ops", "bb22", "full").unwrap();
+    s.set_client_catalog_grant("ops", acme.id, true).unwrap();
+    let plain = s.insert_client_token("plain", "cc33", "full").unwrap();
+    (s, desk.id, ops.id, plain.id, acme.id)
+}
+
+/// The message of an `Err`, for asserting what a refusal says.
+fn message_of(r: Result<CallToolResult, McpError>) -> String {
+    r.err().map(|e| e.message.to_string()).unwrap_or_default()
+}
+
+/// Spec, Testing (authorization): a client without a grant on the catalog
+/// an action touches cannot admit, unadmit, remove or read it; the grant on
+/// one catalog says nothing about another; a personal-only or fleet-wide
+/// action refuses another catalog instead of running on personal.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn each_action_needs_a_grant_on_the_catalog_it_touches() {
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let (s, desk, ops, _plain, _acme) = two_catalog_store();
+    let t = tools(s);
+    let desk = client(desk, TokenMode::Full, None);
+    let ops = client(ops, TokenMode::Full, None);
+    let admit = json!({ "host_alias": "h", "catalog": "acme" });
+
+    let r = call(&t, &desk, "admit_catalog", Some(admit.clone()), None).await;
+    assert_eq!(code_of(&r), "E_FORBIDDEN");
+    assert!(message_of(r).contains("--catalog acme"), "names the remedy");
+    let r = call(&t, &ops, "admit_catalog", Some(admit.clone()), None).await;
+    assert_eq!(code_of(&r), "OK", "{:?}", r.err());
+    assert_eq!(
+        t.store.lock().unwrap().host_admissions("h").unwrap().len(),
+        1
+    );
+    let r = call(&t, &Caller::master(), "unadmit_catalog", Some(admit), None).await;
+    assert_eq!(code_of(&r), "OK", "{:?}", r.err());
+    assert!(t
+        .store
+        .lock()
+        .unwrap()
+        .host_admissions("h")
+        .unwrap()
+        .is_empty());
+
+    assert_eq!(
+        code_of(&call_on(&t, &ops, "config", None, Some("acme")).await),
+        "OK"
+    );
+    assert_eq!(
+        code_of(&call_on(&t, &ops, "config", None, None).await),
+        "E_FORBIDDEN"
+    );
+    assert_eq!(
+        code_of(&call_on(&t, &desk, "config", None, Some("acme")).await),
+        "E_FORBIDDEN"
+    );
+    assert_eq!(
+        code_of(&call_on(&t, &desk, "config", None, None).await),
+        "OK",
+        "parity"
+    );
+
+    // PF16: the refusal is the catalog parameter's, not a parse failure.
+    let m = Caller::master();
+    let create = json!({ "kind": "skill", "name": "x" });
+    let r = call_on(&t, &m, "create_asset", Some(create), Some("acme")).await;
+    assert_eq!(code_of(&r), "E_INVALID");
+    assert!(
+        message_of(r).contains("M4"),
+        "authoring is personal-only until M4"
+    );
+    let r = call_on(&t, &m, "plan_sync", Some(json!({})), Some("acme")).await;
+    assert_eq!(code_of(&r), "E_INVALID");
+    assert!(message_of(r).contains("not per catalog"), "fleet-wide");
+
+    let rm = json!({ "name": "acme" });
+    assert_eq!(
+        code_of(&call(&t, &desk, "remove_catalog", Some(rm.clone()), None).await),
+        "E_FORBIDDEN"
+    );
+    let r = call(&t, &ops, "remove_catalog", Some(rm), None).await;
+    assert_eq!(code_of(&r), "OK", "{:?}", r.err());
+}
+
+/// R11: `list_catalogs` needs no grant (but a per-host token never reaches
+/// `catalog_admin`, PF6); `add_catalog` is the master's alone.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn list_catalogs_needs_no_grant_and_add_catalog_needs_the_master() {
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let (s, desk, _ops, plain, _acme) = two_catalog_store();
+    let t = tools(s);
+    let r = call(
+        &t,
+        &client(plain, TokenMode::Full, None),
+        "list_catalogs",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(code_of(&r), "OK", "{:?}", r.err());
+    assert_eq!(
+        code_of(&call(&t, &host("h1"), "list_catalogs", None, None).await),
+        "E_FORBIDDEN"
+    );
+
+    let add = json!({ "name": "beta", "repo_path": "/nonexistent/m3-beta", "org": "acme" });
+    let r = call(
+        &t,
+        &client(desk, TokenMode::Full, None),
+        "add_catalog",
+        Some(add.clone()),
+        None,
+    )
+    .await;
+    assert_eq!(code_of(&r), "E_FORBIDDEN");
+    assert!(message_of(r).contains("master"));
+    let r = call(&t, &Caller::master(), "add_catalog", Some(add), None).await;
+    assert_eq!(
+        code_of(&r),
+        codes::E_CATALOG_GIT,
+        "past the gate: {:?}",
+        r.err()
+    );
+}
+
+fn host_plan_writing(catalog: &str) -> crate::service::catalog::sync::plan::HostPlan {
+    use crate::service::catalog::sync::plan::{Action, ActionOp, HostPlan};
+    HostPlan {
+        host_alias: "h".into(),
+        harness: "claude".into(),
+        status: "planned".into(),
+        detail: None,
+        actions: vec![Action {
+            kind: "skill".into(),
+            name: "c".into(),
+            op: ActionOp::Create,
+            catalog: Some(catalog.into()),
+            reason: None,
+            files: Vec::new(),
+            merges: Vec::new(),
+            backup: false,
+            secrets: Vec::new(),
+            missing_secrets: Vec::new(),
+            plan: None,
+            expected: Default::default(),
+            secret_files: Default::default(),
+            remove_entry: None,
+            plugin: None,
+        }],
+        snapshot: Default::default(),
+        manifest: Default::default(),
+    }
+}
+
+/// R11: `apply_sync` needs a grant on every catalog its plan writes from.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn apply_sync_needs_a_grant_on_every_catalog_its_plan_writes() {
+    use crate::service::catalog::sync::plan;
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let (s, desk, _ops, _plain, acme) = two_catalog_store();
+    s.set_setting(guard::SETTING_CONFIRM_DESTRUCTIVE, "true")
+        .unwrap();
+    let t = tools(s);
+    let id = plan::registry_put(plan::SyncPlan::new(vec![host_plan_writing("acme")]));
+    let desk_c = client(desk, TokenMode::Full, None);
+    let args = json!({ "plan_id": id, "force_partial": false });
+
+    let r = call(&t, &desk_c, "apply_sync", Some(args.clone()), None).await;
+    assert_eq!(code_of(&r), "E_FORBIDDEN");
+    assert!(message_of(r).contains("acme"));
+    t.store
+        .lock()
+        .unwrap()
+        .set_client_catalog_grant("desk", acme, true)
+        .unwrap();
+    let r = call(&t, &desk_c, "apply_sync", Some(args), None)
+        .await
+        .unwrap_err();
+    assert!(
+        r.message.starts_with(codes::E_CONFIRM_REQUIRED),
+        "past the grant: {}",
+        r.message
+    );
+    assert!(plan::registry_take(&id).is_some(), "the gate only peeks");
 }

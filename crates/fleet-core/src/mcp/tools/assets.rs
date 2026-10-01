@@ -63,7 +63,7 @@ impl FleetTools {
         // doc says a per-host token must never edit the catalog; this is the
         // same gate `catalog_admin` runs, so the same caller who may drive
         // that tool is the only one who may drive this one.
-        if !may_admin_catalog(&caller, &self.store)? {
+        if !may_admin_catalog(&caller, &self.store, catalog::catalogs::PERSONAL)? {
             return Err(mcp_err(
                 "E_FORBIDDEN",
                 format!(
@@ -160,33 +160,30 @@ impl FleetTools {
         ok_json_compact(&summary)
     }
 
-    #[tool(description = "The Assets tab's catalog operations as one tool. \
-        Master or a client granted `assets`.")]
+    #[tool(description = "The Assets tab's catalog operations as one tool, \
+        plus the set of catalogs and host admissions. Master, or a client \
+        granted the catalog the action touches; list_catalogs needs no \
+        grant, add_catalog the master.")]
     pub(super) async fn catalog_admin(
         &self,
         Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<CatalogAdminParams>,
     ) -> Result<CallToolResult, McpError> {
-        use catalog::admin::AdminCall;
+        use catalog::admin::{AdminCall, Touches};
         audit(
             "catalog_admin",
-            &format!("action={} caller={}", p.action, caller.label()),
+            &format!(
+                "action={} catalog={} caller={}",
+                p.action,
+                p.catalog.as_deref().unwrap_or(catalog::catalogs::PERSONAL),
+                caller.label()
+            ),
         );
-        if !may_admin_catalog(&caller, &self.store)? {
-            return Err(mcp_err(
-                "E_FORBIDDEN",
-                format!(
-                    "catalog_admin needs the master token or a paired client granted the \
-                     asset catalog ({} refused); on the hub: fleet-hub client grant <name> assets",
-                    caller.label()
-                ),
-                None,
-            ));
-        }
         let mut wire = serde_json::json!({ "action": p.action });
         if let Some(args) = p.args.filter(|a| !a.is_null()) {
             wire["args"] = args;
         }
+        // Parsed first: what a call touches depends on which call it is (R11).
         let mut call: AdminCall = serde_json::from_value(wire).map_err(|e| {
             mcp_err(
                 "E_INVALID",
@@ -194,10 +191,37 @@ impl FleetTools {
                 None,
             )
         })?;
+        let touches = call.touches(p.catalog.as_deref()).map_err(to_mcp_err)?;
+        let allowed = match &touches {
+            Touches::Nothing => true,
+            Touches::NewCatalog => caller.is_master(),
+            Touches::Catalog(name) => may_admin_catalog(&caller, &self.store, name)?,
+        };
+        if !allowed {
+            return Err(forbidden(&touches, &caller));
+        }
+        // R11: applying a plan writes from every catalog it plans, not only
+        // the one the call names. Peeked, not taken: an unknown or expired
+        // id passes here and `apply_sync` reports it.
+        if let AdminCall::ApplySync(a) = &call {
+            for name in
+                catalog::sync::plan::registry_catalogs_written(&a.plan_id).unwrap_or_default()
+            {
+                if !may_admin_catalog(&caller, &self.store, &name)? {
+                    return Err(forbidden(&Touches::Catalog(name), &caller));
+                }
+            }
+        }
         self.prepare_admin_call(&mut call, p.confirm_nonce.as_deref(), &caller)?;
-        let value = catalog::admin::run(call, &self.store, &self.ssh, &self.reg)
-            .await
-            .map_err(to_mcp_err)?;
+        let value = catalog::admin::run(
+            call,
+            p.catalog.as_deref(),
+            &self.store,
+            &self.ssh,
+            &self.reg,
+        )
+        .await
+        .map_err(to_mcp_err)?;
         ok_json(&value)
     }
 
@@ -366,11 +390,12 @@ impl FleetTools {
 impl FleetTools {
     /// What `catalog_admin` does between parsing a call and running it:
     /// `apply_sync` passes the same confirm gate as the `apply_sync` tool and
-    /// loses the caller's `call_id`; every call but config / configure / load
-    /// and apply_sync reads a fresh catalog. `apply_sync`, like the tool,
-    /// does not refresh: it applies a plan already computed and held in the
-    /// registry, and needs the catalog only for the post-apply re-scan, which
-    /// it skips rather than fail the sync when no catalog is there.
+    /// loses the caller's `call_id`; every call but config / configure /
+    /// load, the catalog-set calls and apply_sync reads a fresh catalog.
+    /// `apply_sync`, like the tool, does not refresh: it applies a plan
+    /// already computed and held in the registry, and needs the catalog only
+    /// for the post-apply re-scan, which it skips rather than fail the sync
+    /// when no catalog is there.
     pub(super) fn prepare_admin_call(
         &self,
         call: &mut catalog::admin::AdminCall,
@@ -389,35 +414,82 @@ impl FleetTools {
                 // failed reload must not refuse a sync the `apply_sync`
                 // tool would run.
             }
-            // Loading and configuring are what `ensure_fresh` would do; every
-            // other call reads the catalog this process last loaded.
-            AdminCall::Config | AdminCall::Configure(_) | AdminCall::Load(_) => {}
+            // Loading and configuring are what `ensure_fresh` would do; the
+            // catalog-set calls read or write the store and load what they
+            // add themselves (`list_catalogs` refreshes best-effort in `run`);
+            // every other call reads the catalog this process last loaded.
+            AdminCall::Config
+            | AdminCall::Configure(_)
+            | AdminCall::Load(_)
+            | AdminCall::ListCatalogs
+            | AdminCall::AddCatalog(_)
+            | AdminCall::RemoveCatalog(_)
+            | AdminCall::AdmitCatalog(_)
+            | AdminCall::UnadmitCatalog(_) => {}
             _ => catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?,
         }
         Ok(())
     }
 }
 
-/// True when `caller` may use `catalog_admin`: the master, or a live `full`
-/// paired client, bound to no org, that the operator granted the asset
-/// catalog to. Read from the store on every call, so an un-grant or a revoke
-/// holds from the next call on. A per-host token never may: a host's Claude
-/// editing what Sync then writes to every host is exactly what the master
-/// gate exists to prevent.
-fn may_admin_catalog(caller: &Caller, store: &std::sync::Mutex<Store>) -> Result<bool, McpError> {
+/// True when `caller` may touch the catalog named `catalog` (spec:
+/// `may_admin_catalog(caller, catalog_id)`): the master, or a live `full`
+/// paired client, bound to no org, holding a grant on it (personal: the
+/// assets grant, R2). Read from the store on every call, so an un-grant or a
+/// revoke holds from the next call on. A per-host token never may: a host's
+/// Claude editing what Sync then writes to every host is exactly what the
+/// master gate exists to prevent. An unknown name is "no" for a client, so
+/// the refusal does not tell it which catalogs exist.
+fn may_admin_catalog(
+    caller: &Caller,
+    store: &std::sync::Mutex<Store>,
+    catalog: &str,
+) -> Result<bool, McpError> {
     if caller.is_master() {
         return Ok(true);
     }
-    match (&caller.host_alias, &caller.client) {
-        (None, Some(c)) => {
-            let s = store
-                .lock()
-                .map_err(|_| mcp_err(codes::E_LOCK, "store mutex poisoned", None))?;
-            s.client_is_assets_admin(c.id)
-                .map_err(|e| to_mcp_err(e.into()))
+    let (None, Some(c)) = (&caller.host_alias, &caller.client) else {
+        return Ok(false);
+    };
+    let s = store
+        .lock()
+        .map_err(|_| mcp_err(codes::E_LOCK, "store mutex poisoned", None))?;
+    let ok = if catalog == catalog::catalogs::PERSONAL {
+        s.client_is_assets_admin(c.id)
+    } else {
+        match s.get_catalog_by_name(catalog) {
+            Ok(Some(row)) => s.client_may_admin_catalog(c.id, row.id),
+            Ok(None) => Ok(false),
+            Err(e) => Err(e),
         }
-        _ => Ok(false),
-    }
+    };
+    ok.map_err(|e| to_mcp_err(e.into()))
+}
+
+/// The `E_FORBIDDEN` for a call `may_admin_catalog` refused, naming the
+/// operator's remedy on the hub.
+fn forbidden(touches: &catalog::admin::Touches, caller: &Caller) -> McpError {
+    use catalog::admin::Touches;
+    let message = match touches {
+        Touches::NewCatalog => format!(
+            "add_catalog needs the master token ({} refused); on the hub: fleet-hub catalog \
+             add <name> <path> --org <org>",
+            caller.label()
+        ),
+        Touches::Catalog(name) if name == catalog::catalogs::PERSONAL => format!(
+            "catalog_admin needs the master token or a paired client granted the asset catalog \
+             ({} refused); on the hub: fleet-hub client grant <name> assets",
+            caller.label()
+        ),
+        Touches::Catalog(name) => format!(
+            "catalog_admin on catalog {name} needs the master token or a paired client granted \
+             that catalog ({} refused); on the hub: fleet-hub client grant <name> assets \
+             --catalog {name}",
+            caller.label()
+        ),
+        Touches::Nothing => format!("catalog_admin refused {}", caller.label()),
+    };
+    mcp_err("E_FORBIDDEN", message, None)
 }
 
 /// Parse an MCP `kind` filter string into a `Kind`, using the same

@@ -919,6 +919,33 @@ pub(crate) fn registry_take(id: &str) -> Option<SyncPlan> {
     registry_take_with_expiry(id).map(|(_, plan)| plan)
 }
 
+/// Which catalogs the plan parked under `id` would write from: the
+/// `catalog` of every action that changes a host (not `Noop`/`Blocked`), and
+/// the catalog of the entry it undoes — a `Remove`'s, or the previous entry a
+/// `Create`/`Update`/`Overwrite` unmerges first (rule 8). Peeks: the plan
+/// stays parked. `None` when no unexpired plan has that id (`apply_sync`
+/// reports that itself). For the per-catalog `apply_sync` gate (Assets M3,
+/// Rulings R11).
+pub(crate) fn registry_catalogs_written(id: &str) -> Option<BTreeSet<String>> {
+    let now = Instant::now();
+    let map = plans();
+    let (expires_at, plan) = map.get(id)?;
+    if *expires_at <= now {
+        return None;
+    }
+    Some(
+        plan.hosts
+            .iter()
+            .flat_map(|h| &h.actions)
+            .filter(|a| !matches!(a.op, ActionOp::Noop | ActionOp::Blocked))
+            .flat_map(|a| {
+                let undone = a.remove_entry.as_ref().map(|e| &e.catalog);
+                a.catalog.iter().chain(undone).cloned()
+            })
+            .collect(),
+    )
+}
+
 /// [`registry_take`], also handing back the plan's original deadline so a
 /// caller that puts it back (`registry_put_existing`) can preserve it
 /// instead of minting a fresh one.
@@ -1941,6 +1968,78 @@ mod tests {
         assert_eq!(back.hosts.len(), 1);
         assert!(registry_take(&id).is_none(), "taking a plan consumes it");
         assert!(registry_take("no-such-plan").is_none());
+    }
+
+    /// The `apply_sync` gate peeks which catalogs a parked plan writes from:
+    /// every action that changes a host names its own, a `Remove` names the
+    /// entry it undoes; `Noop`/`Blocked` name nothing; the plan stays parked.
+    #[test]
+    fn registry_catalogs_written_peeks_without_taking() {
+        let mut hp = plan_for(
+            &cat(),
+            &Claude,
+            &HostSnapshot::default(),
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        for a in &mut hp.actions {
+            a.catalog = Some("acme".into());
+        }
+        let first = hp.actions[0].clone();
+        hp.actions.push(Action {
+            op: ActionOp::Remove,
+            catalog: None,
+            remove_entry: Some(ManifestEntry {
+                catalog: "old".into(),
+                ..Default::default()
+            }),
+            ..first.clone()
+        });
+        hp.actions.push(Action {
+            op: ActionOp::Noop,
+            catalog: Some("ignored".into()),
+            ..first
+        });
+        let id = registry_put(SyncPlan::new(vec![hp]));
+        assert_eq!(
+            registry_catalogs_written(&id),
+            Some(BTreeSet::from(["acme".to_string(), "old".to_string()]))
+        );
+        assert!(
+            registry_take(&id).is_some(),
+            "peeking leaves the plan parked"
+        );
+        assert_eq!(registry_catalogs_written("no-such-plan"), None);
+    }
+
+    /// Rule 8: an `Update` that unmerges a previous entry from another
+    /// catalog (the asset moved catalogs) writes on that catalog's behalf
+    /// too, so the gate names both.
+    #[test]
+    fn registry_catalogs_written_names_the_entry_an_update_unmerges() {
+        let mut hp = plan_for(
+            &cat(),
+            &Claude,
+            &HostSnapshot::default(),
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        let first = hp.actions[0].clone();
+        hp.actions = vec![Action {
+            op: ActionOp::Update,
+            catalog: Some("acme".into()),
+            remove_entry: Some(ManifestEntry {
+                catalog: "prev".into(),
+                ..Default::default()
+            }),
+            ..first
+        }];
+        let id = registry_put(SyncPlan::new(vec![hp]));
+        assert_eq!(
+            registry_catalogs_written(&id),
+            Some(BTreeSet::from(["acme".to_string(), "prev".to_string()]))
+        );
+        assert!(registry_take(&id).is_some());
     }
 
     fn host_plan(alias: &str) -> HostPlan {
