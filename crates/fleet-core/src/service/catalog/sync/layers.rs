@@ -1,11 +1,15 @@
 //! Bridge between a host's stored layer assignment and the pure resolver.
 
 use crate::ipc_error::codes;
+#[cfg(test)]
 use crate::ipc_error::lock;
 use crate::ipc_error::IpcError;
 use crate::service::catalog::repo::Catalog;
 use crate::service::catalog::resolve::{resolve, Resolution};
-use crate::store::{HostLayerRow, Store};
+use crate::store::HostLayerRow;
+#[cfg(test)]
+use crate::store::Store;
+#[cfg(test)]
 use std::sync::Mutex;
 
 /// Read `host_alias`'s stored assignment in `catalog` and resolve the
@@ -15,6 +19,16 @@ use std::sync::Mutex;
 /// catalog). A hand-built catalog with id 0 stands for the personal one.
 /// Takes the store lock briefly; callers inside a registry closure are
 /// fine (registry → store is the allowed order).
+///
+/// This is the single-catalog M1 compatibility API: `resolve_preview` and
+/// `plan_sync` moved to `effective::effective_for_host` (Assets M2), which
+/// resolves every catalog a host accepts, not just one. Nothing in
+/// production calls this any more — it is `#[cfg(test)]` so a future
+/// caller does not take the single-catalog path by mistake — and it
+/// survives only as the independent baseline several tests check
+/// `effective_for_host` against on the personal-only path, where the two
+/// must agree exactly.
+#[cfg(test)]
 pub fn resolve_for_host(
     store: &Mutex<Store>,
     catalog: &Catalog,
