@@ -2,6 +2,7 @@
 //! default, it rescans every reachable host whose inventory is older than a
 //! day, and all of them after the catalog HEAD or a sync changed.
 
+use crate::ipc_error::IpcError;
 use crate::ssh::SshClient;
 use crate::store::Store;
 use std::collections::BTreeSet;
@@ -90,6 +91,61 @@ fn setting_secs(store: &Mutex<Store>, key: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// Whether the catalog HEAD or the last sync moved since the previous pass.
+///
+/// Named so the arm is testable: the tick's own trigger for "rescan every
+/// host" is this comparison, and nothing drove it before.
+fn changed(seen: Option<&ScanKey>, now: &ScanKey) -> bool {
+    seen != Some(now)
+}
+
+/// The catalog HEAD plus the last sync's finish time — what a pass compares
+/// against the previous one.
+type ScanKey = (String, Option<i64>);
+
+/// Record how one host's rescan went: a host that did not come back fully
+/// scanned stays OWED, independent of `hosts_due`'s staleness check, so the
+/// next pass retries it.
+///
+/// Extracted from the tick's loop body because that body is the only thing
+/// that populates and clears `owed`, and no test drove it — the six tests
+/// around it all call the pure helpers with hand-built sets.
+fn settle(
+    owed: &mut BTreeSet<String>,
+    alias: &str,
+    res: &Result<Vec<crate::service::catalog::inventory::HostScanResult>, IpcError>,
+) {
+    match res {
+        Ok(results) => match results.iter().find(|r| r.host == alias) {
+            // The only outcome that clears the debt.
+            Some(r) if r.status == "scanned" => {
+                owed.remove(alias);
+            }
+            Some(r) => {
+                owed.insert(alias.to_string());
+                tracing::warn!(
+                    host = %alias,
+                    status = %r.status,
+                    detail = ?r.detail,
+                    "catalog scan tick: host not fully scanned; retrying next pass"
+                );
+            }
+            // Asked for one host and it is not in the answer at all.
+            None => {
+                owed.insert(alias.to_string());
+                tracing::warn!(
+                    host = %alias,
+                    "catalog scan tick: host missing from its own scan result; retrying next pass"
+                );
+            }
+        },
+        Err(e) => {
+            owed.insert(alias.to_string());
+            tracing::warn!(host = %alias, "catalog scan tick: {}", e.message);
+        }
+    }
+}
+
 /// Started only by a process that owns its fleet (`FleetTasks::
 /// start_catalog_scan_tick` on a standalone desktop, and `fleet-hub serve`),
 /// exactly like the tracker sync — a paired desktop must not run it.
@@ -114,7 +170,7 @@ pub fn spawn_catalog_scan_tick(
     Some(crate::rt::spawn(async move {
         let mut ticker = tokio::time::interval(period);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut seen: Option<(String, Option<i64>)> = None;
+        let mut seen: Option<ScanKey> = None;
         // A host whose scan failed or came back partial (`scan_hosts`
         // returned `Err`, or a status other than "scanned") stays here across
         // passes until it succeeds, independent of `hosts_due`'s staleness
@@ -131,6 +187,23 @@ pub fn spawn_catalog_scan_tick(
             // not the whole catalog (assets, resources and all). Nothing
             // loaded, or the registry lock poisoned, both `continue` —
             // this tick just has nothing to compare against yet.
+            // A separate process loads the catalog and writes the record
+            // (`fleet-hub catalog set` / `catalog reload`), so without this the
+            // registry copy in THIS process is left behind for good: the "HEAD
+            // changed" trigger below could never fire from a CLI reload, and
+            // every `compute_states` diff ran against a superseded asset set.
+            // `spawn_blocking` because the refresh runs git when the record has
+            // actually moved; the common path is two cheap clones.
+            {
+                let s = Arc::clone(&store);
+                match tokio::task::spawn_blocking(move || super::ensure_fresh(&s)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!("catalog scan tick: refresh: {}", e.message);
+                    }
+                    Err(e) => tracing::warn!("catalog scan tick: refresh panicked: {e}"),
+                }
+            }
             let head = match super::registry::with_personal(|c| Ok(c.head.clone())) {
                 Ok(head) => head,
                 Err(_) => continue,
@@ -152,8 +225,8 @@ pub fn spawn_catalog_scan_tick(
                     .collect();
                 (hosts, sync)
             };
-            let now_key = (head, last_sync);
-            let changed = seen.as_ref() != Some(&now_key);
+            let now_key: ScanKey = (head, last_sync);
+            let changed = changed(seen.as_ref(), &now_key);
             let due = hosts_due(
                 super::now_secs(),
                 &hosts,
@@ -163,29 +236,8 @@ pub fn spawn_catalog_scan_tick(
             owed.extend(take_requested());
             let due = with_owed(due, &owed, &hosts);
             for alias in due {
-                match super::inventory::scan_hosts(&store, &ssh, Some(&alias)).await {
-                    Ok(results) => match results.iter().find(|r| r.host == alias) {
-                        Some(r) if r.status == "scanned" => {
-                            owed.remove(&alias);
-                        }
-                        Some(r) => {
-                            owed.insert(alias.clone());
-                            tracing::warn!(
-                                host = %alias,
-                                status = %r.status,
-                                detail = ?r.detail,
-                                "catalog scan tick: host not fully scanned; retrying next pass"
-                            );
-                        }
-                        None => {
-                            owed.insert(alias.clone());
-                        }
-                    },
-                    Err(e) => {
-                        owed.insert(alias.clone());
-                        tracing::warn!(host = %alias, "catalog scan tick: {}", e.message);
-                    }
-                }
+                let res = super::inventory::scan_hosts(&store, &ssh, Some(&alias)).await;
+                settle(&mut owed, &alias, &res);
             }
             seen = Some(now_key);
         }
@@ -195,6 +247,79 @@ pub fn spawn_catalog_scan_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scanned(host: &str, status: &str) -> crate::service::catalog::inventory::HostScanResult {
+        crate::service::catalog::inventory::HostScanResult {
+            host: host.into(),
+            status: status.into(),
+            detail: None,
+            rows: 0,
+        }
+    }
+
+    /// Every arm of the owed-set bookkeeping. Before this it lived inline in
+    /// the spawned task, which no test drove: the arms around it were all
+    /// exercised through the pure helpers with hand-built sets, so the one
+    /// piece of real state the tick carries across passes was untested.
+    #[test]
+    fn settle_clears_a_debt_only_on_a_full_scan() {
+        let mut owed = BTreeSet::new();
+
+        // a clean scan clears
+        owed.insert("a".to_string());
+        settle(&mut owed, "a", &Ok(vec![scanned("a", "scanned")]));
+        assert!(owed.is_empty(), "a scanned host owes nothing");
+
+        // a partial status keeps the debt
+        settle(&mut owed, "a", &Ok(vec![scanned("a", "skipped")]));
+        assert!(owed.contains("a"), "skipped stays owed");
+        owed.clear();
+        settle(&mut owed, "a", &Ok(vec![scanned("a", "failed")]));
+        assert!(owed.contains("a"), "failed stays owed");
+
+        // the host missing from its OWN result is owed, not silently cleared
+        owed.clear();
+        settle(&mut owed, "a", &Ok(vec![scanned("b", "scanned")]));
+        assert!(owed.contains("a"), "another host's success is not ours");
+
+        // an empty answer is the same case
+        owed.clear();
+        settle(&mut owed, "a", &Ok(vec![]));
+        assert!(owed.contains("a"));
+
+        // an error is owed
+        owed.clear();
+        settle(&mut owed, "a", &Err(IpcError::new("E_SCAN", "boom")));
+        assert!(owed.contains("a"));
+
+        // and one host's outcome never disturbs another's debt
+        owed.clear();
+        owed.insert("keep".to_string());
+        settle(&mut owed, "a", &Ok(vec![scanned("a", "scanned")]));
+        assert_eq!(
+            owed.iter().cloned().collect::<Vec<_>>(),
+            vec!["keep".to_string()]
+        );
+    }
+
+    /// The "rescan everything" trigger: the catalog HEAD or the last sync
+    /// moving since the previous pass.
+    #[test]
+    fn changed_fires_on_a_new_head_or_a_new_sync() {
+        let a: ScanKey = ("head-a".into(), Some(10));
+        let b: ScanKey = ("head-b".into(), Some(10));
+        let a_later: ScanKey = ("head-a".into(), Some(20));
+        assert!(changed(None, &a), "the first pass has nothing to compare");
+        assert!(
+            !changed(Some(&a), &a),
+            "an unchanged key does not re-trigger"
+        );
+        assert!(changed(Some(&a), &b), "a new catalog HEAD triggers");
+        assert!(changed(Some(&a), &a_later), "a newer sync triggers");
+        let never_synced: ScanKey = ("head-a".into(), None);
+        assert!(changed(Some(&never_synced), &a), "first sync triggers");
+    }
+
     fn h(alias: &str, reachable: bool, last: Option<i64>) -> HostDue {
         HostDue {
             alias: alias.into(),

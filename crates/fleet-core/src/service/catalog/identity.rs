@@ -149,6 +149,14 @@ mod tests {
         assert_eq!(id.reason.as_deref(), Some("copies differ on oci"));
     }
 
+    /// The classification PRECEDENCE, not just each rule once.
+    ///
+    /// Every row here used to carry at most one flag, so the branch order —
+    /// dot-prefix, then `fleet_owned`, then `secret_like` — was load-bearing on
+    /// every real fleet and yet free to reorder: fleet's own
+    /// `mcp_server:claude-fleet` is `fleet_owned && secret_like` on *every*
+    /// scanned host, so only the order keeps it out of `needs_person`
+    /// fleet-wide. The two-flag rows below are what makes a swap fail.
     #[test]
     fn rules_hide_internals_and_flag_secrets() {
         let mut fleet = r("local", "hook", "stop", None);
@@ -161,6 +169,47 @@ mod tests {
         assert_eq!(class("stop"), IdentityClass::FleetInternal);
         assert_eq!(class("jira"), IdentityClass::NeedsPerson);
         assert_eq!(class(".system"), IdentityClass::HarnessInternal);
+    }
+
+    /// `fleet_owned` outranks `secret_like`, and the dot-prefix outranks both.
+    #[test]
+    fn classification_precedence_holds_when_two_flags_meet() {
+        // fleet's own MCP server, exactly as every scanned host reports it:
+        // fleet-owned AND secret-bearing. It must stay an internal, not become
+        // a person's problem on every host in the fleet.
+        let mut ours = r("local", "mcp_server", "claude-fleet", Some("h"));
+        ours.fleet_owned = true;
+        ours.secret_like = true;
+        let id = &group_identities(&[ours])[0];
+        assert_eq!(
+            id.class,
+            IdentityClass::FleetInternal,
+            "fleet_owned must outrank secret_like"
+        );
+        assert_eq!(id.reason, None);
+
+        // A dot-named secret-bearing server is HarnessInternal today: the dot
+        // check comes first. That is a deliberate record of the current order,
+        // not an endorsement — hiding a credential-carrying asset behind the
+        // internals toggle with no reason is filed separately (low). Changing
+        // it should break this assertion and be a conscious decision.
+        let mut dotted = r("oci", "mcp_server", ".vendor", Some("h"));
+        dotted.secret_like = true;
+        let id = &group_identities(&[dotted])[0];
+        assert_eq!(id.class, IdentityClass::HarnessInternal);
+        assert_eq!(id.reason, None);
+
+        // And secret_like still outranks the copies-differ rule.
+        let mut a = r("local", "mcp_server", "jira", Some("x"));
+        a.secret_like = true;
+        let b = r("oci", "mcp_server", "jira", Some("y"));
+        let id = &group_identities(&[a, b])[0];
+        assert_eq!(id.class, IdentityClass::NeedsPerson);
+        assert_eq!(
+            id.reason.as_deref(),
+            Some("carries a secret"),
+            "the secret is the reason, not the drift"
+        );
     }
 
     #[test]

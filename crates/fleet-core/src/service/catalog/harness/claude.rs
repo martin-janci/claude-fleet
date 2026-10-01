@@ -348,6 +348,33 @@ impl Claude {
     }
 }
 
+/// The identity-bearing part of an `installed_plugins.json` record: the
+/// version each entry pins, in order.
+///
+/// Hashing the WHOLE record made the same plugin at the same version hash
+/// differently per host, because fleet writes that record with
+/// `MergeMode::Subset` — it requires its own `{"version": …}` entry and leaves
+/// everything else alone, so any per-host bookkeeping Claude or the operator
+/// adds (install paths, timestamps, enabled flags) landed in the hash and the
+/// Assets list reported `copies differ on …` for plugins that are identical.
+///
+/// An entry with no `version` is `latest`, which is what `render_plugin`
+/// writes for it. A record whose shape is neither an array nor an object is
+/// hashed whole rather than silently as nothing.
+fn plugin_versions(v: &Value) -> Value {
+    let of = |e: &Value| -> Value {
+        match e.get("version").and_then(Value::as_str) {
+            Some(ver) => Value::String(ver.to_string()),
+            None => Value::String("latest".to_string()),
+        }
+    };
+    match v {
+        Value::Array(entries) => Value::Array(entries.iter().map(of).collect()),
+        Value::Object(_) => Value::Array(vec![of(v)]),
+        other => other.clone(),
+    }
+}
+
 const CONFIG_FILES: &[&str] = &[SETTINGS_PATH, CLAUDE_JSON_PATH, PLUGINS_PATH, MANIFEST_PATH];
 
 impl Harness for Claude {
@@ -568,8 +595,11 @@ impl Harness for Claude {
                         (
                             entry.map(|(k, v)| {
                                 sha256_hex(
-                                    canonical_json(&serde_json::json!({"key": k, "value": v}))
-                                        .as_bytes(),
+                                    canonical_json(&serde_json::json!({
+                                        "key": k,
+                                        "versions": plugin_versions(v),
+                                    }))
+                                    .as_bytes(),
                                 )
                             }),
                             false,
@@ -621,6 +651,57 @@ impl Harness for Claude {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Per-host bookkeeping in a plugin record is not drift.
+    ///
+    /// `render_plugin` writes that record with `MergeMode::Subset`: fleet
+    /// requires its own `{"version": …}` entry and leaves the rest alone. So
+    /// Claude or the operator may add install paths, timestamps or enabled
+    /// flags — and hashing the whole record made the SAME plugin at the SAME
+    /// version hash differently on every host, which the Assets list then
+    /// reported as `copies differ on …` with nothing a person could do.
+    #[test]
+    fn a_plugin_ref_hashes_on_its_version_not_its_bookkeeping() {
+        let bare = serde_json::json!([{"version": "1.2.3"}]);
+        let with_noise = serde_json::json!([{
+            "version": "1.2.3",
+            "installedAt": 1759300000,
+            "path": "/home/alice/.claude/plugins/x",
+            "enabled": true
+        }]);
+        assert_eq!(
+            plugin_versions(&bare),
+            plugin_versions(&with_noise),
+            "bookkeeping must not change the identity"
+        );
+
+        // a real version change IS drift
+        let other = serde_json::json!([{"version": "1.2.4"}]);
+        assert_ne!(plugin_versions(&bare), plugin_versions(&other));
+
+        // no `version` is `latest`, which is what render_plugin writes for it
+        assert_eq!(
+            plugin_versions(&serde_json::json!([{}])),
+            serde_json::json!(["latest"])
+        );
+        assert_eq!(
+            plugin_versions(&serde_json::json!([{"path": "/x"}])),
+            serde_json::json!(["latest"])
+        );
+
+        // a bare object is treated as a one-entry record
+        assert_eq!(
+            plugin_versions(&serde_json::json!({"version": "2.0"})),
+            serde_json::json!(["2.0"])
+        );
+
+        // an unexpected shape is hashed whole rather than silently as nothing
+        assert_eq!(
+            plugin_versions(&serde_json::json!("odd")),
+            serde_json::json!("odd")
+        );
+    }
+
     use crate::service::catalog::harness::{MergeMode, RenderPlan};
     use crate::service::catalog::model::{Asset, Resource};
 

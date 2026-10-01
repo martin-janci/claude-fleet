@@ -2216,13 +2216,95 @@ mod tests {
         );
         // Security fix round 1, IMPORTANT 4: the fixture has plenty to say
         // about assets `only` excludes — a broken symlink under `skills/`
-        // (a `problems` entry), and jira's literal `JIRA_TOKEN` (a
-        // `flagged_secrets` entry, verified present without `only` by
-        // `import_converts_every_kind_losslessly` below). None of it must
-        // reach the report when the caller asked for `skill:worktree` alone.
+        // (a `problems` entry). None of it must reach the report when the
+        // caller asked for `skill:worktree` alone. (The fixture's jira server
+        // now carries a `${JIRA_TOKEN}` placeholder rather than a literal, so
+        // there is no longer a `flagged_secrets` entry to exclude — a literal
+        // is refused outright, see
+        // `a_literal_secret_is_refused_not_imported_with_a_flag`.)
         assert!(rep.problems.is_empty(), "{:?}", rep.problems);
         assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
         assert!(rep.flagged_secrets.is_empty(), "{:?}", rep.flagged_secrets);
+    }
+
+    /// The script's two safety properties, EXECUTED rather than grepped.
+    ///
+    /// `remote_script_quotes_nothing_and_frames_files` asserts them as
+    /// substrings of the script text (`!contains("-L ")`, `contains("-H ")`),
+    /// which says nothing about what bash does with it — and a real-bash
+    /// harness already exists in this module.
+    ///
+    /// Property 1: a symlink NESTED under a skill is not followed, so a secret
+    /// it points at is never emitted. `-H` resolves only the top-level entry
+    /// `find` is given; `-L` would walk through every link it met.
+    #[cfg(unix)]
+    #[test]
+    fn the_remote_script_does_not_follow_a_nested_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        let skills = home.path().join(".claude/skills/one");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::fs::write(skills.join("body.md"), "ok\n").unwrap();
+        // the secret lives OUTSIDE the tree, reachable only through the link
+        let outside = home.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("id_ed25519"), "PRIVATE KEY\n").unwrap();
+        std::os::unix::fs::symlink(&outside, skills.join("nested")).unwrap();
+
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(REMOTE_SOURCES_SCRIPT)
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            text.contains("##FILE .claude/skills/one/body.md"),
+            "the skill itself is emitted: {text}"
+        );
+        assert!(
+            !text.contains("id_ed25519"),
+            "a nested symlink must not be followed: {text}"
+        );
+    }
+
+    /// Property 2: the cap's truncation branch, actually taken. The production
+    /// `cap` is 64 MiB, so the test substitutes a tiny one — and asserts the
+    /// substitution bit, so a change to the literal cannot silently stop
+    /// exercising the branch.
+    #[cfg(unix)]
+    #[test]
+    fn the_remote_script_truncates_past_its_cap() {
+        let small = REMOTE_SOURCES_SCRIPT.replace("cap=67108864", "cap=16");
+        assert_ne!(
+            small, REMOTE_SOURCES_SCRIPT,
+            "the cap literal moved: update this test so the branch is still run"
+        );
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::write(home.path().join(".claude/settings.json"), "x".repeat(64)).unwrap();
+
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&small)
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            text.contains("##TRUNCATED"),
+            "the cap must announce itself: {text}"
+        );
+        assert!(!out.status.success(), "and exit non-zero");
+        // and the over-cap file is never emitted
+        assert!(!text.contains("##FILE"), "{text}");
+        // the controller turns that marker into a refusal
+        let dir = tempfile::tempdir().unwrap();
+        assert!(parse_remote_dump(&text, dir.path()).is_err());
     }
 
     #[test]
