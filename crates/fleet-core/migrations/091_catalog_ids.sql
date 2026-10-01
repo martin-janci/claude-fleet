@@ -18,9 +18,15 @@ CREATE TABLE IF NOT EXISTS host_layers_new (
   active     INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY (host_alias, catalog_id, layer_name)
 );
+-- Only rows whose host still exists: a dangling host_layers row (no
+-- matching hosts.alias) can never resolve anyway, and copying it forward
+-- would resurface as a fatal "added" FK violation after the rebuild
+-- reassigns rowids and FK ids (see final-review I1).
 INSERT OR IGNORE INTO host_layers_new (host_alias, catalog_id, layer_name, axis, position, active)
   SELECT hl.host_alias, c.id, hl.layer_name, hl.axis, hl.position, hl.active
-  FROM host_layers hl JOIN catalogs c ON c.org_id IS NULL;
+  FROM host_layers hl
+  JOIN hosts h ON h.alias = hl.host_alias
+  JOIN catalogs c ON c.org_id IS NULL;
 DROP TABLE host_layers;
 CREATE TABLE host_layers (
   host_alias TEXT    NOT NULL REFERENCES hosts(alias),
