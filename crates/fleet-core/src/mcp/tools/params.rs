@@ -167,9 +167,8 @@ pub struct ProvisionHostsParams {
     /// One host alias; every active host when omitted.
     #[serde(default)]
     pub host: Option<String>,
-    /// Skills, CLAUDE.md block, hooks and — unless `provision.install_ag` is
-    /// off — the ag launcher only, reusing the host's existing token: no token
-    /// minted, no ~/.claude.json rewrite, no tunnel.
+    /// Skills, CLAUDE.md block, hooks and ag only: the host's own token is
+    /// reused, no ~/.claude.json rewrite, no tunnel.
     #[serde(default)]
     pub content_only: bool,
 }
