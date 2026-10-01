@@ -166,7 +166,11 @@ pub async fn scan_hosts(
             .map_err(|_| crate::ipc_error::IpcError::lock())?;
         s.list_hosts()?
     };
-    let catalog = super::registry::personal()?.ok_or_else(|| {
+    // Assets M2: every loaded catalog's assets, not just personal's — a
+    // host that never accepts an org catalog still has its own asset drift
+    // reported the same as before; `compute_states` stamps each row with
+    // whichever catalog it actually came from.
+    let catalog = super::registry::union_all()?.ok_or_else(|| {
         crate::ipc_error::IpcError::new(
             super::E_CATALOG_NOT_CONFIGURED,
             "catalog not loaded; call catalog_load",
@@ -360,6 +364,13 @@ pub fn compute_states(
                 .assets
                 .contains_key(&Manifest::key(asset.kind(), &asset.header.name)),
             scanned_at,
+            // Assets M2: which catalog this asset came from. `origin_of`
+            // falls back to `catalog` itself when there is only one loaded
+            // catalog (no `origin` entries), so a personal-only fleet still
+            // stamps the personal catalog's own id — never `None` for a
+            // catalog asset, restoring what the migration 091 backfill set
+            // and every rescan since had been silently erasing.
+            catalog_id: Some(catalog.origin_of(asset.kind(), &asset.header.name).id),
             ..Default::default()
         };
         let rendered = match harness.render(asset) {
@@ -703,6 +714,62 @@ mod tests {
         );
     }
 
+    /// A carry-forward from Task 1's review: `compute_states` used to write
+    /// `catalog_id: None` unconditionally on every row (via
+    /// `..Default::default()`), silently erasing migration 091's backfill on
+    /// the very first rescan. Every catalog-asset row — whatever its state —
+    /// must instead carry the id of the catalog it came from, while an
+    /// `unmanaged` row (nothing the catalog defines) stays `None`. With a
+    /// single catalog loaded, `Catalog::origin_of` has no `origin` entries to
+    /// consult and falls back to the catalog itself, so this also proves the
+    /// personal-only case stamps the personal catalog's own id rather than
+    /// `None`.
+    #[test]
+    fn compute_states_stamps_the_catalog_id_on_every_catalog_asset_row_and_none_on_unmanaged() {
+        let mut cat = Catalog {
+            id: 42,
+            name: "acme".into(),
+            ..Default::default()
+        };
+        let mut skill = Asset::from_yaml(None, "kind: skill\nname: s\ndescription: d\n").unwrap();
+        skill.body = "b\n".into();
+        cat.assets.push(skill.clone());
+        cat.assets
+            .push(Asset::from_yaml(None, "kind: agent\nname: gone\ndescription: d\n").unwrap());
+
+        let claude = Claude;
+        let skill_plan = claude.render(&skill).unwrap();
+        let skill_hash = crate::service::catalog::model::sha256_hex(&skill_plan.files[0].bytes);
+        let mut snap = HostSnapshot::default();
+        snap.files
+            .insert("~/.claude/skills/s/SKILL.md".into(), skill_hash);
+        // A stray directory the catalog does not define at all.
+        snap.files
+            .insert("~/.claude/skills/extra/SKILL.md".into(), "zzz".into());
+
+        let rows = compute_states(
+            &cat,
+            &claude,
+            "local",
+            &snap,
+            &Manifest::default(),
+            &empty(),
+            1,
+        );
+        let s = rows.iter().find(|r| r.name == "s").unwrap();
+        assert_eq!(s.state, "in_sync");
+        assert_eq!(s.catalog_id, Some(42), "an in_sync catalog-asset row");
+        let gone = rows.iter().find(|r| r.name == "gone").unwrap();
+        assert_eq!(gone.state, "missing");
+        assert_eq!(gone.catalog_id, Some(42), "a missing catalog-asset row");
+        let extra = rows.iter().find(|r| r.name == "extra").unwrap();
+        assert_eq!(extra.state, "unmanaged");
+        assert_eq!(
+            extra.catalog_id, None,
+            "an unmanaged row names nothing the catalog defines"
+        );
+    }
+
     /// An installed identifier that matches the catalog asset's
     /// `install_as` (not its catalog `name`) must be recognised as *that*
     /// asset rather than reported as a second, `unmanaged` asset next to a
@@ -1000,11 +1067,31 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("skills/s/body.md"), "b\n").unwrap();
-        let cat = crate::service::catalog::repo::load_dir(&root).unwrap();
-        crate::service::catalog::registry::install(cat).unwrap();
 
         let store = std::sync::Mutex::new(crate::store::Store::open_in_memory().unwrap());
         store.lock().unwrap().insert_host("local", None).unwrap();
+        // `asset_inventory.catalog_id` (Assets M2) is a real foreign key into
+        // `catalogs(id)`: the registered catalog needs the STORE's real
+        // personal id, not the registry's "id 0 stands for personal"
+        // convention (which only `host_layers` resolution understands) —
+        // production's `load` does this via `set_catalog_config` + `load`;
+        // mirrored here by hand since this test bypasses both.
+        store
+            .lock()
+            .unwrap()
+            .set_catalog_config("/p", None)
+            .unwrap();
+        let personal_id = store
+            .lock()
+            .unwrap()
+            .personal_catalog()
+            .unwrap()
+            .unwrap()
+            .id;
+        let mut cat = crate::service::catalog::repo::load_dir(&root).unwrap();
+        cat.id = personal_id;
+        crate::service::catalog::registry::install(cat).unwrap();
+
         let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
         let results = scan_hosts(&store, &ssh, Some("local")).await.unwrap();
         assert_eq!(results.len(), 1);
@@ -1172,16 +1259,22 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.path().join("skills/s/body.md"), "b\n").unwrap();
-        let cat = crate::service::catalog::repo::load_dir(root.path()).unwrap();
-        crate::service::catalog::registry::install(cat).unwrap();
 
         let store = std::sync::Mutex::new(crate::store::Store::open_in_memory().unwrap());
-        {
+        let personal_id = {
             let s = store.lock().unwrap();
             s.insert_host("local", None).unwrap();
             s.set_host_harnesses("local", Some(&["claude".to_string()][..]))
                 .unwrap();
-        }
+            // See `scan_hosts_scans_local_and_persists_rows`: `catalog_id`
+            // is a real foreign key, so the registered catalog needs the
+            // store's real personal id.
+            s.set_catalog_config("/p", None).unwrap();
+            s.personal_catalog().unwrap().unwrap().id
+        };
+        let mut cat = crate::service::catalog::repo::load_dir(root.path()).unwrap();
+        cat.id = personal_id;
+        crate::service::catalog::registry::install(cat).unwrap();
         let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
         let results = scan_hosts(&store, &ssh, Some("local")).await.unwrap();
         assert_eq!(results[0].status, "scanned", "{:?}", results[0].detail);

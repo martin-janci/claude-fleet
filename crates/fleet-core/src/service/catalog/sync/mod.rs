@@ -25,6 +25,7 @@ pub mod manifest;
 pub mod plan;
 pub mod secrets;
 
+use super::effective;
 use super::harness_set::{self, gated_catalog, harness_gate, HarnessFacts, HarnessGate};
 use crate::cancel::{CancelGuard, CancellationRegistry};
 use crate::events::SyncProgress;
@@ -96,10 +97,13 @@ pub struct SyncRunSummary {
     pub hosts: Vec<HostSyncResult>,
 }
 
-/// The loaded personal catalog, cloned out of the registry so nothing holds
-/// its lock across an await.
+/// Every loaded catalog, merged (Assets M2: `registry::union_all`), cloned
+/// out of the registry so nothing holds its lock across an await. This is
+/// the FULL catalog a scan diffs against — never the host-resolved one
+/// (`effective::effective_for_host`'s `eff.catalog`), which is what a host
+/// is supposed to have, not what its drift is measured against.
 fn catalog() -> Result<super::repo::Catalog, IpcError> {
-    super::registry::personal()?.ok_or_else(|| {
+    super::registry::union_all()?.ok_or_else(|| {
         IpcError::new(
             super::E_CATALOG_NOT_CONFIGURED,
             "catalog not loaded; call catalog_load",
@@ -252,11 +256,14 @@ pub async fn plan_sync(
                 continue;
             }
         };
-        // Resolve the host's layers ONCE per host, before its harnesses are
-        // planned. The scan below still uses the FULL catalog: inventory is
-        // about the whole catalog's drift, while the PLAN is about what this
-        // host is supposed to have.
-        let resolved = match layers::resolve_for_host(store, &catalog, &h.alias) {
+        // Resolve the host's EFFECTIVE catalog ONCE per host, before its
+        // harnesses are planned: every catalog it accepts, resolved for it,
+        // the scope boundary applied and cross-catalog collisions refused
+        // (Assets M2). It does its own store-then-registry ordering, so this
+        // is called with no store guard held. The scan below still uses the
+        // FULL (union) catalog: inventory is about the whole catalog's
+        // drift, while the PLAN is about what this host is supposed to have.
+        let eff = match effective::effective_for_host(store, &h.alias) {
             Ok(r) => r,
             Err(e) => {
                 for harness in &listed {
@@ -271,9 +278,9 @@ pub async fn plan_sync(
         // plan and the host is never touched over SSH.
         if refuse_unlayered(
             &h.alias,
-            resolved.layered,
+            eff.layered,
             args.allow_unlayered,
-            resolved.catalog.assets.is_empty(),
+            eff.catalog.assets.is_empty(),
         ) {
             for harness in &listed {
                 host_plans.push(skipped_plan(&h.alias, harness.id(), UNLAYERED_DETAIL));
@@ -283,14 +290,32 @@ pub async fn plan_sync(
         // A host with no `host_layers` row must plan a dropped `plugin_ref`
         // exactly as it did before layers existed (`Remove`), not the
         // "reported, not removed" `Noop` that only makes sense once a host
-        // opts into layers. `resolved.layered` answers that from the same
-        // read `resolve_for_host` already made — a second read would be a
+        // opts into layers. `eff.layered` answers that from the same read
+        // `effective_for_host` already made — a second read would be a
         // second failure path, and one that used to abort the whole plan
         // instead of skipping just this host.
         let host_filter = PlanFilter {
-            layered: resolved.layered,
+            layered: eff.layered,
             ..filter.clone()
         };
+        // Every asset the effective catalog refused (a scope boundary or a
+        // cross-catalog collision) that this plan's `kind`/`name` filter
+        // still covers becomes a `Blocked` action, once per harness this
+        // host lists — the refusal is a catalog-level decision, independent
+        // of which harness renders it, so every harness's plan reports it.
+        let blocked_for_refusals: Vec<plan::Action> = eff
+            .refused
+            .iter()
+            .filter_map(|r| {
+                let kind = super::model::Kind::ALL
+                    .iter()
+                    .copied()
+                    .find(|k| k.as_str() == r.kind)?;
+                host_filter
+                    .matches(kind, &r.name)
+                    .then(|| plan::blocked_action(kind, &r.name, r.reason.clone()))
+            })
+            .collect();
         // Every scanning harness is scanned, even one this host may not
         // serve: the scan is what detects it and reads its manifest.
         for harness in &scanning {
@@ -303,7 +328,7 @@ pub async fn plan_sync(
                 Ok((snap, manifest, gate)) => {
                     // `Off` plans nothing; `Retiring` plans against an empty
                     // catalog, so only removals of fleet's own installs remain.
-                    let Some(planned) = gated_catalog(gate, &resolved.catalog) else {
+                    let Some(planned) = gated_catalog(gate, &eff.catalog) else {
                         continue;
                     };
                     let mut hp = plan::compute_host_plan(
@@ -317,6 +342,8 @@ pub async fn plan_sync(
                     );
                     if gate == HarnessGate::Retiring {
                         hp.detail = Some(harness_set::retiring_detail(harness.id()));
+                    } else {
+                        hp.actions.extend(blocked_for_refusals.iter().cloned());
                     }
                     host_plans.push(hp);
                 }
@@ -653,6 +680,7 @@ mod tests {
     use super::*;
     use crate::cancel::CancellationRegistry;
     use crate::events::RecordingEventBus;
+    use crate::service::catalog::model::{Asset, Kind};
     use crate::service::catalog::repo;
     use crate::ssh::SshClient;
     use crate::store::Store;
@@ -678,7 +706,14 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
         }
-        let cat = repo::load_dir(root).unwrap();
+        let mut cat = repo::load_dir(root).unwrap();
+        // `repo::load_dir` alone leaves `name` at its `Default` (`""`): real
+        // catalogs get their name from the store's `catalogs` row (`load`),
+        // which these tests bypass. Naming it "personal" here is what every
+        // test in this module has implicitly meant by "the catalog" all
+        // along, and it is now observable: `Action::catalog` (Assets M2)
+        // reports it on every action.
+        cat.name = "personal".into();
         super::super::registry::install(cat).unwrap();
     }
 
@@ -727,6 +762,7 @@ mod tests {
             kind: "skill".into(),
             name: "s".into(),
             op: ActionOp::Create,
+            catalog: Some("personal".into()),
             reason: None,
             files: vec!["~/.claude/skills/s/SKILL.md".into()],
             merges: Vec::new(),
@@ -758,6 +794,28 @@ mod tests {
             .unwrap();
             // `set_host_layers` now targets the personal catalog.
             s.set_catalog_config("/p", None).unwrap();
+            // Every caller here calls `load_catalog` BEFORE this function,
+            // when no store (and so no real catalog id) exists yet —
+            // `load_catalog` installs it under the registry's "id 0 stands
+            // for personal" convention instead. That convention is fine for
+            // resolving `host_layers` rows, but `asset_inventory.catalog_id`
+            // (Assets M2) is a real foreign key into `catalogs(id)`, and
+            // `compute_states` now stamps it from the registry catalog's own
+            // id: a scan would fail its (silently swallowed) insert with no
+            // `catalogs` row `0` to reference. Production's `load` always
+            // stamps the store's real personal id before installing
+            // (`cat.id = personal.id`); reconcile the same way here, now
+            // that the store row exists to read it from.
+            if let Ok(Some(cat)) = super::super::registry::personal() {
+                if cat.id == 0 {
+                    let real_id = s.personal_catalog().unwrap().unwrap().id;
+                    super::super::registry::install_personal(super::super::repo::Catalog {
+                        id: real_id,
+                        ..cat
+                    })
+                    .unwrap();
+                }
+            }
         }
         store
     }
@@ -823,6 +881,133 @@ mod tests {
         assert!(
             plan::registry_take(&plan.id).is_none(),
             "a plan is applied at most once"
+        );
+    }
+
+    /// Assets M2: every action `compute_host_plan` produces for a catalog
+    /// asset says which catalog it came from. With only the personal
+    /// catalog loaded and no layer assignment, that is `"personal"` for
+    /// everything the plan touches — the personal-only equivalence the
+    /// controller notes require, plus the one new field.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_records_each_actions_catalog() {
+        let _lock = super::super::lock_registry_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        let _repo = load_one_skill();
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(PlanArgs::default(), &store, &ssh).await.unwrap();
+        let create = plan
+            .hosts
+            .iter()
+            .flat_map(|h| &h.actions)
+            .find(|a| a.name == "s" && a.op == ActionOp::Create)
+            .expect("a create action for s");
+        assert_eq!(create.catalog.as_deref(), Some("personal"));
+    }
+
+    /// One skill named `s`, scoped `shared` — as `skill_asset` returns it
+    /// via `Asset::from_yaml` rather than `one_skill`'s on-disk YAML: the
+    /// refusal path never renders the asset (it never reaches the resolved
+    /// catalog), so no body/harness rendering is needed here.
+    fn skill_asset(name: &str, scope: &str) -> Asset {
+        Asset::from_yaml(
+            Some(Kind::Skill),
+            &format!("kind: skill\nname: {name}\ndescription: d\nscope: {scope}\n"),
+        )
+        .unwrap()
+    }
+
+    /// Assets M2: a cross-catalog collision (personal's shared `s` vs.
+    /// acme's `s`, on a host bound to org acme) refuses both copies, and
+    /// `plan_sync` turns the refusal into a `Blocked` action carrying
+    /// `effective_for_host`'s own reason — proving the refusal actually
+    /// reaches the plan, not just `EffectiveSet` in isolation.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_refused_asset_is_a_blocked_action_with_its_reason() {
+        let _lock = super::super::lock_registry_for_test();
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let (personal_id, acme_id): (i64, i64) = {
+            let s = store.lock().unwrap();
+            let personal_id = s.personal_catalog().unwrap().unwrap().id;
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO orgs (id, name, created_at) VALUES (10, 'acme', 0)",
+                    [],
+                )
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO catalogs (name, repo_path, org_id, created_at) \
+                     VALUES ('acme', '/a', 10, 0)",
+                    [],
+                )
+                .unwrap();
+            let acme_id: i64 = s
+                .conn_ref()
+                .query_row("SELECT id FROM catalogs WHERE name='acme'", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            // Org-bound: `local`'s only acceptable catalogs are acme (its
+            // own org) and the SHARED slice of personal.
+            s.set_host_org("local", Some(10)).unwrap();
+            (personal_id, acme_id)
+        };
+        // Real store-issued ids, not the registry's "id 0 stands for
+        // personal" convention: `plan_sync` also scans the FULL (union)
+        // catalog for inventory, and `compute_states` now stamps
+        // `catalog_id` — a real foreign key into `catalogs(id)` — from
+        // whichever id the registry catalog carries.
+        super::super::registry::install_personal(repo::Catalog {
+            id: personal_id,
+            name: "personal".into(),
+            org_id: None,
+            assets: vec![skill_asset("s", "shared")],
+            ..Default::default()
+        })
+        .unwrap();
+        super::super::registry::install_for_test(repo::Catalog {
+            id: acme_id,
+            name: "acme".into(),
+            org_id: Some(10),
+            assets: vec![skill_asset("s", "private")],
+            ..Default::default()
+        })
+        .unwrap();
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(
+            PlanArgs {
+                host_alias: Some("local".into()),
+                ..PlanArgs::default()
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+
+        let blocked = plan
+            .hosts
+            .iter()
+            .flat_map(|h| &h.actions)
+            .find(|a| a.name == "s" && a.op == ActionOp::Blocked)
+            .expect("a blocked action for the refused asset");
+        assert!(
+            blocked
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("conflict: personal/s vs acme/s"),
+            "{:?}",
+            blocked.reason
         );
     }
 

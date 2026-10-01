@@ -30,6 +30,15 @@ pub struct Resolution {
     /// Whether ANY layer applied. False only on the no-layering path, which
     /// every host without a `host_layers` row takes.
     pub layered: bool,
+    /// Assets M2: assets that would have gone to this host but a scope
+    /// boundary or a cross-catalog collision refused
+    /// (`effective::EffectiveSet::refused`). Empty on the single-catalog
+    /// path `resolve()` itself takes; `mod::resolve_preview` fills it from
+    /// `effective::effective_for_host`. `#[serde(default)]` because
+    /// `Resolution` travels the wire (`catalog_resolve_preview`'s answer): a
+    /// hub older than Assets M2 never sends this field.
+    #[serde(default)]
+    pub refused: Vec<crate::service::catalog::effective::Refusal>,
 }
 
 /// Deep-merge `over` into `base`: mappings recurse, everything else replaces.
@@ -128,6 +137,7 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
             provenance: BTreeMap::new(),
             excluded: BTreeMap::new(),
             layered: false,
+            refused: Vec::new(),
         };
     }
 
@@ -211,6 +221,7 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
         provenance,
         excluded,
         layered: true,
+        refused: Vec::new(),
     }
 }
 

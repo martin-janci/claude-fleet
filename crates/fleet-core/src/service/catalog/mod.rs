@@ -464,13 +464,31 @@ fn require_host_exists(store: &Mutex<Store>, host_alias: &str) -> Result<(), Ipc
 
 /// Compute the effective asset set for `host_alias`, with provenance.
 /// Nothing is written.
+///
+/// Assets M2: built from [`effective::effective_for_host`] rather than the
+/// single-catalog `sync::layers::resolve_for_host`, so the preview reflects
+/// every catalog the host accepts (its org catalog, and the shared slice of
+/// personal), not personal alone — and `refused` surfaces a scope boundary
+/// or a cross-catalog collision the same way `plan_sync` does. `excluded`
+/// stays empty on this path: it names a *layer's own* exclusion, which is
+/// per-catalog information `effective_for_host`'s composition does not
+/// carry through (unlike `sync::layers::resolve_for_host`'s direct
+/// single-catalog `resolve()` call). `Resolution`'s shape is unchanged
+/// otherwise, so a personal-only host previews exactly as before.
 pub fn resolve_preview(
     host_alias: &str,
     store: &Mutex<Store>,
 ) -> Result<resolve::Resolution, IpcError> {
     crate::validate::host_alias(host_alias)?;
     require_host_exists(store, host_alias)?;
-    with_catalog(|cat| sync::layers::resolve_for_host(store, cat, host_alias))
+    let eff = effective::effective_for_host(store, host_alias)?;
+    Ok(resolve::Resolution {
+        catalog: eff.catalog,
+        provenance: eff.provenance,
+        excluded: std::collections::BTreeMap::new(),
+        layered: eff.layered,
+        refused: eff.refused,
+    })
 }
 
 /// A layer named by `set_host_layers` must exist in the loaded catalog, and

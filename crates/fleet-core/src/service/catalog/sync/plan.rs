@@ -90,6 +90,14 @@ pub struct Action {
     pub kind: String,
     pub name: String,
     pub op: ActionOp,
+    /// Which catalog this asset came from (Assets M2), e.g. `"personal"`.
+    /// `None` for an action that names no catalog asset (a `Remove` for a
+    /// manifest orphan, or a `Blocked` for a refusal the effective catalog
+    /// made before any harness ever saw the asset). `#[serde(default)]`
+    /// because `Action` travels the wire (`sync_plan`'s answer): a hub older
+    /// than Assets M2 never sends this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
     /// Why, for `Blocked`/`Overwrite`/plugin ops.
     pub reason: Option<String>,
     /// Display: file paths this action would write (or delete).
@@ -188,7 +196,10 @@ pub struct PlanFilter {
 }
 
 impl PlanFilter {
-    fn matches(&self, kind: Kind, name: &str) -> bool {
+    /// `pub(crate)`: `sync::plan_sync` (in the parent `sync` module) uses it
+    /// too, to decide which of `EffectiveSet::refused` this host's plan
+    /// should turn into a `Blocked` action.
+    pub(crate) fn matches(&self, kind: Kind, name: &str) -> bool {
         self.kind.is_none_or(|k| k == kind) && self.name.as_deref().is_none_or(|n| n == name)
     }
 }
@@ -326,7 +337,14 @@ pub fn compute_host_plan(
         if !filter.matches(asset.kind(), &asset.header.name) {
             continue;
         }
-        actions.push(action_for(harness, asset, snap, manifest, secrets));
+        let mut action = action_for(harness, asset, snap, manifest, secrets);
+        // Assets M2: every action for a catalog asset says which catalog it
+        // came from. `catalog` here is the host's resolved (`eff.catalog`)
+        // catalog, so `origin_of` answers correctly for a union of several
+        // catalogs as well as for the single-catalog case (where it falls
+        // back to `catalog` itself, e.g. "personal").
+        action.catalog = Some(catalog.origin_of(asset.kind(), &asset.header.name).name);
+        actions.push(action);
     }
     for (key, entry) in manifest.orphans(catalog) {
         let Some((kind, name)) = Manifest::split_key(key) else {
@@ -345,6 +363,9 @@ pub fn compute_host_plan(
                 kind: kind.as_str().to_string(),
                 name: name.clone(),
                 op: ActionOp::Noop,
+                // Not a catalog asset any more — this is exactly the entry
+                // the catalog dropped — so it names no catalog.
+                catalog: None,
                 reason: Some(
                     "no longer in this host's effective catalog; plugins are not removed \
                      automatically"
@@ -367,6 +388,7 @@ pub fn compute_host_plan(
             kind: kind.as_str().to_string(),
             name,
             op: ActionOp::Remove,
+            catalog: None,
             reason: Some("no longer in the catalog".into()),
             files: entry.files.clone(),
             merges: merge_labels(entry.merges.iter().map(|m| (&m.file, &m.json_path))),
@@ -395,6 +417,35 @@ pub fn compute_host_plan(
     }
 }
 
+/// A `Blocked` action for an asset the *effective catalog* refused before
+/// any harness ever saw it — a scope boundary or a cross-catalog collision
+/// (`effective::EffectiveSet::refused`), as opposed to a per-harness render
+/// decision. It carries no files, merges or plan: there is nothing to
+/// render for an asset that never reached the resolved catalog, and it
+/// names no `catalog` for the same reason `action_for`'s `blank()` doesn't
+/// — a refused asset was dropped precisely because which catalog it should
+/// come from is unresolved (a collision) or irrelevant (a scope refusal).
+/// `sync::plan_sync` is the only caller.
+pub(crate) fn blocked_action(kind: Kind, name: &str, reason: String) -> Action {
+    Action {
+        kind: kind.as_str().to_string(),
+        name: name.to_string(),
+        op: ActionOp::Blocked,
+        catalog: None,
+        reason: Some(reason),
+        files: Vec::new(),
+        merges: Vec::new(),
+        backup: false,
+        secrets: Vec::new(),
+        missing_secrets: Vec::new(),
+        plan: None,
+        expected: BTreeMap::new(),
+        secret_files: BTreeSet::new(),
+        remove_entry: None,
+        plugin: None,
+    }
+}
+
 fn action_for(
     harness: &dyn Harness,
     asset: &Asset,
@@ -409,6 +460,10 @@ fn action_for(
         kind: kind.as_str().to_string(),
         name: name.clone(),
         op: ActionOp::Noop,
+        // The caller (`compute_host_plan`) stamps the real value once this
+        // action comes back — it alone knows which resolved catalog is
+        // being planned.
+        catalog: None,
         reason: None,
         files: Vec::new(),
         merges: Vec::new(),
@@ -1037,7 +1092,7 @@ mod tests {
         };
         manifest.assets.insert(
             "skill/foo-bar".into(),
-            Manifest::entry_for(&old_plan.hash(), &old_plan, 0),
+            Manifest::entry_for(&old_plan.hash(), &old_plan, 0, "personal"),
         );
 
         let hp = plan_for(
@@ -1063,7 +1118,7 @@ mod tests {
         };
         manifest.assets.insert(
             "skill/foo-bar".into(),
-            Manifest::entry_for(&new_plan.hash(), &new_plan, 0),
+            Manifest::entry_for(&new_plan.hash(), &new_plan, 0, "personal"),
         );
         let mut snap = HostSnapshot::default();
         satisfy(&mut snap, &new_plan);
@@ -1487,6 +1542,7 @@ mod tests {
                     value_hash: "vh".into(),
                 }],
                 synced_at: 1,
+                catalog: "personal".into(),
             },
         );
         // A key nothing can parse is skipped rather than half-planned.

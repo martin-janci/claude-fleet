@@ -24,6 +24,16 @@ pub struct ManifestEntry {
     pub files: Vec<String>,
     pub merges: Vec<ManifestMerge>,
     pub synced_at: i64,
+    /// Which catalog this asset was applied from (Assets M2). An old
+    /// manifest written before this field existed has none on disk, so it
+    /// reads as `"personal"` — every host synced before Assets M2 could only
+    /// ever have gotten its assets from the personal catalog.
+    #[serde(default = "personal")]
+    pub catalog: String,
+}
+
+fn personal() -> String {
+    "personal".into()
 }
 
 /// The manifest file itself: every managed asset keyed by `Manifest::key`.
@@ -73,9 +83,10 @@ impl Manifest {
 
     /// Build the entry to record for a just-applied `plan`: `hash` is the
     /// plan's overall content hash (see `RenderPlan::hash`), `files` are
-    /// the paths it wrote, and `merges` hash the (already-substituted)
-    /// merge values rather than keeping them.
-    pub fn entry_for(hash: &str, plan: &RenderPlan, now: i64) -> ManifestEntry {
+    /// the paths it wrote, `merges` hash the (already-substituted) merge
+    /// values rather than keeping them, and `catalog` is the name of the
+    /// catalog the applied action's asset came from (`Action::catalog`).
+    pub fn entry_for(hash: &str, plan: &RenderPlan, now: i64, catalog: &str) -> ManifestEntry {
         ManifestEntry {
             hash: hash.to_string(),
             files: plan.files.iter().map(|f| f.path.clone()).collect(),
@@ -90,6 +101,7 @@ impl Manifest {
                 })
                 .collect(),
             synced_at: now,
+            catalog: catalog.to_string(),
         }
     }
 
@@ -174,6 +186,7 @@ mod tests {
                     value_hash: "deadbeef".into(),
                 }],
                 synced_at: 100,
+                catalog: "personal".into(),
             },
         );
         let json = m.to_json();
@@ -241,7 +254,7 @@ mod tests {
             mode: MergeMode::Set,
             value: value.clone(),
         });
-        let entry = Manifest::entry_for("planhash", &plan, 123);
+        let entry = Manifest::entry_for("planhash", &plan, 123, "personal");
         assert_eq!(entry.hash, "planhash");
         assert_eq!(
             entry.files,
@@ -255,6 +268,32 @@ mod tests {
             entry.merges[0].value_hash,
             value_hash(&json!({"token": "${SECRET}"}))
         );
+    }
+
+    /// `entry_for` records whichever catalog name it is given — the applier
+    /// passes `Action::catalog` (Assets M2), so a plugin/asset applied from
+    /// an org catalog is recorded as such rather than silently as
+    /// `"personal"`.
+    #[test]
+    fn entry_for_records_the_catalog_it_is_given() {
+        let mut plan = RenderPlan::default();
+        plan.files.push(FileWrite {
+            path: "~/.claude/skills/s/SKILL.md".into(),
+            bytes: b"body".to_vec(),
+        });
+        let entry = Manifest::entry_for("h", &plan, 1, "acme");
+        assert_eq!(entry.catalog, "acme");
+    }
+
+    /// An old manifest, written before Assets M2 added `catalog` to the
+    /// entry, has no such field on disk. It must still deserialise —
+    /// every host synced before Assets M2 could only ever have gotten its
+    /// assets from the personal catalog, so that is what it reads as.
+    #[test]
+    fn an_entry_with_no_catalog_field_deserialises_as_personal() {
+        let entry: ManifestEntry =
+            serde_json::from_str(r#"{"hash":"h","files":[],"merges":[],"synced_at":1}"#).unwrap();
+        assert_eq!(entry.catalog, "personal");
     }
 
     #[test]
