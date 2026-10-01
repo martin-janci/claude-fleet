@@ -8,7 +8,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import PageView from './PageView.svelte';
 import { allDescriptors, bundle } from './testing';
-import { guideProposals, guidesWritable, liveGuides, loadGuides, type GuidesView } from './guides';
+import { guideProposals, guidesWritable, liveGuides, loadGuides, withheldGuides, type GuidesView } from './guides';
 import type { Page } from './pages';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
@@ -58,6 +58,7 @@ function showGuide(values: Record<string, string>) {
 beforeEach(() => {
   inv.mockReset();
   liveGuides.set([]);
+  withheldGuides.set([]);
   guideProposals.set([]);
   guidesWritable.set(true);
 });
@@ -160,6 +161,35 @@ describe('the Guides page', () => {
     await fireEvent.click(screen.getByTestId('guide-remove-guide.cleanup'));
     await fireEvent.click(screen.getByTestId('guide-remove-confirm'));
     await waitFor(() => expect(screen.queryByTestId('guide-live-guide.cleanup')).toBeNull());
+  });
+
+  it('shows an approved guide the backend withholds, with its reason and a way out', async () => {
+    // Such a row still holds a MAX_APPROVED slot, so leaving it off this screen
+    // is what made an approved guide vanish with nothing saying why and nothing
+    // able to remove it — the Remove button iterates the LIVE guides.
+    inv.mockImplementation(async (cmd: string) =>
+      cmd === 'list_guides'
+        ? {
+            guides: [],
+            proposals: [],
+            can_write: true,
+            withheld: [
+              { id: 4, page_id: 'guide.orphan', why: 'item 2: links to `guide.cleanup`, which is not a page' },
+            ],
+          }
+        : cmd === 'remove_guide'
+          ? { guides: [], proposals: [], can_write: true, withheld: [] }
+          : null,
+    );
+    await loadGuides();
+    showReview();
+    const row = screen.getByTestId('guide-held-guide.orphan');
+    expect(row.textContent).toContain('guide.orphan');
+    expect(row.textContent).toContain('which is not a page');
+
+    // and it can be removed from here — no confirm, since it is not on the pages
+    await fireEvent.click(screen.getByTestId('guide-remove-held-guide.orphan'));
+    await waitFor(() => expect(screen.queryByTestId('guide-held-guide.orphan')).toBeNull());
   });
 
   it('offers no decision to a device the hub does not trust', async () => {

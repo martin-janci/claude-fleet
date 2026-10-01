@@ -25,11 +25,24 @@ export interface GuidesView {
   guides: Page[];
   proposals: GuideProposal[];
   can_write: boolean;
+  /** Approved rows that are NOT being served, and why. Absent from an older hub. */
+  withheld?: WithheldGuide[];
+}
+
+/** An approved guide the backend is withholding, with a reason a person can act on.
+ *  It still holds a MAX_APPROVED slot, so it has to be shown somewhere: before
+ *  this it vanished from every surface with nothing saying why. */
+export interface WithheldGuide {
+  id: number;
+  page_id: string;
+  why: string;
 }
 
 /** The approved guides, as pages. */
 export const liveGuides = writable<Page[]>([]);
 export const guideProposals = writable<GuideProposal[]>([]);
+/** Approved but not served — shown so a person can see why and remove it. */
+export const withheldGuides = writable<WithheldGuide[]>([]);
 /** This app may approve, reject and remove guides: always standalone; on a
  *  paired desktop, when the hub's operator trusts it. */
 export const guidesWritable = writable<boolean>(true);
@@ -43,6 +56,7 @@ export const allPages = derived([pagesBundle, liveGuides], ([$b, $g]) => {
 function apply(v: GuidesView) {
   liveGuides.set(v.guides ?? []);
   guideProposals.set(v.proposals ?? []);
+  withheldGuides.set(v.withheld ?? []);
   guidesWritable.set(v.can_write === true);
 }
 

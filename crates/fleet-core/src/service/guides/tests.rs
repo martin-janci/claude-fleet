@@ -173,6 +173,83 @@ fn a_guide_may_link_to_another_live_guide_but_not_to_a_missing_one() {
     assert!(check(&s, &b).ok, "{:?}", check(&s, &b).problems);
 }
 
+/// Removing a guide another one links to is REFUSED, and the dependent stays.
+///
+/// The judge's own probe on the pre-fix build, using nothing but operations the
+/// feature offers:
+///
+/// ```text
+/// JUDGE before remove: live=["guide.cleanup", "guide.next"]
+/// JUDGE after remove(guide.cleanup): live=[]
+/// JUDGE approved rows still in table: [(2, "guide.next", "approved")]
+/// ```
+///
+/// `guide.next` ended up approved-but-invisible: still holding a
+/// `MAX_APPROVED` slot, dropped by `live()`, and offered for removal by no
+/// surface — the desktop's Remove iterates the live guides and so does
+/// `fleet-hub guides list` — so a person's approved content vanished with no
+/// message and no way back.
+#[test]
+fn removing_a_guide_another_links_to_is_refused() {
+    let s = Store::open_in_memory().unwrap();
+    let a = propose(&s, &example(), None, agent()).unwrap();
+    decide(&s, a.id, true, person()).unwrap();
+    let mut b = example();
+    b["id"] = json!("guide.next");
+    b["sections"][2]["items"][1]["page"] = json!("guide.cleanup");
+    let brow = propose(&s, &b, None, agent()).unwrap();
+    decide(&s, brow.id, true, person()).unwrap();
+    assert_eq!(live(&s).len(), 2, "both are live");
+
+    let e = remove(&s, "guide.cleanup", person()).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    assert!(e.message.contains("guide.next"), "{}", e.message);
+    assert!(e.message.contains("links to"), "{}", e.message);
+    assert_eq!(live(&s).len(), 2, "nothing was removed");
+
+    // Removing the dependent first works, and then so does the target.
+    remove(&s, "guide.next", person()).unwrap();
+    remove(&s, "guide.cleanup", person()).unwrap();
+    assert!(live(&s).is_empty());
+}
+
+/// An approved guide that is not being served is NAMED, with its reason.
+///
+/// Of the four ways `live()` dropped a row, only one logged, and it logged a
+/// count while discarding the problems it had just computed — so a guide a
+/// person approved could vanish from every surface with nothing saying why,
+/// while its row kept its `MAX_APPROVED` slot.
+#[test]
+fn a_withheld_guide_is_reported_with_its_reason() {
+    let s = Store::open_in_memory().unwrap();
+    let row = propose(&s, &example(), None, agent()).unwrap();
+    decide(&s, row.id, true, person()).unwrap();
+    assert!(view(&s, true).unwrap().withheld.is_empty());
+
+    // as if a later build removed the setting it names
+    let mut stale = example();
+    stale["sections"][1]["items"][0]["key"] = json!("gc.removed_in_a_later_build");
+    s.set_guide_spec_for_tests(row.id, &stale.to_string());
+
+    let v = view(&s, true).unwrap();
+    assert!(v.guides.is_empty(), "it is not served");
+    assert_eq!(v.withheld.len(), 1, "but it is named");
+    assert_eq!(v.withheld[0].page_id, "guide.cleanup");
+    assert_eq!(v.withheld[0].id, row.id, "with the id `remove` needs");
+    assert!(
+        v.withheld[0].why.contains("gc.removed_in_a_later_build"),
+        "the reason, not a count: {}",
+        v.withheld[0].why
+    );
+
+    // A spec that no longer PARSES is reported too — that path logged nothing
+    // at all before.
+    s.set_guide_spec_for_tests(row.id, "{not json");
+    let v = view(&s, true).unwrap();
+    assert_eq!(v.withheld.len(), 1);
+    assert!(v.withheld[0].why.contains("parse"), "{}", v.withheld[0].why);
+}
+
 #[test]
 fn a_live_guide_that_no_longer_checks_is_left_out() {
     let s = Store::open_in_memory().unwrap();

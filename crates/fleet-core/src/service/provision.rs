@@ -956,7 +956,8 @@ pub async fn provision_hosts(
                 // A warning is appended: the host still needs (or not) its
                 // Claude restart, whatever else went wrong.
                 let done = if scope.content_only {
-                    "skills, CLAUDE.md block and hooks refreshed (no restart needed)"
+                    "skills, CLAUDE.md block, hooks and the ag launcher refreshed \
+                     (no restart needed)"
                 } else {
                     "restart Claude on this host to load the MCP server"
                 };

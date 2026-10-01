@@ -15,6 +15,7 @@
     guidesWritable,
     liveGuides,
     removeGuide,
+    withheldGuides,
     type GuideProposal,
   } from './guides';
 
@@ -70,6 +71,15 @@
     push({ kind: 'success', message: approve ? `“${p.title}” is on the pages now.` : `Rejected “${p.title}”.` });
   }
 
+  // A withheld guide is not on the pages, so removing it takes nothing away
+  // that a person can see — no confirmation, unlike a live one.
+  async function removeHeld(pageId: string) {
+    busy = true;
+    const r = await removeGuide(pageId);
+    busy = false;
+    if (!r.ok) pushError(r.error, 'Guides');
+  }
+
   async function remove(page: Page) {
     removing = null;
     busy = true;
@@ -90,6 +100,26 @@
             <span class="meta">{(g.sections ?? []).length} steps</span>
             {#if $guidesWritable}
               <button type="button" class="btn" disabled={busy} data-testid={`guide-remove-${g.id}`} onclick={() => (removing = g)}>Remove</button>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
+
+  <!-- Approved but not being served. Such a row still holds a MAX_APPROVED
+       slot, so leaving it out of this screen is what made an approved guide
+       vanish with nothing saying why and no way to remove it. -->
+  {#if $withheldGuides.length > 0}
+    <section class="group">
+      <h5>Approved but not shown</h5>
+      <ul>
+        {#each $withheldGuides as w (w.page_id)}
+          <li class="held" data-testid={`guide-held-${w.page_id}`}>
+            <span class="name">{w.page_id}</span>
+            <span class="why">{w.why}</span>
+            {#if $guidesWritable}
+              <button type="button" class="btn" disabled={busy} data-testid={`guide-remove-held-${w.page_id}`} onclick={() => removeHeld(w.page_id)}>Remove</button>
             {/if}
           </li>
         {/each}

@@ -66,6 +66,17 @@ pub fn run(
                     g.sections.len()
                 ));
             }
+            // An approved row that is NOT being served. It still holds a
+            // MAX_APPROVED slot, and this is the only listing that prints the
+            // page id `guides remove` needs — before this, such a guide was
+            // invisible everywhere and unremovable in practice.
+            for w in &v.withheld {
+                out::line(&format!("held  {}  not served: {}", w.page_id, w.why));
+                out::line(&format!(
+                    "      remove it with: fleet-hub guides remove {}",
+                    w.page_id
+                ));
+            }
             if v.proposals.is_empty() {
                 out::line("No guide proposals are waiting for review.");
             }

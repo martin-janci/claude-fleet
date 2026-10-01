@@ -73,6 +73,22 @@ pub struct GuidesView {
     pub guides: Vec<Page>,
     pub proposals: Vec<GuideProposal>,
     pub can_write: bool,
+    /// Rows that are `approved` but are NOT being served, and why.
+    ///
+    /// Such a row still holds its `MAX_APPROVED` slot, so without this it was
+    /// a guide a person approved that vanished from every surface with nothing
+    /// saying why and no way to remove it — `live()` dropped it and neither
+    /// `fleet-hub guides list` nor Settings → Guides had anywhere to put it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withheld: Vec<WithheldGuide>,
+}
+
+/// An approved guide that is not live, with the reason a person can act on.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WithheldGuide {
+    pub id: i64,
+    pub page_id: String,
+    pub why: String,
 }
 
 fn invalid(msg: impl Into<String>) -> IpcError {
@@ -160,24 +176,67 @@ fn rules(page: &Page) -> Vec<String> {
 /// The approved guides that still check against this build, in approval
 /// order. One that no longer does is left out and logged.
 pub fn live(s: &Store) -> Vec<Page> {
-    let rows = s.guide_proposals_in("approved").unwrap_or_default();
-    let parsed: Vec<Page> = rows
-        .iter()
-        .filter_map(|r| serde_json::from_str::<Page>(&r.spec).ok())
-        .collect();
-    let mut all: Vec<Page> = pages::all().to_vec();
-    all.extend(parsed.iter().cloned());
-    let problems = validate::validate(&all);
-    parsed
-        .into_iter()
-        .filter(|g| {
-            let bad: Vec<_> = problems.iter().filter(|p| p.page == g.id).collect();
-            if !bad.is_empty() {
-                tracing::warn!(guide = %g.id, problems = bad.len(), "[guides] left out: no longer checks");
+    live_and_withheld(s).0
+}
+
+/// The guides being served, and every approved row that is not, with its
+/// reason.
+///
+/// Each of the four ways a row used to disappear is now reported rather than
+/// swallowed: a store error, a spec that no longer parses, a spec that no
+/// longer validates, and one whose `rules` fail. Only the third logged at all,
+/// and it logged a COUNT while throwing away the problems it had just
+/// computed.
+pub fn live_and_withheld(s: &Store) -> (Vec<Page>, Vec<WithheldGuide>) {
+    let mut withheld: Vec<WithheldGuide> = Vec::new();
+    let rows = match s.guide_proposals_in("approved") {
+        Ok(rows) => rows,
+        Err(e) => {
+            // Nothing can be served and nothing can be named, but say so
+            // rather than returning an empty list that reads as "no guides".
+            tracing::warn!("[guides] cannot read approved guides: {e}");
+            return (Vec::new(), Vec::new());
+        }
+    };
+    let mut parsed: Vec<(i64, Page)> = Vec::new();
+    for r in &rows {
+        match serde_json::from_str::<Page>(&r.spec) {
+            Ok(p) => parsed.push((r.id, p)),
+            Err(e) => {
+                tracing::warn!(guide = %r.page_id, "[guides] left out: spec no longer parses: {e}");
+                withheld.push(WithheldGuide {
+                    id: r.id,
+                    page_id: r.page_id.clone(),
+                    why: format!("its stored spec no longer parses: {e}"),
+                });
             }
-            bad.is_empty() && rules(g).is_empty()
-        })
-        .collect()
+        }
+    }
+    let mut all: Vec<Page> = pages::all().to_vec();
+    all.extend(parsed.iter().map(|(_, p)| p.clone()));
+    let problems = validate::validate(&all);
+    let mut served = Vec::new();
+    for (id, g) in parsed {
+        let bad: Vec<String> = problems
+            .iter()
+            .filter(|p| p.page == g.id)
+            .map(|p| p.to_string())
+            .chain(rules(&g))
+            .collect();
+        if bad.is_empty() {
+            served.push(g);
+            continue;
+        }
+        // The reasons, not a count: they are what tells a person whether to
+        // fix the guide or remove it.
+        tracing::warn!(guide = %g.id, problems = %bad.join("; "), "[guides] left out");
+        withheld.push(WithheldGuide {
+            id,
+            page_id: g.id.clone(),
+            why: bad.join("; "),
+        });
+    }
+    (served, withheld)
 }
 
 /// Propose `spec` as a guide on behalf of `actor`. Refused: a spec that does
@@ -252,10 +311,12 @@ pub fn pending(s: &Store) -> Result<Vec<GuideProposal>, IpcError> {
 }
 
 pub fn view(s: &Store, can_write: bool) -> Result<GuidesView, IpcError> {
+    let (guides, withheld) = live_and_withheld(s);
     Ok(GuidesView {
-        guides: live(s),
+        guides,
         proposals: pending(s)?,
         can_write,
+        withheld,
     })
 }
 
@@ -325,9 +386,40 @@ pub fn remove(s: &Store, page_id: &str, actor: Actor<'_>) -> Result<GuidesView, 
         .into_iter()
         .find(|r| r.page_id == page_id)
         .ok_or_else(|| IpcError::new(codes::E_INVALID, format!("no live guide `{page_id}`")))?;
+    // Refuse while another LIVE guide links to this one. `check` deliberately
+    // lets a guide link to a live guide, and `validate` then reports a link to
+    // a missing page as a problem — so removing the target used to make the
+    // dependent fail validation, at which point `live()` dropped it: a guide a
+    // person approved disappeared from every surface, kept its MAX_APPROVED
+    // slot, and no listing offered it for removal (the desktop's Remove
+    // iterates the live guides; so does `fleet-hub guides list`).
+    let dependents: Vec<String> = live(s)
+        .into_iter()
+        .filter(|g| g.id != page_id && links_to(g, page_id))
+        .map(|g| g.id)
+        .collect();
+    if !dependents.is_empty() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{} link{} to `{page_id}`: remove {} first, or edit the link out",
+                dependents.join(", "),
+                if dependents.len() == 1 { "s" } else { "" },
+                if dependents.len() == 1 { "it" } else { "those" },
+            ),
+        ));
+    }
     s.close_guide_proposal(row.id, "approved", "removed", &actor_text(&actor))
         .map_err(IpcError::from)?;
     view(s, true)
+}
+
+/// Whether `page` carries a `link` item pointing at `target`.
+fn links_to(page: &Page, target: &str) -> bool {
+    page.sections
+        .iter()
+        .flat_map(|sec| sec.items.iter())
+        .any(|i| matches!(i, crate::pages::model::Item::Link { page, .. } if page == target))
 }
 
 /// What a guide may name, for an author: the rules, the items, and every

@@ -522,9 +522,9 @@ MCP server entry (the skill files and hooks are picked up live).
 fingerprint of what it shipped (both skills, the managed CLAUDE.md block and
 the hook shape); `list_hosts` reports `provision_stale: true` for a host whose
 fingerprint is not this build's. A minute after start the hub refreshes every
-reachable stale host *content only* — skills, the CLAUDE.md block and hooks,
-with the host's existing token; no new token, no `~/.claude.json` rewrite, no
-Claude restart. By hand: `fleet-hub provision [--host <alias>]
+reachable stale host *content only* — skills, the CLAUDE.md block, hooks and
+(unless `provision.install_ag` is off) the ag launcher, with the host's existing
+token; no new token, no `~/.claude.json` rewrite, no Claude restart. By hand: `fleet-hub provision [--host <alias>]
 [--content-only]` (the `provision_hosts {host, content_only}` tool).
 
 **Upgrade heads-up (the `ag` launcher).** The fingerprint also covers fleet's
@@ -2109,12 +2109,18 @@ Settings → Guides and proposes it with its own token (`guide { propose }`);
 nothing is shown until a person approves it. On the hub machine:
 
 ```bash
-fleet-hub guides list [--json]          # live guides, and proposals: who, why
+fleet-hub guides list [--json]          # live guides, withheld ones, and proposals: who, why
 fleet-hub guides show 3                 # a proposal's steps, and the settings it lets a person change
 fleet-hub guides approve 3              # on the pages (a trusted device may approve too)
 fleet-hub guides reject 4
 fleet-hub guides remove guide.cleanup   # a live guide off the pages
 ```
+
+A guide listed as `held` is approved but is NOT being served — its stored spec
+no longer parses, or no longer checks against this build's settings and pages.
+It still counts toward the live-guide limit, so the listing names it and prints
+the `guides remove` line for it. Removing a live guide another one links to is
+refused, naming the dependent: remove that one first, or edit the link out.
 
 See `docs/pages.md` → *Guides*.
 
