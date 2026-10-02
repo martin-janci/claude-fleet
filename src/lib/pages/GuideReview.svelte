@@ -7,7 +7,7 @@
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import { push, pushError } from '../toasts';
   import { ago } from './resources';
-  import type { Descriptor, Item, Page, SourceSpec } from './pages';
+  import type { Descriptor, Item, Page, PageAction, SourceSpec } from './pages';
   import {
     decideGuide,
     guideAuthor,
@@ -23,12 +23,14 @@
     pages,
     descs,
     sources,
+    actions,
     now = () => Math.floor(Date.now() / 1000),
     onnavigate,
   }: {
     pages: Page[];
     descs: Map<string, Descriptor>;
     sources: SourceSpec[];
+    actions: PageAction[];
     now?: () => number;
     onnavigate: (pageId: string) => void;
   } = $props();
@@ -50,8 +52,15 @@
         return `Note: ${item.text}`;
       case 'link':
         return `Link: ${item.label ?? titleOf(item.page)} → ${titleOf(item.page)}`;
-      case 'action':
-        return `Button: ${item.action}`;
+      case 'action': {
+        // The label and confirm text the button will actually carry. Naming it
+        // by its raw action id told the reviewer the least about the one item
+        // that DOES something — and approving a button an agent put in a guide
+        // is the decision this screen exists for.
+        const a = actions.find((x) => x.id === item.action);
+        if (!a) return `Button: ${item.action} (not an action of this build)`;
+        return `Button: “${a.label}” (${a.id})${a.confirm ? ` — asks first: “${a.confirm}”` : ''}`;
+      }
       case 'stat':
       case 'record':
         return `Shows: ${sources.find((s) => s.id === item.source.id)?.label ?? item.source.id}`;

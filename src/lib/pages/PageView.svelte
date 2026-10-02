@@ -121,7 +121,15 @@
 
   // Layout L9 `guide`: one step (section) at a time. A step whose `when`
   // no longer holds drops out, so the count follows the answers so far.
-  const shownSections = $derived(visibleSections.filter((s) => showData || !s.items.every(isData)));
+  //
+  // An item this mode draws nothing for does not make a step. `showData`
+  // hides every data item, and a page action and a custom component are
+  // local-only — so on a read-only or paired desktop a step of actions alone
+  // rendered as a blank panel and still took a place in "Step N of M". The
+  // filter saw only the data items.
+  const isHidden = (i: Section['items'][number]) =>
+    (!showData && isData(i)) || ((readonly || remote) && (i.type === 'action' || i.type === 'custom'));
+  const shownSections = $derived(visibleSections.filter((s) => !s.items.every(isHidden)));
   let step = $state(0);
   const stepAt = $derived(Math.min(step, Math.max(0, shownSections.length - 1)));
   const lastStep = $derived(stepAt >= shownSections.length - 1);
@@ -180,7 +188,7 @@
   {/if}
 
   {#if page.layout === 'review_apply' && page.review === 'guides'}
-    <GuideReview {pages} {descs} {sources} {onnavigate} />
+    <GuideReview {pages} {descs} {sources} {actions} {onnavigate} />
   {:else if page.layout === 'review_apply'}
     <ReviewApply {proposals} {pages} {descs} {readonly} {onopen} />
   {/if}

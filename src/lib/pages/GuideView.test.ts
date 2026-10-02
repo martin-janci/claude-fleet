@@ -64,6 +64,35 @@ beforeEach(() => {
 });
 
 describe('a guide, step by step', () => {
+  it('leaves out a step this mode draws nothing for, and does not count it', () => {
+    // `showData` hid every data item, but a page action and a custom component
+    // are local-only too — so on a paired desktop a step of actions alone drew
+    // an empty panel and still took a place in "Step N of M".
+    const withButton: Page = {
+      ...cleanup,
+      sections: [
+        cleanup.sections[0],
+        { title: 'Run it', items: [{ type: 'action', action: bundle.actions[0].id }] },
+      ],
+    };
+    const props = {
+      page: withButton,
+      pages: [...bundle.pages, withButton],
+      descs,
+      values: defaults,
+      sources: bundle.sources,
+      actions: bundle.actions,
+      onnavigate: vi.fn(),
+    };
+    const local = render(PageView, { props });
+    expect(screen.getByTestId('guide-progress').textContent).toBe('Step 1 of 2: What it does');
+    local.unmount();
+
+    render(PageView, { props: { ...props, remote: true } });
+    expect(screen.getByTestId('guide-progress').textContent).toBe('Step 1 of 1: What it does');
+  });
+
+
   it('shows one step at a time with Back, Next and Done', async () => {
     const onnavigate = showGuide({ 'gc.enabled': 'true' });
     expect(screen.getByTestId('guide-progress').textContent).toBe('Step 1 of 3: What it does');
@@ -117,7 +146,15 @@ describe('the Guides page', () => {
   function showReview() {
     const onnavigate = vi.fn();
     render(PageView, {
-      props: { page: guidesPage, pages: bundle.pages, descs, values: defaults, sources: bundle.sources, onnavigate },
+      props: {
+        page: guidesPage,
+        pages: bundle.pages,
+        descs,
+        values: defaults,
+        sources: bundle.sources,
+        actions: bundle.actions,
+        onnavigate,
+      },
     });
     return onnavigate;
   }
@@ -190,6 +227,48 @@ describe('the Guides page', () => {
     // and it can be removed from here — no confirm, since it is not on the pages
     await fireEvent.click(screen.getByTestId('guide-remove-held-guide.orphan'));
     await waitFor(() => expect(screen.queryByTestId('guide-held-guide.orphan')).toBeNull());
+  });
+
+  it("names a step's button by the label it will carry, not by its action id", async () => {
+    // The one item that DOES something was read out as its raw action id, so a
+    // reviewer approving a button an agent put in a guide learned the least
+    // about exactly that — and the confirm text it asks with, not at all.
+    const act = bundle.actions[0];
+    const withButton: Page = {
+      ...cleanup,
+      sections: [{ title: 'Run it', items: [{ type: 'action', action: act.id }] }],
+    };
+    inv.mockImplementation(async (cmd: string) =>
+      cmd === 'list_guides'
+        ? { ...waiting, proposals: [{ ...waiting.proposals[0], page: withButton }] }
+        : null,
+    );
+    await loadGuides();
+    showReview();
+    await fireEvent.click(screen.getByTestId('guide-preview-7'));
+    const steps = screen.getByTestId('guide-steps-7');
+    expect(steps.textContent).toContain(act.label);
+    expect(steps.textContent).toContain(act.id);
+
+    // An action this build does not have is said to be missing, not printed as
+    // if it were a button.
+    inv.mockImplementation(async (cmd: string) =>
+      cmd === 'list_guides'
+        ? {
+            ...waiting,
+            proposals: [
+              {
+                ...waiting.proposals[0],
+                page: { ...cleanup, sections: [{ title: 'Run it', items: [{ type: 'action', action: 'work.gone' }] }] },
+              },
+            ],
+          }
+        : null,
+    );
+    await loadGuides();
+    showReview();
+    await fireEvent.click(screen.getAllByTestId('guide-preview-7')[1]);
+    expect(screen.getAllByTestId('guide-steps-7')[0].textContent).toContain('not an action of this build');
   });
 
   it('offers no decision to a device the hub does not trust', async () => {

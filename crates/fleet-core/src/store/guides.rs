@@ -9,6 +9,15 @@ use rusqlite::{OptionalExtension, Result};
 /// (seconds), for the record. An approved guide is kept while it is live.
 pub const DECIDED_GUIDE_KEEP_SECS: i64 = 30 * 24 * 60 * 60;
 
+/// Superseded revisions of ONE guide id kept at once.
+///
+/// A new proposal for an id supersedes that id's pending row, and the row it
+/// just superseded carries `decided_at = now`, so the 30-day retention above
+/// never reaches it: N attempts at one id left N-1 rows of up to
+/// `MAX_SPEC_BYTES` lying there for a month, from a per-host token that only
+/// had to repeat itself. The record is worth keeping; every attempt is not.
+pub const KEEP_SUPERSEDED_PER_GUIDE: usize = 3;
+
 /// One proposed (or approved) guide.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GuideProposalRow {
@@ -61,7 +70,8 @@ fn row(r: &rusqlite::Row<'_>) -> Result<GuideProposalRow> {
 
 impl Store {
     /// Insert a pending proposal, superseding a pending one for the same
-    /// page id, and drop decided rows past [`DECIDED_GUIDE_KEEP_SECS`].
+    /// page id, and drop decided rows past [`DECIDED_GUIDE_KEEP_SECS`] plus
+    /// this id's superseded revisions past [`KEEP_SUPERSEDED_PER_GUIDE`].
     pub fn insert_guide_proposal(&self, p: &NewGuideProposal<'_>) -> Result<GuideProposalRow> {
         let now = now_unix();
         let tx = self.conn.unchecked_transaction()?;
@@ -74,6 +84,14 @@ impl Store {
             "DELETE FROM guide_proposals
              WHERE state IN ('rejected', 'superseded', 'removed') AND decided_at < ?1",
             rusqlite::params![now - DECIDED_GUIDE_KEEP_SECS],
+        )?;
+        tx.execute(
+            "DELETE FROM guide_proposals
+             WHERE state = 'superseded' AND page_id = ?1 AND id NOT IN (
+                 SELECT id FROM guide_proposals
+                  WHERE state = 'superseded' AND page_id = ?1
+                  ORDER BY id DESC LIMIT ?2)",
+            rusqlite::params![p.page_id, KEEP_SUPERSEDED_PER_GUIDE],
         )?;
         tx.execute(
             "INSERT INTO guide_proposals (at, page_id, title, spec, why, source, source_detail)

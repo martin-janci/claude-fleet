@@ -52,6 +52,16 @@ fn plain(text: &str, max: usize) -> Result<(), String> {
     if text.contains('<') || text.contains('>') {
         return Err("is plain text: no markup".into());
     }
+    // A guide's text is written by an agent and READ in a terminal
+    // (`fleet-hub guides list|show` writes it through a bare `writeln!`),
+    // so an ESC or a CR is not cosmetic: `\u{1b}[1A\u{1b}[2K` rewrites the
+    // line above it, in the very listing an operator picks an id from.
+    if let Some(c) = text.chars().find(|c| c.is_control()) {
+        return Err(format!(
+            "is plain text: no control characters (U+{:04X})",
+            c as u32
+        ));
+    }
     Ok(())
 }
 
@@ -450,6 +460,18 @@ fn check_embed(cx: &mut Ctx, page: &Page) {
         }
         if !page.tabs.is_empty() {
             cx.bad("", "an embed page has sections, not tabs");
+        }
+        // The L8 renderer flattens an embed page's sections into the slot's
+        // item list (`embedItems`) without evaluating anything, so a `when`
+        // here is accepted and then ignored — an author would write a
+        // condition, see it have no effect, and have nothing to tell them why.
+        for (n, s) in page.sections.iter().enumerate() {
+            if s.when.is_some() {
+                cx.bad(
+                    &format!("sections[{n}]"),
+                    "an embed page's items go straight into the screen: no `when` on a section",
+                );
+            }
         }
     }
 }

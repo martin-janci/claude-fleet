@@ -299,6 +299,19 @@ fn an_embed_page_fills_one_slot_with_the_views_it_takes() {
         got.contains("is an embed page: nothing links to it"),
         "{got}"
     );
+
+    // A `when` on an embed page's section was accepted and then ignored: the
+    // L8 renderer flattens the sections into the slot's item list and evaluates
+    // nothing, so an author would write a condition, watch it have no effect,
+    // and have nothing to tell them why.
+    let mut conditional = embed("e.a", "host_detail", "block");
+    conditional.sections[0].when = Some(crate::pages::model::Condition {
+        key: Some("gc.enabled".into()),
+        truthy: Some(true),
+        ..Default::default()
+    });
+    let got = messages(&[conditional]);
+    assert!(got.contains("no `when` on a section"), "{got}");
 }
 
 #[test]

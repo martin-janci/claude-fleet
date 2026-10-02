@@ -1013,6 +1013,42 @@ pub fn is_readonly_tool(name: &str) -> bool {
     policy(name).is_some_and(|p| p.readonly)
 }
 
+/// The `action` values of a mixed tool that only READ.
+///
+/// A tool's `readonly` flag classifies the tool, and a tool that both reads
+/// and writes is a write — that is what decides whether a `readonly` token may
+/// call it at all, and it must stay that way. But one caller needs the finer
+/// answer: when a routed call TIMES OUT, the desktop asks whether the hub may
+/// have changed something, and answers a fleet-wide re-fetch if so. For a
+/// read that never arrived there is nothing to re-fetch, and the re-fetch is
+/// itself built out of reads — so one timeout became three.
+///
+/// A row here is a promise about a specific action, so each needs a reason:
+/// `guide`'s three read actions are the ones a host's own token calls while
+/// authoring (`catalog`, `validate`) and the one the desktop's Guides page
+/// calls on every open (`list`). The tool is `readonly: false` because
+/// `propose`, `decide` and `remove` share it.
+const READ_ACTIONS: &[(&str, &[&str])] = &[("guide", &["catalog", "validate", "list"])];
+
+/// Whether this CALL changed nothing on the hub, args included.
+///
+/// `is_readonly_tool` is the answer for a tool that is all one or the other;
+/// this is for the mixed ones, where the `action` decides. A tool with no row
+/// in [`READ_ACTIONS`], or a call whose `action` is not one of its rows, is
+/// treated as a write — the safe direction, since the cost of being wrong
+/// that way is one extra re-fetch, not a stale screen.
+pub fn call_is_read(name: &str, args: &serde_json::Value) -> bool {
+    if is_readonly_tool(name) {
+        return true;
+    }
+    let Some(action) = args.get("action").and_then(|a| a.as_str()) else {
+        return false;
+    };
+    READ_ACTIONS
+        .iter()
+        .any(|(tool, reads)| *tool == name && reads.contains(&action))
+}
+
 /// Tools gated by the `mcp.confirm_destructive` toggle.
 pub fn needs_confirmation(name: &str) -> bool {
     policy(name).is_some_and(|p| p.confirm)
@@ -2339,5 +2375,41 @@ mod tests {
         // defuse() neutralised the body's copy of the closing marker, so the
         // fence the notice sits outside of is fleet's own.
         assert_eq!(out.matches(UNTRUSTED_END).count(), 1);
+    }
+    /// A mixed tool's read actions are reads, and everything else is a write.
+    ///
+    /// `guide` is `readonly: false` because `propose`/`decide`/`remove` share
+    /// it, so a timed-out `guide { list }` — the call the Guides page makes on
+    /// every open — was reported as "the hub may have changed something" and
+    /// answered with a fleet-wide re-fetch built out of reads. One timeout
+    /// became three.
+    #[test]
+    fn a_mixed_tools_read_action_is_a_read() {
+        use serde_json::json;
+        assert!(!is_readonly_tool("guide"), "the tool itself is a write");
+        for action in ["catalog", "validate", "list"] {
+            assert!(
+                call_is_read("guide", &json!({ "action": action })),
+                "guide {{ {action} }} changes nothing"
+            );
+        }
+        for action in ["propose", "decide", "remove", "", "unknown"] {
+            assert!(
+                !call_is_read("guide", &json!({ "action": action })),
+                "guide {{ {action} }} may have written"
+            );
+        }
+        // No action named, or a tool with no row: a write, the safe direction.
+        assert!(!call_is_read("guide", &json!({})));
+        assert!(!call_is_read("quick_replies", &json!({ "action": "list" })));
+        // A tool that is all read stays a read whatever the args say.
+        assert!(call_is_read("list_hosts", &json!({ "action": "remove" })));
+        // Every row names a real tool, and names it as a write — a readonly
+        // tool with a row here would be a contradiction nobody would notice.
+        for (tool, reads) in READ_ACTIONS {
+            assert!(policy(tool).is_some(), "{tool} is a tool");
+            assert!(!is_readonly_tool(tool), "{tool} would not need a row");
+            assert!(!reads.is_empty());
+        }
     }
 }

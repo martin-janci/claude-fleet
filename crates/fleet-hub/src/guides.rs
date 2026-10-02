@@ -186,4 +186,99 @@ mod tests {
         .unwrap();
         assert!(guides::live(&open(&opts, &env).unwrap()).is_empty());
     }
+
+    /// `List`, `Reject` and every unknown id — the half of the CLI no test
+    /// drove.
+    ///
+    /// `List { json }` is the output a script parses and `Reject` is the
+    /// decision an operator makes most, yet neither was ever called, so the
+    /// `no guide proposal #{id} waits` and `no live guide` sentences were
+    /// untested and a panic in either listing branch would have shipped.
+    #[test]
+    fn list_reject_and_the_unknown_id_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..HubOptions::default()
+        };
+        let env = HashMap::new();
+        let path = dir.path().join("state.db");
+        let bus = || Arc::new(fleet_core::events::NoopEventBus);
+
+        // Empty: both "nothing here" branches.
+        {
+            let _ = Store::open_with_bus(&path, bus()).unwrap();
+        }
+        for json in [false, true] {
+            assert_eq!(
+                run(GuidesCmd::List { json }, &opts, &env).unwrap(),
+                ExitCode::SUCCESS
+            );
+        }
+        // Nothing waits, so every id is unknown — the three sentences.
+        let e = run(GuidesCmd::Show { id: 404 }, &opts, &env).unwrap_err();
+        assert!(e.contains("no guide proposal #404 waits"), "{e}");
+        let e = run(GuidesCmd::Reject { id: 404 }, &opts, &env).unwrap_err();
+        assert!(e.contains("no guide proposal 404 waits"), "{e}");
+        let e = run(GuidesCmd::Approve { id: 404 }, &opts, &env).unwrap_err();
+        assert!(e.contains("no guide proposal 404 waits"), "{e}");
+        let e = run(
+            GuidesCmd::Remove {
+                page_id: "guide.nope".into(),
+            },
+            &opts,
+            &env,
+        )
+        .unwrap_err();
+        assert!(e.contains("no live guide `guide.nope`"), "{e}");
+
+        // A live guide and a waiting proposal that replaces it, so each listing
+        // branch runs with something in it — including the `why` line and the
+        // "replaces the live one" note.
+        let (waiting, live_id) = {
+            let s = Store::open_with_bus(&path, bus()).unwrap();
+            let live_id = guides::propose(&s, &guides::example(), None, Actor::Agent("host web-1"))
+                .unwrap()
+                .id;
+            guides::decide(&s, live_id, true, Actor::Person).unwrap();
+            let waiting = guides::propose(
+                &s,
+                &guides::example(),
+                Some("people ask"),
+                Actor::Agent("host web-1"),
+            )
+            .unwrap()
+            .id;
+            assert!(guides::pending(&s).unwrap()[0].replaces);
+            (waiting, live_id)
+        };
+        for json in [false, true] {
+            assert_eq!(
+                run(GuidesCmd::List { json }, &opts, &env).unwrap(),
+                ExitCode::SUCCESS
+            );
+        }
+
+        // Reject moves the row, and says so only once.
+        run(GuidesCmd::Reject { id: waiting }, &opts, &env).unwrap();
+        {
+            let s = open(&opts, &env).unwrap();
+            assert_eq!(
+                s.guide_proposal(waiting).unwrap().unwrap().state,
+                "rejected",
+                "the CLI's rejection reached the row"
+            );
+            assert!(guides::pending(&s).unwrap().is_empty());
+            // Rejecting the revision leaves the live guide alone.
+            assert_eq!(
+                s.guide_proposal(live_id).unwrap().unwrap().state,
+                "approved"
+            );
+            assert_eq!(guides::live(&s).len(), 1);
+        }
+        assert!(
+            run(GuidesCmd::Reject { id: waiting }, &opts, &env).is_err(),
+            "decided once"
+        );
+    }
 }

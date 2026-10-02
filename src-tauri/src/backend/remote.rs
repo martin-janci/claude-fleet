@@ -378,7 +378,7 @@ impl HubBackend {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": { "name": tool, "arguments": args },
+            "params": { "name": tool, "arguments": &args },
         })
         .to_string();
         let url = format!("{}/mcp", self.cfg.base_url);
@@ -406,9 +406,12 @@ impl HubBackend {
                     // and its reaction is a fleet-wide re-fetch built out of
                     // reads, so a read that broadcast would amplify: one
                     // timeout becomes two more calls that can time out in
-                    // turn.
+                    // turn. The args decide for a tool that both reads and
+                    // writes (`guide`), which the tool's own `readonly` flag
+                    // cannot: that flag says a `readonly` token may not call
+                    // it, which is a different question.
                     .with_details(json!({
-                        "outcome_unknown": !fleet_core::mcp::guard::is_readonly_tool(tool),
+                        "outcome_unknown": !fleet_core::mcp::guard::call_is_read(tool, &args),
                     }))
                 })?
                 .map_err(|e| {

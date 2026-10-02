@@ -173,8 +173,9 @@ fn rules(page: &Page) -> Vec<String> {
     out
 }
 
-/// The approved guides that still check against this build, in approval
-/// order. One that no longer does is left out and logged.
+/// The approved guides that still check against this build, oldest proposal
+/// first (the rows come back by `id`, which is when each was PROPOSED — not
+/// when it was approved). One that no longer checks is left out and logged.
 pub fn live(s: &Store) -> Vec<Page> {
     live_and_withheld(s).0
 }
@@ -260,13 +261,33 @@ pub fn propose(
             "why is at most {WHY_MAX_CHARS} characters"
         )));
     }
+    // `why` skipped the text rules a guide's own fields go through, and it is
+    // printed raw by `fleet-hub guides list` — the one line the length check
+    // did not make safe to read.
+    if let Some(c) = why.and_then(|w| w.chars().find(|c| c.is_control())) {
+        return Err(invalid(format!(
+            "why is plain text: no control characters (U+{:04X})",
+            c as u32
+        )));
+    }
     let page: Page = serde_json::from_value(spec.clone()).map_err(|e| invalid(e.to_string()))?;
     let pending = s.guide_proposals_in("pending").map_err(IpcError::from)?;
     if pending.len() >= MAX_PENDING && !pending.iter().any(|p| p.page_id == page.id) {
-        return Err(IpcError::new(
-            codes::E_RATE_LIMITED,
-            format!("{MAX_PENDING} guides already wait for review: a person decides those first"),
-        ));
+        // The cap counted raw rows while `pending()` shows only the rows this
+        // build can still read, so a row left over from an older `Page` shape
+        // was in no listing, could be decided from nowhere, and still held one
+        // of the slots — the queue filled with rows nobody could drain. Such a
+        // row can never be approved (`decide` re-checks the spec), so it is
+        // closed here rather than counted.
+        let gone = prune_unreadable_pending(s, &pending);
+        if pending.len() - gone >= MAX_PENDING {
+            return Err(IpcError::new(
+                codes::E_RATE_LIMITED,
+                format!(
+                    "{MAX_PENDING} guides already wait for review: a person decides those first"
+                ),
+            ));
+        }
     }
     let text = serde_json::to_string(&page).map_err(|e| invalid(e.to_string()))?;
     let row = s
@@ -282,6 +303,40 @@ pub fn propose(
     Ok(row)
 }
 
+/// Close every pending row whose stored spec this build can no longer read,
+/// returning how many were closed.
+///
+/// Such a row is in no listing (`pending` drops it) and can never be approved
+/// (`decide` re-checks the spec), so counting it toward [`MAX_PENDING`] only
+/// took a review slot away from a proposal a person could act on. Closed as
+/// `superseded` — it was not rejected by anyone.
+fn prune_unreadable_pending(s: &Store, rows: &[GuideProposalRow]) -> usize {
+    rows.iter()
+        .filter(|r| serde_json::from_str::<Page>(&r.spec).is_err())
+        .filter(|r| {
+            match s.close_guide_proposal(r.id, "pending", "superseded", "fleet (unreadable spec)") {
+                Ok(done) => {
+                    if done {
+                        tracing::warn!(
+                            guide = %r.page_id, id = r.id,
+                            "[guides] pending proposal closed: its spec no longer parses, \
+                             so nothing could ever approve it"
+                        );
+                    }
+                    done
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        id = r.id,
+                        "[guides] cannot close an unreadable proposal: {e}"
+                    );
+                    false
+                }
+            }
+        })
+        .count()
+}
+
 /// The proposals waiting, oldest first.
 pub fn pending(s: &Store) -> Result<Vec<GuideProposal>, IpcError> {
     let live_ids: Vec<String> = s
@@ -294,7 +349,22 @@ pub fn pending(s: &Store) -> Result<Vec<GuideProposal>, IpcError> {
     Ok(rows
         .into_iter()
         .filter_map(|r| {
-            let page = serde_json::from_str::<Page>(&r.spec).ok()?;
+            // A spec a later build no longer reads is dropped — it cannot be
+            // shown, and approving it would fail `check` anyway — but SAY so.
+            // Silently it was invisible in every listing while still counting
+            // toward `MAX_PENDING`, so the queue filled with rows nobody could
+            // see or decide; `prune_unreadable_pending` is the other half.
+            let page = match serde_json::from_str::<Page>(&r.spec) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        guide = %r.page_id,
+                        id = r.id,
+                        "[guides] pending proposal left out: spec no longer parses: {e}"
+                    );
+                    return None;
+                }
+            };
             Some(GuideProposal {
                 replaces: live_ids.contains(&r.page_id),
                 id: r.id,
@@ -370,10 +440,19 @@ pub fn decide(s: &Store, id: i64, approve: bool, actor: Actor<'_>) -> Result<Gui
                 format!("{MAX_APPROVED} guides are live: remove one first"),
             ));
         }
-        s.approve_guide_proposal(id, &by).map_err(IpcError::from)?;
-    } else {
-        s.close_guide_proposal(id, "pending", "rejected", &by)
-            .map_err(IpcError::from)?;
+        // The store's compare-and-set answers `false` to say "the row was no
+        // longer in that state" — another person decided it, or it was
+        // superseded, between the read above and this write. Discarding that
+        // reported a decision that never happened as a success, and the caller
+        // then showed a view in which its own choice is simply absent.
+        if !s.approve_guide_proposal(id, &by).map_err(IpcError::from)? {
+            return Err(race(id));
+        }
+    } else if !s
+        .close_guide_proposal(id, "pending", "rejected", &by)
+        .map_err(IpcError::from)?
+    {
+        return Err(race(id));
     }
     view(s, true)
 }
@@ -409,9 +488,26 @@ pub fn remove(s: &Store, page_id: &str, actor: Actor<'_>) -> Result<GuidesView, 
             ),
         ));
     }
-    s.close_guide_proposal(row.id, "approved", "removed", &actor_text(&actor))
-        .map_err(IpcError::from)?;
+    if !s
+        .close_guide_proposal(row.id, "approved", "removed", &actor_text(&actor))
+        .map_err(IpcError::from)?
+    {
+        return Err(race(row.id));
+    }
     view(s, true)
+}
+
+/// A decision whose row moved under it. The store's compare-and-set says so by
+/// answering `false`; reporting that as success showed the person a view their
+/// own choice is missing from, with nothing saying why.
+fn race(id: i64) -> IpcError {
+    IpcError::new(
+        codes::E_CONFLICT,
+        format!(
+            "guide proposal {id} was decided or superseded by someone else just now: \
+             read the list again"
+        ),
+    )
 }
 
 /// Whether `page` carries a `link` item pointing at `target`.

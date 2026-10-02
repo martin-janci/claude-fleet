@@ -250,16 +250,47 @@ fn a_withheld_guide_is_reported_with_its_reason() {
     assert!(v.withheld[0].why.contains("parse"), "{}", v.withheld[0].why);
 }
 
+/// One guide that no longer checks is left out — and ONLY that one.
+///
+/// The filter is per-id over the problems of a single shared `validate(&all)`
+/// run, so a regression to "any problem drops everything" would have passed a
+/// test that stored one guide and asserted `live()` is empty. The `rules(g)`
+/// arm of the same filter had nothing driving it either.
 #[test]
 fn a_live_guide_that_no_longer_checks_is_left_out() {
     let s = Store::open_in_memory().unwrap();
     let row = propose(&s, &example(), None, agent()).unwrap();
     decide(&s, row.id, true, person()).unwrap();
+    let mut good = example();
+    good["id"] = json!("guide.keeper");
+    let keeper = propose(&s, &good, None, agent()).unwrap();
+    decide(&s, keeper.id, true, person()).unwrap();
+
     // As if a later build removed the setting it names.
     let mut stale = example();
     stale["sections"][1]["items"][0]["key"] = json!("gc.removed_in_a_later_build");
     s.set_guide_spec_for_tests(row.id, &stale.to_string());
-    assert!(live(&s).is_empty());
+    let (served, withheld) = live_and_withheld(&s);
+    assert_eq!(
+        served.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+        ["guide.keeper"],
+        "the neighbour survives its sibling's problem"
+    );
+    assert_eq!(withheld.len(), 1);
+    assert_eq!(withheld[0].page_id, "guide.cleanup");
+
+    // The other arm of the same filter: `rules(g)`, which `validate` knows
+    // nothing about — a stored guide hung off a page that is not Guides.
+    let mut misplaced = example();
+    misplaced["parent"] = json!("settings");
+    s.set_guide_spec_for_tests(row.id, &misplaced.to_string());
+    let (served, withheld) = live_and_withheld(&s);
+    assert_eq!(served.len(), 1, "still only the keeper");
+    assert!(
+        withheld[0].why.contains(GUIDES_PAGE),
+        "the rules arm says which: {}",
+        withheld[0].why
+    );
 }
 
 // ── the `fleet-guides` skill in catalog-seed/ ──
@@ -336,4 +367,205 @@ fn the_skill_teaches_the_tool_as_it_is() {
     ] {
         assert!(flat.contains(&rule), "the skill states `{rule}`");
     }
+}
+
+// ── the queue is bounded by what a person can actually drain ──
+
+/// An unreadable pending row does not hold a review slot.
+///
+/// The cap counted raw `pending` rows while `pending()` serves only the rows
+/// this build can read, so a row left over from an older `Page` shape was in
+/// no listing, decidable from nowhere, and still one of the twenty — the queue
+/// filled with rows nobody could drain.
+#[test]
+fn a_pending_row_this_build_cannot_read_is_not_counted_against_the_queue() {
+    let s = Store::open_in_memory().unwrap();
+    let mut ids = Vec::new();
+    for i in 0..MAX_PENDING {
+        let mut v = example();
+        v["id"] = json!(format!("guide.g{i}"));
+        ids.push(propose(&s, &v, None, agent()).unwrap().id);
+    }
+    let mut fresh = example();
+    fresh["id"] = json!("guide.fresh");
+    assert_eq!(
+        propose(&s, &fresh, None, agent()).unwrap_err().code,
+        codes::E_RATE_LIMITED,
+        "full of rows a person can see"
+    );
+
+    // As if a later build stopped reading two of the waiting specs.
+    s.set_guide_spec_for_tests(ids[0], "{not a page");
+    s.set_guide_spec_for_tests(ids[1], r#"{"version":"fleet.page/99"}"#);
+    assert_eq!(pending(&s).unwrap().len(), MAX_PENDING - 2, "both drop out");
+
+    propose(&s, &fresh, None, agent()).unwrap();
+    assert_eq!(
+        s.guide_proposal(ids[0]).unwrap().unwrap().state,
+        "superseded",
+        "closed, not left in the queue"
+    );
+    assert_eq!(
+        s.guide_proposal(ids[1]).unwrap().unwrap().state,
+        "superseded"
+    );
+    assert_eq!(pending(&s).unwrap().len(), MAX_PENDING - 1);
+}
+
+/// Repeating one proposal does not leave a month of revisions behind.
+///
+/// Each new proposal for an id supersedes that id's pending row, and the row it
+/// just superseded carries `decided_at = now`, so the 30-day retention never
+/// reached it: N attempts left N-1 rows of up to `MAX_SPEC_BYTES`, from a
+/// per-host token that only had to repeat itself.
+#[test]
+fn superseded_revisions_of_one_guide_are_bounded() {
+    use crate::store::KEEP_SUPERSEDED_PER_GUIDE;
+    let s = Store::open_in_memory().unwrap();
+    for _ in 0..12 {
+        propose(&s, &example(), None, agent()).unwrap();
+    }
+    let kept = s.guide_proposals_in("superseded").unwrap();
+    assert_eq!(kept.len(), KEEP_SUPERSEDED_PER_GUIDE, "the record, bounded");
+    assert_eq!(pending(&s).unwrap().len(), 1, "one waits");
+    // The ones kept are the newest, which is the record worth having.
+    let newest = kept.iter().map(|r| r.id).max().unwrap();
+    assert!(kept.iter().all(|r| r.id > newest - 4));
+}
+
+// ── a decision that lost its race ──
+
+/// A decision whose row moved under it is `E_CONFLICT`, not a false success.
+///
+/// `fleet-hub guides` opens its own `Store` on the live `state.db` while
+/// `fleet-hub serve` handles `guide { decide }` from a device, so the store's
+/// compare-and-set really can answer `false`. Discarding it printed
+/// `rejected #N`, exit 0, while nothing changed — a false confirmation on an
+/// approval. Two `Store`s on one file are that window.
+#[test]
+fn a_decision_that_lost_its_race_is_a_conflict() {
+    use crate::events::NoopEventBus;
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("state.db");
+    let serve = Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap();
+    let cli = Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap();
+
+    let row = propose(&serve, &example(), None, agent()).unwrap();
+    // The CLI reads a pending row; the daemon approves it first.
+    let seen = cli.guide_proposal(row.id).unwrap().unwrap();
+    assert_eq!(seen.state, "pending");
+    decide(&serve, row.id, true, person()).unwrap();
+    assert!(
+        !cli.close_guide_proposal(row.id, "pending", "rejected", "person")
+            .unwrap(),
+        "the store says the row moved"
+    );
+
+    // And the same window on an approved row, which `remove` guards the same
+    // way: the daemon removes it, the CLI's own remove must not report success.
+    let second = propose(&serve, &example(), None, agent()).unwrap();
+    decide(&serve, second.id, true, person()).unwrap();
+    let live_row = cli.guide_proposals_in("approved").unwrap();
+    assert_eq!(live_row.len(), 1);
+    remove(&serve, "guide.cleanup", person()).unwrap();
+    let e = remove(&cli, "guide.cleanup", person()).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID, "gone, so it is not even found");
+
+    // The CAS arm itself: an approved row closed under the caller.
+    let third = propose(&serve, &example(), None, agent()).unwrap();
+    decide(&serve, third.id, true, person()).unwrap();
+    serve
+        .close_guide_proposal(third.id, "approved", "removed", "someone else")
+        .unwrap();
+    assert!(!cli
+        .close_guide_proposal(third.id, "approved", "removed", "person")
+        .unwrap());
+
+    // What `decide` and `remove` now raise on that `false`. Reaching the branch
+    // itself needs two writers interleaved INSIDE one call, which no test can
+    // arrange; this pins the code and the sentence, which are what a person
+    // acts on — anything but `E_CONFLICT` and the house pattern is broken.
+    let e = race(third.id);
+    assert_eq!(e.code, codes::E_CONFLICT);
+    assert!(e.message.contains("read the list again"), "{}", e.message);
+}
+
+// ── the limits that had no test ──
+
+/// `MAX_APPROVED` exactly at the limit is accepted; one past it is refused.
+///
+/// Neither `MAX_APPROVED` nor `WHY_MAX_CHARS` was referenced from any test, so
+/// an off-by-one flip of `>=` to `>` passed the suite.
+#[test]
+fn the_live_cap_admits_exactly_max_approved_and_no_more() {
+    let s = Store::open_in_memory().unwrap();
+    for i in 0..MAX_APPROVED {
+        let mut v = example();
+        v["id"] = json!(format!("guide.g{i}"));
+        let row = propose(&s, &v, None, agent()).unwrap();
+        decide(&s, row.id, true, person()).unwrap();
+    }
+    assert_eq!(live(&s).len(), MAX_APPROVED, "the limit itself is allowed");
+
+    let mut one_more = example();
+    one_more["id"] = json!("guide.over");
+    let row = propose(&s, &one_more, None, agent()).unwrap();
+    let e = decide(&s, row.id, true, person()).unwrap_err();
+    assert_eq!(e.code, codes::E_RATE_LIMITED);
+    assert!(e.message.contains("remove one first"), "{}", e.message);
+
+    // A revision of one already live still goes through: the cap bounds
+    // distinct guides, not revisions.
+    let mut revise = example();
+    revise["id"] = json!("guide.g0");
+    revise["title"] = json!("Tidying up, again");
+    let row = propose(&s, &revise, None, agent()).unwrap();
+    decide(&s, row.id, true, person()).unwrap();
+    assert_eq!(live(&s).len(), MAX_APPROVED);
+}
+
+/// `why` at exactly `WHY_MAX_CHARS` is accepted, one char past it refused —
+/// counted in CHARS, so a non-ASCII reason is not cut short.
+#[test]
+fn a_reason_is_bounded_in_characters_not_bytes() {
+    let s = Store::open_in_memory().unwrap();
+    let at = "á".repeat(WHY_MAX_CHARS);
+    assert!(at.len() > WHY_MAX_CHARS, "longer in bytes than in chars");
+    propose(&s, &example(), Some(&at), agent()).unwrap();
+    let over = "á".repeat(WHY_MAX_CHARS + 1);
+    let e = propose(&s, &example(), Some(&over), agent()).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    assert!(e.message.contains("at most"), "{}", e.message);
+}
+
+/// A guide's text is read in a terminal, so it carries no control characters.
+///
+/// `fleet-hub guides list` prints a title and `why: {why}` through a bare
+/// `writeln!`, so an `ESC [1A ESC [2K` in either rewrites the line above it —
+/// in the very listing an operator picks an id from. `plain()` tested only for
+/// `<`/`>`, and `why` went through no text rule at all.
+#[test]
+fn guide_text_and_its_reason_carry_no_terminal_escapes() {
+    let s = Store::open_in_memory().unwrap();
+    let forged = "ok\u{1b}[1A\u{1b}[2K#99  guide.x  …  (person)";
+
+    let mut v = example();
+    v["title"] = json!(forged);
+    let c = check(&s, &v);
+    assert!(!c.ok, "a forged title is refused");
+    assert!(
+        c.problems.iter().any(|p| p.contains("control")),
+        "{:?}",
+        c.problems
+    );
+
+    let mut v = example();
+    v["sections"][0]["title"] = json!("Step\u{d}one");
+    assert!(!check(&s, &v).ok, "a step title too");
+
+    let e = propose(&s, &example(), Some(forged), agent()).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    assert!(e.message.contains("control"), "{}", e.message);
+    assert!(pending(&s).unwrap().is_empty(), "and nothing was stored");
 }

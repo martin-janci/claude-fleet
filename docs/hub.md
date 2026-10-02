@@ -2148,6 +2148,19 @@ It still counts toward the live-guide limit, so the listing names it and prints
 the `guides remove` line for it. Removing a live guide another one links to is
 refused, naming the dependent: remove that one first, or edit the link out.
 
+Twenty proposals may wait at once. A waiting proposal an upgrade left
+unreadable is not one of the twenty: it is in no listing and nothing could ever
+approve it, so the next proposal closes it as superseded rather than being
+turned away by it. A new proposal for an id supersedes that id's waiting one,
+and the three most recent superseded revisions of an id are kept as the record;
+older ones go with the insert, so repeating a proposal does not accumulate.
+Decided rows are kept for 30 days.
+
+A decision that lost a race — you approve from this console while a trusted
+device rejects the same proposal — answers `E_CONFLICT` and changes nothing,
+rather than printing `approved #3` over someone else's decision. Read the list
+again and decide once.
+
 See `docs/pages.md` → *Guides*.
 
 **On a paired device** (declarative pages P6). The desktop paired with this
