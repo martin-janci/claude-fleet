@@ -318,10 +318,11 @@ fn expected_for<'a>(
 ///    its old element is still in the shared array and nothing else would
 ///    ever take it out — and because the *new* value is absent from that
 ///    array, rule 4 reads the asset as `Create`, not `Update`.
-/// 9. (F3c) An action that would write, adopt or delete a path under a
-///    directory the scan reported as a symlink (`HostSnapshot::links`) ⇒
+/// 9. (F3c) An action that would write, adopt or delete a *file path* under
+///    a directory the scan reported as a symlink (`HostSnapshot::links`) ⇒
 ///    `Blocked(Harness::symlink_reason)`, with no plan and no
-///    `remove_entry` left to apply. `Noop`s and earlier refusals stay.
+///    `remove_entry` left to apply. `Noop`s and earlier refusals stay. File
+///    paths only — a config *merge*'s file is not checked against `links`.
 ///
 /// A host that could not be reached never reaches this function: the caller
 /// pushes a `HostPlan` with `status: "skipped"` and a `detail` instead.
@@ -799,12 +800,21 @@ fn block(action: &mut Action, reason: String) {
 /// The outermost symlinked directory in `links` that `path` lies under (or
 /// is), with its target. `BTreeMap` order puts `~/.agents` before
 /// `~/.agents/skills`, so the first match is the outermost; the `/` check
-/// keeps `~/.agent` from matching `~/.agents/…`.
+/// keeps `~/.agent` from matching `~/.agents/…`. Compared with ASCII
+/// case-folding (review fix round 1, M3): hosts, and therefore the scan's
+/// `readlink` output and the catalog's rendered paths, can differ only in
+/// case on a case-insensitive filesystem (common on macOS; the default on
+/// Windows, if fleet ever grows a harness there). Over-blocking on a
+/// case-sensitive filesystem (Linux) where `FOO` and `foo` are genuinely
+/// different paths is harmless — it just refuses an action that was never
+/// actually under the link.
 fn linked_dir<'a>(links: &'a BTreeMap<String, String>, path: &str) -> Option<(&'a str, &'a str)> {
+    let path_lower = path.to_ascii_lowercase();
     links
         .iter()
         .find(|(link, _)| {
-            path.strip_prefix(link.as_str())
+            path_lower
+                .strip_prefix(link.to_ascii_lowercase().as_str())
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
         })
         .map(|(link, target)| (link.as_str(), target.as_str()))
@@ -815,7 +825,9 @@ fn linked_dir<'a>(links: &'a BTreeMap<String, String>, path: &str) -> Option<(&'
 /// `~/.agents/skills` at `~/.claude/skills`: writing Codex's render through
 /// it would replace Claude's copies, adopting would make two manifests
 /// claim one file, and the two harnesses would undo each other on every
-/// sync.
+/// sync. File paths only (`touched_paths`) — a config *merge*'s file is not
+/// checked, so a symlinked `~/.codex/config.toml` itself is out of scope
+/// for this rule (M7; no harness symlinks a config file today).
 fn block_symlinked(actions: &mut [Action], snap: &HostSnapshot, harness: &dyn Harness) {
     if snap.links.is_empty() {
         return;
@@ -826,7 +838,7 @@ fn block_symlinked(actions: &mut [Action], snap: &HostSnapshot, harness: &dyn Ha
         }
         let hit = touched_paths(action).find_map(|p| linked_dir(&snap.links, p));
         if let Some((link, target)) = hit {
-            let reason = harness.symlink_reason(link, target);
+            let reason = harness.symlink_reason(link, target, action.op);
             block(action, reason);
         }
     }
@@ -2187,6 +2199,151 @@ mod tests {
         assert_eq!(
             a.reason.as_deref(),
             Some("present but differs; not managed")
+        );
+    }
+
+    /// I1 (F3c review fix round 1): a *per-entry* symlink in the legacy
+    /// dir — not the whole `~/.codex/skills`, just one skill's old
+    /// location — blocks the migration's removal exactly like the whole
+    /// directory would: the compare-and-swap hash would otherwise pass
+    /// right through the link and delete whatever it really points at
+    /// (possibly Claude's own file).
+    #[test]
+    fn a_per_entry_symlink_in_the_legacy_dir_blocks_the_move_with_the_legacy_reason() {
+        let mut snap = HostSnapshot::default();
+        snap.links.insert(
+            "~/.codex/skills/s".into(),
+            "/home/u/.claude/skills/s".into(),
+        );
+        let old_plan = {
+            let mut p = substituted(&Codex, &asset(SKILL), &secrets_map());
+            p.files[0].path = "~/.codex/skills/s/SKILL.md".into();
+            p
+        };
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "skill/s".into(),
+            Manifest::entry_for(&old_plan.hash(), &old_plan, 0, "personal"),
+        );
+        let hp = plan_for(
+            &catalog_of(&[SKILL]),
+            &Codex,
+            &snap,
+            &manifest,
+            &secrets_map(),
+        );
+        let a = act(&hp, "s");
+        assert_eq!(a.op, ActionOp::Blocked, "{:?}", a.reason);
+        assert_eq!(
+            a.reason.as_deref(),
+            Some("~/.codex/skills/s is a symlink (to /home/u/.claude/skills/s); fleet won't remove old Codex skill copies through it — replace it with a real directory")
+        );
+    }
+
+    /// I2 (F3c review fix round 1): `touched_paths`' `remove_entry` half —
+    /// untested until this round — must itself be checked against `links`:
+    /// a `Create` whose `remove_entry` names the OLD (`~/.codex/skills`)
+    /// path is blocked when that whole directory is linked, even though
+    /// the NEW path it is about to write is not (nothing is at the new
+    /// location). Fails if the `.chain(action.remove_entry…)` half of
+    /// `touched_paths` is ever deleted.
+    #[test]
+    fn a_create_is_blocked_through_its_remove_entrys_old_path() {
+        let mut snap = HostSnapshot::default();
+        snap.links
+            .insert("~/.codex/skills".into(), "/home/u/.claude/skills".into());
+        let old_plan = {
+            let mut p = substituted(&Codex, &asset(SKILL), &secrets_map());
+            p.files[0].path = "~/.codex/skills/s/SKILL.md".into();
+            p
+        };
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "skill/s".into(),
+            Manifest::entry_for(&old_plan.hash(), &old_plan, 0, "personal"),
+        );
+        let hp = plan_for(
+            &catalog_of(&[SKILL]),
+            &Codex,
+            &snap,
+            &manifest,
+            &secrets_map(),
+        );
+        let a = act(&hp, "s");
+        assert_eq!(a.op, ActionOp::Blocked, "{:?}", a.reason);
+        assert_eq!(
+            a.reason.as_deref(),
+            Some("~/.codex/skills is a symlink (to /home/u/.claude/skills); fleet won't remove old Codex skill copies through it — replace it with a real directory")
+        );
+        assert!(a.remove_entry.is_none());
+        assert!(a.plan.is_none());
+    }
+
+    /// M3 (F3c review fix round 1): `linked_dir` compares with ASCII
+    /// case-folding, since a case-insensitive filesystem (common on macOS)
+    /// can report `readlink`'s path in different case than the catalog's
+    /// rendered path.
+    #[test]
+    fn linked_dir_matches_case_insensitively() {
+        let mut snap = HostSnapshot::default();
+        snap.links
+            .insert("~/.AGENTS/SKILLS".into(), "/home/u/.claude/skills".into());
+        let hp = plan_for(
+            &catalog_of(&[SKILL]),
+            &Codex,
+            &snap,
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        let a = act(&hp, "s");
+        assert_eq!(a.op, ActionOp::Blocked, "{:?}", a.reason);
+        assert!(a
+            .reason
+            .as_deref()
+            .unwrap()
+            .starts_with("~/.AGENTS/SKILLS is a symlink"));
+    }
+
+    /// M5 (F3c review fix round 1): a `Remove` (an orphaned manifest entry
+    /// at the CURRENT `~/.agents/skills` location) reads differently from
+    /// every other blocked op — nothing is being written, so "remove"
+    /// replaces "write", and there is no "or turn Codex off" (turning
+    /// Codex off would not un-block a removal that has to happen anyway).
+    #[test]
+    fn a_blocked_removal_through_the_current_location_uses_remove_wording() {
+        let mut snap = HostSnapshot::default();
+        snap.links
+            .insert("~/.agents/skills".into(), "/home/u/.claude/skills".into());
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "skill/gone".into(),
+            ManifestEntry {
+                hash: "h".into(),
+                files: vec!["~/.agents/skills/gone/SKILL.md".into()],
+                ..Default::default()
+            },
+        );
+        let hp = plan_for(
+            &Catalog::default(),
+            &Codex,
+            &snap,
+            &manifest,
+            &secrets_map(),
+        );
+        let a = act(&hp, "gone");
+        assert_eq!(a.op, ActionOp::Blocked, "{:?}", a.reason);
+        assert_eq!(
+            a.reason.as_deref(),
+            Some("~/.agents/skills is a symlink (to /home/u/.claude/skills); fleet won't remove Codex skills through it — replace it with a real directory")
         );
     }
 }

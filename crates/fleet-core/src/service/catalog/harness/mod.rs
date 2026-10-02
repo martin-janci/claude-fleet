@@ -6,6 +6,7 @@ pub mod claude;
 pub mod codex;
 
 use super::model::{find_placeholders, sha256_hex, Asset, Kind};
+use super::sync::plan::ActionOp;
 use crate::ipc_error::IpcError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -272,10 +273,17 @@ pub trait Harness: Send + Sync {
     /// Why an action touching a path under `link` — a directory the scan
     /// reported as a symlink to `target` (`HostSnapshot::links`) — is
     /// refused (multi-harness F3c). Only a scan that reports links ever
-    /// makes the planner ask.
-    fn symlink_reason(&self, link: &str, target: &str) -> String {
+    /// makes the planner ask. `op` is the action's own op, taken *before*
+    /// `sync::plan` blocks it: a `Remove` (deleting something) reads
+    /// differently from every other op (writing or adopting something).
+    fn symlink_reason(&self, link: &str, target: &str, op: ActionOp) -> String {
+        let verb = if op == ActionOp::Remove {
+            "remove"
+        } else {
+            "write"
+        };
         format!(
-            "{link} is a symlink (to {target}); fleet won't write {} files through it — replace it with a real directory",
+            "{link} is a symlink (to {target}); fleet won't {verb} {} files through it — replace it with a real directory",
             self.id()
         )
     }
@@ -530,13 +538,20 @@ fn link_target(raw: &str) -> String {
 /// stdin) is skipped rather than recorded as a real file.
 ///
 /// `##LINK <path>` (multi-harness F3c) works the same way as a `##CONFIG`
-/// block: its target is the line right after, never split out of the
-/// `##LINK` line itself — a directory whose own name happens to contain
-/// `" -> "` would otherwise corrupt the parsed path. A marker line where a
-/// target line was expected (the scan was cut off right there, or another
-/// `##LINK`/`##CONFIG` immediately follows) still gets processed normally;
-/// the pending link is recorded with `link_target("")`, i.e. "an unknown
-/// target", rather than swallowing that marker's own line.
+/// block: the line right after it is UNCONDITIONALLY its target, whatever
+/// that line's own content is — even another `##`-prefixed marker, even
+/// empty — never split out of the `##LINK` line itself, so a directory
+/// whose own name happens to contain `" -> "` cannot corrupt the parsed
+/// path. A target that happens to print e.g. `##PRESENT` is kept
+/// (sanitised) as that literal text, not mistaken for the presence marker.
+/// A path outside `~/` names nothing fleet writes: it and its target line
+/// are both dropped, but the target line is still consumed — so a line
+/// that would otherwise look like a `<hash>  <path>` hash line is never
+/// recorded as a file. Only true end-of-input right after `##LINK <path>`,
+/// with no line at all following it, cannot be swallowed this way: that
+/// reads as `link_target("")`, "an unknown target" (and, same as any
+/// truncated scan, `##END` never arrives either, so the whole parse still
+/// fails as `E_SCAN`).
 pub fn parse_scan_blocks(
     stdout: &str,
     decode: &dyn Fn(&str, &[u8]) -> Option<Value>,
@@ -544,17 +559,17 @@ pub fn parse_scan_blocks(
     use base64::Engine;
     let mut snap = HostSnapshot::default();
     let mut current_config: Option<String> = None;
-    let mut current_link: Option<String> = None;
+    // Outer `Some` = "the next line is this link's target"; inner
+    // `Some(path)` keeps it, `None` drops it (a non-`~/` path) — either way
+    // the next line is consumed and never reinterpreted as anything else.
+    let mut current_link: Option<Option<String>> = None;
     let mut saw_end = false;
     for line in stdout.lines() {
-        if let Some(path) = current_link.take() {
-            if !line.starts_with("##") {
+        if let Some(pending) = current_link.take() {
+            if let Some(path) = pending {
                 snap.links.insert(path, link_target(line));
-                continue;
             }
-            // No target line turned up before the next marker: unknown,
-            // and the marker below is still processed as usual.
-            snap.links.insert(path, link_target(""));
+            continue;
         }
         if line == "##END" {
             saw_end = true;
@@ -573,11 +588,9 @@ pub fn parse_scan_blocks(
         if let Some(path) = line.strip_prefix("##LINK ") {
             current_config = None;
             // A path outside `~/` names nothing fleet writes and is
-            // dropped (its target line, next, is still just skipped since
-            // `current_link` stays `None`).
-            if path.starts_with("~/") {
-                current_link = Some(path.to_string());
-            }
+            // dropped — but the next line (its target) is still consumed
+            // above, just not kept.
+            current_link = Some(path.starts_with("~/").then(|| path.to_string()));
             continue;
         }
         if let Some(path) = line.strip_prefix("##CONFIG ") {
@@ -617,11 +630,11 @@ pub fn parse_scan_blocks(
         }
     }
     // The scan was cut off right after naming a link, with no line at all
-    // after it (not even `##END`): unknown, same as a marker taking its
-    // place above. `saw_end` is false here too, so the snapshot is about to
-    // be discarded as `E_SCAN` anyway — this only matters for a caller that
-    // inspects `links` without checking the `Result` first.
-    if let Some(path) = current_link.take() {
+    // after it (not even `##END`): unknown. `saw_end` is false here too, so
+    // the snapshot is about to be discarded as `E_SCAN` anyway — this only
+    // matters for a caller that inspects `links` without checking the
+    // `Result` first.
+    if let Some(Some(path)) = current_link.take() {
         snap.links.insert(path, link_target(""));
     }
     if !saw_end {
@@ -809,8 +822,9 @@ mod tests {
         assert!(!absent.present);
     }
 
-    /// `##LINK <path> -> <target>` (multi-harness F3c) records a symlinked
-    /// directory: a path not under `~/` is ignored, a target loses control
+    /// `##LINK <path>`, then its target on the next line (multi-harness
+    /// F3c), records a symlinked directory: a path not under `~/` is
+    /// ignored (its target line is still consumed), a target loses control
     /// characters, an empty one reads as unknown, and none is a hash line.
     #[test]
     fn parse_scan_blocks_reads_symlinked_dirs() {
@@ -853,26 +867,38 @@ mod tests {
         );
     }
 
-    /// EXTRA: a `##LINK` with no target line before the next marker (cut off
-    /// right there, or immediately followed by `##HASHES`/another `##LINK`)
-    /// reads as "an unknown target" rather than swallowing that marker's own
-    /// line as if it were the target.
+    /// M4 (F3c review fix round 1): the line right after `##LINK <path>` is
+    /// unconditionally its target, even when that line itself looks like
+    /// the `##PRESENT` marker — it must not be mistaken for one.
     #[test]
-    fn parse_scan_blocks_a_link_with_no_target_line_reads_as_unknown() {
+    fn parse_scan_blocks_a_links_target_that_looks_like_present_is_not_parsed_as_present() {
         let snap = parse_scan_blocks(
-            "##LINK ~/.agents/skills\n##LINK ~/.codex/skills\nreal-target\n##HASHES\n##END\n",
+            "##LINK ~/.agents/skills\n##PRESENT\n##HASHES\n##END\n",
             &|_, _| None,
         )
         .unwrap();
+        assert!(
+            !snap.present,
+            "the marker-looking line was consumed as a target, not a directive"
+        );
         assert_eq!(
             snap.links,
-            BTreeMap::from([
-                (
-                    "~/.agents/skills".to_string(),
-                    "an unknown target".to_string()
-                ),
-                ("~/.codex/skills".to_string(), "real-target".to_string()),
-            ])
+            BTreeMap::from([("~/.agents/skills".to_string(), "##PRESENT".to_string())])
         );
+    }
+
+    /// M4: a link outside `~/` is dropped, but its target line is still
+    /// consumed — so a line that would otherwise look like a valid
+    /// `<hash>  <path>` hash line is never recorded as a file.
+    #[test]
+    fn parse_scan_blocks_a_non_tilde_links_target_line_is_not_parsed_as_a_hash_line() {
+        let hash = "a".repeat(64);
+        let snap = parse_scan_blocks(
+            &format!("##LINK /etc/x\n{hash}  some/file\n##HASHES\n##END\n"),
+            &|_, _| None,
+        )
+        .unwrap();
+        assert!(snap.links.is_empty());
+        assert!(snap.files.is_empty(), "{:?}", snap.files);
     }
 }
