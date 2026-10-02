@@ -810,7 +810,14 @@ pub async fn provision_ag(ssh: &dyn SshExec, host: &str) -> Option<String> {
         format!("{AG_STAGE_DIR}/{MANAGED_MARKER}"),
         marker_content(),
     );
-    for (dir, path, body) in files.chain(std::iter::once(marker)) {
+    // The marker goes FIRST, before any file. `ag_clear_stage_script` removes a
+    // stage only when it carries the marker, so writing it last meant a staging
+    // pass that failed part way — one `write_host_file` short of the end — left
+    // a populated, unmarked directory that the guarded clear could never remove
+    // and the next pass would write into on top. The marker's own failure is
+    // still the first thing reported, and an empty marked stage is exactly what
+    // the clear is for.
+    for (dir, path, body) in std::iter::once(marker).chain(files) {
         if let Err(e) = write_host_file(ssh, host, &dir, &path, &body).await {
             return Some(format!("ag launcher not installed: {}", capped(&e.message)));
         }
@@ -2061,6 +2068,18 @@ mod tests {
                         "bash -lc script must be one quoted word: {script}"
                     );
                     let body = c.script().unwrap();
+                    // The PATHS of the command, with the payload taken out: a
+                    // `remote_write_script` body is `mkdir -p <dir> && printf
+                    // '%s' '<content>' > <path>`, and the content is a file —
+                    // ag's own scripts mention `~/.local/share/ag`, a skill body
+                    // could mention `.claude.json`. Checking the whole body for
+                    // a path substring reads those as unquoted paths.
+                    let paths = match (body.find("printf '%s' "), body.rfind("' > ")) {
+                        (Some(a), Some(b)) if b > a => {
+                            format!("{} {}", &body[..a], &body[b + 2..])
+                        }
+                        _ => body.clone(),
+                    };
                     // A quoted tilde (`'~'`, `'~/x'`) would be a literal path
                     // named `~` on the remote; the skill body may mention
                     // `~` inside its printf payload, so only the quoted
@@ -2076,11 +2095,20 @@ mod tests {
                         ".tmux.conf",
                         ".claude/settings.json",
                         ".claude/fleet-hook.headers",
+                        // F2's three: the staged tree, and the two paths the
+                        // installer is told explicitly so the host's login
+                        // profile cannot redirect where fleet installs. Their
+                        // quoting had been held only by two whole-string
+                        // equality pins, which any future edit updates along
+                        // with the code it is meant to check.
+                        ".local/share/fleet/ag-src",
+                        ".local/share/ag",
+                        ".local/bin",
                     ] {
-                        if body.contains(path) {
+                        if paths.contains(path) {
                             assert!(
-                                body.contains(&format!("\"$HOME\"/'{path}")),
-                                "{path} must be \"$HOME\"/'…'-quoted in: {body}"
+                                paths.contains(&format!("\"$HOME\"/'{path}")),
+                                "{path} must be \"$HOME\"/'…'-quoted in: {paths}"
                             );
                         }
                     }
@@ -2188,6 +2216,15 @@ mod tests {
     /// marker, then the installer.
     fn ag_stage_steps() -> Vec<Step> {
         let mut steps = vec![Step::Script(ag_clear_stage_script())];
+        // The marker FIRST, before any file: `ag_clear_stage_script` removes a
+        // stage only when it carries the marker, so written last a staging pass
+        // that failed part way left a populated, unmarked directory the guarded
+        // clear could never remove.
+        steps.push(Step::Script(remote_write_script(
+            AG_STAGE_DIR,
+            &format!("{AG_STAGE_DIR}/{MANAGED_MARKER}"),
+            &marker_content(),
+        )));
         for (rel, body) in AG_FILES {
             let path = format!("{AG_STAGE_DIR}/{rel}");
             let dir = match rel.rsplit_once('/') {
@@ -2196,11 +2233,6 @@ mod tests {
             };
             steps.push(Step::Script(remote_write_script(&dir, &path, body)));
         }
-        steps.push(Step::Script(remote_write_script(
-            AG_STAGE_DIR,
-            &format!("{AG_STAGE_DIR}/{MANAGED_MARKER}"),
-            &marker_content(),
-        )));
         steps.push(Step::Script(ag_install_script()));
         steps
     }
@@ -2213,6 +2245,30 @@ mod tests {
         let steps: Vec<Step> = calls.iter().map(step_of).collect();
         assert_eq!(steps, ag_stage_steps());
         assert_quoting_invariants(&calls);
+
+        // The marker is the FIRST write, so a stage that fails part way is still
+        // one the guarded clear will remove. Said separately from the whole-list
+        // comparison above, which a reordering would also break but would not
+        // explain.
+        // `remote_path` rewrites `~/` to `"$HOME"/'…'`, so match on the tail of
+        // the staging path rather than the constant.
+        let writes: Vec<String> = calls
+            .iter()
+            .filter_map(|c| c.script())
+            .filter(|s| s.contains("ag-src") && s.starts_with("mkdir -p"))
+            .collect();
+        let marker_at = writes
+            .iter()
+            .position(|s| s.contains(MANAGED_MARKER))
+            .unwrap_or_else(|| panic!("the marker is written: {writes:#?}"));
+        let first_file = writes
+            .iter()
+            .position(|s| s.contains("install.sh"))
+            .expect("install.sh is staged");
+        assert!(
+            marker_at < first_file,
+            "the marker must precede every staged file: {marker_at} vs {first_file}"
+        );
     }
 
     /// The two rules `output_tail` exists for, each the opposite of what a
@@ -2293,6 +2349,63 @@ mod tests {
             !steps.iter().any(|c| c.contains("install.sh")),
             "the installer must not run: {steps:?}"
         );
+    }
+
+    /// The two arms that answer with an `IpcError` rather than an exit code:
+    /// a clear-stage that could not reach the host, and a staged file that
+    /// could not be written.
+    ///
+    /// Of `provision_ag`'s four failure arms only the installer's non-zero exit
+    /// and the clear-stage's non-zero exit had a test. These two differ in what
+    /// they must SAY — "not installed", since nothing ran — and in what they
+    /// must not do: the mid-stage one must stop, not carry on to the installer
+    /// with half a tree staged.
+    #[tokio::test]
+    async fn an_unreachable_host_and_a_failed_write_both_say_not_installed() {
+        use crate::ssh_fake::{FakeSsh, Match, Reply};
+
+        // (a) the clear-stage never reached the host.
+        let fake: FakeSsh = fresh_host();
+        fake.on(Match::script(&ag_clear_stage_script()), Reply::Unreachable);
+        let warning = provision_ag(&fake, "h1").await.expect("a warning");
+        assert!(
+            warning.starts_with("ag launcher not installed:"),
+            "{warning}"
+        );
+        assert!(
+            warning.len() <= "ag launcher not installed: ".len() + WARNING_MAX_CHARS,
+            "a host's stderr is capped like any other remote text: {warning}"
+        );
+        let after: Vec<String> = fake
+            .calls()
+            .iter()
+            .filter_map(|c| c.script())
+            .filter(|s| s.contains("ag-src") && s.starts_with("mkdir -p"))
+            .collect();
+        assert!(after.is_empty(), "nothing was staged: {after:?}");
+
+        // (b) a staged file could not be written. The marker goes first, so the
+        // failure of the file after it must stop the pass.
+        let fake: FakeSsh = fresh_host();
+        fake.on(
+            Match::script_contains("install.sh"),
+            Reply::SpawnError {
+                message: "no space left on device".into(),
+            },
+        );
+        let warning = provision_ag(&fake, "h1").await.expect("a warning");
+        assert!(
+            warning.starts_with("ag launcher not installed:"),
+            "{warning}"
+        );
+        assert!(warning.contains("no space left"), "{warning}");
+        let ran: Vec<String> = fake
+            .calls()
+            .iter()
+            .filter_map(|c| c.script())
+            .filter(|s| s.starts_with("env AG_HOME="))
+            .collect();
+        assert!(ran.is_empty(), "the installer must not run: {ran:?}");
     }
 
     #[test]

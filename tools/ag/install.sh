@@ -76,8 +76,12 @@ main() {
     fi
     FROM=$(echo "$tmp"/*/tools/ag)
   fi
-  if ! { [ -f "$FROM/ag" ] && [ -d "$FROM/drivers" ]; }; then
-    echo "install.sh: $FROM is not an ag source tree" >&2
+  # `lib/` too: without it the installed tree has no `ag_launch`, which `ag`
+  # itself now refuses rather than mistaking for an unimplemented feature. The
+  # pane fallback (`tmux::CL_FALLBACK`) already requires all three before it
+  # will use `ag`, so an install missing one is an install nothing uses.
+  if ! { [ -f "$FROM/ag" ] && [ -d "$FROM/drivers" ] && [ -d "$FROM/lib" ]; }; then
+    echo "install.sh: $FROM is not an ag source tree (needs ag, drivers/ and lib/)" >&2
     return 5
   fi
 
@@ -219,11 +223,18 @@ EOF
       continue
     fi
     if grep -q '^[[:space:]]*\[alias\][[:space:]]*$' "$CONFIG"; then
+      # Written back THROUGH the existing file, not over it. A tmp + mv replaces
+      # the inode, so rename(2) left the config with the umask default instead of
+      # the mode its owner chose -- and dropped any hard link to it. cat > keeps
+      # the inode, the mode and the owner. The non-empty test is what makes that
+      # safe: a cat that truncates and then fails would otherwise leave nothing.
       if ! {
         awk -v line="$name = $val" '
           { print }
           /^[[:space:]]*\[alias\][[:space:]]*$/ && !done { print line; done = 1 }' "$CONFIG" >"$CONFIG.tmp" &&
-          mv "$CONFIG.tmp" "$CONFIG"
+          [ -s "$CONFIG.tmp" ] &&
+          cat "$CONFIG.tmp" >"$CONFIG" &&
+          rm -f "$CONFIG.tmp"
       }; then
         rm -f "$CONFIG.tmp"
         echo "install.sh: cannot add alias $name to $CONFIG" >&2

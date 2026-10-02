@@ -24,10 +24,28 @@ ag_root() {
 AG_ROOT=${AG_ROOT:-$(ag_root)}
 AG_VERSION=0.1.0
 
+# An incomplete tree is named, not stumbled over. A bare `ag` with no `lib/`
+# used to glob to the literal `.../lib/*.sh`, fail to source it, and carry on to
+# a `type ag_launch` test that then reported "launching is not implemented yet"
+# — which names the wrong problem entirely, and is what a half-copied install
+# looks like from the outside.
+if [ ! -d "$AG_ROOT/lib" ]; then
+  echo "ag: $AG_ROOT/lib is missing — this is not a complete ag install" >&2
+  exit 2
+fi
+loaded=0
 for f in "$AG_ROOT"/lib/*.sh; do
+  [ -f "$f" ] || continue
   # shellcheck source=/dev/null
-  . "$f"
+  if . "$f"; then loaded=$((loaded + 1)); else
+    echo "ag: $f failed to load" >&2
+    exit 2
+  fi
 done
+if [ "$loaded" = 0 ]; then
+  echo "ag: no library files in $AG_ROOT/lib — this is not a complete ag install" >&2
+  exit 2
+fi
 
 case ${1:-} in
   help | -h | --help) ag_usage; exit 0 ;;
@@ -39,5 +57,7 @@ if [ $# -gt 0 ] && type "ag_cmd_$1" >/dev/null 2>&1; then
   "ag_cmd_$cmd" "$@"
   exit $?
 fi
-type ag_launch >/dev/null 2>&1 || ag_die 2 "launching is not implemented yet"
+# `lib/` loaded (checked above), so a missing `ag_launch` is a library that does
+# not define it — not the scaffold message this used to print.
+type ag_launch >/dev/null 2>&1 || ag_die 2 "ag_launch is not defined by $AG_ROOT/lib — incomplete install"
 ag_launch "$@"
