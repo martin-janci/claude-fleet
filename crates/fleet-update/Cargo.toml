@@ -21,7 +21,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 semver = { version = "1", features = ["serde"] }
 sha2 = "0.10"
-async-trait = "0.1"
+# 0.1.92+: older versions add a bare #[must_use] to every trait method returning
+# the (already must_use) boxed future, which clippy 1.99 rejects as
+# double_must_use under -D warnings; 0.1.92 no longer emits it.
+async-trait = "0.1.92"
 # Zero-dependency minisign verifier; the same crate tauri-plugin-updater uses.
 minisign-verify = "0.3"
 # The test signer (`testkit`), for other crates' tests only.
