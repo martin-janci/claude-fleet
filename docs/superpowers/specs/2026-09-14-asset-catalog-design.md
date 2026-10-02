@@ -159,7 +159,7 @@ and reports them in the preview. Substitution is sub-project 2.
 
 | Kind | Codex rendering |
 |---|---|
-| skill | `~/.codex/skills/<name>/SKILL.md` + resources, 1:1 |
+| skill | `~/.agents/skills/<name>/SKILL.md` + resources, 1:1 — since multi-harness F3c (`docs/superpowers/plans/2026-10-01-f3c-codex-skills-agents-dir.md`); `~/.codex/skills/` before, which Codex does not read for user skills |
 | mcp_server | `[mcp_servers.<name>]` table in `~/.codex/config.toml` |
 | agent | `~/.codex/agents/<name>.toml` subagent (`name`, `description`, `developer_instructions`, `model` only from `targets.codex.model`) since multi-harness F3b; `targets.codex.render_as: skill` renders a skill instead |
 | hook | unsupported; skipped with a warning |
