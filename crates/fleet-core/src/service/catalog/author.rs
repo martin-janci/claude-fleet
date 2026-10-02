@@ -578,7 +578,11 @@ pub struct UpdateArgs {
     /// silently stopped reaching every org-bound host, with nothing saying so.
     /// Nothing in the UI edits scope today, so the safe default is to keep it.
     /// `apply_override` refuses a scope change for the same reason.
-    #[serde(default)]
+    ///
+    /// Omitted from the wire when false, so a relay's `UpdateArgs` is
+    /// byte-identical to what it was before the flag existed: an opt-in that
+    /// shows up in every request would be a wire change for nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub set_scope: bool,
 }
 

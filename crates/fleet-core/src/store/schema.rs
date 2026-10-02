@@ -4292,7 +4292,7 @@ mod tests {
         s.replace_host_inventory("fresh", "claude", &[]).unwrap();
         let last = s.inventory_last_scans().unwrap();
         assert!(
-            last.get("fresh").is_some(),
+            last.contains_key("fresh"),
             "an empty host has been scanned, so the tick must stop sweeping it"
         );
         assert_eq!(last.get("scanned"), Some(&500), "and nobody else moved");
