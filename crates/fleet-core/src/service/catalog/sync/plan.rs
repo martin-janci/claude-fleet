@@ -323,6 +323,15 @@ fn expected_for<'a>(
 ///    `Blocked(Harness::symlink_reason)`, with no plan and no
 ///    `remove_entry` left to apply. `Noop`s and earlier refusals stay. File
 ///    paths only — a config *merge*'s file is not checked against `links`.
+/// 10. (F3c) An action whose planned file is absent from the snapshot at its
+///     exact path while a path equal to it ignoring ASCII case is present
+///     (`skill.md` on disk, `SKILL.md` rendered) ⇒ `Blocked`, naming the
+///     on-disk path, with no plan and no `remove_entry`. On a
+///     case-insensitive filesystem rule 4 would read it as absent (`Create`)
+///     while the applier's compare-and-swap finds the file and conflicts on
+///     every sync. Every harness, on every host (conservative where the
+///     filesystem is case-sensitive); runs after rule 9, so a symlink
+///     refusal keeps its reason, and never touches a `Noop` or a `Remove`.
 ///
 /// A host that could not be reached never reaches this function: the caller
 /// pushes a `HostPlan` with `status: "skipped"` and a `detail` instead.
@@ -440,6 +449,9 @@ pub fn compute_host_plan(
     // Rule 9 (F3c): nothing is written or deleted through a symlinked
     // directory.
     block_symlinked(&mut actions, snap, harness);
+    // Rule 10 (F3c): nor over a file that differs only in letter case.
+    // After rule 9, so a symlink refusal keeps its own reason.
+    block_case_variants(&mut actions, snap);
     HostPlan {
         host_alias: host_alias.to_string(),
         harness: harness.id().to_string(),
@@ -840,6 +852,57 @@ fn block_symlinked(actions: &mut [Action], snap: &HostSnapshot, harness: &dyn Ha
         if let Some((link, target)) = hit {
             let reason = harness.symlink_reason(link, target, action.op);
             block(action, reason);
+        }
+    }
+}
+
+/// Rule 10 (F3c final review, I1): refuse every action whose planned file is
+/// absent from the snapshot at its exact path while a path differing from
+/// it only in ASCII letter case is present. On a case-insensitive
+/// filesystem (common on macOS) `~/.agents/skills/x/skill.md` *is* the
+/// rendered `SKILL.md`: rule 4 reads it as absent and plans a `Create`
+/// expecting nothing there, and the applier's compare-and-swap then finds
+/// the file and reports a conflict on every sync, never converging. A
+/// person decides instead — rename it or remove it. Applied on every host:
+/// on a case-sensitive filesystem the two really are different files, and
+/// refusing there is merely conservative. Only `files` (the planned paths)
+/// are checked; `Noop`, `Remove` and already-`Blocked` actions are left
+/// alone. `block` drops `remove_entry`, so a moved asset (rule 8) deletes
+/// nothing either.
+fn block_case_variants(actions: &mut [Action], snap: &HostSnapshot) {
+    // Built once per plan: lowercased path ⇒ an on-disk path with it.
+    let lower: BTreeMap<String, &str> = snap
+        .files
+        .keys()
+        .map(|p| (p.to_ascii_lowercase(), p.as_str()))
+        .collect();
+    for action in actions.iter_mut() {
+        if matches!(
+            action.op,
+            ActionOp::Noop | ActionOp::Blocked | ActionOp::Remove
+        ) {
+            continue;
+        }
+        let variant = action.files.iter().find_map(|rendered| {
+            if snap.files.contains_key(rendered) {
+                return None;
+            }
+            lower
+                .get(&rendered.to_ascii_lowercase())
+                .map(|on_disk| (rendered.clone(), on_disk.to_string()))
+        });
+        if let Some((rendered, on_disk)) = variant {
+            // Name just the file when only its last component differs.
+            let shown = match (rendered.rsplit_once('/'), on_disk.rsplit_once('/')) {
+                (Some((dir, file)), Some((disk_dir, _))) if dir == disk_dir => file.to_string(),
+                _ => rendered,
+            };
+            block(
+                action,
+                format!(
+                    "{on_disk} differs from the rendered {shown} only in letter case; rename it to {shown} or remove it"
+                ),
+            );
         }
     }
 }
@@ -2517,5 +2580,173 @@ mod tests {
             ActionOp::Create,
             "a blocked action claims nothing"
         );
+    }
+
+    /// F3c final review (I1): on a case-insensitive filesystem a host can
+    /// hold `~/.agents/skills/x/skill.md` where fleet renders `SKILL.md`.
+    /// The exact-case lookup reads the file as absent, so a `Create` would
+    /// expect nothing there while the applier's compare-and-swap finds the
+    /// file and conflicts on every sync. Blocked instead, naming the
+    /// on-disk path — for every harness, and a symlink block still wins.
+    #[test]
+    fn a_file_differing_only_in_letter_case_is_blocked_not_created() {
+        const X: &str = "kind: skill\nname: x\ndescription: d\n";
+        for (harness, dir) in [
+            (&Codex as &dyn Harness, "~/.agents/skills"),
+            (&Claude as &dyn Harness, "~/.claude/skills"),
+        ] {
+            let rendered = substituted(harness, &asset(X), &secrets_map());
+            assert_eq!(rendered.files[0].path, format!("{dir}/x/SKILL.md"));
+            let on_disk = format!("{dir}/x/skill.md");
+            let mut snap = HostSnapshot::default();
+            snap.files.insert(on_disk.clone(), "h".into());
+            let hp = plan_for(
+                &catalog_of(&[X]),
+                harness,
+                &snap,
+                &Manifest::default(),
+                &secrets_map(),
+            );
+            let a = act(&hp, "x");
+            assert_eq!(a.op, ActionOp::Blocked, "{}: {:?}", harness.id(), a.reason);
+            assert_eq!(
+                a.reason.clone().unwrap(),
+                format!(
+                    "{on_disk} differs from the rendered SKILL.md only in letter case; rename it to SKILL.md or remove it"
+                )
+            );
+            assert!(a.plan.is_none() && a.remove_entry.is_none() && !a.backup);
+        }
+
+        // A case variant in a directory component names the whole path.
+        let mut snap = HostSnapshot::default();
+        snap.files
+            .insert("~/.agents/skills/X/SKILL.md".into(), "h".into());
+        let hp = plan_for(
+            &catalog_of(&[X]),
+            &Codex,
+            &snap,
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        assert_eq!(
+            act(&hp, "x").reason.as_deref(),
+            Some("~/.agents/skills/X/SKILL.md differs from the rendered ~/.agents/skills/x/SKILL.md only in letter case; rename it to ~/.agents/skills/x/SKILL.md or remove it")
+        );
+
+        // A symlink block still wins.
+        let mut linked = HostSnapshot::default();
+        linked
+            .files
+            .insert("~/.agents/skills/x/skill.md".into(), "h".into());
+        linked
+            .links
+            .insert("~/.agents/skills".into(), "/home/u/.claude/skills".into());
+        let hp = plan_for(
+            &catalog_of(&[X]),
+            &Codex,
+            &linked,
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        let a = act(&hp, "x");
+        assert_eq!(a.op, ActionOp::Blocked);
+        assert!(a
+            .reason
+            .as_deref()
+            .unwrap()
+            .starts_with("~/.agents/skills is a symlink"));
+    }
+
+    /// The case check only fires when the exact path is absent: an
+    /// exact-case file plans as before (`Adopt` when identical, `Overwrite`
+    /// when different), even beside a case variant (a case-sensitive
+    /// filesystem holding both), and a `Noop` is never touched.
+    #[test]
+    fn an_exact_case_file_still_adopts_or_overwrites() {
+        let rendered = substituted(&Codex, &asset(SKILL), &secrets_map());
+        let path = rendered.files[0].path.clone();
+        let mut identical = HostSnapshot::default();
+        satisfy(&mut identical, &rendered);
+        identical
+            .files
+            .insert(path.to_ascii_lowercase(), "other".into());
+        let hp = plan_for(
+            &catalog_of(&[SKILL]),
+            &Codex,
+            &identical,
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        assert_eq!(act(&hp, "s").op, ActionOp::Adopt);
+
+        let mut diverged = HostSnapshot::default();
+        diverged.files.insert(path.clone(), "edited".into());
+        let hp = plan_for(
+            &catalog_of(&[SKILL]),
+            &Codex,
+            &diverged,
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        let a = act(&hp, "s");
+        assert_eq!(a.op, ActionOp::Overwrite);
+        assert_eq!(
+            a.reason.as_deref(),
+            Some("present but differs; not managed")
+        );
+
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "skill/s".into(),
+            Manifest::entry_for(&rendered.hash(), &rendered, 0, "personal"),
+        );
+        let hp = plan_for(
+            &catalog_of(&[SKILL]),
+            &Codex,
+            &identical,
+            &manifest,
+            &secrets_map(),
+        );
+        assert_eq!(act(&hp, "s").op, ActionOp::Noop);
+    }
+
+    /// A moved asset (F3c migration) whose new location holds a case
+    /// variant is Blocked, not a `Create` whose `remove_entry` deletes the
+    /// old copy: nothing is written or deleted until a person resolves it.
+    #[test]
+    fn a_moved_skill_onto_a_case_variant_is_blocked_and_deletes_nothing() {
+        let new_plan = substituted(&Codex, &asset(SKILL), &secrets_map());
+        let mut old_plan = new_plan.clone();
+        old_plan.files[0].path = "~/.codex/skills/s/SKILL.md".into();
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "skill/s".into(),
+            Manifest::entry_for(&old_plan.hash(), &old_plan, 0, "personal"),
+        );
+        let mut snap = HostSnapshot::default();
+        satisfy(&mut snap, &old_plan);
+        snap.files
+            .insert("~/.agents/skills/s/skill.md".into(), "h".into());
+        let hp = plan_for(
+            &catalog_of(&[SKILL]),
+            &Codex,
+            &snap,
+            &manifest,
+            &secrets_map(),
+        );
+        let a = act(&hp, "s");
+        assert_eq!(a.op, ActionOp::Blocked, "{:?}", a.reason);
+        assert_eq!(
+            a.reason.as_deref(),
+            Some("~/.agents/skills/s/skill.md differs from the rendered SKILL.md only in letter case; rename it to SKILL.md or remove it")
+        );
+        assert!(a.remove_entry.is_none() && a.plan.is_none() && !a.backup);
     }
 }

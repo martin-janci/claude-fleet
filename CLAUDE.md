@@ -213,7 +213,10 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   (`HostSnapshot::links`), for a symlinked `~/.agents`, `~/.agents/skills`,
   entry in it, or
   `~/.codex/skills`; `compute_host_plan` blocks every write/adopt/delete
-  under one (rule 9, `Harness::symlink_reason`).
+  under one (rule 9, `Harness::symlink_reason`), and any action whose
+  planned file is absent at its exact path but present differing only in
+  ASCII case (`skill.md` vs `SKILL.md`) is `Blocked` too (rule 10,
+  `block_case_variants`, every harness).
   `plan::block_cross_harness_collisions`, called once per host in
   `plan_sync`, blocks any action whose file another harness's plan on that
   host also touches.

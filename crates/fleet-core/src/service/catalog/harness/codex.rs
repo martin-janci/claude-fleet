@@ -542,7 +542,9 @@ impl Harness for Codex {
         // case-insensitively, so a host whose `readlink` reports
         // `~/.Codex/Skills/s` must still read as the legacy directory.
         let link_lower = link.to_ascii_lowercase();
-        if link_lower == CODEX_LEGACY_SKILLS_DIR || link_lower.starts_with("~/.codex/skills/") {
+        if link_lower == CODEX_LEGACY_SKILLS_DIR
+            || link_lower.starts_with(&format!("{CODEX_LEGACY_SKILLS_DIR}/"))
+        {
             format!("{link} is a symlink (to {target}); fleet won't remove old Codex skill copies through it — replace it with a real directory")
         } else if op == ActionOp::Remove {
             format!("{link} is a symlink (to {target}); fleet won't remove Codex skills through it — replace it with a real directory")
