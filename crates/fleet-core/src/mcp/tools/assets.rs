@@ -229,6 +229,18 @@ impl FleetTools {
             };
             for name in written {
                 if !may_admin_catalog(&caller, &self.store, &name)? {
+                    // Final review M-f: no grant can be made on a catalog
+                    // removed since the plan; the remedy is a new plan.
+                    if catalog_is_gone(&self.store, &name)? {
+                        return Err(mcp_err(
+                            codes::E_SYNC_PLAN_STALE,
+                            format!(
+                                "catalog {name} no longer exists; this plan writes from it, so \
+                                 re-plan (plan_sync)"
+                            ),
+                            None,
+                        ));
+                    }
                     return Err(forbidden(&Touches::Catalog(name), &caller));
                 }
             }
@@ -485,6 +497,20 @@ fn may_admin_catalog(
         }
     };
     ok.map_err(|e| to_mcp_err(e.into()))
+}
+
+/// Whether no catalog is configured under `name` any more (`personal` is
+/// never gone: its row cannot be removed).
+fn catalog_is_gone(store: &std::sync::Mutex<Store>, name: &str) -> Result<bool, McpError> {
+    if name == catalog::catalogs::PERSONAL {
+        return Ok(false);
+    }
+    let s = store
+        .lock()
+        .map_err(|_| mcp_err(codes::E_LOCK, "store mutex poisoned", None))?;
+    s.get_catalog_by_name(name)
+        .map(|row| row.is_none())
+        .map_err(|e| to_mcp_err(e.into()))
 }
 
 /// The `E_FORBIDDEN` for a call `may_admin_catalog` refused, naming the

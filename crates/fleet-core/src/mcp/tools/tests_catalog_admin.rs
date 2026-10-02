@@ -667,6 +667,41 @@ fn host_plan_writing(catalog: &str) -> crate::service::catalog::sync::plan::Host
     }
 }
 
+/// Final review M-f: a plan that writes from a catalog removed since is
+/// refused as stale — "re-plan" — not with a grant no one could make.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn apply_sync_from_a_catalog_removed_since_the_plan_says_re_plan() {
+    use crate::service::catalog::sync::plan;
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let (s, desk, _ops, _plain, _acme) = two_catalog_store();
+    s.remove_catalog("acme").unwrap();
+    let t = tools(s);
+    let id = plan::registry_put(plan::SyncPlan::new(vec![host_plan_writing("acme")]));
+    let args = json!({ "plan_id": id, "force_partial": false });
+    let r = call(
+        &t,
+        &client(desk, TokenMode::Full, None),
+        "apply_sync",
+        Some(args),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        r.message.starts_with(codes::E_SYNC_PLAN_STALE),
+        "{}",
+        r.message
+    );
+    assert!(
+        r.message.contains("catalog acme no longer exists"),
+        "{}",
+        r.message
+    );
+    assert!(!r.message.contains("client grant"), "{}", r.message);
+    assert!(plan::registry_take(&id).is_some(), "the gate only peeks");
+}
+
 /// R11: `apply_sync` needs a grant on every catalog its plan writes from.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
