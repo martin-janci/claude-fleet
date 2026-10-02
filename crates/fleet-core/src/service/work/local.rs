@@ -164,6 +164,22 @@ pub fn name_session_work_as(
         .map(crate::store::normalize_work_ref)
         .transpose()?;
     if let Some(k) = key.as_deref() {
+        // `TASK-<n>` is fleet's own spelling for a native item, assigned from
+        // the row id. A person choosing that exact shape could collide with an
+        // id `insert_native` is about to mint — and that collision used to
+        // WEDGE: the key is written by a second statement, so the unique
+        // violation aborted the transaction, the row id was not persisted, and
+        // every later attempt was handed the same id and failed identically.
+        // Reserving the shape makes the collision impossible instead.
+        if crate::store::is_native_key_shape(k) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "{k} is reserved: fleet names its own tasks `{}-<number>`. Pick another key",
+                    crate::store::TASK_KEY_PREFIX
+                ),
+            ));
+        }
         for item in s.tracker_items_with_key(k)? {
             if scope.sees_org(s.item_org(item.id)?) {
                 return Err(IpcError::new(

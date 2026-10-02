@@ -34,10 +34,23 @@ export function groupTasksByStatus(tasks: WorkTask[], nowSecs: number): StatusSe
     else roots.push(t);
   }
   const out: StatusSections = { todo: [], doing: [], done: [] };
-  for (const t of [...roots].sort(newestFirst)) {
-    const s = sectionOf(t);
-    if (s === 'done' && (t.last_activity_at ?? 0) < nowSecs - DONE_WINDOW_SECS) continue;
-    out[s].push({ task: t, children: [...(kids.get(t.task_id) ?? [])].sort(newestFirst) });
+  const stale = (t: WorkTask) =>
+    sectionOf(t) === 'done' && (t.last_activity_at ?? 0) < nowSecs - DONE_WINDOW_SECS;
+  for (const t of roots) {
+    const children = [...(kids.get(t.task_id) ?? [])].sort(newestFirst);
+    if (stale(t)) {
+      // The parent is done and outside the window, but a subtask of it is
+      // separate work with its own status: promote every one the window
+      // keeps, instead of dropping it with the parent into no section at all.
+      for (const k of children) {
+        if (!stale(k)) out[sectionOf(k)].push({ task: k, children: [] });
+      }
+      continue;
+    }
+    out[sectionOf(t)].push({ task: t, children });
+  }
+  for (const k of ['todo', 'doing', 'done'] as const) {
+    out[k].sort((a, b) => newestFirst(a.task, b.task));
   }
   return out;
 }

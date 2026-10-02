@@ -9,6 +9,7 @@
 //! proposal columns, and (with `work_status.rs`) of `status_set_by`:
 //! `'task'` is written here only.
 
+use super::is_unique_violation;
 use super::work::{map_item, ITEM_COLUMNS};
 use super::work_local::{validate_local_work_title, LOCAL_WORK_TITLE_MAX_CHARS};
 use super::{now_unix, Store, TaskRow, WorkItemRow};
@@ -17,6 +18,18 @@ use rusqlite::OptionalExtension;
 use std::collections::HashMap;
 
 pub const TASK_KEY_PREFIX: &str = "TASK";
+
+/// Whether `key` is the shape `insert_native` mints for a native item —
+/// `TASK-<digits>`, the row id. Reserved against a person's own key, because a
+/// collision cannot be recovered from: see `insert_native`.
+///
+/// Matching the SHAPE, not a specific id: the id a new item will get is not
+/// known until it is inserted.
+pub fn is_native_key_shape(key: &str) -> bool {
+    key.strip_prefix(TASK_KEY_PREFIX)
+        .and_then(|r| r.strip_prefix('-'))
+        .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
 /// Open proposals one parent may hold (counter-review risk 2).
 pub const PROPOSALS_OPEN_CAP: usize = 10;
 
@@ -148,10 +161,29 @@ impl Store {
             ],
         )?;
         let id = self.conn.last_insert_rowid();
-        self.conn.execute(
-            "UPDATE work_items SET key = ?1 WHERE id = ?2",
-            rusqlite::params![format!("{TASK_KEY_PREFIX}-{id}"), id],
-        )?;
+        let key = format!("{TASK_KEY_PREFIX}-{id}");
+        // A pre-existing row already holding this exact key (one chosen before
+        // the shape was reserved) must read as a plain conflict, not as the
+        // bare constraint error that gave no hint why every retry failed the
+        // same way.
+        self.conn
+            .execute(
+                "UPDATE work_items SET key = ?1 WHERE id = ?2",
+                rusqlite::params![&key, id],
+            )
+            .map_err(|e| {
+                if is_unique_violation(&e) {
+                    IpcError::new(
+                        codes::E_EXISTS,
+                        format!(
+                            "{key} is already taken by other work: rename it, \
+                             then create this task again"
+                        ),
+                    )
+                } else {
+                    IpcError::from(e)
+                }
+            })?;
         tx.commit()?;
         self.emit_work_item(
             id,

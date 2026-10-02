@@ -43,6 +43,74 @@ describe('groupTasksByStatus', () => {
     expect(s.doing[0].children.map((c) => c.task_id)).toEqual(['item:2']);
     expect(s.todo.map((n) => n.task.task_id)).toEqual(['item:3']);
   });
+
+  it('promotes the subtasks of a parent the Done window drops', () => {
+    const s = groupTasksByStatus(
+      [
+        task({
+          task_id: 'item:1',
+          status_category: 'done',
+          counts: { active: 0, ended: 1, suggested: 0 },
+          last_activity_at: NOW - DONE_WINDOW_SECS - 1,
+        }),
+        task({
+          task_id: 'item:2',
+          origin: 'manual',
+          parent_task_id: 'item:1',
+          status_category: 'todo',
+          counts: { active: 0, ended: 0, suggested: 0 },
+          last_activity_at: NOW - 60,
+        }),
+        task({
+          task_id: 'item:3',
+          origin: 'agent',
+          parent_task_id: 'item:1',
+          status_category: 'done',
+          counts: { active: 0, ended: 1, suggested: 0 },
+          last_activity_at: NOW - 30,
+        }),
+        task({
+          task_id: 'item:4',
+          origin: 'agent',
+          parent_task_id: 'item:1',
+          status_category: 'done',
+          counts: { active: 0, ended: 1, suggested: 0 },
+          last_activity_at: NOW - DONE_WINDOW_SECS - 2,
+        }),
+      ],
+      NOW,
+    );
+    // The parent itself is out of the window …
+    expect(s.done.map((n) => n.task.task_id)).toEqual(['item:3']);
+    // … but its open subtask is its own work: it lands in To do, not nowhere.
+    expect(s.todo.map((n) => n.task.task_id)).toEqual(['item:2']);
+    // The window still applies to each promoted subtask.
+    expect([...s.todo, ...s.doing, ...s.done].map((n) => n.task.task_id)).not.toContain('item:4');
+  });
+
+  it('sorts each section newest first, promoted subtasks included', () => {
+    const s = groupTasksByStatus(
+      [
+        task({ task_id: 'item:1', status_category: 'todo', counts: { active: 0, ended: 0, suggested: 0 }, last_activity_at: NOW - 100 }),
+        task({
+          task_id: 'item:2',
+          status_category: 'done',
+          counts: { active: 0, ended: 1, suggested: 0 },
+          last_activity_at: NOW - DONE_WINDOW_SECS - 1,
+        }),
+        task({
+          task_id: 'item:3',
+          origin: 'manual',
+          parent_task_id: 'item:2',
+          status_category: 'todo',
+          counts: { active: 0, ended: 0, suggested: 0 },
+          last_activity_at: NOW - 1,
+        }),
+      ],
+      NOW,
+    );
+    expect(s.todo.map((n) => n.task.task_id)).toEqual(['item:3', 'item:1']);
+  });
 });
 
 describe('displayTitle', () => {

@@ -124,7 +124,27 @@ pub use work_journal::{
 pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_MAX_CHARS};
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
 pub use work_status::STATUS_CATEGORIES;
-pub use work_tasks::{job_status, NativeItem, Proposal, PROPOSALS_OPEN_CAP, TASK_KEY_PREFIX};
+/// Whether a `rusqlite` error is a UNIQUE constraint violation.
+///
+/// One definition, because three modules had grown byte-identical private
+/// copies (`clients`, `peer_links`, and `work_tasks` when it needed one too) —
+/// the same drift `shell::quote` exists to prevent.
+pub(crate) fn is_unique_violation(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::ConstraintViolation,
+                extended_code: rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE,
+            },
+            _
+        )
+    )
+}
+
+pub use work_tasks::{
+    is_native_key_shape, job_status, NativeItem, Proposal, PROPOSALS_OPEN_CAP, TASK_KEY_PREFIX,
+};
 pub use work_tidy::ReopenedWork;
 pub use work_usage::{DetectionCounts, JournalCounts};
 pub use work_view::{

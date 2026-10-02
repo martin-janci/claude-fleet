@@ -651,11 +651,6 @@ pub async fn resolve_start(
                 Some(item) if item_visible(scope, &s, &item)? => item,
                 _ => return Err(orgs::not_found("work item", id)),
             };
-            if item.origin.as_deref() == Some("proposed")
-                && item.proposal_state.as_deref() != Some("accepted")
-            {
-                return Err(IpcError::new(codes::E_INVALID, "accept the proposal first"));
-            }
             let key = item.key.clone().ok_or_else(|| {
                 IpcError::new(codes::E_INVALID, "that work item has no key to start from")
             })?;
@@ -680,6 +675,27 @@ pub async fn resolve_start(
             ))
         }
     };
+    // Gated on the RESOLVED row, so both ways in are covered. This check lived
+    // in the `item_id` arm alone, but a `TASK-<id>` reference reaches the very
+    // same row — `lookup` does not find a local key, so the fallback arm above
+    // carries it on as a bare key with `item_id: None`, and the store resolves
+    // it to the item when the link is written. Starting an undecided proposal
+    // that way wrote a confirmed primary link to it, which the Work view then
+    // silently dropped: it lists a `proposed` child as a proposal, not as work.
+    {
+        let s = lock(store)?;
+        let resolved = match item_id {
+            Some(id) => s.get_work_item(id)?,
+            None => s.work_item_by_key(&key)?,
+        };
+        if let Some(item) = resolved {
+            if item.origin.as_deref() == Some("proposed")
+                && item.proposal_state.as_deref() != Some("accepted")
+            {
+                return Err(IpcError::new(codes::E_INVALID, "accept the proposal first"));
+            }
+        }
+    }
     Ok(StartTicket {
         key,
         title,
@@ -1294,20 +1310,55 @@ fn with_native_defaults(
     };
     let mut out = args.clone();
     if out.project_id.is_none() {
-        out.project_id = item
-            .project_id
-            .or_else(|| parent.as_ref().and_then(|p| p.project_id));
+        out.project_id = match item.project_id {
+            Some(pid) => Some(pid),
+            // `work_items.project_id` is written by `insert_native` only, so a
+            // SYNCED parent — the feature's headline shape, a native subtask
+            // under a tracker ticket — never carries one. Ask where the
+            // parent's own work ran, then (a GitHub issue) its repository's
+            // project, exactly as `plan_start` resolves a key's place.
+            None => match &parent {
+                Some(p) => match p.project_id {
+                    Some(pid) => Some(pid),
+                    None => match s.project_for_item(p.id)? {
+                        Some(pid) => Some(pid),
+                        None => p
+                            .key
+                            .as_deref()
+                            .and_then(crate::store::github_ref)
+                            .map(|(repo, _)| s.project_for_repo(repo))
+                            .transpose()?
+                            .flatten(),
+                    },
+                },
+                None => None,
+            },
+        };
     }
     if out.brief.is_none() {
+        // The brief is read by the new session's Claude, and everything in it
+        // but fleet's own headings is somebody else's text: the notes are the
+        // agent's (a proposal) or the person's, the parent's title and key the
+        // tracker's. Fleet's lines are flattened and defused like every other
+        // brief's; the notes are fenced, because they are a body, not a line.
+        let title = tracker_line(&item.title, 200);
         let own = match item.notes.as_deref().filter(|n| !n.trim().is_empty()) {
-            Some(n) => format!("{}\n\n{n}", item.title),
-            None => item.title.clone(),
+            Some(n) => format!(
+                "{title}\n\n{}",
+                crate::mcp::guard::fence_untrusted(
+                    n,
+                    "the task's notes",
+                    crate::service::work::handover::BRIEF_MAX_CHARS,
+                )
+            ),
+            None => title,
         };
         out.brief = Some(match &parent {
             Some(p) => {
+                let p_title = tracker_line(&p.title, 200);
                 let head = match p.key.as_deref() {
-                    Some(k) => format!("{k} {}", p.title),
-                    None => p.title.clone(),
+                    Some(k) => format!("{} {p_title}", tracker_line(k, KEY_LINE_MAX)),
+                    None => p_title,
                 };
                 let desc = s
                     .work_item_meta(p.id)?
@@ -1326,7 +1377,7 @@ fn with_native_defaults(
                 };
                 let brief = format!(
                     "{task}\n\n## Subtask {}\n\n{own}",
-                    item.key.as_deref().unwrap_or_default()
+                    tracker_line(item.key.as_deref().unwrap_or_default(), KEY_LINE_MAX)
                 );
                 brief
                     .chars()

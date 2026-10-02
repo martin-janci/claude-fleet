@@ -2263,8 +2263,21 @@ fn native_work(
             .transpose()
             .map(Option::flatten)
     };
+    let sees_session = |sid: i64| g.sessions.get(&sid).is_some_and(|r| scope.sees_row(r));
+    // A job's RESULT is the worker agent's own output, so it is the worker
+    // session's content and not the parent task's: a caller that cannot see
+    // that session must not read it, exactly as it cannot read the worker's
+    // name. The state, the timing and the fact that a job ran stay visible —
+    // the parent item already passed the org gate — so this withholds the text
+    // rather than hiding the work, which is the same choice `worker` makes.
+    let visible_result = |job: &crate::store::TaskRow| -> Option<String> {
+        match job.worker_session_id {
+            Some(w) if !sees_session(w) => None,
+            _ => job.result.clone(),
+        }
+    };
     if let Some(i) = item {
-        out.own_result = job_of(i.item.task_id)?.and_then(|t| t.result);
+        out.own_result = job_of(i.item.task_id)?.as_ref().and_then(visible_result);
     }
     let children: Vec<crate::store::WorkItemRow> = match item {
         Some(i) => s
@@ -2277,7 +2290,6 @@ fn native_work(
             .collect(),
         None => Vec::new(),
     };
-    let sees_session = |sid: i64| g.sessions.get(&sid).is_some_and(|r| scope.sees_row(r));
     let mut item_ids: BTreeSet<i64> = item.map(|i| i.item.id).into_iter().collect();
     let mut keys: Vec<String> = key.map(str::to_string).into_iter().collect();
     for c in children {
@@ -2328,7 +2340,7 @@ fn native_work(
                                 .unwrap_or_else(|| r.tmux_name.clone())
                         }),
                     at: job.finished_at.or(job.started_at).unwrap_or(job.created_at),
-                    result: job.result,
+                    result: visible_result(&job),
                 });
             }
         }

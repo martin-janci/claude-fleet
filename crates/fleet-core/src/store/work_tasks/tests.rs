@@ -234,3 +234,58 @@ fn local_items_named_after_the_migration_are_manual_too() {
     let (named, _) = s.name_session_work(sid, None, "named work").unwrap();
     assert_eq!(named.origin.as_deref(), Some("manual"));
 }
+
+#[test]
+fn the_native_key_shape_is_recognised_exactly() {
+    for yes in ["TASK-1", "TASK-0", "TASK-409"] {
+        assert!(is_native_key_shape(yes), "{yes}");
+    }
+    for no in [
+        "TASK", "TASK-", "TASK-x", "TASK-1a", "TASK--1", "TASKS-1", "task-1", "OM-110", "",
+    ] {
+        assert!(!is_native_key_shape(no), "{no}");
+    }
+}
+
+/// The key is written by a second statement, so a row already holding
+/// `TASK-<the new id>` makes it fail. That used to WEDGE: the bare constraint
+/// error named nothing, the id was rolled back with the row, and every retry
+/// was handed the same id and failed identically. It now reads as a conflict
+/// that names the key, and renaming the other row lets the retry through.
+#[test]
+fn a_key_already_taken_reads_as_a_conflict_and_the_retry_works_once_it_is_freed() {
+    let s = Store::open_in_memory().unwrap();
+    let squatter = s.create_local_work_item(Some("OPS-1"), "ops").unwrap();
+    // A key of the native shape, chosen before the shape was reserved, that
+    // lands on the id the next insert will get.
+    let taken = format!("TASK-{}", squatter.id + 1);
+    s.conn
+        .execute(
+            "UPDATE work_items SET key = ?1 WHERE id = ?2",
+            rusqlite::params![&taken, squatter.id],
+        )
+        .unwrap();
+
+    let e = s.create_native_item(&native("Blocked")).unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS);
+    assert!(e.message.contains(&taken), "{}", e.message);
+    // The whole insert rolled back — no half-written row without a key.
+    let orphans: i64 = s
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM work_items WHERE title = 'Blocked'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphans, 0);
+
+    s.conn
+        .execute(
+            "UPDATE work_items SET key = 'OPS-1' WHERE id = ?1",
+            [squatter.id],
+        )
+        .unwrap();
+    let t = s.create_native_item(&native("Blocked")).unwrap();
+    assert_eq!(t.key.as_deref(), Some(taken.as_str()));
+}

@@ -195,6 +195,32 @@ fn a_visible_tickets_key_is_refused_an_invisible_one_is_just_a_key() {
     let _ = fx.ticket_a;
 }
 
+/// `TASK-<n>` is fleet's own spelling for a native item, assigned from the row
+/// id, so a person may not choose it: a collision with the id `insert_native`
+/// is about to mint cannot be recovered from by the caller. Only that exact
+/// shape is reserved — a key that merely starts with the word is a key.
+#[test]
+fn the_native_task_key_shape_is_reserved() {
+    let fx = fixture();
+    for taken in ["TASK-7", "task-7"] {
+        let e = name_session_work(
+            &name(fx.s_a, "Mine", Some(taken)),
+            &fx.store,
+            &OrgScope::All,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{taken}");
+        assert!(e.message.contains("reserved"), "{}", e.message);
+    }
+    let row = name_session_work(
+        &name(fx.s_a, "Mine", Some("TASKS-7")),
+        &fx.store,
+        &OrgScope::All,
+    )
+    .unwrap();
+    assert_eq!(row.work.unwrap().key.as_deref(), Some("TASKS-7"));
+}
+
 #[test]
 fn a_taken_local_key_is_refused_with_the_item_only_for_who_sees_it() {
     let fx = fixture();

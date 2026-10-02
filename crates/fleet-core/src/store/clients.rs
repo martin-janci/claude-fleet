@@ -3,6 +3,7 @@
 //! Unlike `host_tokens`, only the SHA-256 of the token is stored: the
 //! plaintext is shown once at pairing and never needs to be displayed again.
 
+use super::is_unique_violation;
 use super::*;
 use crate::ipc_error::codes;
 
@@ -439,20 +440,6 @@ impl Store {
             )
             .optional()?)
     }
-}
-
-/// Whether `e` is a SQLite UNIQUE constraint violation.
-fn is_unique_violation(e: &rusqlite::Error) -> bool {
-    matches!(
-        e,
-        rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error {
-                code: rusqlite::ErrorCode::ConstraintViolation,
-                extended_code: rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE,
-            },
-            _
-        )
-    )
 }
 
 fn map_client_token_row(row: &rusqlite::Row) -> rusqlite::Result<ClientTokenRow> {

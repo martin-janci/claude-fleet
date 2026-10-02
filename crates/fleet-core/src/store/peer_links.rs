@@ -3,6 +3,7 @@
 //! idempotent inbound insert. See
 //! `docs/superpowers/specs/2026-09-24-hub-federation-design.md`.
 
+use super::is_unique_violation;
 use super::{now_unix, Store, PARTICIPANT_REMOTE};
 use crate::ipc_error::{codes, IpcError};
 use rusqlite::OptionalExtension;
@@ -130,24 +131,6 @@ fn map_link(r: &rusqlite::Row<'_>) -> rusqlite::Result<PeerLinkRow> {
         created_at: r.get(11)?,
         revoked_at: r.get(12)?,
     })
-}
-
-/// Whether `e` is a SQLite UNIQUE constraint violation. A private copy of
-/// `clients::is_unique_violation` — that one is private to its own module,
-/// and this file's constraint (`idx_peer_links_live_fleet`) is unrelated to
-/// client tokens, so a shared helper would only add an import for a five-line
-/// match.
-fn is_unique_violation(e: &rusqlite::Error) -> bool {
-    matches!(
-        e,
-        rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error {
-                code: rusqlite::ErrorCode::ConstraintViolation,
-                extended_code: rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE,
-            },
-            _
-        )
-    )
 }
 
 /// Maps a unique-constraint violation on `idx_peer_links_live_fleet` to

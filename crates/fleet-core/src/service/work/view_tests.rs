@@ -2025,6 +2025,65 @@ fn a_task_page_shows_the_jobs_result_and_its_sessions_steps() {
     assert_eq!(jd.task.origin, "agent");
 }
 
+/// A job's RESULT is the worker session's content, so a scope that cannot see
+/// that session does not read it.
+///
+/// The same `JobView` literal already fenced the worker's NAME with
+/// `scope.sees_row` while passing `result` through untouched — so an org-bound
+/// client could read the full output of an agent that ran in another org's
+/// session, just by opening a parent task it is allowed to see. What stays
+/// visible is deliberate: the job, its state and its timing, because the parent
+/// item already passed the org gate; only the text is withheld, the same choice
+/// `worker` makes.
+#[test]
+fn a_job_result_is_withheld_when_its_worker_session_is_out_of_scope() {
+    let w = world();
+    let (parent, job_item) = {
+        let s = w.st.lock().unwrap();
+        let parent = s
+            .create_native_item(&crate::store::NativeItem {
+                title: "Ship v1",
+                ..Default::default()
+            })
+            .unwrap();
+        // the parent is org_b's work, so an org_b scope may open it
+        s.seed_local_item_org(parent.id, Some(w.org_b));
+        // the job ran in s2, which belongs to host h1 — org_a
+        let job = s.insert_task(None, Some(w.s2), "Changelog", "n").unwrap();
+        let job_item = s
+            .create_agent_task_item(&job, Some(parent.id), None)
+            .unwrap();
+        s.finish_task(job.id, "done", Some("CHANGELOG.md written"), None)
+            .unwrap();
+        (parent, job_item)
+    };
+
+    // Unscoped: the whole thing, as before.
+    let all = task(&w.st, &OrgScope::All, &format!("item:{}", parent.id)).unwrap();
+    assert_eq!(all.jobs[0].result.as_deref(), Some("CHANGELOG.md written"));
+    assert_eq!(all.jobs[0].worker.as_deref(), Some("two"));
+
+    // Scoped to org_b: the session is org_a's, so the text is withheld —
+    // and the job is still listed, with its state and its id.
+    let scoped = task(&w.st, &bound(w.org_b), &format!("item:{}", parent.id)).unwrap();
+    assert_eq!(scoped.jobs.len(), 1, "the job is not hidden, only its text");
+    assert_eq!(scoped.jobs[0].item_id, job_item.id);
+    assert_eq!(scoped.jobs[0].state, "done");
+    assert_eq!(
+        scoped.jobs[0].result, None,
+        "the worker's output belongs to a session this scope cannot see"
+    );
+    assert_eq!(
+        scoped.jobs[0].worker, None,
+        "as the worker name already was"
+    );
+
+    // The job mirror's OWN page is fenced the same way — it reads the same
+    // row through `own_result`, which had no check at all.
+    let own = task(&w.st, &bound(w.org_b), &format!("item:{}", job_item.id)).unwrap();
+    assert_eq!(own.job_result, None);
+}
+
 #[test]
 fn a_subtasks_steps_roll_up_to_its_parent_and_count_its_live_sessions() {
     let w = world();

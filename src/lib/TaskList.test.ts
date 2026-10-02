@@ -157,6 +157,38 @@ describe('TaskList', () => {
     expect(calls('create_work_task')[0][1]).toEqual({ args: { title: 'New', project_id: 3, notes: 'Rebase first' } });
   });
 
+  it('says what it has of the total and pages on from the cursor', async () => {
+    const first = {
+      ...page,
+      tasks: [task({ task_id: 'item:1', title: 'One', status_category: 'todo', counts: { active: 0, ended: 0, suggested: 0 } })],
+      total: 2,
+      next_cursor: 'c1',
+    };
+    const second = {
+      ...page,
+      tasks: [task({ task_id: 'item:2', title: 'Two', status_category: 'todo', counts: { active: 0, ended: 0, suggested: 0 } })],
+      total: 2,
+      next_cursor: null,
+    };
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, a: unknown) => {
+      if (cmd !== 'work_tree') return [];
+      return (a as { args: { cursor?: string | null } }).args.cursor === 'c1' ? second : first;
+    });
+    render(TaskList);
+    await flush();
+    // A short page is all the hub had to give, so the first read stops there
+    // and says so instead of presenting one page as the whole result.
+    expect(calls('work_tree')).toHaveLength(1);
+    expect(screen.getByTestId('task-list-more').textContent).toContain('1 of 2');
+    await fireEvent.click(screen.getByTestId('task-list-load-more'));
+    await flush();
+    expect((calls('work_tree')[1][1] as { args: { cursor?: string | null } }).args.cursor).toBe('c1');
+    const todo = screen.getByTestId('task-section-todo').textContent;
+    expect(todo).toContain('One');
+    expect(todo).toContain('Two');
+    expect(screen.queryByTestId('task-list-more')).toBeNull();
+  });
+
   it('renders tracker text as text', async () => {
     (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
       cmd === 'work_tree'

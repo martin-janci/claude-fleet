@@ -10,6 +10,7 @@
   import { get } from 'svelte/store';
   import { createWorkTask, onWorkChangedDebounced } from './work';
   import {
+    mergeTasks,
     openTask,
     readErrorText,
     selectedTaskId,
@@ -37,7 +38,14 @@
 
   const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
 
+  /** One page: `work_tree`'s own maximum, so a page is one read. */
+  const PAGE_MAX = 200;
+
   let tasks = $state.raw<WorkTask[]>([]);
+  /** Every task the filters match, which is not every task READ. */
+  let total = $state(0);
+  let cursor = $state.raw<string | null>(null);
+  let loadingMore = $state(false);
   let orgNames = $state.raw<Map<number, string>>(new Map());
   let loaded = $state(false);
   let error = $state<IpcError | null>(null);
@@ -53,25 +61,54 @@
   const pickable = $derived(($projects ?? []).filter((p) => !p.project?.system));
 
   let seq = 0;
-  async function load() {
+  /** Read from the start, or (`more`) one page on from the last cursor.
+   *
+   *  The first read is one page; a refetch re-reads as many as were shown, so
+   *  a list the person paged does not shrink back under them. `total` is what
+   *  the filters match, so what is NOT on screen can be said rather than
+   *  silently dropped. */
+  async function load(opts: { more?: boolean } = {}) {
     const mine = ++seq;
-    const r = await workTree({ filters: { ...get(workViewFilters), archived: true }, limit: 200, per_task: 3 });
-    if (mine !== seq) return;
-    loaded = true;
-    if (!r.ok) {
-      error = r.error;
-      return;
+    const more = opts.more === true && cursor != null;
+    const filters = { ...get(workViewFilters), archived: true };
+    const want = more ? tasks.length + PAGE_MAX : Math.max(PAGE_MAX, tasks.length);
+    let acc: WorkTask[] = more ? tasks : [];
+    let from = more ? cursor : null;
+    let page: WorkTreePage | null = null;
+    if (more) loadingMore = true;
+    for (;;) {
+      const r = await workTree({ filters, cursor: from, limit: PAGE_MAX, per_task: 3 });
+      if (mine !== seq) {
+        if (more) loadingMore = false;
+        return;
+      }
+      loaded = true;
+      if (!r.ok) {
+        error = r.error;
+        loadingMore = false;
+        return;
+      }
+      page = r.value;
+      const got = Array.isArray(page?.tasks) ? page.tasks : [];
+      acc = acc.length === 0 ? got : mergeTasks(acc, got);
+      from = page?.next_cursor ?? null;
+      // Only past a full page: a short page is all the hub had to give.
+      if (from == null || got.length < PAGE_MAX || acc.length >= want) break;
     }
+    loadingMore = false;
     error = null;
-    tasks = Array.isArray(r.value?.tasks) ? r.value.tasks : [];
-    const orgs = Array.isArray(r.value?.orgs) ? r.value.orgs : [];
+    tasks = acc;
+    cursor = from;
+    total = typeof page?.total === 'number' ? page.total : acc.length;
+    const orgs = Array.isArray(page?.orgs) ? page.orgs : [];
     orgNames = new Map(orgs.map((o) => [o.id, o.name]));
     onpage?.({
-      ...r.value,
+      ...page,
       tasks,
+      total,
       orgs,
-      groups: Array.isArray(r.value?.groups) ? r.value.groups : [],
-      trackers: Array.isArray(r.value?.trackers) ? r.value.trackers : [],
+      groups: Array.isArray(page?.groups) ? page.groups : [],
+      trackers: Array.isArray(page?.trackers) ? page.trackers : [],
     });
   }
 
@@ -190,6 +227,18 @@
     {@render section('todo', 'To do', sections.todo, true)}
     {@render section('doing', 'Doing', sections.doing, true)}
     {@render section('done', 'Done · last 7 days', sections.done, doneOpen)}
+    {#if cursor}
+      <p class="muted more-row" data-testid="task-list-more">
+        {tasks.length} of {total} tasks read.
+        <button
+          class="btn btn--quiet"
+          type="button"
+          data-testid="task-list-load-more"
+          disabled={loadingMore}
+          onclick={() => void load({ more: true })}>{loadingMore ? 'Loading…' : 'Load more'}</button
+        >
+      </p>
+    {/if}
   {/if}
 </div>
 
@@ -455,6 +504,11 @@
     color: var(--fg-muted);
     padding: 6px 4px;
     margin: 0;
+  }
+  .more-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
   .err {
     color: var(--usage-crit, #c62828);

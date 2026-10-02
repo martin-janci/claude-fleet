@@ -1124,6 +1124,29 @@ impl Store {
             .optional()?)
     }
 
+    /// The project a confirmed link on `item_id` last ran in, live or ended.
+    ///
+    /// `work_items.project_id` is written by `insert_native` only, so it is
+    /// NULL on every tracker ticket; this is how a native subtask under a
+    /// synced parent learns where that parent's own work ran.
+    pub fn project_for_item(&self, item_id: i64) -> Result<Option<i64>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT COALESCE(s.project_id, l.snap_project_id) \
+                 FROM work_links l \
+                 LEFT JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+                 LEFT JOIN sessions s ON s.id = p.session_id AND l.ended_at IS NULL \
+                 WHERE l.item_id = ?1 AND l.state = 'confirmed' \
+                   AND COALESCE(s.project_id, l.snap_project_id) IS NOT NULL \
+                 ORDER BY COALESCE(l.ended_at, l.decided_at, l.created_at) DESC, l.id DESC \
+                 LIMIT 1",
+                [item_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// The project whose repository is `repo` (`owner/repo`, any case):
     /// where a GitHub issue's work starts by default.
     pub fn project_for_repo(&self, repo: &str) -> Result<Option<i64>, IpcError> {
