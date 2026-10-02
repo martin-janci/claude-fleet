@@ -287,6 +287,23 @@ export function groupItems(items: ConvItem[]): ConvGroup[] {
   return out;
 }
 
+/** The word a block leads with: the subagent type the call named, else the
+ *  tool's own name when the block is not a subagent at all (`Workflow` →
+ *  `workflow`), else `subagent`.
+ *
+ *  The hub sends a `Workflow` call as a `subagent` item deliberately
+ *  (`BLOCK_TOOLS` in `service/transcript.rs`): it is a whole piece of work
+ *  with a report at the end, which is what this block draws, and reusing the
+ *  wire kind is what put it on a phone that shipped before the change. It
+ *  carries no `subagent_type`, though, and "subagent" is the one word that
+ *  would be wrong above it. */
+export function blockTypeLabel(item: { agent_type: string | null; name: string }): string {
+  if (item.agent_type) return item.agent_type;
+  const name = item.name.trim();
+  if (name === '' || name === 'Task' || name === 'Agent') return 'subagent';
+  return name.toLowerCase();
+}
+
 /** The tool name of a one-liner such as `Bash(command=ls)`. */
 export function toolName(summary: string): string {
   const paren = summary.indexOf('(');
@@ -402,7 +419,15 @@ export interface BackgroundEntry {
  *  but produces no switcher entry, and its row falls back to the
  *  non-clickable form. That is the honest degradation: the thread stays
  *  truthful, and nothing is invented for a shape we have never seen. Widen
- *  it only for a tool whose backgrounded shape has actually been observed. */
+ *  it only for a tool whose backgrounded shape has actually been observed.
+ *
+ *  `Workflow` is kept here for an OLDER HUB only. A current hub sends a
+ *  workflow as a `subagent` item (`BLOCK_TOOLS` in
+ *  `service/transcript.rs`), which the arm above handles — and handles
+ *  better, since a subagent block is listed while it is still running
+ *  rather than only once it has reported. Against a hub that predates that
+ *  change it still arrives as a plain tool line, and this entry is what
+ *  keeps its notification clickable there. */
 const BACKGROUND_TOOLS = new Set(['Bash', 'Monitor', 'Workflow', 'SendMessage']);
 
 /** The newest report that carried a status decides. The failing values are
