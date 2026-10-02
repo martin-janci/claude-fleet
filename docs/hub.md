@@ -1024,7 +1024,21 @@ What a client may do:
   effect from the client's next call, and neither needs a running hub. Grant
   it to the desktop whose keyboard is yours, like `trust` — never to a token
   an agent holds: a Sync writes files and plugins to every host. A per-host
-  token can never use `catalog_admin`, and is not shown it.
+  token can never use `catalog_admin`, and is not shown it. A grant names
+  one catalog: `--catalog <name>` grants an org's catalog instead of the
+  personal one (`client ungrant <name> assets --catalog <name>` takes it
+  back), and the client may then touch only the catalogs it holds — admit
+  hosts to them, load them or list their layers, and apply a Sync plan only
+  when it holds every catalog that plan writes from. The fleet-wide actions
+  (`plan_sync`, `apply_sync`, `inventory`, secrets, `resolve_preview` and
+  the rest) also need the personal grant: an org-only grant covers that
+  catalog's config, load, layers and admissions, nothing more.
+  `list_catalogs` is open to the master or a person's own unbound full
+  device, never an org-bound client; only the master token may
+  `add_catalog` or `remove_catalog` (a removal drops every other client's
+  grant on that catalog, and only the master could add it back). `client
+  list`'s ASSETS column is the personal grant; `catalog list` shows every
+  grant.
 - A prompt typed on a phone reaches an agent **marked** as untrusted input,
   naming the client it came from, unless you have **trusted** that client.
   `raw: true` is the master token's alone.
@@ -2228,9 +2242,27 @@ Sync installs on hosts — is a git checkout on the hub's machine. The desktop
 sets it in its Assets tab; on a hub, set it with `fleet-hub catalog`. A
 running hub is not needed, and does not need a restart: it picks the change
 up at its next catalog call (on a paired client, Assets → Refresh).
-`catalog set` always configures the personal catalog; per-org catalogs
-arrive later (S1b M3). A host bound to an org receives only the `shared`
-assets of the personal catalog.
+`catalog set` configures the personal catalog. An org can have its own:
+`catalog add <name> <path> --org <org> [--remote <url>]` records and loads
+it (on an existing name it re-points it). Which hosts take what: a host
+bound to an org receives that org's catalog plus the `shared` assets of the
+personal catalog; a host with no org receives all of personal plus every org
+catalog it admits (`catalog admit <host> <catalog>`, `catalog unadmit`).
+`catalog list` shows each catalog's owner, load state, HEAD, admissions and
+grants; `catalog reload --catalog <name>` re-reads one. `catalog remove
+<name>` forgets an org catalog — config only, the checkout stays — along
+with its layer assignments, admissions and grants (over MCP,
+`remove_catalog` is the master token's alone, like `add_catalog`).
+
+A catalog whose checkout cannot be loaded is shown as a problem (`catalog
+list`) while the others load; it is retried at its next `reload`. Sync never
+removes what a catalog installed because that catalog went away — not
+loaded, failed, unadmitted, the host changed org, or removed: it reports
+those assets as `Noop` "kept, not removed" and leaves them to you.
+
+`catalog list` and the MCP `list_catalogs` action show every catalog's path
+and remote across orgs, so only the master token or a person's own unbound
+full device may call them — an org-bound client is refused.
 
 **Upgrade note.** An asset's `scope` defaults to `private`: once a host is
 bound to an org, it stops receiving creates and updates for assets that are
@@ -2252,6 +2284,10 @@ docker compose exec fleet-hub fleet-hub catalog reload --pull   # after a push t
   no checkout is cloned from `--remote`, with this machine's git
   credentials: for an SSH remote, allow the key `fleet-hub ssh-key` prints
   to read the repository.
+- `add <name> <path> [--remote <url>] --org <org>` records an org catalog
+  and loads it; `list`, `remove <name>`, `admit <host> <catalog>`,
+  `unadmit <host> <catalog>` manage the set; `reload --catalog <name>`
+  reloads one.
 - `reload [--pull]` re-reads the checkout (optionally `git pull --ff-only`
   first). Nothing pulls on its own.
 - `show` prints the path, remote and last loaded commit.

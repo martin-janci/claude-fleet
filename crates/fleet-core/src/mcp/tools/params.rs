@@ -1055,7 +1055,8 @@ pub struct CatalogAdminParams {
     /// commit_pending|push|repo_status|inventory|import_host|plan_sync|
     /// apply_sync|last_sync|list_secrets|set_secret|delete_secret|
     /// list_layers|resolve_preview|propose_layers|set_host_layers|set_host_harnesses|
-    /// layer_template|write_layer|delete_layer
+    /// layer_template|write_layer|delete_layer|list_catalogs|add_catalog|
+    /// remove_catalog|admit_catalog|unadmit_catalog
     pub action: String,
     /// The desktop command's own argument object.
     #[serde(default)]
@@ -1063,6 +1064,12 @@ pub struct CatalogAdminParams {
     /// apply_sync: nonce of an approved E_CONFIRM_REQUIRED.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+    /// config|load|list_layers|set_host_layers: catalog name (default
+    /// personal). remove/admit/unadmit_catalog: only the name in args.
+    /// add/remove_catalog: master only.
+    /// Others refuse it (authoring until M4; the rest are not per catalog).
+    #[serde(default)]
+    pub catalog: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema, Default)]

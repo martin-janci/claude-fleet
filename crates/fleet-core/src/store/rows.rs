@@ -1200,6 +1200,18 @@ pub struct CatalogRow {
     pub last_loaded_at: Option<i64>,
 }
 
+/// What `Store::remove_catalog` dropped along with the row (migration 093,
+/// Rulings R13): the catalog's layer assignments, admissions and grants all
+/// go by `ON DELETE CASCADE`. The checkout on disk is never touched.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CatalogRemoval {
+    pub id: i64,
+    pub name: String,
+    pub layer_rows: usize,
+    pub admissions: usize,
+    pub grants: usize,
+}
+
 /// Drift state of one catalog asset on one host for one harness
 /// (migration 030). `state` is one of in_sync | drifted | missing |
 /// unmanaged | unsupported.

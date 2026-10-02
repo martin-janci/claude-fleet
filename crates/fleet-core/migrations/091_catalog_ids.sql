@@ -9,6 +9,20 @@
 -- `sessions_row_version_bump` can already name a column that repair has not
 -- added back, and the rename fails validating it. Copy out, drop, recreate,
 -- copy back: no rename, same result.
+--
+-- Assets M3 (R1): never assume host_layers exists. A database from the
+-- 033/035 collision family can reach this migration without it, and
+-- `repair_skipped_main_migrations` — which recreates it — only runs after
+-- every pending migration. 033's shape; the rebuild below converts it.
+CREATE TABLE IF NOT EXISTS host_layers (
+  host_alias TEXT    NOT NULL REFERENCES hosts(alias),
+  layer_name TEXT    NOT NULL,
+  axis       TEXT    NOT NULL,
+  position   INTEGER NOT NULL DEFAULT 0,
+  active     INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (host_alias, layer_name)
+);
+
 CREATE TABLE IF NOT EXISTS host_layers_new (
   host_alias TEXT    NOT NULL REFERENCES hosts(alias),
   catalog_id INTEGER NOT NULL REFERENCES catalogs(id) ON DELETE CASCADE,
