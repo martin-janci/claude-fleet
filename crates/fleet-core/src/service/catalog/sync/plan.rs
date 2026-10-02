@@ -152,6 +152,19 @@ pub struct HostPlan {
     pub snapshot: HostSnapshot,
     #[serde(skip)]
     pub manifest: Manifest,
+    /// The host's `hosts.harnesses` as it stood when this plan was computed
+    /// (`None` = auto), so `apply_sync_with` can tell that the choice moved
+    /// under a parked plan.
+    ///
+    /// `set_host_harnesses` drops every plan already PARKED, which does not
+    /// cover the plan still being computed: a `plan_sync` mid-scan when Codex
+    /// is turned off parks its old-choice plan afterwards, and apply never
+    /// re-checked the gate — so the one plan the drop cannot reach was the one
+    /// that could still write Codex assets to a host that had just said no.
+    /// Off the wire (`serde(skip)`), like the snapshot and the manifest: it is
+    /// the engine's own bookkeeping, and no contract shape moves for it.
+    #[serde(skip)]
+    pub harnesses_at_plan: Option<Vec<String>>,
 }
 
 /// A whole fleet-wide plan, as handed to the UI and stashed in the registry.
@@ -435,6 +448,8 @@ pub fn compute_host_plan(
         actions,
         snapshot: snap.clone(),
         manifest: manifest.clone(),
+        // Stamped by `plan_sync`, which is the layer that knows the host's row.
+        harnesses_at_plan: None,
     }
 }
 
@@ -1852,6 +1867,7 @@ mod tests {
             actions: Vec::new(),
             snapshot: HostSnapshot::default(),
             manifest: Manifest::default(),
+            harnesses_at_plan: None,
         }
     }
 

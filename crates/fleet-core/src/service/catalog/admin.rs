@@ -383,6 +383,7 @@ mod tests {
             }),
             AdminCall::UpdateAsset(Box::new(UpdateArgs {
                 asset: author::template(Kind::Skill, "s"),
+                set_scope: false,
             })),
             AdminCall::DeleteAsset(skill("s")),
             AdminCall::AddResourceBytes(AddResourceBytesArgs {
@@ -428,7 +429,10 @@ mod tests {
                 rel_path: rel_path.into(),
                 bytes: vec![1],
             });
-            AdminCall::UpdateAsset(Box::new(UpdateArgs { asset }))
+            AdminCall::UpdateAsset(Box::new(UpdateArgs {
+                asset,
+                set_scope: false,
+            }))
         };
         let mut calls: Vec<(String, AdminCall)> = Vec::new();
         for bad in ["../x", "a/b", "", ".hidden"] {
@@ -454,6 +458,7 @@ mod tests {
             asset.header.name = bad.into();
             calls.push(named(AdminCall::UpdateAsset(Box::new(UpdateArgs {
                 asset,
+                set_scope: false,
             }))));
             calls.push(named(AdminCall::RemoveResource(RemoveResourceArgs {
                 kind: Kind::Skill,

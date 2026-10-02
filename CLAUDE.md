@@ -185,10 +185,12 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   the `assets` grant) reads any registered host over SSH through
   `REMOTE_SOURCES_SCRIPT`, scrubbing fleet-owned hook entries
   (`hooks_install::is_fleet_owned_hook`), confined to top-level symlinks
-  under a 64 MiB cap. `plan_sync` skips a non-`local`, unlayered,
-  non-empty-catalog host — never scanning it over SSH — unless
-  `allow_unlayered` is set, since syncing it as-is would otherwise install
-  the whole catalog there.
+  under a 64 MiB cap. `plan_sync` skips a non-`local`, unlayered host —
+  never scanning it over SSH — unless `allow_unlayered` is set, since
+  syncing it as-is would otherwise install the whole catalog there. An
+  empty catalog used to be exempt from that guard and no longer is: with
+  nothing in the catalog the plan is `Remove` for every entry the host's
+  manifest names, which is the same guard pointing the other way.
 - **Multi-harness F3a / F3b** (plan
   `docs/superpowers/plans/2026-09-30-f3ab-harness-set-and-codex-agents.md`):
   `hosts.harnesses` (migration 089, NULL = auto) and the one gate
@@ -241,8 +243,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   catalog an asset came from (an old manifest with no field reads as
   `"personal"`); `compute_states` stamps `asset_inventory.catalog_id` from
   the same source. Scans compose every loaded catalog via
-  `registry::union_all`, and the unlayered guard (`refuse_unlayered`) checks
-  against that same union, not just `personal`. `apply_override` rejects a
+  `registry::union_all`. `apply_override` rejects a
   layer that tries to change an asset's `scope`, since scope is what decides
   who may receive it.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +

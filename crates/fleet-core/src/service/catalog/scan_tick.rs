@@ -95,8 +95,15 @@ fn setting_secs(store: &Mutex<Store>, key: &str) -> i64 {
 ///
 /// Named so the arm is testable: the tick's own trigger for "rescan every
 /// host" is this comparison, and nothing drove it before.
+///
+/// The FIRST pass is not a change. `tokio::time::interval`'s first tick
+/// completes immediately and `seen` starts as `None`, so every process start
+/// swept every reachable host over SSH to learn what it already had in the
+/// store — and a hub that restarts often never stopped scanning. The first
+/// pass only primes the key; what is genuinely stale is `hosts_due`'s own
+/// job, through `catalog.scan_max_age_secs`, and that still runs.
 fn changed(seen: Option<&ScanKey>, now: &ScanKey) -> bool {
-    seen != Some(now)
+    seen.is_some() && seen != Some(now)
 }
 
 /// The catalog HEAD plus the last sync's finish time — what a pass compares
@@ -236,6 +243,15 @@ pub fn spawn_catalog_scan_tick(
             owed.extend(take_requested());
             let due = with_owed(due, &owed, &hosts);
             for alias in due {
+                // Between hosts, too. The token was read once at the top of a
+                // pass, so a shutdown (or a cancelled sync) during a sweep of
+                // twenty hosts still went to all twenty over SSH. The host
+                // already in flight finishes — `scan_hosts` builds its own
+                // token — and stays owed, so the next pass retries it.
+                if token.is_cancelled() {
+                    owed.insert(alias);
+                    break;
+                }
                 let res = super::inventory::scan_hosts(&store, &ssh, Some(&alias)).await;
                 settle(&mut owed, &alias, &res);
             }
@@ -304,12 +320,21 @@ mod tests {
 
     /// The "rescan everything" trigger: the catalog HEAD or the last sync
     /// moving since the previous pass.
+    ///
+    /// The first assertion was the other way round — "the first pass has
+    /// nothing to compare" — which, with `interval`'s immediately-completing
+    /// first tick, made every process start sweep every reachable host over SSH
+    /// to learn what the store already held. Nothing MOVED at a start, and
+    /// staleness is `hosts_due`'s job; changing this assertion is the fix.
     #[test]
     fn changed_fires_on_a_new_head_or_a_new_sync() {
         let a: ScanKey = ("head-a".into(), Some(10));
         let b: ScanKey = ("head-b".into(), Some(10));
         let a_later: ScanKey = ("head-a".into(), Some(20));
-        assert!(changed(None, &a), "the first pass has nothing to compare");
+        assert!(
+            !changed(None, &a),
+            "the first pass primes the key; it is not a change"
+        );
         assert!(
             !changed(Some(&a), &a),
             "an unchanged key does not re-trigger"
@@ -329,15 +354,43 @@ mod tests {
         }
     }
 
-    /// `owe_rescan` parks the host for the tick; the tick's own drain
-    /// (`take_requested`, a `mem::take`) is not exercised here because the
-    /// set is process-wide and other tests park hosts in it concurrently.
+    /// `owe_rescan` parks a host, and the tick's own drain takes it.
+    ///
+    /// The drain — `owed.extend(take_requested())`, a `mem::take` of the
+    /// process-wide set — was exercised by nothing, as this test's own doc
+    /// comment used to concede: it is the only mechanism by which an
+    /// out-of-band "rescan this host" request ever reaches a pass, so a
+    /// `mem::take` that took the wrong thing, or a drain dropped from the loop,
+    /// would have been invisible.
+    ///
+    /// `REQUESTED` is process-wide, so this is the ONE test that touches it:
+    /// a second one parking an alias could have it taken from under it. Anything
+    /// else the drain happens to pick up is parked again.
     #[test]
-    fn owe_rescan_parks_the_host_for_the_next_pass() {
+    fn owe_rescan_parks_a_host_and_the_tick_drains_it() {
         let alias = format!("owed-{}", uuid::Uuid::new_v4());
         assert!(!rescan_requested(&alias));
         owe_rescan(&alias);
         assert!(rescan_requested(&alias));
+
+        // What the tick does with it, on the line the loop runs.
+        let mut owed: BTreeSet<String> = BTreeSet::new();
+        owed.insert("already-owed".to_string());
+        let taken = take_requested();
+        let others: Vec<String> = taken.iter().filter(|a| **a != alias).cloned().collect();
+        owed.extend(taken);
+        assert!(owed.contains(&alias), "the request reached the pass");
+        assert!(
+            owed.contains("already-owed"),
+            "and did not replace the debt"
+        );
+        assert!(
+            !rescan_requested(&alias),
+            "a request is taken once: the next pass does not re-scan for it"
+        );
+        for a in others {
+            owe_rescan(&a);
+        }
     }
 
     #[test]

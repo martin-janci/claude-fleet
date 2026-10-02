@@ -832,12 +832,20 @@ fn read_json(p: &Path) -> Value {
 pub const REMOTE_SOURCES_SCRIPT: &str = r###"cd "$HOME" || exit 1
 total=0
 cap=67108864
-# One per-file cap for every emitted file, not just the ones find filters:
+# One per-file cap for every emitted file, and it is the ONLY per-file cap:
 # the four config files and .claude/agents/*.md reached emit at any size, so a
 # single huge .claude.json could spend the whole 64 MiB budget on its own --
 # and .claude.json is the one file that grows without bound, since it holds
-# the history of every project. Over the cap a file is named and left out and
-# the dump goes on; the 64 MiB budget is for the whole dump, this is one file.
+# the history of every project. Over the cap a file is named on a ##SKIPPED
+# line and left out and the dump goes on; the budget below is for every file
+# together, this is one file. The skills find used to carry -size -512k as
+# well, which dropped the same files SILENTLY -- no ##SKIPPED line, so an
+# asset was simply missing from the inventory with nothing saying why.
+#
+# Both numbers count the bytes of the FILES, which is what wc -c reads. The
+# dump itself is about 4/3 of that, since each file is base64 on one line;
+# the controller-side backstop (HOST_SCRIPT_MAX_OUTPUT) is the one that
+# bounds the dump.
 # No apostrophes anywhere in this script: it is passed through shell::quote
 # whole (remote_script_quotes_nothing_and_frames_files).
 filecap=524288
@@ -862,7 +870,7 @@ done
 if [ -d .claude/skills ]; then
   for entry in .claude/skills/*; do
     [ -e "$entry" ] || continue
-    while IFS= read -r f; do emit "$f"; done < <(find -H "$entry" -type f -size -512k 2>/dev/null)
+    while IFS= read -r f; do emit "$f"; done < <(find -H "$entry" -type f 2>/dev/null)
   done
 fi
 if [ -d .claude/agents ]; then
@@ -883,9 +891,21 @@ exit 0
 /// `..\..\x` is a real traversal the moment this repo (or the temp dir a
 /// remote dump lands in) is on a Windows machine.
 fn is_confined_path(path: &str) -> bool {
-    if path.contains('\\') || path.contains(':') {
-        return false;
-    }
+    !path.contains('\\') && !path.contains(':') && is_traversal_free(path)
+}
+
+/// The traversal half of [`is_confined_path`], on its own.
+///
+/// The two halves answer different questions and deserve different outcomes. A
+/// `..`, a leading `/` or a `.` is an ATTEMPT — nothing legitimate produces one
+/// — and refusing the whole dump is right. A `\` or a `:` in a name is not: on
+/// the POSIX host being imported from they are ordinary bytes, so
+/// `.claude/skills/a:b/SKILL.md` is a real, legal file, and a dump containing
+/// one aborted the whole import with "refusing path". They are still not
+/// written (this repo and a remote dump's temp dir can be on Windows, where
+/// they are a separator and a drive marker), but they cost one file, not the
+/// import.
+fn is_traversal_free(path: &str) -> bool {
     Path::new(path)
         .components()
         .all(|c| matches!(c, std::path::Component::Normal(_)))
@@ -910,7 +930,11 @@ pub fn parse_remote_dump(stdout: &str, root: &Path) -> Result<ImportSources, Ipc
     let mut lines = stdout.lines();
     while let Some(line) = lines.next() {
         if line == TRUNCATED_MARKER {
-            return Err(IpcError::new(E_INVALID, "remote dump exceeds 64 MiB"));
+            return Err(IpcError::new(
+                E_INVALID,
+                "remote import: the host's .claude files add up to more than 64 MiB, \
+                 so the dump was cut short",
+            ));
         }
         if let Some(path) = line.strip_prefix("##SKIPPED ") {
             // The script left a file out for being over the per-file cap. Not
@@ -926,12 +950,39 @@ pub fn parse_remote_dump(stdout: &str, root: &Path) -> Result<ImportSources, Ipc
         let Some(path) = line.strip_prefix("##FILE ") else {
             continue;
         };
-        let ok = (path == ".claude.json" || path.starts_with(".claude/")) && is_confined_path(path);
-        if !ok {
+        // Outside `.claude/`, or a traversal: the dump is not what the script
+        // prints, so none of it is trusted.
+        let inside = path == ".claude.json" || path.starts_with(".claude/");
+        if !inside || !is_traversal_free(path) {
             return Err(bad(path));
         }
+        // The data line always follows its `##FILE` line, so it is taken
+        // before any decision to skip — otherwise base64 would be read back
+        // as the next path line.
+        let encoded = lines.next();
+        // A name this platform cannot hold. One file, not the import — see
+        // `is_confined_path`.
+        if !is_confined_path(path) {
+            tracing::warn!(
+                path = %path,
+                "remote import: skipping a name that is not a filename everywhere (`\\` or `:`)"
+            );
+            continue;
+        }
+        // `unwrap_or("")` decoded to an EMPTY FILE: a dump that ended after a
+        // `##FILE` line, or any line loss, wrote a zero-byte asset that reads
+        // as a real one. A `##FILE` line with nothing after it is a cut dump.
+        let encoded = match encoded {
+            Some(e) if !e.starts_with("##") => e,
+            _ => {
+                return Err(IpcError::new(
+                    E_INVALID,
+                    format!("remote import: {path}: no data followed its ##FILE line"),
+                ))
+            }
+        };
         let data = base64::engine::general_purpose::STANDARD
-            .decode(lines.next().unwrap_or("").trim())
+            .decode(encoded.trim())
             .map_err(|e| IpcError::new(E_INVALID, format!("remote import: {path}: {e}")))?;
         let dest = root.join(path);
         if let Some(parent) = dest.parent() {
@@ -2205,13 +2256,74 @@ mod tests {
             // saw these as traversal, but on a Windows machine `\` is a real
             // separator and `C:` a real drive prefix.
             ".claude\\..\\..\\x",
-            ".claude/x:y",
             "C:\\Windows\\x",
+            // Traversal first, whatever else the name carries.
+            ".claude/../x:y",
         ] {
             let out = format!("##FILE {bad}\nAAAA\n");
             let dir = tempfile::tempdir().unwrap();
             assert!(parse_remote_dump(&out, dir.path()).is_err(), "{bad}");
         }
+    }
+
+    /// A name this platform cannot hold costs ONE FILE, not the import.
+    ///
+    /// `.claude/x:y` was refused with "refusing path", which aborted the whole
+    /// dump: on the POSIX host being imported from, `:` and `\` are ordinary
+    /// bytes, so one legally-named skill took the entire import down. They are
+    /// still never written — this repo, and the temp dir a dump lands in, can be
+    /// on Windows, where they are a separator and a drive marker — but the rest
+    /// of the dump arrives.
+    #[test]
+    fn parse_remote_dump_skips_a_name_it_cannot_write_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = concat!(
+            "##FILE .claude/skills/a:b/SKILL.md\n",
+            "AAAA\n",
+            "##FILE .claude/settings.json\n",
+            "e30=\n",
+        );
+        let src = parse_remote_dump(out, dir.path()).expect("the rest of the dump arrives");
+        assert_eq!(
+            std::fs::read_to_string(src.claude_dir.join("settings.json")).unwrap(),
+            "{}"
+        );
+        assert!(
+            !dir.path().join(".claude/skills").exists(),
+            "and the unwritable name was not written under any spelling"
+        );
+    }
+
+    /// A `##FILE` line with nothing after it is a CUT dump, not an empty file.
+    ///
+    /// `lines.next().unwrap_or("")` decoded to zero bytes, so a dump that ended
+    /// mid-record — or lost a line anywhere — wrote a zero-byte asset that
+    /// reads back as a real one, and a sync would then propagate the empty
+    /// version to every host.
+    #[test]
+    fn parse_remote_dump_refuses_a_file_with_no_data_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = parse_remote_dump("##FILE .claude/settings.json\n", dir.path())
+            .err()
+            .expect("a cut record is refused");
+        assert!(e.message.contains("no data"), "{}", e.message);
+
+        // And one whose data line is the NEXT record's header.
+        let out = "##FILE .claude/a.json\n##FILE .claude/b.json\ne30=\n";
+        let e = parse_remote_dump(out, dir.path())
+            .err()
+            .expect("a cut record is refused");
+        assert!(e.message.contains("no data"), "{}", e.message);
+
+        // A genuinely empty file is still fine: it has a data line, empty.
+        let dir2 = tempfile::tempdir().unwrap();
+        let src = parse_remote_dump("##FILE .claude/empty.json\n\n", dir2.path()).unwrap();
+        assert_eq!(
+            std::fs::read(src.claude_dir.join("empty.json"))
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     /// Security fix round 1, IMPORTANT 3: the script caps a dump at 64 MiB

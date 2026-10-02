@@ -37,13 +37,39 @@ fn scan_failed(host: &str, out: &std::process::Output) -> crate::ipc_error::IpcE
         .code()
         .map(|c| c.to_string())
         .unwrap_or_else(|| "signal".to_string());
+    // Stderr first, and STDOUT's own last word when stderr says nothing: a
+    // script that reports on stdout and exits non-zero — which is exactly what
+    // `REMOTE_SOURCES_SCRIPT` does at its 64 MiB cap, printing `##TRUNCATED`
+    // and exiting 1 — left a message no caller could reach, so the operator
+    // got "scan script exited 1: " and nothing else.
+    let err = String::from_utf8_lossy(&out.stderr);
+    let said: String = match err.trim() {
+        "" => last_message_line(&String::from_utf8_lossy(&out.stdout)),
+        e => e.chars().take(SCRIPT_MESSAGE_MAX).collect(),
+    };
     crate::ipc_error::IpcError::new(
         codes::E_SCAN,
-        format!(
-            "{host}: scan script exited {code}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ),
+        format!("{host}: scan script exited {code}: {said}"),
     )
+}
+
+/// How much of a script's own output an error quotes.
+const SCRIPT_MESSAGE_MAX: usize = 200;
+
+/// The last line of `stdout` that reads as a MESSAGE rather than payload.
+///
+/// A scan script's stdout is mostly data — a snapshot, or an import dump whose
+/// every other line is base64 — and an error message is no place for it. A
+/// message either starts with the scripts' own `##` marker or has a space in
+/// it; base64 has neither. Bounded, because one such line can be a whole file.
+fn last_message_line(stdout: &str) -> String {
+    stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && (l.starts_with("##") || l.contains(char::is_whitespace)))
+        .map(|l| l.chars().take(SCRIPT_MESSAGE_MAX).collect())
+        .unwrap_or_default()
 }
 
 /// Run a bash script on a host and return stdout. `local` runs in-process;
@@ -277,8 +303,16 @@ pub async fn scan_hosts(
             match scan_host_harness(ssh, &h.alias, harness.as_ref()).await {
                 Ok(snap) => {
                     let manifest = Manifest::from_snapshot(&snap, harness.manifest_path());
-                    // `Off` persists no rows (clearing stale ones); `Retiring`
-                    // only fleet's own installs, as orphans.
+                    // `Off` persists no rows (clearing stale ones). `Retiring`
+                    // plans against an EMPTY catalog, so every manifest entry
+                    // reads as an `orphan` — but `compute_states` also reports
+                    // what is installed and unmanaged, and an empty catalog
+                    // makes everything unmanaged, so a retiring harness's rows
+                    // are its orphans PLUS an `unmanaged` row per installed
+                    // asset. That is a true statement about the host (the
+                    // assets are there and fleet does not manage them), which
+                    // is why it stands; it is not "only fleet's own installs",
+                    // as this comment used to say.
                     let gate = harness_gate(
                         harness.id(),
                         configured.as_deref(),
@@ -615,6 +649,52 @@ mod tests {
     use crate::service::catalog::model::Asset;
     use crate::service::catalog::repo::Catalog;
     use serde_json::json;
+
+    /// A script that reports on STDOUT and exits non-zero still says what
+    /// happened.
+    ///
+    /// `REMOTE_SOURCES_SCRIPT` does exactly that at its 64 MiB cap — it prints
+    /// `##TRUNCATED` and exits 1 — so the message it was written to deliver
+    /// could never reach a caller: the error read "scan script exited 1: " and
+    /// stopped there. Only the TAIL of stdout is quoted, because the start of a
+    /// dump is base64.
+    #[test]
+    fn a_scripts_stdout_is_quoted_when_its_stderr_says_nothing() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = |stdout: &str, stderr: &str| std::process::Output {
+            status: std::process::ExitStatus::from_raw(256),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        };
+        let e = scan_failed("oci", &out("##FILE a\nQUJD\n##TRUNCATED\n", ""));
+        assert!(e.message.contains("##TRUNCATED"), "{}", e.message);
+        assert!(
+            !e.message.contains("QUJD"),
+            "not the dump itself: {}",
+            e.message
+        );
+
+        // A dump whose LAST line is payload quotes nothing: an error message is
+        // no place for a file, and a `.claude.json` line is one.
+        let b64 = "e".repeat(5000);
+        let e = scan_failed("oci", &out(&format!("##FILE a\n{b64}\n"), ""));
+        assert!(!e.message.contains("eeee"), "{}", e.message);
+        assert!(e.message.len() < 120, "{}", e.message);
+
+        // And a long message is cut rather than carried whole.
+        let long: String = std::iter::repeat_n("word ", 200).collect();
+        let e = scan_failed("oci", &out(&long, ""));
+        assert!(e.message.len() < 300, "{}", e.message);
+
+        // Stderr still wins when there is any.
+        let e = scan_failed("oci", &out("##TRUNCATED\n", "bash: find: not found"));
+        assert!(e.message.contains("find: not found"), "{}", e.message);
+        assert!(!e.message.contains("##TRUNCATED"), "{}", e.message);
+
+        // Nothing on either: the exit code alone, as before.
+        let e = scan_failed("oci", &out("", ""));
+        assert!(e.message.contains("exited 1"), "{}", e.message);
+    }
 
     /// No secrets: the default for every test that does not exercise
     /// `${NAME}` substitution.
@@ -1048,6 +1128,61 @@ mod tests {
                 .unwrap()
                 .fleet_owned
         );
+    }
+
+    /// What a `Retiring` harness's inventory rows actually are: its manifest's
+    /// entries as `orphan`, PLUS an `unmanaged` row per installed asset.
+    ///
+    /// `Retiring` was tested only through `plan_sync`; `scan_hosts` and
+    /// `rescan_after_apply` — the two call sites F3b added — had none, and two
+    /// code comments described the result as "only fleet's own installs (as
+    /// orphans)". It is not: an empty catalog manages nothing, so everything
+    /// installed is also reported unmanaged. Both are true statements about the
+    /// host, and this is the test that says which is which.
+    #[test]
+    fn a_retiring_harness_reports_its_orphans_and_what_is_installed() {
+        use crate::service::catalog::harness_set::{gated_catalog, HarnessGate};
+        let cat = Catalog::default();
+        // One asset fleet installed (in the manifest) and one it did not.
+        let mut snap = HostSnapshot::default();
+        snap.files
+            .insert("~/.claude/skills/ours/SKILL.md".into(), "aa".into());
+        snap.files
+            .insert("~/.claude/skills/theirs/SKILL.md".into(), "bb".into());
+        let mut manifest = Manifest::default();
+        manifest.assets.insert(
+            Manifest::key(crate::service::catalog::model::Kind::Skill, "ours"),
+            Default::default(),
+        );
+
+        // The gate's own catalog for `Retiring` is the empty one.
+        let planned = gated_catalog(HarnessGate::Retiring, &cat).expect("retiring still scans");
+        assert!(
+            planned.assets.is_empty(),
+            "an empty catalog, by construction"
+        );
+        let rows = compute_states(planned, &Claude, "local", &snap, &manifest, &empty(), 1);
+
+        let state = |n: &str| {
+            rows.iter()
+                .find(|r| r.name == n)
+                .map(|r| r.state.as_str())
+                .unwrap_or("absent")
+        };
+        assert_eq!(
+            state("ours"),
+            "orphan",
+            "in the manifest, not in the catalog"
+        );
+        assert_eq!(
+            state("theirs"),
+            "unmanaged",
+            "installed and unmanaged — the half the comments denied"
+        );
+
+        // `Off` is the other half of the same gate: no catalog, no rows, which
+        // is how a turned-off harness's stale rows get cleared.
+        assert!(gated_catalog(HarnessGate::Off, &cat).is_none());
     }
 
     #[cfg(unix)]

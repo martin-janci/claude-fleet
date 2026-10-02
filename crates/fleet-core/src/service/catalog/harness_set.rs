@@ -329,6 +329,7 @@ mod tests {
             actions: Vec::new(),
             snapshot: HostSnapshot::default(),
             manifest: Manifest::default(),
+            harnesses_at_plan: None,
         };
         let store = std::sync::Mutex::new(crate::store::Store::open_in_memory().unwrap());
         store

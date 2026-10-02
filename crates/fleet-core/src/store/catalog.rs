@@ -139,6 +139,14 @@ impl Store {
                 ],
             )?;
         }
+        // The SCAN, not its findings: a host whose scan succeeded and found
+        // nothing writes no row, and deriving "last scanned" from the rows then
+        // read as "never scanned", so the tick swept that host over SSH on
+        // every pass for ever (migration 093).
+        tx.execute(
+            "UPDATE hosts SET inventory_scanned_at = ?2 WHERE alias = ?1",
+            rusqlite::params![host_alias, now_unix()],
+        )?;
         tx.commit()?;
         self.bus.asset_inventory_cleared(host_alias, harness);
         for r in rows {
@@ -171,15 +179,38 @@ impl Store {
         rows.collect()
     }
 
-    /// The newest `scanned_at` per host, for hosts with any inventory row.
+    /// When each host's inventory was last replaced — the host's own
+    /// `inventory_scanned_at` (migration 093), falling back to the newest
+    /// `scanned_at` among its rows.
+    ///
+    /// The fallback is for a database whose last scan predates the column; it
+    /// is also why the answer is still absent for a host neither scanned nor
+    /// holding a row, which is what "never scanned" means. A host whose scan
+    /// found NOTHING is the case the fallback alone could not express, and the
+    /// scan tick read that as never-scanned and re-swept it every pass.
     pub fn inventory_last_scans(
         &self,
     ) -> Result<std::collections::BTreeMap<String, i64>, rusqlite::Error> {
+        let mut out: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
         let mut stmt = self.conn.prepare_cached(
             "SELECT host_alias, MAX(scanned_at) FROM asset_inventory GROUP BY host_alias",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-        rows.collect()
+        for r in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+            let (alias, at) = r?;
+            out.insert(alias, at);
+        }
+        // Overlaid rather than joined: an inventory row whose host is not (or
+        // is no longer) in `hosts` still counts, which is what the rows-only
+        // query meant, and the stamp only ever moves the answer FORWARD.
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT alias, inventory_scanned_at FROM hosts WHERE inventory_scanned_at IS NOT NULL",
+        )?;
+        for r in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+            let (alias, at) = r?;
+            let e = out.entry(alias).or_insert(at);
+            *e = (*e).max(at);
+        }
+        Ok(out)
     }
 
     /// Every known secret name (migration 031): global rows (`host_alias:
@@ -356,6 +387,54 @@ mod tests {
         assert_eq!(p.remote_url.as_deref(), Some("git@x:y.git"));
         assert_eq!(s.list_catalogs().unwrap(), vec![p.clone()]);
         assert_eq!(s.get_catalog(p.id).unwrap(), Some(p));
+    }
+
+    /// Acceptance criterion 5 of Assets M1: the personal catalog's id stays
+    /// stable across a reconfigure.
+    ///
+    /// The only re-configure test asserted `repo_path` and `remote_url` and
+    /// nothing else, so the claim the plan said was covered was not: an
+    /// `INSERT OR REPLACE` that re-keyed the row would have passed it, and
+    /// every `host_layers.catalog_id` and `asset_inventory.catalog_id`
+    /// (migration 091) pointing at the old id would have read as `NULL` — a
+    /// host's layer assignments and its whole scanned inventory silently
+    /// unpinned by someone changing the repo path.
+    #[test]
+    fn the_personal_catalog_keeps_its_id_across_a_reconfigure() {
+        let s = Store::open_in_memory().expect("open");
+        s.set_catalog_config("/tmp/assets", Some("git@x:y.git"))
+            .unwrap();
+        let first = s.personal_catalog().unwrap().unwrap();
+        s.set_catalog_head_for(first.id, "abc", 7).unwrap();
+
+        s.set_catalog_config("/srv/assets", None).unwrap();
+        let again = s.personal_catalog().unwrap().unwrap();
+        assert_eq!(again.id, first.id, "the id is what other tables point at");
+        assert_eq!(again.repo_path, "/srv/assets");
+        assert_eq!(again.remote_url, None, "a reconfigure clears what it omits");
+        assert_eq!(s.list_catalogs().unwrap().len(), 1, "one personal row only");
+
+        // And a row that points at it still resolves.
+        let row = crate::store::AssetInventoryRow {
+            host_alias: "local".into(),
+            harness: "claude".into(),
+            kind: "skill".into(),
+            name: "a".into(),
+            state: "unmanaged".into(),
+            catalog_hash: None,
+            host_hash: None,
+            scanned_at: 1,
+            managed: false,
+            secret_like: false,
+            fleet_owned: false,
+            catalog_id: Some(first.id),
+        };
+        s.replace_host_inventory("local", "claude", &[row]).unwrap();
+        assert_eq!(
+            s.list_inventory().unwrap()[0].catalog_id,
+            Some(first.id),
+            "a reconfigure did not unpin it"
+        );
     }
 
     #[test]

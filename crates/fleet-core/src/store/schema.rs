@@ -428,6 +428,15 @@ fn hosts_has_harnesses(conn: &Connection) -> rusqlite::Result<bool> {
 }
 
 /// `already_applied` guard of migration 092.
+fn hosts_has_inventory_scanned_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'inventory_scanned_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn hosts_has_provision_warning(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'provision_warning'",
@@ -1015,6 +1024,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 92,
         sql: include_str!("../../migrations/092_host_provision_warning.sql"),
         already_applied: Some(hosts_has_provision_warning),
+    },
+    // When a host's inventory was last replaced, so a scan that found nothing
+    // is not indistinguishable from a host never scanned. Same ADD COLUMN
+    // guard.
+    Migration {
+        version: 93,
+        sql: include_str!("../../migrations/093_host_inventory_scanned_at.sql"),
+        already_applied: Some(hosts_has_inventory_scanned_at),
     },
 ];
 
@@ -4241,6 +4258,48 @@ mod tests {
         // the ADD COLUMN is not idempotent, so a re-run must be guarded
         s.conn
             .execute_batch("DELETE FROM schema_version WHERE version >= 92;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// Migration 093: a host's own last-scan stamp, and the rows-only fallback
+    /// that keeps an upgraded database from being re-swept.
+    #[test]
+    fn migration_093_adds_the_scan_stamp_and_falls_back_to_the_rows() {
+        let s = store_at_version(92);
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias, reachable) VALUES ('scanned', 1), ('fresh', 1);
+                 INSERT INTO asset_inventory
+                     (host_alias, harness, kind, name, state, scanned_at, managed)
+                 VALUES ('scanned', 'claude', 'skill', 'a', 'unmanaged', 500, 0);",
+            )
+            .unwrap();
+        assert!(!hosts_has_inventory_scanned_at(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(hosts_has_inventory_scanned_at(&s.conn).unwrap());
+
+        // Upgrading stamps nothing, so the rows still answer for the host that
+        // has them: an upgrade must not make every host look freshly scanned,
+        // nor re-sweep one whose inventory is current.
+        let last = s.inventory_last_scans().unwrap();
+        assert_eq!(last.get("scanned"), Some(&500));
+        assert_eq!(last.get("fresh"), None, "never scanned, and still unknown");
+
+        // A scan that finds NOTHING is the case the rows could not express.
+        s.replace_host_inventory("fresh", "claude", &[]).unwrap();
+        let last = s.inventory_last_scans().unwrap();
+        assert!(
+            last.get("fresh").is_some(),
+            "an empty host has been scanned, so the tick must stop sweeping it"
+        );
+        assert_eq!(last.get("scanned"), Some(&500), "and nobody else moved");
+
+        // the ADD COLUMN is not idempotent, so a re-run must be guarded
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 93;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);

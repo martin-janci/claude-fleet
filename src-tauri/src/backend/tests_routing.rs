@@ -4726,6 +4726,7 @@ fn catalog_admin_cases() -> Vec<Case> {
                     b,
                     UpdateArgs {
                         asset: author::template(Kind::Skill, "s"),
+                        set_scope: false,
                     },
                     s,
                 ))

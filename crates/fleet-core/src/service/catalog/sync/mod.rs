@@ -63,13 +63,47 @@ pub const UNLAYERED_DETAIL: &str =
 
 /// A remote host with no layers would receive the whole catalog. `local` is
 /// exempt: a single-machine user syncs its own catalog back to itself.
-pub(crate) fn refuse_unlayered(
-    alias: &str,
-    layered: bool,
-    allow: bool,
-    catalog_empty: bool,
-) -> bool {
-    alias != "local" && !layered && !allow && !catalog_empty
+///
+/// An EMPTY catalog used to be exempt as well, on the reading that there is
+/// nothing to install. There is nothing to install and everything to remove: a
+/// plan against an empty catalog makes every entry the host's manifest already
+/// names an orphan, so the one plan an unlayered remote host got without being
+/// asked was `Remove` for every managed file it had. Both directions are the
+/// harm this guard exists to prevent, so the host is refused either way and a
+/// deliberate `allow_unlayered` is what sweeps it.
+pub(crate) fn refuse_unlayered(alias: &str, layered: bool, allow: bool) -> bool {
+    alias != "local" && !layered && !allow
+}
+
+/// Why this host's part of a parked plan must not be applied: its harness
+/// choice is no longer the one the plan was computed against.
+///
+/// A store read failure is NOT a refusal — the run would otherwise be stopped
+/// by a locked store, which says nothing about the choice — and a plan from
+/// before this field existed (`None` against a host that is also `None`) reads
+/// as unchanged, which it is.
+fn choice_moved(store: &Mutex<Store>, host: &plan::HostPlan) -> Option<String> {
+    let now = match lock(store) {
+        Ok(s) => match s.get_host_row(&host.host_alias) {
+            Ok(Some(row)) => row.harnesses,
+            Ok(None) => return None,
+            Err(_) => return None,
+        },
+        Err(_) => return None,
+    };
+    if now == host.harnesses_at_plan {
+        return None;
+    }
+    let say = |v: &Option<Vec<String>>| match v {
+        Some(list) => list.join(", "),
+        None => "auto".to_string(),
+    };
+    Some(format!(
+        "the harness choice for {} changed since this plan was computed ({} → {}): compute a new one",
+        host.host_alias,
+        say(&host.harnesses_at_plan),
+        say(&now),
+    ))
 }
 
 /// Apply a plan `plan_sync` computed and parked in the registry.
@@ -124,6 +158,7 @@ fn skipped_plan(host_alias: &str, harness: &str, detail: &str) -> HostPlan {
         actions: Vec::new(),
         snapshot: Default::default(),
         manifest: Manifest::default(),
+        harnesses_at_plan: None,
     }
 }
 
@@ -134,9 +169,12 @@ fn skipped_plan(host_alias: &str, harness: &str, detail: &str) -> HostPlan {
 /// resolved by the caller BEFORE this await — `secrets::resolve` takes the
 /// store lock internally. `configured` is the host's `harnesses` column
 /// (`None` = auto): the rows follow `harness_set::harness_gate` — none for
-/// `Off` (persisting the empty list clears rows an earlier scan left), only
-/// fleet's own installs (as orphans) for `Retiring`. Persisting is
-/// best-effort: a scan is still usable if the rows could not be written.
+/// `Off` (persisting the empty list clears rows an earlier scan left), and for
+/// `Retiring` the manifest's entries as orphans plus an `unmanaged` row per
+/// installed asset, since an empty catalog manages nothing (this used to say
+/// "only fleet's own installs", which is not what `compute_states` does).
+/// Persisting is best-effort: a scan is still usable if the rows could not be
+/// written.
 async fn scan_and_persist(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
@@ -277,20 +315,15 @@ pub async fn plan_sync(
         // before the scan: every listed harness gets the same skipped
         // plan and the host is never touched over SSH.
         //
-        // The emptiness check is against the WHOLE loaded (union) catalog,
-        // never `eff.catalog`: an org-bound host's effective catalog can be
-        // empty purely because the scope boundary dropped every (private)
-        // asset an unlayered personal catalog would otherwise hand it — that
-        // is exactly the case this guard exists to catch, not a reason to
-        // let it through. Treating that as "nothing to refuse" would plan
-        // this host against an empty catalog, and every entry its manifest
-        // already names would read as an orphan and get removed.
-        if refuse_unlayered(
-            &h.alias,
-            eff.layered,
-            args.allow_unlayered,
-            catalog.assets.is_empty(),
-        ) {
+        // Emptiness does not enter into it any more — see `refuse_unlayered`:
+        // an empty catalog is the case whose plan is `Remove` for everything
+        // the host's manifest names, so exempting it turned a guard against
+        // installing the whole catalog into a path that wiped the host
+        // instead. (The old check also had to be against the WHOLE loaded
+        // union catalog rather than `eff.catalog`, since an org-bound host's
+        // effective catalog can be empty purely because the scope boundary
+        // dropped every private asset — precisely the case to catch.)
+        if refuse_unlayered(&h.alias, eff.layered, args.allow_unlayered) {
             for harness in &listed {
                 host_plans.push(skipped_plan(&h.alias, harness.id(), UNLAYERED_DETAIL));
             }
@@ -397,6 +430,9 @@ pub async fn plan_sync(
                         &host_filter,
                         &protected_keys,
                     );
+                    // The choice this plan was computed against, so apply can
+                    // tell that it moved — see `HostPlan::harnesses_at_plan`.
+                    hp.harnesses_at_plan = configured.map(|c| c.to_vec());
                     if gate == HarnessGate::Retiring {
                         hp.detail = Some(harness_set::retiring_detail(harness.id()));
                     } else {
@@ -510,19 +546,26 @@ async fn rescan_after_apply(
     };
     // F3a: the host's harness choice decides which rows the re-scan keeps.
     // Read before the await, as everywhere else.
-    // A failed read falls back to auto, and says so: the re-scan then keeps
-    // whatever auto would, which can differ from an explicit choice.
+    //
+    // A failure to read it SKIPS the re-scan. It used to fall back to auto and
+    // scan anyway, which writes an explicitly-Off host's inventory as if that
+    // harness were On — a worse answer than the one the apply just left, and
+    // one that then drives the asset matrix. Nothing is lost by waiting: the
+    // scan tick owes this host a pass, and `catalog.scan_max_age_secs` brings
+    // it round regardless.
     let configured = match lock(store) {
         Ok(s) => match s.get_host_row(host_alias) {
-            Ok(row) => row.and_then(|r| r.harnesses),
+            Ok(Some(row)) => row.harnesses,
+            Ok(None) => return,
             Err(e) => {
                 tracing::warn!(
                     host = host_alias,
                     harness = harness.id(),
                     error = %e,
-                    "could not read the host's harness choice for the post-sync re-scan; using auto"
+                    "could not read the host's harness choice; skipping the post-sync re-scan \
+                     rather than persisting it under a guess (the scan tick will refresh it)"
                 );
-                None
+                return;
             }
         },
         Err(e) => {
@@ -530,9 +573,10 @@ async fn rescan_after_apply(
                 host = host_alias,
                 harness = harness.id(),
                 error = %e.message,
-                "could not lock the store for the post-sync re-scan's harness choice; using auto"
+                "could not lock the store for the host's harness choice; skipping the post-sync \
+                 re-scan rather than persisting it under a guess (the scan tick will refresh it)"
             );
-            None
+            return;
         }
     };
     if let Err(e) = scan_and_persist(
@@ -667,6 +711,24 @@ pub async fn apply_sync_with(
             });
             continue;
         };
+        // The host's harness choice, re-read. `set_host_harnesses` drops every
+        // plan already PARKED, which cannot reach the plan still being
+        // computed: a `plan_sync` mid-scan when Codex is turned off parks its
+        // old-choice plan afterwards, and nothing re-checked the gate — so that
+        // one plan could still write Codex assets to a host that had just said
+        // no. Refused per host, not for the whole run: the other hosts' actions
+        // are unaffected by this host's choice.
+        if let Some(detail) = choice_moved(store, host) {
+            results.push(HostSyncResult {
+                host_alias: host.host_alias.clone(),
+                harness: host.harness.clone(),
+                status: "skipped".into(),
+                detail: Some(detail),
+                restart_required: false,
+                actions: Vec::new(),
+            });
+            continue;
+        }
         let ctx = ApplyCtx {
             ssh,
             token: token.clone(),
@@ -1463,21 +1525,19 @@ mod tests {
     }
 
     /// The decision is a pure function: it needs no SSH, no store, no
-    /// catalog. Only a remote (non-`local`), unlayered host with a
-    /// non-empty resolved catalog and `allow_unlayered` off gets refused.
+    /// catalog. Every remote (non-`local`) unlayered host is refused unless
+    /// `allow_unlayered` says otherwise.
+    ///
+    /// The empty-catalog exemption that used to be the fourth argument is
+    /// gone, and its assertion with it: an empty catalog is not "nothing to
+    /// do", it is `Remove` for every entry the host's manifest names — the
+    /// same guard, pointing the other way.
     #[test]
-    fn refuse_unlayered_only_for_remote_unlayered_non_empty_unless_allowed() {
-        assert!(refuse_unlayered("oci", false, false, false));
-        assert!(!refuse_unlayered("oci", false, true, false), "allowed");
-        assert!(!refuse_unlayered("oci", true, false, false), "layered");
-        assert!(
-            !refuse_unlayered("oci", false, false, true),
-            "empty catalog"
-        );
-        assert!(
-            !refuse_unlayered("local", false, false, false),
-            "local is exempt"
-        );
+    fn refuse_unlayered_only_for_a_remote_unlayered_host_unless_allowed() {
+        assert!(refuse_unlayered("oci", false, false));
+        assert!(!refuse_unlayered("oci", false, true), "allowed");
+        assert!(!refuse_unlayered("oci", true, false), "layered");
+        assert!(!refuse_unlayered("local", false, false), "local is exempt");
     }
 
     /// `plan_sync` skips an unlayered remote host entirely — every scanning
@@ -1521,6 +1581,58 @@ mod tests {
                 .iter()
                 .all(|h| h.status == "skipped" && h.detail.as_deref() == Some(UNLAYERED_DETAIL)),
             "{:?}",
+            plan.hosts
+        );
+    }
+
+    /// `allow_unlayered: true` reaches the guard and turns it off.
+    ///
+    /// The flag was exercised only as the pure predicate's third argument — no
+    /// test took it through `plan_sync`, so a plumbing mistake between
+    /// `PlanArgs` and the guard (the flag not read, or read from the wrong
+    /// field) would have left the host skipped with nobody the wiser, and the
+    /// documented escape hatch simply would not work.
+    ///
+    /// The host is not reachable here (`SshClient::new()` has no transport), so
+    /// what proves the guard was passed is the REASON it comes back with: the
+    /// scan's own failure rather than `UNLAYERED_DETAIL`.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn plan_sync_lets_an_unlayered_remote_host_through_when_allowed() {
+        let _lock = super::super::lock_registry_for_test();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let files = one_skill("b\n");
+        load_catalog(
+            repo_dir.path(),
+            &files
+                .iter()
+                .map(|(a, b)| (*a, b.as_str()))
+                .collect::<Vec<_>>(),
+        );
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("oci", Some("oci")).unwrap();
+            s.update_host_probe("oci", true, None, None, 1).unwrap();
+        }
+        let ssh = Arc::new(SshClient::new());
+        let plan = plan_sync(
+            PlanArgs {
+                host_alias: Some("oci".into()),
+                allow_unlayered: true,
+                ..PlanArgs::default()
+            },
+            &store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+        assert!(!plan.hosts.is_empty());
+        assert!(
+            plan.hosts
+                .iter()
+                .all(|h| h.detail.as_deref() != Some(UNLAYERED_DETAIL)),
+            "the guard was turned off, so no host carries its reason: {:?}",
             plan.hosts
         );
     }
@@ -1920,6 +2032,102 @@ mod tests {
         );
         let again = plan_sync(PlanArgs::default(), &store, &ssh).await.unwrap();
         assert_eq!(again.counts.get("noop"), Some(&2), "{:?}", again.counts);
+    }
+
+    /// A parked plan whose host has since changed its harness choice is not
+    /// applied to that host.
+    ///
+    /// `set_host_harnesses` drops every plan already PARKED, which cannot reach
+    /// the plan still being computed: a `plan_sync` mid-scan when Codex is
+    /// turned off parks its old-choice plan afterwards, and nothing re-checked
+    /// the gate — so the one plan the drop could not reach was the one that
+    /// could still write Codex assets to a host that had just said no. Per
+    /// host, because another host's choice is none of this host's business.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn apply_sync_refuses_a_host_whose_harness_choice_moved() {
+        let _lock = super::super::lock_registry_for_test();
+        let bus = Arc::new(RecordingEventBus::new());
+        let store = store_with_local(bus.clone());
+        let ssh = Arc::new(SshClient::new());
+
+        // Planned while the host was claude+codex (what `store_with_local` sets).
+        let mut claude = plan_with_one_create("local", "claude");
+        let mut codex = plan_with_one_create("local", "codex");
+        let at_plan = Some(vec!["claude".to_string(), "codex".to_string()]);
+        claude.harnesses_at_plan = at_plan.clone();
+        codex.harnesses_at_plan = at_plan;
+        let id = plan::registry_put(SyncPlan::new(vec![claude, codex]));
+
+        // Codex turned off AFTER the plan was parked, by a path that did not
+        // drop it (this is the race; the drop is tested in `harness_set`).
+        {
+            let s = store.lock().unwrap();
+            s.set_host_harnesses("local", Some(&["claude".to_string()][..]))
+                .unwrap();
+        }
+
+        let summary = apply_sync_with(
+            ApplyArgs {
+                plan_id: id,
+                force_partial: false,
+                call_id: None,
+            },
+            &store,
+            &ssh,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.hosts.len(), 2);
+        for h in &summary.hosts {
+            assert_eq!(h.status, "skipped", "{h:?}");
+            let detail = h.detail.as_deref().unwrap_or("");
+            assert!(
+                detail.contains("harness choice for local changed"),
+                "{detail}"
+            );
+            assert!(detail.contains("claude, codex → claude"), "{detail}");
+            assert!(h.actions.is_empty(), "nothing was written: {h:?}");
+        }
+    }
+
+    /// A plan whose stamp MATCHES is applied as before — the guard above must
+    /// not refuse the ordinary case, and a plan from before the stamp existed
+    /// (both `None`) reads as unchanged.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn apply_sync_applies_a_host_whose_choice_did_not_move() {
+        let _lock = super::super::lock_registry_for_test();
+        let bus = Arc::new(RecordingEventBus::new());
+        let store = store_with_local(bus.clone());
+        let ssh = Arc::new(SshClient::new());
+        {
+            let s = store.lock().unwrap();
+            s.set_host_harnesses("local", None).unwrap();
+        }
+        let mut hp = plan_with_one_create("local", "claude");
+        hp.harnesses_at_plan = None;
+        let id = plan::registry_put(SyncPlan::new(vec![hp]));
+
+        let summary = apply_sync_with(
+            ApplyArgs {
+                plan_id: id,
+                force_partial: false,
+                call_id: None,
+            },
+            &store,
+            &ssh,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let detail = summary.hosts[0].detail.as_deref().unwrap_or("");
+        assert!(
+            !detail.contains("harness choice"),
+            "auto against auto is unchanged: {detail}"
+        );
     }
 
     /// A sync cancelled before it starts touches nothing: every pair is

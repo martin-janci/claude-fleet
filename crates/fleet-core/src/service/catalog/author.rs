@@ -567,6 +567,19 @@ pub struct CreateArgs {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateArgs {
     pub asset: Asset,
+    /// Change the asset's `scope` to the one `asset.header` carries. Without
+    /// it, an update KEEPS whatever the catalog holds.
+    ///
+    /// `scope` decides who may receive an asset, and the one way it could
+    /// change was by accident: `Header::scope` is `#[serde(default)]`, so any
+    /// relay that re-serialises an asset through a type without the field —
+    /// a hub-client desktop older than Assets M1 is exactly that — dropped it,
+    /// and `update` then wrote the asset back as `private`. A `shared` asset
+    /// silently stopped reaching every org-bound host, with nothing saying so.
+    /// Nothing in the UI edits scope today, so the safe default is to keep it.
+    /// `apply_override` refuses a scope change for the same reason.
+    #[serde(default)]
+    pub set_scope: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -721,7 +734,7 @@ pub fn create(args: CreateArgs, store: &Mutex<Store>) -> Result<WriteResult, Ipc
 /// errors (`E_LINT`, `details` = the report). The write overwrites and
 /// prunes `resources/…` files the asset no longer lists.
 pub fn update(args: UpdateArgs, store: &Mutex<Store>) -> Result<WriteResult, IpcError> {
-    let asset = args.asset;
+    let mut asset = args.asset;
     let kind = asset.kind();
     check_name(&asset.header.name)?;
     for r in &asset.resources {
@@ -737,6 +750,23 @@ pub fn update(args: UpdateArgs, store: &Mutex<Store>) -> Result<WriteResult, Ipc
                 asset.header.name
             ),
         ));
+    }
+    // Keep the stored scope unless the caller said to change it — see
+    // `UpdateArgs::set_scope`. The registry is taken after `repo_root` has
+    // released the store guard, never while holding it.
+    if !args.set_scope {
+        if let Ok(Some(cat)) = super::registry::personal() {
+            if let Some(stored) = cat.find(kind, &asset.header.name) {
+                if stored.header.scope != asset.header.scope {
+                    tracing::info!(
+                        kind = kind.as_str(),
+                        name = %asset.header.name,
+                        "catalog update kept the stored scope; pass set_scope to change it"
+                    );
+                }
+                asset.header.scope = stored.header.scope;
+            }
+        }
     }
     let report = lint_in_repo(&asset, &root);
     if !report.errors.is_empty() {
@@ -1602,7 +1632,14 @@ mod tests {
         let mut edited = loaded;
         edited.header.description = "A demo skill used by the authoring tests.".into();
         edited.body = "# demo\n\nEdited body.\n".into();
-        let updated = update(UpdateArgs { asset: edited }, &store).unwrap();
+        let updated = update(
+            UpdateArgs {
+                asset: edited,
+                set_scope: false,
+            },
+            &store,
+        )
+        .unwrap();
         assert_ne!(updated.commit, created.commit);
         assert_eq!(
             std::fs::read_to_string(root.join("skills/demo/body.md")).unwrap(),
@@ -1664,7 +1701,14 @@ mod tests {
         let mut bad = catalog_asset(Kind::Skill, "demo").unwrap();
         bad.header.description = String::new();
         bad.body = "# demo\n\nEdited.\n".into();
-        let err = update(UpdateArgs { asset: bad }, &store).unwrap_err();
+        let err = update(
+            UpdateArgs {
+                asset: bad,
+                set_scope: false,
+            },
+            &store,
+        )
+        .unwrap_err();
         assert_eq!(err.code, E_LINT);
         let details = err.details.unwrap();
         assert_eq!(details["errors"][0]["field"], "description");
@@ -1681,9 +1725,15 @@ mod tests {
         let mut ghost = clean_skill();
         ghost.header.name = "ghost".into();
         assert_eq!(
-            update(UpdateArgs { asset: ghost }, &store)
-                .unwrap_err()
-                .code,
+            update(
+                UpdateArgs {
+                    asset: ghost,
+                    set_scope: false
+                },
+                &store
+            )
+            .unwrap_err()
+            .code,
             E_ASSET_NOT_FOUND
         );
         assert!(!root.join("skills/ghost").exists());
@@ -1713,6 +1763,7 @@ mod tests {
         let saved = update(
             UpdateArgs {
                 asset: unchanged.clone(),
+                set_scope: false,
             },
             &store,
         )
@@ -1727,6 +1778,7 @@ mod tests {
         let saved = update(
             UpdateArgs {
                 asset: unchanged.clone(),
+                set_scope: false,
             },
             &store,
         )
@@ -1742,10 +1794,101 @@ mod tests {
         // A real edit still commits, and still leaves the stray file alone.
         let mut edited = unchanged;
         edited.header.description = "A demo skill used by the authoring tests.".into();
-        let saved = update(UpdateArgs { asset: edited }, &store).unwrap();
+        let saved = update(
+            UpdateArgs {
+                asset: edited,
+                set_scope: false,
+            },
+            &store,
+        )
+        .unwrap();
         assert_ne!(saved.commit, head);
         assert_eq!(subjects(&root)[0], "catalog: update skill/demo");
         assert_eq!(repo_status(&store).unwrap().dirty, 1);
+    }
+
+    /// An update keeps the asset's stored `scope` unless it is asked to change
+    /// it.
+    ///
+    /// `Header::scope` is `#[serde(default)]`, so any relay that re-serialises
+    /// an asset through a type without the field — a hub-client desktop older
+    /// than Assets M1 is exactly that — dropped it, and `update` wrote the asset
+    /// back as `private`: a `shared` asset silently stopped reaching every
+    /// org-bound host, with nothing saying so. Nothing in the UI edits scope, so
+    /// the default is to keep it.
+    #[cfg(unix)]
+    #[test]
+    fn an_update_keeps_the_stored_scope_unless_asked_to_change_it() {
+        use crate::service::catalog::model::Scope;
+        let _g = lock_registry_for_test();
+        let root = init_repo("scope");
+        let store = configured_store(&root);
+        create(
+            CreateArgs {
+                kind: Kind::Skill,
+                name: "demo".into(),
+                duplicate_from: None,
+            },
+            &store,
+        )
+        .unwrap();
+
+        // Make it shared, the way a person does today: edit and save with the
+        // change asked for.
+        let mut shared = catalog_asset(Kind::Skill, "demo").unwrap();
+        shared.header.scope = Scope::Shared;
+        update(
+            UpdateArgs {
+                asset: shared,
+                set_scope: true,
+            },
+            &store,
+        )
+        .unwrap();
+        assert_eq!(
+            catalog_asset(Kind::Skill, "demo").unwrap().header.scope,
+            Scope::Shared
+        );
+
+        // Now an ordinary edit that arrives with the field DROPPED (which
+        // deserialises as the default, `private`).
+        let mut relayed = catalog_asset(Kind::Skill, "demo").unwrap();
+        relayed.header.scope = Scope::Private;
+        relayed.header.description = "edited elsewhere".into();
+        update(
+            UpdateArgs {
+                asset: relayed,
+                set_scope: false,
+            },
+            &store,
+        )
+        .unwrap();
+        let after = catalog_asset(Kind::Skill, "demo").unwrap();
+        assert_eq!(
+            after.header.description, "edited elsewhere",
+            "the edit landed"
+        );
+        assert_eq!(
+            after.header.scope,
+            Scope::Shared,
+            "and the scope did not change under it"
+        );
+
+        // And asking for it does change it.
+        let mut back = catalog_asset(Kind::Skill, "demo").unwrap();
+        back.header.scope = Scope::Private;
+        update(
+            UpdateArgs {
+                asset: back,
+                set_scope: true,
+            },
+            &store,
+        )
+        .unwrap();
+        assert_eq!(
+            catalog_asset(Kind::Skill, "demo").unwrap().header.scope,
+            Scope::Private
+        );
     }
 
     #[cfg(unix)]
@@ -1975,7 +2118,14 @@ mod tests {
             rel_path: "resources/data.txt".into(),
             bytes: b"payload".to_vec(),
         });
-        update(UpdateArgs { asset: original }, &store).unwrap();
+        update(
+            UpdateArgs {
+                asset: original,
+                set_scope: false,
+            },
+            &store,
+        )
+        .unwrap();
 
         create(
             CreateArgs {

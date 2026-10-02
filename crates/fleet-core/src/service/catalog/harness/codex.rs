@@ -788,6 +788,74 @@ mod tests {
         );
     }
 
+    /// `json_to_toml`'s non-trivial refusals, each one an `extra` key the agent
+    /// ships WITHOUT rather than a broken file.
+    ///
+    /// Only a top-level `null` was covered; a null nested inside an object or
+    /// array, and a number TOML has no form for, were not — and the second is
+    /// the one that reaches `toml::Value::try_from`'s own failure rather than
+    /// the `is_null` shortcut.
+    #[test]
+    fn an_extra_value_with_no_toml_form_is_left_out_and_named() {
+        // A null inside a table: the table survives without the key.
+        let mut a = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: d\ntargets:\n  codex:\n    extra:\n      nested:\n        keep: 1\n        drop: null\n",
+        )
+        .unwrap();
+        a.body = "b\n".into();
+        let plan = Codex.render(&a).unwrap();
+        let v = toml_of(&plan);
+        assert_eq!(v["nested"]["keep"].as_integer(), Some(1));
+        assert!(v["nested"].get("drop").is_none(), "{v}");
+        assert!(
+            !plan.warnings.iter().any(|w| w.contains("nested")),
+            "the key itself is written, so nothing is lost to report: {:?}",
+            plan.warnings
+        );
+
+        // A null inside an array: the element goes, the array stays.
+        let mut a = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: d\ntargets:\n  codex:\n    extra:\n      list: [1, null, 2]\n",
+        )
+        .unwrap();
+        a.body = "b\n".into();
+        let v = toml_of(&Codex.render(&a).unwrap());
+        assert_eq!(v["list"].as_array().map(|a| a.len()), Some(2), "{v}");
+
+        // A whole table that is nothing BUT nulls still converts — to an empty
+        // table — which is the honest answer: the key was given.
+        let mut a = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: d\ntargets:\n  codex:\n    extra:\n      empty:\n        gone: null\n",
+        )
+        .unwrap();
+        a.body = "b\n".into();
+        let v = toml_of(&Codex.render(&a).unwrap());
+        assert!(
+            v["empty"].as_table().map(|t| t.is_empty()).unwrap_or(false),
+            "{v}"
+        );
+    }
+
+    /// `json_to_toml` answers `None` for a value with no TOML form at all, and
+    /// the caller names the key rather than writing a broken file.
+    #[test]
+    fn json_to_toml_refuses_what_toml_cannot_hold() {
+        use serde_json::json;
+        assert!(json_to_toml(&json!(null)).is_none(), "a bare null");
+        // TOML integers are i64; JSON's larger numbers have no form.
+        let big: serde_json::Value = serde_json::from_str("18446744073709551615").unwrap();
+        assert!(json_to_toml(&big).is_none(), "a u64 past i64");
+        // And the ordinary values all convert.
+        assert!(json_to_toml(&json!("s")).is_some());
+        assert!(json_to_toml(&json!(1)).is_some());
+        assert!(json_to_toml(&json!(true)).is_some());
+        assert!(json_to_toml(&json!({"a": 1})).is_some());
+        assert!(json_to_toml(&json!([1, 2])).is_some());
+    }
+
     /// The TOML comes from the toml crate, so nothing in a description or
     /// prompt can close a string and inject a key.
     #[test]
@@ -977,13 +1045,18 @@ mod tests {
     /// CLI of the machine running the test cannot answer for it.
     #[cfg(unix)]
     fn present_with(setup: impl FnOnce(&std::path::Path)) -> bool {
+        present_with_path(setup, "/usr/bin:/bin")
+    }
+
+    #[cfg(unix)]
+    fn present_with_path(setup: impl FnOnce(&std::path::Path), path: &str) -> bool {
         let tmp = tempfile::TempDir::new().unwrap();
         setup(tmp.path());
         let out = std::process::Command::new("sh")
             .arg("-c")
             .arg(Codex.scan_script().unwrap())
             .env("HOME", tmp.path())
-            .env("PATH", "/usr/bin:/bin")
+            .env("PATH", path)
             .output()
             .expect("run scan script");
         assert!(
@@ -1003,11 +1076,32 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn only_codex_own_state_reads_as_present() {
+        // The CLI arm, on every machine: a `codex` on PATH is present whatever
+        // `~/.codex` holds. This used to be the arm that made the whole test
+        // RETURN EARLY, asserting nothing, on exactly the machines that have
+        // Codex — a silent conditional skip of the detection test where it
+        // matters most.
+        let bin = tempfile::TempDir::new().unwrap();
+        let stub = bin.path().join("codex");
+        std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let with_cli = format!("{}:/usr/bin:/bin", bin.path().display());
+        assert!(
+            present_with_path(|_| {}, &with_cli),
+            "a codex on PATH is the CLI arm of the probe"
+        );
+
+        // The state arms need a machine with no `codex` of its own, since
+        // nothing can un-find one that is already on PATH. Where there is one,
+        // the assertion above is what this test proves.
         if ["/usr/bin/codex", "/bin/codex"]
             .iter()
             .any(|p| std::path::Path::new(p).exists())
         {
-            return; // the CLI itself answers on this machine
+            return;
         }
         assert!(present_with(|h| {
             std::fs::create_dir_all(h.join(".codex/sessions")).unwrap();

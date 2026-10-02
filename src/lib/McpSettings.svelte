@@ -220,10 +220,14 @@
 
     <div class="hook-section">
       <p class="hook-desc">
-        Push the MCP server config, a per-host bearer token and the
-        Stop/WorktreeCreate hooks to every host so agents can connect to
-        the control API. Existing tokens are reused; "Rotate all" mints
-        fresh ones.
+        Push the MCP server config, a per-host bearer token, the
+        Stop/WorktreeCreate hooks, fleet's own skills and — unless
+        <code>provision.install_ag</code> is off — the <code>ag</code>
+        launcher under <code>~/.local/share/ag</code>, with a
+        <code>cl</code> shim in <code>~/.local/bin</code> on a host that
+        has none. Existing tokens are reused; "Rotate all" mints fresh
+        ones. Nothing here removes what an earlier run installed —
+        docs/hub.md names the paths.
       </p>
       <div class="hook-actions">
         <button

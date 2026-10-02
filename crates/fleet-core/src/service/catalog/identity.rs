@@ -60,15 +60,26 @@ pub fn group_identities(rows: &[AssetInventoryRow]) -> Vec<AssetIdentity> {
                 }
             }
             let variants = counts.len();
-            let (class, reason) = if name.starts_with('.') {
-                (IdentityClass::HarnessInternal, None)
-            } else if copies.iter().all(|c| c.fleet_owned) {
+            // `fleet_owned` first, deliberately: fleet's own MCP server is
+            // both fleet-owned and secret-bearing on every scanned host, and it
+            // must stay an internal rather than becoming a person's problem
+            // fleet-wide.
+            //
+            // A CREDENTIAL then outranks the dot-name shortcut, which used to be
+            // tested first — so a `.`-named asset carrying a token was filed
+            // `harness_internal` with no reason, the one class a person never
+            // looks at, while the same content under any other name was
+            // `needs_person`. Nothing about a leading dot makes a secret less
+            // of one.
+            let (class, reason) = if copies.iter().all(|c| c.fleet_owned) {
                 (IdentityClass::FleetInternal, None)
             } else if copies.iter().any(|c| c.secret_like) {
                 (
                     IdentityClass::NeedsPerson,
                     Some("carries a secret".to_string()),
                 )
+            } else if name.starts_with('.') {
+                (IdentityClass::HarnessInternal, None)
             } else if variants > 1 {
                 let common = counts.iter().max_by_key(|(_, n)| **n).map(|(h, _)| *h);
                 let mut odd: Vec<&str> = copies
@@ -171,7 +182,8 @@ mod tests {
         assert_eq!(class(".system"), IdentityClass::HarnessInternal);
     }
 
-    /// `fleet_owned` outranks `secret_like`, and the dot-prefix outranks both.
+    /// `fleet_owned` outranks `secret_like`, and `secret_like` outranks the
+    /// dot-prefix.
     #[test]
     fn classification_precedence_holds_when_two_flags_meet() {
         // fleet's own MCP server, exactly as every scanned host reports it:
@@ -188,16 +200,24 @@ mod tests {
         );
         assert_eq!(id.reason, None);
 
-        // A dot-named secret-bearing server is HarnessInternal today: the dot
-        // check comes first. That is a deliberate record of the current order,
-        // not an endorsement — hiding a credential-carrying asset behind the
-        // internals toggle with no reason is filed separately (low). Changing
-        // it should break this assertion and be a conscious decision.
+        // A dot-named secret-bearing server is NeedsPerson. This assertion was
+        // the other way round, recording the dot check coming first and saying
+        // that changing it should be a conscious decision — this is that
+        // decision: hiding a credential-carrying asset behind the internals
+        // toggle, with no reason given, is the one outcome a person cannot act
+        // on. Nothing about a leading dot makes a secret less of one.
         let mut dotted = r("oci", "mcp_server", ".vendor", Some("h"));
         dotted.secret_like = true;
         let id = &group_identities(&[dotted])[0];
-        assert_eq!(id.class, IdentityClass::HarnessInternal);
-        assert_eq!(id.reason, None);
+        assert_eq!(id.class, IdentityClass::NeedsPerson);
+        assert_eq!(id.reason.as_deref(), Some("carries a secret"));
+
+        // A dot-named asset with no secret is still an internal.
+        let plain = r("oci", "mcp_server", ".vendor", Some("h"));
+        assert_eq!(
+            group_identities(&[plain])[0].class,
+            IdentityClass::HarnessInternal
+        );
 
         // And secret_like still outranks the copies-differ rule.
         let mut a = r("local", "mcp_server", "jira", Some("x"));
@@ -219,10 +239,17 @@ mod tests {
         assert!(group_identities(&[o]).is_empty());
     }
 
-    /// The live fleet's shape (2026-09-29): 520 rows are 164 identities in 8
-    /// host-set signatures. Synthetic names, real distribution.
+    /// The live fleet's shape (2026-09-29): 164 identities in 8 host-set
+    /// signatures, over the 514 rows this distribution accounts for. Synthetic
+    /// names, real distribution.
+    ///
+    /// Named and documented as 520 rows while building 514, with nothing
+    /// asserting the count — so the one number the fixture exists to represent
+    /// was both wrong and unheld. 520 was the live fleet's total; the eight
+    /// signatures below are 514 of it. The assertion is what keeps the name
+    /// honest when a count below is edited.
     #[test]
-    fn live_shape_collapses_520_rows_to_164_identities() {
+    fn live_shape_collapses_514_rows_to_164_identities() {
         let sets: &[(&[&str], usize)] = &[
             (&["local", "mefistos", "oci", "trn"], 82),
             (&["local"], 30),
@@ -243,6 +270,7 @@ mod tests {
                 }
             }
         }
+        assert_eq!(rows.len(), 514, "the distribution below, counted");
         let ids = group_identities(&rows);
         assert_eq!(ids.len(), 164);
         let mut sigs: Vec<&str> = ids.iter().map(|i| i.signature.as_str()).collect();

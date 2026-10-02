@@ -2291,6 +2291,7 @@ mod tests {
             actions: vec![action],
             snapshot,
             manifest: Manifest::default(),
+            harnesses_at_plan: None,
         };
         let ssh = Arc::new(SshClient::new());
         let ctx = ApplyCtx {
@@ -2455,6 +2456,7 @@ mod tests {
             actions: vec![action],
             snapshot: HostSnapshot::default(),
             manifest: Manifest::default(),
+            harnesses_at_plan: None,
         };
         let ssh = Arc::new(SshClient::new());
         let ctx = ApplyCtx {
@@ -2487,6 +2489,7 @@ mod tests {
             actions: Vec::new(),
             snapshot: HostSnapshot::default(),
             manifest: Manifest::default(),
+            harnesses_at_plan: None,
         };
         let ssh = Arc::new(SshClient::new());
         let ctx = ApplyCtx {
@@ -2534,6 +2537,7 @@ mod tests {
             }],
             snapshot: HostSnapshot::default(),
             manifest: Manifest::default(),
+            harnesses_at_plan: None,
         };
         let ssh = Arc::new(SshClient::new());
         let token = CancellationToken::new();
