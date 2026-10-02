@@ -1,5 +1,7 @@
 # Assets M3: admissions, per-catalog grants and per-catalog loading — Implementation Plan
 
+> **Renumbered:** `main` took migration 092 (`092_host_provision_warning.sql`) before this landed, so this plan's migration 092 shipped as **093** (`093_catalog_access.sql`). Read every "092" below as 093.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let a host with no org admit an org catalog, let the operator grant a paired client one catalog at a time, and load every configured catalog (keeping a broken one as a problem entry), so that org catalogs can be added, listed, removed, admitted and synced from the hub CLI and `catalog_admin` — without any sync ever removing an asset whose catalog it cannot speak for.

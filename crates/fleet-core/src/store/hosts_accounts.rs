@@ -1105,7 +1105,7 @@ mod tests {
         assert!(!row.provisioned && !row.provision_stale && row.provisioned_at.is_none());
     }
 
-    /// Migration 092: a merged host keeps its admissions, like its layer
+    /// Migration 093: a merged host keeps its admissions, like its layer
     /// assignments (M2 fix round 1).
     #[test]
     fn merge_host_alias_carries_admissions() {

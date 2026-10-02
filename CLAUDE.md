@@ -246,7 +246,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   layer that tries to change an asset's `scope`, since scope is what decides
   who may receive it.
 - **Assets M3 — admissions, grants per catalog, loading every catalog** (plan
-  `docs/superpowers/plans/2026-10-01-assets-m3-admissions.md`): migration 092
+  `docs/superpowers/plans/2026-10-01-assets-m3-admissions.md`): migration 093
   adds `host_catalogs` (a host with no org admits an org catalog; `admit`
   refuses an org-bound host and `personal`) and `client_catalog_grants` (a
   grant names one catalog; the personal grant is also mirrored into

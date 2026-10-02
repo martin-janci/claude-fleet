@@ -412,7 +412,7 @@ impl Store {
     }
 
     /// Grant (or take back) one catalog to the live client `name` (migration
-    /// 092). On `personal` the mirror `assets_admin_at` follows (R2).
+    /// 093). On `personal` the mirror `assets_admin_at` follows (R2).
     pub fn set_client_catalog_grant(
         &self,
         name: &str,
@@ -927,7 +927,7 @@ mod tests {
         assert!(!s.client_is_assets_admin(desk.id).unwrap());
     }
 
-    /// Migration 092: a grant names one catalog, is read live, and holds
+    /// Migration 093: a grant names one catalog, is read live, and holds
     /// only for a live, `full` client bound to no org (Rulings R3). The
     /// personal grant is mirrored into `assets_admin_at` (R2).
     #[test]

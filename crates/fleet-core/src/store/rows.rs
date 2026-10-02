@@ -1200,7 +1200,7 @@ pub struct CatalogRow {
     pub last_loaded_at: Option<i64>,
 }
 
-/// What `Store::remove_catalog` dropped along with the row (migration 092,
+/// What `Store::remove_catalog` dropped along with the row (migration 093,
 /// Rulings R13): the catalog's layer assignments, admissions and grants all
 /// go by `ON DELETE CASCADE`. The checkout on disk is never touched.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

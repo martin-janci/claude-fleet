@@ -78,7 +78,7 @@ impl Store {
                                              head_commit=NULL, last_loaded_at=NULL",
             rusqlite::params![repo_path, remote_url],
         )?;
-        // Migration 092 / Rulings R2: a personal grant made while no personal
+        // Migration 093 / Rulings R2: a personal grant made while no personal
         // catalog existed waits in `assets_admin_at`; give it its grant row
         // now that there is a catalog to attach it to. Idempotent. Same
         // transaction as the re-point above: a crash between the two must
@@ -213,7 +213,7 @@ impl Store {
         Ok(removal)
     }
 
-    /// Admit `catalog_id` on a host (migration 092). Whether the host may use
+    /// Admit `catalog_id` on a host (migration 093). Whether the host may use
     /// an admission (no org, an org catalog) is the service's check.
     pub fn admit_host_catalog(
         &self,
