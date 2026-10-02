@@ -232,7 +232,8 @@ fn is_current(entry: &repo::Catalog, row: &CatalogRow) -> bool {
 /// `E_CATALOG_PARSE`, or `E_IO` for an unreadable checkout) rather than from
 /// the store or a lock (`E_SQLITE`, `E_LOCK`) or a row that vanished
 /// (`E_NOTFOUND`, a store race between `ensure_fresh`'s own `list_catalogs`
-/// and `load_catalog`'s `get_catalog`). Only a load failure becomes a
+/// and `load_catalog`'s `get_catalog` — `refresh_row` evicts that one, see
+/// there). Only a load failure becomes a
 /// problem entry in `ensure_fresh`: a store/lock failure must propagate
 /// instead, because by the time it can happen (after `load_catalog`'s own
 /// repo/parse steps already succeeded) the catalog may be fully loaded and
@@ -262,24 +263,45 @@ pub fn ensure_fresh(store: &Mutex<Store>) -> Result<(), IpcError> {
     registry::evict_org_catalogs_not_in(&configured)?;
     let mut personal_err = None;
     for row in &rows {
-        let current = registry::with_catalogs(|m| {
-            Ok(registry::entry_for(m, row).is_some_and(|c| is_current(c, row)))
-        })
-        .unwrap_or(false);
-        if current {
-            continue;
-        }
-        match load_catalog(row.id, false, store) {
-            Ok(_) => {}
-            Err(e) if row.org_id.is_none() => personal_err = Some(e),
-            Err(e) if is_load_failure(&e) => {
-                tracing::warn!(catalog = %row.name, error = %e.message, "catalog could not be loaded; kept as a problem");
-                registry::install(problem_entry(row, &e))?;
-            }
-            Err(e) => return Err(e),
+        if let Err(e) = refresh_row(row, store)? {
+            personal_err = Some(e);
         }
     }
     personal_err.map_or(Ok(()), Err)
+}
+
+/// One row of [`ensure_fresh`]'s pass: `Ok(Err(e))` is personal's load
+/// failure, kept for the end of the pass (R5); an outer `Err` stops it.
+///
+/// Final review M-b: an org row listed a moment ago that `load_catalog`
+/// no longer finds (`E_NOTFOUND`) was removed meanwhile (`catalog remove`
+/// in another process) — evicted, like the next pass would, instead of
+/// failing an unrelated asset call.
+fn refresh_row(row: &CatalogRow, store: &Mutex<Store>) -> Result<Result<(), IpcError>, IpcError> {
+    let current = registry::with_catalogs(|m| {
+        Ok(registry::entry_for(m, row).is_some_and(|c| is_current(c, row)))
+    })
+    .unwrap_or(false);
+    if current {
+        return Ok(Ok(()));
+    }
+    match load_catalog(row.id, false, store) {
+        Ok(_) => {}
+        Err(e) if row.org_id.is_none() => return Ok(Err(e)),
+        Err(e) if e.code == codes::E_NOTFOUND => {
+            // Only when the row really is gone, not some other not-found.
+            if lock(store)?.get_catalog(row.id)?.is_some() {
+                return Err(e);
+            }
+            registry::remove(row.id)?;
+        }
+        Err(e) if is_load_failure(&e) => {
+            tracing::warn!(catalog = %row.name, error = %e.message, "catalog could not be loaded; kept as a problem");
+            registry::install(problem_entry(row, &e))?;
+        }
+        Err(e) => return Err(e),
+    }
+    Ok(Ok(()))
 }
 
 fn with_catalog<T>(f: impl FnOnce(&repo::Catalog) -> Result<T, IpcError>) -> Result<T, IpcError> {
@@ -985,6 +1007,50 @@ mod tests {
         assert!(
             registry::get(acme.id).unwrap().is_none(),
             "removed elsewhere: evicted"
+        );
+        registry::clear().unwrap();
+    }
+
+    /// Final review M-b: a row `ensure_fresh` listed, removed before its
+    /// load (another process's `catalog remove`), is evicted — not an error
+    /// for the unrelated call that triggered the pass.
+    #[test]
+    fn a_catalog_removed_between_list_and_load_is_evicted_not_an_error() {
+        let _g = lock_registry_for_test();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let org = acme_org(&store);
+        let acme = store
+            .lock()
+            .unwrap()
+            .upsert_catalog(
+                "acme",
+                &repo_with_one_skill("m3-removed-meanwhile").to_string_lossy(),
+                None,
+                Some(org),
+            )
+            .unwrap();
+        // A stale entry for it, so the pass tries to load it.
+        registry::install_for_test(repo::Catalog {
+            id: acme.id,
+            name: "acme".into(),
+            org_id: Some(org),
+            head: "stale".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let row = store
+            .lock()
+            .unwrap()
+            .list_catalogs()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == acme.id)
+            .unwrap();
+        store.lock().unwrap().remove_catalog("acme").unwrap();
+        assert!(refresh_row(&row, &store).unwrap().is_ok());
+        assert!(
+            registry::get(acme.id).unwrap().is_none(),
+            "removed meanwhile: evicted"
         );
         registry::clear().unwrap();
     }
