@@ -51,6 +51,14 @@ const CONFIG_FILES: &[&str] = &[CODEX_CONFIG_PATH, CODEX_MANIFEST_PATH];
 /// single quote: the whole script is wrapped in `shell::quote`.
 const CODEX_PRESENT_PROBE: &str = "if command -v codex >/dev/null 2>&1 || [ -e .codex/auth.json ] || [ -d .codex/sessions ]; then echo \"##PRESENT\"; fi; ";
 
+/// The scan's symlink probe (multi-harness F3c): `~/.agents`,
+/// `~/.agents/skills` and each entry in it (where Codex skills are written)
+/// and `~/.codex/skills` (where the migration deletes old copies). Some
+/// setups point one of them at `~/.claude/skills`; fleet must never write
+/// Codex skills through it (`sync::plan`). POSIX sh, no single quote; a
+/// glob that matches nothing stays literal and fails `-L`.
+const CODEX_LINK_PROBE: &str = "for l in .agents .agents/skills .agents/skills/* .codex/skills; do if [ -L \"$l\" ]; then echo \"##LINK ~/$l -> $(readlink \"$l\")\"; fi; done; ";
+
 /// A `targets.codex.extra` value as TOML: nulls stripped (TOML has none);
 /// `None` when nothing representable is left.
 fn json_to_toml(v: &Value) -> Option<toml::Value> {
@@ -357,7 +365,8 @@ impl Harness for Codex {
     }
 
     /// Same shape as `Claude::scan_script`: hasher detection, the presence
-    /// probe, `##HASHES` + file hashes under `.agents/skills`,
+    /// probe, the symlink probe (`CODEX_LINK_PROBE`, `##LINK` lines),
+    /// `##HASHES` + file hashes under `.agents/skills`,
     /// `.codex/skills` (legacy, minus `.system`) and `.codex/agents`, a hash
     /// for each config file, then one `##CONFIG <path>` block per config
     /// file (base64, one line), then `##END`. No single quotes: the caller
@@ -374,6 +383,7 @@ impl Harness for Codex {
         // never writes counts: the CLI, its login (`auth.json`) or its
         // session logs — not `~/.codex` itself, which a Codex sync creates.
         s.push_str(CODEX_PRESENT_PROBE);
+        s.push_str(CODEX_LINK_PROBE);
         s.push_str("echo \"##HASHES\"; ");
         // `-exec $H {} +` (not `-print0 | xargs -0 $H`): see `Claude::scan_script`
         // for why this matters for an existing-but-empty directory.
@@ -1343,5 +1353,62 @@ mod tests {
             Codex.installed(&snap),
             vec![(Kind::Skill, "new".to_string())]
         );
+    }
+
+    /// F3c: the scan reports a symlinked `~/.agents/skills` with its target
+    /// (as `readlink` prints it) and still hashes what it points at — that
+    /// is what Codex sees. A real directory reports no link.
+    #[cfg(unix)]
+    #[test]
+    fn scan_reports_a_symlinked_agents_skills_dir() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::TempDir::new().unwrap();
+        let h = home.path();
+        std::fs::create_dir_all(h.join(".claude/skills/s")).unwrap();
+        std::fs::write(h.join(".claude/skills/s/SKILL.md"), b"claude").unwrap();
+        std::fs::create_dir_all(h.join(".agents")).unwrap();
+        symlink(h.join(".claude/skills"), h.join(".agents/skills")).unwrap();
+        let snap = scan_home(h);
+        assert_eq!(
+            snap.links,
+            std::collections::BTreeMap::from([(
+                "~/.agents/skills".to_string(),
+                h.join(".claude/skills").to_string_lossy().to_string()
+            )])
+        );
+        assert!(
+            snap.files.contains_key("~/.agents/skills/s/SKILL.md"),
+            "{:?}",
+            snap.files
+        );
+
+        let plain = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(plain.path().join(".agents/skills/s")).unwrap();
+        assert!(scan_home(plain.path()).links.is_empty());
+    }
+
+    /// A whole linked `~/.agents`, one linked skill inside a real
+    /// `~/.agents/skills`, and a linked legacy `~/.codex/skills` are each
+    /// reported.
+    #[cfg(unix)]
+    #[test]
+    fn scan_reports_a_linked_agents_dir_a_linked_skill_and_a_linked_legacy_dir() {
+        use std::os::unix::fs::symlink;
+        let whole = tempfile::TempDir::new().unwrap();
+        let w = whole.path();
+        std::fs::create_dir_all(w.join("dotfiles/agents/skills")).unwrap();
+        symlink(w.join("dotfiles/agents"), w.join(".agents")).unwrap();
+        let keys: Vec<String> = scan_home(w).links.into_keys().collect();
+        assert_eq!(keys, vec!["~/.agents"]);
+
+        let mixed = tempfile::TempDir::new().unwrap();
+        let m = mixed.path();
+        std::fs::create_dir_all(m.join(".claude/skills/x")).unwrap();
+        std::fs::create_dir_all(m.join(".agents/skills")).unwrap();
+        std::fs::create_dir_all(m.join(".codex")).unwrap();
+        symlink(m.join(".claude/skills/x"), m.join(".agents/skills/x")).unwrap();
+        symlink(m.join(".claude/skills"), m.join(".codex/skills")).unwrap();
+        let keys: Vec<String> = scan_home(m).links.into_keys().collect();
+        assert_eq!(keys, vec!["~/.agents/skills/x", "~/.codex/skills"]);
     }
 }

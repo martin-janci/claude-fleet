@@ -152,6 +152,13 @@ pub struct HostSnapshot {
     /// Claude's does not, and `harness_set::harness_gate` never asks for
     /// Claude.
     pub present: bool,
+    /// Multi-harness F3c: every directory the scan found to be a symlink,
+    /// `~/`-relative path → its target as `readlink` printed it (control
+    /// characters dropped, at most 256 characters). Only Codex's scan
+    /// reports any (`##LINK`); `sync::plan` refuses every write, adopt or
+    /// removal under one (`Harness::symlink_reason`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub links: BTreeMap<String, String>,
 }
 
 /// One installed asset with what a scan can say about it without the
@@ -492,6 +499,18 @@ pub fn is_hex_hash(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// A `##LINK` target as a plan reason may show it: host output, so control
+/// characters are dropped and it is capped at 256 characters; an empty one
+/// (a `readlink` that printed nothing) reads as unknown.
+fn link_target(raw: &str) -> String {
+    let t: String = raw.chars().filter(|c| !c.is_control()).take(256).collect();
+    if t.is_empty() {
+        "an unknown target".to_string()
+    } else {
+        t
+    }
+}
+
 /// Generalised `parse_scan`: `##HASHES` lines, then `##CONFIG <path>` blocks
 /// whose base64 body is decoded by `decode(path, bytes)` (a harness plugs in
 /// its own format — Claude's is plain JSON), then a required `##END`
@@ -520,6 +539,18 @@ pub fn parse_scan_blocks(
         if line == "##PRESENT" {
             snap.present = true;
             current_config = None;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("##LINK ") {
+            current_config = None;
+            // `<~/path> -> <target>`: `" -> "` rather than a space, so a
+            // name with a space still parses. A path outside `~/` names
+            // nothing fleet writes and is dropped.
+            if let Some((path, target)) = rest.split_once(" -> ") {
+                if path.starts_with("~/") {
+                    snap.links.insert(path.to_string(), link_target(target));
+                }
+            }
             continue;
         }
         if let Some(path) = line.strip_prefix("##CONFIG ") {
@@ -741,5 +772,32 @@ mod tests {
         assert_eq!(present.files.len(), 1);
         let absent = parse_scan_blocks("##HASHES\n##END\n", &|_, _| None).unwrap();
         assert!(!absent.present);
+    }
+
+    /// `##LINK <path> -> <target>` (multi-harness F3c) records a symlinked
+    /// directory: a path not under `~/` is ignored, a target loses control
+    /// characters, an empty one reads as unknown, and none is a hash line.
+    #[test]
+    fn parse_scan_blocks_reads_symlinked_dirs() {
+        let snap = parse_scan_blocks(
+            "##LINK ~/.agents/skills -> /home/u/.claude/skills\n##LINK ~/.codex/skills -> \n##LINK /etc/x -> /y\n##LINK ~/.agents/skills/a b -> ../x\u{7}y\n##HASHES\n##END\n",
+            &|_, _| None,
+        )
+        .unwrap();
+        assert_eq!(
+            snap.links,
+            BTreeMap::from([
+                (
+                    "~/.agents/skills".to_string(),
+                    "/home/u/.claude/skills".to_string()
+                ),
+                ("~/.agents/skills/a b".to_string(), "../xy".to_string()),
+                (
+                    "~/.codex/skills".to_string(),
+                    "an unknown target".to_string()
+                ),
+            ])
+        );
+        assert!(snap.files.is_empty());
     }
 }
