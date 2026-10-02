@@ -30,7 +30,7 @@ The aliases live in `.cargo/config.toml`.
 # 1. after every edit (fleet-core edit ≈ 20 s; = rust-analyzer's own check)
 cargo fleet-check                       # check --workspace --all-targets
 pnpm check                              # frontend edits: svelte-check
-# 2. the tests of what you touched (module path filter; fleet-core module ≈ 35 s)
+# 2. the tests of what you touched (module path filter; fleet-core module ≈ 40 s)
 cargo fleet-test -- service::health     # test --workspace --lib --bins -- <filter>
 pnpm exec vitest run src/lib/foo.test.ts
 # 3. before committing (also what .githooks/pre-commit runs)
