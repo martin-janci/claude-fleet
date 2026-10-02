@@ -112,6 +112,13 @@ impl Store {
     /// refuse before taking them (PF18); [`Self::upsert_catalog`] runs it
     /// again as its own backstop. Whether a NEW catalog's org exists is
     /// `upsert_catalog`'s check.
+    /// [`Self::check_catalog_owner`]'s refusal of a non-personal catalog
+    /// with no org — shared so `fleet-hub catalog add` can tell exactly that
+    /// refusal apart and add how to pass the org (`--org`).
+    pub fn catalog_needs_an_org_message(name: &str) -> String {
+        format!("catalog {name} needs an org: only `personal` belongs to none")
+    }
+
     pub fn check_catalog_owner(
         &self,
         name: &str,
@@ -125,7 +132,7 @@ impl Store {
             )),
             (false, None) => Err(IpcError::new(
                 codes::E_INVALID,
-                format!("catalog {name} needs an org: only `personal` belongs to none"),
+                Self::catalog_needs_an_org_message(name),
             )),
             _ => match self.get_catalog_by_name(name)? {
                 Some(existing) if existing.org_id != org_id => Err(IpcError::new(

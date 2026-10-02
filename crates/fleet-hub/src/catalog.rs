@@ -223,7 +223,12 @@ fn add(
         store,
     )
     .map_err(|e| {
-        if no_org && e.code == codes::E_INVALID {
+        // Only the owner rule's "needs an org" refusal — not a bad name or
+        // an empty path, which `--org` would not fix.
+        if no_org
+            && e.code == codes::E_INVALID
+            && e.message == Store::catalog_needs_an_org_message(&name)
+        {
             format!("{}; pass --org NAME", e.message)
         } else {
             e.message
@@ -463,6 +468,19 @@ mod tests {
         let refused = run(repoint(None), &opts, &env).unwrap_err();
         assert!(
             refused.contains("needs an org") && refused.ends_with("; pass --org NAME"),
+            "{refused}"
+        );
+        // Any other refusal with no --org gets no hint: --org would not fix
+        // an empty path.
+        let empty_path = CatalogCmd::Add {
+            name: "acme".into(),
+            path: "  ".into(),
+            remote: None,
+            org: None,
+        };
+        let refused = run(empty_path, &opts, &env).unwrap_err();
+        assert!(
+            refused.contains("repo_path must not be empty") && !refused.contains("--org"),
             "{refused}"
         );
         assert_eq!(
