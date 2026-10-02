@@ -724,8 +724,8 @@ Index by area (names only; see the reference for details):
   effect on the next one. On a hub, this is how `reports.*` and `work.*`,
   which have no flag, are set.
 - **`guide`** — step-by-step guides in Settings → Guides (declarative
-  pages, layout `guide`; `docs/pages.md` → *Guides*). Any token, a host's
-  own included, calls `catalog` (the rules, every setting's key, label and
+  pages, layout `guide`; `docs/pages.md` → *Guides*). Any **`full`** token, a
+  host's own included, calls `catalog` (the rules, every setting's key, label and
   kind — never a value — the pages, page actions and read-only sources a
   guide may name, and a working example), `validate { spec }` (`ok` and
   every problem with where it is) and `propose { spec, why }`: nothing is
@@ -733,6 +733,11 @@ Index by area (names only; see the reference for details):
   waits, and `can_write`. `decide { id, approve }` and `remove { page_id }`
   are a person's: the master or a trusted device, as for settings. A host's
   session writes one with the `fleet-guides` catalog skill.
+
+  A `readonly` token reaches none of the four and is not shown the tool at
+  all: the whole tool is classified as a mutation, because one of its actions
+  proposes. A host whose token mode is `readonly` therefore cannot even read
+  the catalog.
 
 A typical loop: `list_sessions` to see state → `new_session` to spawn one →
 `run_prompt` to steer it and get the reply back (or `send_prompt` →

@@ -141,3 +141,7 @@ never in raw seconds. A `percent` is typed as a number of percent.
 - No `claude-fleet` MCP server (the tool is missing): this session is not
   running under claude-fleet. Say so, and give the user the spec to propose
   from a session that is.
+- The server IS there and `guide` is missing from it: this host's token is
+  `readonly`, which is refused the whole tool — reads included, since one of
+  its actions proposes. Not the same thing as "claude-fleet is not running
+  here". Say which it is; only the operator can change the token's mode.

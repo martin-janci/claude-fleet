@@ -703,3 +703,9 @@ git commit -m "docs: provisioning installs ag; panes launch through it"
 - `ag caps <harness>` capability list; `--harness` in the pane command (F5, with `SessionRuntime`).
 - Probing the host's `ag` version in `toolchain_script` / Hosts UI.
 - Per-host override of `provision.install_ag`.
+- `drv_pretrust` (project pre-trust in a driver). The multi-harness spec
+  (`specs/2026-09-29-multi-harness-agents-design.md`, *Driver contract*) says
+  it "is added with F2"; F2 ships no driver hook of that name, so it is
+  deferred here rather than left reading as delivered. Nothing in F2 depends
+  on it: the pane's `--yolo` path already skips the trust prompt for Claude,
+  and the phone's trust card handles the one that still appears.

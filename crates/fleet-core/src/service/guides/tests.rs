@@ -315,13 +315,25 @@ fn the_skill_teaches_the_tool_as_it_is() {
             "the skill shows `{action}`"
         );
     }
+    // Whitespace-flattened, so a rule that the body happens to wrap across
+    // two lines is still one phrase to match against.
+    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
     for rule in [
-        format!("{}", validate::MAX_GUIDE_STEPS),
-        format!("≤{}", validate::MAX_HINT),
-        format!("≤{}", validate::MAX_TEXT),
+        // In the SENTENCE that states each limit, not as a bare number: the
+        // step cap was asserted as `body.contains("12")`, which `≤120 chars`
+        // satisfies — so it was vacuous, and would have stayed green for any
+        // new value whose digits appear anywhere in the body.
+        format!("in order: 1–{}", validate::MAX_GUIDE_STEPS),
+        format!("`hint` at most {}", validate::MAX_HINT),
+        format!("every notice's `text` at most {}", validate::MAX_TEXT),
+        // The two limits the body stated with nothing holding them to a
+        // constant, which is what made CLAUDE.md's "its example and limits are
+        // held to the tool by `service::guides` tests" partly aspirational.
+        format!("`title` are at most {} characters", validate::MAX_TITLE),
+        format!("(≤{} characters)", WHY_MAX_CHARS),
         format!("{MAX_PENDING} guides already wait"),
         format!("{} KiB", MAX_SPEC_BYTES / 1024),
     ] {
-        assert!(body.contains(&rule), "the skill states `{rule}`");
+        assert!(flat.contains(&rule), "the skill states `{rule}`");
     }
 }

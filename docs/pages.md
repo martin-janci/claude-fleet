@@ -430,8 +430,16 @@ desktop the guides are the hub's (`list_guides`, `decide_guide`,
 
 `every_source_has_a_reader_that_returns_its_shape` holds the reader to the
 declared shape. A **live** source (`live: { command, event }`, today only
-`accounts.usage`) has no reader: the app loads it with `command` and keeps
-it current from the `event` row kind, so `fetch_page_source` refuses it and
-`resource_commands_exist` holds `command` to the handler list. A source is read-only; changes are made through actions
+`accounts.usage`) has no reader, so `fetch_page_source` refuses it: the app
+loads and refreshes it itself.
+
+Those two fields are a CONTRACT the tests check, not a mechanism that does
+the loading. Nothing reads them to issue the command or subscribe to the
+event — `App.svelte` does both by hand (`loadAccountUsage`,
+`applyAccountUsageEvents`). What they buy is that the declaration cannot
+drift from the wiring: `resource_commands_exist` holds `command` to the
+handler list, and `event` names the row kind whose subscription the app is
+expected to have. A new live source therefore needs its own wiring written;
+declaring it is not enough. A source is read-only; changes are made through actions
 (design P4). Every source reads the whole fleet, so it is only for whatever
 owns the fleet. An org-scoped view is a new source, not a parameter.

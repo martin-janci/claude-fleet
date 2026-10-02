@@ -329,10 +329,19 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
-    // Guides (declarative pages, layout guide): any token reads the catalog,
-    // validates and proposes — a host's session is who writes one, with the
-    // fleet-guides skill — and lists. Deciding and removing are a person's:
-    // the master or a trusted device (`settings_writer`, in the tool).
+    // Guides (declarative pages, layout guide): any FULL token reads the
+    // catalog, validates and proposes — a host's session is who writes one,
+    // with the fleet-guides skill — and lists. Deciding and removing are a
+    // person's: the master or a trusted device (`settings_writer`, in the
+    // tool).
+    //
+    // `readonly: false` is the whole tool, reads included, because one tool
+    // carries both: a `readonly` host token or paired client is refused every
+    // action and is not even shown the tool (`enforce_mode`,
+    // `present::visible_to`). That is the cost of folding four actions into
+    // one name, and it is deliberate — splitting the reads out would be a new
+    // routed tool, hence a `CONTRACT_REVISION` bump — but it means "any
+    // token" was never true. Say `full`.
     ToolPolicy {
         name: "guide",
         access: Access::Client,

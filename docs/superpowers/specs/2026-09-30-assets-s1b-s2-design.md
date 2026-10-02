@@ -25,11 +25,15 @@ defined here).
 | SB4 | Push after a card is applied | Not automatic; the footer chip pushes. `catalog.auto_push` exists, off by default. |
 | SB5 | Undo | `git revert` of the card's commits plus the stored `host_layers` snapshot; only the latest applied card per catalog (a stack). |
 | SB6 | Automatic apply without a card | Only additive ops (adopt, create, backed-up update) on layers that have been rolled out at least once. A layer's first rollout is always a card. |
+| SB7 | AW7's "one catalog per org" | **Relaxed to many.** The umbrella's AW7 reads one; `catalogs` keys only `name`, the acceptance rule says "catalog(s) of org X", and the Bootstrap card's destination rule says "an org that HAS a catalog" — all three already assume more than one is possible. Relaxed rather than enforced because an org that splits its assets across two repositories (one public, one private to a team) is a shape nobody wants to refuse at the schema, and nothing downstream needs a single one: `effective_for_host` unions every accepted catalog, and a collision between two of them is already a `Blocked` action with a reason. If it is ever to be one, the index is `CREATE UNIQUE INDEX idx_catalogs_org ON catalogs(org_id) WHERE org_id IS NOT NULL`. |
 
 ## Design coverage
 
 Every element of the mockups and where it lands. Nothing in screens 1–4 is
-left for later.
+left for later EXCEPT the three rows below that name a later slice — the
+lifecycle pill (S3), the test glyph (S4) and the Jev confidence badge (S5).
+The Inbox's *Test regressions* section is S4 as well, and is hidden until
+then.
 
 | Mockup element | State after S1a | Milestone |
 |---|---|---|
@@ -137,6 +141,14 @@ verdict about a still-unmanaged identity is the catalog the card proposed to
 put it in — the decision is "not this, here", which is the only shape a
 person can be asked about.
 
+- `merge_host_alias` re-homes a retired alias's per-host rows from a
+  HARD-CODED table-and-column list, so both of this design's per-host
+  additions have to be added to it: `catalog_id` on `host_layers` (its key
+  gains a column, so the re-home has to carry it) and a `host_catalogs`
+  entry. A merge test covers both. It re-homes with `INSERT OR IGNORE`,
+  which is what makes the omission silent — prefer a plain `INSERT` there,
+  so the next column added to a per-host table fails the merge loudly
+  instead of dropping the row.
 - `host_layers` gains `catalog_id` (NOT NULL after backfill). Primary key
   `(host_alias, catalog_id, layer_name)`; the one-active-role index becomes
   per `(host_alias, catalog_id)`.
@@ -159,6 +171,16 @@ person can be asked about.
 2. Every `host_layers` row gets `catalog_id` = `personal`.
 3. Every client with `assets_admin_at` gets a `client_catalog_grants` row on
    `personal`. `assets_admin_at` stays but nothing reads it.
+
+   The column is not the whole gate. `client_is_assets_admin` reads
+   `revoked_at IS NULL AND mode = 'full' AND org_id IS NULL AND
+   assets_admin_at IS NOT NULL` in ONE query, so `may_admin_catalog` has to
+   join `client_tokens` and keep the other three conjuncts — a grant row on
+   its own must not outlive a revoke, survive a downgrade to `readonly`, or
+   let an org-bound client administer a catalog. `client grant --catalog`
+   applies the same refusals at grant time, and an org-bound client is
+   refused a grant on any catalog: the fleet's catalog admin is the
+   operator's, not an org's.
 4. Every existing asset is `private` (SB1). No file is rewritten: the
    default is the absence of the key.
 
@@ -235,6 +257,13 @@ overturns a person's verdict.
 **Rollout apply** = `plan_sync` (hosts of the card) + `apply_sync`.
 `overwrite` and `remove` never go through a card.
 
+Applying a Rollout card passes the `apply_sync` confirm gate:
+`changesets { apply, confirm_nonce }`, refused with `E_CONFIRM_REQUIRED`
+while `mcp.confirm_destructive` is on, and `changesets` joins
+`guard::CONFIRM_TOOLS`. A card is a new route to the same write, not an
+exemption from it. Bootstrap / New / Drift cards write only to the catalog
+repository, so they need no nonce.
+
 **Undo** = `git revert` of the card's commits (one per catalog) + restore the
 `host_layers` snapshot; allowed only for the latest applied card in each
 catalog it touched. It never touches hosts; a follow-up Rollout card
@@ -251,7 +280,10 @@ rolled out once (SB6).
   repo), `catalog admit|unadmit <host> <catalog>`. `catalog set` stays as the
   alias for `personal`.
 - `fleet-hub client grant <name> assets [--catalog NAME]` (default
-  `personal`) and `client revoke … --catalog`.
+  `personal`) and `client ungrant <name> assets [--catalog NAME]`. NOT
+  `client revoke`, which is the shipped verb for killing the client's whole
+  token — taking one catalog back must not read as the command that
+  un-pairs the device.
 - MCP `catalog_admin` actions take an optional `catalog` (default
   `personal`); new actions `list_catalogs`, `add_catalog`,
   `remove_catalog`, `admit_catalog`, `unadmit_catalog`. A new tool
@@ -332,14 +364,25 @@ and wrapped, not rewritten.
 
 ## Milestones
 
-Each ends with `cargo test --workspace`, `pnpm test`, `pnpm check` green.
+Each ends with `cargo test --workspace`, `pnpm test`, `pnpm check` green —
+which is only possible if the generated files are regenerated in the SAME
+milestone that moves them, not in M7. A milestone that adds a tool, a Tauri
+command or a `SPECS` row ends with its `REGEN_` run (`REGEN_DOCS`,
+`REGEN_HUB_VERDICTS`, `REGEN_HUB_CONTRACT`, `REGEN_LOCAL_ONLY`,
+`REGEN_SETTINGS_DOCS`, `REGEN_PAGE_DOCS`) and the artefacts committed; CI
+fails otherwise, so "green" and "regenerate later" cannot both be true.
+
+The table indexes the SCHEMA each milestone adds; the behaviour clauses after
+each `+` are what it is for. An earlier rewrite dropped them, which left every
+non-schema item in this document without a milestone — they are not optional
+and they are not later slices.
 
 | M | Contents |
 |---|---|
 | M1 | migration 090 `catalogs` (+ backfill); `registry.rs` (loaded catalogs by id; personal); `scope` in `asset.yaml` |
-| M2 | `host_layers.catalog_id`, `asset_inventory.catalog_id`, manifest `catalog`, `effective_for_host`, `with_catalog(id, f)`; layers must not override `scope` |
-| M3 | `host_catalogs`, `client_catalog_grants`, `load(id)` / per-catalog `ensure_fresh` |
-| M4 | `changesets`, `changeset_items`, `asset_triage_verdicts` |
+| M2 | `host_layers.catalog_id`, `asset_inventory.catalog_id`, manifest `catalog`, `effective_for_host`, `with_catalog(id, f)`; layers must not override `scope` — **+ the scope boundary, collisions as per-asset `Blocked` actions, and a layer-validation error for each**; + `merge_host_alias`'s per-host list |
+| M3 | `host_catalogs`, `client_catalog_grants`, `load(id)` / per-catalog `ensure_fresh` — **+ the hub CLI (`catalog add|list|remove|admit|unadmit`, `client grant|ungrant --catalog`), `catalog_admin`'s `catalog` parameter and its new actions, and `may_admin_catalog`** |
+| M4 | `changesets`, `changeset_items`, `asset_triage_verdicts` — **+ the Bootstrap / New on host / Drift / Rollout engine, apply / undo / dismiss / reject_item, the confirm gate on a Rollout apply, and the `catalog.auto` / `catalog.auto_push` settings with their home in `crates/fleet-core/pages/settings.automation.json`, beside `catalog.scan_check_secs`**; + `CONTRACT_REVISION` 6 → 7 and both clients' `MAX_HUB_CONTRACT`, since `changesets` is a new routed tool |
 | M5 | shell: `AssetsWorkspace`, rail, Inbox sections, Library, Inspector, footer chips, `JobChip`, `QueryInput`, keyboard, `Badge`, read-only chip |
 | M6 | Layers and Hosts views, admissions UI, `ChangesetCard` (Bootstrap, New, Drift, Rollout), `DiffView`, Settings → Catalogs, QuickSwitcher |
 | M7 | full verification, generated files, `docs/hub.md` catalog section, `CLAUDE.md` |

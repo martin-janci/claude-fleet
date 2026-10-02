@@ -565,6 +565,22 @@ Conversation event tracking is landed end to end (migration 037
 `session_conversations` API; the Conversations UI panel), per
 `docs/superpowers/specs/2026-09-18-conversation-events-design.md`.
 
+Fleet launches panes through its own `ag` launcher (F2, `tools/ag`; plan
+`docs/superpowers/plans/2026-09-29-f2-fleet-launches-via-ag.md`). A pane's
+command opens with `tmux::CL_FALLBACK`, whose preference order is: the host's
+own `cl`, else `ag claude --yolo` when `~/.local/share/ag` holds a COMPLETE
+tree (`ag`, `drivers/` and `lib/` — a bare `ag` binary is not enough), else
+`claude --dangerously-skip-permissions`. Provisioning stages `AG_FILES` under
+`~/.local/share/fleet/ag-src` and runs `install.sh --alias 'cl=claude --yolo'`
+warning-only behind `provision.install_ag` (default on): a failed ag step
+leaves a `hosts.provision_warning` and clears the fingerprint, so the next
+pass retries, while the rest of provisioning stands. Two build constraints
+come with it: every file under `tools/ag` must be listed in `AG_FILES`
+(`every_ag_file_is_compiled_in`, since the tree is `include_str!`-compiled
+into the binary), and `scripts/ag-test.sh` plus `shellcheck` over
+`tools/ag/**` run in CI. The install is one-way — nothing removes it; the
+paths to delete by hand are in `docs/hub.md`.
+
 The desktop builds for Windows as a **client** (plan
 `docs/superpowers/plans/2026-09-27-windows-desktop.md`, user guide
 `docs/windows.md`): no `local` host (`retire_local_host`, as on a hub with

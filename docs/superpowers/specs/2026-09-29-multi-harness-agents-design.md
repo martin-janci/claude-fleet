@@ -119,7 +119,8 @@ ag shims                                    # (re)generate alias shims from conf
   globals in a fixed canonical order; returns 3 for a flag the harness cannot honour). One
   `drv_argv` per driver instead of one function per flag: harnesses reshape the whole command
   (Codex: `codex [exec] [resume --last|ID] [opts] [PROMPT]`), not single flags. Project
-  pre-trust (`drv_pretrust`) is added with F2; agy `-p` runs under `script` for a PTY (F6).
+  pre-trust (`drv_pretrust`) is deferred past F2 (F2's own plan lists it; F2 ships
+  no hook of that name); agy `-p` runs under `script` for a PTY (F6).
 - Config `~/.config/ag/config` (INI, bash-3.2-parseable):
   `default`, `order`, `yolo` (default false), `[alias] cl = claude --yolo` etc.
 - Shims are 3-line scripts in `~/.local/bin` (work in tmux, `ssh host cmd`, fleet panes — unlike

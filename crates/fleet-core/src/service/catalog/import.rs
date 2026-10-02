@@ -799,6 +799,11 @@ fn read_json(p: &Path) -> Value {
 /// command-line argument itself, never a symlink found while walking under
 /// it; `.claude/agents` is top-level `*.md` files only, so a link there is
 /// followed once and never recursed into either way. `emit` also tracks a
+/// per-file cap of 512 KiB, which applies to EVERY emitted file (the four
+/// config files and `.claude/agents/*.md` reach `emit` with no `find` filter
+/// in front of them, and `.claude.json` is the one file that grows without
+/// bound) — over it, the file is named on a `##SKIPPED` line, logged by
+/// `parse_remote_dump`, and left out. `emit` also tracks a
 /// running total and, at 64 MiB, prints `##TRUNCATED` and exits non-zero —
 /// `run_host_script` already turns a non-zero exit into an error, and
 /// `parse_remote_dump` refuses a `##TRUNCATED` line even if a caller handed
@@ -827,8 +832,21 @@ fn read_json(p: &Path) -> Value {
 pub const REMOTE_SOURCES_SCRIPT: &str = r###"cd "$HOME" || exit 1
 total=0
 cap=67108864
+# One per-file cap for every emitted file, not just the ones find filters:
+# the four config files and .claude/agents/*.md reached emit at any size, so a
+# single huge .claude.json could spend the whole 64 MiB budget on its own --
+# and .claude.json is the one file that grows without bound, since it holds
+# the history of every project. Over the cap a file is named and left out and
+# the dump goes on; the 64 MiB budget is for the whole dump, this is one file.
+# No apostrophes anywhere in this script: it is passed through shell::quote
+# whole (remote_script_quotes_nothing_and_frames_files).
+filecap=524288
 emit() {
   sz=$(wc -c < "$1" 2>/dev/null) || return 0
+  if [ "$sz" -gt "$filecap" ]; then
+    printf "##SKIPPED %s\n" "$1"
+    return 0
+  fi
   total=$((total + sz))
   if [ "$total" -gt "$cap" ]; then
     printf "##TRUNCATED\n"
@@ -883,7 +901,9 @@ const TRUNCATED_MARKER: &str = "##TRUNCATED";
 
 /// Rebuild the files `REMOTE_SOURCES_SCRIPT` printed under `root`, and point
 /// `ImportSources` at them. Refuses anything outside `.claude/` and
-/// `.claude.json`, and a dump the script cut short at its 64 MiB cap.
+/// `.claude.json`, and a dump the script cut short at its 64 MiB cap. A
+/// `##SKIPPED` line (one file over the per-file cap) is logged and the rest of
+/// the dump is read.
 pub fn parse_remote_dump(stdout: &str, root: &Path) -> Result<ImportSources, IpcError> {
     use base64::Engine;
     let bad = |p: &str| IpcError::new(E_INVALID, format!("remote import: refusing path {p}"));
@@ -891,6 +911,17 @@ pub fn parse_remote_dump(stdout: &str, root: &Path) -> Result<ImportSources, Ipc
     while let Some(line) = lines.next() {
         if line == TRUNCATED_MARKER {
             return Err(IpcError::new(E_INVALID, "remote dump exceeds 64 MiB"));
+        }
+        if let Some(path) = line.strip_prefix("##SKIPPED ") {
+            // The script left a file out for being over the per-file cap. Not
+            // an error — the import goes on without it — but it must not be
+            // silent, or an asset would simply be missing from the inventory
+            // with nothing saying why.
+            tracing::warn!(
+                path = %path,
+                "remote import: file over the per-file cap, left out of the dump"
+            );
+            continue;
         }
         let Some(path) = line.strip_prefix("##FILE ") else {
             continue;
@@ -2344,6 +2375,61 @@ mod tests {
             .env("HOME", home)
             .output()
             .expect("spawn bash")
+    }
+
+    /// The per-file cap applies to EVERY emitted file, not only the ones a
+    /// `find -size` filter stands in front of.
+    ///
+    /// `.claude.json` and `.claude/agents/*.md` reach `emit` directly, so
+    /// before this a single oversized `.claude.json` — the one file that grows
+    /// without bound, since it holds every project's history — could spend the
+    /// whole 64 MiB budget by itself and truncate the dump, failing the import
+    /// outright. Over the cap the file is named on a `##SKIPPED` line and the
+    /// rest of the dump still arrives. Executed, not asserted on the script's
+    /// text.
+    #[cfg(unix)]
+    #[test]
+    fn remote_script_skips_one_oversized_file_and_dumps_the_rest() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".claude/agents")).unwrap();
+        // Over 512 KiB, and valid JSON so nothing else refuses it first.
+        let big = format!(r#"{{"pad":"{}"}}"#, "x".repeat(600 * 1024));
+        fs::write(home.path().join(".claude.json"), &big).unwrap();
+        fs::write(
+            home.path().join(".claude/agents/small.md"),
+            "# small
+",
+        )
+        .unwrap();
+
+        let out = run_remote_script(home.path());
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(out.status.success(), "stdout={stdout}");
+        assert!(
+            stdout.contains("##SKIPPED .claude.json"),
+            "the oversized file is named: {stdout}"
+        );
+        assert!(
+            !stdout.contains("##FILE .claude.json"),
+            "and not emitted: {stdout}"
+        );
+        assert!(
+            stdout.contains("##FILE .claude/agents/small.md"),
+            "the rest of the dump still arrives: {stdout}"
+        );
+        assert!(
+            !stdout.contains("##TRUNCATED"),
+            "one big file no longer ends the dump: {stdout}"
+        );
+
+        // And the parser reads such a dump: the skip is a log line, not an error.
+        let root = tempfile::tempdir().unwrap();
+        let src = parse_remote_dump(&stdout, root.path()).expect("a dump with a skip still parses");
+        assert!(src.claude_dir.join("agents/small.md").exists());
+        assert!(
+            !src.claude_json.exists(),
+            "the skipped file is simply absent"
+        );
     }
 
     /// Security fix round 2: a `for` loop's exit status is its LAST

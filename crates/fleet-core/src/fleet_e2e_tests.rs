@@ -278,7 +278,10 @@ async fn reconcile_pass_updates_reachable_hosts_and_keeps_unreachable_ones() {
             .collect();
         assert_eq!(
             scripts,
-            vec![crate::tmux::probe_snapshot_script(crate::service::pane_intel::PANE_TAIL_LINES, true)],
+            vec![crate::tmux::probe_snapshot_script(
+                crate::service::pane_intel::PANE_TAIL_LINES,
+                true
+            )],
             "{host}"
         );
     }

@@ -551,6 +551,58 @@ fn render_embeds() -> String {
     serde_json::to_string_pretty(&v).unwrap() + "\n"
 }
 
+/// `catalog::SLOTS` and `catalog::LAYOUTS` are hand-kept parallels of the
+/// `Slot` and `Layout` enums, and their only reader is the generator
+/// `page_docs_are_current` compares against — so a variant missing from a
+/// list is self-consistent and invisible: the catalog simply never mentions
+/// it, and nothing says it should have.
+///
+/// The schema is derived from the enums themselves, so it is the one place
+/// the full set is written down by the compiler. Both lists are held to it,
+/// in order.
+#[test]
+fn every_slot_and_layout_variant_is_in_its_catalog_list() {
+    let schema: Value = serde_json::from_str(&render_schema()).unwrap();
+    let variants = |name: &str| -> Vec<String> {
+        schema["$defs"][name]["oneOf"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name} is a closed enum in the schema"))
+            .iter()
+            .map(|v| {
+                v["const"]
+                    .as_str()
+                    .expect("one const per variant")
+                    .to_string()
+            })
+            .collect()
+    };
+    let listed = |vals: Vec<Value>| -> Vec<String> {
+        vals.iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(
+        variants("Slot"),
+        listed(
+            catalog::SLOTS
+                .iter()
+                .map(|s| serde_json::to_value(s).unwrap())
+                .collect()
+        ),
+        "a Slot variant is missing from catalog::SLOTS (or they are out of order)"
+    );
+    assert_eq!(
+        variants("Layout"),
+        listed(
+            LAYOUTS
+                .iter()
+                .map(|l| serde_json::to_value(l).unwrap())
+                .collect()
+        ),
+        "a Layout variant is missing from catalog::LAYOUTS (or they are out of order)"
+    );
+}
+
 fn render_schema() -> String {
     let schema = rmcp::schemars::schema_for!(Page);
     serde_json::to_string_pretty(&schema).unwrap() + "\n"
