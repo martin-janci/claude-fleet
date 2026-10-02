@@ -509,7 +509,8 @@ fn message_of(r: Result<CallToolResult, McpError>) -> String {
 }
 
 /// Spec, Testing (authorization): a client without a grant on the catalog
-/// an action touches cannot admit, unadmit, remove or read it; the grant on
+/// an action touches cannot admit, unadmit or read it (nor remove it, which
+/// even a grant does not allow: final review M-c); the grant on
 /// one catalog says nothing about another; a personal-only or fleet-wide
 /// action refuses another catalog instead of running on personal.
 #[tokio::test]
@@ -572,12 +573,26 @@ async fn each_action_needs_a_grant_on_the_catalog_it_touches() {
     assert_eq!(code_of(&r), "E_INVALID");
     assert!(message_of(r).contains("not per catalog"), "fleet-wide");
 
+    // Final review M-c: `remove_catalog` is the master's alone, like
+    // `add_catalog` — it cascades every other client's grant on the
+    // catalog, and only the master could add it back. A grant on acme is
+    // not enough.
     let rm = json!({ "name": "acme" });
     assert_eq!(
         code_of(&call(&t, &desk, "remove_catalog", Some(rm.clone()), None).await),
         "E_FORBIDDEN"
     );
-    let r = call(&t, &ops, "remove_catalog", Some(rm), None).await;
+    let r = call(&t, &ops, "remove_catalog", Some(rm.clone()), None).await;
+    assert_eq!(code_of(&r), "E_FORBIDDEN", "{:?}", r.err());
+    assert!(message_of(r).contains("remove_catalog needs the master token"));
+    assert!(t
+        .store
+        .lock()
+        .unwrap()
+        .get_catalog_by_name("acme")
+        .unwrap()
+        .is_some());
+    let r = call(&t, &m, "remove_catalog", Some(rm), None).await;
     assert_eq!(code_of(&r), "OK", "{:?}", r.err());
 }
 

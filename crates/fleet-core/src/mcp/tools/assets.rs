@@ -163,7 +163,7 @@ impl FleetTools {
     #[tool(description = "The Assets tab's catalog operations as one tool, \
         plus the set of catalogs and host admissions. Master, or a client \
         granted the catalog the action touches; list_catalogs an unbound \
-        one, add_catalog the master.")]
+        one, add/remove_catalog the master.")]
     pub(super) async fn catalog_admin(
         &self,
         Extension(caller): Extension<Caller>,
@@ -190,7 +190,8 @@ impl FleetTools {
         // The catalog the call really touches, not the raw parameter.
         let touched = match &parsed {
             Ok((_, Touches::Catalog(name))) => name.as_str(),
-            Ok((_, Touches::NewCatalog)) => "(new)",
+            Ok((_, Touches::MasterOnly(None))) => "(new)",
+            Ok((_, Touches::MasterOnly(Some(name)))) => name.as_str(),
             Ok((_, Touches::Nothing)) => "-",
             Err(_) => "(invalid)",
         };
@@ -209,7 +210,7 @@ impl FleetTools {
             Touches::Nothing => {
                 caller.is_master() || (caller.is_person_device() && caller.mode == TokenMode::Full)
             }
-            Touches::NewCatalog => caller.is_master(),
+            Touches::MasterOnly(_) => caller.is_master(),
             Touches::Catalog(name) => may_admin_catalog(&caller, &self.store, name)?,
         };
         if !allowed {
@@ -491,9 +492,15 @@ fn may_admin_catalog(
 fn forbidden(touches: &catalog::admin::Touches, caller: &Caller) -> McpError {
     use catalog::admin::Touches;
     let message = match touches {
-        Touches::NewCatalog => format!(
+        Touches::MasterOnly(None) => format!(
             "add_catalog needs the master token ({} refused); on the hub: fleet-hub catalog \
              add <name> <path> --org <org>",
+            caller.label()
+        ),
+        Touches::MasterOnly(Some(name)) => format!(
+            "remove_catalog needs the master token ({} refused): it drops every grant on \
+             {name}, and only the master can add it back; on the hub: fleet-hub catalog \
+             remove {name}",
             caller.label()
         ),
         Touches::Catalog(name) if name == catalog::catalogs::PERSONAL => format!(

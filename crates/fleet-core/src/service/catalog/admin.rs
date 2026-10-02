@@ -266,8 +266,12 @@ impl AdminCall {
         };
         match self {
             AdminCall::ListCatalogs => no_param(Touches::Nothing),
-            AdminCall::AddCatalog(_) => no_param(Touches::NewCatalog),
-            AdminCall::RemoveCatalog(a) => named_in_args(&a.name),
+            AdminCall::AddCatalog(_) => no_param(Touches::MasterOnly(None)),
+            // Final review M-c: master-only, like add — see `MasterOnly`.
+            AdminCall::RemoveCatalog(a) => {
+                named_in_args(&a.name)?;
+                Ok(Touches::MasterOnly(Some(a.name.clone())))
+            }
             AdminCall::AdmitCatalog(a) | AdminCall::UnadmitCatalog(a) => named_in_args(&a.catalog),
             c if c.is_per_catalog() => {
                 Ok(Touches::Catalog(catalog.unwrap_or(PERSONAL).to_string()))
@@ -301,8 +305,11 @@ impl AdminCall {
 pub enum Touches {
     /// `list_catalogs`: every caller that reaches `catalog_admin`.
     Nothing,
-    /// `add_catalog`: no grant can name a catalog not created yet — master only.
-    NewCatalog,
+    /// The master's alone: `add_catalog` (`None`: no grant can name a
+    /// catalog not created yet) and `remove_catalog` (`Some(name)`, final
+    /// review M-c: it cascades every other client's grant on it, and only
+    /// the master can add it back).
+    MasterOnly(Option<String>),
     /// One catalog, by name.
     Catalog(String),
 }
@@ -613,7 +620,18 @@ mod tests {
             remote_url: None,
             org: Some("acme".into()),
         });
-        assert_eq!(add.touches(None).unwrap(), Touches::NewCatalog);
+        assert_eq!(add.touches(None).unwrap(), Touches::MasterOnly(None));
+        let rm = AdminCall::RemoveCatalog(CatalogNameArgs {
+            name: "acme".into(),
+        });
+        assert_eq!(
+            rm.touches(None).unwrap(),
+            Touches::MasterOnly(Some("acme".into()))
+        );
+        assert_eq!(
+            rm.touches(Some("other")).unwrap_err().code,
+            codes::E_INVALID
+        );
         assert_eq!(
             AdminCall::Config.touches(None).unwrap(),
             Touches::Catalog("personal".into())

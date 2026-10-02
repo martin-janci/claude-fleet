@@ -273,7 +273,8 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   `resolve_preview`…) touch `personal`, so an org-only grant covers only that
   catalog's config/load/layers/admissions —
   `list_catalogs` is master or an unbound full client only (an org-bound
-  client is refused), `add_catalog` is master-only, and `apply_sync` fails
+  client is refused), `add_catalog` and `remove_catalog` are master-only
+  (a removal cascades every other client's grant), and `apply_sync` fails
   closed for a non-master caller when its parked plan is gone and otherwise
   needs a grant on the catalog of every manifest entry an Update/Overwrite
   replaces, not only the catalogs its actions come from. Operator side:

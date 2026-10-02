@@ -1014,16 +1014,18 @@ What a client may do:
   token can never use `catalog_admin`, and is not shown it. A grant names
   one catalog: `--catalog <name>` grants an org's catalog instead of the
   personal one (`client ungrant <name> assets --catalog <name>` takes it
-  back), and the client may then touch only the catalogs it holds — admit,
-  remove, load or list layers in them, and apply a Sync plan only when it
-  holds every catalog that plan writes from. The fleet-wide actions
+  back), and the client may then touch only the catalogs it holds — admit
+  hosts to them, load them or list their layers, and apply a Sync plan only
+  when it holds every catalog that plan writes from. The fleet-wide actions
   (`plan_sync`, `apply_sync`, `inventory`, secrets, `resolve_preview` and
   the rest) also need the personal grant: an org-only grant covers that
   catalog's config, load, layers and admissions, nothing more.
   `list_catalogs` is open to the master or a person's own unbound full
   device, never an org-bound client; only the master token may
-  `add_catalog`. `client list`'s ASSETS column is the personal grant;
-  `catalog list` shows every grant.
+  `add_catalog` or `remove_catalog` (a removal drops every other client's
+  grant on that catalog, and only the master could add it back). `client
+  list`'s ASSETS column is the personal grant; `catalog list` shows every
+  grant.
 - A prompt typed on a phone reaches an agent **marked** as untrusted input,
   naming the client it came from, unless you have **trusted** that client.
   `raw: true` is the master token's alone.
@@ -2236,7 +2238,8 @@ catalog it admits (`catalog admit <host> <catalog>`, `catalog unadmit`).
 `catalog list` shows each catalog's owner, load state, HEAD, admissions and
 grants; `catalog reload --catalog <name>` re-reads one. `catalog remove
 <name>` forgets an org catalog — config only, the checkout stays — along
-with its layer assignments, admissions and grants.
+with its layer assignments, admissions and grants (over MCP,
+`remove_catalog` is the master token's alone, like `add_catalog`).
 
 A catalog whose checkout cannot be loaded is shown as a problem (`catalog
 list`) while the others load; it is retried at its next `reload`. Sync never
