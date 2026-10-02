@@ -7,11 +7,15 @@
 //! not need a running hub. A running hub notices at its next catalog call
 //! (`catalog::ensure_fresh` compares the load recorded here with its own);
 //! on a paired client that is the Assets tab's Refresh.
+//!
+//! `add`/`list`/`remove`/`admit`/`unadmit` manage org catalogs (Assets M3);
+//! `set` stays the personal one's, and `reload --catalog NAME` reloads any.
 
 use crate::config::{self, HubOptions};
 use crate::out;
 use crate::serve;
 use clap::Subcommand;
+use fleet_core::service::catalog::catalogs::{self, AddCatalogArgs};
 use fleet_core::service::catalog::{self, ConfigureArgs};
 use fleet_core::store::Store;
 use std::collections::HashMap;
@@ -34,12 +38,38 @@ pub enum CatalogCmd {
         #[arg(long)]
         remote: Option<String>,
     },
-    /// Re-read the checkout, after editing it or pulling by hand.
+    /// Re-read a checkout, after editing it or pulling by hand.
     Reload {
         /// `git pull --ff-only` first.
         #[arg(long)]
         pull: bool,
+        /// The catalog to reload; the personal one by default.
+        #[arg(long)]
+        catalog: Option<String>,
     },
+    /// Add an org's catalog — a git checkout on this machine — and load it.
+    /// On an existing name, re-point it. `add personal <path>` is `set`.
+    Add {
+        /// The catalog's name (`[a-z0-9][a-z0-9-]*`).
+        name: String,
+        /// The checkout, on this machine. `~/` is this user's home.
+        path: String,
+        /// Clone from this URL when PATH is not a checkout yet.
+        #[arg(long)]
+        remote: Option<String>,
+        /// The org that owns it (by name). Required for every catalog but `personal`.
+        #[arg(long)]
+        org: Option<String>,
+    },
+    /// Print every catalog: owner, load state, HEAD, path, admissions, grants.
+    List,
+    /// Forget an org catalog (config only: the checkout is never deleted).
+    /// Its layer assignments, admissions and grants go; hosts keep what it installed.
+    Remove { name: String },
+    /// Let a host with no org take an org catalog.
+    Admit { host: String, catalog: String },
+    /// Take an admission back. Nothing is removed from the host.
+    Unadmit { host: String, catalog: String },
 }
 
 pub fn run(
@@ -51,19 +81,113 @@ pub fn run(
     let store = Mutex::new(serve::open_store(opts, env)?);
     match cmd {
         CatalogCmd::Show => show(&store),
-        CatalogCmd::Set { path, remote } => {
-            catalog::configure(
-                ConfigureArgs {
-                    repo_path: path,
-                    remote_url: remote,
-                },
-                &store,
-            )
-            .map_err(|e| e.message)?;
-            load(&store, false)
+        CatalogCmd::Set { path, remote } => set_personal(&store, path, remote),
+        CatalogCmd::Reload {
+            pull,
+            catalog: None,
+        } => load(&store, pull),
+        CatalogCmd::Reload {
+            pull,
+            catalog: Some(name),
+        } if name == catalogs::PERSONAL => load(&store, pull),
+        CatalogCmd::Reload {
+            pull,
+            catalog: Some(name),
+        } => {
+            let row = catalogs::catalog_named(&name, &store).map_err(|e| e.message)?;
+            let s = catalog::load_catalog(row.id, pull, &store).map_err(|e| e.message)?;
+            print_loaded(&s);
+            Ok(ExitCode::SUCCESS)
         }
-        CatalogCmd::Reload { pull } => load(&store, pull),
+        // R12: `add personal <path>` is `set <path>`.
+        CatalogCmd::Add {
+            name,
+            path,
+            remote,
+            org: None,
+        } if name == catalogs::PERSONAL => set_personal(&store, path, remote),
+        CatalogCmd::Add {
+            name, org: None, ..
+        } => Err(format!(
+            "catalog {name} needs an org: add it with --org NAME (only `personal` belongs to none)"
+        )),
+        CatalogCmd::Add {
+            name,
+            path,
+            remote,
+            org,
+        } => add(&store, name, path, remote, org),
+        CatalogCmd::List => list(&store),
+        CatalogCmd::Remove { name } => {
+            let r = catalogs::remove_catalog(&name, &store).map_err(|e| e.message)?;
+            out::line(&format!(
+                "removed catalog {} (config only; the checkout is untouched): dropped {} layer \
+                 assignment(s), {} admission(s), {} grant(s); hosts keep what it installed",
+                r.name, r.layer_rows, r.admissions, r.grants
+            ));
+            Ok(ExitCode::SUCCESS)
+        }
+        CatalogCmd::Admit { host, catalog } => {
+            let names = catalogs::admit(&host, &catalog, &store).map_err(|e| e.message)?;
+            out::line(&format!("{host} admits: {}", names.join(", ")));
+            Ok(ExitCode::SUCCESS)
+        }
+        CatalogCmd::Unadmit { host, catalog } => {
+            let names = catalogs::unadmit(&host, &catalog, &store).map_err(|e| e.message)?;
+            out::line(&if names.is_empty() {
+                format!("{host} admits no org catalog")
+            } else {
+                format!("{host} admits: {}", names.join(", "))
+            });
+            Ok(ExitCode::SUCCESS)
+        }
     }
+}
+
+fn set_personal(
+    store: &Mutex<Store>,
+    path: String,
+    remote: Option<String>,
+) -> Result<ExitCode, String> {
+    catalog::configure(
+        ConfigureArgs {
+            repo_path: path,
+            remote_url: remote,
+        },
+        store,
+    )
+    .map_err(|e| e.message)?;
+    load(store, false)
+}
+
+fn add(
+    store: &Mutex<Store>,
+    name: String,
+    path: String,
+    remote: Option<String>,
+    org: Option<String>,
+) -> Result<ExitCode, String> {
+    let st = catalogs::add_catalog(
+        AddCatalogArgs {
+            name: name.clone(),
+            repo_path: path,
+            remote_url: remote,
+            org,
+        },
+        store,
+    )
+    .map_err(|e| e.message)?;
+    if let Some(problem) = st.problem {
+        return Err(format!(
+            "added catalog {name}, but it could not be loaded: {problem}; fix the checkout and \
+             run `fleet-hub catalog reload --catalog {name}`"
+        ));
+    }
+    out::line(&format!(
+        "added catalog {} ({} asset(s)); a running hub picks it up at its next catalog call",
+        st.name, st.asset_count
+    ));
+    Ok(ExitCode::SUCCESS)
 }
 
 fn show(store: &Mutex<Store>) -> Result<ExitCode, String> {
@@ -89,8 +213,7 @@ fn show(store: &Mutex<Store>) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn load(store: &Mutex<Store>, pull: bool) -> Result<ExitCode, String> {
-    let s = catalog::load(pull, store).map_err(|e| e.message)?;
+fn print_loaded(s: &fleet_core::events::CatalogSummary) {
     out::line(&format!(
         "loaded {} asset(s) at {}{}; a running hub picks it up at its next catalog call (Refresh on a client)",
         s.asset_count,
@@ -101,5 +224,207 @@ fn load(store: &Mutex<Store>, pull: bool) -> Result<ExitCode, String> {
             String::new()
         }
     ));
+}
+
+fn load(store: &Mutex<Store>, pull: bool) -> Result<ExitCode, String> {
+    let s = catalog::load(pull, store).map_err(|e| e.message)?;
+    print_loaded(&s);
     Ok(ExitCode::SUCCESS)
+}
+
+/// `catalog list`: one line per catalog (NAME, OWNER, STATE, HEAD, PATH), then
+/// its admissions and its grants (R19) on their own lines.
+fn list(store: &Mutex<Store>) -> Result<ExitCode, String> {
+    // This process's registry is empty: load what can be loaded so the
+    // state column says something (a broken org catalog shows as `problem`).
+    let _ = catalog::ensure_fresh(store);
+    let all = catalogs::list_catalogs(store).map_err(|e| e.message)?;
+    if all.is_empty() {
+        out::line(
+            "no catalogs; set the personal one with: fleet-hub catalog set <path> [--remote <url>]",
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    out::line(&format!(
+        "{:<14} {:<12} {:<10} {:<12} PATH",
+        "NAME", "OWNER", "STATE", "HEAD"
+    ));
+    for c in all {
+        out::line(&format!(
+            "{:<14} {:<12} {:<10} {:<12} {}",
+            c.name,
+            c.org.as_deref().unwrap_or("personal"),
+            c.state,
+            c.head_commit
+                .as_deref()
+                .filter(|h| !h.is_empty())
+                .map_or("—", |h| &h[..h.len().min(12)]),
+            c.repo_path
+        ));
+        if !c.admitted.is_empty() {
+            out::line(&format!("    admitted: {}", c.admitted.join(", ")));
+        }
+        if !c.granted.is_empty() {
+            out::line(&format!("    granted:  {}", c.granted.join(", ")));
+        }
+        if let Some(p) = c.problem {
+            out::line(&format!("    problem:  {p}"));
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// fleet-core's catalog registry is process-global and its
+    /// `lock_registry_for_test` is `cfg(test)` in that crate, so the tests
+    /// here that load catalogs serialize on their own lock (PF15).
+    static REGISTRY: Mutex<()> = Mutex::new(());
+
+    fn git_repo(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let root = dir.join(name);
+        std::fs::create_dir_all(root.join("skills/s")).unwrap();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::write(
+            root.join("skills/s/asset.yaml"),
+            "kind: skill\nname: s\ndescription: d\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("skills/s/body.md"), "b\n").unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.email", "t@t"],
+            &["config", "user.name", "t"],
+            &["add", "."],
+            &["commit", "-q", "-m", "init"],
+        ] {
+            let o = fleet_core::proc::std_command("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        }
+        root
+    }
+
+    #[test]
+    fn add_admit_list_reload_and_remove_an_org_catalog() {
+        let _registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..HubOptions::default()
+        };
+        let env = HashMap::new();
+        let org_id = {
+            let s = Store::open_with_bus(
+                &dir.path().join("state.db"),
+                Arc::new(fleet_core::events::NoopEventBus),
+            )
+            .unwrap();
+            s.upsert_host("h").unwrap();
+            s.add_org("acme", None, false).unwrap().id
+        };
+        // A personal catalog, so `remove personal` reaches its own guard (PF7).
+        let personal = git_repo(dir.path(), "personal-assets");
+        run(
+            CatalogCmd::Set {
+                path: personal.to_string_lossy().into(),
+                remote: None,
+            },
+            &opts,
+            &env,
+        )
+        .unwrap();
+        // R12: `add personal <path>` is `set <path>` (no --org needed).
+        let add_personal = CatalogCmd::Add {
+            name: "personal".into(),
+            path: personal.to_string_lossy().into(),
+            remote: None,
+            org: None,
+        };
+        assert_eq!(run(add_personal, &opts, &env).unwrap(), ExitCode::SUCCESS);
+        let repo = git_repo(dir.path(), "acme-assets");
+        let add = |org: Option<&str>| CatalogCmd::Add {
+            name: "acme".into(),
+            path: repo.to_string_lossy().into(),
+            remote: None,
+            org: org.map(String::from),
+        };
+        assert!(run(add(None), &opts, &env).unwrap_err().contains("--org"));
+        assert_eq!(
+            run(add(Some("acme")), &opts, &env).unwrap(),
+            ExitCode::SUCCESS
+        );
+        run(
+            CatalogCmd::Admit {
+                host: "h".into(),
+                catalog: "acme".into(),
+            },
+            &opts,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(
+            run(CatalogCmd::List, &opts, &env).unwrap(),
+            ExitCode::SUCCESS
+        );
+        run(
+            CatalogCmd::Reload {
+                pull: false,
+                catalog: Some("acme".into()),
+            },
+            &opts,
+            &env,
+        )
+        .unwrap();
+
+        let s = serve::open_store(&opts, &env).unwrap();
+        let acme = s.get_catalog_by_name("acme").unwrap().expect("added");
+        assert_eq!(acme.org_id, Some(org_id));
+        assert!(acme.head_commit.is_some(), "loaded and recorded");
+        assert_eq!(s.host_admissions("h").unwrap(), vec![acme.id]);
+        drop(s);
+
+        run(
+            CatalogCmd::Unadmit {
+                host: "h".into(),
+                catalog: "acme".into(),
+            },
+            &opts,
+            &env,
+        )
+        .unwrap();
+        run(
+            CatalogCmd::Remove {
+                name: "acme".into(),
+            },
+            &opts,
+            &env,
+        )
+        .unwrap();
+        let s = serve::open_store(&opts, &env).unwrap();
+        assert!(s.get_catalog_by_name("acme").unwrap().is_none());
+        assert!(
+            repo.join(".git").is_dir(),
+            "remove is config only: the checkout stays"
+        );
+        drop(s);
+        let refused = run(
+            CatalogCmd::Remove {
+                name: "personal".into(),
+            },
+            &opts,
+            &env,
+        )
+        .unwrap_err();
+        assert!(
+            refused.contains("personal catalog cannot be removed"),
+            "{refused}"
+        );
+    }
 }
