@@ -11,6 +11,7 @@ use std::sync::Arc;
 pub mod backup;
 mod bench_work_link;
 mod catalog;
+mod changesets;
 mod clients;
 mod conversations;
 mod decisions;
@@ -56,6 +57,7 @@ mod work_usage;
 mod work_view;
 
 pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
+pub use changesets::{ChangesetItemRow, ChangesetRow, NewChangesetItem, TriageVerdictRow};
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
 };

@@ -1020,6 +1020,9 @@ const MIGRATIONS: &[Migration] = &[
     // (personal backfilled from `assets_admin_at`). IF NOT EXISTS + INSERT
     // OR IGNORE: safe to re-run.
     Migration::plain(93, include_str!("../../migrations/093_catalog_access.sql")),
+    // Assets S1b+S2 M4: changeset cards, their items, triage verdicts (the
+    // spec's DDL verbatim). CREATE IF NOT EXISTS: safe to re-run.
+    Migration::plain(94, include_str!("../../migrations/094_changesets.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -1352,6 +1355,12 @@ mod tests {
         "participants",
         "read_cursors",
         "peer_links",
+        "host_layers",
+        "host_catalogs",
+        "client_catalog_grants",
+        "changesets",
+        "changeset_items",
+        "asset_triage_verdicts",
     ];
 
     #[test]
@@ -2571,6 +2580,119 @@ mod tests {
             })
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    /// Carry 3c (Rulings R30): 093 backfills a grant for every
+    /// `assets_admin_at` holder, eligible or not — revoked, readonly and
+    /// org-bound ones too — and those rows grant nothing: the live predicate
+    /// refuses them and `catalog_grantees` never lists them.
+    #[test]
+    fn migration_93_backfills_ineligible_holders_but_they_grant_nothing() {
+        let old = store_at_version(92);
+        old.conn
+            .execute_batch(
+                "INSERT INTO catalogs (id, name, repo_path, org_id, created_at) VALUES (1, 'personal', '/p', NULL, 0);\
+                 INSERT INTO orgs (id, name, created_at) VALUES (10, 'acme', 0);\
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at, revoked_at) \
+                   VALUES ('gone', 'h1', 'full', 1, 5, 9);\
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at) \
+                   VALUES ('kiosk', 'h2', 'readonly', 1, 5);\
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at, org_id) \
+                   VALUES ('contractor', 'h3', 'full', 1, 5, 10);\
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at) \
+                   VALUES ('desk', 'h4', 'full', 1, 5);",
+            )
+            .unwrap();
+        old.migrate().expect("093 and 094");
+        let n: i64 = old
+            .conn
+            .query_row("SELECT COUNT(*) FROM client_catalog_grants", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 4, "the backfill copies every holder");
+        let id = |name: &str| -> i64 {
+            old.conn
+                .query_row(
+                    "SELECT id FROM client_tokens WHERE name = ?1",
+                    [name],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        for name in ["gone", "kiosk", "contractor"] {
+            assert!(
+                !old.client_may_admin_catalog(id(name), 1).unwrap(),
+                "{name} is not eligible"
+            );
+        }
+        assert!(old.client_may_admin_catalog(id("desk"), 1).unwrap());
+        assert_eq!(old.catalog_grantees(1).unwrap(), vec!["desk".to_string()]);
+    }
+
+    /// 094 on a database stopped at 093 creates the spec's three tables,
+    /// column for column; re-running it is a no-op.
+    #[test]
+    fn migration_94_creates_changesets_items_and_verdicts() {
+        let old = store_at_version(93);
+        old.migrate().expect("094");
+        let cols = |t: &str| -> Vec<String> {
+            old.conn
+                .prepare(&format!(
+                    "SELECT name FROM pragma_table_info('{t}') ORDER BY cid"
+                ))
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            cols("changesets"),
+            [
+                "id",
+                "kind",
+                "summary",
+                "state",
+                "created_at",
+                "applied_at",
+                "commits",
+                "layers_snapshot",
+                "error"
+            ]
+        );
+        assert_eq!(
+            cols("changeset_items"),
+            [
+                "changeset_id",
+                "position",
+                "grp",
+                "catalog_id",
+                "kind",
+                "name",
+                "action",
+                "params",
+                "decider",
+                "state"
+            ]
+        );
+        assert_eq!(
+            cols("asset_triage_verdicts"),
+            [
+                "catalog_id",
+                "kind",
+                "name",
+                "content_hash",
+                "verdict",
+                "decider",
+                "decided_at"
+            ]
+        );
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 94;")
+            .unwrap();
+        old.migrate().expect("re-running 094 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     }
 
     /// M2 carry 6 / Rulings R1: 091 must not assume `host_layers` exists — a
