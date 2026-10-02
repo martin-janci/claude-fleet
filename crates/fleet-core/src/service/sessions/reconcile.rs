@@ -9,9 +9,10 @@ use crate::store::StartSource;
 use std::collections::HashMap;
 
 /// Number of pane lines captured per work session for the reconcile intel
-/// probe. Eight lines covers the REPL footer (status bar / context %) plus the
-/// last tool line or prompt without dragging in scrollback.
-pub(super) const PANE_TAIL_LINES: u32 = 8;
+/// probe — [`pane_intel::PANE_TAIL_LINES`], the one height every capture
+/// reads, because the row this writes is compared against the probe's own
+/// reading before any key is sent.
+pub(super) use crate::service::pane_intel::PANE_TAIL_LINES;
 
 /// Hard wall-clock cap on a single host's reconcile probe. Without it, a wedged
 /// SSH ControlMaster (see `ssh.rs` `mux_opts`) leaves `tmux.list_sessions`

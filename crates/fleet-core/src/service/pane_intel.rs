@@ -366,9 +366,23 @@ fn parse_trailing_number(s: &str) -> Option<f64> {
     num.parse::<f64>().ok()
 }
 
-/// How far up the tail the OOM rule looks. The reconcile capture is 8 lines
-/// (`PANE_TAIL_LINES`); `session_activity` reads more, and a crash block
-/// older than a screen is history, not the state of the pane.
+/// Lines of pane tail EVERY capture reads: the reconcile tick's intel probe
+/// (`sessions::reconcile`) and `session_activity` alike.
+///
+/// One constant, because the two readings are COMPARED. A client draws its
+/// answer card from the row the tick wrote and then, immediately before a key
+/// goes out, re-reads the pane through the probe and refuses the key unless
+/// the two agree. Captured windows of different heights do not agree about a
+/// dialog whose question line sits above its options: the shorter one loses
+/// the line, which decides both `kind` (`permission` vs `input`) and
+/// `question` — so the pane "moved" between two reads of the same screen and
+/// a legitimate answer was refused. Twelve, the taller of the two the tick
+/// and the probe used to carry: enough for a dialog's question above its
+/// options, the spinner, a queued prompt line and the mode footer.
+pub const PANE_TAIL_LINES: u32 = 12;
+
+/// How far up the tail the OOM rule looks: a crash block older than a screen
+/// is history, not the state of the pane.
 const OOM_TAIL_LINES: usize = 12;
 
 /// Node's fatal heap block: the process that printed it is dead.
@@ -754,8 +768,34 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
     Some(Dialog {
         kind,
         prompt: question.or(selected),
-        options,
+        options: own_menu(options),
     })
+}
+
+/// The dialog's own menu out of the choices read off the pane: one ordinal
+/// per choice, ascending.
+///
+/// The bound above keeps `options` to the dialog's own block, but a numbered
+/// list the AGENT printed INSIDE that block (prose "1. … 2. …" between the
+/// question and the choices) still reaches it, and then one set carries
+/// `n = 1, 2, 1, 2, 3`. A client presses the DIGIT, so a repeated ordinal is
+/// a chip whose label is not the choice the REPL would pick — the one way to
+/// answer the wrong question while reading the right one.
+///
+/// The dialog's own choices are the LAST ones on screen (prose above it, and
+/// nothing numbered below it, or `live_below` would have rejected the whole
+/// dialog), so a repeat starts a new run and the last run is the menu. A gap
+/// is not a repeat: `1, 3` is kept as it is, since each digit still names one
+/// choice.
+fn own_menu(options: Vec<PendingOption>) -> Vec<PendingOption> {
+    let start = options
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(i, o)| *i > 0 && o.n <= options[i - 1].n)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    options[start..].to_vec()
 }
 
 /// Derive a coarse status from the tail. Used ONLY as a fallback when the
@@ -1489,6 +1529,57 @@ Do you want to proceed?
         assert_eq!(p.question.as_deref(), Some("Do you want to proceed?"));
         assert_eq!(p.options.len(), 3);
         assert_eq!(p.options.iter().map(|o| o.n).collect::<Vec<_>>(), [1, 2, 3]);
+    }
+
+    /// The bound keeps `options` to the dialog's own block, but a numbered
+    /// list the agent printed INSIDE that block — between the question and
+    /// the choices — still reaches it, and then one option set carries `n` =
+    /// 1, 2, 1, 2, 3. A client presses the DIGIT, so a chip labelled from the
+    /// agent's prose would answer a different choice entirely. The dialog's
+    /// own choices are the last run.
+    #[test]
+    fn a_numbered_list_inside_the_dialog_block_does_not_duplicate_an_ordinal() {
+        let pane = "\
+Do you want to proceed?
+  1. Add the guard
+  2. Run the tests
+❯ 1. Yes
+  2. Yes, and don't ask again
+  3. No, and tell Claude what to do differently
+";
+        let p = detect_dialog(pane).expect("dialog").pending_input();
+        assert_eq!(p.question.as_deref(), Some("Do you want to proceed?"));
+        assert_eq!(p.options.iter().map(|o| o.n).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(
+            p.options
+                .iter()
+                .map(|o| o.label.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Yes",
+                "Yes, and don't ask again",
+                "No, and tell Claude what to do differently"
+            ]
+        );
+    }
+
+    /// A GAP is not a repeat: each digit still names one choice, so the pair
+    /// is kept as the pane printed it.
+    #[test]
+    fn own_menu_keeps_a_gap_and_trims_only_a_repeat() {
+        let opt = |n: u8| PendingOption {
+            n,
+            label: format!("o{n}"),
+            selected: false,
+        };
+        assert_eq!(own_menu(vec![opt(1), opt(3)]), vec![opt(1), opt(3)]);
+        assert_eq!(own_menu(vec![]), vec![]);
+        assert_eq!(own_menu(vec![opt(2)]), vec![opt(2)]);
+        // Two repeats in a row: the last run wins.
+        assert_eq!(
+            own_menu(vec![opt(1), opt(2), opt(1), opt(1), opt(2)]),
+            vec![opt(1), opt(2)]
+        );
     }
 
     #[test]

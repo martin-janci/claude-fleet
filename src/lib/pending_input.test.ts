@@ -172,4 +172,20 @@ describe('answerFingerprint', () => {
     };
     expect(answerFingerprint(moved)).toBe(answerFingerprint(dialog));
   });
+
+  it('ignores a question the hub filled from the highlighted line', () => {
+    // The hub stores `question.or(selected)`: a dialog whose lines end in no
+    // `?` gets the HIGHLIGHTED option's own line as its question, so an arrow
+    // key changed it — the same cursor move the case above says must not
+    // count. Both of the hub's choice spellings (`1. ` and `2) `).
+    const bare = { ...dialog, question: null };
+    expect(answerFingerprint({ ...bare, question: '1. Yes' })).toBe(answerFingerprint(bare));
+    expect(answerFingerprint({ ...bare, question: "2) Yes, and don't ask again" })).toBe(
+      answerFingerprint(bare),
+    );
+    // A real question of its own is still identity (the case above).
+    expect(answerFingerprint({ ...bare, question: 'Delete the repo?' })).not.toBe(
+      answerFingerprint(bare),
+    );
+  });
 });

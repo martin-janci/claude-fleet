@@ -10,10 +10,10 @@ use crate::ipc_error::lock;
 use crate::service::pane_intel;
 use serde::{Deserialize, Serialize};
 
-/// Lines of pane tail the probe reads: enough for the spinner, a queued
-/// prompt line and the mode footer; more than the tick's 8 so a dialog's
-/// question still fits above its options.
-pub const ACTIVITY_TAIL_LINES: u32 = 12;
+/// Lines of pane tail the probe reads — [`pane_intel::PANE_TAIL_LINES`], the
+/// same height the reconcile tick captures, so the two readings of one screen
+/// can be compared (see that constant).
+pub use crate::service::pane_intel::PANE_TAIL_LINES as ACTIVITY_TAIL_LINES;
 
 /// What the pane looks like right now. Strings use the same vocabularies as
 /// the session row (`claude_status`, `stuck_kind`), so the frontend can lay

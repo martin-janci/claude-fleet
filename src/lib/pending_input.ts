@@ -72,18 +72,46 @@ export function pendingInputFor(a: {
   };
 }
 
+/** `1. `, `2) ` — the ordinal marker the hub's own choice parser accepts. */
+const ORDINAL_MARKER = /^\s*\d+\s*[.)]\s*/;
+
+/**
+ * The dialog's SUBJECT out of its `question`, or null when `question` is not
+ * one.
+ *
+ * The hub stores `question.or(selected)`: for a dialog whose lines end in no
+ * `?` the field is the HIGHLIGHTED option's own line, which an arrow key
+ * changes. Taken as identity that made moving the cursor "a different
+ * question" and refused the key the person then pressed. A `question` that is
+ * one of the options, ordinal and all, is the cursor — not a subject.
+ */
+function dialogSubject(p: { question: string | null; options: { label: string }[] }): string | null {
+  if (p.question === null) return null;
+  const bare = p.question.replace(ORDINAL_MARKER, '').trim();
+  const isCursor = p.options.some((o) => o.label.length > 0 && o.label.trim() === bare);
+  return isCursor ? null : p.question;
+}
+
 /**
  * A stable identity for "the question being asked", for the check made
  * immediately before a key goes out: if the pane is no longer showing this
  * dialog, the click answers something the user never read.
  *
  * Which option is *highlighted* is deliberately not part of it — arrow keys
- * move the `❯` glyph without changing the question.
+ * move the `❯` glyph without changing the question, and `question` is dropped
+ * when the hub filled it from that glyph's own line (`dialogSubject`).
+ *
+ * It identifies a dialog of the same SHAPE. Two permission dialogs whose
+ * question lines are both absent and whose options read the same (Yes / Yes,
+ * and don't ask again / No) are identical here even when they are about
+ * different commands: the hub puts the command on a description line, which
+ * `pending_input` does not carry. Closing that needs a content hash from the
+ * hub, not a change here.
  */
 export function answerFingerprint(p: {
   kind: string;
   question: string | null;
   options: { n: number; label: string }[];
 }): string {
-  return JSON.stringify([p.kind, p.question, p.options.map((o) => [o.n, o.label])]);
+  return JSON.stringify([p.kind, dialogSubject(p), p.options.map((o) => [o.n, o.label])]);
 }
