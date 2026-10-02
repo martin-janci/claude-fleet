@@ -161,19 +161,24 @@ a link, and a hub never re-forwards. No replication of orgs, work or catalogs.
 ## 3. Decisions
 
 *agreed* = the owner decided it. *recommended* = this spec recommends it and §16
-says why, what it costs if wrong, and what to verify. *open* = forced by §2, so
-it needs a confirming "yes" rather than a debate.
+says why, what it costs if wrong, and what to verify.
+
+Every row is now decided. P1, P2, P3, P5, P6, P7 and P8 were the block forced by
+§2's findings; the owner accepted them as a block on 2026-10-02, with a plain
+"ok" in answer to the question — recorded that way rather than as a reasoned
+assent to each row, so anyone re-reading knows how much was actually said. Any
+one of them is a single edit away from being reopened.
 
 | # | Question | Decision | State |
 |---|---|---|---|
-| P1 | Does Fleet own the Project, with a provider project only ever a connection? | Yes. F1 leaves no alternative. | open |
-| P2 | Is a native Claude Project connection built in v1? | Yes, as `reference` only: a stored link plus an exportable instructions block a person pastes. No automation claimed. | open |
-| P3 | Does a Project become a boundary? | No. Org stays the only boundary. | open |
+| P1 | Does Fleet own the Project, with a provider project only ever a connection? | Yes. F1 leaves no alternative. | **agreed** (owner, 2026-10-02) |
+| P2 | Is a native Claude Project connection built in v1? | Yes, as `reference` only: a stored link plus an exportable instructions block a person pastes. No automation claimed. | **agreed** (owner, 2026-10-02) |
+| P3 | Does a Project become a boundary? | No. Org stays the only boundary. | **agreed** (owner, 2026-10-02) |
 | P4 | How are members modelled? | **Not here.** Deferred to the parallel permissions system; §9 is the seam. | **agreed** (owner, 2026-10-01) |
-| P5 | Where do a Project's tasks live? | In `work_items`, unchanged: one column, one read. | open |
-| P6 | Is a Project org-bound? | Optional: `org_id` nullable, like `catalogs`. Never crosses its org without `force_cross_org`. | open |
-| P7 | Does a Project's context ride the catalog? | Both: assets as a context-axis layer in a catalog; the per-session header on the existing hook budget. | open |
-| P8 | Does the UI rename today's `projects` to "Repository"? | Yes, strings only. No schema or API rename. | open |
+| P5 | Where do a Project's tasks live? | In `work_items`, unchanged: one column, one read. | **agreed** (owner, 2026-10-02) |
+| P6 | Is a Project org-bound? | Optional: `org_id` nullable, like `catalogs`. Never crosses its org without `force_cross_org`. | **agreed** (owner, 2026-10-02) |
+| P7 | Does a Project's context ride the catalog? | Both: assets as a context-axis layer in a catalog; the per-session header on the existing hook budget. | **agreed** (owner, 2026-10-02) |
+| P8 | Does the UI rename today's `projects` to "Repository"? | Yes, strings only. No schema or API rename. | **agreed** (owner, 2026-10-02) |
 | P9 | Dependencies between tasks in v1? | **No.** Status-and-repository grouping is enough to start. | **agreed** (owner, 2026-10-01) |
 | P10 | Cloud sessions as an execution target? | **Yes**, as its own phase FP6 (§15), with the capability rows F2 verifies. | **agreed** (owner, 2026-10-01) |
 | P11 | Which provider account runs a Project's cloud work? | **The host's.** No account selector; a Project may *require* an account and Fleet refuses a host that does not carry it (§16 Q1). | **agreed** (owner, 2026-10-01) |
@@ -350,7 +355,7 @@ page and by the MCP read.
 | Parallel threads under one goal | native inside a provider Project Fleet cannot drive | n/a | **native, on Fleet's own machine** (`--spawn worktree`, `--capacity N`) | none | native at the infrastructure layer; **substituted** for coordination |
 | Cross-repo task coordination | none | none | none | none | **substituted** (§8) |
 | Native provider Project, driven by Fleet | **unavailable** (F1) | n/a | **unavailable** — Fleet hosts the execution, never the coordination | n/a | **gap** — shown, never faked |
-| Rewind, fork, move | native | **no** | the transcript is local, so possibly yes (**to verify**) | no | capability-gated, as F5 defines |
+| Rewind, fork, move | native | **no** | **no** — a Remote Control thread is a pane-less row, and `rewind_conversation` refuses one with `E_BG_SESSION` before the rebind (`service/rewind.rs`), because there is no pane to restart | no | capability-gated, as F5 defines |
 
 Three connection modes, and `controlled` is claimed only where F2 names the
 interface:
@@ -695,6 +700,16 @@ Claim 4 said a Remote Control thread gets "Fleet's whole context layer". That is
 | The catalog's assets, the repository's `CLAUDE.md`, and Fleet's own hooks | **Yes, immediately.** `hooks_install.rs` merges Fleet's hooks into the host's **`~/.claude/settings.json`** — user-level, per host, not per session. Every Claude Code process on that host fires them, including one a Remote Control server starts. |
 | Fleet's row-keyed context — the mail, the M2 handover brief, §6's project header | **Only after** a reconcile pass has created an `external` row for the thread. Those payloads are delivered against a `SessionRow`, and `resolve_hook_row`'s step 2 (`claude_session_id = payload.session_id`, host-checked) can reach an `external` row, because such a row carries the real id from `claude agents --json` (`tmux_name` is `bg:<claude session id>`). Before that row exists, the hook resolves to nothing and is a no-op. |
 | Pane attribution (`X-Fleet-Pane`) | **No — and it is a hazard.** The header is `$TMUX_PANE`, and `resolve_hook_row` tries **the pane first**, before the session id. A Remote Control server's sessions inherit its environment, so if the server runs in a pane Fleet has a row for, every hook from **all** of its sessions resolves to that one Fleet row (`ResolvedBy::Pane`) — the case the code itself warns about: "a pane match says only which pane sent the hook, not that the payload's conversation is the row's". `rebind_eligible` stops the row's id from moving on a plain `SessionStart`, so this is misattribution of activity rather than a stolen identity, but it is still wrong. |
+
+**A third thing checked at the same time.** Rewind, Fork and Retry are **not**
+available on a Remote Control thread, and not for want of a transcript — the
+transcript is on the host. `rewind_conversation` refuses a pane-less row with
+`E_BG_SESSION` before it rebinds anything, because the operation ends by
+restarting the session's pane and such a row has none
+(`service/rewind.rs`, and its test `rewinding_a_pane_less_session_is_refused_before_the_rebind`).
+The quiet check itself would pass: `pane_status` returns `None` for a pane-less
+row and the guard falls back to the row's stored `claude_status`. So this is a
+capability gap to show, in F5's sense, not a bug to fix in FP7.
 
 **Two consequences for FP7.**
 
