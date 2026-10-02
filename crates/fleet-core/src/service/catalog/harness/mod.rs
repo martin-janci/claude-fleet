@@ -269,6 +269,16 @@ pub trait Harness: Send + Sync {
     /// Home-relative path (`~/...`) to the manifest file this harness uses
     /// to track which merges/files the sync engine applied.
     fn manifest_path(&self) -> &'static str;
+    /// Why an action touching a path under `link` — a directory the scan
+    /// reported as a symlink to `target` (`HostSnapshot::links`) — is
+    /// refused (multi-harness F3c). Only a scan that reports links ever
+    /// makes the planner ask.
+    fn symlink_reason(&self, link: &str, target: &str) -> String {
+        format!(
+            "{link} is a symlink (to {target}); fleet won't write {} files through it — replace it with a real directory",
+            self.id()
+        )
+    }
     /// Apply `merges` then `remove` to `existing`'s parsed content and
     /// return the full new file text (with a trailing newline). An empty
     /// `existing` means an empty document.
@@ -518,6 +528,15 @@ fn link_target(raw: &str) -> String {
 /// gathered so far must not be trusted as complete: `E_SCAN`). A hash line
 /// whose path is `-` (a hasher invoked with no file argument, reading
 /// stdin) is skipped rather than recorded as a real file.
+///
+/// `##LINK <path>` (multi-harness F3c) works the same way as a `##CONFIG`
+/// block: its target is the line right after, never split out of the
+/// `##LINK` line itself — a directory whose own name happens to contain
+/// `" -> "` would otherwise corrupt the parsed path. A marker line where a
+/// target line was expected (the scan was cut off right there, or another
+/// `##LINK`/`##CONFIG` immediately follows) still gets processed normally;
+/// the pending link is recorded with `link_target("")`, i.e. "an unknown
+/// target", rather than swallowing that marker's own line.
 pub fn parse_scan_blocks(
     stdout: &str,
     decode: &dyn Fn(&str, &[u8]) -> Option<Value>,
@@ -525,8 +544,18 @@ pub fn parse_scan_blocks(
     use base64::Engine;
     let mut snap = HostSnapshot::default();
     let mut current_config: Option<String> = None;
+    let mut current_link: Option<String> = None;
     let mut saw_end = false;
     for line in stdout.lines() {
+        if let Some(path) = current_link.take() {
+            if !line.starts_with("##") {
+                snap.links.insert(path, link_target(line));
+                continue;
+            }
+            // No target line turned up before the next marker: unknown,
+            // and the marker below is still processed as usual.
+            snap.links.insert(path, link_target(""));
+        }
         if line == "##END" {
             saw_end = true;
             current_config = None;
@@ -541,15 +570,13 @@ pub fn parse_scan_blocks(
             current_config = None;
             continue;
         }
-        if let Some(rest) = line.strip_prefix("##LINK ") {
+        if let Some(path) = line.strip_prefix("##LINK ") {
             current_config = None;
-            // `<~/path> -> <target>`: `" -> "` rather than a space, so a
-            // name with a space still parses. A path outside `~/` names
-            // nothing fleet writes and is dropped.
-            if let Some((path, target)) = rest.split_once(" -> ") {
-                if path.starts_with("~/") {
-                    snap.links.insert(path.to_string(), link_target(target));
-                }
+            // A path outside `~/` names nothing fleet writes and is
+            // dropped (its target line, next, is still just skipped since
+            // `current_link` stays `None`).
+            if path.starts_with("~/") {
+                current_link = Some(path.to_string());
             }
             continue;
         }
@@ -588,6 +615,14 @@ pub fn parse_scan_blocks(
             }
             snap.files.insert(format!("~/{path}"), hash.to_string());
         }
+    }
+    // The scan was cut off right after naming a link, with no line at all
+    // after it (not even `##END`): unknown, same as a marker taking its
+    // place above. `saw_end` is false here too, so the snapshot is about to
+    // be discarded as `E_SCAN` anyway — this only matters for a caller that
+    // inspects `links` without checking the `Result` first.
+    if let Some(path) = current_link.take() {
+        snap.links.insert(path, link_target(""));
     }
     if !saw_end {
         return Err(IpcError::new(
@@ -780,7 +815,7 @@ mod tests {
     #[test]
     fn parse_scan_blocks_reads_symlinked_dirs() {
         let snap = parse_scan_blocks(
-            "##LINK ~/.agents/skills -> /home/u/.claude/skills\n##LINK ~/.codex/skills -> \n##LINK /etc/x -> /y\n##LINK ~/.agents/skills/a b -> ../x\u{7}y\n##HASHES\n##END\n",
+            "##LINK ~/.agents/skills\n/home/u/.claude/skills\n##LINK ~/.codex/skills\n\n##LINK /etc/x\n/y\n##LINK ~/.agents/skills/a b\n../x\u{7}y\n##HASHES\n##END\n",
             &|_, _| None,
         )
         .unwrap();
@@ -799,5 +834,45 @@ mod tests {
             ])
         );
         assert!(snap.files.is_empty());
+    }
+
+    /// EXTRA (F3c controller ruling): the target is always the line right
+    /// after `##LINK <path>`, never split out of that line with `" -> "` —
+    /// so a directory whose own name contains that exact substring parses
+    /// intact instead of corrupting the path.
+    #[test]
+    fn parse_scan_blocks_a_link_path_may_contain_the_old_separator_literally() {
+        let snap = parse_scan_blocks(
+            "##LINK ~/.agents/skills/a -> b\n/x/y\n##HASHES\n##END\n",
+            &|_, _| None,
+        )
+        .unwrap();
+        assert_eq!(
+            snap.links,
+            BTreeMap::from([("~/.agents/skills/a -> b".to_string(), "/x/y".to_string())])
+        );
+    }
+
+    /// EXTRA: a `##LINK` with no target line before the next marker (cut off
+    /// right there, or immediately followed by `##HASHES`/another `##LINK`)
+    /// reads as "an unknown target" rather than swallowing that marker's own
+    /// line as if it were the target.
+    #[test]
+    fn parse_scan_blocks_a_link_with_no_target_line_reads_as_unknown() {
+        let snap = parse_scan_blocks(
+            "##LINK ~/.agents/skills\n##LINK ~/.codex/skills\nreal-target\n##HASHES\n##END\n",
+            &|_, _| None,
+        )
+        .unwrap();
+        assert_eq!(
+            snap.links,
+            BTreeMap::from([
+                (
+                    "~/.agents/skills".to_string(),
+                    "an unknown target".to_string()
+                ),
+                ("~/.codex/skills".to_string(), "real-target".to_string()),
+            ])
+        );
     }
 }

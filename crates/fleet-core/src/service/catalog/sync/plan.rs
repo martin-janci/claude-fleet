@@ -287,14 +287,19 @@ fn expected_for<'a>(
 ///    merge is `merge_satisfied`. Then: not present ⇒ `Create`; present and
 ///    matching ⇒ `Noop` if the manifest names it *at the locations this
 ///    render produces*, `Update` if the entry still lists a path or merge
-///    the render has moved away from (a re-pointed `install_as` whose new
-///    identifier already held an identical copy — the old one has to go),
-///    else `Adopt`; present and
-///    differing ⇒ `Update` when the manifest names it with a *different*
+///    the render has moved away from (a re-pointed `install_as`, or a Codex
+///    skill moving from `~/.codex/skills` to `~/.agents/skills` in F3c,
+///    whose new location already held an identical copy — the old one has
+///    to go), else `Adopt`; present and differing ⇒ `Overwrite` when the
+///    asset moved (as above) onto a planned file the entry does not list —
+///    a copy fleet never wrote there, so not a catalog update — else
+///    `Update` when the manifest names it with a *different*
 ///    hash (the catalog moved on), `Overwrite("edited on host")` when the
 ///    manifest names it with the *same* hash (so the difference came from
 ///    the host), and `Overwrite("present but differs; not managed")` when
-///    the manifest does not name it at all.
+///    the manifest does not name it at all. A `Create` whose entry lists
+///    locations the render moved away from says so in its reason: rule 8
+///    deletes those old files with it, and `files` names only the new ones.
 /// 5. `expected` records the scanned hash of every planned file and every
 ///    merged config file (`None` when the scan did not see it).
 /// 6. `manifest.orphans(catalog)` ⇒ `Remove`, with `files`/`merges`/
@@ -313,6 +318,10 @@ fn expected_for<'a>(
 ///    its old element is still in the shared array and nothing else would
 ///    ever take it out — and because the *new* value is absent from that
 ///    array, rule 4 reads the asset as `Create`, not `Update`.
+/// 9. (F3c) An action that would write, adopt or delete a path under a
+///    directory the scan reported as a symlink (`HostSnapshot::links`) ⇒
+///    `Blocked(Harness::symlink_reason)`, with no plan and no
+///    `remove_entry` left to apply. `Noop`s and earlier refusals stay.
 ///
 /// A host that could not be reached never reaches this function: the caller
 /// pushes a `HostPlan` with `status: "skipped"` and a `detail` instead.
@@ -427,6 +436,9 @@ pub fn compute_host_plan(
             plugin: None,
         });
     }
+    // Rule 9 (F3c): nothing is written or deleted through a symlinked
+    // directory.
+    block_symlinked(&mut actions, snap, harness);
     HostPlan {
         host_alias: host_alias.to_string(),
         harness: harness.id().to_string(),
@@ -499,6 +511,15 @@ pub(crate) fn withheld_noop(kind: Kind, name: &str) -> Action {
         plugin: None,
     }
 }
+
+/// Rule 4's reasons for an asset whose manifest entry lists locations the
+/// render moved away from (F3c: Codex skills moving to `~/.agents/skills`;
+/// also a re-pointed `install_as`).
+pub(crate) const MOVED_CREATE_REASON: &str =
+    "the last sync's files at its old location are removed";
+pub(crate) const MOVED_UPDATE_REASON: &str =
+    "installed at a different location; the old copy is removed";
+pub(crate) const MOVED_ONTO_FOREIGN_REASON: &str = "moved to a location that already holds a different copy fleet did not write; it is replaced (backed up) and the old copy removed";
 
 fn action_for(
     harness: &dyn Harness,
@@ -637,26 +658,44 @@ fn action_for(
     }
 
     let (op, reason) = if !present {
-        (ActionOp::Create, None)
+        (
+            ActionOp::Create,
+            // F3c: the entry lists files this render no longer produces (a
+            // Codex skill fleet synced to `~/.codex/skills` before it moved
+            // to `~/.agents/skills`). Rule 8's `remove_entry` deletes them;
+            // the reason says so, since `files` lists only the new ones.
+            manifest_entry
+                .filter(|entry| has_stale_locations(entry, plan))
+                .map(|_| MOVED_CREATE_REASON.to_string()),
+        )
     } else if matches {
         match manifest_entry {
             // Present, identical and managed — but the entry points at a
             // location the render no longer produces. `install_as` can
             // re-point an asset at an identifier that already holds an
-            // identical copy: the content check then passes at the new
+            // identical copy (and F3c moves Codex skills to a new
+            // directory): the content check then passes at the new
             // location while the old files are still on the host and the
             // entry still claims them. `Update` (whose `remove_entry`,
             // rule 8, carries the previous entry) deletes them and
             // refreshes the entry; a `Noop` would leak them forever.
-            Some(entry) if has_stale_locations(entry, plan) => (
-                ActionOp::Update,
-                Some("installed under a different identifier; the old copy is removed".into()),
-            ),
+            Some(entry) if has_stale_locations(entry, plan) => {
+                (ActionOp::Update, Some(MOVED_UPDATE_REASON.into()))
+            }
             Some(_) => (ActionOp::Noop, None),
             None => (ActionOp::Adopt, None),
         }
     } else {
         match manifest_entry {
+            // F3c: the asset moved, and its new location already holds a
+            // different copy the entry never listed — fleet did not write
+            // it, so replacing it is an overwrite for a person to see, not
+            // a catalog update.
+            Some(entry)
+                if has_stale_locations(entry, plan) && holds_unlisted_copy(entry, plan, snap) =>
+            {
+                (ActionOp::Overwrite, Some(MOVED_ONTO_FOREIGN_REASON.into()))
+            }
             Some(entry) if entry.hash == plan.hash() => (
                 ActionOp::Overwrite,
                 Some("edited on host; the catalog has not changed".into()),
@@ -725,6 +764,72 @@ fn has_stale_locations(entry: &ManifestEntry, plan: &RenderPlan) -> bool {
         .merges
         .iter()
         .any(|m| !merges.contains(&(m.file.as_str(), &m.json_path)))
+}
+
+/// Does the host already hold one of `plan`'s files at a path `entry` does
+/// not list — a copy no earlier sync of this asset wrote there? Only asked
+/// for an asset that moved (`has_stale_locations`): an entry recorded
+/// without files (as some tests build them) never reads as moved.
+fn holds_unlisted_copy(entry: &ManifestEntry, plan: &RenderPlan, snap: &HostSnapshot) -> bool {
+    plan.files
+        .iter()
+        .any(|f| snap.files.contains_key(&f.path) && !entry.files.contains(&f.path))
+}
+
+/// Every host path `action` writes, adopts or deletes: its own `files` (the
+/// planned files, or a `Remove`'s entry files) plus the files of the entry
+/// it supersedes, which the applier deletes when the render no longer
+/// produces them.
+fn touched_paths(action: &Action) -> impl Iterator<Item = &String> {
+    action
+        .files
+        .iter()
+        .chain(action.remove_entry.iter().flat_map(|e| e.files.iter()))
+}
+
+/// Turn `action` into a refusal: nothing of it is written or deleted.
+fn block(action: &mut Action, reason: String) {
+    action.op = ActionOp::Blocked;
+    action.reason = Some(reason);
+    action.backup = false;
+    action.plan = None;
+    action.remove_entry = None;
+}
+
+/// The outermost symlinked directory in `links` that `path` lies under (or
+/// is), with its target. `BTreeMap` order puts `~/.agents` before
+/// `~/.agents/skills`, so the first match is the outermost; the `/` check
+/// keeps `~/.agent` from matching `~/.agents/…`.
+fn linked_dir<'a>(links: &'a BTreeMap<String, String>, path: &str) -> Option<(&'a str, &'a str)> {
+    links
+        .iter()
+        .find(|(link, _)| {
+            path.strip_prefix(link.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        })
+        .map(|(link, target)| (link.as_str(), target.as_str()))
+}
+
+/// Rule 9 (multi-harness F3c): refuse every action that would write, adopt
+/// or delete anything under a symlinked directory. Some setups point
+/// `~/.agents/skills` at `~/.claude/skills`: writing Codex's render through
+/// it would replace Claude's copies, adopting would make two manifests
+/// claim one file, and the two harnesses would undo each other on every
+/// sync.
+fn block_symlinked(actions: &mut [Action], snap: &HostSnapshot, harness: &dyn Harness) {
+    if snap.links.is_empty() {
+        return;
+    }
+    for action in actions.iter_mut() {
+        if matches!(action.op, ActionOp::Noop | ActionOp::Blocked) {
+            continue;
+        }
+        let hit = touched_paths(action).find_map(|p| linked_dir(&snap.links, p));
+        if let Some((link, target)) = hit {
+            let reason = harness.symlink_reason(link, target);
+            block(action, reason);
+        }
+    }
 }
 
 /// Rule 3's decision, split out to keep `action_for` readable. `plan` is the
@@ -1859,6 +1964,229 @@ mod tests {
         assert!(
             !plans().contains_key(&abandoned),
             "an expired plan is dropped, not left pinning its host snapshots"
+        );
+    }
+
+    /// F3c: with `~/.agents/skills` a symlink, every Codex action that would
+    /// write or adopt under it is refused with the reason; Codex's MCP merge
+    /// (`~/.codex/config.toml`) and Claude's plan are unaffected.
+    #[test]
+    fn writes_through_a_symlinked_skills_dir_are_blocked() {
+        let mut snap = HostSnapshot::default();
+        snap.links
+            .insert("~/.agents/skills".into(), "/home/u/.claude/skills".into());
+        let hp = plan_for(
+            &catalog_of(&[SKILL, MCP]),
+            &Codex,
+            &snap,
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        let s = act(&hp, "s");
+        assert_eq!(s.op, ActionOp::Blocked);
+        assert_eq!(
+            s.reason.as_deref(),
+            Some("~/.agents/skills is a symlink (to /home/u/.claude/skills); fleet won't write Codex skills through it — replace it with a real directory or turn Codex off for this host")
+        );
+        assert!(s.plan.is_none() && s.remove_entry.is_none() && !s.backup);
+        assert_eq!(
+            act(&hp, "fleet").op,
+            ActionOp::Create,
+            "config.toml is not under the link"
+        );
+
+        // Adopting is refused too: Claude's copy of a plain skill is
+        // byte-identical to Codex's render, and both manifests would claim it.
+        let mut identical = snap.clone();
+        satisfy(
+            &mut identical,
+            &substituted(&Codex, &asset(SKILL), &secrets_map()),
+        );
+        let hp = plan_for(
+            &catalog_of(&[SKILL]),
+            &Codex,
+            &identical,
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        assert_eq!(act(&hp, "s").op, ActionOp::Blocked);
+
+        // Claude never writes under ~/.agents: its plan is unchanged.
+        let hp = plan_for(
+            &catalog_of(&[SKILL]),
+            &Claude,
+            &snap,
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        assert_eq!(act(&hp, "s").op, ActionOp::Create);
+    }
+
+    /// The outermost link names the reason; a linked single skill blocks
+    /// only that skill; a sibling path that merely shares a prefix is not
+    /// under the link.
+    #[test]
+    fn the_outermost_link_names_the_reason_and_unlinked_skills_still_plan() {
+        const T: &str = "kind: skill\nname: t\ndescription: d\n";
+        let mut snap = HostSnapshot::default();
+        snap.links
+            .insert("~/.agents/skills/s".into(), "/x/s".into());
+        snap.links.insert("~/.agent".into(), "/not/a/parent".into());
+        let hp = plan_for(
+            &catalog_of(&[SKILL, T]),
+            &Codex,
+            &snap,
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        assert_eq!(act(&hp, "s").op, ActionOp::Blocked);
+        assert!(act(&hp, "s")
+            .reason
+            .as_deref()
+            .unwrap()
+            .starts_with("~/.agents/skills/s is a symlink (to /x/s);"));
+        assert_eq!(act(&hp, "t").op, ActionOp::Create);
+
+        snap.links
+            .insert("~/.agents".into(), "/dotfiles/agents".into());
+        let hp = plan_for(
+            &catalog_of(&[SKILL, T]),
+            &Codex,
+            &snap,
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        for name in ["s", "t"] {
+            assert!(
+                act(&hp, name)
+                    .reason
+                    .as_deref()
+                    .unwrap()
+                    .starts_with("~/.agents is a symlink (to /dotfiles/agents);"),
+                "{name}"
+            );
+        }
+    }
+
+    /// F3c: a symlinked legacy `~/.codex/skills` blocks the removal of a
+    /// manifest-listed old copy — it may be Claude's own file — with advice
+    /// that does not suggest turning Codex off (a retiring host still
+    /// removes).
+    #[test]
+    fn removing_an_old_copy_through_a_symlinked_legacy_dir_is_blocked() {
+        let mut snap = HostSnapshot::default();
+        snap.links
+            .insert("~/.codex/skills".into(), "/home/u/.claude/skills".into());
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "skill/gone".into(),
+            ManifestEntry {
+                hash: "h".into(),
+                files: vec!["~/.codex/skills/gone/SKILL.md".into()],
+                ..Default::default()
+            },
+        );
+        let hp = plan_for(
+            &Catalog::default(),
+            &Codex,
+            &snap,
+            &manifest,
+            &secrets_map(),
+        );
+        let a = act(&hp, "gone");
+        assert_eq!(a.op, ActionOp::Blocked);
+        assert_eq!(
+            a.reason.as_deref(),
+            Some("~/.codex/skills is a symlink (to /home/u/.claude/skills); fleet won't remove old Codex skill copies through it — replace it with a real directory")
+        );
+    }
+
+    /// F3c: a Codex skill fleet synced to `~/.codex/skills` before F3c,
+    /// planned by what the new `~/.agents/skills` location already holds:
+    /// nothing ⇒ `Create` that deletes the old copy; an identical copy ⇒
+    /// `Update` that deletes the old copy; a different copy fleet never
+    /// wrote ⇒ `Overwrite` (backed up), never a silent `Update`. Without a
+    /// manifest entry the ordinary rules hold: identical ⇒ `Adopt`,
+    /// different ⇒ `Overwrite("present but differs; not managed")`.
+    #[test]
+    fn a_codex_skill_moving_to_agents_skills_plans_by_what_the_new_location_holds() {
+        let new_plan = substituted(&Codex, &asset(SKILL), &secrets_map());
+        let new_path = new_plan.files[0].path.clone();
+        assert_eq!(new_path, "~/.agents/skills/s/SKILL.md");
+        let old_path = "~/.codex/skills/s/SKILL.md".to_string();
+        let mut old_plan = new_plan.clone();
+        old_plan.files[0].path = old_path.clone();
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "skill/s".into(),
+            Manifest::entry_for(&old_plan.hash(), &old_plan, 0, "personal"),
+        );
+        let mut old_only = HostSnapshot::default();
+        satisfy(&mut old_only, &old_plan);
+        let catalog = catalog_of(&[SKILL]);
+        let old_files = |a: &Action| a.remove_entry.as_ref().map(|e| e.files.clone());
+
+        // Nothing at the new location yet: the normal migration.
+        let hp = plan_for(&catalog, &Codex, &old_only, &manifest, &secrets_map());
+        let a = act(&hp, "s");
+        assert_eq!(a.op, ActionOp::Create);
+        assert_eq!(a.reason.as_deref(), Some(MOVED_CREATE_REASON));
+        assert_eq!(a.files, vec![new_path.clone()]);
+        assert_eq!(old_files(a), Some(vec![old_path.clone()]));
+        assert_eq!(a.expected[&new_path], None);
+
+        // An identical copy is already there.
+        let mut identical = old_only.clone();
+        satisfy(&mut identical, &new_plan);
+        let hp = plan_for(&catalog, &Codex, &identical, &manifest, &secrets_map());
+        let a = act(&hp, "s");
+        assert_eq!(a.op, ActionOp::Update);
+        assert_eq!(a.reason.as_deref(), Some(MOVED_UPDATE_REASON));
+        assert_eq!(old_files(a), Some(vec![old_path.clone()]));
+
+        // A diverged hand-made copy is there: an overwrite, backed up.
+        let mut diverged = old_only.clone();
+        diverged.files.insert(new_path.clone(), "edited".into());
+        let hp = plan_for(&catalog, &Codex, &diverged, &manifest, &secrets_map());
+        let a = act(&hp, "s");
+        assert_eq!(a.op, ActionOp::Overwrite);
+        assert_eq!(a.reason.as_deref(), Some(MOVED_ONTO_FOREIGN_REASON));
+        assert!(a.backup);
+        assert_eq!(old_files(a), Some(vec![old_path.clone()]));
+
+        // Never managed: the ordinary unmanaged rules.
+        let mut fresh_identical = HostSnapshot::default();
+        satisfy(&mut fresh_identical, &new_plan);
+        let hp = plan_for(
+            &catalog,
+            &Codex,
+            &fresh_identical,
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        assert_eq!(act(&hp, "s").op, ActionOp::Adopt);
+        let mut fresh_diverged = HostSnapshot::default();
+        fresh_diverged
+            .files
+            .insert(new_path.clone(), "edited".into());
+        let hp = plan_for(
+            &catalog,
+            &Codex,
+            &fresh_diverged,
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        let a = act(&hp, "s");
+        assert_eq!(a.op, ActionOp::Overwrite);
+        assert_eq!(
+            a.reason.as_deref(),
+            Some("present but differs; not managed")
         );
     }
 }

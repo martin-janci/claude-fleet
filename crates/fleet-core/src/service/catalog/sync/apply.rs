@@ -2418,6 +2418,184 @@ mod tests {
         assert!(manifest.assets.is_empty(), "{manifest:?}");
     }
 
+    /// F3c end to end: with `~/.agents/skills` a symlink to
+    /// `~/.claude/skills`, the real Codex scan reports the link and both
+    /// Codex skill actions are blocked — the one that differs from Claude's
+    /// copy and the one byte-identical to it (adopting would make two
+    /// manifests claim one file) — so Claude's files are untouched and no
+    /// Codex manifest is written.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn codex_never_writes_through_a_symlinked_agents_skills_locally() {
+        use crate::service::catalog::harness::codex::Codex;
+        use crate::service::catalog::model::Kind;
+        let _lock = crate::service::catalog::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        let repo_dir = tempfile::tempdir().unwrap();
+        let catalog = write_catalog(
+            repo_dir.path(),
+            &[
+                (
+                    "skills/s/asset.yaml",
+                    "kind: skill\nname: s\ndescription: d\n",
+                ),
+                ("skills/s/body.md", "codex body\n"),
+                (
+                    "skills/t/asset.yaml",
+                    "kind: skill\nname: t\ndescription: d\n",
+                ),
+                ("skills/t/body.md", "same body\n"),
+            ],
+        );
+        let claude_skills = home.path().join(".claude/skills");
+        std::fs::create_dir_all(claude_skills.join("s")).unwrap();
+        std::fs::write(claude_skills.join("s/SKILL.md"), "claude's copy\n").unwrap();
+        let t_bytes = Codex
+            .render(catalog.find(Kind::Skill, "t").unwrap())
+            .unwrap()
+            .files[0]
+            .bytes
+            .clone();
+        std::fs::create_dir_all(claude_skills.join("t")).unwrap();
+        std::fs::write(claude_skills.join("t/SKILL.md"), &t_bytes).unwrap();
+        std::fs::create_dir_all(home.path().join(".agents")).unwrap();
+        std::os::unix::fs::symlink(&claude_skills, home.path().join(".agents/skills")).unwrap();
+        let ssh = Arc::new(SshClient::new());
+        let ctx = ApplyCtx {
+            ssh: &ssh,
+            token: CancellationToken::new(),
+            now: 1_000,
+        };
+
+        let plan = codex_plan_for(&ssh, &catalog).await;
+        let target = claude_skills.to_string_lossy().to_string();
+        let reason = format!(
+            "~/.agents/skills is a symlink (to {target}); fleet won't write Codex skills through it — replace it with a real directory or turn Codex off for this host"
+        );
+        for name in ["s", "t"] {
+            let a = plan.actions.iter().find(|a| a.name == name).unwrap();
+            assert_eq!(a.op, ActionOp::Blocked, "{name}: {:?}", a.reason);
+            assert_eq!(a.reason.as_deref(), Some(reason.as_str()));
+        }
+        let res = apply_host(&ctx, &Codex, &plan).await;
+        assert!(res.actions.iter().all(|r| r.outcome == BLOCKED), "{res:?}");
+        assert_eq!(
+            std::fs::read_to_string(claude_skills.join("s/SKILL.md")).unwrap(),
+            "claude's copy\n"
+        );
+        assert_eq!(
+            std::fs::read(claude_skills.join("t/SKILL.md")).unwrap(),
+            t_bytes
+        );
+        assert!(
+            !home.path().join(".codex/.fleet-assets.json").exists(),
+            "nothing recorded"
+        );
+    }
+
+    /// F3c end to end against a real temp `$HOME`: a host fleet synced
+    /// before F3c holds a Codex skill at `~/.codex/skills/s/` and a manifest
+    /// pointing there. The next plan creates it in `~/.agents/skills/s/` and
+    /// deletes the old copy (backed up); Codex's own `.system` and a
+    /// hand-made `~/.codex/skills/hand` are never touched; the manifest
+    /// lists only the new path; the plan after that is a no-op.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_codex_skill_synced_before_f3c_moves_to_agents_skills_locally() {
+        use crate::service::catalog::harness::codex::Codex;
+        use crate::service::catalog::model::Kind;
+        let _lock = crate::service::catalog::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        let repo_dir = tempfile::tempdir().unwrap();
+        let catalog = write_catalog(
+            repo_dir.path(),
+            &[
+                (
+                    "skills/s/asset.yaml",
+                    "kind: skill\nname: s\ndescription: d\n",
+                ),
+                ("skills/s/body.md", "body\n"),
+            ],
+        );
+
+        // The pre-F3c layout: the same bytes, where fleet used to write them,
+        // and a manifest entry naming that path.
+        let rendered = Codex
+            .render(catalog.find(Kind::Skill, "s").unwrap())
+            .unwrap();
+        let bytes = rendered.files[0].bytes.clone();
+        let old_dir = home.path().join(".codex/skills/s");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join("SKILL.md"), &bytes).unwrap();
+        let mut old_plan = rendered.clone();
+        old_plan.files[0].path = "~/.codex/skills/s/SKILL.md".into();
+        let mut old_manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        old_manifest.assets.insert(
+            "skill/s".into(),
+            Manifest::entry_for(&old_plan.hash(), &old_plan, 1, "personal"),
+        );
+        let manifest_file = home.path().join(".codex/.fleet-assets.json");
+        std::fs::write(&manifest_file, old_manifest.to_json()).unwrap();
+        // Codex's built-ins and a hand-made skill: never fleet's to touch.
+        let system = home.path().join(".codex/skills/.system/builtin/SKILL.md");
+        std::fs::create_dir_all(system.parent().unwrap()).unwrap();
+        std::fs::write(&system, "builtin\n").unwrap();
+        let hand = home.path().join(".codex/skills/hand/SKILL.md");
+        std::fs::create_dir_all(hand.parent().unwrap()).unwrap();
+        std::fs::write(&hand, "mine\n").unwrap();
+
+        let ssh = Arc::new(SshClient::new());
+        let ctx = ApplyCtx {
+            ssh: &ssh,
+            token: CancellationToken::new(),
+            now: 2_000,
+        };
+        let plan = codex_plan_for(&ssh, &catalog).await;
+        assert_eq!(plan.actions.len(), 1, "{:?}", plan.actions);
+        let a = &plan.actions[0];
+        assert_eq!(a.op, ActionOp::Create, "{:?}", a.reason);
+        assert_eq!(a.reason.as_deref(), Some(plan::MOVED_CREATE_REASON));
+        assert_eq!(a.files, vec!["~/.agents/skills/s/SKILL.md".to_string()]);
+        assert_eq!(
+            a.remove_entry.as_ref().map(|e| e.files.clone()),
+            Some(vec!["~/.codex/skills/s/SKILL.md".to_string()])
+        );
+
+        let res = apply_host(&ctx, &Codex, &plan).await;
+        assert_eq!(res.status, "applied", "{res:?}");
+        assert_eq!(
+            std::fs::read(home.path().join(".agents/skills/s/SKILL.md")).unwrap(),
+            bytes
+        );
+        assert!(!old_dir.join("SKILL.md").exists(), "the old copy is gone");
+        assert_eq!(backups(&old_dir).len(), 1, "backed up, like any removal");
+        assert_eq!(std::fs::read_to_string(&system).unwrap(), "builtin\n");
+        assert_eq!(std::fs::read_to_string(&hand).unwrap(), "mine\n");
+        let manifest: Manifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_file).unwrap()).unwrap();
+        assert_eq!(
+            manifest.assets["skill/s"].files,
+            vec!["~/.agents/skills/s/SKILL.md".to_string()]
+        );
+        assert_eq!(manifest.assets.len(), 1, "{manifest:?}");
+
+        let again = codex_plan_for(&ssh, &catalog).await;
+        assert_eq!(again.actions[0].op, ActionOp::Noop);
+    }
+
     /// A path the applier refuses to interpolate fails its action outright,
     /// and nothing at all is sent to the host.
     #[tokio::test]

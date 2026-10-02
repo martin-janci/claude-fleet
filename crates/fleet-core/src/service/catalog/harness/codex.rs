@@ -57,7 +57,14 @@ const CODEX_PRESENT_PROBE: &str = "if command -v codex >/dev/null 2>&1 || [ -e .
 /// setups point one of them at `~/.claude/skills`; fleet must never write
 /// Codex skills through it (`sync::plan`). POSIX sh, no single quote; a
 /// glob that matches nothing stays literal and fails `-L`.
-const CODEX_LINK_PROBE: &str = "for l in .agents .agents/skills .agents/skills/* .codex/skills; do if [ -L \"$l\" ]; then echo \"##LINK ~/$l -> $(readlink \"$l\")\"; fi; done; ";
+///
+/// Each hit is two lines, like a `##CONFIG` block: `##LINK <path>`, then the
+/// `readlink` target alone on the next line (`tr -d` strips any newline it
+/// printed, and the trailing `echo` guarantees exactly one line even when
+/// `readlink` fails). Never `##LINK <path> -> <target>` on one line — a
+/// directory whose own name contains `" -> "` would otherwise corrupt the
+/// parsed path (`harness::parse_scan_blocks`).
+const CODEX_LINK_PROBE: &str = "for l in .agents .agents/skills .agents/skills/* .codex/skills; do if [ -L \"$l\" ]; then echo \"##LINK ~/$l\"; readlink \"$l\" 2>/dev/null | tr -d \"\\n\"; echo; fi; done; ";
 
 /// A `targets.codex.extra` value as TOML: nulls stripped (TOML has none);
 /// `None` when nothing representable is left.
@@ -508,6 +515,17 @@ impl Harness for Codex {
 
     fn manifest_path(&self) -> &'static str {
         CODEX_MANIFEST_PATH
+    }
+
+    /// F3c. A linked legacy `~/.codex/skills` only blocks removing old
+    /// copies, and turning Codex off would not avoid that (a retiring host
+    /// still runs those removals), so its advice differs.
+    fn symlink_reason(&self, link: &str, target: &str) -> String {
+        if link == CODEX_LEGACY_SKILLS_DIR {
+            format!("{link} is a symlink (to {target}); fleet won't remove old Codex skill copies through it — replace it with a real directory")
+        } else {
+            format!("{link} is a symlink (to {target}); fleet won't write Codex skills through it — replace it with a real directory or turn Codex off for this host")
+        }
     }
 
     /// Parses `existing` as TOML (an empty string is an empty document; a
