@@ -47,6 +47,16 @@ export const withheldGuides = writable<WithheldGuide[]>([]);
  *  paired desktop, when the hub's operator trusts it. */
 export const guidesWritable = writable<boolean>(true);
 
+/** Why the last read of the guides failed, or null when it did not.
+ *
+ *  `loadGuides`'s `Result` was discarded, so a failed read left `liveGuides`
+ *  and `guideProposals` at `[]` and the page stated "No guide is waiting" as
+ *  FACT — the one thing a failed call cannot establish. `guidesWritable` also
+ *  stayed at its `true` initialiser, which suppressed the read-only note built
+ *  for exactly that case. A revision-6 hub (no `guide` tool) and a
+ *  readonly-paired desktop both reach it. */
+export const guidesError = writable<string | null>(null);
+
 /** Every page a person navigates: the compiled ones and the live guides. */
 export const allPages = derived([pagesBundle, liveGuides], ([$b, $g]) => {
   const compiled = new Set($b.pages.map((p) => p.id));
@@ -62,7 +72,16 @@ function apply(v: GuidesView) {
 
 export async function loadGuides(): Promise<Result<GuidesView>> {
   const r = await invokeCmd<GuidesView>('list_guides');
-  if (r.ok && r.value) apply(r.value);
+  if (r.ok && r.value) {
+    apply(r.value);
+    guidesError.set(null);
+  } else if (!r.ok) {
+    // What `loadHubPages` and the sibling `loadProposals` both already do: say
+    // the read failed, and do not claim the fleet has no guides. `can_write`
+    // goes false too — this device established nothing about what it may do.
+    guidesError.set(r.error.message);
+    guidesWritable.set(false);
+  }
   return r;
 }
 

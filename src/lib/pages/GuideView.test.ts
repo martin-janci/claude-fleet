@@ -8,7 +8,16 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import PageView from './PageView.svelte';
 import { allDescriptors, bundle } from './testing';
-import { guideProposals, guidesWritable, liveGuides, loadGuides, withheldGuides, type GuidesView } from './guides';
+import {
+  guideProposals,
+  guidesError,
+  guidesWritable,
+  liveGuides,
+  loadGuides,
+  withheldGuides,
+  type GuidesView,
+} from './guides';
+import { get } from 'svelte/store';
 import type { Page } from './pages';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
@@ -61,6 +70,7 @@ beforeEach(() => {
   withheldGuides.set([]);
   guideProposals.set([]);
   guidesWritable.set(true);
+  guidesError.set(null);
 });
 
 describe('a guide, step by step', () => {
@@ -71,7 +81,7 @@ describe('a guide, step by step', () => {
     const withButton: Page = {
       ...cleanup,
       sections: [
-        cleanup.sections[0],
+        (cleanup.sections ?? [])[0],
         { title: 'Run it', items: [{ type: 'action', action: bundle.actions[0].id }] },
       ],
     };
@@ -269,6 +279,57 @@ describe('the Guides page', () => {
     showReview();
     await fireEvent.click(screen.getAllByTestId('guide-preview-7')[1]);
     expect(screen.getAllByTestId('guide-steps-7')[0].textContent).toContain('not an action of this build');
+  });
+
+  it("reads out a step's own prose and a stat's own label", async () => {
+    // The preview is the only thing a person reads before making an
+    // agent-authored guide live, and these two were the agent's free text: a
+    // step's `intro` was never rendered at all, and a `stat` was read out as
+    // fleet's source label with the guide's own words for the number dropped.
+    const authored: Page = {
+      ...cleanup,
+      sections: [
+        {
+          title: 'What it does',
+          intro: 'Trust me, this is completely safe and reversible.',
+          items: [{ type: 'stat', source: { id: 'work.usage' }, label: 'Sessions we will stop' }],
+        },
+      ],
+    };
+    inv.mockImplementation(async (cmd: string) =>
+      cmd === 'list_guides' ? { ...waiting, proposals: [{ ...waiting.proposals[0], page: authored }] } : null,
+    );
+    await loadGuides();
+    showReview();
+    await fireEvent.click(screen.getByTestId('guide-preview-7'));
+    const steps = screen.getByTestId('guide-steps-7');
+    expect(steps.textContent).toContain('completely safe and reversible');
+    expect(steps.textContent).toContain('Sessions we will stop');
+  });
+
+  it("says the read failed rather than claiming the fleet has no guides", async () => {
+    // `loadGuides`'s Result was discarded, so a failed read left the stores at
+    // their initialisers and the page asserted "No guide is waiting" — the one
+    // thing a failed call cannot establish — while `guidesWritable` stayed
+    // `true`, which also hid the read-only note built for that case.
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_guides') throw { code: 'E_HUB_PROTOCOL', message: 'this hub has no `guide` tool' };
+      return null;
+    });
+    const r = await loadGuides();
+    expect(r.ok).toBe(false);
+    showReview();
+    expect(screen.getByTestId('guide-review-error').textContent).toContain('no `guide` tool');
+    expect(screen.queryByTestId('guide-review-empty')).toBeNull();
+    // And this device no longer claims it may decide: `guidesWritable` stayed
+    // at its `true` initialiser on a failed read, which is what drew an
+    // Approve button for a device that had established nothing.
+    expect(get(guidesWritable)).toBe(false);
+
+    // And a read that works clears it.
+    inv.mockImplementation(async (cmd: string) => (cmd === 'list_guides' ? waiting : null));
+    await loadGuides();
+    expect(get(guidesError)).toBeNull();
   });
 
   it('offers no decision to a device the hub does not trust', async () => {

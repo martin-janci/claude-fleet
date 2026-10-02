@@ -82,6 +82,10 @@ export type RowEventHandlers = {
   /** One call per flush with every `update:changed` (update design §11: ids
    *  only), in order: re-read `update_status`. */
   onUpdateChanged?: (changes: UpdateChanged[]) => void;
+  /** Called once per flush when any `guides:changed` arrived (declarative
+   *  pages L9: no payload — re-read `list_guides`, which is the only thing
+   *  that knows what this caller may see). */
+  onGuidesChanged?: () => void;
 };
 
 /** The payload of `update:changed`: what moved, never the row itself. */
@@ -121,7 +125,8 @@ type Queued =
   | { name: 'work:tracker_removed'; payload: { id: number } }
   | { name: 'work:changed'; payload: unknown }
   | { name: 'settings:changed'; payload: { key: string } }
-  | { name: 'update:changed'; payload: UpdateChanged };
+  | { name: 'update:changed'; payload: UpdateChanged }
+  | { name: 'guides:changed'; payload: Record<string, never> };
 
 /**
  * Subscribe to every row-change event from the backend. Returns a single
@@ -161,6 +166,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     const workEvents: WorkEvent[] = [];
     const workChanges: WorkChanged[] = [];
     const settingsKeys: string[] = [];
+    let guidesChanged = false;
     const updateChanges: UpdateChanged[] = [];
     for (const ev of batch) {
       switch (ev.name) {
@@ -254,6 +260,11 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
         case 'settings:changed':
           if (typeof ev.payload?.key === 'string') settingsKeys.push(ev.payload.key);
           break;
+        case 'guides:changed':
+          // No payload and nothing to accumulate: one re-read per flush
+          // however many guides moved.
+          guidesChanged = true;
+          break;
         case 'update:changed': {
           // Ids only, so anything readable is enough: a newer hub's `what`
           // still means "re-read".
@@ -279,6 +290,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     if (workChanges.length > 0) handlers.onWorkChanged?.(workChanges);
     if (settingsKeys.length > 0) handlers.onSettingsChanged?.(settingsKeys);
     if (updateChanges.length > 0) handlers.onUpdateChanged?.(updateChanges);
+    if (guidesChanged) handlers.onGuidesChanged?.();
   };
 
   const enqueue = (ev: Queued) => {
@@ -318,6 +330,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     work: !!handlers.onWorkEvents,
     workChanged: !!handlers.onWorkChanged,
     settingsChanged: !!handlers.onSettingsChanged,
+    guidesChanged: !!handlers.onGuidesChanged,
     updateChanged: !!handlers.onUpdateChanged,
   };
 
@@ -359,6 +372,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('work:changed', wanted.workChanged),
     sub('settings:changed', wanted.settingsChanged),
     sub('update:changed', wanted.updateChanged),
+    sub('guides:changed', wanted.guidesChanged),
   ]);
   return () => {
     disposed = true;

@@ -37,8 +37,10 @@
 //! * a new variant of an enum a client deserialises — serde fails the whole
 //!   payload on a tag it does not know, so one new `ConvItem` kind costs an
 //!   older desktop the entire `Conversation` rather than one line;
-//! * a command the desktop now routes to a hub **tool that did not exist
-//!   before** (an older hub's router answers "unknown tool", which no
+//! * a command the desktop now routes to a hub **tool, or an action of a
+//!   tool, that did not exist before** (an older hub's router answers
+//!   "unknown tool", and an unknown action fails the internally-tagged
+//!   `AdminCall`'s deserialisation outright — neither of which any
 //!   `#[serde(default)]` can soften).
 //!
 //! A client compares this against the range of revisions it understands
@@ -109,4 +111,22 @@
 //!   local-only, for the master or a paired client granted the catalog. A
 //!   revision-5 hub does not serve it, so even a granted desktop would open
 //!   the full Assets panel and fail every action with an unknown tool.
-pub const CONTRACT_REVISION: u32 = 6;
+//! - **7** — *a brand-new tool the desktop routes to, and a new ACTION on an
+//!   existing one.* Both shipped on revision 6 without a bump, which is what
+//!   this revision corrects.
+//!
+//!   `guide` (declarative pages, layout L9): `list_guides`, `decide_guide`
+//!   and `remove_guide` route to it. A revision-6 hub's router does not serve
+//!   it, and the desktop discards the resulting `E_HUB_PROTOCOL` — so the
+//!   Guides page on such a pairing reads as "no guides are live", stating as
+//!   fact the one thing the failed call could not establish.
+//!
+//!   `catalog_admin` gained the `import_host` and `set_host_harnesses`
+//!   actions, which `catalog_import_host` and `catalog_set_host_harnesses`
+//!   route to. A new action is as unabsorbable as a new tool and worse to
+//!   read: the older hub's `AdminCall` is an internally-tagged enum, so an
+//!   unknown action fails deserialisation and the desktop shows a raw serde
+//!   message instead of "update the hub". The rule above says a tool that did
+//!   not exist before; an action that did not exist before is the same
+//!   promise, and this is the revision that says so.
+pub const CONTRACT_REVISION: u32 = 7;

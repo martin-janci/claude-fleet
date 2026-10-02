@@ -591,6 +591,14 @@ impl Store {
         self.bus.emit(&RowChange::SettingsChanged(key.to_string()));
     }
 
+    /// Emit `guides:changed` (declarative pages L9). Called by
+    /// `service::guides` after a propose, a decision or a removal — the house
+    /// rule its sibling `settings_review` already follows, and the reason the
+    /// Guides page can be open while a host session proposes into it.
+    pub fn emit_guides_changed(&self) {
+        self.bus.emit(&RowChange::GuidesChanged);
+    }
+
     /// Forget a key, so the next `get_setting` answers `None` and its reader
     /// falls back to its own default. Absent and "stored as the default" are
     /// not the same thing: the second pins today's default forever (see

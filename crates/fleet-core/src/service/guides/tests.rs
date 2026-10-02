@@ -569,3 +569,43 @@ fn guide_text_and_its_reason_carry_no_terminal_escapes() {
     assert!(e.message.contains("control"), "{}", e.message);
     assert!(pending(&s).unwrap().is_empty(), "and nothing was stored");
 }
+
+/// Every write says so on the bus.
+///
+/// Without an event the Guides page was read once on mount and never again: a
+/// host session proposing a guide while Settings is open — the whole point of
+/// the `fleet-guides` skill — never appeared, the nav badge never moved, and a
+/// row approved from `fleet-hub guides` elsewhere kept a live Approve button
+/// whose every click raised `no guide proposal {id} waits`. Its sibling
+/// `settings_review` emits on propose and on decide; this is the same rule.
+#[test]
+fn propose_decide_and_remove_each_say_so_on_the_bus() {
+    use crate::events::RecordingEventBus;
+    use std::sync::Arc;
+    let bus = Arc::new(RecordingEventBus::new());
+    let dyn_bus: Arc<dyn crate::events::EventBus> = bus.clone();
+    let s = Store::open_with_bus_in_memory(dyn_bus).unwrap();
+
+    let row = propose(&s, &example(), None, agent()).unwrap();
+    assert!(
+        bus.take().iter().any(|e| e.starts_with("guides:changed")),
+        "a proposal is a change"
+    );
+
+    decide(&s, row.id, true, person()).unwrap();
+    assert!(bus.take().iter().any(|e| e.starts_with("guides:changed")));
+
+    remove(&s, "guide.cleanup", person()).unwrap();
+    assert!(bus.take().iter().any(|e| e.starts_with("guides:changed")));
+
+    // A rejection too, and a REFUSED write does not pretend to be one.
+    let again = propose(&s, &example(), None, agent()).unwrap();
+    bus.take();
+    decide(&s, again.id, false, person()).unwrap();
+    assert!(bus.take().iter().any(|e| e.starts_with("guides:changed")));
+    assert!(remove(&s, "guide.cleanup", person()).is_err());
+    assert!(
+        !bus.take().iter().any(|e| e.starts_with("guides:changed")),
+        "nothing changed, so nothing is announced"
+    );
+}

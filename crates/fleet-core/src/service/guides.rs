@@ -300,6 +300,7 @@ pub fn propose(
             source_detail: actor.detail(),
         })
         .map_err(IpcError::from)?;
+    s.emit_guides_changed();
     Ok(row)
 }
 
@@ -454,6 +455,7 @@ pub fn decide(s: &Store, id: i64, approve: bool, actor: Actor<'_>) -> Result<Gui
     {
         return Err(race(id));
     }
+    s.emit_guides_changed();
     view(s, true)
 }
 
@@ -494,6 +496,7 @@ pub fn remove(s: &Store, page_id: &str, actor: Actor<'_>) -> Result<GuidesView, 
     {
         return Err(race(row.id));
     }
+    s.emit_guides_changed();
     view(s, true)
 }
 

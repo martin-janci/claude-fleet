@@ -381,8 +381,13 @@ API's `guide` tool (`docs/control-api.md`), usually through the
    problem with where it is — the same `pages::validate` as every page,
    against this build's registries — plus: id `guide.<name>` and none of
    the app's pages, parent `guides`, 16 KiB at most.
-3. `guide { action: propose, spec, why }` stores a proposal. **Nothing is
-   shown until a person approves it**: in Settings → Guides (each proposal
+3. `guide { action: propose, spec, why }` stores a proposal. Every propose,
+   decision and removal emits `guides:changed` (no payload — a reader
+   re-reads `list_guides`, the only thing that knows what that caller may
+   see), so a Settings dialog that is already open follows a guide a host
+   session proposes into it. Like `settings:changed`, it never reaches a
+   per-host token or an org-bound client. **Nothing is shown until a person
+   approves it**: in Settings → Guides (each proposal
    with who, why and its steps in words, then Approve / Reject), or with
    `fleet-hub guides list | show <id> | approve <id> | reject <id> |
    remove <guide id>` on a hub. Deciding and removing need the master or a

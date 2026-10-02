@@ -264,6 +264,14 @@
         void loadFleetSettings();
         void loadProposals();
       },
+      // A guide proposed, approved, rejected or removed — by a host session
+      // while this dialog is open (the point of the `fleet-guides` skill), or
+      // by `fleet-hub guides` elsewhere. Without this the list, the nav badge
+      // and the live-guide page tree were whatever they were on mount, and a
+      // stale row kept a live Approve button that refused every click.
+      onGuidesChanged: () => {
+        void loadGuides();
+      },
     });
     if (destroyed) off();
     else unlistenSettings = off;

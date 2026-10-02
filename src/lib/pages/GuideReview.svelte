@@ -12,6 +12,7 @@
     decideGuide,
     guideAuthor,
     guideProposals,
+    guidesError,
     guidesWritable,
     liveGuides,
     removeGuide,
@@ -61,7 +62,13 @@
         if (!a) return `Button: ${item.action} (not an action of this build)`;
         return `Button: “${a.label}” (${a.id})${a.confirm ? ` — asks first: “${a.confirm}”` : ''}`;
       }
-      case 'stat':
+      case 'stat': {
+        // A `stat`'s `label` is the agent's own words for the number, so it is
+        // read out beside the source it reads — naming only the source showed
+        // the reviewer fleet's label and hid the guide's.
+        const src = sources.find((s) => s.id === item.source.id)?.label ?? item.source.id;
+        return item.label ? `Shows: ${src} — labelled “${item.label}”` : `Shows: ${src}`;
+      }
       case 'record':
         return `Shows: ${sources.find((s) => s.id === item.source.id)?.label ?? item.source.id}`;
       default:
@@ -138,7 +145,13 @@
 
   <section class="group">
     <h5>Waiting for review</h5>
-    {#if $guideProposals.length === 0}
+    {#if $guidesError}
+      <!-- Never "no guide is waiting" when the read is what failed: that is
+           the one thing a failed call cannot establish. -->
+      <p class="note" data-testid="guide-review-error">
+        The guides could not be read: {$guidesError}
+      </p>
+    {:else if $guideProposals.length === 0}
       <p class="empty" data-testid="guide-review-empty">No guide is waiting. When a Claude session proposes one, it waits here.</p>
     {:else}
       {#if !$guidesWritable}
@@ -163,6 +176,11 @@
                 {#each p.page.sections ?? [] as s (s.title)}
                   <li>
                     <strong>{s.title}</strong>{#if s.when}<span class="meta"> (only when it applies)</span>{/if}
+                    <!-- A step's own prose. An agent writes it, and it was the
+                         one thing on the step the reviewer was never shown:
+                         free text landing in front of a desktop user, approved
+                         unread. -->
+                    {#if s.intro}<p class="intro">{s.intro}</p>{/if}
                     <ul>
                       {#each s.items as item, i (i)}<li>{words(item)}</li>{/each}
                     </ul>

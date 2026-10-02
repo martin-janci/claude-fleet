@@ -114,6 +114,18 @@ pub enum RowChange {
     /// Ids only — a client re-reads `update_status`. Kind `update`, so never
     /// sent to a host-bound or org-bound stream (it names every target).
     UpdateChanged(UpdateChanged),
+    /// A stored guide was proposed, decided or removed (declarative pages
+    /// L9). No payload — a client re-reads `list_guides`, which is the only
+    /// thing that knows what this caller may see.
+    ///
+    /// Without it the Guides page was read once on mount and never again: a
+    /// host session proposing a guide while Settings is open — the whole point
+    /// of the `fleet-guides` skill — never appeared, the nav badge never
+    /// moved, and a row approved elsewhere kept a live Approve button that
+    /// raised `no guide proposal {id} waits` on every click. Kind `guides`, so
+    /// never sent to a host-bound or org-bound stream: a guide is fleet-wide
+    /// and a person's to decide.
+    GuidesChanged,
 }
 
 /// The payload of `update:changed`.
@@ -309,6 +321,7 @@ impl RowChange {
             RowChange::WorkChanged(_) => "work:changed",
             RowChange::SettingsChanged(_) => "settings:changed",
             RowChange::UpdateChanged(_) => "update:changed",
+            RowChange::GuidesChanged => "guides:changed",
         }
     }
 
@@ -363,6 +376,7 @@ impl RowChange {
             RowChange::TrackerRemoved(id) => serde_json::json!({ "id": id }),
             RowChange::WorkChanged(w) => to_value(w),
             RowChange::SettingsChanged(key) => serde_json::json!({ "key": key }),
+            RowChange::GuidesChanged => serde_json::json!({}),
             RowChange::UpdateChanged(u) => to_value(u),
         }
     }
@@ -550,7 +564,7 @@ pub struct BroadcastEventBus {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 26] = [
+pub const EVENT_NAMES: [&str; 27] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -577,12 +591,13 @@ pub const EVENT_NAMES: [&str; 26] = [
     "work:changed",
     "settings:changed",
     "update:changed",
+    "guides:changed",
 ];
 
 /// Every event kind — the part of a [`RowChange::name`] before the `:`, which
 /// is what the `/events` route's `?kinds=` filter matches on.
 /// `event_kinds_cover_every_name` keeps it in step with the variants.
-pub const EVENT_KINDS: [&str; 14] = [
+pub const EVENT_KINDS: [&str; 15] = [
     "session",
     "host",
     "account",
@@ -597,6 +612,7 @@ pub const EVENT_KINDS: [&str; 14] = [
     "work",
     "settings",
     "update",
+    "guides",
 ];
 
 /// Seconds since the Unix epoch (0 on a clock set before 1970).
@@ -887,6 +903,7 @@ impl EventBus for RecordingEventBus {
                 w.view_id
             ),
             RowChange::SettingsChanged(key) => key.clone(),
+            RowChange::GuidesChanged => String::new(),
             RowChange::UpdateChanged(u) => {
                 format!("{}:{}", u.what, u.target.as_deref().unwrap_or_default())
             }
@@ -1089,6 +1106,7 @@ mod tests {
                 RowChange::TrackerRemoved(_) => pinned_name!("work:tracker_removed"),
                 RowChange::WorkChanged(_) => pinned_name!("work:changed"),
                 RowChange::SettingsChanged(_) => pinned_name!("settings:changed"),
+                RowChange::GuidesChanged => pinned_name!("guides:changed"),
                 RowChange::UpdateChanged(_) => pinned_name!("update:changed"),
             }
         }

@@ -108,6 +108,33 @@ describe('subscribeToRowEvents', () => {
     expect(seen).toEqual([['gc.enabled', 'work.recent_days']]);
   });
 
+  it('collapses every guides:changed in a flush into one re-read', async () => {
+    // No payload, so there is nothing to accumulate: a host session proposing
+    // three guides at once costs one `list_guides`, not three. Before the event
+    // existed the Guides page was read on mount and never again.
+    let calls = 0;
+    await subscribeToRowEvents({ onGuidesChanged: () => (calls += 1) });
+    fire('guides:changed', {});
+    fire('guides:changed', {});
+    await flush();
+    expect(calls).toBe(1);
+    // And not again on an empty flush.
+    await flush();
+    expect(calls).toBe(1);
+    fire('guides:changed', {});
+    await flush();
+    expect(calls).toBe(2);
+  });
+
+  it('listens for guides:changed only when asked', async () => {
+    vi.mocked(listen).mockClear();
+    await subscribeToRowEvents({ onSettingsChanged: () => {} });
+    expect(vi.mocked(listen).mock.calls.map((c) => c[0])).not.toContain('guides:changed');
+    vi.mocked(listen).mockClear();
+    await subscribeToRowEvents({ onGuidesChanged: () => {} });
+    expect(vi.mocked(listen).mock.calls.map((c) => c[0])).toContain('guides:changed');
+  });
+
   it('listens for work:changed only when asked', async () => {
     vi.mocked(listen).mockClear();
     await subscribeToRowEvents({ onWorkEvents: () => {} });

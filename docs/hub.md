@@ -2161,6 +2161,12 @@ device rejects the same proposal — answers `E_CONFLICT` and changes nothing,
 rather than printing `approved #3` over someone else's decision. Read the list
 again and decide once.
 
+Every propose, decision and removal emits `guides:changed` on `/events`, so a
+paired desktop with Settings open follows what this console does rather than
+showing what it read on open. The frame carries no payload: a reader re-reads
+`list_guides`, which is the only thing that knows what that caller may see.
+Kind `guides`, so it never reaches a per-host token or an org-bound client.
+
 See `docs/pages.md` → *Guides*.
 
 **On a paired device** (declarative pages P6). The desktop paired with this
