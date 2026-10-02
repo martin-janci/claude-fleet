@@ -1,6 +1,11 @@
-# Keep in sync with README ("Rust 1.83+") and .github/workflows/ci.yml
-# (dtolnay/rust-toolchain@stable). Tracks stable rather than pinning a
-# specific version so local builds match what CI resolves.
+# Pinned, not `stable`: a floating channel cold-started every CI cache (the
+# rust-cache key embeds the rustc version), every local `target/` and every
+# build benchmark on each stable release, and new clippy lints failed
+# unrelated PRs (RUST-BUILD-PERFORMANCE-AUDIT.md §18.4). Bump it in a PR of
+# its own, together with every `dtolnay/rust-toolchain@<version>` in
+# .github/workflows and the `rust:<version>-bookworm` image in
+# crates/fleet-hub/Dockerfile; scripts/check-version-consistency.sh fails CI
+# when they disagree. README's "Rust 1.83+" is the minimum, not the pin.
 [toolchain]
-channel = "stable"
+channel = "1.99.0"
 components = ["rustfmt", "clippy"]
