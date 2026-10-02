@@ -88,6 +88,22 @@ describe('groupTasksByStatus', () => {
     expect([...s.todo, ...s.doing, ...s.done].map((n) => n.task.task_id)).not.toContain('item:4');
   });
 
+  it('puts an archived task with no status in Done, under the window', () => {
+    const s = groupTasksByStatus(
+      [
+        // A bare-key task: no item, so no status_category at all.
+        task({ task_id: 'ref:PAY-9', status_category: undefined as never, archived: true, counts: { active: 0, ended: 1, suggested: 0 }, last_activity_at: NOW - 60 }),
+        task({ task_id: 'ref:PAY-8', status_category: undefined as never, archived: true, counts: { active: 0, ended: 1, suggested: 0 }, last_activity_at: NOW - DONE_WINDOW_SECS - 1 }),
+        // Archived but still live is still Doing: something is running on it.
+        task({ task_id: 'item:3', status_category: 'todo', archived: true, counts: { active: 1, ended: 0, suggested: 0 }, last_activity_at: NOW }),
+      ],
+      NOW,
+    );
+    expect(s.done.map((n) => n.task.task_id)).toEqual(['ref:PAY-9']);
+    expect(s.doing.map((n) => n.task.task_id)).toEqual(['item:3']);
+    expect(s.todo).toEqual([]);
+  });
+
   it('sorts each section newest first, promoted subtasks included', () => {
     const s = groupTasksByStatus(
       [

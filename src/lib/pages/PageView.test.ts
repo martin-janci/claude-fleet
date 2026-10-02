@@ -9,7 +9,7 @@ import { copyText } from '../clipboard';
 import { hosts, type HostRow } from '../hosts';
 import { accounts } from '../accounts';
 import { accountUsage } from '../account_usage_store';
-import { WORK, GMAIL, snapshot } from '../hosts_fixture';
+import { WORK, GMAIL, host, snapshot } from '../hosts_fixture';
 import PageView from './PageView.svelte';
 import { fleetSettings, SETTING_DEFAULTS } from '../fleet_settings';
 import { allDescriptors, bundle, registryRouter } from './testing';
@@ -252,6 +252,9 @@ describe('PageView — data and links', () => {
 
   it('Claude accounts: a usage block per account from the live store, refreshed through the floor (L8)', async () => {
     accounts.set([WORK, GMAIL]);
+    // A host is logged in to each, which is what makes an account one whose
+    // usage can be read at all: the fetch goes over a host's SSH connection.
+    hosts.set([host('alpha', { account_uuid: WORK.uuid }), host('beta', { account_uuid: GMAIL.uuid })]);
     accountUsage.set({ [WORK.uuid]: snapshot(WORK.uuid, { next_try_at: 0 }) });
     show('usage.accounts');
     const blocks = await screen.findAllByTestId('usage-block');
@@ -269,6 +272,27 @@ describe('PageView — data and links', () => {
     );
     accounts.set([]);
     accountUsage.set({});
+    hosts.set([]);
+  });
+
+  /** `accounts` is every row the table ever held, so an account a host logged
+   *  out of stays in it — and nothing will ever fetch usage for one, since the
+   *  fetch needs a host. Drawn as a block it was a permanent "no usage yet"
+   *  card that no refresh could fill. */
+  it('Claude accounts: an account no host is logged in to is one muted line', async () => {
+    accounts.set([WORK, GMAIL]);
+    hosts.set([host('alpha', { account_uuid: WORK.uuid })]);
+    accountUsage.set({ [WORK.uuid]: snapshot(WORK.uuid, { next_try_at: 0 }) });
+    show('usage.accounts');
+
+    const blocks = await screen.findAllByTestId('usage-block');
+    expect(blocks).toHaveLength(1);
+    const retired = screen.getAllByTestId('accounts-usage-retired');
+    expect(retired).toHaveLength(1);
+    expect(retired[0].textContent).toContain('no host is logged in');
+    accounts.set([]);
+    accountUsage.set({});
+    hosts.set([]);
   });
 
   it('Claude accounts: none yet, and nothing on a paired desktop', async () => {

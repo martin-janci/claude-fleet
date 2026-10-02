@@ -46,6 +46,7 @@
     suppressUnavailable={ctx.suppressUnavailable ?? false}
     onRefresh={account ? ctx.onrefresh : undefined}
     refreshBlocked={ctx.refreshBlocked ?? null}
+    refreshKey={ctx.refreshKey ?? null}
   />
 {:else if view === 'freshness'}
   {@const tier = snap?.subscription ?? account?.seat_tier ?? null}

@@ -234,6 +234,19 @@ fn tracker_view(s: &Store, repo: Option<String>) -> Result<TrackerView, IpcError
             }
         }
     }
+    // Fleet's OWN key shape is known wherever the list RESTRICTS at all.
+    //
+    // `prefix_known` reads an empty list as "no tracker, so any key-shaped
+    // token counts" — so on a fleet with no tracker `TASK-<n>` was already
+    // recognised, and adding it there would have turned that permissive rule
+    // into a list of exactly one, dropping every other key. On a fleet that
+    // HAS a prefix-carrying tracker the list excluded `TASK`, so a native
+    // item's own key was not a key and no prompt or branch signal was ever
+    // produced for one. Added only in that second case, and never counted in
+    // `owners`: fleet is not a tracker that could share a prefix.
+    if !ctx.prefixes.is_empty() {
+        ctx.prefixes.push(crate::store::TASK_KEY_PREFIX.to_string());
+    }
     ctx.trackers = tracker_hosts(&trackers);
     Ok(TrackerView {
         ctx,

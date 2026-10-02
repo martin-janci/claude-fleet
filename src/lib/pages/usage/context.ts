@@ -24,6 +24,10 @@ export interface UsageContext {
   onrefresh?: () => void;
   /** Why a refresh is refused here (a hub client), else null. */
   refreshBlocked?: string | null;
+  /** The key that ALSO refreshes on this surface, shown as a hint beside the
+   *  refresh button. Only the Hosts view binds one (`u`); every other surface
+   *  leaves it out, so the hint is not advertised where nothing answers it. */
+  refreshKey?: string | null;
   /** new_session_host, status_footer: every host. */
   hosts?: HostRow[];
   /** status_footer: every account and snapshot. */

@@ -60,6 +60,11 @@ export interface HostProvisionResult {
   host: string;
   status: string; // provisioned | skipped | failed
   detail: string | null;
+  /** The degraded part of an otherwise successful run (the ag step that did not
+   *  finish, the WSL hooks note), on its own. It is also appended to `detail`;
+   *  this is so a caller need not find it by splitting that sentence. A host
+   *  with a warning is still `provisioned`. */
+  warning?: string | null;
 }
 
 /** Provision every reachable host. `rotate` mints fresh per-host tokens. */

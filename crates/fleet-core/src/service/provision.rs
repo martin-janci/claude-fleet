@@ -907,6 +907,14 @@ pub struct HostProvisionResult {
     /// "provisioned" | "skipped" | "failed"
     pub status: String,
     pub detail: Option<String>,
+    /// The degraded part of an otherwise successful run, on its own — the ag
+    /// step that did not finish, or the WSL hooks note.
+    ///
+    /// It is ALSO appended to `detail`, which is the one readable sentence; the
+    /// field is here so a UI does not have to find it by splitting that
+    /// sentence on `"; "`. `status` stays `"provisioned"`: the host was, and
+    /// what failed is optional.
+    pub warning: Option<String>,
 }
 
 /// Provision every non-hidden host, each with its OWN bearer token (reused
@@ -943,6 +951,7 @@ pub async fn provision_hosts(
                 host: h.alias,
                 status: "skipped".into(),
                 detail: Some("unreachable".into()),
+                warning: None,
             });
             continue;
         }
@@ -973,16 +982,18 @@ pub async fn provision_hosts(
                 results.push(HostProvisionResult {
                     host: h.alias,
                     status: "provisioned".into(),
-                    detail: Some(match warning {
+                    detail: Some(match &warning {
                         Some(w) => format!("{done}; {w}"),
                         None => done.to_string(),
                     }),
+                    warning,
                 });
             }
             Err(e) => results.push(HostProvisionResult {
                 host: h.alias,
                 status: "failed".into(),
                 detail: Some(e.message),
+                warning: None,
             }),
         }
     }
@@ -3380,10 +3391,22 @@ mod tests {
         }
         let tunnels = quiet_tunnels();
         let fake = host_whose_ag_install_fails();
-        let detail = |results: Vec<HostProvisionResult>| {
+        // The warning is BOTH its own field and the tail of the one readable
+        // sentence: a UI reads the field (the onboarding card did it by
+        // splitting `detail` on "; ", which is not a contract), and a person
+        // reads the sentence.
+        let both = |results: Vec<HostProvisionResult>| {
             let r = results.into_iter().find(|r| r.host == "h").unwrap();
-            assert_eq!(r.status, "provisioned");
-            r.detail.unwrap()
+            assert_eq!(r.status, "provisioned", "a degraded run still provisioned");
+            (r.detail.unwrap(), r.warning)
+        };
+        let detail = |results: Vec<HostProvisionResult>| {
+            let (d, w) = both(results);
+            assert!(
+                w.as_deref().is_none_or(|w| d.ends_with(w)),
+                "the field is the tail of the sentence: {d:?} / {w:?}"
+            );
+            d
         };
 
         let full = detail(
@@ -3418,6 +3441,19 @@ mod tests {
                  ag launcher install incomplete"
             ),
             "{content}"
+        );
+
+        // The field carries it on its own, for a caller that must not parse.
+        let (_, warning) = both(
+            provision_hosts(&store, &fake, &tunnels, &base(), ProvisionScope::default())
+                .await
+                .unwrap(),
+        );
+        assert!(
+            warning
+                .as_deref()
+                .is_some_and(|w| w.starts_with("ag launcher install incomplete")),
+            "{warning:?}"
         );
 
         // Clean runs keep the plain success text.

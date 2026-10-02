@@ -37,6 +37,10 @@
   }: { debounceMs?: number; maxWaitMs?: number; onpage?: (p: WorkTreePage) => void } = $props();
 
   const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
+  /** Creating a task routes to the hub too, so it greys out for the same reason
+   *  Start does — it used to stay enabled beside a greyed-out Start, which is
+   *  an offer the click cannot keep. */
+  const createBlocked = $derived(hubActionBlocked('create_work_task', $hubStatus, $hubConnection));
 
   /** One page: `work_tree`'s own maximum, so a page is one read. */
   const PAGE_MAX = 200;
@@ -56,6 +60,8 @@
   let addNotes = $state('');
   let busy = $state(false);
   let actionError = $state<string | null>(null);
+  /** A refetch that failed while rows are on screen: a line, not the page. */
+  let refreshError = $state<string | null>(null);
 
   const sections: StatusSections = $derived(groupTasksByStatus(tasks, Math.floor(Date.now() / 1000)));
   const pickable = $derived(($projects ?? []).filter((p) => !p.project?.system));
@@ -84,10 +90,21 @@
       }
       loaded = true;
       if (!r.ok) {
-        error = r.error;
+        // A failed REFETCH must not take the page away. The `{#if error}`
+        // branch outranks the sections, so one failed background read — a
+        // `work:changed` tick arriving while the hub blinks — replaced a
+        // perfectly good list with an error and a Retry button. With rows on
+        // screen it is a line above them instead; `error` is for a first read
+        // that has nothing to show.
+        if (tasks.length > 0) {
+          refreshError = readErrorText(r.error);
+        } else {
+          error = r.error;
+        }
         loadingMore = false;
         return;
       }
+      refreshError = null;
       page = r.value;
       const got = Array.isArray(page?.tasks) ? page.tasks : [];
       acc = acc.length === 0 ? got : mergeTasks(acc, got);
@@ -135,7 +152,7 @@
 
   async function add() {
     const title = addTitle.trim();
-    if (!title || busy) return;
+    if (!title || busy || createBlocked !== null) return;
     busy = true;
     const r = await createWorkTask({ title, projectId: addProject, notes: addNotes });
     busy = false;
@@ -180,6 +197,8 @@
       placeholder="+ New task"
       aria-label="New task"
       data-testid="task-add-input"
+      disabled={createBlocked !== null}
+      title={createBlocked ?? ''}
       bind:value={addTitle}
       onkeydown={(e) => {
         if (e.key === 'Enter') void add();
@@ -213,6 +232,12 @@
     </div>
   {/if}
   {#if actionError}<p class="err" role="alert" data-testid="task-list-action-error">{actionError}</p>{/if}
+  {#if refreshError}
+    <p class="err" role="status" data-testid="task-list-refresh-error">
+      {refreshError}
+      <button class="btn btn--quiet" type="button" onclick={() => void load()}>Retry</button>
+    </p>
+  {/if}
 
   {#if error}
     <p class="err" role="alert" data-testid="task-list-error">

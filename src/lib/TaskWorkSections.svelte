@@ -16,6 +16,11 @@
   let { detail, part = 'all' }: { detail: TaskDetail; part?: 'all' | 'work' | 'steps' } = $props();
 
   const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
+  /** Adding a subtask and deciding a proposal route to the hub as well, so they
+   *  grey out for the same reason Start does rather than offering a click the
+   *  link cannot carry. */
+  const createBlocked = $derived(hubActionBlocked('create_work_task', $hubStatus, $hubConnection));
+  const decideBlocked = $derived(hubActionBlocked('accept_work_proposal', $hubStatus, $hubConnection));
   const showWork = $derived(part !== 'steps');
   const showSteps = $derived(part !== 'work');
   // A subtask's parent is never itself a subtask; a bare key has no item.
@@ -69,7 +74,14 @@
       <h4>
         Subtasks <span class="n">{detail.subtasks?.length ?? 0}</span>
         {#if canAddSubtask}
-          <button class="btn btn--quiet" type="button" data-testid="task-add-subtask" onclick={() => (adding = true)}>+ Add subtask</button>
+          <button
+            class="btn btn--quiet"
+            type="button"
+            data-testid="task-add-subtask"
+            disabled={createBlocked !== null}
+            title={createBlocked ?? 'Add a subtask'}
+            onclick={() => (adding = true)}>+ Add subtask</button
+          >
         {/if}
       </h4>
       {#if adding}
@@ -126,14 +138,16 @@
                 class="btn btn--primary"
                 type="button"
                 data-testid="task-proposal-accept"
-                disabled={busy}
+                disabled={busy || decideBlocked !== null}
+                title={decideBlocked ?? 'Accept this proposal'}
                 onclick={() => void run(decideWorkProposal(p.item_id, true))}>Accept</button
               >
               <button
                 class="btn"
                 type="button"
                 data-testid="task-proposal-reject"
-                disabled={busy}
+                disabled={busy || decideBlocked !== null}
+                title={decideBlocked ?? 'Reject this proposal'}
                 onclick={() => void run(decideWorkProposal(p.item_id, false))}>Reject</button
               >
             </div>

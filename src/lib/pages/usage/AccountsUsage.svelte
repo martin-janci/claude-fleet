@@ -11,7 +11,6 @@
   import { accountUsage, refreshAccountUsage } from '../../account_usage_store';
   import { refreshCountdown } from '../../account_usage';
   import { hosts } from '../../hosts';
-  import { hubBlock, hubStatus } from '../../hub';
   import { pushError } from '../../toasts';
   import type { UsageView } from '../pages';
 
@@ -21,8 +20,27 @@
   const timer = setInterval(() => (now = Math.floor(Date.now() / 1000)), 15_000);
   onDestroy(() => clearInterval(timer));
 
-  const refreshBlocked = $derived(hubBlock('refresh_account_usage', $hubStatus));
+  // No `refreshBlocked`. `refresh_account_usage` IS `LocalOnly`, but this page
+  // is a data item on a declarative page, and a paired desktop (`remote`) draws
+  // no data items at all — so every path that reaches this component is a
+  // standalone one, where `hubBlock` answers null. The derived, its import and
+  // the ctx field were inert. If data items are ever shown in `remote` mode,
+  // the reason belongs here, and it is the `LocalOnly` one.
   const sorted = $derived([...$accounts].sort((a, b) => accountLabel(a).localeCompare(accountLabel(b))));
+
+  /** Hosts logged in to this account right now. */
+  const hostsOf = (uuid: string) => $hosts.filter((h) => h.account_uuid === uuid).map((h) => h.alias);
+
+  /**
+   * An account no host is logged in to and that has never answered.
+   *
+   * `accounts` is every row the table ever held, so an account a host logged
+   * out of stays in it — and nothing will ever fetch usage for one, because the
+   * fetch goes over a host's SSH connection. Drawn as a full usage block it was
+   * a permanent "no usage yet" card that no refresh could ever fill. One muted
+   * line says what it is instead.
+   */
+  const retired = (uuid: string) => hostsOf(uuid).length === 0 && !$accountUsage[uuid]?.fetched_at;
 
   async function refresh(uuid: string) {
     const snap = $accountUsage[uuid];
@@ -38,23 +56,39 @@
   <div class="accounts" data-testid="accounts-usage">
     {#each sorted as a (a.uuid)}
       <div class="account" data-testid="accounts-usage-account" data-uuid={a.uuid}>
+        {#if retired(a.uuid)}
+          <p class="retired" data-testid="accounts-usage-retired">
+            {accountLabel(a)} — no host is logged in to this account, so there is no usage to read.
+          </p>
+        {:else}
         <AccountUsageItem
           {view}
           ctx={{
             now,
             account: a,
             snapshot: $accountUsage[a.uuid] ?? null,
-            sharedWith: $hosts.filter((h) => h.account_uuid === a.uuid).map((h) => h.alias),
+            // `sharedWith` is contracted as "the OTHER hosts logged in to this
+            // account" — a list relative to one host. This page is per
+            // ACCOUNT and names no host, so there is no "other": handing it
+            // every host made the line read "· shared with mefistos" beside
+            // an account whose only host is mefistos. The hosts are named by
+            // the view itself instead.
+            sharedWith: [],
             onrefresh: () => void refresh(a.uuid),
-            refreshBlocked,
           }}
         />
+        {/if}
       </div>
     {/each}
   </div>
 {/if}
 
 <style>
+  .retired {
+    color: var(--fg-muted);
+    margin: 0;
+    padding: 6px 0;
+  }
   .accounts {
     display: flex;
     flex-direction: column;

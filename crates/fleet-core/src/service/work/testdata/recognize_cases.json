@@ -763,5 +763,41 @@
   "text": "ghe.corp.example/acme/api#7",
   "ctx": {},
   "expect": []
+ },
+ {
+  "name": "fleet's own TASK keys ride beside a tracker's prefixes",
+  "text": "started TASK-12 for ABC-7, see task-13 too",
+  "ctx": {
+   "prefixes": [
+    "ABC",
+    "TASK"
+   ]
+  },
+  "expect": [
+   {
+    "kind": "key",
+    "key": "TASK-12",
+    "tracker_id": null,
+    "provider": null,
+    "text": "TASK-12",
+    "upper_written": true
+   },
+   {
+    "kind": "key",
+    "key": "ABC-7",
+    "tracker_id": null,
+    "provider": null,
+    "text": "ABC-7",
+    "upper_written": true
+   },
+   {
+    "kind": "key",
+    "key": "TASK-13",
+    "tracker_id": null,
+    "provider": null,
+    "text": "task-13",
+    "upper_written": false
+   }
+  ]
  }
 ]

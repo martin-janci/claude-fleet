@@ -96,6 +96,68 @@ fn a_first_prompt_reference_is_a_preselected_suggestion_that_never_regroups() {
         .contains("see ABC-99 for context"));
 }
 
+/// Fleet's own `TASK-<n>` keys are recognised on a fleet that HAS a tracker.
+///
+/// `prefix_known` is "no tracker, so any key counts; a tracker, so only its
+/// prefixes", and `tracker_view` seeded the prefix list from the trackers
+/// alone — so on any real fleet (one that has configured a tracker, which is
+/// every fleet the work graph is for) a native item's own key was not a key at
+/// all, and no prompt or branch signal was ever produced for one.
+#[test]
+fn a_native_task_key_is_recognised_beside_a_trackers_prefixes() {
+    let f = fx();
+    let item =
+        f.s.create_native_item(&crate::store::NativeItem {
+            title: "Rework the tick",
+            parent_id: None,
+            project_id: None,
+            notes: None,
+        })
+        .unwrap();
+    let key = item.key.clone().expect("a native item gets its TASK key");
+    let sid = session(&f, "dev", "c-task");
+
+    assert!(on_prompt(&f.s, sid, &format!("working on {key} now"), true).unwrap());
+    let row = f.s.get_session_by_id(sid).unwrap().unwrap();
+    let sg = row.work_suggested.expect("the chip's suggestion");
+    assert_eq!(sg.key.as_deref(), Some(key.as_str()));
+
+    // And the tracker's own prefix still works, so TASK was added, not swapped.
+    let other = session(&f, "dev2", "c-abc");
+    assert!(on_prompt(&f.s, other, "see ABC-5 for context", true).unwrap());
+    assert_eq!(
+        f.s.get_session_by_id(other)
+            .unwrap()
+            .unwrap()
+            .work_suggested
+            .expect("suggestion")
+            .key
+            .as_deref(),
+        Some("ABC-5")
+    );
+
+    // The other half of the rule, which the obvious fix breaks: with NO
+    // tracker the empty list means "any key-shaped token counts", so adding
+    // TASK unconditionally would turn that into a list of exactly one and drop
+    // every other key — `no_tracker_means_prompt_keys_count_only_when_fleet_knows_them`
+    // is the test that catches it. TASK is added only where the list already
+    // restricts.
+    let bare = Store::open_in_memory().unwrap();
+    bare.upsert_host("h").unwrap();
+    let bsid = bare
+        .upsert_session("dev", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    bare.rebind_conversation(bsid, "cb", StartSource::Startup, None, None)
+        .unwrap();
+    bare.create_local_work_item(Some("PAY-7"), "Retry").unwrap();
+    on_prompt(&bare, bsid, "and PAY-7", true).unwrap();
+    assert_eq!(
+        bare.session_work_links(bsid).unwrap().len(),
+        1,
+        "with no tracker, any key still counts"
+    );
+}
+
 #[test]
 fn not_this_is_final_for_every_signal() {
     let f = fx();

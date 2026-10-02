@@ -27,6 +27,7 @@
     timeZone,
     suppressUnavailable = false,
     refreshBlocked = null,
+    refreshKey = null,
   }: {
     account: AccountRow | null;
     snapshot: AccountUsageSnapshot | null;
@@ -43,6 +44,12 @@
     /** `hubBlock('refresh_account_usage', …)` from the owner — a refresh
      *  SSHes to the host from here, and a hub client has no such connection. */
     refreshBlocked?: string | null;
+    /** The key that also refreshes on THIS surface, shown as a hint beside the
+     *  button; null where no handler binds one. Only the Hosts view binds `u`
+     *  (`HostsView`'s key dispatch), so a second owner — Usage → Claude
+     *  accounts, Host detail's embed — advertised a shortcut that did nothing
+     *  there. */
+    refreshKey?: string | null;
   } = $props();
 
   const msg = $derived(statusMessage(snapshot, account, sharedWith, now, locale, timeZone));
@@ -97,7 +104,7 @@
           title={refreshBlocked ?? ''}
           onclick={() => onRefresh?.()}
         >
-          {#if refreshBlocked}refresh{:else if countdown !== null}refresh available in {countdown}{:else}<kbd>u</kbd> refresh{/if}
+          {#if refreshBlocked}refresh{:else if countdown !== null}refresh available in {countdown}{:else if refreshKey}<kbd>{refreshKey}</kbd> refresh{:else}refresh{/if}
         </button>
       {/if}
     {/if}

@@ -189,6 +189,34 @@ describe('TaskList', () => {
     expect(screen.queryByTestId('task-list-more')).toBeNull();
   });
 
+  it('keeps the rows when a refetch fails, and loses them only on a first read', async () => {
+    render(TaskList);
+    await flush();
+    expect(screen.getByTestId('task-section-todo').textContent).toContain('Write notes');
+
+    // A background refetch fails: the rows stay, with a line above them.
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tree') throw { code: 'E_HUB_DOWN', message: 'the hub is not answering' };
+      return [];
+    });
+    workViewFilters.set({ tracker: 3 });
+    await flush();
+    expect(screen.getByTestId('task-list-refresh-error').textContent).toContain('the hub is not answering');
+    expect(screen.getByTestId('task-section-todo').textContent).toContain('Write notes');
+    expect(screen.queryByTestId('task-list-error')).toBeNull();
+  });
+
+  it('shows the error page when the FIRST read fails', async () => {
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_tree') throw { code: 'E_HUB_DOWN', message: 'the hub is not answering' };
+      return [];
+    });
+    render(TaskList);
+    await flush();
+    expect(screen.getByTestId('task-list-error')).toBeTruthy();
+    expect(screen.queryByTestId('task-section-todo')).toBeNull();
+  });
+
   it('renders tracker text as text', async () => {
     (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
       cmd === 'work_tree'

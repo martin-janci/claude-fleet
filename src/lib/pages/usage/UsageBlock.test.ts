@@ -55,6 +55,7 @@ function mount(
     now?: number;
     onRefresh?: () => void;
     suppressUnavailable?: boolean;
+    refreshKey?: string | null;
   } = {},
 ) {
   return render(UsageBlock, {
@@ -314,9 +315,17 @@ describe('UsageBlock — refresh', () => {
     mount({ snapshot: snap({ next_try_at: NOW }), onRefresh });
     const btn = screen.getByTestId('usage-refresh');
     expect(btn).toBeEnabled();
-    expect(norm(btn)).toBe('u refresh');
+    // No key hint by default: only a surface that actually BINDS one passes it.
+    // The hint used to be drawn unconditionally, so a second owner (Usage →
+    // Claude accounts) advertised `u` where nothing answered it.
+    expect(norm(btn)).toBe('refresh');
     await fireEvent.click(btn);
     expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the key only where the surface binds one', () => {
+    mount({ snapshot: snap({ next_try_at: NOW }), onRefresh: vi.fn(), refreshKey: 'u' });
+    expect(norm(screen.getByTestId('usage-refresh'))).toBe('u refresh');
   });
 
   it('counts down as now advances', async () => {

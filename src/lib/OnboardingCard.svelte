@@ -29,6 +29,8 @@
   // In-flight UI per step.
   let busy = $state<StepId | null>(null);
   let errorText = $state<string | null>(null);
+  /** A step that SUCCEEDED with something degraded — not an error, not silence. */
+  let warnText = $state<string | null>(null);
 
   // Three of the six commands this UI calls UNPROMPTED live here
   // (check_local_prereqs, tunnel_status, mcp_status), fired from an $effect on
@@ -73,6 +75,7 @@
 
   async function runStep(id: StepId) {
     errorText = null;
+    warnText = null;
     if (id === 'add-host') {
       onaddhost();
       return;
@@ -90,7 +93,14 @@
         if (!r.ok) errorText = r.error.message;
         else {
           const failed = r.value.find((h) => h.status === 'failed');
+          // A DEGRADED run is `provisioned` with a warning — the ag step that
+          // did not finish, or the WSL hooks note. Looking only at `failed`
+          // reported such a host as a clean success, and the one thing that
+          // says otherwise was buried in `detail`. Read the field rather than
+          // splitting the sentence.
+          const warned = r.value.find((h) => h.warning);
           if (failed) errorText = `${failed.host}: ${failed.detail ?? 'provision failed'}`;
+          else if (warned) warnText = `${warned.host}: ${warned.warning}`;
         }
         await refreshSnapshots();
       } else if (id === 'projects') {
@@ -169,10 +179,18 @@
     {#if errorText}
       <p class="err">{errorText}</p>
     {/if}
+    {#if warnText}
+      <p class="warn" data-testid="onboarding-warning">{warnText}</p>
+    {/if}
   {/if}
 </div>
 
 <style>
+  .warn {
+    color: var(--usage-warn, #b26a00);
+    margin: 6px 0 0;
+    font-size: 0.85em;
+  }
   .card {
     background: var(--bg);
     border: 1px solid var(--border);

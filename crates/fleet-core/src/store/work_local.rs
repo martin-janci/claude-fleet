@@ -52,10 +52,17 @@ pub struct LocalItemLink {
 }
 
 impl Store {
-    /// Every local work item, most recently changed first.
+    /// Every local work item a person may pick, most recently changed first.
+    ///
+    /// An UNDECIDED proposal (`proposal_state = 'proposed'`) is not one: it is
+    /// an agent's suggestion waiting for a person, and offering it as ordinary
+    /// work would let it be started without ever being accepted — which the
+    /// start path refuses, so it could only ever be an error further down. A
+    /// REJECTED one is not one either: a person has already said no.
     pub fn local_work_items(&self) -> Result<Vec<WorkItemRow>, IpcError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {ITEM_COLUMNS} FROM work_items WHERE source = 'local' \
+             AND COALESCE(proposal_state, '') NOT IN ('proposed', 'rejected') \
              ORDER BY updated_at DESC, id DESC"
         ))?;
         let rows = stmt.query_map([], map_item)?;

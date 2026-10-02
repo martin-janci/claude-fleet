@@ -19,6 +19,12 @@ function sectionOf(t: WorkTask): keyof StatusSections {
   const live = (t.counts?.active ?? 0) > 0;
   if (live || t.status_category === 'in_progress') return 'doing';
   if (t.status_category === 'done') return 'done';
+  // Archived with nothing live is finished work, so it belongs in Done and
+  // falls under the 7-day window. A bare-key task (`ref:<KEY>`) has no item
+  // and therefore NO `status_category` at all, so it used to land in To do and
+  // stay there for ever — no age cut-off and no Start button, since there is
+  // no item to start.
+  if (t.archived) return 'done';
   return 'todo';
 }
 

@@ -193,3 +193,88 @@ fn local_item_links_name_the_live_session_and_its_host() {
     assert_eq!(s.local_item_links(None).unwrap().len(), 3);
     assert_eq!(s.local_work_items().unwrap().len(), 2);
 }
+
+/// A proposal is not pickable work, and a rejected one is not work at all.
+///
+/// `local_work_items` backs `work { action: local_items }` — the list a person
+/// chooses from — and `recent_local_work_items` backs the classification
+/// nudge's candidates. Neither filtered on `proposal_state`, so an agent's
+/// undecided suggestion was offered as ordinary work (and starting it is
+/// refused further down, so it could only ever end in an error), and a
+/// proposal a person had REJECTED was offered to an agent as work its session
+/// might be doing — straight past the decision D34 says an agent never
+/// overturns.
+#[test]
+fn a_proposal_is_not_offered_as_pickable_local_work() {
+    let s = Store::open_in_memory().unwrap();
+    let parent = s.create_local_work_item(Some("OM-1"), "Qomora").unwrap();
+    let plain = s
+        .create_native_item(&crate::store::NativeItem {
+            title: "mine",
+            parent_id: Some(parent.id),
+            project_id: None,
+            notes: None,
+        })
+        .unwrap();
+    let open = s
+        .propose_subtask(&crate::store::Proposal {
+            parent_id: parent.id,
+            title: "open idea",
+            notes: None,
+            why: None,
+            proposed_by: "agent",
+        })
+        .unwrap();
+    let accepted = s
+        .propose_subtask(&crate::store::Proposal {
+            parent_id: parent.id,
+            title: "accepted idea",
+            notes: None,
+            why: None,
+            proposed_by: "agent",
+        })
+        .unwrap();
+    let rejected = s
+        .propose_subtask(&crate::store::Proposal {
+            parent_id: parent.id,
+            title: "rejected idea",
+            notes: None,
+            why: None,
+            proposed_by: "agent",
+        })
+        .unwrap();
+    s.decide_proposal(accepted.id, true).unwrap();
+    s.decide_proposal(rejected.id, false).unwrap();
+
+    let offered: Vec<i64> = s
+        .local_work_items()
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert!(offered.contains(&parent.id), "the ticket is work");
+    assert!(offered.contains(&plain.id), "a person's own task is work");
+    assert!(
+        offered.contains(&accepted.id),
+        "an ACCEPTED proposal is ordinary work"
+    );
+    assert!(
+        !offered.contains(&open.id),
+        "an undecided proposal waits for a person: {offered:?}"
+    );
+    assert!(
+        !offered.contains(&rejected.id),
+        "a rejected proposal is not work: {offered:?}"
+    );
+
+    // The nudge's candidates are keyed, and follow the same rule.
+    let recent: Vec<i64> = s
+        .recent_local_work_items(0, 50)
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    assert!(recent.contains(&accepted.id));
+    assert!(!recent.contains(&open.id), "{recent:?}");
+    assert!(!recent.contains(&rejected.id), "{recent:?}");
+}

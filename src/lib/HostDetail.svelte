@@ -183,11 +183,20 @@
   // catalog_admin, so a paired desktop only needs the live link.
   const harnessBlocked = $derived(hubActionBlocked('catalog_set_host_harnesses', $hubStatus, $hubConnection));
 
-  async function onCodexMode(mode: HarnessMode) {
+  async function onCodexMode(mode: HarnessMode, el: HTMLSelectElement) {
     busy = true;
     const r = await setHostHarnesses(host.alias, harnessesFor(mode));
     busy = false;
-    if (!r.ok) pushError(r.error, 'Codex setting not changed');
+    if (!r.ok) {
+      pushError(r.error, 'Codex setting not changed');
+      // Put the control back. `value={codexModeOf(host)}` is one-way and
+      // compiles to a guarded effect, so it does not re-run when nothing about
+      // `host` changed — and nothing does change on a failure. The select
+      // therefore kept showing the mode the person picked, which is not the
+      // stored one: it read as applied while the error banner said otherwise,
+      // and picking that same mode again was a no-op `onchange`.
+      el.value = codexModeOf(host);
+    }
   }
 
   // Resume is a `new_session` carrying `resume_claude_session_id`, and
@@ -381,6 +390,11 @@
         suppressUnavailable,
         onrefresh: onrefreshusage,
         refreshBlocked: refreshUsageBlocked,
+        // This pane only ever renders inside `HostsView`, whose key dispatch
+        // binds `u` for the focused host in the detail too — so the hint is
+        // true here. Usage → Claude accounts passes none, since nothing there
+        // answers a key.
+        refreshKey: 'u',
       }}
     />
   </section>
@@ -508,7 +522,10 @@
         title={harnessBlocked ?? ''}
         aria-label="Codex assets"
         data-testid="detail-codex"
-        onchange={(e) => onCodexMode((e.currentTarget as HTMLSelectElement).value as HarnessMode)}
+        onchange={(e) => {
+          const el = e.currentTarget as HTMLSelectElement;
+          void onCodexMode(el.value as HarnessMode, el);
+        }}
       >
         <option value="auto">auto</option>
         <option value="on">on</option>

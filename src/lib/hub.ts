@@ -300,6 +300,12 @@ export const ROUTED_ACTIONS = [
   'catalog_import_host',
   // Multi-harness F3a: a host's Codex choice is a catalog_admin action too.
   'catalog_set_host_harnesses',
+  // The Work view's own mutations (M14): all three route to `work_link`, so a
+  // paired desktop with the link down must grey them out like Start, not offer
+  // a click that cannot land.
+  'create_work_task',
+  'accept_work_proposal',
+  'reject_work_proposal',
   'send_prompt',
   'kill_session',
   'safe_kill_session',

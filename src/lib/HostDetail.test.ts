@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, within } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
@@ -662,6 +662,24 @@ describe('HostDetail Codex assets (F3a)', () => {
     expect(sel.value).toBe('off');
     await fireEvent.change(sel, { target: { value: 'auto' } });
     expect(mockedSetHarnesses).toHaveBeenCalledWith('mefistos', null);
+  });
+
+  /** `value={codexModeOf(host)}` is one-way and compiles to a guarded effect,
+   *  so nothing re-runs it when the failure leaves `host` unchanged: the select
+   *  kept showing the mode the person picked while the banner said it had not
+   *  been changed — and picking it again was a no-op `onchange`. */
+  it('puts the select back to the stored mode when the change fails', async () => {
+    mockedSetHarnesses.mockResolvedValueOnce({
+      ok: false,
+      error: { code: 'E_FORBIDDEN', message: 'not granted' },
+    });
+    mount('mefistos', { host: host('mefistos', { harnesses: ['claude'] }) });
+    const sel = screen.getByTestId('detail-codex') as HTMLSelectElement;
+    expect(sel.value).toBe('off');
+
+    await fireEvent.change(sel, { target: { value: 'on' } });
+    await waitFor(() => expect(mockedSetHarnesses).toHaveBeenCalled());
+    await waitFor(() => expect(sel.value).toBe('off'));
   });
 
   it('an offline paired desktop cannot change it and says why', () => {

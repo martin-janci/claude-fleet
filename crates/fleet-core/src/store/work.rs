@@ -605,6 +605,12 @@ impl Store {
     /// first — the classification nudge's (work graph M4.6) local
     /// candidates. A keyless item cannot be named back by key, so it is not
     /// one.
+    ///
+    /// Nor is a proposal nobody has accepted, or one a person REJECTED: the
+    /// nudge asks an agent "is your session doing one of these?", and an
+    /// answer naming an undecided proposal would link a session to work that
+    /// does not exist yet — while naming a rejected one would walk straight
+    /// past the person's decision (D34: an agent never overturns a rejection).
     pub fn recent_local_work_items(
         &self,
         since: i64,
@@ -613,6 +619,7 @@ impl Store {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {ITEM_COLUMNS} FROM work_items \
              WHERE source = 'local' AND key IS NOT NULL AND updated_at >= ?1 \
+             AND COALESCE(proposal_state, '') NOT IN ('proposed', 'rejected') \
              ORDER BY updated_at DESC, id DESC LIMIT ?2"
         ))?;
         let rows = stmt.query_map(rusqlite::params![since, limit as i64], map_item)?;
