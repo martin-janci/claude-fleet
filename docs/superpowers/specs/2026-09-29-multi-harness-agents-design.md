@@ -149,7 +149,9 @@ ag shims                                    # (re)generate alias shims from conf
    for enabled harnesses.
 4. **Shared skills dir**: skills for codex/agy/auggie/gemini render once into `~/.agents/skills`
    (one manifest owner), Claude keeps `~/.claude/skills`. Import learns `~/.agents/skills` and
-   `~/.codex` so the diverged copies can be adopted (backup) instead of duplicated.
+   `~/.codex` so the diverged copies can be adopted (backup) instead of duplicated. Codex reads
+   user skills from `~/.agents/skills`, not `~/.codex/skills` (source: OpenAI Codex docs,
+   "Build skills" (learn.chatgpt.com/docs/build-skills), checked 2026-09-29).
 5. **New `Harness` impls** in order: `agy`, `auggie`, `gemini` (skills, agents, MCP via each CLI's
    `mcp add` where JSON editing is fragile, hooks where the event model maps).
 6. **Provision on catalog**: fleet's own skills (`claude-fleet-control`, `fleet-friendly-name`),

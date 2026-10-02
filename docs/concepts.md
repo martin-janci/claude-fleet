@@ -161,8 +161,15 @@ would write, adopt or delete through it is `blocked`, with the link's
 target in the reason: Codex's copy would replace Claude's, and the two
 would undo each other on every sync. Replace the link with a real
 directory, or turn Codex off for that host (for `~/.codex/skills` only the
-first helps); Claude is unaffected. A plan also blocks any action whose
-file another harness's plan on the same host would write too.
+first helps). Only links on the Codex side are detected so far: a link
+from Claude's side into `~/.agents/skills` (say `~/.claude/skills/<name>`
+pointing at `~/.agents/skills/<name>`) is not, and Claude and Codex would
+then both write one file — don't link Claude skills into
+`~/.agents/skills`; detecting this is planned. A plan also blocks any
+action whose file another harness's plan on the same host would write too.
+A skill fleet withholds from a host, or one that is blocked, while its
+manifest entry still points at `~/.codex/skills` stays there — where Codex
+no longer reads it — until the block is resolved.
 
 **Sync** is plan-first: `plan_sync` scans the selected hosts and computes
 which assets to create, update, overwrite, adopt, or remove, returning a plan

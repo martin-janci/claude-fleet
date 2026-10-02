@@ -264,8 +264,12 @@ there, and the first sync after upgrading moves every Codex skill fleet put
 in `~/.codex/skills` (backing the old copy up, never touching Codex's
 `.system` or skills you added yourself). A host whose `~/.agents/skills`
 (or `~/.agents`, or `~/.codex/skills`) is a symlink shows those Codex
-actions as `blocked` until the link is replaced with a real directory; see
-*Codex skills live in `~/.agents/skills`* in `docs/concepts.md`.
+actions as `blocked` until the link is replaced with a real directory. A
+link the other way — a Claude skill such as `~/.claude/skills/<name>`
+pointing into `~/.agents/skills` — is not detected yet, and both harnesses
+would then write one file: don't link Claude skills into
+`~/.agents/skills`. See *Codex skills live in `~/.agents/skills`* in
+`docs/concepts.md`.
 
 Refreshing the compose file itself (`curl -O …/deploy/hub/docker-compose.yml`)
 also upgrades you, because the copy on `main` carries the pin from the newest
