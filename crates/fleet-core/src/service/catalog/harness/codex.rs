@@ -20,10 +20,19 @@ use crate::ipc_error::IpcError;
 use crate::service::catalog::model::{sha256_hex, Asset, AssetSpec, Kind};
 use serde_json::{json, Value};
 
-pub const CODEX_SKILLS_DIR: &str = "~/.codex/skills";
+/// Where Codex reads user skills (multi-harness F3c): `~/.agents/skills`, the
+/// cross-harness skills directory — not `~/.codex/skills`, which Codex keeps
+/// for its own built-ins (`.system`).
+pub const CODEX_SKILLS_DIR: &str = "~/.agents/skills";
 pub const CODEX_CONFIG_PATH: &str = "~/.codex/config.toml";
 pub const CODEX_MANIFEST_PATH: &str = "~/.codex/.fleet-assets.json";
 pub const CODEX_AGENTS_DIR: &str = "~/.codex/agents";
+/// Where fleet rendered Codex skills before F3c. Still hashed by the scan
+/// (minus Codex's `.system`) so a manifest entry pointing here can be
+/// deleted under compare-and-swap when its skill moves to
+/// `CODEX_SKILLS_DIR`; never listed as installed, since Codex does not read
+/// it.
+pub const CODEX_LEGACY_SKILLS_DIR: &str = "~/.codex/skills";
 
 /// Render warning for an agent with `tools` (F3b): Codex subagents have no
 /// per-agent tool allowlist. Shown in Asset detail's Codex preview.
@@ -347,11 +356,12 @@ impl Harness for Codex {
         Ok(plan)
     }
 
-    /// Same shape as `Claude::scan_script`: hasher detection, `##HASHES` +
-    /// file hashes under `.codex/skills` and `.codex/agents`, a hash for each config file, then
-    /// one `##CONFIG <path>` block per config file (base64, one line), then
-    /// `##END`. No single quotes: the caller wraps the whole script in
-    /// `shell::quote`.
+    /// Same shape as `Claude::scan_script`: hasher detection, the presence
+    /// probe, `##HASHES` + file hashes under `.agents/skills`,
+    /// `.codex/skills` (legacy, minus `.system`) and `.codex/agents`, a hash
+    /// for each config file, then one `##CONFIG <path>` block per config
+    /// file (base64, one line), then `##END`. No single quotes: the caller
+    /// wraps the whole script in `shell::quote`.
     fn scan_script(&self) -> Option<String> {
         let mut s = String::new();
         s.push_str("cd \"$HOME\" || exit 0; ");
@@ -367,8 +377,12 @@ impl Harness for Codex {
         s.push_str("echo \"##HASHES\"; ");
         // `-exec $H {} +` (not `-print0 | xargs -0 $H`): see `Claude::scan_script`
         // for why this matters for an existing-but-empty directory.
+        // F3c: `.agents/skills` is where Codex reads skills. `.codex/skills`
+        // is where fleet put them before — hashed only so a manifest entry
+        // pointing there can be deleted under compare-and-swap; Codex's own
+        // `.codex/skills/.system` is pruned, it is never fleet's.
         s.push_str(
-            "for d in .codex/skills .codex/agents; do if [ -d \"$d\" ]; then find -L \"$d\" -type f -exec $H {} + 2>/dev/null; fi; done; ",
+            "for d in .agents/skills .codex/skills .codex/agents; do if [ -d \"$d\" ]; then find -L \"$d\" -path .codex/skills/.system -prune -o -type f -exec $H {} + 2>/dev/null; fi; done; ",
         );
         let config_rel: Vec<&str> = CONFIG_FILES
             .iter()
@@ -413,6 +427,9 @@ impl Harness for Codex {
             }
         };
         for path in snap.files.keys() {
+            // F3c: only `CODEX_SKILLS_DIR`. A skill left in
+            // `CODEX_LEGACY_SKILLS_DIR` is invisible to Codex, so it is not
+            // Codex inventory (fleet's own copies there migrate on sync).
             if let Some(rest) = path.strip_prefix(&format!("{CODEX_SKILLS_DIR}/")) {
                 if let Some((name, _)) = rest.split_once('/') {
                     push(Kind::Skill, name.to_string());
@@ -560,7 +577,7 @@ mod tests {
     use crate::service::catalog::model::Asset;
 
     #[test]
-    fn skill_renders_to_codex_skills_dir() {
+    fn skill_renders_to_agents_skills_dir() {
         let mut a = Asset::from_yaml(
             None,
             "kind: skill\nname: worktree\ndescription: Make one.\nallowed_tools: [bash]\n",
@@ -569,7 +586,7 @@ mod tests {
         a.body = "body\n".into();
         let plan = Codex.render(&a).unwrap();
         assert_eq!(plan.files.len(), 1);
-        assert_eq!(plan.files[0].path, "~/.codex/skills/worktree/SKILL.md");
+        assert_eq!(plan.files[0].path, "~/.agents/skills/worktree/SKILL.md");
         assert_eq!(
             String::from_utf8(plan.files[0].bytes.clone()).unwrap(),
             "---\nname: worktree\ndescription: Make one.\n---\nbody\n"
@@ -585,7 +602,7 @@ mod tests {
         .unwrap();
         a.body = "b\n".into();
         let plan = Codex.render(&a).unwrap();
-        assert_eq!(plan.files[0].path, "~/.codex/skills/foo_bar/SKILL.md");
+        assert_eq!(plan.files[0].path, "~/.agents/skills/foo_bar/SKILL.md");
         let text = String::from_utf8(plan.files[0].bytes.clone()).unwrap();
         let yaml = text.split("---\n").nth(1).expect("frontmatter block");
         let map: serde_yaml::Mapping = serde_yaml::from_str(yaml).expect("valid yaml");
@@ -690,7 +707,7 @@ mod tests {
         .unwrap();
         as_skill.body = "prompt\n".into();
         let plan = Codex.render(&as_skill).unwrap();
-        assert_eq!(plan.files[0].path, "~/.codex/skills/pm/SKILL.md");
+        assert_eq!(plan.files[0].path, "~/.agents/skills/pm/SKILL.md");
         assert_eq!(
             plan.warnings,
             vec!["agent rendered as a codex skill (targets.codex.render_as)"]
@@ -927,7 +944,7 @@ mod tests {
         .unwrap();
         as_skill.body = "prompt\n".into();
         let plan = Codex.render(&as_skill).unwrap();
-        assert_eq!(plan.files[0].path, "~/.codex/skills/foo_bar/SKILL.md");
+        assert_eq!(plan.files[0].path, "~/.agents/skills/foo_bar/SKILL.md");
         let text = String::from_utf8(plan.files[0].bytes.clone()).unwrap();
         let yaml = text.split("---\n").nth(1).expect("frontmatter block");
         let map: serde_yaml::Mapping = serde_yaml::from_str(yaml).expect("valid yaml");
@@ -1034,7 +1051,7 @@ mod tests {
         let toml_text = "[mcp_servers.fleet]\nurl = \"http://127.0.0.1:4180/mcp\"\n";
         let b64 = base64::engine::general_purpose::STANDARD.encode(toml_text);
         format!(
-            "##HASHES\naaaa  .codex/skills/worktree/SKILL.md\n##CONFIG ~/.codex/config.toml\n{b64}\n##CONFIG ~/.codex/.fleet-assets.json\n##END\n"
+            "##HASHES\naaaa  .agents/skills/worktree/SKILL.md\n##CONFIG ~/.codex/config.toml\n{b64}\n##CONFIG ~/.codex/.fleet-assets.json\n##END\n"
         )
     }
 
@@ -1243,6 +1260,88 @@ mod tests {
                 .find(|a| a.kind == Kind::McpServer)
                 .unwrap()
                 .secret_like
+        );
+    }
+
+    /// Runs the real scan under plain `sh` against `home`.
+    #[cfg(unix)]
+    fn scan_home(home: &std::path::Path) -> HostSnapshot {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(Codex.scan_script().unwrap())
+            .env("HOME", home)
+            .output()
+            .expect("run scan script");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Codex
+            .parse_scan(&String::from_utf8(out.stdout).unwrap())
+            .unwrap()
+    }
+
+    /// F3c: skills are listed only from `~/.agents/skills`, where Codex reads
+    /// them. A copy left in `~/.codex/skills` is invisible to Codex, and
+    /// Codex's own `.system` is never a skill of the user's.
+    #[test]
+    fn codex_skills_are_listed_only_from_agents_skills() {
+        let mut s = HostSnapshot::default();
+        s.files
+            .insert("~/.agents/skills/new/SKILL.md".into(), "aa".into());
+        s.files
+            .insert("~/.codex/skills/old/SKILL.md".into(), "bb".into());
+        s.files.insert(
+            "~/.codex/skills/.system/builtin/SKILL.md".into(),
+            "cc".into(),
+        );
+        assert_eq!(Codex.installed(&s), vec![(Kind::Skill, "new".to_string())]);
+        let d = Codex.installed_detail(&s);
+        assert_eq!(d.len(), 1);
+        assert_eq!(
+            d[0].hash.as_deref(),
+            Some(sha256_hex(b"SKILL.md=aa").as_str())
+        );
+    }
+
+    /// F3c: the real scan hashes `~/.agents/skills` and still the legacy
+    /// `~/.codex/skills` — a pre-F3c manifest entry there needs its hash for
+    /// the compare-and-swap that deletes the old copy — but never Codex's
+    /// `.system` built-ins.
+    #[cfg(unix)]
+    #[test]
+    fn scan_hashes_agents_skills_and_the_legacy_dir_but_never_codex_system() {
+        let home = tempfile::TempDir::new().unwrap();
+        let h = home.path();
+        for (rel, body) in [
+            (".agents/skills/new/SKILL.md", "n"),
+            (".codex/skills/old/SKILL.md", "o"),
+            (".codex/skills/.system/builtin/SKILL.md", "b"),
+        ] {
+            let p = h.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+        }
+        let snap = scan_home(h);
+        assert!(
+            snap.files.contains_key("~/.agents/skills/new/SKILL.md"),
+            "{:?}",
+            snap.files
+        );
+        assert!(
+            snap.files.contains_key("~/.codex/skills/old/SKILL.md"),
+            "the legacy copy keeps a hash for its removal: {:?}",
+            snap.files
+        );
+        assert!(
+            !snap.files.keys().any(|p| p.contains(".system")),
+            "{:?}",
+            snap.files
+        );
+        assert_eq!(
+            Codex.installed(&snap),
+            vec![(Kind::Skill, "new".to_string())]
         );
     }
 }

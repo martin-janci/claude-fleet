@@ -320,7 +320,7 @@ pub fn secrets_example_names(root: &Path) -> Vec<String> {
     }
 }
 
-/// Whether Codex renders `a` into `~/.codex/skills/`: a skill, or an agent
+/// Whether Codex renders `a` into `~/.agents/skills/` (`CODEX_SKILLS_DIR`): a skill, or an agent
 /// with `targets.codex.render_as: skill` — in both cases only while its
 /// Codex target is enabled.
 fn lands_in_codex_skills(a: &Asset) -> bool {
@@ -398,7 +398,7 @@ pub fn lint(
         );
     }
     // F3b: Codex renders an agent with `targets.codex.render_as: skill` into
-    // `~/.codex/skills/<install name>/`, where a skill of that install name
+    // `~/.agents/skills/<install name>/` (F3c), where a skill of that install name
     // also lands — across kinds, so the rule above cannot see it. Both
     // manifest entries would claim one path, and removing either asset would
     // delete the other's installed copy.
@@ -1437,7 +1437,7 @@ mod tests {
     }
 
     /// F3b: an agent Codex renders as a skill lands in the same
-    /// `~/.codex/skills/<install name>/` as a skill of that install name —
+    /// `~/.agents/skills/<install name>/` as a skill of that install name —
     /// reported from both sides; a skill with Codex disabled does not collide.
     #[test]
     fn lint_errors_when_a_codex_skill_agent_shares_a_skills_install_name() {
@@ -1456,7 +1456,7 @@ mod tests {
         let report = lint(&agent, &catalog, &[], true);
         assert_eq!(fields(&report.errors), vec!["name"], "{:?}", report.errors);
         assert!(
-            report.errors[0].message.contains("~/.codex/skills/pm")
+            report.errors[0].message.contains("~/.agents/skills/pm")
                 && report.errors[0].message.contains("skill/pm"),
             "{:?}",
             report.errors
