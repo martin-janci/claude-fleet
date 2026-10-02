@@ -363,6 +363,10 @@ interface:
   Fleet can *act*; it does not mean Fleet can *see* — a cloud session is
   `controlled` and still has the status gap.
 
+A fourth execution mode — a cloud session on a **self-hosted environment** — has
+no column here on purpose: it is Team/Enterprise only and is treated as the
+conditional phase FP8 (§16 Q2's third option).
+
 A gap is a first-class row in the UI with its reason and its `checked_at` date,
 so "there is no interface, checked 2026-10-01" is visible rather than
 remembered. Where the gap is a *sync* refusal, the reason is the per-asset
@@ -569,6 +573,7 @@ catalog, or keep a second copy of a repository's `CLAUDE.md`.
 | **FP4 Project assets** | the context-axis layer per Project through M2's per-catalog API; the catalog `Instructions` kind | one sync delivers a Project's skills and instructions to its hosts for Claude and Codex, and a scope refusal shows its reason |
 | **FP5 Non-Claude harnesses** | per-harness capability rows as multi-harness F5/F6 land | a Codex session in a Project shows the same Project with its gaps named |
 | **FP6 Cloud execution** | `projects.cloud_execution` (off); start a Project task as a cloud session on a Project host (`claude --cloud`), steer it (`-p --cloud <id>`), record it as a `cloud_session` connection, and land it with `claude --teleport` | a task starts in the cloud from a Project, is steered from Fleet, and teleports into a Fleet session on a host — with the status and diff gaps shown, not faked |
+| **FP8 Self-hosted environment** *(conditional on a Team/Enterprise plan)* | a Fleet host registered as a `claude self-hosted-runner`; a `checkout` hook seeding the working tree from Fleet's clone, a `post-session` hook carrying results back, a transcript locator for the per-session config dir, and a runner restart after `apply_sync` | a Project task runs as a cloud session on a Fleet host, with Fleet's assets, hooks and `CLAUDE.md` seeded into it, and its transcript readable by Fleet |
 | **FP7 Remote Control host** | `projects.remote_control` (off); provision and supervise `claude remote-control --spawn worktree --capacity N` on a Project host, link the sessions it serves to the Project, and show the native Project it serves as a `reference` connection | a thread the owner starts in a native Claude Project runs in a Fleet worktree on a Fleet host, with Fleet's catalog assets, hooks and project header applied, and appears on the Project page |
 
 FP0 → FP1 → FP2 is the critical path to R7. FP4 depends on assets M2 (PR #416)
@@ -726,11 +731,45 @@ from an ordinary interactive session only by `pid` ancestry or `cwd` (the
 server's worktree root). Whether they are listed at all still needs one
 `claude remote-control` run.
 
-**A third option §7 does not have a column for.** `--cloud --environment
-<ccpool_…>` creates a cloud session that "runs on the given self-hosted
-environment". If that environment can be a Fleet host, it is FP6's interface
-(`controlled` create and steer) on FP7's machine (Fleet's assets and hooks).
-Unread beyond the CLI help; worth one look before FP6 or FP7 is planned.
+**A third option, now read (2026-10-02): a self-hosted environment.** The lead
+was `--cloud --environment <ccpool_…>`, and it is real. `self-hosted-environments`
+and `-configuration`, read 2026-10-02:
+
+- A **runner** (`claude self-hosted-runner`) is a long-lived process on a host
+  you own. It claims queued cloud sessions, clones the repository into its own
+  working directory, and spawns a child Claude Code process there. "Anthropic
+  never connects into your network"; everything is outbound HTTPS.
+- **It does give Fleet's context layer, deliberately:** "The runner gives each
+  session its own config directory, seeded from a snapshot of the host's
+  `~/.claude/` … `settings.json`, `CLAUDE.md`, hooks, agents, commands, and
+  **skills** in your runner image apply to every session as the user-level
+  baseline." That is exactly where Fleet installs its hooks
+  (`hooks_install.rs`) and where the catalog renders its assets. So this mode
+  has *better* context fidelity than FP7, not worse.
+- Two lifecycle hooks are seams Fleet could use: **`checkout`** replaces the
+  built-in clone and must leave a working tree at `CLAUDE_RUNNER_CHECKOUT_PATH`
+  (so Fleet could seed it from its own clone), and **`post-session`** is "your
+  only chance to save uncommitted work" (so Fleet could carry results back).
+- A wrapper script or the `command` hook can pin `--permission-mode auto`.
+
+**Why it is not the answer yet — four hard constraints:**
+
+| Constraint | Consequence |
+|---|---|
+| **Team and Enterprise plans only**, public beta, off by default until an Owner turns on *Allow self-hosted environments* | Unavailable on Pro/Max, which is also the only tier native Claude Projects run on (F1). The two cannot be combined today. |
+| The config snapshot is taken **once at runner startup** — "If you change config on a running host, the change takes effect only after you restart the runner" | A catalog `apply_sync` would not reach live runners. Fleet would have to restart a runner after every sync, which collides with its "serve one owner, exit when drained" lifecycle. |
+| The snapshot **leaves out `projects/`**, and each session's config is a per-session directory under `<base-dir>/_sessions/` | The transcript is **not** in the host's `~/.claude/projects/`, so Fleet's transcript, usage and rewind machinery does not see it. A new locator would be needed (multi-harness F5's `transcript_locator` is the right seam). |
+| **A runner serves one owner at a time**, locking to the first session's owner | The minimum fleet size is the number of people working at once — a real cost for R2, and the same account question as Q1. |
+
+**Verdict.** Worth a phase of its own, **FP8**, but **conditional on the plan**:
+it cannot be built for an owner on Pro/Max, and it is the natural home for R6 on
+Team/Enterprise. It does not change FP6 or FP7, and the roadmap keeps it as a
+dependency on a plan tier rather than on code.
+
+**One line in the vendor docs settles the near term**, and it is worth quoting
+because it endorses FP7 for this owner's plan directly: "If you want to run
+Claude Code on your own always-on machine and drive it from other devices, use
+**Remote Control**, which is also available on Pro and Max plans.
 
 **If this is wrong.** The cost is bounded: a provisioning step and a supervised
 process. Nothing in FP0–FP5 depends on it.
