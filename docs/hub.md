@@ -1016,10 +1016,14 @@ What a client may do:
   personal one (`client ungrant <name> assets --catalog <name>` takes it
   back), and the client may then touch only the catalogs it holds — admit,
   remove, load or list layers in them, and apply a Sync plan only when it
-  holds every catalog that plan writes from. `list_catalogs` is open to the
-  master or a person's own unbound full device, never an org-bound client;
-  only the master token may `add_catalog`. `client list`'s ASSETS column is
-  the personal grant; `catalog list` shows every grant.
+  holds every catalog that plan writes from. The fleet-wide actions
+  (`plan_sync`, `apply_sync`, `inventory`, secrets, `resolve_preview` and
+  the rest) also need the personal grant: an org-only grant covers that
+  catalog's config, load, layers and admissions, nothing more.
+  `list_catalogs` is open to the master or a person's own unbound full
+  device, never an org-bound client; only the master token may
+  `add_catalog`. `client list`'s ASSETS column is the personal grant;
+  `catalog list` shows every grant.
 - A prompt typed on a phone reaches an agent **marked** as untrusted input,
   naming the client it came from, unless you have **trusted** that client.
   `raw: true` is the master token's alone.

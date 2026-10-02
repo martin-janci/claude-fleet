@@ -268,7 +268,10 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   set_host_layers; the authoring actions stay personal-only until M4) and
   five actions (`list_catalogs`, `add_catalog`, `remove_catalog`,
   `admit_catalog`, `unadmit_catalog`); every action checks a grant on the
-  catalog it touches (`AdminCall::touches` → `may_admin_catalog`),
+  catalog it touches (`AdminCall::touches` → `may_admin_catalog`) — the
+  fleet-wide actions (`plan_sync`, `apply_sync`, `inventory`, secrets,
+  `resolve_preview`…) touch `personal`, so an org-only grant covers only that
+  catalog's config/load/layers/admissions —
   `list_catalogs` is master or an unbound full client only (an org-bound
   client is refused), `add_catalog` is master-only, and `apply_sync` fails
   closed for a non-master caller when its parked plan is gone and otherwise
