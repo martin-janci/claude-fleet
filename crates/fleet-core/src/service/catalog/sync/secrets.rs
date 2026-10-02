@@ -119,6 +119,11 @@ pub struct Substituted {
     /// Config files whose merge value actually changed as a result of
     /// substitution.
     pub secret_merge_files: BTreeSet<String>,
+    /// `${NAME}`s found in a TOML **key**, which is never substituted
+    /// (`<file>: <NAME>`, once each, in first-seen order). The plan is
+    /// blocked on these: a warning nothing reads would otherwise let the
+    /// file install with the placeholder still in it.
+    pub key_placeholders: Vec<String>,
 }
 
 impl std::fmt::Debug for Substituted {
@@ -128,6 +133,7 @@ impl std::fmt::Debug for Substituted {
             .field("missing", &self.missing)
             .field("secret_files", &self.secret_files)
             .field("secret_merge_files", &self.secret_merge_files)
+            .field("key_placeholders", &self.key_placeholders)
             .finish()
     }
 }
@@ -267,14 +273,30 @@ fn substitute_toml_value(
     }
 }
 
-/// Whether any key anywhere in `value` holds a `${NAME}` placeholder.
-fn toml_keys_hold_placeholders(value: &toml::Value) -> bool {
+/// Every `${NAME}` a key anywhere in `value` holds, once each. Keys are never
+/// substituted, so each of these is a placeholder that would reach the host
+/// verbatim.
+///
+/// In the order the PARSED document holds them, which a `toml::Table` sorts by
+/// key — not the order they appear in the file.
+fn toml_key_placeholders(value: &toml::Value, out: &mut Vec<String>) {
     match value {
-        toml::Value::Table(table) => table
-            .iter()
-            .any(|(k, v)| !find_placeholders(k).is_empty() || toml_keys_hold_placeholders(v)),
-        toml::Value::Array(items) => items.iter().any(toml_keys_hold_placeholders),
-        _ => false,
+        toml::Value::Table(table) => {
+            for (k, v) in table {
+                for name in find_placeholders(k) {
+                    if !out.contains(&name) {
+                        out.push(name);
+                    }
+                }
+                toml_key_placeholders(v, out);
+            }
+        }
+        toml::Value::Array(items) => {
+            for v in items {
+                toml_key_placeholders(v, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -286,13 +308,14 @@ fn toml_keys_hold_placeholders(value: &toml::Value) -> bool {
 /// text replace would. The text is returned untouched when nothing was
 /// substituted. `None` when `text` is not a TOML document or the result
 /// cannot be serialized; the caller then falls back to raw replacement.
-/// `missing` is only extended on success. The second flag says a key held a
-/// placeholder (keys are never substituted).
+/// `missing` is only extended on success. The third element is every
+/// `${NAME}` a KEY held (keys are never substituted), which the caller
+/// blocks on.
 fn substitute_toml(
     text: &str,
     values: &BTreeMap<String, String>,
     missing: &mut Vec<String>,
-) -> Option<(String, bool, bool)> {
+) -> Option<(String, bool, Vec<String>)> {
     let table: toml::Table = toml::from_str(text).ok()?;
     let doc = toml::Value::Table(table);
     let mut local_missing = Vec::new();
@@ -310,7 +333,9 @@ fn substitute_toml(
             missing.push(name);
         }
     }
-    Some((text_out, changed, toml_keys_hold_placeholders(&doc)))
+    let mut in_keys = Vec::new();
+    toml_key_placeholders(&doc, &mut in_keys);
+    Some((text_out, changed, in_keys))
 }
 
 /// Substitute `${NAME}` in every UTF-8 file body and every string leaf of
@@ -328,6 +353,7 @@ pub fn substitute(plan: &RenderPlan, values: &BTreeMap<String, String>) -> Subst
     let mut missing = Vec::new();
     let mut secret_files = BTreeSet::new();
     let mut secret_merge_files = BTreeSet::new();
+    let mut key_placeholders = Vec::new();
 
     let mut warnings = plan.warnings.clone();
 
@@ -349,10 +375,19 @@ pub fn substitute(plan: &RenderPlan, values: &BTreeMap<String, String>) -> Subst
                                 f.path
                             ));
                         }
-                        Some((_, _, true)) => warnings.push(format!(
-                            "{}: a ${{NAME}} in a TOML key is not substituted",
-                            f.path
-                        )),
+                        Some((_, _, in_keys)) if !in_keys.is_empty() => {
+                            warnings.push(format!(
+                                "{}: a ${{NAME}} in a TOML key is not substituted ({})",
+                                f.path,
+                                in_keys.join(", ")
+                            ));
+                            for name in in_keys {
+                                let entry = format!("{}: {name}", f.path);
+                                if !key_placeholders.contains(&entry) {
+                                    key_placeholders.push(entry);
+                                }
+                            }
+                        }
                         Some(_) => {}
                     }
                     parsed.map(|(out, changed, _)| (out, changed))
@@ -402,6 +437,7 @@ pub fn substitute(plan: &RenderPlan, values: &BTreeMap<String, String>) -> Subst
         missing,
         secret_files,
         secret_merge_files,
+        key_placeholders,
     }
 }
 
@@ -639,6 +675,44 @@ mod tests {
         assert!(out.secret_files.contains("~/.codex/agents/pm.toml"));
         assert!(out.missing.is_empty());
         assert_eq!(out.plan.inner().warnings, plan.warnings);
+    }
+
+    /// A `${NAME}` in a TOML KEY is never substituted, so the file would
+    /// install with the literal placeholder in it even when the secret
+    /// resolves. It is reported as such, not as a missing secret — and
+    /// `plan.rs` blocks the asset on it, so the warning is no longer the only
+    /// trace (`a_placeholder_in_a_toml_key_blocks_the_asset`).
+    #[test]
+    fn substitute_names_every_placeholder_a_toml_key_holds() {
+        let mut plan = RenderPlan::default();
+        let text = "[servers.\"${TOKEN}\"]\ncommand = \"npx\"\n[env]\n\"${TOKEN}\" = \"x\"\n\"${OTHER}\" = \"${TOKEN}\"\n";
+        plan.files.push(FileWrite {
+            path: "~/.codex/agents/pm.toml".into(),
+            bytes: text.as_bytes().to_vec(),
+        });
+        let out = substitute(
+            &plan,
+            &values(&[("TOKEN", "sekret-value-123"), ("OTHER", "o")]),
+        );
+        assert_eq!(
+            out.key_placeholders,
+            vec![
+                // A `toml::Table` is sorted by key, so this is the parsed
+                // document's order, not the file's.
+                "~/.codex/agents/pm.toml: OTHER".to_string(),
+                "~/.codex/agents/pm.toml: TOKEN".to_string(),
+            ],
+            "once each"
+        );
+        // Resolvable, so not missing — and the VALUE is still substituted.
+        assert!(out.missing.is_empty());
+        let warn = out.plan.inner().warnings.join(" | ");
+        assert!(warn.contains("TOKEN") && warn.contains("OTHER"), "{warn}");
+        let written = std::str::from_utf8(&out.plan.inner().files[0].bytes).unwrap();
+        assert!(
+            written.contains("\"${TOKEN}\" ="),
+            "the key is left alone: {written}"
+        );
     }
 
     #[test]

@@ -114,18 +114,28 @@ CREATE TABLE changeset_items (
 );
 
 CREATE TABLE asset_triage_verdicts (
-  catalog_id   INTEGER REFERENCES catalogs(id) ON DELETE CASCADE,
+  -- NOT NULL and in the key: a verdict is per catalog, and a NULL in a
+  -- non-INTEGER primary key compares DISTINCT in SQLite, so a nullable
+  -- column in the key would let duplicates in rather than refuse them.
+  catalog_id   INTEGER NOT NULL REFERENCES catalogs(id) ON DELETE CASCADE,
   kind         TEXT NOT NULL,
   name         TEXT NOT NULL,
   content_hash TEXT NOT NULL,
   verdict      TEXT NOT NULL,       -- ignored | rejected | host_local
   decider      TEXT NOT NULL,
   decided_at   INTEGER NOT NULL,
-  PRIMARY KEY (kind, name, content_hash)
+  PRIMARY KEY (catalog_id, kind, name, content_hash)
 );
 ```
 
 **Changed**
+
+`asset_triage_verdicts` is keyed per catalog on purpose: ignoring
+`skill/foo` in `personal` must not silence the same name in an org catalog,
+whose copy is different content under a different owner. The catalog of a
+verdict about a still-unmanaged identity is the catalog the card proposed to
+put it in — the decision is "not this, here", which is the only shape a
+person can be asked about.
 
 - `host_layers` gains `catalog_id` (NOT NULL after backfill). Primary key
   `(host_alias, catalog_id, layer_name)`; the one-active-role index becomes
@@ -152,6 +162,17 @@ CREATE TABLE asset_triage_verdicts (
 4. Every existing asset is `private` (SB1). No file is rewritten: the
    default is the absence of the key.
 
+   **This must not be allowed to read as a removal.** Every asset an
+   org-bound host already has becomes, at that moment, a private asset the
+   scope rule would not plan onto it — and an asset the effective set does
+   not carry is what the planner otherwise calls an orphan, i.e. `Remove`.
+   So an upgrade would uninstall the fleet from every org-bound host unless
+   the planner is explicit about it, which M2 is: a private asset withheld
+   from an org-bound host that already holds it is a `Noop`
+   ("private; withheld from org host, not removed"), never a `Remove`, and
+   the Bootstrap card proposes `set_scope shared` for exactly those
+   identities. A refused asset never produces an orphan `Remove` either.
+
 **Which catalogs a host accepts**
 
 - A host with `org_id = X`: catalog(s) of org X, plus the `shared` assets
@@ -173,6 +194,10 @@ the others load.
   by the scope rule above. A private asset is never planned onto an
   org-bound host; an org asset never onto a host that does not accept its
   catalog. A layer that would do either fails validation with the reason.
+  Withholding is never removal: where the host already holds the withheld
+  asset the action is a `Noop` carrying the reason, and where a layer or a
+  collision refuses one it is a per-asset `Blocked` — neither becomes an
+  orphan `Remove` (see the migration's step 4).
 - **Unlayered guard (from S1a)** applies per host: a remote host with no
   layers in *any* accepted catalog is skipped unless `allow_unlayered`.
 - **Collision:** two catalogs render the same install target (kind +
@@ -232,10 +257,25 @@ rolled out once (SB6).
   `remove_catalog`, `admit_catalog`, `unadmit_catalog`. A new tool
   `changesets { list | propose | apply | undo | dismiss | reject_item }`.
   Every mutating action checks the caller's grant **for the catalogs it
-  touches** (`may_admin_catalog(caller, catalog_id)`); per-host tokens never
-  pass. `list_assets` and the inventory stay readable as today.
+  touches** (`may_admin_catalog(caller, catalog_id)`). That check is an
+  addition to the gate that exists, not a replacement for it, and the order
+  matters: `catalog_admin` is gated tool-wide today, so a per-host token is
+  refused centrally (it never reaches an action) and a client with no
+  `assets` grant is refused before the action string is parsed. The
+  tool-wide gate therefore has to widen to "holds a grant on **any**
+  catalog" for the per-catalog check to be reachable at all, and the
+  refusals must stay distinguishable: no grant anywhere is still the
+  tool-wide refusal; a grant on another catalog is the new per-catalog one. `list_assets` and the inventory stay readable as today.
 - The Tauri commands route to the hub through `AdminCall` as today; the
-  verdict table gains the new actions.
+  verdict table gains the new actions (and `REGEN_HUB_VERDICTS=1`).
+- **`changesets` bumps `CONTRACT_REVISION` 6 → 7.** It is a new routed hub
+  *tool*, which `wire_contract.rs` names as one of the two additions an older
+  client cannot absorb: an older hub's router answers "unknown tool" and no
+  `#[serde(default)]` softens that. New *actions* on the existing
+  `catalog_admin` are the same shape and ride the same bump. So M4 also moves
+  the desktop's `MAX_HUB_CONTRACT` (`src-tauri/src/backend/contract.rs`) and
+  fleet-mobile's, and regenerates `hub_contract.golden.json`; `tests_contract.rs`
+  fails until it does.
 
 ## Workspace shell
 

@@ -565,10 +565,26 @@ fn action_for(
     let mut secret_files = sub.secret_files.clone();
     secret_files.extend(sub.secret_merge_files.iter().cloned());
 
-    if !sub.missing.is_empty() {
+    // A placeholder that would reach the host verbatim blocks the asset.
+    // `${NAME}` in a TOML KEY is one of those even when the secret resolves:
+    // keys are never substituted, so installing the file would write the
+    // literal `${NAME}` into the host's config. It is not a missing secret,
+    // so it is named in the reason rather than in `missing_secrets`.
+    if !sub.missing.is_empty() || !sub.key_placeholders.is_empty() {
+        let mut why = Vec::new();
+        if !sub.missing.is_empty() {
+            why.push(format!("missing secrets: {}", sub.missing.join(", ")));
+        }
+        if !sub.key_placeholders.is_empty() {
+            why.push(format!(
+                "a ${{NAME}} in a TOML key is never substituted ({}): \
+                 put the placeholder in the value, or rename the key",
+                sub.key_placeholders.join(", ")
+            ));
+        }
         return Action {
             op: ActionOp::Blocked,
-            reason: Some(format!("missing secrets: {}", sub.missing.join(", "))),
+            reason: Some(why.join("; ")),
             files,
             merges,
             secrets: resolved,
@@ -1334,6 +1350,37 @@ mod tests {
         let a = act(&hp, "h");
         assert_eq!(a.op, ActionOp::Noop);
         assert!(a.remove_entry.is_none());
+    }
+
+    /// A `${NAME}` in a TOML KEY is never substituted, so an apply would
+    /// write the literal placeholder onto the host. The asset is blocked even
+    /// though the secret resolves — the plan warning on its own is read by
+    /// nothing that stops an apply.
+    #[test]
+    fn a_placeholder_in_a_toml_key_blocks_the_asset() {
+        const AGENT: &str = "kind: agent\nname: pm\ndescription: d\ntargets:\n  codex:\n    extra:\n      mcp_servers:\n        \"${FLEET_MCP_TOKEN}\":\n          command: npx\n";
+        let hp = plan_for(
+            &catalog_of(&[AGENT]),
+            &Codex,
+            &HostSnapshot::default(),
+            &Manifest::default(),
+            &secrets_map(),
+        );
+        let a = act(&hp, "pm");
+        assert_eq!(a.op, ActionOp::Blocked);
+        assert!(
+            a.missing_secrets.is_empty(),
+            "the secret resolves; it is the key that cannot take it: {a:?}"
+        );
+        let why = a.reason.clone().unwrap_or_default();
+        assert!(
+            why.contains("TOML key") && why.contains("FLEET_MCP_TOKEN"),
+            "{why}"
+        );
+        assert!(
+            a.plan.is_none(),
+            "a blocked action carries nothing to write"
+        );
     }
 
     #[test]
