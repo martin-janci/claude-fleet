@@ -11,7 +11,7 @@
 use crate::ipc_error::{lock, IpcError};
 use crate::service::catalog::model::{Asset, Kind, Scope};
 use crate::service::catalog::registry;
-use crate::service::catalog::repo::{Catalog, CatalogRef};
+use crate::service::catalog::repo::{Catalog, CatalogRef, ProblemHolds};
 use crate::service::catalog::resolve::Provenance;
 use crate::service::catalog::sync::layers::resolve_rows;
 use crate::store::{CatalogRow, HostLayerRow, Store};
@@ -145,6 +145,12 @@ pub struct EffectiveSet {
     /// only for catalogs the host's own manifest names.
     #[serde(skip)]
     pub not_accepted: BTreeMap<String, String>,
+    /// Assets M4 (carry 2, R24): catalog → the keys its own load problems
+    /// put in doubt, for every catalog in `speaks_for` that has any. A held
+    /// key's manifest entries are kept, never removed as orphans. Never
+    /// serialized (problem messages can name paths on the hub's machine).
+    #[serde(skip)]
+    pub problem_held: BTreeMap<String, ProblemHolds>,
 }
 
 impl EffectiveSet {
@@ -331,6 +337,7 @@ fn compose<'r>(
     let mut speaks_for: BTreeSet<String> = BTreeSet::new();
     let mut held_back: BTreeMap<String, String> = BTreeMap::new();
     let mut not_accepted: BTreeMap<String, String> = BTreeMap::new();
+    let mut problem_held: BTreeMap<String, ProblemHolds> = BTreeMap::new();
 
     for cat in registry::in_order(catalogs) {
         let label = label_of(cat.org_id, &cat.name);
@@ -364,6 +371,13 @@ fn compose<'r>(
             }
             Err(e) => return Err(e),
         };
+        // Carry 2 (R24): the catalog still speaks — a broken file holds only
+        // the key (or the kind directory) its problem path names, never the
+        // whole catalog.
+        let holds = ProblemHolds::from_problems(&cat.problems);
+        if !holds.is_empty() {
+            problem_held.insert(label.clone(), holds);
+        }
         speaks_for.insert(label);
         layered |= res.layered;
         problems.extend(res.catalog.problems);
@@ -566,6 +580,7 @@ fn compose<'r>(
         speaks_for,
         held_back,
         not_accepted,
+        problem_held,
     })
 }
 
@@ -1203,5 +1218,23 @@ mod tests {
             "{held:?}"
         );
         assert!(e.held_back_for([]).is_empty());
+    }
+
+    /// Carry 2: a speaking catalog's load problems are reported per key, so
+    /// the planner can keep a broken asset's copies (Rulings R24).
+    #[test]
+    fn a_speaking_catalogs_load_problems_are_held_per_key() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        let (store, personal, _acme) = seeded_store();
+        let mut cat = personal_cat(personal, vec![skill("a", "private")], LayerSet::default());
+        cat.problems.push(crate::service::catalog::model::Problem {
+            path: "skills/broken/asset.yaml".into(),
+            message: "bad yaml".into(),
+        });
+        registry::install_personal(cat).unwrap();
+        let e = effective_for_host(&store, "h").unwrap();
+        let holds = e.problem_held.get("personal").expect("held");
+        assert_eq!(holds.reason(Kind::Skill, "broken"), Some("bad yaml"));
+        assert_eq!(holds.reason(Kind::Skill, "a"), None);
     }
 }

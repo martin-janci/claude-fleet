@@ -12,7 +12,7 @@ use super::super::harness::{
 };
 use super::super::inventory::merge_satisfied;
 use super::super::model::{sha256_hex, Asset, AssetSpec, Kind};
-use super::super::repo::Catalog;
+use super::super::repo::{Catalog, ProblemHolds};
 use super::manifest::{Manifest, ManifestEntry};
 use super::secrets::{self, SecretPlan};
 use serde::{Deserialize, Serialize};
@@ -305,7 +305,9 @@ fn expected_for<'a>(
 ///    absent from `catalog` whose catalog does NOT speak for this host (not
 ///    loaded, failed to load, no longer accepted, not configured —
 ///    `manifest.held`) is kept: a `Noop` naming its catalog and why
-///    (Assets M3, Rulings R6; spec: no automatic remove).
+///    (Assets M3, Rulings R6; spec: no automatic remove). An entry whose
+///    own catalog speaks but whose key that catalog could not read
+///    (`keep.problem_held`, Assets M4) is kept the same way.
 /// 7. `backup` is true whenever something that exists on the host right now
 ///    would be replaced (`Update`/`Overwrite`) or deleted (`Remove`) — a
 ///    planned file that is already there, or, for a merge-only asset, a
@@ -373,6 +375,31 @@ pub fn compute_host_plan(
             // (`sync::plan_sync` appends it), and removing the host's
             // existing copy here would make either destructive — the one
             // thing neither must ever be.
+            continue;
+        }
+        // Assets M4, carry 2 (Rulings R24): the entry's catalog speaks, but
+        // could not read this key's own file (or its whole kind directory)
+        // — absence here is "unreadable", not "dropped". Hold it with a
+        // `Noop` saying why; never a `Remove`. This is the one deliberate
+        // change for a personal-only fleet (ruling PF6 amends the parity
+        // constraint: "plans exactly as before, EXCEPT carry 2 — an asset
+        // whose catalog file has a Problem is held, never removed"). Checked
+        // after `protected`, which already reports its key (one action per
+        // key), and before the plugin rule, whose reason would be wrong.
+        if let Some(why) = keep
+            .problem_held
+            .get(&entry.catalog)
+            .and_then(|h| h.reason(kind, &name))
+        {
+            actions.push(held_noop(
+                kind,
+                &name,
+                &entry.catalog,
+                format!(
+                    "catalog {} could not read it ({why}); its copy is kept, not removed",
+                    entry.catalog
+                ),
+            ));
             continue;
         }
         if kind == Kind::PluginRef && filter.layered {
@@ -460,6 +487,10 @@ pub struct KeepRules {
     pub speaks_for: Option<BTreeSet<String>>,
     /// Catalog → why its entries are kept (`EffectiveSet::held_back_for`).
     pub held_back: BTreeMap<String, String>,
+    /// Catalog → the keys its load problems hold (Assets M4, carry 2,
+    /// `EffectiveSet::problem_held`): an entry of that catalog whose key is
+    /// held gets a `Noop` saying why, never a `Remove`.
+    pub problem_held: BTreeMap<String, ProblemHolds>,
 }
 
 impl KeepRules {
@@ -995,6 +1026,7 @@ mod tests {
     use crate::service::catalog::harness::codex::Codex;
     use crate::service::catalog::harness::{apply_merges, ManifestMerge};
     use crate::service::catalog::model::Asset;
+    use crate::service::catalog::model::Problem;
 
     const SKILL: &str = "kind: skill\nname: s\ndescription: d\n";
     const HOOK: &str =
@@ -1866,6 +1898,7 @@ mod tests {
                 "catalog acme is not accepted by this host; its assets are kept, not removed"
                     .to_string(),
             )]),
+            ..Default::default()
         };
         let hp = compute_host_plan(
             &Catalog::default(),
@@ -2105,6 +2138,66 @@ mod tests {
         assert!(
             !plans().contains_key(&abandoned),
             "an expired plan is dropped, not left pinning its host snapshots"
+        );
+    }
+
+    /// Carry 2 (Rulings R24): an entry whose catalog speaks but whose own
+    /// file is a load problem is kept with a `Noop`, never removed; so is
+    /// every entry of a kind whose directory could not be read. A sibling
+    /// the catalog really dropped is still removed.
+    #[test]
+    fn an_asset_the_catalog_could_not_read_is_kept_not_removed() {
+        let mut manifest = Manifest::default();
+        for name in ["broken", "gone"] {
+            manifest.assets.insert(
+                format!("skill/{name}"),
+                ManifestEntry {
+                    files: vec![format!("~/.claude/skills/{name}/SKILL.md")],
+                    ..Default::default()
+                },
+            );
+        }
+        manifest
+            .assets
+            .insert("agent/x".into(), ManifestEntry::default());
+        let holds = ProblemHolds::from_problems(&[
+            Problem {
+                path: "skills/broken/asset.yaml".into(),
+                message: "bad yaml".into(),
+            },
+            Problem {
+                path: "agents".into(),
+                message: "permission denied".into(),
+            },
+        ]);
+        let keep = KeepRules {
+            speaks_for: Some(BTreeSet::from(["personal".to_string()])),
+            problem_held: BTreeMap::from([("personal".to_string(), holds)]),
+            ..Default::default()
+        };
+        let hp = compute_host_plan(
+            &Catalog::default(),
+            &Claude,
+            "local",
+            &HostSnapshot::default(),
+            &manifest,
+            &secrets_map(),
+            &PlanFilter::default(),
+            &keep,
+        );
+        assert_eq!(act(&hp, "gone").op, ActionOp::Remove);
+        let broken = act(&hp, "broken");
+        assert_eq!(broken.op, ActionOp::Noop);
+        assert!(
+            broken.reason.as_deref().unwrap().contains("bad yaml"),
+            "{:?}",
+            broken.reason
+        );
+        assert!(broken.remove_entry.is_none());
+        assert_eq!(
+            act(&hp, "x").op,
+            ActionOp::Noop,
+            "an unreadable kind dir holds its entries"
         );
     }
 }

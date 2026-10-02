@@ -92,6 +92,62 @@ impl Catalog {
     }
 }
 
+/// What a catalog's load problems put in doubt (Assets M4, carry 2,
+/// Rulings R24). `load_dir` records a file that did not parse at
+/// `<kind dir>/<name>/asset.yaml` (skills, agents) or `<kind dir>/<name>.yaml`
+/// (the rest), and a kind directory it could not read at `<kind dir>`. The
+/// first holds that one asset, the second every asset of the kind. Layer
+/// and catalog-file problems hold nothing. A sync must never read a held
+/// asset's absence as "the catalog dropped it" (`sync::plan::KeepRules`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProblemHolds {
+    /// Kind → why its whole directory could not be read.
+    pub kinds: BTreeMap<Kind, String>,
+    /// `(kind, name)` → why its file did not load.
+    pub assets: BTreeMap<(Kind, String), String>,
+}
+
+impl ProblemHolds {
+    pub fn from_problems(problems: &[Problem]) -> ProblemHolds {
+        let mut out = ProblemHolds::default();
+        for p in problems {
+            let parts: Vec<&str> = p.path.split(['/', '\\']).collect();
+            let Some(kind) = parts.first().and_then(|d| Kind::from_dir(d)) else {
+                continue;
+            };
+            match parts.as_slice() {
+                [_] => {
+                    out.kinds.insert(kind, p.message.clone());
+                }
+                [_, name, "asset.yaml"] if kind.is_folder() => {
+                    out.assets
+                        .insert((kind, (*name).to_string()), p.message.clone());
+                }
+                [_, file] if !kind.is_folder() => {
+                    if let Some(name) = file.strip_suffix(".yaml") {
+                        out.assets
+                            .insert((kind, name.to_string()), p.message.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Why `kind/name` is held, if it is.
+    pub fn reason(&self, kind: Kind, name: &str) -> Option<&str> {
+        self.assets
+            .get(&(kind, name.to_string()))
+            .or_else(|| self.kinds.get(&kind))
+            .map(String::as_str)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.kinds.is_empty() && self.assets.is_empty()
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct CatalogFile {
     schema_version: u64,
@@ -1560,6 +1616,53 @@ mod tests {
         assert_eq!(
             fs::read(root.join("skills/s/resources/keep.txt")).unwrap(),
             b"keep2"
+        );
+    }
+
+    /// Carry 2 (Rulings R24): a problem holds the asset its path names, or a
+    /// whole kind when the kind's directory could not be read; layer,
+    /// catalog-file and absolute (problem-entry) paths hold nothing.
+    #[test]
+    fn problem_holds_name_the_asset_or_the_kind_a_problem_is_about() {
+        let p = |path: &str| Problem {
+            path: path.into(),
+            message: format!("bad {path}"),
+        };
+        let h = ProblemHolds::from_problems(&[
+            p("skills/broken/asset.yaml"),
+            p("hooks/stop.yaml"),
+            p("agents"),
+            p("layers/core.yaml"),
+            p("layers"),
+            p("/abs/repo"),
+        ]);
+        assert_eq!(
+            h.reason(Kind::Skill, "broken"),
+            Some("bad skills/broken/asset.yaml")
+        );
+        assert_eq!(h.reason(Kind::Hook, "stop"), Some("bad hooks/stop.yaml"));
+        assert_eq!(h.reason(Kind::Agent, "anything"), Some("bad agents"));
+        assert_eq!(h.reason(Kind::Skill, "fine"), None);
+        assert_eq!(h.assets.len() + h.kinds.len(), 3);
+    }
+
+    /// The loader's own paths: a skill whose asset.yaml does not parse.
+    #[test]
+    fn load_dir_problems_become_holds() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::create_dir_all(root.path().join("skills/broken")).unwrap();
+        std::fs::write(
+            root.path().join("skills/broken/asset.yaml"),
+            "kind: skill\nname: [\n",
+        )
+        .unwrap();
+        let cat = load_dir(root.path()).unwrap();
+        let h = ProblemHolds::from_problems(&cat.problems);
+        assert!(
+            h.reason(Kind::Skill, "broken").is_some(),
+            "{:?}",
+            cat.problems
         );
     }
 }

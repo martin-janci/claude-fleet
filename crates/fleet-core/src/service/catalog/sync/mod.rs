@@ -404,6 +404,7 @@ pub async fn plan_sync(
                         speaks_for: Some(eff.speaks_for.clone()),
                         held_back: eff
                             .held_back_for(manifest.assets.values().map(|e| e.catalog.as_str())),
+                        problem_held: eff.problem_held.clone(),
                     };
                     let mut hp = plan::compute_host_plan(
                         planned,
