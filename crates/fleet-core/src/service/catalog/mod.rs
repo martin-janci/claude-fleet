@@ -6,6 +6,7 @@
 pub mod admin;
 pub mod author;
 pub mod author_session;
+pub mod catalogs;
 pub mod effective;
 pub mod harness;
 pub mod harness_set;
@@ -63,10 +64,11 @@ use crate::events::CatalogSummary;
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::ssh::SshClient;
-use crate::store::{AssetInventoryRow, CatalogConfigRow, Store};
+use crate::store::{AssetInventoryRow, CatalogConfigRow, CatalogRow, Store};
 use harness::RenderPlan;
 use model::{Asset, Kind, Problem};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +77,7 @@ pub struct ConfigureArgs {
     pub remote_url: Option<String>,
 }
 
-fn expand_home(p: &str) -> String {
+pub(crate) fn expand_home(p: &str) -> String {
     // `~\` too on Windows, where that is how a user types it.
     let rest = p
         .strip_prefix("~/")
@@ -113,11 +115,14 @@ pub fn configure(args: ConfigureArgs, store: &Mutex<Store>) -> Result<CatalogCon
     Ok(lock(store)?.set_catalog_config(&path, remote)?)
 }
 
-/// (Optionally pull, then) parse the repo into the registry and record HEAD.
-pub fn load(pull: bool, store: &Mutex<Store>) -> Result<CatalogSummary, IpcError> {
-    let cfg = require_config(store)?;
-    let root = std::path::PathBuf::from(&cfg.repo_path);
-    repo::ensure_repo(&root, cfg.remote_url.as_deref())?;
+/// (Optionally pull, then) parse catalog `id`'s checkout into the registry
+/// and record its HEAD. Always tries, whatever the registry holds.
+pub fn load_catalog(id: i64, pull: bool, store: &Mutex<Store>) -> Result<CatalogSummary, IpcError> {
+    let row = lock(store)?
+        .get_catalog(id)?
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("catalog {id} not found")))?;
+    let root = std::path::PathBuf::from(&row.repo_path);
+    repo::ensure_repo(&root, row.remote_url.as_deref())?;
     if pull {
         repo::pull(&root)?;
     }
@@ -129,6 +134,9 @@ pub fn load(pull: bool, store: &Mutex<Store>) -> Result<CatalogSummary, IpcError
         asset_count: cat.assets.len(),
         problem_count: cat.problems.len(),
     };
+    cat.id = row.id;
+    cat.name = row.name.clone();
+    cat.org_id = row.org_id;
     // The store guard and the registry lock are never held at the same
     // time: `resolve_preview` (via `with_catalog` → `sync::layers::
     // resolve_for_host`) takes the registry read lock and, from inside
@@ -137,54 +145,163 @@ pub fn load(pull: bool, store: &Mutex<Store>) -> Result<CatalogSummary, IpcError
     // Two callers on opposite lock orders can deadlock each other, so each
     // store/registry access below is its own, non-overlapping critical
     // section. See `registry.rs`'s module doc.
-    let personal = lock(store)?.personal_catalog()?.ok_or_else(|| {
-        IpcError::new(E_CATALOG_NOT_CONFIGURED, "configure the catalog repo first")
-    })?;
-    cat.id = personal.id;
-    cat.name = personal.name;
-    cat.org_id = personal.org_id;
-    registry::install_personal(cat)?;
+    //
+    // Fix round 1, item 3: the store write happens BEFORE the registry
+    // install, not after. A failure here (`E_SQLITE` from `rusqlite`, or
+    // `E_LOCK` from a poisoned mutex) must propagate without the registry
+    // having changed at all — `ensure_fresh` tells this kind of failure
+    // apart from a genuine load failure (`is_load_failure`) and would
+    // otherwise clobber whatever the registry already held (a good load
+    // from a previous pass, say) with a problem entry over what is really
+    // just a bookkeeping failure.
     {
         let s = lock(store)?;
-        s.set_catalog_head_for(personal.id, &summary.head, summary.loaded_at)?;
+        s.set_catalog_head_for(row.id, &summary.head, summary.loaded_at)?;
         s.bus_catalog_loaded(&summary);
+    }
+    if row.org_id.is_none() {
+        registry::install_personal(cat)?;
+    } else {
+        registry::install(cat)?;
     }
     Ok(summary)
 }
 
-/// Load the configured catalog into the registry unless what is there is
-/// already the load the store last recorded. A no-op when nothing is
-/// configured (the caller's own `require_config` reports that).
-///
-/// The registry lives in one process's memory, but the configuration and the
-/// record of the last load (`head_commit`, `last_loaded_at`) are in the
-/// store. On a hub nothing else ever calls `load`: the catalog is pointed at
-/// with `fleet-hub catalog set` and refreshed with `fleet-hub catalog reload`,
-/// both separate processes that load and write that record. Comparing it
-/// with the in-memory copy is how the running hub notices: a re-point clears
-/// the record (`set_catalog_config`) and every load stamps a new one, so a
-/// mismatch — or no catalog at all — means reload.
-pub fn ensure_fresh(store: &Mutex<Store>) -> Result<(), IpcError> {
-    let Some(cfg) = config(store)? else {
-        return Ok(());
-    };
-    // Compares through the closure rather than `registry::personal()?`
-    // (which clones the whole catalog, resources included) so the common
-    // "already fresh" path — every MCP asset tool calls this — only ever
-    // clones a `loaded_at` and a `head` string. Nothing loaded, or the
-    // registry lock poisoned, both count as "not current": `load` below
-    // either fixes the first or surfaces the second on its own next
-    // registry access.
-    let current = registry::with_personal(|c| Ok((c.loaded_at, c.head.clone()))).is_ok_and(
-        |(loaded_at, head)| {
-            cfg.last_loaded_at == Some(loaded_at)
-                && cfg.head_commit.as_deref() == Some(head.as_str())
-        },
-    );
-    if !current {
-        load(false, store)?;
+/// Load the personal catalog — the desktop's and `catalog set`'s load.
+pub fn load(pull: bool, store: &Mutex<Store>) -> Result<CatalogSummary, IpcError> {
+    let id = lock(store)?
+        .personal_catalog()?
+        .ok_or_else(|| IpcError::new(E_CATALOG_NOT_CONFIGURED, "configure the catalog repo first"))?
+        .id;
+    load_catalog(id, pull, store)
+}
+
+/// `catalog_load` with no catalog named (Rulings R18): personal, then every
+/// other catalog brought up to date — an org catalog that cannot load stays
+/// a problem entry. Answers personal's summary.
+pub fn load_all(pull: bool, store: &Mutex<Store>) -> Result<CatalogSummary, IpcError> {
+    let summary = load(pull, store)?;
+    ensure_fresh(store)?;
+    Ok(summary)
+}
+
+/// A registry entry for an org catalog that failed to load (Rulings R5):
+/// stamped with the store's record as it stood, so [`is_current`] holds —
+/// and nothing retries — until that record changes.
+pub(crate) fn problem_entry(row: &CatalogRow, err: &IpcError) -> repo::Catalog {
+    repo::Catalog {
+        id: row.id,
+        name: row.name.clone(),
+        org_id: row.org_id,
+        head: row.head_commit.as_deref().unwrap_or("").to_string(),
+        loaded_at: row.last_loaded_at.unwrap_or(0),
+        problems: vec![model::Problem {
+            path: row.repo_path.clone(),
+            message: format!("catalog {} could not be loaded: {}", row.name, err.message),
+        }],
+        load_error: Some(err.message.clone()),
+        load_error_stamp: Some(problem_stamp(row)),
+        ..Default::default()
     }
-    Ok(())
+}
+
+/// `repo_path`+`remote_url`, joined so a change in either is detectable —
+/// see [`repo::Catalog::load_error_stamp`] (PF13).
+fn problem_stamp(row: &CatalogRow) -> String {
+    format!(
+        "{}\u{0}{}",
+        row.repo_path,
+        row.remote_url.as_deref().unwrap_or("")
+    )
+}
+
+/// Whether the registry's `entry` is the load the store last recorded.
+fn is_current(entry: &repo::Catalog, row: &CatalogRow) -> bool {
+    if entry.load_error.is_some() {
+        entry.head == row.head_commit.as_deref().unwrap_or("")
+            && entry.loaded_at == row.last_loaded_at.unwrap_or(0)
+            && entry.load_error_stamp.as_deref() == Some(problem_stamp(row).as_str())
+    } else {
+        row.last_loaded_at == Some(entry.loaded_at)
+            && row.head_commit.as_deref() == Some(entry.head.as_str())
+    }
+}
+
+/// Fix round 1, item 3: whether `e` came from reading/parsing the catalog's
+/// checkout itself (`ensure_repo`/`pull`/`head`/`load_dir` — `E_CATALOG_GIT`,
+/// `E_CATALOG_PARSE`, or `E_IO` for an unreadable checkout) rather than from
+/// the store or a lock (`E_SQLITE`, `E_LOCK`) or a row that vanished
+/// (`E_NOTFOUND`, a store race between `ensure_fresh`'s own `list_catalogs`
+/// and `load_catalog`'s `get_catalog` — `refresh_row` evicts that one, see
+/// there). Only a load failure becomes a
+/// problem entry in `ensure_fresh`: a store/lock failure must propagate
+/// instead, because by the time it can happen (after `load_catalog`'s own
+/// repo/parse steps already succeeded) the catalog may be fully loaded and
+/// simply not yet installed — see `load_catalog`'s store-before-registry
+/// ordering — so treating it as a load failure would clobber a good load,
+/// or whatever the registry already held, with a problem entry over what is
+/// really just a bookkeeping failure.
+pub fn is_load_failure(e: &IpcError) -> bool {
+    matches!(
+        e.code.as_str(),
+        E_CATALOG_GIT | E_CATALOG_PARSE | codes::E_IO
+    )
+}
+
+/// Bring every configured catalog's registry entry up to the store's record
+/// (spec, Runtime). The registry is one process's memory; the configuration
+/// and each catalog's last load are in the store, written by `fleet-hub
+/// catalog …` in another process — comparing the two is how a running hub
+/// notices. An org catalog that cannot load becomes a problem entry and the
+/// others still load; a personal failure is returned, as before (R5), after
+/// the org catalogs were attempted. Org entries the store no longer has are
+/// evicted. A store or lock failure (`is_load_failure` false) propagates
+/// immediately instead of becoming a problem entry — see its doc.
+pub fn ensure_fresh(store: &Mutex<Store>) -> Result<(), IpcError> {
+    let rows = lock(store)?.list_catalogs()?;
+    let configured: BTreeSet<i64> = rows.iter().map(|r| r.id).collect();
+    registry::evict_org_catalogs_not_in(&configured)?;
+    let mut personal_err = None;
+    for row in &rows {
+        if let Err(e) = refresh_row(row, store)? {
+            personal_err = Some(e);
+        }
+    }
+    personal_err.map_or(Ok(()), Err)
+}
+
+/// One row of [`ensure_fresh`]'s pass: `Ok(Err(e))` is personal's load
+/// failure, kept for the end of the pass (R5); an outer `Err` stops it.
+///
+/// Final review M-b: an org row listed a moment ago that `load_catalog`
+/// no longer finds (`E_NOTFOUND`) was removed meanwhile (`catalog remove`
+/// in another process) — evicted, like the next pass would, instead of
+/// failing an unrelated asset call.
+fn refresh_row(row: &CatalogRow, store: &Mutex<Store>) -> Result<Result<(), IpcError>, IpcError> {
+    let current = registry::with_catalogs(|m| {
+        Ok(registry::entry_for(m, row).is_some_and(|c| is_current(c, row)))
+    })
+    .unwrap_or(false);
+    if current {
+        return Ok(Ok(()));
+    }
+    match load_catalog(row.id, false, store) {
+        Ok(_) => {}
+        Err(e) if row.org_id.is_none() => return Ok(Err(e)),
+        Err(e) if e.code == codes::E_NOTFOUND => {
+            // Only when the row really is gone, not some other not-found.
+            if lock(store)?.get_catalog(row.id)?.is_some() {
+                return Err(e);
+            }
+            registry::remove(row.id)?;
+        }
+        Err(e) if is_load_failure(&e) => {
+            tracing::warn!(catalog = %row.name, error = %e.message, "catalog could not be loaded; kept as a problem");
+            registry::install(problem_entry(row, &e))?;
+        }
+        Err(e) => return Err(e),
+    }
+    Ok(Ok(()))
 }
 
 fn with_catalog<T>(f: impl FnOnce(&repo::Catalog) -> Result<T, IpcError>) -> Result<T, IpcError> {
@@ -429,22 +546,38 @@ pub struct LayerListing {
     pub hosts: Vec<crate::store::HostLayerRow>,
 }
 
-pub fn list_layers(store: &Mutex<Store>) -> Result<LayerListing, IpcError> {
-    // Only active rows are part of an assignment — the same rule
-    // `get_host_layers` (and therefore resolution) applies. The store call
-    // stays "all rows" because callers such as `delete_host`'s checks need
-    // exactly that.
+/// One catalog's layer definitions plus every host's active assignment IN
+/// THAT CATALOG (M2 carry 7: the rows of other catalogs no longer appear
+/// next to definitions they do not belong to). Only active rows are part of
+/// an assignment — the same rule `get_host_layers` (and therefore
+/// resolution) applies. The store call stays "all rows" because callers
+/// such as `delete_host`'s checks need exactly that.
+pub fn list_layers_for(row: &CatalogRow, store: &Mutex<Store>) -> Result<LayerListing, IpcError> {
     let hosts: Vec<_> = lock(store)?
         .list_all_host_layers()?
         .into_iter()
-        .filter(|r| r.active)
+        .filter(|r| r.active && r.catalog_id == row.id)
         .collect();
-    with_catalog(|cat| {
+    registry::with_catalog_row(row, |cat| {
         Ok(LayerListing {
             layers: cat.layers.iter().cloned().collect(),
             hosts,
         })
     })
+}
+
+/// The personal catalog's layers and assignments.
+pub fn list_layers(store: &Mutex<Store>) -> Result<LayerListing, IpcError> {
+    let personal = lock(store)?.personal_catalog()?;
+    match personal {
+        Some(row) => list_layers_for(&row, store),
+        None => with_catalog(|cat| {
+            Ok(LayerListing {
+                layers: cat.layers.iter().cloned().collect(),
+                hosts: Vec::new(),
+            })
+        }),
+    }
 }
 
 /// `host_alias` must be a registered host. Without this check, a typo'd
@@ -453,7 +586,13 @@ pub fn list_layers(store: &Mutex<Store>) -> Result<LayerListing, IpcError> {
 /// treats "no assignment rows" as "no layering" for backward compatibility
 /// and cannot tell a nonexistent host from an unassigned one.
 fn require_host_exists(store: &Mutex<Store>, host_alias: &str) -> Result<(), IpcError> {
-    match lock(store)?.get_host_row(host_alias)? {
+    require_host(&*lock(store)?, host_alias)
+}
+
+/// [`require_host_exists`] under a guard the caller already holds
+/// (`catalogs::admit`/`unadmit`).
+pub(crate) fn require_host(s: &Store, host_alias: &str) -> Result<(), IpcError> {
+    match s.get_host_row(host_alias)? {
         Some(_) => Ok(()),
         None => Err(IpcError::new(
             codes::E_NOTFOUND,
@@ -488,6 +627,7 @@ pub fn resolve_preview(
         layered: eff.layered,
         refused: eff.refused,
         withheld: eff.withheld,
+        held_back: eff.held_back,
     })
 }
 
@@ -540,11 +680,13 @@ fn check_no_name_collision(role: Option<&str>, contexts: &[&str]) -> Result<(), 
     Ok(())
 }
 
-/// Replace a host's layer assignment wholesale: one optional role plus
-/// contexts in application order. Edits fleet state only; catalog files are
-/// never written. Returns the host's new assignment.
-pub fn set_host_layers(
+/// Replace a host's assignment in one catalog: one optional role plus
+/// contexts in application order, checked against THAT catalog's layer
+/// definitions. Edits fleet state only; catalog files are never written.
+/// Answers the host's rows in that catalog only (M2 carry 7).
+pub fn set_host_layers_for(
     host_alias: &str,
+    row: &CatalogRow,
     role: Option<&str>,
     contexts: &[&str],
     store: &Mutex<Store>,
@@ -552,7 +694,7 @@ pub fn set_host_layers(
     crate::validate::host_alias(host_alias)?;
     require_host_exists(store, host_alias)?;
     check_no_name_collision(role, contexts)?;
-    with_catalog(|cat| {
+    registry::with_catalog_row(row, |cat| {
         if let Some(r) = role {
             check_layer_axis(cat, r, layer::Axis::Role)?;
         }
@@ -562,8 +704,25 @@ pub fn set_host_layers(
         Ok(())
     })?;
     let s = lock(store)?;
-    s.set_host_layers(host_alias, role, contexts)?;
-    Ok(s.get_host_layers(host_alias)?)
+    s.set_host_layers_for(host_alias, row.id, role, contexts)?;
+    Ok(s.get_host_layers_for(host_alias, row.id)?)
+}
+
+/// [`set_host_layers_for`] in the personal catalog — the desktop's command.
+/// The host is validated once, by [`set_host_layers_for`] (PF14).
+pub fn set_host_layers(
+    host_alias: &str,
+    role: Option<&str>,
+    contexts: &[&str],
+    store: &Mutex<Store>,
+) -> Result<Vec<crate::store::HostLayerRow>, IpcError> {
+    let row = lock(store)?.personal_catalog()?.ok_or_else(|| {
+        IpcError::new(
+            E_CATALOG_NOT_CONFIGURED,
+            "catalog not loaded; call catalog_load",
+        )
+    })?;
+    set_host_layers_for(host_alias, &row, role, contexts, store)
 }
 
 #[cfg(test)]
@@ -754,6 +913,389 @@ mod tests {
         .unwrap();
         ensure_fresh(&store).unwrap();
         assert_eq!(list_assets(&store).unwrap().assets.len(), 2);
+        registry::clear().unwrap();
+    }
+
+    fn acme_org(store: &Mutex<Store>) -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .add_org("acme", None, false)
+            .unwrap()
+            .id
+    }
+
+    /// Assets M3: `ensure_fresh` loads every configured catalog; an org
+    /// catalog whose checkout cannot be read is kept as a problem entry while
+    /// the others load (spec, Runtime), and is not retried until the store's
+    /// record changes (Rulings R5); an explicit `load_catalog` always tries;
+    /// a catalog removed from the store leaves the registry.
+    #[test]
+    fn ensure_fresh_loads_every_catalog_and_keeps_a_broken_one_as_a_problem() {
+        let _g = lock_registry_for_test();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        configure(
+            ConfigureArgs {
+                repo_path: repo_with_one_skill("m3-personal").to_string_lossy().into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        let org = acme_org(&store);
+        let acme_repo = repo_with_one_skill("m3-acme");
+        let broken_path = std::env::temp_dir().join(format!(
+            "fleet-catalog-svc-m3-broken-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&broken_path);
+        let (acme, broken) = {
+            let s = store.lock().unwrap();
+            (
+                s.upsert_catalog("acme", &acme_repo.to_string_lossy(), None, Some(org))
+                    .unwrap(),
+                s.upsert_catalog("broken", &broken_path.to_string_lossy(), None, Some(org))
+                    .unwrap(),
+            )
+        };
+
+        ensure_fresh(&store).unwrap();
+        assert_eq!(registry::personal().unwrap().unwrap().assets.len(), 1);
+        let a = registry::get(acme.id).unwrap().expect("acme loaded");
+        assert_eq!(
+            (
+                a.name.as_str(),
+                a.org_id,
+                a.assets.len(),
+                a.load_error.is_none()
+            ),
+            ("acme", Some(org), 1, true)
+        );
+        let b = registry::get(broken.id)
+            .unwrap()
+            .expect("a problem entry, not a gap");
+        assert!(
+            b.load_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not a git repository"),
+            "{:?}",
+            b.load_error
+        );
+        assert!(b.assets.is_empty());
+        assert_eq!(b.problems.len(), 1);
+
+        // A checkout appearing at the path is not picked up by the catch-up
+        // while the store's record stands…
+        std::fs::rename(repo_with_one_skill("m3-broken-fixed"), &broken_path).unwrap();
+        ensure_fresh(&store).unwrap();
+        assert!(registry::get(broken.id)
+            .unwrap()
+            .unwrap()
+            .load_error
+            .is_some());
+        // …but an explicit load always tries.
+        load_catalog(broken.id, false, &store).unwrap();
+        assert!(registry::get(broken.id)
+            .unwrap()
+            .unwrap()
+            .load_error
+            .is_none());
+
+        store.lock().unwrap().remove_catalog("acme").unwrap();
+        ensure_fresh(&store).unwrap();
+        assert!(
+            registry::get(acme.id).unwrap().is_none(),
+            "removed elsewhere: evicted"
+        );
+        registry::clear().unwrap();
+    }
+
+    /// Final review M-b: a row `ensure_fresh` listed, removed before its
+    /// load (another process's `catalog remove`), is evicted — not an error
+    /// for the unrelated call that triggered the pass.
+    #[test]
+    fn a_catalog_removed_between_list_and_load_is_evicted_not_an_error() {
+        let _g = lock_registry_for_test();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let org = acme_org(&store);
+        let acme = store
+            .lock()
+            .unwrap()
+            .upsert_catalog(
+                "acme",
+                &repo_with_one_skill("m3-removed-meanwhile").to_string_lossy(),
+                None,
+                Some(org),
+            )
+            .unwrap();
+        // A stale entry for it, so the pass tries to load it.
+        registry::install_for_test(repo::Catalog {
+            id: acme.id,
+            name: "acme".into(),
+            org_id: Some(org),
+            head: "stale".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let row = store
+            .lock()
+            .unwrap()
+            .list_catalogs()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == acme.id)
+            .unwrap();
+        store.lock().unwrap().remove_catalog("acme").unwrap();
+        assert!(refresh_row(&row, &store).unwrap().is_ok());
+        assert!(
+            registry::get(acme.id).unwrap().is_none(),
+            "removed meanwhile: evicted"
+        );
+        registry::clear().unwrap();
+    }
+
+    /// Parity (R5): personal never becomes a problem entry — its failure is
+    /// still `ensure_fresh`'s error — but the org catalogs are attempted too.
+    #[test]
+    fn a_personal_load_failure_is_still_an_error_but_the_org_catalogs_load() {
+        let _g = lock_registry_for_test();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        store
+            .lock()
+            .unwrap()
+            .set_catalog_config("/nonexistent/fleet-m3-personal", None)
+            .unwrap();
+        let org = acme_org(&store);
+        let acme = store
+            .lock()
+            .unwrap()
+            .upsert_catalog(
+                "acme",
+                &repo_with_one_skill("m3-org-ok").to_string_lossy(),
+                None,
+                Some(org),
+            )
+            .unwrap();
+        assert_eq!(ensure_fresh(&store).unwrap_err().code, E_CATALOG_GIT);
+        assert!(registry::personal().unwrap().is_none());
+        assert!(registry::get(acme.id)
+            .unwrap()
+            .is_some_and(|c| c.load_error.is_none()));
+        registry::clear().unwrap();
+    }
+
+    /// R18: `load_all` loads personal and catches every other catalog up.
+    #[test]
+    fn load_all_loads_personal_and_catches_up_the_rest() {
+        let _g = lock_registry_for_test();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        configure(
+            ConfigureArgs {
+                repo_path: repo_with_one_skill("m3-all-p").to_string_lossy().into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        let org = acme_org(&store);
+        let acme = store
+            .lock()
+            .unwrap()
+            .upsert_catalog(
+                "acme",
+                &repo_with_one_skill("m3-all-a").to_string_lossy(),
+                None,
+                Some(org),
+            )
+            .unwrap();
+        let summary = load_all(false, &store).unwrap();
+        assert_eq!(summary.asset_count, 1, "the personal catalog's summary");
+        assert!(registry::get(acme.id).unwrap().is_some());
+        registry::clear().unwrap();
+    }
+
+    /// PF13: the freshness stamp on a problem entry also tracks `repo_path`
+    /// / `remote_url`, not only `head_commit`/`last_loaded_at` — both of
+    /// which `upsert_catalog` clears to `NULL` on *every* re-point, so a
+    /// catalog that has never once loaded looks identical before and after
+    /// unless the path itself is compared too. Without that, a `catalog
+    /// add` re-point of a broken catalog would never be retried by a
+    /// running hub.
+    #[test]
+    fn ensure_fresh_retries_a_broken_catalog_once_its_repo_path_changes() {
+        let _g = lock_registry_for_test();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        configure(
+            ConfigureArgs {
+                repo_path: repo_with_one_skill("pf13-personal")
+                    .to_string_lossy()
+                    .into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        let org = acme_org(&store);
+        let broken_path = std::env::temp_dir().join(format!(
+            "fleet-catalog-svc-pf13-broken-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&broken_path);
+        let broken = store
+            .lock()
+            .unwrap()
+            .upsert_catalog("broken", &broken_path.to_string_lossy(), None, Some(org))
+            .unwrap();
+
+        ensure_fresh(&store).unwrap();
+        assert!(registry::get(broken.id)
+            .unwrap()
+            .unwrap()
+            .load_error
+            .is_some());
+
+        // Re-point to a real checkout: `head_commit`/`last_loaded_at` stay
+        // `NULL` (as they already were), but `repo_path` itself changed.
+        let fixed = repo_with_one_skill("pf13-broken-fixed");
+        store
+            .lock()
+            .unwrap()
+            .upsert_catalog("broken", &fixed.to_string_lossy(), None, Some(org))
+            .unwrap();
+
+        ensure_fresh(&store).unwrap();
+        let after = registry::get(broken.id)
+            .unwrap()
+            .expect("still in the registry");
+        assert!(after.load_error.is_none(), "{:?}", after.load_error);
+        assert_eq!(after.assets.len(), 1);
+        registry::clear().unwrap();
+    }
+
+    /// Fix round 1, item 6: the freshness stamp also catches a
+    /// `remote_url`-only change — `repo_path` stays put, but a broken
+    /// catalog that is given a remote it can finally clone from must still
+    /// be retried.
+    #[test]
+    fn ensure_fresh_retries_a_broken_catalog_once_its_remote_url_changes() {
+        let _g = lock_registry_for_test();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        configure(
+            ConfigureArgs {
+                repo_path: repo_with_one_skill("pf13r-personal")
+                    .to_string_lossy()
+                    .into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        let org = acme_org(&store);
+        let broken_path = std::env::temp_dir().join(format!(
+            "fleet-catalog-svc-pf13r-broken-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&broken_path);
+        let broken = store
+            .lock()
+            .unwrap()
+            .upsert_catalog("broken", &broken_path.to_string_lossy(), None, Some(org))
+            .unwrap();
+
+        ensure_fresh(&store).unwrap();
+        assert!(registry::get(broken.id)
+            .unwrap()
+            .unwrap()
+            .load_error
+            .is_some());
+
+        // `repo_path` is untouched; only `remote_url` changes, from `None`
+        // to a clonable local source.
+        let remote = repo_with_one_skill("pf13r-remote");
+        store
+            .lock()
+            .unwrap()
+            .upsert_catalog(
+                "broken",
+                &broken_path.to_string_lossy(),
+                Some(&remote.to_string_lossy()),
+                Some(org),
+            )
+            .unwrap();
+
+        ensure_fresh(&store).unwrap();
+        let after = registry::get(broken.id)
+            .unwrap()
+            .expect("still in the registry");
+        assert!(after.load_error.is_none(), "{:?}", after.load_error);
+        assert_eq!(after.assets.len(), 1);
+        registry::clear().unwrap();
+    }
+
+    /// Fix round 1, item 3: `is_load_failure` is what decides whether
+    /// `ensure_fresh` turns a `load_catalog` failure into a problem entry.
+    /// Only the catalog-checkout codes qualify; a store write failure, a
+    /// poisoned lock, or a row that vanished between `list_catalogs` and
+    /// `get_catalog` must all propagate instead.
+    #[test]
+    fn is_load_failure_only_matches_checkout_codes() {
+        let checkout = |code: &str| is_load_failure(&IpcError::new(code, "x"));
+        assert!(checkout(E_CATALOG_GIT));
+        assert!(checkout(E_CATALOG_PARSE));
+        assert!(checkout(codes::E_IO));
+        assert!(!checkout(codes::E_SQLITE));
+        assert!(!checkout(codes::E_LOCK));
+        assert!(!checkout(codes::E_NOTFOUND));
+    }
+
+    /// Fix round 1, item 3: a failure writing the store's record
+    /// (`set_catalog_head_for`, after the checkout has already parsed fine)
+    /// must propagate out of `ensure_fresh` as-is — never as a problem entry
+    /// — and must leave the registry exactly as it was (here: never
+    /// installed at all, since `load_catalog` now writes the store before
+    /// touching the registry). `PRAGMA query_only` fails every write on the
+    /// store's connection while reads (the row lookup, `list_catalogs`)
+    /// keep working, which reproduces "the checkout loaded fine, but the
+    /// store write failed" without needing to race a second thread.
+    #[test]
+    fn ensure_fresh_propagates_a_store_write_failure_without_a_problem_entry() {
+        let _g = lock_registry_for_test();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        configure(
+            ConfigureArgs {
+                repo_path: repo_with_one_skill("pf3-personal").to_string_lossy().into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        load(false, &store).unwrap();
+        let org = acme_org(&store);
+        let acme = store
+            .lock()
+            .unwrap()
+            .upsert_catalog(
+                "acme",
+                &repo_with_one_skill("pf3-acme").to_string_lossy(),
+                None,
+                Some(org),
+            )
+            .unwrap();
+
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute_batch("PRAGMA query_only = ON;")
+            .unwrap();
+
+        let err = ensure_fresh(&store).unwrap_err();
+        assert_eq!(err.code, codes::E_SQLITE, "{}", err.message);
+        assert!(
+            registry::get(acme.id).unwrap().is_none(),
+            "a store-write failure must not install a problem entry"
+        );
         registry::clear().unwrap();
     }
 
@@ -1289,6 +1831,62 @@ mod tests {
             "'other' is not a member of any assigned layer"
         );
         assert_eq!(resolved.provenance["skill/s"].introduced_by, "core");
+    }
+
+    /// Assets M3 (M2 carry 7): layers are listed and assigned per catalog —
+    /// personal's listing no longer shows another catalog's rows, and an
+    /// assignment answers with the rows of the catalog it was made in.
+    #[test]
+    fn layers_are_listed_and_assigned_per_catalog() {
+        let _g = lock_registry_for_test();
+        let store = configured_store_with_layers("m3-layers");
+        let org = store.lock().unwrap().add_org("acme", None, false).unwrap();
+        let acme = store
+            .lock()
+            .unwrap()
+            .upsert_catalog(
+                "acme",
+                &repo_with_layers("m3-layers-acme").to_string_lossy(),
+                None,
+                Some(org.id),
+            )
+            .unwrap();
+        load_catalog(acme.id, false, &store).unwrap();
+
+        let personal_rows = set_host_layers("local", Some("core"), &[], &store).unwrap();
+        assert_eq!(personal_rows.len(), 1);
+        let rows = set_host_layers_for("local", &acme, Some("core"), &["extra"], &store).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.catalog_id == acme.id), "{rows:?}");
+
+        assert_eq!(list_layers(&store).unwrap().hosts.len(), 1);
+        let listing = list_layers_for(&acme, &store).unwrap();
+        assert_eq!((listing.hosts.len(), listing.layers.len()), (2, 2));
+        assert_eq!(
+            set_host_layers_for("local", &acme, Some("extra"), &[], &store)
+                .unwrap_err()
+                .code,
+            codes::E_INVALID,
+            "the axis is checked against THAT catalog's layers"
+        );
+        registry::clear().unwrap();
+    }
+
+    #[test]
+    fn an_unloaded_org_catalog_has_no_layers_to_list() {
+        let _g = lock_registry_for_test();
+        let store = configured_store_with_layers("m3-unloaded");
+        let org = store.lock().unwrap().add_org("acme", None, false).unwrap();
+        let acme = store
+            .lock()
+            .unwrap()
+            .upsert_catalog("acme", "/nowhere", None, Some(org.id))
+            .unwrap();
+        assert_eq!(
+            list_layers_for(&acme, &store).unwrap_err().code,
+            E_CATALOG_NOT_CONFIGURED
+        );
+        registry::clear().unwrap();
     }
 
     /// Fix round 1, item 3 (controller ruling): `resolve_preview` is built

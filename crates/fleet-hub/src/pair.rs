@@ -517,9 +517,10 @@ pub async fn client_trust(
     Ok(ExitCode::SUCCESS)
 }
 
-/// `fleet-hub client grant <name> assets` / `client ungrant <name> assets`:
-/// let a paired client manage the asset catalog through `catalog_admin`, or
-/// take that back. Written straight to `state.db`, like `host-token-mode`: the
+/// `fleet-hub client grant <name> assets [--catalog NAME]` / `client ungrant
+/// <name> assets [--catalog NAME]`: let a paired client manage an asset
+/// catalog (the personal one by default) through `catalog_admin`, or take
+/// that back (R12). Written straight to `state.db`, like `host-token-mode`: the
 /// hub reads the grant live on every `catalog_admin` call, so a running hub
 /// honours it from the client's next call and no running hub is needed.
 pub fn client_grant(
@@ -527,27 +528,47 @@ pub fn client_grant(
     env: &HashMap<String, String>,
     name: &str,
     grant: crate::Grant,
+    catalog: Option<&str>,
     on: bool,
 ) -> Result<ExitCode, String> {
     crate::serve::existing_db(&crate::config::resolve_data_dir(opts, env))?;
     let store = crate::serve::open_store(opts, env)?;
     let crate::Grant::Assets = grant;
-    let row = store
-        .set_client_assets_admin(name, on)
-        .map_err(|e| e.message)?;
-    out::line(&if on {
-        format!(
-            "{} may manage the asset catalog (since {}): editing assets, Sync and Secrets \
-             from its Assets tab, on this hub's checkout and hosts",
-            row.name,
-            fmt_time(row.assets_admin_at)
-        )
-    } else {
-        format!(
-            "{} no longer manages the asset catalog; its Assets tab is read-only from its next call",
-            row.name
-        )
-    });
+    match catalog.filter(|c| *c != fleet_core::service::catalog::catalogs::PERSONAL) {
+        None => {
+            let row = store
+                .set_client_assets_admin(name, on)
+                .map_err(|e| e.message)?;
+            out::line(&if on {
+                format!(
+                    "{} may manage the asset catalog (since {}): editing assets, Sync and Secrets \
+                     from its Assets tab, on this hub's checkout and hosts",
+                    row.name,
+                    fmt_time(row.assets_admin_at)
+                )
+            } else {
+                format!(
+                    "{} no longer manages the asset catalog; its Assets tab is read-only from its next call",
+                    row.name
+                )
+            });
+        }
+        Some(cat) => {
+            let id = store
+                .get_catalog_by_name(cat)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("no catalog named {cat}; see `fleet-hub catalog list`"))?
+                .id;
+            let row = store
+                .set_client_catalog_grant(name, id, on)
+                .map_err(|e| e.message)?;
+            out::line(&if on {
+                format!("{} may manage catalog {cat} from its next call", row.name)
+            } else {
+                format!("{} no longer manages catalog {cat}", row.name)
+            });
+        }
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1123,5 +1144,106 @@ mod tests {
             result.is_ok(),
             "pair over plaintext must succeed: {result:?}"
         );
+    }
+
+    /// `client grant <name> assets --catalog acme` grants that catalog only;
+    /// `ungrant … --catalog acme` takes it back; an unknown catalog is named.
+    #[test]
+    fn grant_and_ungrant_one_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = opts_for(&dir, None);
+        let env = HashMap::new();
+        let (desk, acme) = {
+            let s = fleet_core::store::Store::open_with_bus(
+                &dir.path().join("state.db"),
+                std::sync::Arc::new(fleet_core::events::NoopEventBus),
+            )
+            .unwrap();
+            let org = s.add_org("acme", None, false).unwrap();
+            let acme = s.upsert_catalog("acme", "/a", None, Some(org.id)).unwrap();
+            (
+                s.insert_client_token("desk", "aa11", "full").unwrap().id,
+                acme.id,
+            )
+        };
+        client_grant(
+            &opts,
+            &env,
+            "desk",
+            crate::Grant::Assets,
+            Some("acme"),
+            true,
+        )
+        .unwrap();
+        let s = crate::serve::open_store(&opts, &env).unwrap();
+        assert!(s.client_may_admin_catalog(desk, acme).unwrap());
+        assert!(
+            !s.client_is_assets_admin(desk).unwrap(),
+            "personal is untouched"
+        );
+        drop(s);
+        client_grant(
+            &opts,
+            &env,
+            "desk",
+            crate::Grant::Assets,
+            Some("acme"),
+            false,
+        )
+        .unwrap();
+        assert!(!crate::serve::open_store(&opts, &env)
+            .unwrap()
+            .client_may_admin_catalog(desk, acme)
+            .unwrap());
+        assert!(client_grant(
+            &opts,
+            &env,
+            "desk",
+            crate::Grant::Assets,
+            Some("nope"),
+            true
+        )
+        .unwrap_err()
+        .contains("nope"));
+    }
+
+    /// `--catalog personal` is the default grant: the personal catalog, and
+    /// `ungrant … --catalog personal` takes it back.
+    #[test]
+    fn grant_and_ungrant_the_personal_catalog_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = opts_for(&dir, None);
+        let env = HashMap::new();
+        let (desk, personal) = {
+            let s = fleet_core::store::Store::open_with_bus(
+                &dir.path().join("state.db"),
+                std::sync::Arc::new(fleet_core::events::NoopEventBus),
+            )
+            .unwrap();
+            let personal = s.upsert_catalog("personal", "/p", None, None).unwrap();
+            (
+                s.insert_client_token("desk", "aa11", "full").unwrap().id,
+                personal.id,
+            )
+        };
+        let grant = |on| {
+            client_grant(
+                &opts,
+                &env,
+                "desk",
+                crate::Grant::Assets,
+                Some("personal"),
+                on,
+            )
+        };
+        grant(true).unwrap();
+        let s = crate::serve::open_store(&opts, &env).unwrap();
+        assert!(s.client_is_assets_admin(desk).unwrap());
+        assert!(s.client_may_admin_catalog(desk, personal).unwrap());
+        drop(s);
+        grant(false).unwrap();
+        let s = crate::serve::open_store(&opts, &env).unwrap();
+        assert!(!s.client_is_assets_admin(desk).unwrap());
+        assert!(!s.client_may_admin_catalog(desk, personal).unwrap());
     }
 }

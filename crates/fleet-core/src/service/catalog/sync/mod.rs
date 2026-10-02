@@ -97,13 +97,14 @@ pub struct SyncRunSummary {
     pub hosts: Vec<HostSyncResult>,
 }
 
-/// Every loaded catalog, merged (Assets M2: `registry::union_all`), cloned
-/// out of the registry so nothing holds its lock across an await. This is
-/// the FULL catalog a scan diffs against — never the host-resolved one
-/// (`effective::effective_for_host`'s `eff.catalog`), which is what a host
-/// is supposed to have, not what its drift is measured against.
-fn catalog() -> Result<super::repo::Catalog, IpcError> {
-    super::registry::union_all()?.ok_or_else(|| {
+/// Every catalog in `snapshot`, merged (`registry::union_of`). This is the
+/// FULL catalog a scan diffs against — never the host-resolved one
+/// (`effective::effective_for_host_in`'s `eff.catalog`), which is what a
+/// host is supposed to have, not what its drift is measured against.
+fn union_catalog(
+    snapshot: &BTreeMap<i64, super::repo::Catalog>,
+) -> Result<super::repo::Catalog, IpcError> {
+    super::registry::union_of(snapshot).ok_or_else(|| {
         IpcError::new(
             super::E_CATALOG_NOT_CONFIGURED,
             "catalog not loaded; call catalog_load",
@@ -190,7 +191,12 @@ pub async fn plan_sync(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<SyncPlan, IpcError> {
-    let catalog = catalog()?;
+    // One registry view for the whole plan (Rulings R9, M2 carry 5): the
+    // scan union and every host's effective set are built from the same
+    // snapshot, cloned out of the registry so no lock is held across an
+    // await.
+    let snapshot = super::registry::snapshot()?;
+    let catalog = union_catalog(&snapshot)?;
     let hosts = {
         let s = lock(store)?;
         s.list_hosts()?
@@ -257,13 +263,14 @@ pub async fn plan_sync(
             }
         };
         // Resolve the host's EFFECTIVE catalog ONCE per host, before its
-        // harnesses are planned: every catalog it accepts, resolved for it,
-        // the scope boundary applied and cross-catalog collisions refused
-        // (Assets M2). It does its own store-then-registry ordering, so this
+        // harnesses are planned: every catalog it accepts (its admissions
+        // included, Assets M3), resolved for it, the scope boundary applied
+        // and cross-catalog collisions refused (Assets M2) — against the
+        // plan's one snapshot (R9). It takes the store lock itself, so this
         // is called with no store guard held. The scan below still uses the
         // FULL (union) catalog: inventory is about the whole catalog's
         // drift, while the PLAN is about what this host is supposed to have.
-        let eff = match effective::effective_for_host(store, &h.alias) {
+        let eff = match effective::effective_for_host_in(store, &h.alias, &snapshot) {
             Ok(r) => r,
             Err(e) => {
                 for harness in &listed {
@@ -387,6 +394,17 @@ pub async fn plan_sync(
                     let Some(planned) = gated_catalog(gate, &eff.catalog) else {
                         continue;
                     };
+                    // Assets M3 (R6): only a catalog that speaks for this
+                    // host may have its dropped entries removed; the rest
+                    // are kept with a `Noop` and why. A "not accepted"
+                    // reason (stale admissions included) is added only for
+                    // catalogs this harness's own manifest names (PF10).
+                    let keep = plan::KeepRules {
+                        protected: protected_keys.clone(),
+                        speaks_for: Some(eff.speaks_for.clone()),
+                        held_back: eff
+                            .held_back_for(manifest.assets.values().map(|e| e.catalog.as_str())),
+                    };
                     let mut hp = plan::compute_host_plan(
                         planned,
                         harness,
@@ -395,7 +413,7 @@ pub async fn plan_sync(
                         &manifest,
                         &secrets,
                         &host_filter,
-                        &protected_keys,
+                        &keep,
                     );
                     if gate == HarnessGate::Retiring {
                         hp.detail = Some(harness_set::retiring_detail(harness.id()));
@@ -408,7 +426,12 @@ pub async fn plan_sync(
                         // automatically" report just below in
                         // `compute_host_plan`'s own orphans pass.
                         for (kind, name) in &withheld_keys {
-                            if manifest.assets.contains_key(&Manifest::key(*kind, name)) {
+                            // M2 carry 4: only when no other catalog supplies
+                            // the same name — then that catalog's own action
+                            // already speaks for it.
+                            if manifest.assets.contains_key(&Manifest::key(*kind, name))
+                                && eff.catalog.find(*kind, name).is_none()
+                            {
                                 hp.actions.push(plan::withheld_noop(*kind, name));
                             }
                         }
@@ -596,6 +619,15 @@ pub async fn apply_sync(
     apply_sync_with(args, store, ssh, token).await
 }
 
+/// What applying an unknown or expired plan id answers — also the
+/// `catalog_admin` gate's answer when it cannot see the plan (Assets M3).
+pub(crate) fn stale_plan() -> IpcError {
+    IpcError::new(
+        codes::E_SYNC_PLAN_STALE,
+        "that sync plan is unknown or has expired; compute a new one",
+    )
+}
+
 /// [`apply_sync`] with the cancellation token supplied directly, so a test
 /// can prove what an already-cancelled run does without racing the
 /// registry.
@@ -606,12 +638,7 @@ pub async fn apply_sync_with(
     token: CancellationToken,
 ) -> Result<SyncRunSummary, IpcError> {
     let (expires_at, computed) =
-        plan::registry_take_with_expiry(&args.plan_id).ok_or_else(|| {
-            IpcError::new(
-                codes::E_SYNC_PLAN_STALE,
-                "that sync plan is unknown or has expired; compute a new one",
-            )
-        })?;
+        plan::registry_take_with_expiry(&args.plan_id).ok_or_else(stale_plan)?;
 
     if !args.force_partial {
         let missing = missing_secret_names(&computed);
@@ -635,7 +662,7 @@ pub async fn apply_sync_with(
     // Only the post-apply re-scan needs the catalog. A catalog unloaded
     // mid-flight must not abort a sync that is already under way — the
     // writes still happen, only the matrix refresh is skipped.
-    let catalog = catalog().ok();
+    let catalog = super::registry::union_all().ok().flatten();
     let harnesses = super::harness::all();
     let started_at = super::now_secs();
     let total = computed.hosts.len();
@@ -1267,18 +1294,323 @@ mod tests {
         );
     }
 
-    /// Fix round 2, item (b): the same scope-withholding hazard on a REMOTE
-    /// host with `allow_unlayered: true` — `refuse_unlayered` is bypassed
-    /// (by `allow_unlayered`, independent of the item-1 fix), so this proves
-    /// the destructive path stays closed even when the per-host unlayered
-    /// guard itself is turned off. The host is never actually reachable in
-    /// this test (`SshClient::new()` has no transport), so the scan fails
-    /// and the host comes back `skipped` with no actions at all — which is
-    /// itself the point: still no `Remove`, by construction.
+    // ---- Assets M3: admissions, held catalogs, one snapshot -------------
+
+    /// Org 10 (`acme`) and its catalog row. Returns `(personal_id, acme_id)`.
+    #[cfg(unix)]
+    fn with_acme(store: &Mutex<Store>) -> (i64, i64) {
+        let s = store.lock().unwrap();
+        let personal_id = s.personal_catalog().unwrap().unwrap().id;
+        s.conn_ref()
+            .execute(
+                "INSERT INTO orgs (id, name, created_at) VALUES (10, 'acme', 0)",
+                [],
+            )
+            .unwrap();
+        let acme = s.upsert_catalog("acme", "/a", None, Some(10)).unwrap();
+        (personal_id, acme.id)
+    }
+
+    /// A skill with a body, so the Claude harness renders it.
+    #[cfg(unix)]
+    fn body_skill(name: &str, scope: &str) -> Asset {
+        let mut a = skill_asset(name, scope);
+        a.body = "b\n".into();
+        a
+    }
+
+    /// Install personal (with `personal`'s assets) and `acme` (org 10, the
+    /// rest of its fields from `acme`) under their real store ids.
+    #[cfg(unix)]
+    fn install(personal_id: i64, personal: Vec<Asset>, acme_id: i64, acme: repo::Catalog) {
+        super::super::registry::install_personal(repo::Catalog {
+            id: personal_id,
+            name: "personal".into(),
+            org_id: None,
+            assets: personal,
+            ..Default::default()
+        })
+        .unwrap();
+        super::super::registry::install_for_test(repo::Catalog {
+            id: acme_id,
+            name: "acme".into(),
+            org_id: Some(10),
+            ..acme
+        })
+        .unwrap();
+    }
+
+    /// `~/.claude/.fleet-assets.json` naming each `(key, catalog)` as synced.
+    #[cfg(unix)]
+    fn seed_manifest(home: &std::path::Path, entries: &[(&str, &str)]) {
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        let assets: serde_json::Map<String, serde_json::Value> = entries
+            .iter()
+            .map(|(key, catalog)| {
+                let name = key.split('/').nth(1).unwrap();
+                (
+                    (*key).to_string(),
+                    serde_json::json!({
+                        "hash": "h",
+                        "files": [format!("~/.claude/skills/{name}/SKILL.md")],
+                        "merges": [],
+                        "synced_at": 0,
+                        "catalog": catalog,
+                    }),
+                )
+            })
+            .collect();
+        std::fs::write(
+            home.join(".claude/.fleet-assets.json"),
+            serde_json::json!({ "version": 1, "updated_at": 0, "assets": assets }).to_string(),
+        )
+        .unwrap();
+    }
+
+    /// The Claude harness's actions for `name` on `host`.
+    #[cfg(unix)]
+    fn claude_actions<'a>(plan: &'a SyncPlan, host: &str, name: &str) -> Vec<&'a plan::Action> {
+        plan.hosts
+            .iter()
+            .filter(|h| h.harness == "claude" && h.host_alias == host)
+            .flat_map(|h| &h.actions)
+            .filter(|a| a.name == name)
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn only(host: &str) -> PlanArgs {
+        PlanArgs {
+            host_alias: Some(host.into()),
+            ..PlanArgs::default()
+        }
+    }
+
+    #[cfg(unix)]
+    fn no_remove(plan: &SyncPlan) -> bool {
+        plan.hosts
+            .iter()
+            .all(|h| h.actions.iter().all(|a| a.op != ActionOp::Remove))
+    }
+
+    /// Spec, Testing (planning): a no-org host receives an org asset only
+    /// when admitted.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_no_org_host_receives_an_org_asset_only_when_admitted() {
+        let _lock = super::super::lock_registry_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let (personal_id, acme_id) = with_acme(&store);
+        install(
+            personal_id,
+            vec![body_skill("p", "private")],
+            acme_id,
+            repo::Catalog {
+                assets: vec![body_skill("c", "private")],
+                ..Default::default()
+            },
+        );
+        let ssh = Arc::new(SshClient::new());
+
+        let before = plan_sync(only("local"), &store, &ssh).await.unwrap();
+        assert!(
+            claude_actions(&before, "local", "c").is_empty(),
+            "{:?}",
+            before.hosts
+        );
+        assert_eq!(
+            claude_actions(&before, "local", "p")[0].op,
+            ActionOp::Create
+        );
+
+        store
+            .lock()
+            .unwrap()
+            .admit_host_catalog("local", acme_id)
+            .unwrap();
+        let after = plan_sync(only("local"), &store, &ssh).await.unwrap();
+        let c = claude_actions(&after, "local", "c");
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!(c[0].op, ActionOp::Create);
+        assert_eq!(c[0].catalog.as_deref(), Some("acme"));
+    }
+
+    /// M2 carry 2: losing acceptance — an unadmit, or an org change — keeps
+    /// what the catalog installed, with a `Noop` saying why; never a `Remove`.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn losing_acceptance_keeps_the_org_assets_with_a_noop() {
+        let _lock = super::super::lock_registry_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        seed_manifest(home.path(), &[("skill/c", "acme")]);
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let (personal_id, acme_id) = with_acme(&store);
+        install(
+            personal_id,
+            vec![],
+            acme_id,
+            repo::Catalog {
+                assets: vec![body_skill("c", "private")],
+                ..Default::default()
+            },
+        );
+        let ssh = Arc::new(SshClient::new());
+
+        // Not admitted (an unadmit after the sync that installed it).
+        let plan = plan_sync(only("local"), &store, &ssh).await.unwrap();
+        assert!(no_remove(&plan), "{:?}", plan.hosts);
+        let c = claude_actions(&plan, "local", "c");
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!(c[0].op, ActionOp::Noop);
+        assert_eq!(c[0].catalog.as_deref(), Some("acme"));
+        assert!(
+            c[0].reason
+                .as_deref()
+                .unwrap()
+                .contains("not accepted by this host"),
+            "{:?}",
+            c[0].reason
+        );
+
+        // An org change (local joins org 11): the same.
+        {
+            let s = store.lock().unwrap();
+            s.conn_ref()
+                .execute(
+                    "INSERT INTO orgs (id, name, created_at) VALUES (11, 'other', 0)",
+                    [],
+                )
+                .unwrap();
+            s.set_host_org("local", Some(11)).unwrap();
+        }
+        let plan = plan_sync(only("local"), &store, &ssh).await.unwrap();
+        assert!(no_remove(&plan), "{:?}", plan.hosts);
+        let c = claude_actions(&plan, "local", "c");
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!(c[0].op, ActionOp::Noop);
+    }
+
+    /// M2 carry 1: an org catalog that failed to load (a problem entry)
+    /// never makes its installed assets read as orphans.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn an_org_catalog_that_failed_to_load_never_plans_a_remove() {
+        let _lock = super::super::lock_registry_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        seed_manifest(home.path(), &[("skill/c", "acme")]);
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let (personal_id, acme_id) = with_acme(&store);
+        store
+            .lock()
+            .unwrap()
+            .set_host_org("local", Some(10))
+            .unwrap();
+        install(
+            personal_id,
+            vec![],
+            acme_id,
+            repo::Catalog {
+                load_error: Some("boom".into()),
+                ..Default::default()
+            },
+        );
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(only("local"), &store, &ssh).await.unwrap();
+        assert!(no_remove(&plan), "{:?}", plan.hosts);
+        let c = claude_actions(&plan, "local", "c");
+        assert_eq!(c.len(), 1, "{c:?}");
+        assert_eq!(c[0].op, ActionOp::Noop);
+        assert!(
+            c[0].reason.as_deref().unwrap().contains("failed to load"),
+            "{:?}",
+            c[0].reason
+        );
+    }
+
+    /// M2 carry 4: the withheld `Noop` is only for an asset nothing else
+    /// supplies — here acme supplies the same name, so acme's action stands
+    /// alone.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn the_withheld_noop_is_skipped_when_another_catalog_supplies_the_name() {
+        let _lock = super::super::lock_registry_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        seed_manifest(home.path(), &[("skill/s", "personal")]);
+        let store = store_with_local(Arc::new(RecordingEventBus::new()));
+        let (personal_id, acme_id) = with_acme(&store);
+        store
+            .lock()
+            .unwrap()
+            .set_host_org("local", Some(10))
+            .unwrap();
+        install(
+            personal_id,
+            vec![body_skill("s", "private")],
+            acme_id,
+            repo::Catalog {
+                assets: vec![body_skill("s", "private")],
+                ..Default::default()
+            },
+        );
+        let ssh = Arc::new(SshClient::new());
+
+        let plan = plan_sync(only("local"), &store, &ssh).await.unwrap();
+        let s = claude_actions(&plan, "local", "s");
+        assert_eq!(s.len(), 1, "{s:?}");
+        assert_eq!(s[0].catalog.as_deref(), Some("acme"));
+        assert_ne!(
+            s[0].reason.as_deref(),
+            Some("private; withheld from org host, not removed")
+        );
+    }
+
+    /// A fake `ssh` that runs the remote command locally: everything up to
+    /// `-- <host>` is dropped and the rest goes to `sh -c`, which re-parses it
+    /// exactly as the remote login shell would (`bash -lc '<script>'`).
+    #[cfg(unix)]
+    fn ssh_running_locally(dir: &std::path::Path) -> Arc<SshClient> {
+        use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
+        let bin = write_exec(
+            dir,
+            "ssh",
+            &format!(
+                "#!/bin/sh\n{PROBE_GUARD}\
+                 case \"$*\" in *'-O check'*|*'-O exit'*) exit 0;; esac\n\
+                 while [ \"$#\" -gt 0 ] && [ \"$1\" != \"--\" ]; do shift; done\n\
+                 shift 2\n\
+                 exec sh -c \"$*\"\n"
+            ),
+        );
+        Arc::new(SshClient::with_ssh_binary(bin))
+    }
+
+    /// Fix round 2, item (b) — no longer vacuous (Rulings R20): a REMOTE
+    /// org-bound unlayered host planned with `allow_unlayered` is really
+    /// scanned (fake `ssh`, temp `HOME`), and its already-synced private
+    /// skill is kept with the withheld `Noop`, never removed.
+    #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn an_org_bound_unlayered_remote_host_with_allow_unlayered_keeps_withheld_assets() {
         let _lock = super::super::lock_registry_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        seed_manifest(home.path(), &[("skill/s", "personal")]);
         let repo_dir = tempfile::tempdir().unwrap();
         let files = one_skill("b\n");
         load_catalog(
@@ -1301,7 +1633,8 @@ mod tests {
                 .unwrap();
             s.set_host_org("oci", Some(10)).unwrap();
         }
-        let ssh = Arc::new(SshClient::new());
+        let bin_dir = tempfile::tempdir().unwrap();
+        let ssh = ssh_running_locally(bin_dir.path());
         let plan = plan_sync(
             PlanArgs {
                 host_alias: Some("oci".into()),
@@ -1313,13 +1646,23 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!plan.hosts.is_empty());
-        assert!(
-            plan.hosts
-                .iter()
-                .all(|h| h.actions.iter().all(|a| a.op != ActionOp::Remove)),
-            "{:?}",
-            plan.hosts
+        let claude: Vec<&HostPlan> = plan
+            .hosts
+            .iter()
+            .filter(|h| h.harness == "claude")
+            .collect();
+        assert_eq!(claude.len(), 1, "{:?}", plan.hosts);
+        assert_eq!(
+            claude[0].status, "planned",
+            "really scanned: {:?}",
+            claude[0].detail
+        );
+        assert!(no_remove(&plan), "{:?}", plan.hosts);
+        let s = claude_actions(&plan, "oci", "s");
+        assert_eq!(s.len(), 1, "{s:?}");
+        assert_eq!(
+            s[0].reason.as_deref(),
+            Some("private; withheld from org host, not removed")
         );
     }
 

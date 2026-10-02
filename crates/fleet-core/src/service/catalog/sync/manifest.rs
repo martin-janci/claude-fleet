@@ -12,7 +12,7 @@ use super::super::harness::{value_hash, HostSnapshot, ManifestMerge, RenderPlan}
 use super::super::model::Kind;
 use super::super::repo::Catalog;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// What fleet wrote on the host for one catalog asset: which files, which
 /// config merges (as `ManifestMerge`, so the value itself is never kept
@@ -122,15 +122,42 @@ impl Manifest {
         }
     }
 
-    /// Manifest entries whose `(kind, name)` is no longer in `catalog` (the
-    /// asset was removed, or renamed) — candidates for `remove_merges` /
-    /// deletion the next time this host is synced.
-    pub fn orphans<'a>(&'a self, catalog: &Catalog) -> Vec<(&'a str, &'a ManifestEntry)> {
+    /// Manifest entries whose `(kind, name)` is no longer in `catalog` — the
+    /// asset was removed or renamed — and whose own catalog speaks for this
+    /// host (`speaks_for`; `None` = every catalog does, Rulings R8). Spec: an
+    /// orphan is "a manifest entry whose catalog no longer has it". These
+    /// are candidates for `remove_merges` / deletion the next time this host
+    /// is synced.
+    pub fn orphans<'a>(
+        &'a self,
+        catalog: &Catalog,
+        speaks_for: Option<&BTreeSet<String>>,
+    ) -> Vec<(&'a str, &'a ManifestEntry)> {
         self.assets
             .iter()
             .filter(|(key, _)| match Self::split_key(key) {
                 Some((kind, name)) => catalog.find(kind, &name).is_none(),
                 None => true,
+            })
+            .filter(|(_, entry)| speaks_for.is_none_or(|s| s.contains(&entry.catalog)))
+            .map(|(key, entry)| (key.as_str(), entry))
+            .collect()
+    }
+
+    /// Entries absent from `catalog` whose catalog does NOT speak for this
+    /// host: nobody here can say it dropped them, so they are kept (R6).
+    /// Unparseable keys are `orphans`' business, never listed here.
+    pub fn held<'a>(
+        &'a self,
+        catalog: &Catalog,
+        speaks_for: &BTreeSet<String>,
+    ) -> Vec<(&'a str, &'a ManifestEntry)> {
+        self.assets
+            .iter()
+            .filter(|(key, entry)| {
+                !speaks_for.contains(&entry.catalog)
+                    && Self::split_key(key)
+                        .is_some_and(|(kind, name)| catalog.find(kind, &name).is_none())
             })
             .map(|(key, entry)| (key.as_str(), entry))
             .collect()
@@ -362,8 +389,49 @@ mod tests {
         );
         m.assets
             .insert("garbage-key".to_string(), ManifestEntry::default());
-        let orphans = m.orphans(&catalog);
+        let orphans = m.orphans(&catalog, None);
         let keys: Vec<&str> = orphans.iter().map(|(k, _)| *k).collect();
         assert_eq!(keys, vec!["garbage-key", "skill/removed"]);
+    }
+
+    /// M2 carry 3: an orphan is an entry whose OWN catalog no longer has it;
+    /// an entry of a catalog that does not speak for this host is `held`.
+    #[test]
+    fn orphans_and_held_split_on_the_entrys_catalog() {
+        let catalog = Catalog {
+            assets: vec![skill("kept")],
+            ..Default::default()
+        };
+        let mut m = Manifest::default();
+        m.assets
+            .insert(Manifest::key(Kind::Skill, "kept"), ManifestEntry::default());
+        m.assets
+            .insert(Manifest::key(Kind::Skill, "mine"), ManifestEntry::default());
+        let theirs = ManifestEntry {
+            catalog: "acme".into(),
+            ..Default::default()
+        };
+        m.assets
+            .insert(Manifest::key(Kind::Skill, "theirs"), theirs.clone());
+        // Still in the catalog (another catalog supplies it now): neither.
+        m.assets
+            .insert(Manifest::key(Kind::Skill, "kept-theirs"), theirs.clone());
+        // Unparseable: never `held` (nothing to name it as).
+        m.assets.insert("garbage-key".to_string(), theirs);
+        let catalog = Catalog {
+            assets: vec![skill("kept"), skill("kept-theirs")],
+            ..catalog
+        };
+        let speaks = std::collections::BTreeSet::from(["personal".to_string()]);
+        let keys = |v: Vec<(&str, &ManifestEntry)>| -> Vec<String> {
+            v.into_iter().map(|(k, _)| k.to_string()).collect()
+        };
+        assert_eq!(keys(m.orphans(&catalog, Some(&speaks))), vec!["skill/mine"]);
+        assert_eq!(keys(m.held(&catalog, &speaks)), vec!["skill/theirs"]);
+        assert_eq!(
+            keys(m.orphans(&catalog, None)),
+            vec!["garbage-key", "skill/mine", "skill/theirs"],
+            "None: every catalog speaks (inventory, R8)"
+        );
     }
 }
