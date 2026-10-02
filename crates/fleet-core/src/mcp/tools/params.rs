@@ -1065,7 +1065,8 @@ pub struct CatalogAdminParams {
     #[serde(default)]
     pub confirm_nonce: Option<String>,
     /// config|load|list_layers|set_host_layers: catalog name (default
-    /// personal); other actions refuse another.
+    /// personal). remove/admit/unadmit_catalog: only the name in args.
+    /// Others refuse it (authoring until M4; the rest are not per catalog).
     #[serde(default)]
     pub catalog: Option<String>,
 }

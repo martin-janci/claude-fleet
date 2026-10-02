@@ -162,38 +162,53 @@ impl FleetTools {
 
     #[tool(description = "The Assets tab's catalog operations as one tool, \
         plus the set of catalogs and host admissions. Master, or a client \
-        granted the catalog the action touches; list_catalogs needs no \
-        grant, add_catalog the master.")]
+        granted the catalog the action touches; list_catalogs an unbound \
+        one, add_catalog the master.")]
     pub(super) async fn catalog_admin(
         &self,
         Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<CatalogAdminParams>,
     ) -> Result<CallToolResult, McpError> {
         use catalog::admin::{AdminCall, Touches};
-        audit(
-            "catalog_admin",
-            &format!(
-                "action={} catalog={} caller={}",
-                p.action,
-                p.catalog.as_deref().unwrap_or(catalog::catalogs::PERSONAL),
-                caller.label()
-            ),
-        );
         let mut wire = serde_json::json!({ "action": p.action });
         if let Some(args) = p.args.filter(|a| !a.is_null()) {
             wire["args"] = args;
         }
         // Parsed first: what a call touches depends on which call it is (R11).
-        let mut call: AdminCall = serde_json::from_value(wire).map_err(|e| {
-            mcp_err(
-                "E_INVALID",
-                format!("catalog_admin {}: {e}", p.action),
-                None,
-            )
-        })?;
-        let touches = call.touches(p.catalog.as_deref()).map_err(to_mcp_err)?;
+        let parsed = serde_json::from_value::<AdminCall>(wire)
+            .map_err(|e| {
+                mcp_err(
+                    "E_INVALID",
+                    format!("catalog_admin {}: {e}", p.action),
+                    None,
+                )
+            })
+            .and_then(|call| {
+                let touches = call.touches(p.catalog.as_deref()).map_err(to_mcp_err)?;
+                Ok((call, touches))
+            });
+        // The catalog the call really touches, not the raw parameter.
+        let touched = match &parsed {
+            Ok((_, Touches::Catalog(name))) => name.as_str(),
+            Ok((_, Touches::NewCatalog)) => "(new)",
+            Ok((_, Touches::Nothing)) => "-",
+            Err(_) => "(invalid)",
+        };
+        audit(
+            "catalog_admin",
+            &format!(
+                "action={} catalog={touched} caller={}",
+                p.action,
+                caller.label()
+            ),
+        );
+        let (mut call, touches) = parsed?;
         let allowed = match &touches {
-            Touches::Nothing => true,
+            // Every catalog's paths, remotes and grantees, across orgs: the
+            // master's, or a person's own unbound full device.
+            Touches::Nothing => {
+                caller.is_master() || (caller.is_person_device() && caller.mode == TokenMode::Full)
+            }
             Touches::NewCatalog => caller.is_master(),
             Touches::Catalog(name) => may_admin_catalog(&caller, &self.store, name)?,
         };
@@ -201,12 +216,17 @@ impl FleetTools {
             return Err(forbidden(&touches, &caller));
         }
         // R11: applying a plan writes from every catalog it plans, not only
-        // the one the call names. Peeked, not taken: an unknown or expired
-        // id passes here and `apply_sync` reports it.
+        // the one the call names. Peeked, not taken. Fails closed: a plan a
+        // client cannot see (unknown, expired, or taken by an apply in
+        // flight) is stale for it, as `apply_sync` would say; the master
+        // goes on and `apply_sync` reports it.
         if let AdminCall::ApplySync(a) = &call {
-            for name in
-                catalog::sync::plan::registry_catalogs_written(&a.plan_id).unwrap_or_default()
-            {
+            let written = catalog::sync::plan::registry_catalogs_written(&a.plan_id);
+            let Some(written) = written.or_else(|| caller.is_master().then(Default::default))
+            else {
+                return Err(to_mcp_err(catalog::sync::stale_plan()));
+            };
+            for name in written {
                 if !may_admin_catalog(&caller, &self.store, &name)? {
                     return Err(forbidden(&Touches::Catalog(name), &caller));
                 }
@@ -487,7 +507,11 @@ fn forbidden(touches: &catalog::admin::Touches, caller: &Caller) -> McpError {
              --catalog {name}",
             caller.label()
         ),
-        Touches::Nothing => format!("catalog_admin refused {}", caller.label()),
+        Touches::Nothing => format!(
+            "list_catalogs needs the master token or a full paired client bound to no org \
+             ({} refused)",
+            caller.label()
+        ),
     };
     mcp_err("E_FORBIDDEN", message, None)
 }

@@ -684,3 +684,140 @@ async fn apply_sync_needs_a_grant_on_every_catalog_its_plan_writes() {
     );
     assert!(plan::registry_take(&id).is_some(), "the gate only peeks");
 }
+
+/// Fix round 1: an org-bound client is refused everything here, its grants
+/// notwithstanding (R3) — `list_catalogs` included, which shows every org's
+/// paths, remotes and grantees.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn an_org_bound_client_is_refused_every_catalog_action() {
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let (s, _desk, _ops, _plain, acme) = two_catalog_store();
+    let bound = s.insert_client_token("bound", "dd44", "full").unwrap();
+    s.set_client_assets_admin("bound", true).unwrap();
+    s.set_client_catalog_grant("bound", acme, true).unwrap();
+    let org = s.get_catalog_by_name("acme").unwrap().unwrap().org_id;
+    s.set_client_org("bound", org).unwrap();
+    let t = tools(s);
+    let bound = client(bound.id, TokenMode::Full, org);
+
+    let admit = json!({ "host_alias": "h", "catalog": "acme" });
+    let rm = json!({ "name": "acme" });
+    for (action, args, catalog) in [
+        ("admit_catalog", Some(admit), None),
+        ("remove_catalog", Some(rm), None),
+        ("config", None, None),
+        ("config", None, Some("acme")),
+        ("list_catalogs", None, None),
+    ] {
+        let r = call_on(&t, &bound, action, args, catalog).await;
+        assert_eq!(
+            code_of(&r),
+            "E_FORBIDDEN",
+            "{action} {catalog:?}: {:?}",
+            r.err()
+        );
+    }
+    assert!(t
+        .store
+        .lock()
+        .unwrap()
+        .host_admissions("h")
+        .unwrap()
+        .is_empty());
+}
+
+/// Fix round 1: the fleet-wide actions need the personal grant; a client
+/// granted only `acme` can neither plan nor apply, even a plan that writes
+/// acme alone.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn an_acme_only_client_cannot_plan_or_apply() {
+    use crate::service::catalog::sync::plan;
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let (s, _desk, ops, _plain, _acme) = two_catalog_store();
+    let t = tools(s);
+    let ops = client(ops, TokenMode::Full, None);
+    let r = call(&t, &ops, "plan_sync", Some(json!({})), None).await;
+    assert_eq!(code_of(&r), "E_FORBIDDEN", "{:?}", r.err());
+    let id = plan::registry_put(plan::SyncPlan::new(vec![host_plan_writing("acme")]));
+    let args = json!({ "plan_id": id, "force_partial": false });
+    let r = call(&t, &ops, "apply_sync", Some(args), None).await;
+    assert_eq!(code_of(&r), "E_FORBIDDEN", "{:?}", r.err());
+    assert!(plan::registry_take(&id).is_some(), "refused, still parked");
+}
+
+/// Fix round 1: a client cannot tell an unknown catalog from one it is not
+/// granted — the refusal is the same but for the name it was given.
+#[tokio::test]
+async fn an_unknown_catalog_reads_like_an_ungranted_one() {
+    let (s, desk, _ops, _plain, _acme) = two_catalog_store();
+    let t = tools(s);
+    let desk = client(desk, TokenMode::Full, None);
+    let known = call_on(&t, &desk, "config", None, Some("acme")).await;
+    let unknown = call_on(&t, &desk, "config", None, Some("nope")).await;
+    assert_eq!(code_of(&known), "E_FORBIDDEN");
+    assert_eq!(code_of(&unknown), "E_FORBIDDEN");
+    assert_eq!(
+        message_of(unknown),
+        message_of(known).replace("acme", "nope")
+    );
+}
+
+/// Fix round 1: the catalog-set actions refuse a `catalog` parameter they
+/// cannot honour, for the master too.
+#[tokio::test]
+async fn catalog_set_actions_refuse_a_parameter_they_cannot_honour() {
+    let (s, _desk, _ops, _plain, _acme) = two_catalog_store();
+    let t = tools(s);
+    let m = Caller::master();
+    let r = call_on(&t, &m, "list_catalogs", None, Some("acme")).await;
+    assert_eq!(code_of(&r), "E_INVALID");
+    assert!(message_of(r).contains("takes no catalog parameter"));
+    let rm = json!({ "name": "acme" });
+    let r = call_on(&t, &m, "remove_catalog", Some(rm), Some("personal")).await;
+    assert_eq!(code_of(&r), "E_INVALID");
+    assert!(message_of(r).contains("drop the catalog parameter"));
+    assert!(t
+        .store
+        .lock()
+        .unwrap()
+        .get_catalog_by_name("acme")
+        .unwrap()
+        .is_some());
+}
+
+/// Fix round 1: the `apply_sync` gate fails closed for a client — a plan it
+/// cannot see (unknown, expired, or taken by an apply in flight) is stale,
+/// answered before the confirm gate and before anything runs.
+#[tokio::test]
+async fn apply_sync_with_an_unknown_plan_is_refused_before_run_for_a_client() {
+    let (s, desk, _ops, _plain, _acme) = two_catalog_store();
+    s.set_setting(guard::SETTING_CONFIRM_DESTRUCTIVE, "true")
+        .unwrap();
+    let t = tools(s);
+    let args = json!({ "plan_id": "no-such-plan", "force_partial": false });
+    let r = call(
+        &t,
+        &client(desk, TokenMode::Full, None),
+        "apply_sync",
+        Some(args.clone()),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        r.message.starts_with(codes::E_SYNC_PLAN_STALE),
+        "{}",
+        r.message
+    );
+    // The master keeps today's path: the confirm gate, then the sync.
+    let r = call(&t, &Caller::master(), "apply_sync", Some(args), None)
+        .await
+        .unwrap_err();
+    assert!(
+        r.message.starts_with(codes::E_CONFIRM_REQUIRED),
+        "{}",
+        r.message
+    );
+}

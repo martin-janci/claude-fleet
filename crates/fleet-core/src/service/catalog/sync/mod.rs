@@ -619,6 +619,15 @@ pub async fn apply_sync(
     apply_sync_with(args, store, ssh, token).await
 }
 
+/// What applying an unknown or expired plan id answers — also the
+/// `catalog_admin` gate's answer when it cannot see the plan (Assets M3).
+pub(crate) fn stale_plan() -> IpcError {
+    IpcError::new(
+        codes::E_SYNC_PLAN_STALE,
+        "that sync plan is unknown or has expired; compute a new one",
+    )
+}
+
 /// [`apply_sync`] with the cancellation token supplied directly, so a test
 /// can prove what an already-cancelled run does without racing the
 /// registry.
@@ -629,12 +638,7 @@ pub async fn apply_sync_with(
     token: CancellationToken,
 ) -> Result<SyncRunSummary, IpcError> {
     let (expires_at, computed) =
-        plan::registry_take_with_expiry(&args.plan_id).ok_or_else(|| {
-            IpcError::new(
-                codes::E_SYNC_PLAN_STALE,
-                "that sync plan is unknown or has expired; compute a new one",
-            )
-        })?;
+        plan::registry_take_with_expiry(&args.plan_id).ok_or_else(stale_plan)?;
 
     if !args.force_partial {
         let missing = missing_secret_names(&computed);

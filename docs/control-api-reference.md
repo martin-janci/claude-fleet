@@ -49,7 +49,7 @@ Parameters: `max_lines`, `scrollback_lines`, `session_id`
 
 ### `catalog_admin`
 
-The Assets tab's catalog operations as one tool, plus the set of catalogs and host admissions. Master, or a client granted the catalog the action touches; list_catalogs needs no grant, add_catalog the master.
+The Assets tab's catalog operations as one tool, plus the set of catalogs and host admissions. Master, or a client granted the catalog the action touches; list_catalogs an unbound one, add_catalog the master.
 
 Parameters: `action`, `args`, `catalog`, `confirm_nonce`
 
