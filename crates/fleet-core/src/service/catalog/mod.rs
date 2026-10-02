@@ -97,6 +97,49 @@ pub(crate) fn require_config(store: &Mutex<Store>) -> Result<CatalogConfigRow, I
         .ok_or_else(|| IpcError::new(E_CATALOG_NOT_CONFIGURED, "configure the catalog repo first"))
 }
 
+/// Which catalog an authoring call reads and writes (Assets M4, Rulings
+/// R21). `Personal` keeps every pre-M4 path exactly — `require_config` for
+/// the checkout, `registry::with_personal` for the loaded catalog, `load`
+/// to reload — so the desktop's commands behave as before; `Row` is a
+/// catalog the caller resolved (`catalog_admin`'s gate, R22).
+#[derive(Debug, Clone, Copy)]
+pub enum CatalogTarget<'a> {
+    Personal,
+    Row(&'a CatalogRow),
+}
+
+impl CatalogTarget<'_> {
+    /// The checkout this target writes.
+    pub(crate) fn root(self, store: &Mutex<Store>) -> Result<std::path::PathBuf, IpcError> {
+        match self {
+            CatalogTarget::Personal => {
+                Ok(std::path::PathBuf::from(require_config(store)?.repo_path))
+            }
+            CatalogTarget::Row(r) => Ok(std::path::PathBuf::from(&r.repo_path)),
+        }
+    }
+
+    /// Borrow its loaded catalog. Same lock rule as `registry::with_*`: `f`
+    /// must never take the store.
+    pub(crate) fn with<T>(
+        self,
+        f: impl FnOnce(&repo::Catalog) -> Result<T, IpcError>,
+    ) -> Result<T, IpcError> {
+        match self {
+            CatalogTarget::Personal => registry::with_personal(f),
+            CatalogTarget::Row(r) => registry::with_catalog_row(r, f),
+        }
+    }
+
+    /// Reload it after a write.
+    pub(crate) fn reload(self, store: &Mutex<Store>) -> Result<CatalogSummary, IpcError> {
+        match self {
+            CatalogTarget::Personal => load(false, store),
+            CatalogTarget::Row(r) => load_catalog(r.id, false, store),
+        }
+    }
+}
+
 /// Persist the repo location and clone it if needed. Does not load.
 pub fn configure(args: ConfigureArgs, store: &Mutex<Store>) -> Result<CatalogConfigRow, IpcError> {
     let path = expand_home(args.repo_path.trim());
@@ -476,8 +519,19 @@ pub async fn import_host(
     ssh: &Arc<SshClient>,
     fleet_token: Option<&str>,
 ) -> Result<import::ImportReport, IpcError> {
-    let cfg = require_config(store)?;
-    let repo = std::path::PathBuf::from(&cfg.repo_path);
+    import_host_into(CatalogTarget::Personal, args, store, ssh, fleet_token).await
+}
+
+/// [`import_host`] into `target`'s checkout (Assets M4: `catalog_admin
+/// import_host` with a `catalog`, and a card's apply).
+pub async fn import_host_into(
+    target: CatalogTarget<'_>,
+    args: ImportArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    fleet_token: Option<&str>,
+) -> Result<import::ImportReport, IpcError> {
+    let repo = target.root(store)?;
     if args.host_alias == "local" {
         crate::service::hub::ensure_local_allowed(&args.host_alias)?;
         let src = import::ImportSources::for_local()?;
@@ -508,8 +562,18 @@ pub async fn import_host(
 }
 
 pub fn get_asset(kind: Kind, name: &str, store: &Mutex<Store>) -> Result<AssetDetail, IpcError> {
+    get_asset_in(CatalogTarget::Personal, kind, name, store)
+}
+
+/// [`get_asset`] out of `target`'s loaded catalog (Assets M4).
+pub fn get_asset_in(
+    target: CatalogTarget<'_>,
+    kind: Kind,
+    name: &str,
+    store: &Mutex<Store>,
+) -> Result<AssetDetail, IpcError> {
     let rows = inventory(store)?;
-    with_catalog(|cat| {
+    target.with(|cat| {
         let asset = cat.find(kind, name).ok_or_else(|| {
             IpcError::new(
                 E_ASSET_NOT_FOUND,
