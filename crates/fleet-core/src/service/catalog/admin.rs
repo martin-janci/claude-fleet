@@ -278,6 +278,16 @@ impl AdminCall {
             }
             c => match catalog {
                 None | Some(PERSONAL) => Ok(Touches::Catalog(PERSONAL.to_string())),
+                // Final review M-g: re-pointing an org catalog is
+                // `add_catalog`'s job, not an M4 edit.
+                Some(other) if matches!(c, AdminCall::Configure(_)) => Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!(
+                        "configure sets the personal catalog only; re-point catalog {other} \
+                         with add_catalog (on the hub: fleet-hub catalog add {other} <path> \
+                         --org <org>)"
+                    ),
+                )),
                 Some(other) if c.is_authoring() => Err(IpcError::new(
                     codes::E_INVALID,
                     format!(
@@ -646,6 +656,15 @@ mod tests {
         );
         let e = AdminCall::Push.touches(Some("acme")).unwrap_err();
         assert!(e.message.contains("M4"), "{}", e.message);
+        // M-g: configure points at add_catalog, not at an M4 git edit.
+        let configure: AdminCall = serde_json::from_value(
+            serde_json::json!({ "action": "configure", "args": { "repo_path": "/x" } }),
+        )
+        .unwrap();
+        let e = configure.touches(Some("acme")).unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        assert!(e.message.contains("add_catalog"), "{}", e.message);
+        assert!(!e.message.contains("M4"), "{}", e.message);
         let e = AdminCall::LastSync.touches(Some("acme")).unwrap_err();
         assert!(e.message.contains("not per catalog"), "{}", e.message);
     }
