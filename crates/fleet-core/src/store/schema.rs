@@ -427,6 +427,16 @@ fn hosts_has_harnesses(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 092.
+fn hosts_has_provision_warning(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'provision_warning'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 067 (work graph M14.1b, D31).
 fn orgs_has_bound_sees_unassigned(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -997,6 +1007,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 91,
         sql: include_str!("../../migrations/091_catalog_ids.sql"),
         already_applied: Some(asset_inventory_has_catalog_id),
+    },
+    // The warning a degraded provisioning left behind, so it survives the
+    // call that produced it. ADD COLUMN is not idempotent: the same guard
+    // 087 and 089 use.
+    Migration {
+        version: 92,
+        sql: include_str!("../../migrations/092_host_provision_warning.sql"),
+        already_applied: Some(hosts_has_provision_warning),
     },
     // Assets S1b M3: `host_catalogs` (admissions) and `client_catalog_grants`
     // (personal backfilled from `assets_admin_at`). IF NOT EXISTS + INSERT
@@ -2468,10 +2486,15 @@ mod tests {
                 "INSERT INTO catalogs (name, repo_path, org_id, created_at) VALUES ('personal', '/p', NULL, 0);",
             )
             .unwrap();
-        old.upsert_host("h").unwrap();
+        // Raw SQL, not `upsert_host`: a typed host read selects HOST_COLUMNS,
+        // which names every column of the CURRENT schema, so calling it on a
+        // store pinned to an older version breaks as soon as any later
+        // migration adds a host column. The 089 test inserts this way for the
+        // same reason; this test is about `host_layers`, not the host API.
         old.conn
             .execute_batch(
-                "INSERT INTO host_layers (host_alias, layer_name, axis) VALUES ('h', 'core', 'role');\
+                "INSERT INTO hosts (alias, reachable) VALUES ('h', 1);\
+                 INSERT INTO host_layers (host_alias, layer_name, axis) VALUES ('h', 'core', 'role');\
                  PRAGMA foreign_keys = OFF;\
                  INSERT INTO host_layers (host_alias, layer_name, axis) VALUES ('ghost', 'core', 'role');",
             )
@@ -4279,6 +4302,33 @@ mod tests {
         assert_eq!(v, None, "an existing host starts on auto");
         s.conn
             .execute_batch("DELETE FROM schema_version WHERE version >= 89;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_092_adds_the_provision_warning_as_none_and_is_safe_to_rerun() {
+        let s = store_at_version(91);
+        s.conn
+            .execute_batch("INSERT INTO hosts (alias, reachable, provisioned) VALUES ('h', 1, 1);")
+            .unwrap();
+        assert!(!hosts_has_provision_warning(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(hosts_has_provision_warning(&s.conn).unwrap());
+        let v: Option<String> = s
+            .conn
+            .query_row(
+                "SELECT provision_warning FROM hosts WHERE alias = 'h'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, None, "an existing host carries no warning");
+        // the ADD COLUMN is not idempotent, so a re-run must be guarded
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 92;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);

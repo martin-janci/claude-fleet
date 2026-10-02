@@ -658,9 +658,24 @@ impl Graph {
         })
     }
 
-    /// An item's own org: its tracker's, or a local item's (M14) —
-    /// `Store::item_org` in memory (a test holds the two equal).
+    /// An item's own org: its tracker's, or a local item's (M14), or — for a
+    /// native subtask, which `insert_native` leaves with no `org_id` — its
+    /// parent's. `Store::item_org` in memory (a test holds the two equal).
+    ///
+    /// One level only, matching the SQL: `parent_for_new_child` refuses a
+    /// native parent that is itself a subtask, so there is no deeper chain to
+    /// walk and no cycle to guard against.
     pub(crate) fn item_org(&self, item: &ViewItem) -> Option<i64> {
+        self.own_item_org(item).or_else(|| {
+            item.item
+                .parent_id
+                .and_then(|p| self.items.get(&p))
+                .and_then(|p| self.own_item_org(p))
+        })
+    }
+
+    /// The org an item carries itself, with no parent fallback.
+    fn own_item_org(&self, item: &ViewItem) -> Option<i64> {
         match item.item.tracker_id {
             Some(t) => self.trackers.get(&t).and_then(|t| t.org_id),
             None => item.own_org,

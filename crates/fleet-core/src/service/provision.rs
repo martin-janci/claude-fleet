@@ -81,6 +81,16 @@ pub(crate) const AG_FILES: &[(&str, &str)] = &[
 ];
 /// Where provisioning stages [`AG_FILES`] before running their installer.
 const AG_STAGE_DIR: &str = "~/.local/share/fleet/ag-src";
+/// Where the installer puts the ag tree, passed to it EXPLICITLY.
+///
+/// `install.sh` honours a caller-set `AG_HOME`/`AG_BIN_DIR` by design, and
+/// fleet runs it through `bash -lc`, which sources the host's login profile
+/// first — so an `export AG_HOME=...` there would otherwise decide where
+/// fleet installs (and, before the installer's guard was hardened, what it
+/// deleted). Passing both pins the location to the one
+/// `tmux::CL_FALLBACK` reads; `ag_paths_match_the_pane_fallback` ties them.
+const AG_HOME_DIR: &str = "~/.local/share/ag";
+const AG_BIN_DIR: &str = "~/.local/bin";
 /// The alias every provisioned host gets: `cl` = Claude Code without
 /// permission prompts, the same launch fleet's panes use.
 const AG_CL_ALIAS: &str = "cl=claude --yolo";
@@ -320,10 +330,23 @@ pub async fn provision_content_only(
     } else {
         None
     };
+    // the ag step is retryable, so a warning from it is owed another pass
+    mark_provisioned(store, host, warning.as_deref(), warning.is_some());
+    Ok(warning)
+}
+
+/// Record a finished provisioning: provisioned either way, with the warning
+/// kept so the reason survives the call and reaches `fleet_health` and
+/// Attention, and the fingerprint forgotten when the run is owed a RETRY, so
+/// it reads `provision_stale` instead of being recorded as delivered.
+///
+/// `owed_retry` is deliberately not `warning.is_some()` — see
+/// `Store::record_host_provision_outcome`.
+fn mark_provisioned(store: &Mutex<Store>, host: &str, warning: Option<&str>, owed_retry: bool) {
     if let Ok(s) = store.lock() {
         let _ = s.set_host_provisioned(host, true);
+        let _ = s.record_host_provision_outcome(host, warning, owed_retry);
     }
-    Ok(warning)
 }
 
 /// Refresh every reachable, non-hidden host whose stored fingerprint is
@@ -644,13 +667,18 @@ pub async fn provision_host_with_token(
     } else {
         None
     };
+    // Only the `ag` outcome marks the run degraded. `wsl_warning` reports a
+    // persistent environment condition (WSL mirrored networking is needed),
+    // which recurs on every provisioning until the operator changes their WSL
+    // config — clearing the fingerprint for it would leave that host forever
+    // `provision_stale` and re-provisioned on every tick.
+    let owed_retry = ag_warning.is_some();
     let warning = match (wsl_warning, ag_warning) {
         (Some(a), Some(b)) => Some(format!("{a}; {b}")),
         (a, b) => a.or(b),
     };
-    if let Ok(s) = store.lock() {
-        let _ = s.set_host_provisioned(host, true);
-    }
+    // Both warnings are KEPT; only the ag one is owed a retry.
+    mark_provisioned(store, host, warning.as_deref(), owed_retry);
     Ok(warning)
 }
 
@@ -684,10 +712,15 @@ fn ag_clear_stage_script() -> String {
 }
 
 /// `bash -lc` body that runs the staged installer (see [`provision_ag`]).
+///
+/// `AG_HOME`/`AG_BIN_DIR` go in the command's own environment so the host's
+/// login profile cannot redirect where fleet installs.
 fn ag_install_script() -> String {
     let stage = remote_path(AG_STAGE_DIR);
     format!(
-        "bash {stage}/install.sh --from {stage} --alias {} </dev/null 2>&1",
+        "env AG_HOME={} AG_BIN_DIR={} bash {stage}/install.sh --from {stage} --alias {} </dev/null 2>&1",
+        remote_path(AG_HOME_DIR),
+        remote_path(AG_BIN_DIR),
         quote(AG_CL_ALIAS)
     )
 }
@@ -2130,8 +2163,24 @@ mod tests {
     fn ag_install_script_is_quoted_and_adds_the_cl_alias() {
         assert_eq!(
             ag_install_script(),
-            "bash \"$HOME\"/'.local/share/fleet/ag-src'/install.sh --from \"$HOME\"/'.local/share/fleet/ag-src' --alias 'cl=claude --yolo' </dev/null 2>&1"
+            "env AG_HOME=\"$HOME\"/'.local/share/ag' AG_BIN_DIR=\"$HOME\"/'.local/bin' bash \"$HOME\"/'.local/share/fleet/ag-src'/install.sh --from \"$HOME\"/'.local/share/fleet/ag-src' --alias 'cl=claude --yolo' </dev/null 2>&1"
         );
+    }
+
+    /// The installer is told where to install, and it is the one place the
+    /// pane's own fallback looks. Two unrelated literals here would mean a
+    /// provisioned host whose panes still fall through to plain `claude`.
+    #[test]
+    fn ag_paths_match_the_pane_fallback() {
+        let home = AG_HOME_DIR.strip_prefix('~').expect("~-relative");
+        assert!(
+            crate::tmux::CL_FALLBACK.contains(&format!("$HOME{home}/ag")),
+            "CL_FALLBACK must probe {AG_HOME_DIR}/ag; it reads: {}",
+            crate::tmux::CL_FALLBACK
+        );
+        // and the installer is told that same path, not left to the profile
+        assert!(ag_install_script().contains(&remote_path(AG_HOME_DIR)));
+        assert!(ag_install_script().contains(&remote_path(AG_BIN_DIR)));
     }
 
     /// A failed install is a warning, never an error: the pane command's
@@ -3050,7 +3099,10 @@ mod tests {
     }
 
     /// M11b: a content-only refresh whose ag install fails is still a
-    /// refresh — the warning comes back and the host is provisioned.
+    /// refresh — the warning comes back and the host is provisioned — but it
+    /// keeps NO fingerprint, so it reads `provision_stale` and is retried.
+    /// Stamping this build's fingerprint here would record a degraded run as
+    /// delivered: permanent, invisible, and a no-op to re-enable.
     #[tokio::test]
     async fn provision_content_only_returns_the_ag_warning_and_still_marks_provisioned() {
         let store = Mutex::new(Store::open_in_memory().unwrap());
@@ -3078,7 +3130,50 @@ mod tests {
         );
         let row = store.lock().unwrap().get_host_row("h1").unwrap().unwrap();
         assert!(row.provisioned);
-        assert!(!row.provision_stale);
+        assert!(
+            row.provision_stale,
+            "a degraded ag step keeps no fingerprint, so the host is owed a retry"
+        );
+        assert!(
+            row.provisioned_at.is_some(),
+            "the content WAS delivered: provisioned_at still stands"
+        );
+        // and the REASON survives the call that produced it, so it can reach
+        // fleet_health and the host's Attention row
+        assert_eq!(
+            row.provision_warning.as_deref(),
+            Some(warning.as_str()),
+            "the warning is kept on the host, not just returned"
+        );
+        let health = crate::service::health::hosts_health(
+            std::slice::from_ref(&row),
+            &[],
+            &crate::service::health::HostHealthThresholds {
+                disk_low_pct: 90,
+                claude_max_behind: 1,
+                hooks_silent_secs: 3600,
+            },
+            &[],
+            "0.0.0",
+            crate::store::now_unix(),
+        );
+        assert_eq!(
+            health[0].provision_warning.as_deref(),
+            Some(warning.as_str()),
+            "fleet_health carries it"
+        );
+
+        // A clean re-run clears it: the warning is about the LAST run.
+        let ok = fresh_host();
+        provision_content_only(&store, &ok, "h1", &base())
+            .await
+            .unwrap();
+        let row = store.lock().unwrap().get_host_row("h1").unwrap().unwrap();
+        assert_eq!(
+            row.provision_warning, None,
+            "a clean run clears the warning"
+        );
+        assert!(!row.provision_stale, "and re-stamps the fingerprint");
     }
 
     /// M11d: a full provisioning whose installer exits non-zero is

@@ -159,6 +159,10 @@ pub(crate) fn sample_host() -> HostRow {
         provisioned_at: Some(1_725_000_000),
         provision_stale: true,
         harnesses: Some(vec!["claude".into(), "codex".into()]),
+        // Some, so the golden records the field name: this sample exists to
+        // pin every name the desktop reads, and the field is
+        // `skip_serializing_if = "Option::is_none"`.
+        provision_warning: Some("ag launcher not installed".into()),
     }
 }
 
@@ -322,6 +326,11 @@ fn sample_health() -> Health {
             claude_behind: true,
             agent_behind: true,
             hooks_silent: true,
+            // Some rather than None so this sample exercises the populated
+            // shape. Unlike `sample_host_row`'s, these field names are NOT in
+            // `hub_contract.golden.json` — the golden tracks `HostRow` only —
+            // so nothing here pins the name.
+            provision_warning: Some("ag launcher not installed".into()),
         }],
         hub: Some(sample_hub_health()),
         tunnels_mode: Some("none".into()),

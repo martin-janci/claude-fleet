@@ -406,7 +406,26 @@ export function searchSettings(
       }
     }
   }
-  return hits;
+  // One hit per setting. `pages` is the compiled pages PLUS every live guide,
+  // and a guide names settings that already have a home elsewhere — so an
+  // approved guide mentioning a matched setting used to yield two hits with
+  // the same key, which the nav renders as `{#each hits as h (h.key)}` and
+  // Svelte refuses as a duplicate key. Prefer the setting's real home: a
+  // guide's fields are never one (`a_guide_walks_through_settings_without_
+  // taking_their_home`), so a guide hit only stands for a setting whose own
+  // page did not match the query.
+  const best = new Map<string, SearchHit>();
+  for (const h of hits) {
+    const kept = best.get(h.key);
+    if (!kept) {
+      best.set(h.key, h);
+      continue;
+    }
+    const keptIsGuide = pages.find((p) => p.id === kept.page)?.layout === 'guide';
+    const thisIsGuide = pages.find((p) => p.id === h.page)?.layout === 'guide';
+    if (keptIsGuide && !thisIsGuide) best.set(h.key, h);
+  }
+  return hits.filter((h) => best.get(h.key) === h);
 }
 
 // ── formatting data ──
