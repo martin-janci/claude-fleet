@@ -374,6 +374,7 @@ pub async fn plan_sync(
             .collect();
         // Every scanning harness is scanned, even one this host may not
         // serve: the scan is what detects it and reads its manifest.
+        let first_plan = host_plans.len();
         for harness in &scanning {
             let harness = *harness;
             match scan_and_persist(
@@ -418,6 +419,8 @@ pub async fn plan_sync(
                 Err(e) => host_plans.push(skipped_plan(&h.alias, harness.id(), &e.message)),
             }
         }
+        // F3c: no two harnesses on this host may manage one file.
+        plan::block_cross_harness_collisions(&mut host_plans[first_plan..]);
     }
 
     let mut computed = SyncPlan::new(host_plans);

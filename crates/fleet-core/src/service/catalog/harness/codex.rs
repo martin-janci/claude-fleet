@@ -537,7 +537,12 @@ impl Harness for Codex {
     /// orphaned manifest entry) reads differently from every other blocked
     /// op, since nothing is being written there either.
     fn symlink_reason(&self, link: &str, target: &str, op: ActionOp) -> String {
-        if link == CODEX_LEGACY_SKILLS_DIR || link.starts_with("~/.codex/skills/") {
+        // Case-insensitive (M3's reasoning applies here too, review fix
+        // round 2): `linked_dir` already matches `link` against a path
+        // case-insensitively, so a host whose `readlink` reports
+        // `~/.Codex/Skills/s` must still read as the legacy directory.
+        let link_lower = link.to_ascii_lowercase();
+        if link_lower == CODEX_LEGACY_SKILLS_DIR || link_lower.starts_with("~/.codex/skills/") {
             format!("{link} is a symlink (to {target}); fleet won't remove old Codex skill copies through it — replace it with a real directory")
         } else if op == ActionOp::Remove {
             format!("{link} is a symlink (to {target}); fleet won't remove Codex skills through it — replace it with a real directory")
@@ -1470,6 +1475,21 @@ mod tests {
             snap.links.into_keys().collect::<Vec<_>>(),
             vec!["~/.agents/skills/.hidden", "~/.codex/skills/s"],
             "no entry for .codex/skills/.system"
+        );
+    }
+
+    /// F3c (plan 5/6 review fix): `symlink_reason` compares the legacy-dir
+    /// check case-insensitively too, matching `linked_dir`'s own ASCII
+    /// case-folding (M3) — a host whose `readlink`/scan reports
+    /// `~/.Codex/Skills/s` (a case-insensitive filesystem) still gets the
+    /// legacy "remove old copies" wording, not the generic "write ... or
+    /// turn Codex off" one.
+    #[test]
+    fn symlink_reason_matches_the_legacy_dir_case_insensitively() {
+        let reason = Codex.symlink_reason("~/.Codex/Skills/s", "/x", ActionOp::Create);
+        assert_eq!(
+            reason,
+            "~/.Codex/Skills/s is a symlink (to /x); fleet won't remove old Codex skill copies through it — replace it with a real directory"
         );
     }
 }

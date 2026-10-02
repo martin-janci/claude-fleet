@@ -844,6 +844,54 @@ fn block_symlinked(actions: &mut [Action], snap: &HostSnapshot, harness: &dyn Ha
     }
 }
 
+/// Multi-harness F3c: no two harnesses on one host may manage one file.
+/// `plans` are one host's plans, one per harness. A path is claimed by
+/// every action that is not `Blocked` and names it in `files` or in its
+/// `remove_entry` (so a `Noop` claims what it already manages); every
+/// action that would write, adopt or delete a path another harness also
+/// claims becomes `Blocked`, naming that harness. Config merges are not
+/// compared: each harness merges into its own config files.
+///
+/// Today Claude (`~/.claude/…`) and Codex (`~/.agents/…`, `~/.codex/…`)
+/// never share a path, so this never fires; it is the guard for later
+/// harnesses that also render into `~/.agents/skills`.
+pub(crate) fn block_cross_harness_collisions(plans: &mut [HostPlan]) {
+    let mut claims: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for hp in plans.iter() {
+        for action in hp.actions.iter().filter(|a| a.op != ActionOp::Blocked) {
+            for path in touched_paths(action) {
+                claims
+                    .entry(path.clone())
+                    .or_default()
+                    .insert(hp.harness.clone());
+            }
+        }
+    }
+    for hp in plans.iter_mut() {
+        let harness = hp.harness.clone();
+        for action in hp.actions.iter_mut() {
+            if matches!(action.op, ActionOp::Noop | ActionOp::Blocked) {
+                continue;
+            }
+            let clash = touched_paths(action).find_map(|path| {
+                claims
+                    .get(path)?
+                    .iter()
+                    .find(|other| **other != harness)
+                    .map(|other| (path.clone(), other.clone()))
+            });
+            if let Some((path, other)) = clash {
+                block(
+                    action,
+                    format!(
+                        "{path} is also managed by the {other} plan on this host; fleet won't let two harnesses write one file"
+                    ),
+                );
+            }
+        }
+    }
+}
+
 /// Rule 3's decision, split out to keep `action_for` readable. `plan` is the
 /// substituted plan; a plugin ref renders exactly one `Subset` merge.
 fn plugin_op(
@@ -2344,6 +2392,130 @@ mod tests {
         assert_eq!(
             a.reason.as_deref(),
             Some("~/.agents/skills is a symlink (to /home/u/.claude/skills); fleet won't remove Codex skills through it — replace it with a real directory")
+        );
+    }
+
+    fn planned(harness: &str, actions: Vec<Action>) -> HostPlan {
+        HostPlan {
+            host_alias: "h".into(),
+            harness: harness.into(),
+            status: "planned".into(),
+            detail: None,
+            actions,
+            snapshot: HostSnapshot::default(),
+            manifest: Manifest::default(),
+        }
+    }
+
+    fn file_action(name: &str, op: ActionOp, path: &str) -> Action {
+        Action {
+            kind: "skill".into(),
+            name: name.into(),
+            op,
+            catalog: None,
+            reason: None,
+            files: vec![path.into()],
+            merges: Vec::new(),
+            backup: false,
+            secrets: Vec::new(),
+            missing_secrets: Vec::new(),
+            plan: None,
+            expected: BTreeMap::new(),
+            secret_files: BTreeSet::new(),
+            remove_entry: None,
+            plugin: None,
+        }
+    }
+
+    /// F3c (future-proofing for harnesses sharing `~/.agents/skills`): two
+    /// harnesses on one host writing one file are both blocked, each naming
+    /// the other; actions on paths nobody else touches are left alone.
+    #[test]
+    fn two_harnesses_writing_one_path_are_both_blocked() {
+        let shared = "~/.agents/skills/s/SKILL.md";
+        let mut plans = vec![
+            planned(
+                "codex",
+                vec![
+                    file_action("s", ActionOp::Create, shared),
+                    file_action("t", ActionOp::Create, "~/.agents/skills/t/SKILL.md"),
+                ],
+            ),
+            planned("gemini", vec![file_action("s", ActionOp::Update, shared)]),
+            planned(
+                "claude",
+                vec![file_action(
+                    "s",
+                    ActionOp::Create,
+                    "~/.claude/skills/s/SKILL.md",
+                )],
+            ),
+        ];
+        block_cross_harness_collisions(&mut plans);
+        assert_eq!(plans[0].actions[0].op, ActionOp::Blocked);
+        assert_eq!(
+            plans[0].actions[0].reason.as_deref(),
+            Some("~/.agents/skills/s/SKILL.md is also managed by the gemini plan on this host; fleet won't let two harnesses write one file")
+        );
+        assert_eq!(plans[1].actions[0].op, ActionOp::Blocked);
+        assert!(plans[1].actions[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("by the codex plan"));
+        assert_eq!(plans[0].actions[1].op, ActionOp::Create);
+        assert_eq!(plans[2].actions[0].op, ActionOp::Create);
+    }
+
+    /// A `Noop` claims the file it manages (it stays a `Noop`); a removal
+    /// claims its entry's files through `remove_entry`; an already-blocked
+    /// action claims nothing.
+    #[test]
+    fn noops_and_removals_claim_their_files_and_blocked_actions_do_not() {
+        let managed = "~/.agents/skills/s/SKILL.md";
+        let mut moving = file_action("s", ActionOp::Create, "~/.agents/skills/s2/SKILL.md");
+        moving.remove_entry = Some(ManifestEntry {
+            files: vec!["~/.agents/skills/old/SKILL.md".into()],
+            ..Default::default()
+        });
+        let mut plans = vec![
+            planned(
+                "codex",
+                vec![
+                    file_action("s", ActionOp::Noop, managed),
+                    file_action("b", ActionOp::Blocked, "~/.agents/skills/b/SKILL.md"),
+                ],
+            ),
+            planned(
+                "gemini",
+                vec![
+                    file_action("s", ActionOp::Create, managed),
+                    moving,
+                    file_action("b", ActionOp::Create, "~/.agents/skills/b/SKILL.md"),
+                ],
+            ),
+            planned(
+                "agy",
+                vec![file_action(
+                    "old",
+                    ActionOp::Remove,
+                    "~/.agents/skills/old/SKILL.md",
+                )],
+            ),
+        ];
+        block_cross_harness_collisions(&mut plans);
+        assert_eq!(plans[0].actions[0].op, ActionOp::Noop);
+        assert_eq!(plans[1].actions[0].op, ActionOp::Blocked);
+        assert_eq!(
+            plans[1].actions[1].op,
+            ActionOp::Blocked,
+            "its old file is agy's removal"
+        );
+        assert_eq!(plans[2].actions[0].op, ActionOp::Blocked);
+        assert_eq!(
+            plans[1].actions[2].op,
+            ActionOp::Create,
+            "a blocked action claims nothing"
         );
     }
 }
