@@ -240,7 +240,7 @@ fn is_current(entry: &repo::Catalog, row: &CatalogRow) -> bool {
 /// ordering — so treating it as a load failure would clobber a good load,
 /// or whatever the registry already held, with a problem entry over what is
 /// really just a bookkeeping failure.
-pub(crate) fn is_load_failure(e: &IpcError) -> bool {
+pub fn is_load_failure(e: &IpcError) -> bool {
     matches!(
         e.code.as_str(),
         E_CATALOG_GIT | E_CATALOG_PARSE | codes::E_IO

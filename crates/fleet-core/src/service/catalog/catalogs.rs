@@ -231,10 +231,20 @@ pub fn unadmit(
     catalog: &str,
     store: &Mutex<Store>,
 ) -> Result<Vec<String>, IpcError> {
+    unadmit_reporting(host_alias, catalog, store).map(|(_, names)| names)
+}
+
+/// [`unadmit`], also saying whether the host admitted that catalog at all
+/// (`fleet-hub catalog unadmit` says so when it did not).
+pub fn unadmit_reporting(
+    host_alias: &str,
+    catalog: &str,
+    store: &Mutex<Store>,
+) -> Result<(bool, Vec<String>), IpcError> {
     let s = lock(store)?;
     let row = host_and_catalog(&s, host_alias, catalog)?;
-    s.unadmit_host_catalog(host_alias, row.id)?;
-    admitted_names(&s, host_alias)
+    let was_admitted = s.unadmit_host_catalog(host_alias, row.id)?;
+    Ok((was_admitted, admitted_names(&s, host_alias)?))
 }
 
 #[cfg(test)]

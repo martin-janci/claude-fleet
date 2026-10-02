@@ -15,6 +15,7 @@ use crate::config::{self, HubOptions};
 use crate::out;
 use crate::serve;
 use clap::Subcommand;
+use fleet_core::ipc_error::codes;
 use fleet_core::service::catalog::catalogs::{self, AddCatalogArgs};
 use fleet_core::service::catalog::{self, ConfigureArgs};
 use fleet_core::store::Store;
@@ -61,7 +62,8 @@ pub enum CatalogCmd {
         #[arg(long)]
         org: Option<String>,
     },
-    /// Print every catalog: owner, load state, HEAD, path, admissions, grants.
+    /// Load or refresh every catalog (as a running hub would), then print
+    /// each: owner, load state, HEAD, path, admissions, grants.
     List,
     /// Forget an org catalog (config only: the checkout is never deleted).
     /// Its layer assignments, admissions and grants go; hosts keep what it installed.
@@ -94,7 +96,13 @@ pub fn run(
             pull,
             catalog: Some(name),
         } => {
-            let row = catalogs::catalog_named(&name, &store).map_err(|e| e.message)?;
+            let row = catalogs::catalog_named(&name, &store).map_err(|e| {
+                if e.code == codes::E_NOTFOUND {
+                    format!("no catalog named {name}; see `fleet-hub catalog list`")
+                } else {
+                    e.message
+                }
+            })?;
             let s = catalog::load_catalog(row.id, pull, &store).map_err(|e| e.message)?;
             print_loaded(&s);
             Ok(ExitCode::SUCCESS)
@@ -106,11 +114,6 @@ pub fn run(
             remote,
             org: None,
         } if name == catalogs::PERSONAL => set_personal(&store, path, remote),
-        CatalogCmd::Add {
-            name, org: None, ..
-        } => Err(format!(
-            "catalog {name} needs an org: add it with --org NAME (only `personal` belongs to none)"
-        )),
         CatalogCmd::Add {
             name,
             path,
@@ -133,14 +136,51 @@ pub fn run(
             Ok(ExitCode::SUCCESS)
         }
         CatalogCmd::Unadmit { host, catalog } => {
-            let names = catalogs::unadmit(&host, &catalog, &store).map_err(|e| e.message)?;
-            out::line(&if names.is_empty() {
-                format!("{host} admits no org catalog")
-            } else {
-                format!("{host} admits: {}", names.join(", "))
-            });
+            let (was_admitted, names) =
+                catalogs::unadmit_reporting(&host, &catalog, &store).map_err(|e| e.message)?;
+            out::line(&unadmit_line(&host, &catalog, was_admitted, &names));
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+/// What `catalog unadmit` prints: whether anything was taken back, then
+/// what the host still admits.
+fn unadmit_line(host: &str, catalog: &str, was_admitted: bool, names: &[String]) -> String {
+    let rest = if names.is_empty() {
+        format!("{host} admits no org catalog")
+    } else {
+        format!("{host} admits: {}", names.join(", "))
+    };
+    if was_admitted {
+        rest
+    } else {
+        format!("{host} did not admit {catalog}; nothing changed. {rest}")
+    }
+}
+
+/// `catalog list`'s rows after `ensure_fresh`. A checkout failure it
+/// returns can only be the personal catalog's (an org catalog's is kept as a
+/// problem entry), so it lands on the personal row: `problem`, with the
+/// error, whatever this process's registry held before. Any other error is
+/// handed back to be printed on its own line.
+fn list_rows(
+    store: &Mutex<Store>,
+) -> Result<(Vec<catalogs::CatalogStatus>, Option<String>), String> {
+    let refresh_err = catalog::ensure_fresh(store).err();
+    let mut all = catalogs::list_catalogs(store).map_err(|e| e.message)?;
+    let Some(e) = refresh_err else {
+        return Ok((all, None));
+    };
+    let personal = all.iter_mut().find(|c| c.org_id.is_none());
+    match personal {
+        Some(p) if catalog::is_load_failure(&e) => {
+            p.state = "problem".to_string();
+            p.problem = Some(e.message);
+            p.asset_count = 0;
+            Ok((all, None))
+        }
+        _ => Ok((all, Some(e.message))),
     }
 }
 
@@ -167,6 +207,12 @@ fn add(
     remote: Option<String>,
     org: Option<String>,
 ) -> Result<ExitCode, String> {
+    // Who may own which catalog is the service's (`Store::check_catalog_owner`);
+    // the CLI only adds how to say it here.
+    let no_org = org.is_none();
+    let existed = fleet_core::ipc_error::lock(store)
+        .and_then(|s| Ok(s.get_catalog_by_name(&name)?.is_some()))
+        .map_err(|e| e.message)?;
     let st = catalogs::add_catalog(
         AddCatalogArgs {
             name: name.clone(),
@@ -176,15 +222,22 @@ fn add(
         },
         store,
     )
-    .map_err(|e| e.message)?;
+    .map_err(|e| {
+        if no_org && e.code == codes::E_INVALID {
+            format!("{}; pass --org NAME", e.message)
+        } else {
+            e.message
+        }
+    })?;
+    let verb = if existed { "re-pointed" } else { "added" };
     if let Some(problem) = st.problem {
         return Err(format!(
-            "added catalog {name}, but it could not be loaded: {problem}; fix the checkout and \
+            "{verb} catalog {name}, but it could not be loaded: {problem}; fix the checkout and \
              run `fleet-hub catalog reload --catalog {name}`"
         ));
     }
     out::line(&format!(
-        "added catalog {} ({} asset(s)); a running hub picks it up at its next catalog call",
+        "{verb} catalog {} ({} asset(s)); a running hub picks it up at its next catalog call",
         st.name, st.asset_count
     ));
     Ok(ExitCode::SUCCESS)
@@ -232,13 +285,17 @@ fn load(store: &Mutex<Store>, pull: bool) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `catalog list`: one line per catalog (NAME, OWNER, STATE, HEAD, PATH), then
-/// its admissions and its grants (R19) on their own lines.
+/// `catalog list`: loads or refreshes every catalog first (`ensure_fresh`:
+/// this process's registry starts empty, so the state column would say
+/// nothing otherwise), then prints one line per catalog (NAME, OWNER, STATE,
+/// HEAD, PATH) and its admissions and grants (R19) on their own lines. A
+/// broken org catalog shows as `problem`; so does a personal one that failed
+/// to load, with the error `ensure_fresh` returned for it.
 fn list(store: &Mutex<Store>) -> Result<ExitCode, String> {
-    // This process's registry is empty: load what can be loaded so the
-    // state column says something (a broken org catalog shows as `problem`).
-    let _ = catalog::ensure_fresh(store);
-    let all = catalogs::list_catalogs(store).map_err(|e| e.message)?;
+    let (all, unplaced) = list_rows(store)?;
+    if let Some(e) = unplaced {
+        out::line(&format!("refreshing the catalogs failed: {e}"));
+    }
     if all.is_empty() {
         out::line(
             "no catalogs; set the personal one with: fleet-hub catalog set <path> [--remote <url>]",
@@ -348,6 +405,40 @@ mod tests {
             org: None,
         };
         assert_eq!(run(add_personal, &opts, &env).unwrap(), ExitCode::SUCCESS);
+        let refused = run(
+            CatalogCmd::Add {
+                name: "personal".into(),
+                path: personal.to_string_lossy().into(),
+                remote: None,
+                org: Some("acme".into()),
+            },
+            &opts,
+            &env,
+        )
+        .unwrap_err();
+        assert!(refused.contains("belongs to no org"), "{refused}");
+        run(
+            CatalogCmd::Reload {
+                pull: false,
+                catalog: Some("personal".into()),
+            },
+            &opts,
+            &env,
+        )
+        .unwrap();
+        let unknown = run(
+            CatalogCmd::Reload {
+                pull: false,
+                catalog: Some("nope".into()),
+            },
+            &opts,
+            &env,
+        )
+        .unwrap_err();
+        assert_eq!(
+            unknown,
+            "no catalog named nope; see `fleet-hub catalog list`"
+        );
         let repo = git_repo(dir.path(), "acme-assets");
         let add = |org: Option<&str>| CatalogCmd::Add {
             name: "acme".into(),
@@ -359,6 +450,33 @@ mod tests {
         assert_eq!(
             run(add(Some("acme")), &opts, &env).unwrap(),
             ExitCode::SUCCESS
+        );
+        // Re-pointing (R12): with its own --org it works; without, the
+        // service's owner rule refuses and the CLI says how to pass it.
+        let moved = git_repo(dir.path(), "acme-assets-2");
+        let repoint = |org: Option<&str>| CatalogCmd::Add {
+            name: "acme".into(),
+            path: moved.to_string_lossy().into(),
+            remote: None,
+            org: org.map(String::from),
+        };
+        let refused = run(repoint(None), &opts, &env).unwrap_err();
+        assert!(
+            refused.contains("needs an org") && refused.ends_with("; pass --org NAME"),
+            "{refused}"
+        );
+        assert_eq!(
+            run(repoint(Some("acme")), &opts, &env).unwrap(),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            serve::open_store(&opts, &env)
+                .unwrap()
+                .get_catalog_by_name("acme")
+                .unwrap()
+                .unwrap()
+                .repo_path,
+            moved.to_string_lossy()
         );
         run(
             CatalogCmd::Admit {
@@ -399,6 +517,14 @@ mod tests {
             &env,
         )
         .unwrap();
+        // A second unadmit changes nothing, and the store says so.
+        let again = catalogs::unadmit_reporting(
+            "h",
+            "acme",
+            &Mutex::new(serve::open_store(&opts, &env).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(again, (false, Vec::<String>::new()));
         run(
             CatalogCmd::Remove {
                 name: "acme".into(),
@@ -425,6 +551,65 @@ mod tests {
         assert!(
             refused.contains("personal catalog cannot be removed"),
             "{refused}"
+        );
+    }
+
+    /// A personal catalog that fails to load shows on its own row as
+    /// `problem` with the error, not as a bare `not_loaded`.
+    #[test]
+    fn list_puts_a_personal_load_error_on_the_personal_row() {
+        let _registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..HubOptions::default()
+        };
+        let env = HashMap::new();
+        drop(
+            Store::open_with_bus(
+                &dir.path().join("state.db"),
+                Arc::new(fleet_core::events::NoopEventBus),
+            )
+            .unwrap(),
+        );
+        let personal = git_repo(dir.path(), "personal-assets");
+        std::fs::write(personal.join("catalog.yaml"), "schema_version: 99\n").unwrap();
+        let o = fleet_core::proc::std_command("git")
+            .args(["commit", "-q", "-am", "unsupported schema"])
+            .current_dir(&personal)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let set = CatalogCmd::Set {
+            path: personal.to_string_lossy().into(),
+            remote: None,
+        };
+        assert!(
+            run(set, &opts, &env).is_err(),
+            "the checkout does not parse"
+        );
+
+        let store = Mutex::new(serve::open_store(&opts, &env).unwrap());
+        let (rows, unplaced) = list_rows(&store).unwrap();
+        assert_eq!(unplaced, None);
+        let row = rows
+            .iter()
+            .find(|c| c.name == "personal")
+            .expect("configured");
+        assert_eq!(row.state, "problem");
+        assert!(row.problem.as_deref().is_some_and(|p| !p.is_empty()));
+    }
+
+    #[test]
+    fn unadmit_says_when_nothing_was_admitted() {
+        let none: Vec<String> = Vec::new();
+        assert_eq!(
+            unadmit_line("h", "acme", false, &none),
+            "h did not admit acme; nothing changed. h admits no org catalog"
+        );
+        assert_eq!(
+            unadmit_line("h", "acme", true, &["beta".to_string()]),
+            "h admits: beta"
         );
     }
 }

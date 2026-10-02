@@ -1206,4 +1206,44 @@ mod tests {
         .unwrap_err()
         .contains("nope"));
     }
+
+    /// `--catalog personal` is the default grant: the personal catalog, and
+    /// `ungrant … --catalog personal` takes it back.
+    #[test]
+    fn grant_and_ungrant_the_personal_catalog_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = opts_for(&dir, None);
+        let env = HashMap::new();
+        let (desk, personal) = {
+            let s = fleet_core::store::Store::open_with_bus(
+                &dir.path().join("state.db"),
+                std::sync::Arc::new(fleet_core::events::NoopEventBus),
+            )
+            .unwrap();
+            let personal = s.upsert_catalog("personal", "/p", None, None).unwrap();
+            (
+                s.insert_client_token("desk", "aa11", "full").unwrap().id,
+                personal.id,
+            )
+        };
+        let grant = |on| {
+            client_grant(
+                &opts,
+                &env,
+                "desk",
+                crate::Grant::Assets,
+                Some("personal"),
+                on,
+            )
+        };
+        grant(true).unwrap();
+        let s = crate::serve::open_store(&opts, &env).unwrap();
+        assert!(s.client_is_assets_admin(desk).unwrap());
+        assert!(s.client_may_admin_catalog(desk, personal).unwrap());
+        drop(s);
+        grant(false).unwrap();
+        let s = crate::serve::open_store(&opts, &env).unwrap();
+        assert!(!s.client_is_assets_admin(desk).unwrap());
+        assert!(!s.client_may_admin_catalog(desk, personal).unwrap());
+    }
 }
