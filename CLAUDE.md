@@ -225,9 +225,9 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   as `NULL`), so a host's layer assignments and scanned inventory are each
   pinned to one catalog. `service/catalog/effective.rs` decides, per host,
   what it should end up with: `acceptance(host_org, catalog_id, catalog_org,
-  admitted)` returns `No` / `SharedOnly` / `All` (admissions arrive in M3;
-  empty here, so an org-bound host gets only the `shared` slice of
-  `personal`), and `effective_for_host(store, host)` composes an
+  admitted)` returns `No` / `SharedOnly` / `All` (an org-bound host gets only
+  the `shared` slice of `personal`; a host with no org also takes every org
+  catalog it admits, M3), and `effective_for_host(store, host)` composes an
   `EffectiveSet` — reading every store row under one guard first, then the
   registry, since store → registry is never allowed. Within that set, the
   scope boundary and a `(kind, name)`/`(kind, install_name)` collision
@@ -245,6 +245,37 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   against that same union, not just `personal`. `apply_override` rejects a
   layer that tries to change an asset's `scope`, since scope is what decides
   who may receive it.
+- **Assets M3 — admissions, grants per catalog, loading every catalog** (plan
+  `docs/superpowers/plans/2026-10-01-assets-m3-admissions.md`): migration 092
+  adds `host_catalogs` (a host with no org admits an org catalog; `admit`
+  refuses an org-bound host and `personal`) and `client_catalog_grants` (a
+  grant names one catalog; the personal grant is also mirrored into
+  `client_tokens.assets_admin_at`, which is read only while no personal
+  catalog exists yet). `load_catalog(id)` loads any catalog; `ensure_fresh`
+  walks every `catalogs` row — an org catalog that cannot load becomes a
+  registry *problem entry* (`Catalog.load_error`, retried once its row's load
+  record, `repo_path` or `remote_url` changes), a removed one is evicted, a
+  personal failure is still the error. `effective_for_host` reads admissions
+  and reports `speaks_for` / `held_back`: a manifest entry is an orphan
+  (`Remove`) only when its own catalog speaks for the host; one whose catalog
+  is not loaded, failed, no longer accepted (unadmit, org change) or not
+  configured gets a `Noop` saying why — never a remove. `plan_sync` reads one
+  `registry::snapshot()` for scan and plan. `service/catalog/catalogs.rs`
+  adds / lists / removes catalogs (removal is config only and cascades their
+  layer rows, admissions and grants) and admits hosts; `add_catalog` refuses
+  moving an existing catalog to another org (`Store::check_catalog_owner`).
+  `catalog_admin` takes an optional `catalog` (config, load, list_layers,
+  set_host_layers; the authoring actions stay personal-only until M4) and
+  five actions (`list_catalogs`, `add_catalog`, `remove_catalog`,
+  `admit_catalog`, `unadmit_catalog`); every action checks a grant on the
+  catalog it touches (`AdminCall::touches` → `may_admin_catalog`),
+  `list_catalogs` is master or an unbound full client only (an org-bound
+  client is refused), `add_catalog` is master-only, and `apply_sync` fails
+  closed for a non-master caller when its parked plan is gone and otherwise
+  needs a grant on the catalog of every manifest entry an Update/Overwrite
+  replaces, not only the catalogs its actions come from. Operator side:
+  `fleet-hub catalog add|list|remove|admit|unadmit`, `catalog reload
+  --catalog`, `client grant|ungrant <name> assets --catalog`.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. Only one PTY is attached at a time.
