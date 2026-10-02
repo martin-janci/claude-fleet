@@ -52,8 +52,8 @@ pub struct Resolution {
     pub withheld: std::collections::BTreeSet<(String, String)>,
     /// Assets M3: catalog → why its assets on this host are kept but no
     /// longer managed (`effective::EffectiveSet::held_back`: not loaded,
-    /// failed to load, cannot resolve, or an admission that no longer
-    /// applies). Never a catalog the host has no tie to (PF10). Empty on the
+    /// failed to load, cannot resolve) — only catalogs the host accepts
+    /// (PF10), and never a load error's text (final review I1). Empty on the
     /// single-catalog path. `#[serde(default)]`: travels the wire.
     #[serde(default)]
     pub held_back: BTreeMap<String, String>,

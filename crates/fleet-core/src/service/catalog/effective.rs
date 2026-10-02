@@ -130,40 +130,36 @@ pub struct EffectiveSet {
     pub speaks_for: BTreeSet<String>,
     /// Assets M3: catalog → why its manifest entries on this host are kept
     /// rather than removed: not loaded, failed to load, or not resolvable
-    /// for this host (R6, R7) — for a catalog the host accepts — or not
-    /// accepted any more although the host still has an admission for it.
-    /// Never a catalog the host has no tie to (PF10: `resolve_preview`,
-    /// which any client may call, copies this into `Resolution::held_back`,
-    /// so it must not list other orgs' catalogs).
+    /// for this host (R6, R7) — only for a catalog the host accepts. Never a
+    /// catalog the host does not accept (PF10: `resolve_preview`, which any
+    /// client may call, copies this into `Resolution::held_back`, so it must
+    /// not list other orgs' catalogs), and never a load error's text (final
+    /// review I1: it can carry the clone URL; the full error stays on the
+    /// gated paths — `list_catalogs`, `fleet-hub catalog list`, the log).
     #[serde(default)]
     pub held_back: BTreeMap<String, String>,
-    /// Assets M3: every configured or loaded catalog this host does not
-    /// accept and has no admission for. NEVER serialized (it names other
+    /// Assets M3: catalog → why, for every configured or loaded catalog this
+    /// host does not accept — including one it still holds a stale admission
+    /// for (it has joined an org since). NEVER serialized (it names other
     /// orgs' catalogs): `plan_sync` uses it, through [`Self::held_back_for`],
     /// only for catalogs the host's own manifest names.
     #[serde(skip)]
-    pub not_accepted: BTreeSet<String>,
+    pub not_accepted: BTreeMap<String, String>,
 }
 
 impl EffectiveSet {
     /// `held_back` plus, for each catalog in `named` (the catalogs the
     /// host's own manifest entries name) that this host does not accept,
-    /// the generic reason. A name the fleet does not know at all is left
-    /// out: the planner's "not configured" fallback covers it.
+    /// the reason it was refused. A name the fleet does not know at all is
+    /// left out: the planner's "not configured" fallback covers it.
     pub fn held_back_for<'a>(
         &self,
         named: impl IntoIterator<Item = &'a str>,
     ) -> BTreeMap<String, String> {
         let mut out = self.held_back.clone();
         for name in named {
-            if self.not_accepted.contains(name) && !out.contains_key(name) {
-                out.insert(
-                    name.to_string(),
-                    format!(
-                        "catalog {name} is not accepted by this host; its assets are kept, \
-                         not removed"
-                    ),
-                );
+            if let Some(why) = self.not_accepted.get(name) {
+                out.entry(name.to_string()).or_insert_with(|| why.clone());
             }
         }
         out
@@ -263,29 +259,39 @@ pub fn effective_for_host_in(
     compose_from(catalogs, host_alias, &st)
 }
 
-/// Record a catalog this host does not accept. PF10: a reason goes into
-/// `held_back` only when the host has an admission for it — the one refusal
-/// whose cause is known here (R4: admissions are made on hosts with no org,
-/// so this host has joined an org since). Any other refusal is only noted in
-/// `not_accepted`, which never leaves the process.
+/// Record a catalog this host does not accept, in `not_accepted` only —
+/// it never leaves the process (PF10), and `plan_sync` names it only when
+/// the host's own manifest does (`held_back_for`). The one refusal whose
+/// cause is known here gets it: the host holds an admission for the catalog,
+/// so (R4: admissions are made on hosts with no org) it has joined an org
+/// since (final review, Task 3 M1: that too is a tie to an org's catalog
+/// `resolve_preview` must not reveal).
 fn refuse(
-    held_back: &mut BTreeMap<String, String>,
-    not_accepted: &mut BTreeSet<String>,
+    not_accepted: &mut BTreeMap<String, String>,
     admitted: &[i64],
     host_alias: &str,
     label: String,
     id: i64,
 ) {
-    if admitted.contains(&id) {
-        let reason = format!(
+    let reason = if admitted.contains(&id) {
+        format!(
             "catalog {label} is not accepted by host {host_alias}: it was admitted while the \
              host had no org, and the host has since joined an org (an admission never \
              crosses orgs); its assets are kept, not removed"
-        );
-        held_back.insert(label, reason);
+        )
     } else {
-        not_accepted.insert(label);
-    }
+        format!("catalog {label} is not accepted by this host; its assets are kept, not removed")
+    };
+    not_accepted.insert(label, reason);
+}
+
+/// The fixed `held_back` reason for a catalog that failed to load: it names
+/// where the error is, never the error itself (final review I1).
+pub(crate) fn failed_to_load_reason(label: &str) -> String {
+    format!(
+        "catalog {label} failed to load; its assets are kept, not removed (see `fleet-hub \
+         catalog list`)"
+    )
 }
 
 /// One asset collected from one accepted catalog, before collisions.
@@ -324,27 +330,21 @@ fn compose<'r>(
     let mut withheld: BTreeSet<(String, String)> = BTreeSet::new();
     let mut speaks_for: BTreeSet<String> = BTreeSet::new();
     let mut held_back: BTreeMap<String, String> = BTreeMap::new();
-    let mut not_accepted: BTreeSet<String> = BTreeSet::new();
+    let mut not_accepted: BTreeMap<String, String> = BTreeMap::new();
 
     for cat in registry::in_order(catalogs) {
         let label = label_of(cat.org_id, &cat.name);
         let accepts = acceptance(host_org, cat.id, cat.org_id, admitted);
         if accepts == Acceptance::No {
-            refuse(
-                &mut held_back,
-                &mut not_accepted,
-                admitted,
-                host_alias,
-                label,
-                cat.id,
-            );
+            refuse(&mut not_accepted, admitted, host_alias, label, cat.id);
             continue;
         }
-        if let Some(err) = &cat.load_error {
-            held_back.insert(
-                label.clone(),
-                format!("catalog {label} failed to load ({err}); its assets are kept, not removed"),
-            );
+        // Final review I1: never the load error's text — it can carry the
+        // clone URL, and `resolve_preview` (open to any client, per-host
+        // tokens included) serializes `held_back`. The full error is on the
+        // gated paths (`list_catalogs`, `fleet-hub catalog list`, the log).
+        if cat.load_error.is_some() {
+            held_back.insert(label.clone(), failed_to_load_reason(&label));
             continue;
         }
         let res = match resolve_rows(cat, host_alias, rows_for(cat)) {
@@ -437,19 +437,12 @@ fn compose<'r>(
         let label = label_of(row.org_id, &row.name);
         if speaks_for.contains(&label)
             || held_back.contains_key(&label)
-            || not_accepted.contains(&label)
+            || not_accepted.contains_key(&label)
         {
             continue;
         }
         if acceptance(host_org, row.id, row.org_id, admitted) == Acceptance::No {
-            refuse(
-                &mut held_back,
-                &mut not_accepted,
-                admitted,
-                host_alias,
-                label,
-                row.id,
-            );
+            refuse(&mut not_accepted, admitted, host_alias, label, row.id);
         } else {
             held_back.insert(
                 label.clone(),
@@ -988,7 +981,7 @@ mod tests {
             before.held_back
         );
         assert!(
-            before.not_accepted.contains("acme"),
+            before.not_accepted.contains_key("acme"),
             "{:?}",
             before.not_accepted
         );
@@ -1009,7 +1002,7 @@ mod tests {
     /// An admission left behind when the host joined another org never
     /// crosses orgs (R4). The admission row ties the host to `acme`, and it
     /// says what happened, so the reason names it (PF10: "org changed" only
-    /// when actually known).
+    /// when actually known) — but only through `held_back_for`.
     #[test]
     fn an_admission_never_reaches_a_host_bound_to_an_org() {
         let _g = crate::service::catalog::lock_registry_for_test();
@@ -1023,7 +1016,14 @@ mod tests {
         registry::install_for_test(acme_cat(acme, vec![skill("c", "shared")])).unwrap();
         let e = effective_for_host(&store, "h").unwrap();
         assert!(!names(&e).contains(&"c"), "{:?}", names(&e));
-        let why = &e.held_back["acme"];
+        // Task 3 M1: never in the serialized `held_back` (`resolve_preview`
+        // would name an org's catalog to any caller) — only through
+        // `held_back_for`, when the host's own manifest names it.
+        assert!(!e.held_back.contains_key("acme"), "{:?}", e.held_back);
+        let wire = serde_json::to_string(&e).unwrap();
+        assert!(!wire.contains("acme"), "{wire}");
+        let held = e.held_back_for(["acme"]);
+        let why = &held["acme"];
         assert!(why.contains("not accepted"), "{why}");
         assert!(why.contains("joined an org"), "{why}");
         assert!(!e.speaks_for.contains("acme"), "{:?}", e.speaks_for);
@@ -1093,11 +1093,45 @@ mod tests {
             e.held_back
         );
         assert!(
-            e.held_back["beta"].contains("failed to load (boom)"),
+            e.held_back["beta"].contains("failed to load;"),
             "{:?}",
             e.held_back
         );
+        assert!(!e.held_back["beta"].contains("boom"), "{:?}", e.held_back);
         assert_eq!(e.speaks_for, BTreeSet::from(["personal".to_string()]));
+    }
+
+    /// Final review I1: `resolve_preview` is open to per-host tokens,
+    /// readonly and org-bound clients, so a problem entry's load error —
+    /// which can carry the clone URL and its userinfo — never reaches its
+    /// serialized output; the fixed reason points at `catalog list`.
+    #[test]
+    fn resolve_preview_never_carries_a_load_errors_text() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        let (store, personal, acme) = seeded_store();
+        store
+            .lock()
+            .unwrap()
+            .set_host_org("h", Some(ORG_10))
+            .unwrap();
+        registry::install_personal(personal_cat(personal, vec![], LayerSet::default())).unwrap();
+        registry::install_for_test(Catalog {
+            id: acme,
+            name: "acme".into(),
+            org_id: Some(ORG_10),
+            load_error: Some("git clone -q https://u:secret@host/r.git /srv/acme: failed".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let res = crate::service::catalog::resolve_preview("h", &store).unwrap();
+        let wire = serde_json::to_string(&res).unwrap();
+        assert!(!wire.contains("secret"), "{wire}");
+        assert!(!wire.contains("u:secret"), "{wire}");
+        assert!(!wire.contains("r.git"), "{wire}");
+        assert_eq!(
+            res.held_back.get("acme").map(String::as_str),
+            Some(failed_to_load_reason("acme").as_str())
+        );
     }
 
     /// Rulings R7: an org catalog whose layers do not resolve for this host is

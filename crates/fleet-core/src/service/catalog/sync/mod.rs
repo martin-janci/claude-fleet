@@ -396,9 +396,9 @@ pub async fn plan_sync(
                     };
                     // Assets M3 (R6): only a catalog that speaks for this
                     // host may have its dropped entries removed; the rest
-                    // are kept with a `Noop` and why. The generic "not
-                    // accepted" reason is added only for catalogs this
-                    // harness's own manifest names (PF10).
+                    // are kept with a `Noop` and why. A "not accepted"
+                    // reason (stale admissions included) is added only for
+                    // catalogs this harness's own manifest names (PF10).
                     let keep = plan::KeepRules {
                         protected: protected_keys.clone(),
                         speaks_for: Some(eff.speaks_for.clone()),
