@@ -1,0 +1,13 @@
+# The canonical validation commands (CLAUDE.md → "Validation ladder").
+#
+# All three select the whole workspace and build test targets, so cargo
+# resolves ONE feature set for them (dev-dependency features such as
+# tokio/test-util included) and they share one set of compiled dependencies.
+# Mixing in `-p <crate>`, plain `cargo build` or `cargo check` without
+# --all-targets makes cargo compile another copy of fleet-core and its
+# dependency graph (RUST-BUILD-PERFORMANCE-AUDIT.md §10.3).
+# `fleet-check` is also exactly what rust-analyzer runs by default.
+[alias]
+fleet-check = "check --workspace --all-targets"
+fleet-test = "test --workspace --lib --bins"
+fleet-lint = "clippy --workspace --all-targets -- -D warnings"
