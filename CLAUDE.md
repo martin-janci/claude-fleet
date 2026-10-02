@@ -201,6 +201,22 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   Host detail's Codex control) sets it; `claude` cannot be removed. Codex
   renders agents to `~/.codex/agents/<install name>.toml` via the `toml`
   crate.
+- **Multi-harness F3c** (plan
+  `docs/superpowers/plans/2026-10-01-f3c-codex-skills-agents-dir.md`):
+  Codex skills render to `~/.agents/skills/<install name>/`
+  (`CODEX_SKILLS_DIR`); `~/.codex/skills` (`CODEX_LEGACY_SKILLS_DIR`, minus
+  Codex's `.system`) is still hashed so a pre-F3c manifest entry's old copy
+  can be deleted under compare-and-swap — the planner's existing rule-8
+  `remove_entry` path does the move, and a moved asset whose new location
+  holds a copy fleet did not write is an `overwrite`, not an `update`. The
+  Codex scan prints `##LINK <path>`, then the target on the next line
+  (`HostSnapshot::links`), for a symlinked `~/.agents`, `~/.agents/skills`,
+  entry in it, or
+  `~/.codex/skills`; `compute_host_plan` blocks every write/adopt/delete
+  under one (rule 9, `Harness::symlink_reason`).
+  `plan::block_cross_harness_collisions`, called once per host in
+  `plan_sync`, blocks any action whose file another harness's plan on that
+  host also touches.
 - **Assets M1 — catalogs table** (plan
   `docs/superpowers/plans/2026-09-30-assets-m1-catalogs.md`, spec
   `docs/superpowers/specs/2026-09-30-assets-s1b-s2-design.md`): a catalog is

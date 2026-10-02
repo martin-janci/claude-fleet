@@ -141,6 +141,29 @@ Host detail: the next sync removes only what fleet installed. A Codex MCP
 server merge re-serializes `~/.codex/config.toml`, dropping its comments
 (a limitation that predates this change).
 
+*Codex skills live in `~/.agents/skills`.* Codex reads user skills from
+`~/.agents/skills/<install name>/` (a directory several agent CLIs share),
+not from `~/.codex/skills`, which it keeps for its own built-ins
+(`.system`). Fleet renders Codex skills — and an agent with
+`targets.codex.render_as: skill` — there. A host synced by an older fleet
+moves on its next sync: the plan writes each fleet-managed Codex skill to
+`~/.agents/skills/` and deletes the copy its manifest names under
+`~/.codex/skills/` (a `.fleet-bak-*` backup of it stays beside it), so
+Codex starts seeing them. Nothing else under `~/.codex/skills` is touched —
+not `.system`, not a skill you put there yourself. Codex cannot see such a
+skill, so fleet no longer lists it either; move it to `~/.agents/skills/`
+to use it. Where `~/.agents/skills` already holds a same-named skill fleet
+did not write, the plan adopts it when identical and otherwise shows an
+`overwrite`, as for any unmanaged copy. If `~/.agents`, `~/.agents/skills`,
+a skill directory in it, or `~/.codex/skills` is a symlink — some setups
+point `~/.agents/skills` at `~/.claude/skills` — every Codex action that
+would write, adopt or delete through it is `blocked`, with the link's
+target in the reason: Codex's copy would replace Claude's, and the two
+would undo each other on every sync. Replace the link with a real
+directory, or turn Codex off for that host (for `~/.codex/skills` only the
+first helps); Claude is unaffected. A plan also blocks any action whose
+file another harness's plan on the same host would write too.
+
 **Sync** is plan-first: `plan_sync` scans the selected hosts and computes
 which assets to create, update, overwrite, adopt, or remove, returning a plan
 valid for 10 minutes. `apply_sync` applies the plan using compare-and-swap on
