@@ -237,9 +237,9 @@ fn prefix_of(name: &str) -> Option<String> {
     (!p.is_empty() && !rest.is_empty()).then(|| p.to_string())
 }
 
-/// R5: org X's catalog when every holder is bound to X and X has one, else
-/// personal; `Err(why)` when it needs a look.
-fn destination(id: &AssetIdentity, input: &RulesInput<'_>) -> Result<i64, String> {
+/// Org X's catalog when every holder is bound to X and X has one, loaded
+/// or not.
+fn org_catalog<'a>(id: &AssetIdentity, input: &'a RulesInput<'_>) -> Option<&'a CatalogFacts> {
     let orgs: Vec<Option<i64>> = id
         .hosts
         .iter()
@@ -247,14 +247,21 @@ fn destination(id: &AssetIdentity, input: &RulesInput<'_>) -> Result<i64, String
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    if let [Some(org)] = orgs.as_slice() {
-        if let Some(c) = input.catalogs.iter().find(|c| c.org_id == Some(*org)) {
-            return if c.loaded {
-                Ok(c.id)
-            } else {
-                Err(format!("catalog {} failed to load", c.name))
-            };
-        }
+    match orgs.as_slice() {
+        [Some(org)] => input.catalogs.iter().find(|c| c.org_id == Some(*org)),
+        _ => None,
+    }
+}
+
+/// R5: org X's catalog when every holder is bound to X and X has one, else
+/// personal; `Err(why)` when it needs a look.
+fn destination(id: &AssetIdentity, input: &RulesInput<'_>) -> Result<i64, String> {
+    if let Some(c) = org_catalog(id, input) {
+        return if c.loaded {
+            Ok(c.id)
+        } else {
+            Err(format!("catalog {} failed to load", c.name))
+        };
     }
     personal_id(input).ok_or_else(|| "no personal catalog".to_string())
 }
@@ -354,9 +361,15 @@ fn hide_item(id: &AssetIdentity) -> ProposedItem {
     }
 }
 
-/// An import a person must name to apply (R8), with why.
+/// An import a person must name to apply (R8), with why. Its catalog is
+/// where it would go — an org catalog that failed to load included (Task 4
+/// review M3), so apply refuses it until that catalog loads (R11) rather
+/// than adopting it into personal.
 fn look_item(id: &AssetIdentity, input: &RulesInput<'_>) -> ProposedItem {
     let dest = destination(id, input);
+    let catalog_id = org_catalog(id, input)
+        .map(|c| c.id)
+        .or_else(|| personal_id(input));
     let reason = if id.class == IdentityClass::NeedsPerson {
         id.reason.clone().unwrap_or_else(|| "needs a person".into())
     } else {
@@ -369,7 +382,7 @@ fn look_item(id: &AssetIdentity, input: &RulesInput<'_>) -> ProposedItem {
     import_item(
         id,
         NEEDS_A_LOOK,
-        dest.ok().or_else(|| personal_id(input)),
+        catalog_id,
         source_host(id),
         None,
         Some(reason),
@@ -1050,6 +1063,31 @@ mod tests {
         assert!(
             propose(&f.input()).is_empty(),
             "an open rollout and a verdict hold both"
+        );
+    }
+
+    /// Task 4 review M3 / R11: a look item whose org catalog failed to load
+    /// keeps that catalog's id, so apply refuses it until the catalog loads
+    /// instead of adopting it into personal.
+    #[test]
+    fn a_look_item_for_a_failed_org_catalog_keeps_that_catalog() {
+        let mut f = fleet(true, vec![row("trn", "skill", "x", "h1")]);
+        f.catalogs[1].loaded = false;
+        let cards = propose(&f.input());
+        let look = cards
+            .iter()
+            .flat_map(|c| &c.items)
+            .find(|i| i.grp == NEEDS_A_LOOK && i.name == "x")
+            .expect("a look item");
+        assert_eq!(look.catalog_id, Some(PAPAYA));
+        assert!(
+            look.params
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("failed to load"),
+            "{:?}",
+            look.params.reason
         );
     }
 }
