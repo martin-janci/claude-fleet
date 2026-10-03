@@ -411,7 +411,7 @@ pub(crate) mod routed {
     ) -> Result<fleet_core::events::CatalogSummary, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("catalog_load", &AdminCall::Load(args)).await,
-            None => catalog::load(args.pull, store),
+            None => catalog::load_all(args.pull, store),
         }
     }
 

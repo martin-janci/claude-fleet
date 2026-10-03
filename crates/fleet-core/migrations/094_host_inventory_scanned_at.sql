@@ -15,4 +15,4 @@
 -- ADD COLUMN is not idempotent: guarded in schema.rs.
 ALTER TABLE hosts ADD COLUMN inventory_scanned_at INTEGER;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (93);
+INSERT OR IGNORE INTO schema_version (version) VALUES (94);

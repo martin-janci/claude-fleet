@@ -49,9 +49,9 @@ Parameters: `max_lines`, `scrollback_lines`, `session_id`
 
 ### `catalog_admin`
 
-The Assets tab's catalog operations as one tool. Master or a client granted `assets`.
+The Assets tab's catalog operations as one tool, plus the set of catalogs and host admissions. Master, or a client granted the catalog the action touches; list_catalogs an unbound one, add/remove_catalog the master.
 
-Parameters: `action`, `args`, `confirm_nonce`
+Parameters: `action`, `args`, `catalog`, `confirm_nonce`
 
 ### `decide_setting_proposals`
 
@@ -385,7 +385,7 @@ Parameters: `action`, `confirm_nonce`, `session_id`
 
 ### `resolve_preview`
 
-One host's effective asset set after its role and contexts resolve: provenance, what was excluded and why, every refused asset (scope or collision), and every private asset an org host withheld silently. Nothing is written. Requires catalog_configure + catalog_load in the app.
+One host's effective asset set after its role and contexts resolve: provenance, what was excluded and why, every refused asset (scope or collision), every private asset an org host withheld silently, and each held-back catalog with why. Nothing is written. Requires catalog_configure + catalog_load in the app.
 
 Parameters: `host_alias`
 

@@ -189,18 +189,15 @@ pub fn spawn_catalog_scan_tick(
                 _ = token.cancelled() => break,
                 _ = ticker.tick() => {}
             }
-            // A borrow via `with_personal` rather than `personal()`'s full
-            // clone: only the `head` string needs to leave the closure,
-            // not the whole catalog (assets, resources and all). Nothing
-            // loaded, or the registry lock poisoned, both `continue` —
-            // this tick just has nothing to compare against yet.
             // A separate process loads the catalog and writes the record
             // (`fleet-hub catalog set` / `catalog reload`), so without this the
             // registry copy in THIS process is left behind for good: the "HEAD
             // changed" trigger below could never fire from a CLI reload, and
             // every `compute_states` diff ran against a superseded asset set.
             // `spawn_blocking` because the refresh runs git when the record has
-            // actually moved; the common path is two cheap clones.
+            // actually moved; the common path is cheap. `ensure_fresh` loads
+            // EVERY catalog (Assets M3), which is the set `heads_key` below
+            // then reads.
             {
                 let s = Arc::clone(&store);
                 match tokio::task::spawn_blocking(move || super::ensure_fresh(&s)).await {
@@ -211,7 +208,18 @@ pub fn spawn_catalog_scan_tick(
                     Err(e) => tracing::warn!("catalog scan tick: refresh panicked: {e}"),
                 }
             }
-            let head = match super::registry::with_personal(|c| Ok(c.head.clone())) {
+            // Assets M3: every loaded catalog's HEAD, not just personal's — an
+            // org catalog that moves must rescan too. Nothing loaded (no
+            // personal), or the lock poisoned: nothing to compare yet.
+            let head = match super::registry::with_catalogs(|m| {
+                if !m.values().any(|c| c.org_id.is_none()) {
+                    return Err(crate::ipc_error::IpcError::new(
+                        super::E_CATALOG_NOT_CONFIGURED,
+                        "catalog not loaded",
+                    ));
+                }
+                Ok(super::registry::heads_key(m))
+            }) {
                 Ok(head) => head,
                 Err(_) => continue,
             };

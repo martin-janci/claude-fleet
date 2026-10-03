@@ -1025,20 +1025,24 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/092_host_provision_warning.sql"),
         already_applied: Some(hosts_has_provision_warning),
     },
+    // Assets S1b M3: `host_catalogs` (admissions) and `client_catalog_grants`
+    // (personal backfilled from `assets_admin_at`). IF NOT EXISTS + INSERT
+    // OR IGNORE: safe to re-run.
+    Migration::plain(93, include_str!("../../migrations/093_catalog_access.sql")),
     // When a host's inventory was last replaced, so a scan that found nothing
     // is not indistinguishable from a host never scanned. Same ADD COLUMN
-    // guard.
+    // guard. Numbered 94, not 93: Assets S1b M3 took 93 on main while this sat
+    // on a branch.
     Migration {
-        version: 93,
-        sql: include_str!("../../migrations/093_host_inventory_scanned_at.sql"),
+        version: 94,
+        sql: include_str!("../../migrations/094_host_inventory_scanned_at.sql"),
         already_applied: Some(hosts_has_inventory_scanned_at),
     },
     // `DROP INDEX IF EXISTS` is idempotent on its own, so no guard.
-    Migration {
-        version: 94,
-        sql: include_str!("../../migrations/094_drop_unusable_proposal_index.sql"),
-        already_applied: None,
-    },
+    Migration::plain(
+        95,
+        include_str!("../../migrations/095_drop_unusable_proposal_index.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -2498,7 +2502,13 @@ mod tests {
     #[test]
     fn migration_91_drops_a_preexisting_dangling_host_layers_row() {
         let old = store_at_version(90);
-        old.set_catalog_config("/p", None).unwrap();
+        // Raw SQL, not `set_catalog_config`: at version 90 there is no
+        // `client_catalog_grants` table for its grant backfill to write to.
+        old.conn
+            .execute_batch(
+                "INSERT INTO catalogs (name, repo_path, org_id, created_at) VALUES ('personal', '/p', NULL, 0);",
+            )
+            .unwrap();
         // Raw SQL, not `upsert_host`: a typed host read selects HOST_COLUMNS,
         // which names every column of the CURRENT schema, so calling it on a
         // store pinned to an older version breaks as soon as any later
@@ -2527,6 +2537,84 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ghost, 0, "the dangling row is not carried forward");
+    }
+
+    /// 093 on a database stopped at 092: every client with `assets_admin_at`
+    /// gets a grant on `personal` at that time (spec, Migration step 3); a
+    /// client without one gets none; re-running is a no-op.
+    #[test]
+    fn migration_93_backfills_personal_grants_from_assets_admin_at() {
+        let old = store_at_version(92);
+        old.conn
+            .execute_batch(
+                "INSERT INTO catalogs (name, repo_path, org_id, created_at) VALUES ('personal', '/p', NULL, 0);\
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at) \
+                   VALUES ('desk', 'h1', 'full', 1, 77);\
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at) VALUES ('plain', 'h2', 'full', 1);",
+            )
+            .unwrap();
+        old.migrate().expect("093");
+        let grants = |s: &Store| -> Vec<(String, i64)> {
+            s.conn
+                .prepare(
+                    "SELECT t.name, g.granted_at FROM client_catalog_grants g \
+                     JOIN client_tokens t ON t.id = g.client_id ORDER BY t.name",
+                )
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(grants(&old), vec![("desk".to_string(), 77)]);
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 93;")
+            .unwrap();
+        old.migrate().expect("re-running 093 is safe");
+        assert_eq!(grants(&old).len(), 1);
+    }
+
+    /// No personal catalog yet: nothing to attach a grant to, so 093 writes
+    /// none (the grant waits in `assets_admin_at`, Rulings R2).
+    #[test]
+    fn migration_93_without_a_personal_catalog_backfills_nothing() {
+        let old = store_at_version(92);
+        old.conn
+            .execute_batch(
+                "INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at) \
+                   VALUES ('desk', 'h1', 'full', 1, 77);",
+            )
+            .unwrap();
+        old.migrate().expect("093");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let n: i64 = old
+            .conn
+            .query_row("SELECT COUNT(*) FROM client_catalog_grants", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    /// M2 carry 6 / Rulings R1: 091 must not assume `host_layers` exists — a
+    /// database from the 033 collision family can reach 091 without it, and
+    /// `repair_skipped_main_migrations` (which recreates it) runs only after
+    /// every pending migration.
+    #[test]
+    fn migration_91_recreates_a_missing_host_layers_table() {
+        let old = store_at_version(90);
+        old.conn.execute_batch("DROP TABLE host_layers;").unwrap();
+        old.migrate()
+            .expect("091 must not assume host_layers exists");
+        let n: i64 = old
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('host_layers') WHERE name = 'catalog_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     /// 034 on a database stopped at 033 with a host row: `transport` is
@@ -4314,10 +4402,10 @@ mod tests {
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     }
 
-    /// Migration 094: the partial index 086 added and no query could use.
+    /// Migration 095: the partial index 086 added and no query could use.
     #[test]
-    fn migration_094_drops_the_unusable_proposal_index() {
-        let s = store_at_version(93);
+    fn migration_095_drops_the_unusable_proposal_index() {
+        let s = store_at_version(94);
         let present = |s: &Store| -> i64 {
             s.conn
                 .query_row(
@@ -4338,18 +4426,18 @@ mod tests {
         // `DROP INDEX IF EXISTS` needs no guard: a re-run is a no-op, and a
         // database created after this migration never had the index.
         s.conn
-            .execute_batch("DELETE FROM schema_version WHERE version >= 94;")
+            .execute_batch("DELETE FROM schema_version WHERE version >= 95;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(present(&s), 0);
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     }
 
-    /// Migration 093: a host's own last-scan stamp, and the rows-only fallback
+    /// Migration 094: a host's own last-scan stamp, and the rows-only fallback
     /// that keeps an upgraded database from being re-swept.
     #[test]
-    fn migration_093_adds_the_scan_stamp_and_falls_back_to_the_rows() {
-        let s = store_at_version(92);
+    fn migration_094_adds_the_scan_stamp_and_falls_back_to_the_rows() {
+        let s = store_at_version(93);
         s.conn
             .execute_batch(
                 "INSERT INTO hosts (alias, reachable) VALUES ('scanned', 1), ('fresh', 1);
@@ -4381,7 +4469,7 @@ mod tests {
 
         // the ADD COLUMN is not idempotent, so a re-run must be guarded
         s.conn
-            .execute_batch("DELETE FROM schema_version WHERE version >= 93;")
+            .execute_batch("DELETE FROM schema_version WHERE version >= 94;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);

@@ -622,6 +622,7 @@ impl Store {
                 "host_layers",
                 "catalog_id, layer_name, axis, position, active",
             ),
+            ("host_catalogs", "catalog_id, admitted_at"),
             ("catalog_secrets_host", "name, value, updated_at"),
         ] {
             tx.execute(
@@ -1110,6 +1111,25 @@ mod tests {
         s.set_host_provisioned("h", false).unwrap();
         let row = s.get_host_row("h").unwrap().unwrap();
         assert!(!row.provisioned && !row.provision_stale && row.provisioned_at.is_none());
+    }
+
+    /// Migration 093: a merged host keeps its admissions, like its layer
+    /// assignments (M2 fix round 1).
+    #[test]
+    fn merge_host_alias_carries_admissions() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_host("mac").unwrap();
+        s.set_catalog_config("/p", None).unwrap();
+        let org = s.add_org("acme", None, false).unwrap();
+        let acme = s
+            .upsert_catalog("acme", "/a", None, Some(org.id))
+            .unwrap()
+            .id;
+        s.admit_host_catalog("local", acme).unwrap();
+        s.merge_host_alias("local", "mac").unwrap();
+        assert_eq!(s.host_admissions("mac").unwrap(), vec![acme]);
+        assert!(s.host_admissions("local").unwrap().is_empty());
     }
 
     /// data-sync F2/F5: the `local` → `mac` rename left 249 worktree rows

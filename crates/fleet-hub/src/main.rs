@@ -1,5 +1,10 @@
 //! `fleet-hub` — claude-fleet without the desktop app. See `docs/hub.md`.
 
+// `#[async_trait]` expands each async trait method into a `#[must_use]` fn that
+// returns a boxed future, which is already `#[must_use]`; clippy 1.99 flags that
+// macro output as `double_must_use`. It is not code we wrote — allow it crate-wide.
+#![allow(clippy::double_must_use)]
+
 mod bench;
 mod catalog;
 mod census;
@@ -140,9 +145,9 @@ enum Cmd {
         #[command(flatten)]
         opts: HubOptions,
     },
-    /// Point the hub at its asset catalog (a git checkout on this machine),
-    /// show it, or reload it. No running hub needed; a running one picks the
-    /// change up at its next catalog call.
+    /// Point the hub at its asset catalogs (git checkouts on this machine),
+    /// list, add, remove or admit them, or reload one. No running hub needed;
+    /// a running one picks the change up at its next catalog call.
     Catalog {
         #[command(subcommand)]
         cmd: catalog::CatalogCmd,
@@ -338,12 +343,24 @@ enum ClientCmd {
     /// Bind a client to one org (its id): it reads only that org's work and sessions.
     Bind { name: String, org: i64 },
     /// Let a paired client do what is otherwise the master's. `assets`: manage
-    /// the asset catalog (edit, commit, push, Sync, Secrets, layers) from its
-    /// Assets tab. Only a `full` client bound to no org. No running hub
-    /// needed.
-    Grant { name: String, grant: Grant },
+    /// an asset catalog (edit, commit, push, Sync, Secrets, layers) from its
+    /// Assets tab — the personal one, or `--catalog NAME`. Only a `full`
+    /// client bound to no org. No running hub needed.
+    Grant {
+        name: String,
+        grant: Grant,
+        /// The catalog to grant; the personal one by default.
+        #[arg(long)]
+        catalog: Option<String>,
+    },
     /// Take a `grant` back.
-    Ungrant { name: String, grant: Grant },
+    Ungrant {
+        name: String,
+        grant: Grant,
+        /// The catalog to take back; the personal one by default.
+        #[arg(long)]
+        catalog: Option<String>,
+    },
     /// Lift a client's org binding: it reads every org again.
     Unbind { name: String },
 }
@@ -429,10 +446,16 @@ async fn main() -> ExitCode {
             ClientCmd::Untrust { name } => pair::client_trust(&opts, &env, &name, false).await,
             ClientCmd::Bind { name, org } => pair::client_bind(&opts, &env, &name, Some(org)).await,
             ClientCmd::Unbind { name } => pair::client_bind(&opts, &env, &name, None).await,
-            ClientCmd::Grant { name, grant } => pair::client_grant(&opts, &env, &name, grant, true),
-            ClientCmd::Ungrant { name, grant } => {
-                pair::client_grant(&opts, &env, &name, grant, false)
-            }
+            ClientCmd::Grant {
+                name,
+                grant,
+                catalog,
+            } => pair::client_grant(&opts, &env, &name, grant, catalog.as_deref(), true),
+            ClientCmd::Ungrant {
+                name,
+                grant,
+                catalog,
+            } => pair::client_grant(&opts, &env, &name, grant, catalog.as_deref(), false),
         },
         Cmd::Peer { cmd, opts } => match cmd {
             PeerCmd::Add {
@@ -952,6 +975,85 @@ mod tests {
         assert!(matches!(
             cmd,
             update::UpdateCmd::Check { track: Some(ref t), json: true } if t == "beta"
+        ));
+    }
+
+    /// Assets M3 (R12): `client grant|ungrant … --catalog`, `catalog add …
+    /// --org`, `catalog reload --catalog`, `catalog admit|unadmit`.
+    #[test]
+    fn catalog_verbs_and_per_catalog_grants_parse() {
+        let parse = |argv: &[&str]| Cli::try_parse_from(argv).unwrap().cmd;
+        let Cmd::Client { cmd, .. } = parse(&[
+            "fleet-hub",
+            "client",
+            "grant",
+            "desk",
+            "assets",
+            "--catalog",
+            "acme",
+        ]) else {
+            panic!("client grant --catalog");
+        };
+        assert!(
+            matches!(cmd, ClientCmd::Grant { ref name, grant: Grant::Assets, catalog: Some(ref c) } if name == "desk" && c == "acme")
+        );
+        let Cmd::Client { cmd, .. } = parse(&["fleet-hub", "client", "ungrant", "desk", "assets"])
+        else {
+            panic!("client ungrant");
+        };
+        assert!(matches!(cmd, ClientCmd::Ungrant { catalog: None, .. }));
+        let Cmd::Catalog { cmd, .. } = parse(&[
+            "fleet-hub",
+            "catalog",
+            "add",
+            "acme",
+            "/a",
+            "--org",
+            "acme",
+            "--remote",
+            "u",
+        ]) else {
+            panic!("catalog add");
+        };
+        assert!(
+            matches!(cmd, catalog::CatalogCmd::Add { ref name, ref path, remote: Some(_), org: Some(ref o) } if name == "acme" && path == "/a" && o == "acme")
+        );
+        let Cmd::Catalog { cmd, .. } = parse(&[
+            "fleet-hub",
+            "catalog",
+            "reload",
+            "--pull",
+            "--catalog",
+            "acme",
+        ]) else {
+            panic!("catalog reload --catalog");
+        };
+        assert!(
+            matches!(cmd, catalog::CatalogCmd::Reload { pull: true, catalog: Some(ref c) } if c == "acme")
+        );
+        for verb in ["admit", "unadmit"] {
+            let Cmd::Catalog { cmd, .. } = parse(&["fleet-hub", "catalog", verb, "h", "acme"])
+            else {
+                panic!("catalog {verb}");
+            };
+            assert!(matches!(
+                cmd,
+                catalog::CatalogCmd::Admit { .. } | catalog::CatalogCmd::Unadmit { .. }
+            ));
+        }
+        assert!(matches!(
+            parse(&["fleet-hub", "catalog", "list"]),
+            Cmd::Catalog {
+                cmd: catalog::CatalogCmd::List,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse(&["fleet-hub", "catalog", "remove", "acme"]),
+            Cmd::Catalog {
+                cmd: catalog::CatalogCmd::Remove { .. },
+                ..
+            }
         ));
     }
 }

@@ -345,11 +345,12 @@ impl AgentRegistry {
         self.conns.get(alias).map(|e| Arc::clone(e.value()))
     }
 
-    /// Which connection is live for `alias`. Test-only: it is how an
-    /// end-to-end test knows a reconnect has REPLACED the old connection,
-    /// which `connected(alias)` cannot tell it.
-    #[cfg(all(test, unix))]
-    pub(crate) fn live_conn(&self, alias: &str) -> Option<ConnId> {
+    /// Which connection is live for `alias`. Test-only (`testkit` for the
+    /// `fleet-agent-e2e` crate): it is how an end-to-end test knows a
+    /// reconnect has REPLACED the old connection, which `connected(alias)`
+    /// cannot tell it.
+    #[cfg(all(unix, any(test, feature = "testkit")))]
+    pub fn live_conn(&self, alias: &str) -> Option<ConnId> {
         self.live(alias).map(|c| c.id)
     }
 

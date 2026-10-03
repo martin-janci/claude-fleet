@@ -11,13 +11,15 @@
 //! same type the local call returns, as JSON.
 //!
 //! Who may call it is the tool's business, not this module's: the master, or
-//! a paired client the operator granted (`fleet-hub client grant <name>
-//! assets`, [`crate::store::Store::client_is_assets_admin`]).
+//! a paired client the operator granted the catalog each call touches
+//! ([`AdminCall::touches`]; `fleet-hub client grant <name> assets [--catalog
+//! NAME]`).
 
 use super::author::{
     self, AddResourceBytesArgs, AssetRef, CommitPendingArgs, CreateArgs, RemoveResourceArgs,
     UpdateArgs,
 };
+use super::catalogs::{self, AddCatalogArgs, PERSONAL};
 use super::layer::{Axis, Layer};
 use super::model::Kind;
 use super::sync::{self, ApplyArgs, PlanArgs};
@@ -97,6 +99,17 @@ pub struct DeleteSecretArgs {
     pub host_alias: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogNameArgs {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdmitArgs {
+    pub host_alias: String,
+    pub catalog: String,
+}
+
 /// Declares [`AdminCall`] with each variant's wire name written once: the
 /// literal is both the serde tag (`#[serde(rename = ...)]`) and what
 /// [`AdminCall::action`] answers, so the two cannot drift apart.
@@ -163,6 +176,12 @@ admin_calls! {
     "push" => Push,
     "repo_status" => RepoStatus,
     "template" => Template(AssetRef),
+    /// Assets M3: the set of catalogs and admissions (`catalogs.rs`).
+    "list_catalogs" => ListCatalogs,
+    "add_catalog" => AddCatalog(AddCatalogArgs),
+    "remove_catalog" => RemoveCatalog(CatalogNameArgs),
+    "admit_catalog" => AdmitCatalog(AdmitArgs),
+    "unadmit_catalog" => UnadmitCatalog(AdmitArgs),
 }
 
 impl AdminCall {
@@ -185,8 +204,124 @@ impl AdminCall {
                 | AdminCall::LintAll
                 | AdminCall::RepoStatus
                 | AdminCall::Template(_)
+                | AdminCall::ListCatalogs
         )
     }
+
+    /// The calls the tool's `catalog` parameter addresses (R10).
+    pub fn is_per_catalog(&self) -> bool {
+        matches!(
+            self,
+            AdminCall::Config
+                | AdminCall::Load(_)
+                | AdminCall::ListLayers
+                | AdminCall::SetHostLayers(_)
+        )
+    }
+
+    /// The calls that read or write the personal checkout — personal-only
+    /// until M4's changeset apply gives them a per-catalog target (R10).
+    fn is_authoring(&self) -> bool {
+        matches!(
+            self,
+            AdminCall::Configure(_)
+                | AdminCall::GetAsset(_)
+                | AdminCall::Template(_)
+                | AdminCall::CreateAsset(_)
+                | AdminCall::UpdateAsset(_)
+                | AdminCall::DeleteAsset(_)
+                | AdminCall::AddResourceBytes(_)
+                | AdminCall::RemoveResource(_)
+                | AdminCall::LintAsset(_)
+                | AdminCall::LintAll
+                | AdminCall::CommitPending(_)
+                | AdminCall::Push
+                | AdminCall::RepoStatus
+                | AdminCall::LayerTemplate(_)
+                | AdminCall::WriteLayer(_)
+                | AdminCall::DeleteLayer(_)
+                | AdminCall::ImportHost(_)
+        )
+    }
+
+    /// Which catalog this call touches, given the tool's `catalog` parameter
+    /// (default `personal`) — or `E_INVALID` for a parameter it cannot honour.
+    pub fn touches(&self, catalog: Option<&str>) -> Result<Touches, IpcError> {
+        let named_in_args = |name: &str| match catalog {
+            Some(c) if c != name => Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "{} names catalog {name} in its args; drop the catalog parameter ({c})",
+                    self.action()
+                ),
+            )),
+            _ => Ok(Touches::Catalog(name.to_string())),
+        };
+        let no_param = |t: Touches| match catalog {
+            Some(c) => Err(IpcError::new(
+                codes::E_INVALID,
+                format!("{} takes no catalog parameter ({c})", self.action()),
+            )),
+            None => Ok(t),
+        };
+        match self {
+            AdminCall::ListCatalogs => no_param(Touches::Nothing),
+            AdminCall::AddCatalog(_) => no_param(Touches::MasterOnly(None)),
+            // Final review M-c: master-only, like add — see `MasterOnly`.
+            AdminCall::RemoveCatalog(a) => {
+                named_in_args(&a.name)?;
+                Ok(Touches::MasterOnly(Some(a.name.clone())))
+            }
+            AdminCall::AdmitCatalog(a) | AdminCall::UnadmitCatalog(a) => named_in_args(&a.catalog),
+            c if c.is_per_catalog() => {
+                Ok(Touches::Catalog(catalog.unwrap_or(PERSONAL).to_string()))
+            }
+            c => match catalog {
+                None | Some(PERSONAL) => Ok(Touches::Catalog(PERSONAL.to_string())),
+                // Final review M-g: re-pointing an org catalog is
+                // `add_catalog`'s job, not an M4 edit.
+                Some(other) if matches!(c, AdminCall::Configure(_)) => Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!(
+                        "configure sets the personal catalog only; re-point catalog {other} \
+                         with add_catalog (on the hub: fleet-hub catalog add {other} <path> \
+                         --org <org>)"
+                    ),
+                )),
+                Some(other) if c.is_authoring() => Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!(
+                        "{} works on the personal catalog only until changesets (Assets M4); edit \
+                         catalog {other}'s checkout with git and run `fleet-hub catalog reload \
+                         --catalog {other}`",
+                        c.action()
+                    ),
+                )),
+                Some(other) => Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!(
+                        "{} is not per catalog; drop the catalog parameter ({other})",
+                        c.action()
+                    ),
+                )),
+            },
+        }
+    }
+}
+
+/// What a call needs a grant on (Assets M3, Rulings R11): the tool asks
+/// `may_admin_catalog` once per touched catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Touches {
+    /// `list_catalogs`: every caller that reaches `catalog_admin`.
+    Nothing,
+    /// The master's alone: `add_catalog` (`None`: no grant can name a
+    /// catalog not created yet) and `remove_catalog` (`Some(name)`, final
+    /// review M-c: it cascades every other client's grant on it, and only
+    /// the master can add it back).
+    MasterOnly(Option<String>),
+    /// One catalog, by name.
+    Catalog(String),
 }
 
 fn json<T: Serialize>(v: T) -> Result<serde_json::Value, IpcError> {
@@ -197,30 +332,63 @@ fn json<T: Serialize>(v: T) -> Result<serde_json::Value, IpcError> {
 /// Run one call against this process's catalog and answer the same value
 /// the matching desktop command returns, as JSON. Every argument check the
 /// desktop command makes is made here too: the arguments may have come over
-/// the wire.
+/// the wire. `catalog` is the tool's parameter: [`AdminCall::touches`]
+/// refuses one the call cannot honour before anything runs.
 pub async fn run(
     call: AdminCall,
+    catalog: Option<&str>,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
     reg: &Arc<CancellationRegistry>,
 ) -> Result<serde_json::Value, IpcError> {
+    call.touches(catalog)?;
+    // A per-catalog call naming a catalog other than personal (R10).
+    let named = match catalog {
+        Some(name) if name != PERSONAL && call.is_per_catalog() => {
+            Some(catalogs::catalog_named(name, store)?)
+        }
+        _ => None,
+    };
     match call {
-        AdminCall::Config => json(super::config(store)?),
+        AdminCall::Config => match &named {
+            Some(row) => json(Some(catalogs::config_row(row))),
+            None => json(super::config(store)?),
+        },
         AdminCall::Configure(a) => json(super::configure(a, store)?),
-        AdminCall::Load(a) => json(super::load(a.pull, store)?),
+        // R18: no catalog named = personal, then every other one caught up.
+        AdminCall::Load(a) => match &named {
+            Some(row) => json(super::load_catalog(row.id, a.pull, store)?),
+            None => json(super::load_all(a.pull, store)?),
+        },
         AdminCall::GetAsset(a) => {
             check_name(&a.name)?;
             json(super::get_asset(a.kind, &a.name, store)?)
         }
-        AdminCall::ListLayers => json(super::list_layers(store)?),
+        AdminCall::ListLayers => match &named {
+            Some(row) => json(super::list_layers_for(row, store)?),
+            None => json(super::list_layers(store)?),
+        },
         AdminCall::ResolvePreview(a) => json(super::resolve_preview(&a.host_alias, store)?),
         AdminCall::ProposeLayers => json(super::propose::propose_layers(store)?),
-        AdminCall::SetHostLayers(a) => json(super::set_host_layers(
-            &a.host_alias,
-            a.role.as_deref(),
-            &a.contexts.iter().map(String::as_str).collect::<Vec<_>>(),
-            store,
-        )?),
+        AdminCall::SetHostLayers(a) => {
+            let contexts: Vec<&str> = a.contexts.iter().map(String::as_str).collect();
+            let role = a.role.as_deref();
+            match &named {
+                Some(row) => json(super::set_host_layers_for(
+                    &a.host_alias,
+                    row,
+                    role,
+                    &contexts,
+                    store,
+                )?),
+                None => json(super::set_host_layers(
+                    &a.host_alias,
+                    role,
+                    &contexts,
+                    store,
+                )?),
+            }
+        }
         AdminCall::SetHostHarnesses(a) => json(super::harness_set::set_host_harnesses(
             &a.host_alias,
             a.harnesses.as_deref(),
@@ -265,6 +433,17 @@ pub async fn run(
             check_name(&a.name)?;
             json(author::template(a.kind, &a.name))
         }
+        AdminCall::ListCatalogs => {
+            // Best effort: a personal that cannot load must not hide the list.
+            if let Err(e) = super::ensure_fresh(store) {
+                tracing::debug!(error = %e.message, "list_catalogs: refresh failed");
+            }
+            json(catalogs::list_catalogs(store)?)
+        }
+        AdminCall::AddCatalog(a) => json(catalogs::add_catalog(a, store)?),
+        AdminCall::RemoveCatalog(a) => json(catalogs::remove_catalog(&a.name, store)?),
+        AdminCall::AdmitCatalog(a) => json(catalogs::admit(&a.host_alias, &a.catalog, store)?),
+        AdminCall::UnadmitCatalog(a) => json(catalogs::unadmit(&a.host_alias, &a.catalog, store)?),
     }
 }
 
@@ -405,7 +584,90 @@ mod tests {
             AdminCall::Push,
             AdminCall::RepoStatus,
             AdminCall::Template(skill("s")),
+            AdminCall::ListCatalogs,
+            AdminCall::AddCatalog(super::super::catalogs::AddCatalogArgs {
+                name: "acme".into(),
+                repo_path: "/a".into(),
+                remote_url: Some("git@example.com:a.git".into()),
+                org: Some("acme".into()),
+            }),
+            AdminCall::RemoveCatalog(CatalogNameArgs {
+                name: "acme".into(),
+            }),
+            AdminCall::AdmitCatalog(AdmitArgs {
+                host_alias: "h".into(),
+                catalog: "acme".into(),
+            }),
+            AdminCall::UnadmitCatalog(AdmitArgs {
+                host_alias: "h".into(),
+                catalog: "acme".into(),
+            }),
         ]
+    }
+
+    /// R10/R11: which catalog a call needs a grant on, and which `catalog`
+    /// parameters it refuses.
+    #[test]
+    fn touches_names_the_catalog_a_grant_is_checked_on() {
+        let admit = AdminCall::AdmitCatalog(AdmitArgs {
+            host_alias: "h".into(),
+            catalog: "acme".into(),
+        });
+        assert_eq!(
+            admit.touches(None).unwrap(),
+            Touches::Catalog("acme".into())
+        );
+        assert_eq!(
+            admit.touches(Some("other")).unwrap_err().code,
+            codes::E_INVALID
+        );
+        assert_eq!(
+            AdminCall::ListCatalogs.touches(None).unwrap(),
+            Touches::Nothing
+        );
+        let add = AdminCall::AddCatalog(super::super::catalogs::AddCatalogArgs {
+            name: "acme".into(),
+            repo_path: "/a".into(),
+            remote_url: None,
+            org: Some("acme".into()),
+        });
+        assert_eq!(add.touches(None).unwrap(), Touches::MasterOnly(None));
+        let rm = AdminCall::RemoveCatalog(CatalogNameArgs {
+            name: "acme".into(),
+        });
+        assert_eq!(
+            rm.touches(None).unwrap(),
+            Touches::MasterOnly(Some("acme".into()))
+        );
+        assert_eq!(
+            rm.touches(Some("other")).unwrap_err().code,
+            codes::E_INVALID
+        );
+        assert_eq!(
+            AdminCall::Config.touches(None).unwrap(),
+            Touches::Catalog("personal".into())
+        );
+        assert_eq!(
+            AdminCall::ListLayers.touches(Some("acme")).unwrap(),
+            Touches::Catalog("acme".into())
+        );
+        assert_eq!(
+            AdminCall::Push.touches(Some("personal")).unwrap(),
+            Touches::Catalog("personal".into())
+        );
+        let e = AdminCall::Push.touches(Some("acme")).unwrap_err();
+        assert!(e.message.contains("M4"), "{}", e.message);
+        // M-g: configure points at add_catalog, not at an M4 git edit.
+        let configure: AdminCall = serde_json::from_value(
+            serde_json::json!({ "action": "configure", "args": { "repo_path": "/x" } }),
+        )
+        .unwrap();
+        let e = configure.touches(Some("acme")).unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID);
+        assert!(e.message.contains("add_catalog"), "{}", e.message);
+        assert!(!e.message.contains("M4"), "{}", e.message);
+        let e = AdminCall::LastSync.touches(Some("acme")).unwrap_err();
+        assert!(e.message.contains("not per catalog"), "{}", e.message);
     }
 
     /// Every call that names an asset, a layer, a resource or a secret
@@ -504,7 +766,7 @@ mod tests {
             }),
         ));
         for (label, call) in calls {
-            let err = match run(call, &store, &ssh, &reg).await {
+            let err = match run(call, None, &store, &ssh, &reg).await {
                 Ok(v) => panic!("{label}: accepted, answered {v}"),
                 Err(e) => e,
             };

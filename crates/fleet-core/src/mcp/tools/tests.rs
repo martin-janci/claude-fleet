@@ -1183,13 +1183,14 @@ fn kill_session_description_covers_external_and_inactive_agent_rows() {
     );
 }
 
-const CONTROL_API_GUIDE: &str = include_str!("../../../../../docs/control-api.md");
+static CONTROL_API_GUIDE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| crate::repo_files::read("docs/control-api.md"));
 
 #[test]
 fn docs_track_background_runs_with_session_transcript() {
     for (name, text) in [
         ("SKILL.md", CONTROL_SKILL),
-        ("docs/control-api.md", CONTROL_API_GUIDE),
+        ("docs/control-api.md", CONTROL_API_GUIDE.as_str()),
     ] {
         // `peek_session` was removed once `new_bg_session` started returning
         // the fleet row (the gap it filled): a doc that still names it points
@@ -3594,8 +3595,15 @@ fn the_served_definition_budget_stays_bounded() {
     /// (`set_host_harnesses` and its `catalog_admin` action). Measured at
     /// 69,306 on 2026-09-30 after declarative pages' `guide` tool (a host's
     /// session proposes a guide, +787 bytes). Measured at 69,996 on 2026-09-30
-    /// with both merged.
-    const BUDGET_BYTES: usize = 70_096;
+    /// with both merged. Measured at 70,039 on 2026-10-01 after Assets M3
+    /// Task 3 (`resolve_preview` names each held-back catalog, +33 bytes).
+    /// Measured at 70,391 on 2026-10-01 after Assets M3 Task 5
+    /// (`catalog_admin` takes a `catalog` and five catalog-set actions,
+    /// +352 bytes). Measured at 70,523 on 2026-10-02 after merging `main`
+    /// into Assets M3 (70,483, +92 bytes) and the final review's M-c
+    /// (`remove_catalog` is master-only, said in `catalog_admin`'s
+    /// description and its `catalog` parameter, +40 bytes).
+    const BUDGET_BYTES: usize = 70_623;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

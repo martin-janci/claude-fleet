@@ -18,12 +18,22 @@ use super::{
 };
 use crate::ipc_error::IpcError;
 use crate::service::catalog::model::{sha256_hex, Asset, AssetSpec, Kind};
+use crate::service::catalog::sync::plan::ActionOp;
 use serde_json::{json, Value};
 
-pub const CODEX_SKILLS_DIR: &str = "~/.codex/skills";
+/// Where Codex reads user skills (multi-harness F3c): `~/.agents/skills`, the
+/// cross-harness skills directory — not `~/.codex/skills`, which Codex keeps
+/// for its own built-ins (`.system`).
+pub const CODEX_SKILLS_DIR: &str = "~/.agents/skills";
 pub const CODEX_CONFIG_PATH: &str = "~/.codex/config.toml";
 pub const CODEX_MANIFEST_PATH: &str = "~/.codex/.fleet-assets.json";
 pub const CODEX_AGENTS_DIR: &str = "~/.codex/agents";
+/// Where fleet rendered Codex skills before F3c. Still hashed by the scan
+/// (minus Codex's `.system`) so a manifest entry pointing here can be
+/// deleted under compare-and-swap when its skill moves to
+/// `CODEX_SKILLS_DIR`; never listed as installed, since Codex does not read
+/// it.
+pub const CODEX_LEGACY_SKILLS_DIR: &str = "~/.codex/skills";
 
 /// Render warning for an agent with `tools` (F3b): Codex subagents have no
 /// per-agent tool allowlist. Shown in Asset detail's Codex preview.
@@ -41,6 +51,29 @@ const CONFIG_FILES: &[&str] = &[CODEX_CONFIG_PATH, CODEX_MANIFEST_PATH];
 /// The scan's Codex presence probe (see `scan_script`). POSIX sh with no
 /// single quote: the whole script is wrapped in `shell::quote`.
 const CODEX_PRESENT_PROBE: &str = "if command -v codex >/dev/null 2>&1 || [ -e .codex/auth.json ] || [ -d .codex/sessions ]; then echo \"##PRESENT\"; fi; ";
+
+/// The scan's symlink probe (multi-harness F3c): `~/.agents`,
+/// `~/.agents/skills` and each entry in it (where Codex skills are written,
+/// including a dot-entry), and `~/.codex/skills` and each entry in IT
+/// (review fix round 1, I1/M3) — where the migration deletes old copies, so
+/// a *per-skill* symlink there (e.g. `~/.codex/skills/s` pointed at
+/// `~/.claude/skills/s`) is just as dangerous as the whole directory: its
+/// compare-and-swap hash would pass through the link and `rm` would delete
+/// Claude's own file. `~/.codex/skills/.system` (Codex's own built-ins,
+/// never fleet's) is excluded even though it starts with a dot. Some setups
+/// point one of these at `~/.claude/skills`; fleet must never write or
+/// remove Codex skills through it (`sync::plan`). POSIX sh, no single
+/// quote; a glob that matches nothing stays literal and fails `-L`.
+///
+/// Each hit is two lines, like a `##CONFIG` block: `##LINK <path>` (via
+/// `printf`, not `echo` — no behavioural difference here, just consistent
+/// no-single-quote style), then the `readlink` target alone on the next
+/// line (`tr -d` strips any newline it printed, and the trailing `echo`
+/// guarantees exactly one line even when `readlink` fails). Never
+/// `##LINK <path> -> <target>` on one line — a directory whose own name
+/// contains `" -> "` would otherwise corrupt the parsed path
+/// (`harness::parse_scan_blocks`).
+const CODEX_LINK_PROBE: &str = "for l in .agents .agents/skills .agents/skills/* .agents/skills/.[!.]* .codex/skills .codex/skills/* .codex/skills/.[!.]*; do case \"$l\" in .codex/skills/.system) continue ;; esac; if [ -L \"$l\" ]; then printf \"%s\\n\" \"##LINK ~/$l\"; readlink \"$l\" 2>/dev/null | tr -d \"\\n\"; echo; fi; done; ";
 
 /// A `targets.codex.extra` value as TOML: nulls stripped (TOML has none);
 /// `None` when nothing representable is left.
@@ -347,11 +380,13 @@ impl Harness for Codex {
         Ok(plan)
     }
 
-    /// Same shape as `Claude::scan_script`: hasher detection, `##HASHES` +
-    /// file hashes under `.codex/skills` and `.codex/agents`, a hash for each config file, then
-    /// one `##CONFIG <path>` block per config file (base64, one line), then
-    /// `##END`. No single quotes: the caller wraps the whole script in
-    /// `shell::quote`.
+    /// Same shape as `Claude::scan_script`: hasher detection, the presence
+    /// probe, the symlink probe (`CODEX_LINK_PROBE`, `##LINK` lines),
+    /// `##HASHES` + file hashes under `.agents/skills`,
+    /// `.codex/skills` (legacy, minus `.system`) and `.codex/agents`, a hash
+    /// for each config file, then one `##CONFIG <path>` block per config
+    /// file (base64, one line), then `##END`. No single quotes: the caller
+    /// wraps the whole script in `shell::quote`.
     fn scan_script(&self) -> Option<String> {
         let mut s = String::new();
         s.push_str("cd \"$HOME\" || exit 0; ");
@@ -364,11 +399,16 @@ impl Harness for Codex {
         // never writes counts: the CLI, its login (`auth.json`) or its
         // session logs — not `~/.codex` itself, which a Codex sync creates.
         s.push_str(CODEX_PRESENT_PROBE);
+        s.push_str(CODEX_LINK_PROBE);
         s.push_str("echo \"##HASHES\"; ");
         // `-exec $H {} +` (not `-print0 | xargs -0 $H`): see `Claude::scan_script`
         // for why this matters for an existing-but-empty directory.
+        // F3c: `.agents/skills` is where Codex reads skills. `.codex/skills`
+        // is where fleet put them before — hashed only so a manifest entry
+        // pointing there can be deleted under compare-and-swap; Codex's own
+        // `.codex/skills/.system` is pruned, it is never fleet's.
         s.push_str(
-            "for d in .codex/skills .codex/agents; do if [ -d \"$d\" ]; then find -L \"$d\" -type f -exec $H {} + 2>/dev/null; fi; done; ",
+            "for d in .agents/skills .codex/skills .codex/agents; do if [ -d \"$d\" ]; then find -L \"$d\" -path .codex/skills/.system -prune -o -type f -exec $H {} + 2>/dev/null; fi; done; ",
         );
         let config_rel: Vec<&str> = CONFIG_FILES
             .iter()
@@ -413,6 +453,9 @@ impl Harness for Codex {
             }
         };
         for path in snap.files.keys() {
+            // F3c: only `CODEX_SKILLS_DIR`. A skill left in
+            // `CODEX_LEGACY_SKILLS_DIR` is invisible to Codex, so it is not
+            // Codex inventory (fleet's own copies there migrate on sync).
             if let Some(rest) = path.strip_prefix(&format!("{CODEX_SKILLS_DIR}/")) {
                 if let Some((name, _)) = rest.split_once('/') {
                     push(Kind::Skill, name.to_string());
@@ -481,6 +524,33 @@ impl Harness for Codex {
 
     fn manifest_path(&self) -> &'static str {
         CODEX_MANIFEST_PATH
+    }
+
+    /// F3c, extended in review fix round 1 (I1/M5). A linked legacy
+    /// `~/.codex/skills` — the whole directory, or any one entry under it
+    /// (`~/.codex/skills/<name>`, the per-skill case the link probe now
+    /// also reports) — only blocks removing old copies, and turning Codex
+    /// off would not avoid that (a retiring host still runs those
+    /// removals), so both get the same "old copies" wording: a per-entry
+    /// link is itself an old copy, same as the whole directory. Elsewhere
+    /// (today, only the *current* `~/.agents/skills`), a `Remove` (an
+    /// orphaned manifest entry) reads differently from every other blocked
+    /// op, since nothing is being written there either.
+    fn symlink_reason(&self, link: &str, target: &str, op: ActionOp) -> String {
+        // Case-insensitive (M3's reasoning applies here too, review fix
+        // round 2): `linked_dir` already matches `link` against a path
+        // case-insensitively, so a host whose `readlink` reports
+        // `~/.Codex/Skills/s` must still read as the legacy directory.
+        let link_lower = link.to_ascii_lowercase();
+        if link_lower == CODEX_LEGACY_SKILLS_DIR
+            || link_lower.starts_with(&format!("{CODEX_LEGACY_SKILLS_DIR}/"))
+        {
+            format!("{link} is a symlink (to {target}); fleet won't remove old Codex skill copies through it — replace it with a real directory")
+        } else if op == ActionOp::Remove {
+            format!("{link} is a symlink (to {target}); fleet won't remove Codex skills through it — replace it with a real directory")
+        } else {
+            format!("{link} is a symlink (to {target}); fleet won't write Codex skills through it — replace it with a real directory or turn Codex off for this host")
+        }
     }
 
     /// Parses `existing` as TOML (an empty string is an empty document; a
@@ -560,7 +630,7 @@ mod tests {
     use crate::service::catalog::model::Asset;
 
     #[test]
-    fn skill_renders_to_codex_skills_dir() {
+    fn skill_renders_to_agents_skills_dir() {
         let mut a = Asset::from_yaml(
             None,
             "kind: skill\nname: worktree\ndescription: Make one.\nallowed_tools: [bash]\n",
@@ -569,7 +639,7 @@ mod tests {
         a.body = "body\n".into();
         let plan = Codex.render(&a).unwrap();
         assert_eq!(plan.files.len(), 1);
-        assert_eq!(plan.files[0].path, "~/.codex/skills/worktree/SKILL.md");
+        assert_eq!(plan.files[0].path, "~/.agents/skills/worktree/SKILL.md");
         assert_eq!(
             String::from_utf8(plan.files[0].bytes.clone()).unwrap(),
             "---\nname: worktree\ndescription: Make one.\n---\nbody\n"
@@ -585,7 +655,7 @@ mod tests {
         .unwrap();
         a.body = "b\n".into();
         let plan = Codex.render(&a).unwrap();
-        assert_eq!(plan.files[0].path, "~/.codex/skills/foo_bar/SKILL.md");
+        assert_eq!(plan.files[0].path, "~/.agents/skills/foo_bar/SKILL.md");
         let text = String::from_utf8(plan.files[0].bytes.clone()).unwrap();
         let yaml = text.split("---\n").nth(1).expect("frontmatter block");
         let map: serde_yaml::Mapping = serde_yaml::from_str(yaml).expect("valid yaml");
@@ -690,7 +760,7 @@ mod tests {
         .unwrap();
         as_skill.body = "prompt\n".into();
         let plan = Codex.render(&as_skill).unwrap();
-        assert_eq!(plan.files[0].path, "~/.codex/skills/pm/SKILL.md");
+        assert_eq!(plan.files[0].path, "~/.agents/skills/pm/SKILL.md");
         assert_eq!(
             plan.warnings,
             vec!["agent rendered as a codex skill (targets.codex.render_as)"]
@@ -995,7 +1065,7 @@ mod tests {
         .unwrap();
         as_skill.body = "prompt\n".into();
         let plan = Codex.render(&as_skill).unwrap();
-        assert_eq!(plan.files[0].path, "~/.codex/skills/foo_bar/SKILL.md");
+        assert_eq!(plan.files[0].path, "~/.agents/skills/foo_bar/SKILL.md");
         let text = String::from_utf8(plan.files[0].bytes.clone()).unwrap();
         let yaml = text.split("---\n").nth(1).expect("frontmatter block");
         let map: serde_yaml::Mapping = serde_yaml::from_str(yaml).expect("valid yaml");
@@ -1128,7 +1198,7 @@ mod tests {
         let toml_text = "[mcp_servers.fleet]\nurl = \"http://127.0.0.1:4180/mcp\"\n";
         let b64 = base64::engine::general_purpose::STANDARD.encode(toml_text);
         format!(
-            "##HASHES\naaaa  .codex/skills/worktree/SKILL.md\n##CONFIG ~/.codex/config.toml\n{b64}\n##CONFIG ~/.codex/.fleet-assets.json\n##END\n"
+            "##HASHES\naaaa  .agents/skills/worktree/SKILL.md\n##CONFIG ~/.codex/config.toml\n{b64}\n##CONFIG ~/.codex/.fleet-assets.json\n##END\n"
         )
     }
 
@@ -1337,6 +1407,185 @@ mod tests {
                 .find(|a| a.kind == Kind::McpServer)
                 .unwrap()
                 .secret_like
+        );
+    }
+
+    /// Runs the real scan under plain `sh` against `home`.
+    #[cfg(unix)]
+    fn scan_home(home: &std::path::Path) -> HostSnapshot {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(Codex.scan_script().unwrap())
+            .env("HOME", home)
+            .output()
+            .expect("run scan script");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Codex
+            .parse_scan(&String::from_utf8(out.stdout).unwrap())
+            .unwrap()
+    }
+
+    /// F3c: skills are listed only from `~/.agents/skills`, where Codex reads
+    /// them. A copy left in `~/.codex/skills` is invisible to Codex, and
+    /// Codex's own `.system` is never a skill of the user's.
+    #[test]
+    fn codex_skills_are_listed_only_from_agents_skills() {
+        let mut s = HostSnapshot::default();
+        s.files
+            .insert("~/.agents/skills/new/SKILL.md".into(), "aa".into());
+        s.files
+            .insert("~/.codex/skills/old/SKILL.md".into(), "bb".into());
+        s.files.insert(
+            "~/.codex/skills/.system/builtin/SKILL.md".into(),
+            "cc".into(),
+        );
+        assert_eq!(Codex.installed(&s), vec![(Kind::Skill, "new".to_string())]);
+        let d = Codex.installed_detail(&s);
+        assert_eq!(d.len(), 1);
+        assert_eq!(
+            d[0].hash.as_deref(),
+            Some(sha256_hex(b"SKILL.md=aa").as_str())
+        );
+    }
+
+    /// F3c: the real scan hashes `~/.agents/skills` and still the legacy
+    /// `~/.codex/skills` — a pre-F3c manifest entry there needs its hash for
+    /// the compare-and-swap that deletes the old copy — but never Codex's
+    /// `.system` built-ins.
+    #[cfg(unix)]
+    #[test]
+    fn scan_hashes_agents_skills_and_the_legacy_dir_but_never_codex_system() {
+        let home = tempfile::TempDir::new().unwrap();
+        let h = home.path();
+        for (rel, body) in [
+            (".agents/skills/new/SKILL.md", "n"),
+            (".codex/skills/old/SKILL.md", "o"),
+            (".codex/skills/.system/builtin/SKILL.md", "b"),
+        ] {
+            let p = h.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+        }
+        let snap = scan_home(h);
+        assert!(
+            snap.files.contains_key("~/.agents/skills/new/SKILL.md"),
+            "{:?}",
+            snap.files
+        );
+        assert!(
+            snap.files.contains_key("~/.codex/skills/old/SKILL.md"),
+            "the legacy copy keeps a hash for its removal: {:?}",
+            snap.files
+        );
+        assert!(
+            !snap.files.keys().any(|p| p.contains(".system")),
+            "{:?}",
+            snap.files
+        );
+        assert_eq!(
+            Codex.installed(&snap),
+            vec![(Kind::Skill, "new".to_string())]
+        );
+    }
+
+    /// F3c: the scan reports a symlinked `~/.agents/skills` with its target
+    /// (as `readlink` prints it) and still hashes what it points at — that
+    /// is what Codex sees. A real directory reports no link.
+    #[cfg(unix)]
+    #[test]
+    fn scan_reports_a_symlinked_agents_skills_dir() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::TempDir::new().unwrap();
+        let h = home.path();
+        std::fs::create_dir_all(h.join(".claude/skills/s")).unwrap();
+        std::fs::write(h.join(".claude/skills/s/SKILL.md"), b"claude").unwrap();
+        std::fs::create_dir_all(h.join(".agents")).unwrap();
+        symlink(h.join(".claude/skills"), h.join(".agents/skills")).unwrap();
+        let snap = scan_home(h);
+        assert_eq!(
+            snap.links,
+            std::collections::BTreeMap::from([(
+                "~/.agents/skills".to_string(),
+                h.join(".claude/skills").to_string_lossy().to_string()
+            )])
+        );
+        assert!(
+            snap.files.contains_key("~/.agents/skills/s/SKILL.md"),
+            "{:?}",
+            snap.files
+        );
+
+        let plain = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(plain.path().join(".agents/skills/s")).unwrap();
+        assert!(scan_home(plain.path()).links.is_empty());
+    }
+
+    /// A whole linked `~/.agents`, one linked skill inside a real
+    /// `~/.agents/skills`, and a linked legacy `~/.codex/skills` are each
+    /// reported.
+    #[cfg(unix)]
+    #[test]
+    fn scan_reports_a_linked_agents_dir_a_linked_skill_and_a_linked_legacy_dir() {
+        use std::os::unix::fs::symlink;
+        let whole = tempfile::TempDir::new().unwrap();
+        let w = whole.path();
+        std::fs::create_dir_all(w.join("dotfiles/agents/skills")).unwrap();
+        symlink(w.join("dotfiles/agents"), w.join(".agents")).unwrap();
+        let keys: Vec<String> = scan_home(w).links.into_keys().collect();
+        assert_eq!(keys, vec!["~/.agents"]);
+
+        let mixed = tempfile::TempDir::new().unwrap();
+        let m = mixed.path();
+        std::fs::create_dir_all(m.join(".claude/skills/x")).unwrap();
+        std::fs::create_dir_all(m.join(".agents/skills")).unwrap();
+        std::fs::create_dir_all(m.join(".codex")).unwrap();
+        symlink(m.join(".claude/skills/x"), m.join(".agents/skills/x")).unwrap();
+        symlink(m.join(".claude/skills"), m.join(".codex/skills")).unwrap();
+        let keys: Vec<String> = scan_home(m).links.into_keys().collect();
+        assert_eq!(keys, vec!["~/.agents/skills/x", "~/.codex/skills"]);
+    }
+
+    /// I1/M3 (F3c review fix round 1): a *per-entry* symlink under the
+    /// legacy `~/.codex/skills/<name>` is reported, same as the whole
+    /// directory — the migration's removal would otherwise `rm` straight
+    /// through it. A dot-entry under `~/.agents/skills` is reported too,
+    /// but Codex's own `~/.codex/skills/.system` never is, even though it
+    /// also starts with a dot.
+    #[cfg(unix)]
+    #[test]
+    fn scan_reports_a_per_entry_legacy_symlink_and_a_dot_entry_but_never_dot_system() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::TempDir::new().unwrap();
+        let h = home.path();
+        std::fs::create_dir_all(h.join(".claude/skills/s")).unwrap();
+        std::fs::create_dir_all(h.join(".codex/skills/.system/builtin")).unwrap();
+        std::fs::create_dir_all(h.join(".agents/skills")).unwrap();
+        symlink(h.join(".claude/skills/s"), h.join(".codex/skills/s")).unwrap();
+        symlink(h.join(".claude/skills/s"), h.join(".agents/skills/.hidden")).unwrap();
+        let snap = scan_home(h);
+        assert_eq!(
+            snap.links.into_keys().collect::<Vec<_>>(),
+            vec!["~/.agents/skills/.hidden", "~/.codex/skills/s"],
+            "no entry for .codex/skills/.system"
+        );
+    }
+
+    /// F3c (plan 5/6 review fix): `symlink_reason` compares the legacy-dir
+    /// check case-insensitively too, matching `linked_dir`'s own ASCII
+    /// case-folding (M3) — a host whose `readlink`/scan reports
+    /// `~/.Codex/Skills/s` (a case-insensitive filesystem) still gets the
+    /// legacy "remove old copies" wording, not the generic "write ... or
+    /// turn Codex off" one.
+    #[test]
+    fn symlink_reason_matches_the_legacy_dir_case_insensitively() {
+        let reason = Codex.symlink_reason("~/.Codex/Skills/s", "/x", ActionOp::Create);
+        assert_eq!(
+            reason,
+            "~/.Codex/Skills/s is a symlink (to /x); fleet won't remove old Codex skill copies through it — replace it with a real directory"
         );
     }
 }

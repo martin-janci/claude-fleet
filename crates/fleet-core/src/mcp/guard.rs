@@ -883,11 +883,13 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: true,
         deadline: Deadline::Lifecycle,
     },
-    // Managing the catalog from a paired desktop: every catalog operation
-    // the desktop app has, as one tool. `Client` here only lets the call past
-    // the central gate; the tool itself answers the master and a paired
-    // client the operator granted (`fleet-hub client grant <name> assets`)
-    // and refuses everyone else, per-host tokens included. Not confirm-gated
+    // Managing the catalogs from a paired desktop: every catalog operation
+    // the desktop app has, plus the set of catalogs, as one tool. `Client`
+    // here only lets the call past the central gate (per-host tokens are
+    // refused there, `NOT_FOR_HOST_TOKENS`); the tool itself answers the
+    // master and a paired client granted the catalog each action touches
+    // (`fleet-hub client grant <name> assets [--catalog NAME]`; Assets M3,
+    // R11) and refuses everyone else. Not confirm-gated
     // as a whole — most actions are reads or checkout edits — but its
     // `apply_sync` action passes the same confirm gate as `apply_sync`.
     ToolPolicy {

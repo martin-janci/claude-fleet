@@ -14,4 +14,4 @@
 -- `IF EXISTS`: a database created after this migration never had it.
 DROP INDEX IF EXISTS idx_work_items_proposals;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (94);
+INSERT OR IGNORE INTO schema_version (version) VALUES (95);

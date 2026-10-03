@@ -1,0 +1,27 @@
+[package]
+name = "fleet-agent-e2e"
+version = "0.1.0"
+# Tests only: nothing depends on it and it builds no binary. Not versioned in
+# step with the app (scripts/release.sh excludes it) and never published;
+# scripts/check-version-consistency.sh holds it to this exception.
+publish = false
+description = "The hub and the real fleet-agent over a loopback socket, in one test process"
+authors = ["martin-janci"]
+edition = "2021"
+license = "MIT"
+
+# Why a crate of its own: this test needs the REAL agent, and a dev-dependency
+# on fleet-agent from fleet-core made every fleet-agent edit recompile
+# fleet-core's whole unit-test target (~30 s) before any test could run
+# (RUST-BUILD-PERFORMANCE-AUDIT.md §11). Here an agent edit recompiles this
+# one file.
+#
+# Everything is a dev-dependency, so a plain `cargo build --workspace` builds
+# an empty library and never turns on fleet-core's `testkit`. Unix only, like
+# the agent itself.
+[target.'cfg(unix)'.dev-dependencies]
+fleet-core = { path = "../fleet-core", features = ["testkit"] }
+fleet-agent = { path = "../fleet-agent" }
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"

@@ -50,6 +50,13 @@ pub struct Resolution {
     /// never sends it.
     #[serde(default)]
     pub withheld: std::collections::BTreeSet<(String, String)>,
+    /// Assets M3: catalog → why its assets on this host are kept but no
+    /// longer managed (`effective::EffectiveSet::held_back`: not loaded,
+    /// failed to load, cannot resolve) — only catalogs the host accepts
+    /// (PF10), and never a load error's text (final review I1). Empty on the
+    /// single-catalog path. `#[serde(default)]`: travels the wire.
+    #[serde(default)]
+    pub held_back: BTreeMap<String, String>,
 }
 
 /// Deep-merge `over` into `base`: mappings recurse, everything else replaces.
@@ -144,12 +151,15 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
                 loaded_at: catalog.loaded_at,
                 layers: Default::default(),
                 origin: catalog.origin.clone(),
+                load_error: catalog.load_error.clone(),
+                load_error_stamp: catalog.load_error_stamp.clone(),
             },
             provenance: BTreeMap::new(),
             excluded: BTreeMap::new(),
             layered: false,
             refused: Vec::new(),
             withheld: Default::default(),
+            held_back: BTreeMap::new(),
         };
     }
 
@@ -229,12 +239,15 @@ pub fn resolve(catalog: &Catalog, role_chain: &[&Layer], contexts: &[&Layer]) ->
             // Deliberately empty: a layer must never travel into the planner.
             layers: Default::default(),
             origin: catalog.origin.clone(),
+            load_error: catalog.load_error.clone(),
+            load_error_stamp: catalog.load_error_stamp.clone(),
         },
         provenance,
         excluded,
         layered: true,
         refused: Vec::new(),
         withheld: Default::default(),
+        held_back: BTreeMap::new(),
     }
 }
 

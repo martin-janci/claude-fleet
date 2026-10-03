@@ -576,7 +576,8 @@ pub fn compute_states(
     // `orphan` (fleet put it there, and the next sync removes it) says
     // strictly more than `unmanaged`.
     let mut orphans: Vec<AssetInventoryRow> = Vec::new();
-    for (key, _entry) in manifest.orphans(catalog) {
+    // None (R8): the inventory decides nothing; only the plan keeps held entries.
+    for (key, _entry) in manifest.orphans(catalog, None) {
         // A key that names no kind cannot be displayed as an asset row; the
         // sync plan skips it for the same reason.
         let Some((kind, name)) = Manifest::split_key(key) else {

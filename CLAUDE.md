@@ -12,22 +12,69 @@ The Rust side is a workspace: `crates/fleet-core` (Tauri-free service/store/SSH/
 `crates/fleet-hub` (headless daemon, see `docs/hub.md`), `crates/fleet-proto` (the
 hub/agent frame types, shared by both ends), `crates/fleet-agent` (the agent binary
 for hosts the hub cannot reach — depends on `fleet-proto` only, never `fleet-core`),
-`src-tauri` (the desktop app).
+`crates/fleet-agent-e2e` (tests only: the hub against the real agent over a socket,
+through fleet-core's `testkit` feature), `src-tauri` (the desktop app).
 
 ## Build & test
 
+### Validation ladder (use this, in this order)
+
+One canonical way to validate Rust changes. Every command below selects the
+whole workspace and builds test targets, so they share one set of compiled
+dependencies. Mixing in other selections (`-p <crate>`, plain `cargo build`,
+`cargo check` without `--all-targets`, `pnpm tauri …`) makes cargo compile
+another copy of fleet-core and its dependency graph: 1.5–3 min the first time,
+then every edit paid once per copy (RUST-BUILD-PERFORMANCE-AUDIT.md §10.3).
+The aliases live in `.cargo/config.toml`.
+
 ```bash
-pnpm install
-pnpm test                       # frontend (Vitest)
-pnpm check                      # Svelte/TS type-check
-cargo test --workspace          # backend (all crates)
-cargo clippy --workspace --all-targets -- -D warnings
+# 1. after every edit (fleet-core edit ≈ 20 s; = rust-analyzer's own check)
+cargo fleet-check                       # check --workspace --all-targets
+pnpm check                              # frontend edits: svelte-check
+# 2. the tests of what you touched (module path filter; fleet-core module ≈ 40 s)
+cargo fleet-test -- service::health     # test --workspace --lib --bins -- <filter>
+pnpm exec vitest run src/lib/foo.test.ts
+# 3. before committing (also what .githooks/pre-commit runs)
 cargo fmt --all --check
+cargo fleet-lint                        # clippy --workspace --all-targets -- -D warnings
+# 4. before pushing / marking a PR ready (≈ 20 min; offload it on a small box)
+cargo test --workspace                  # full suite, what CI runs
+scripts/ci-local.sh                     # everything in CI order; --rust-only / --frontend-only / --hub-e2e
+```
+
+Rules:
+
+- Do not run `cargo build` to see whether something compiles; `cargo
+  fleet-check` answers that 2–6× faster. Build only when you need a binary.
+- Do not narrow with `-p <crate>` in the inner loop; narrow with a test filter.
+  Keep `-p` for the cases below that need a binary or a different feature set.
+- A test that checks a file outside its crate (a `src/lib/*.ts` mirror,
+  `src-tauri/src/lib.rs`, a `docs/*.md` guide) reads it when it runs
+  (`repo_files::read` in fleet-core), never with `include_str!`: a compiled-in
+  copy makes every edit to that file recompile the whole test target (~26 s
+  for fleet-core's, against ~0.4 s). Likewise fleet-core takes no
+  dev-dependency on a workspace crate it does not already depend on; a test
+  that needs one lives in a crate of its own, as `crates/fleet-agent-e2e`
+  does. `src/lib/names.json`,
+  `tools/ag/**` and two `skills/*/SKILL.md` are embedded in fleet-core itself,
+  so editing them does recompile it.
+- `pnpm tauri dev` / `pnpm tauri build` and `cargo build -p fleet-hub` use other
+  feature sets. Run them when you need them; in a cloud session (no display,
+  ~30 GB disk) do not run the Tauri ones at all.
+
+Other commands:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm test                       # frontend (Vitest), all of it
 cargo deny check                # licenses + advisories (cargo install cargo-deny --locked)
 cargo build -p fleet-hub --locked   # headless hub (no Tauri libs needed)
 scripts/hub-e2e.sh               # real fleet-hub/-agent e2e; needs tmux, opt-in via ci-local.sh --hub-e2e
-scripts/ci-local.sh             # all of the above in CI order; --rust-only / --frontend-only / --hub-e2e
 ```
+
+The Rust toolchain is pinned in `rust-toolchain.toml` (bump it in its own PR,
+with the CI and Dockerfile pins; `scripts/check-version-consistency.sh`
+enforces it).
 
 `devtools` is an off-by-default cargo feature: `cargo tauri build --features
 devtools` enables the Web Inspector in a release bundle; dev builds have it
@@ -44,6 +91,16 @@ in `App.test.ts` and `clipboard_native.test.ts` — that is a dependency gap, no
 code error. (`localStorage` is polyfilled in `vitest.setup.ts`; there are no
 known pre-existing frontend test failures.)
 
+Known Rust flakes — timing-sensitive, so they fail on a loaded box; re-run
+alone before blaming your change: `rewind::tests::the_removal_script_leaves_a_tree_a_live_pane_is_in`,
+`work::scale_tests::*`, the `CHAIN_BUDGET` migration tests in
+`store/schema/tests_upgrade.rs`, and `service::add_project`. Not a flake:
+`cargo test -p fleet-core --lib -- --test-threads=1` takes 23–25 minutes
+(4.5k tests; measured on mercury, 2026-10-02), so a `timeout 600` wrapper
+kills it mid-run and the last `test … ...` line names whichever test was in
+flight — a slow run, not a hang. Run it in parallel (the default), or give a
+sequential run a 30-minute budget.
+
 ## Releasing
 
 Releases are cut manually with `scripts/release.sh <new-version>` — it bumps
@@ -59,7 +116,7 @@ editing any `#[tool(...)]` description or the `generate_handler!` list,
 regenerate it or CI fails:
 
 ```bash
-REGEN_DOCS=1 cargo test -p fleet-core reference_is_current
+REGEN_DOCS=1 cargo fleet-test -- reference_is_current
 ```
 
 `src/lib/hub_verdicts.generated.json` and the refusal table in `docs/hub.md`
@@ -67,7 +124,7 @@ are generated from `src-tauri/src/backend/verdicts.rs`. After editing any row,
 regenerate them or CI fails:
 
 ```bash
-REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
+REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
 ```
 
 ## Architecture
@@ -95,7 +152,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   `describe_fleet_settings`; `docs/settings-reference.md` and the settings
   tables in `docs/work-graph.md` / `docs/decisions.md` are generated from
   it — after editing a spec run
-  `REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current`.
+  `REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current`.
   This is P1 of the declarative pages framework
   (`docs/superpowers/specs/2026-09-28-declarative-pages-design.md`).
 - **Declarative pages** (`crates/fleet-core/src/pages/`, P2): pages are JSON
@@ -106,7 +163,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   `SPECS` row needs a `field` on a page). Authoring guide `docs/pages.md`;
   regenerate `docs/page-spec.schema.json` / `docs/page-catalog.json` and
   the frontend fixture `src/lib/pages/registry.generated.json` with
-  `REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current`.
+  `REGEN_PAGE_DOCS=1 cargo fleet-test -- page_docs_are_current`.
   P3's renderer (`src/lib/pages/`) shows them in Settings beside
   "General" (`list_pages`, `fetch_page_source`); `hub.*` / `mcp.*` are
   read-only specs (`owned_by`, D-P7), and `settings::set` emits
@@ -203,6 +260,25 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   Host detail's Codex control) sets it; `claude` cannot be removed. Codex
   renders agents to `~/.codex/agents/<install name>.toml` via the `toml`
   crate.
+- **Multi-harness F3c** (plan
+  `docs/superpowers/plans/2026-10-01-f3c-codex-skills-agents-dir.md`):
+  Codex skills render to `~/.agents/skills/<install name>/`
+  (`CODEX_SKILLS_DIR`); `~/.codex/skills` (`CODEX_LEGACY_SKILLS_DIR`, minus
+  Codex's `.system`) is still hashed so a pre-F3c manifest entry's old copy
+  can be deleted under compare-and-swap — the planner's existing rule-8
+  `remove_entry` path does the move, and a moved asset whose new location
+  holds a copy fleet did not write is an `overwrite`, not an `update`. The
+  Codex scan prints `##LINK <path>`, then the target on the next line
+  (`HostSnapshot::links`), for a symlinked `~/.agents`, `~/.agents/skills`,
+  entry in it, or
+  `~/.codex/skills`; `compute_host_plan` blocks every write/adopt/delete
+  under one (rule 9, `Harness::symlink_reason`), and any action whose
+  planned file is absent at its exact path but present differing only in
+  ASCII case (`skill.md` vs `SKILL.md`) is `Blocked` too (rule 10,
+  `block_case_variants`, every harness).
+  `plan::block_cross_harness_collisions`, called once per host in
+  `plan_sync`, blocks any action whose file another harness's plan on that
+  host also touches.
 - **Assets M1 — catalogs table** (plan
   `docs/superpowers/plans/2026-09-30-assets-m1-catalogs.md`, spec
   `docs/superpowers/specs/2026-09-30-assets-s1b-s2-design.md`): a catalog is
@@ -227,9 +303,9 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   as `NULL`), so a host's layer assignments and scanned inventory are each
   pinned to one catalog. `service/catalog/effective.rs` decides, per host,
   what it should end up with: `acceptance(host_org, catalog_id, catalog_org,
-  admitted)` returns `No` / `SharedOnly` / `All` (admissions arrive in M3;
-  empty here, so an org-bound host gets only the `shared` slice of
-  `personal`), and `effective_for_host(store, host)` composes an
+  admitted)` returns `No` / `SharedOnly` / `All` (an org-bound host gets only
+  the `shared` slice of `personal`; a host with no org also takes every org
+  catalog it admits, M3), and `effective_for_host(store, host)` composes an
   `EffectiveSet` — reading every store row under one guard first, then the
   registry, since store → registry is never allowed. Within that set, the
   scope boundary and a `(kind, name)`/`(kind, install_name)` collision
@@ -246,6 +322,41 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   `registry::union_all`. `apply_override` rejects a
   layer that tries to change an asset's `scope`, since scope is what decides
   who may receive it.
+- **Assets M3 — admissions, grants per catalog, loading every catalog** (plan
+  `docs/superpowers/plans/2026-10-01-assets-m3-admissions.md`): migration 093
+  adds `host_catalogs` (a host with no org admits an org catalog; `admit`
+  refuses an org-bound host and `personal`) and `client_catalog_grants` (a
+  grant names one catalog; the personal grant is also mirrored into
+  `client_tokens.assets_admin_at`, which is read only while no personal
+  catalog exists yet). `load_catalog(id)` loads any catalog; `ensure_fresh`
+  walks every `catalogs` row — an org catalog that cannot load becomes a
+  registry *problem entry* (`Catalog.load_error`, retried once its row's load
+  record, `repo_path` or `remote_url` changes), a removed one is evicted, a
+  personal failure is still the error. `effective_for_host` reads admissions
+  and reports `speaks_for` / `held_back`: a manifest entry is an orphan
+  (`Remove`) only when its own catalog speaks for the host; one whose catalog
+  is not loaded, failed, no longer accepted (unadmit, org change) or not
+  configured gets a `Noop` saying why — never a remove. `plan_sync` reads one
+  `registry::snapshot()` for scan and plan. `service/catalog/catalogs.rs`
+  adds / lists / removes catalogs (removal is config only and cascades their
+  layer rows, admissions and grants) and admits hosts; `add_catalog` refuses
+  moving an existing catalog to another org (`Store::check_catalog_owner`).
+  `catalog_admin` takes an optional `catalog` (config, load, list_layers,
+  set_host_layers; the authoring actions stay personal-only until M4) and
+  five actions (`list_catalogs`, `add_catalog`, `remove_catalog`,
+  `admit_catalog`, `unadmit_catalog`); every action checks a grant on the
+  catalog it touches (`AdminCall::touches` → `may_admin_catalog`) — the
+  fleet-wide actions (`plan_sync`, `apply_sync`, `inventory`, secrets,
+  `resolve_preview`…) touch `personal`, so an org-only grant covers only that
+  catalog's config/load/layers/admissions —
+  `list_catalogs` is master or an unbound full client only (an org-bound
+  client is refused), `add_catalog` and `remove_catalog` are master-only
+  (a removal cascades every other client's grant), and `apply_sync` fails
+  closed for a non-master caller when its parked plan is gone and otherwise
+  needs a grant on the catalog of every manifest entry an Update/Overwrite
+  replaces, not only the catalogs its actions come from. Operator side:
+  `fleet-hub catalog add|list|remove|admit|unadmit`, `catalog reload
+  --catalog`, `client grant|ungrant <name> assets --catalog`.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. Only one PTY is attached at a time.
@@ -280,6 +391,12 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   `no_eprintln_tests::production_code_spawns_through_proc` enforces it.
 - SQLite access goes through `Store` behind a `std::sync::Mutex`. Never hold the
   guard across an `.await`.
+- In tests, `Store::open_in_memory()` / `open_with_bus_in_memory` hand out a
+  copy of a database migrated once per test process (`migrated_template_copy`);
+  a test about the migrations themselves builds its database with
+  `store::testgen` / `migrations_through` instead. The bundled SQLite is built
+  with `SQLITE_DEFAULT_MEMSTATUS=0` (`.cargo/config.toml`), so it takes no
+  process-wide lock per allocation.
 - No blocking I/O under `Mutex<PtyState>` and none on a sync Tauri command (a
   sync command runs on the macOS main thread). PTY input goes to the writer
   thread through its bounded channel — `E_PTY_BUSY` when it is full,

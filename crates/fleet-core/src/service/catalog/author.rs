@@ -320,7 +320,7 @@ pub fn secrets_example_names(root: &Path) -> Vec<String> {
     }
 }
 
-/// Whether Codex renders `a` into `~/.codex/skills/`: a skill, or an agent
+/// Whether Codex renders `a` into `~/.agents/skills/` (`CODEX_SKILLS_DIR`): a skill, or an agent
 /// with `targets.codex.render_as: skill` — in both cases only while its
 /// Codex target is enabled.
 fn lands_in_codex_skills(a: &Asset) -> bool {
@@ -398,7 +398,7 @@ pub fn lint(
         );
     }
     // F3b: Codex renders an agent with `targets.codex.render_as: skill` into
-    // `~/.codex/skills/<install name>/`, where a skill of that install name
+    // `~/.agents/skills/<install name>/` (F3c), where a skill of that install name
     // also lands — across kinds, so the rule above cannot see it. Both
     // manifest entries would claim one path, and removing either asset would
     // delete the other's installed copy.
@@ -537,13 +537,19 @@ pub fn lint(
 pub fn lint_all(catalog: &Catalog, root: &Path) -> LintAll {
     let names = secrets_example_names(root);
     let exists = root.join(SECRETS_EXAMPLE).exists();
+    lint_all_with(catalog, &names, exists)
+}
+
+/// [`lint_all`] with `secrets.example` already read, so a caller borrowing
+/// the registry ([`lint_everything`]) does no file I/O under its read lock.
+fn lint_all_with(catalog: &Catalog, names: &[String], exists: bool) -> LintAll {
     let assets: Vec<AssetLint> = catalog
         .assets
         .iter()
         .map(|a| AssetLint {
             kind: a.kind().as_str().to_string(),
             name: a.header.name.clone(),
-            report: lint(a, catalog, &names, exists),
+            report: lint(a, catalog, names, exists),
         })
         .collect();
     LintAll {
@@ -659,14 +665,13 @@ fn catalog_asset(kind: Kind, name: &str) -> Result<Asset, IpcError> {
 }
 
 /// Lint against the catalog as currently loaded (an unloaded catalog lints
-/// against an empty one — no rule consults it).
+/// against an empty one — no rule consults it). Borrows the registry; never
+/// clones the catalog (M1 carry, R16).
 fn lint_in_repo(asset: &Asset, root: &Path) -> LintReport {
     let names = secrets_example_names(root);
     let exists = root.join(SECRETS_EXAMPLE).exists();
-    let loaded = registry::personal().ok().flatten();
-    let empty = Catalog::default();
-    let catalog = loaded.as_ref().unwrap_or(&empty);
-    lint(asset, catalog, &names, exists)
+    registry::with_personal(|c| Ok(lint(asset, c, &names, exists)))
+        .unwrap_or_else(|_| lint(asset, &Catalog::default(), &names, exists))
 }
 
 /// Stage `rel_paths`, commit them under `message`, then reload the catalog
@@ -722,6 +727,7 @@ pub fn create(args: CreateArgs, store: &Mutex<Store>) -> Result<WriteResult, Ipc
             let mut a = catalog_asset(args.kind, from)?;
             a.header.name = args.name.clone();
             a.header.source = None;
+            a.header.scope = Scope::Private; // R15: a copy is private until marked
             a
         }
         None => template(args.kind, &args.name),
@@ -1046,12 +1052,19 @@ pub fn lint_asset(args: AssetRef, store: &Mutex<Store>) -> Result<LintReport, Ip
     Ok(lint_in_repo(&asset, &root))
 }
 
+/// Every asset linted against the loaded catalog, borrowed from the
+/// registry (R16); an unloaded catalog lints against an empty one.
 pub fn lint_everything(store: &Mutex<Store>) -> Result<LintAll, IpcError> {
     let root = repo_root(store)?;
-    let loaded = registry::personal()?;
-    let empty = Catalog::default();
-    let catalog = loaded.as_ref().unwrap_or(&empty);
-    Ok(lint_all(catalog, &root))
+    let names = secrets_example_names(&root);
+    let exists = root.join(SECRETS_EXAMPLE).exists();
+    match registry::with_personal(|c| Ok(lint_all_with(c, &names, exists))) {
+        Ok(all) => Ok(all),
+        Err(e) if e.code == super::E_CATALOG_NOT_CONFIGURED => {
+            Ok(lint_all_with(&Catalog::default(), &names, exists))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
@@ -1471,7 +1484,7 @@ mod tests {
     }
 
     /// F3b: an agent Codex renders as a skill lands in the same
-    /// `~/.codex/skills/<install name>/` as a skill of that install name —
+    /// `~/.agents/skills/<install name>/` as a skill of that install name —
     /// reported from both sides; a skill with Codex disabled does not collide.
     #[test]
     fn lint_errors_when_a_codex_skill_agent_shares_a_skills_install_name() {
@@ -1490,7 +1503,7 @@ mod tests {
         let report = lint(&agent, &catalog, &[], true);
         assert_eq!(fields(&report.errors), vec!["name"], "{:?}", report.errors);
         assert!(
-            report.errors[0].message.contains("~/.codex/skills/pm")
+            report.errors[0].message.contains("~/.agents/skills/pm")
                 && report.errors[0].message.contains("skill/pm"),
             "{:?}",
             report.errors
@@ -2410,6 +2423,53 @@ mod tests {
         assert_eq!(
             delete_layer("Bad Name", &store).unwrap_err().code,
             E_INVALID
+        );
+    }
+
+    /// Rulings R15: a copy is a new asset — private until marked, whatever
+    /// the original's scope.
+    #[test]
+    fn duplicate_from_makes_a_private_copy_of_a_shared_asset() {
+        let _g = lock_registry_for_test();
+        let root = init_repo("dup-scope");
+        let store = configured_store(&root);
+        create(
+            CreateArgs {
+                kind: Kind::Skill,
+                name: "src".into(),
+                duplicate_from: None,
+            },
+            &store,
+        )
+        .unwrap();
+        let mut shared = catalog_asset(Kind::Skill, "src").unwrap();
+        shared.header.scope = Scope::Shared;
+        shared.header.description = "A shared skill that is worth copying once.".into();
+        shared.body = "# src\n\nShared body.\n".into();
+        update(
+            UpdateArgs {
+                asset: shared,
+                set_scope: true,
+            },
+            &store,
+        )
+        .unwrap();
+        create(
+            CreateArgs {
+                kind: Kind::Skill,
+                name: "copy".into(),
+                duplicate_from: Some("src".into()),
+            },
+            &store,
+        )
+        .unwrap();
+        assert_eq!(
+            catalog_asset(Kind::Skill, "copy").unwrap().header.scope,
+            Scope::Private
+        );
+        assert_eq!(
+            catalog_asset(Kind::Skill, "src").unwrap().header.scope,
+            Scope::Shared
         );
     }
 }
