@@ -483,6 +483,23 @@ impl Store {
         )
     }
 
+    /// True when the live client `id` holds a grant on any catalog, under the
+    /// same eligibility as [`Self::client_may_admin_catalog`] — a check that
+    /// needs no catalog, so a caller holding none is refused before anything
+    /// is read (the `changesets` tool's pre-check).
+    pub fn client_has_any_catalog_grant(&self, id: i64) -> Result<bool, rusqlite::Error> {
+        self.conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM client_tokens t
+                   JOIN client_catalog_grants g ON g.client_id = t.id
+                   WHERE t.id = ?1 AND {elig})",
+                elig = Self::LIVE_GRANT_ELIGIBLE,
+            ),
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+    }
+
     /// The live clients holding a grant on `catalog_id`, by name. Filters
     /// with the same eligibility predicate (`LIVE_GRANT_ELIGIBLE`) as
     /// [`Self::client_may_admin_catalog`]: this must never list a client
@@ -943,8 +960,10 @@ mod tests {
             .id;
         let desk = s.insert_client_token("desk", "aa11", "full").unwrap();
 
+        assert!(!s.client_has_any_catalog_grant(desk.id).unwrap());
         let e0 = s.auth_epoch().unwrap();
         let row = s.set_client_catalog_grant("desk", acme, true).unwrap();
+        assert!(s.client_has_any_catalog_grant(desk.id).unwrap());
         assert!(s.auth_epoch().unwrap() > e0, "a grant bumps the epoch");
         assert!(
             row.assets_admin_at.is_none(),
@@ -970,6 +989,7 @@ mod tests {
             !s.client_may_admin_catalog(desk.id, acme).unwrap(),
             "bound: no catalog at all"
         );
+        assert!(!s.client_has_any_catalog_grant(desk.id).unwrap(), "bound");
         assert!(!s.client_is_assets_admin(desk.id).unwrap());
         assert!(
             s.catalog_grantees(acme).unwrap().is_empty(),
@@ -992,6 +1012,7 @@ mod tests {
             !s.client_may_admin_catalog(desk.id, acme).unwrap(),
             "revoked"
         );
+        assert!(!s.client_has_any_catalog_grant(desk.id).unwrap(), "revoked");
 
         s.insert_client_token("kiosk", "bb22", "readonly").unwrap();
         let code = |r: Result<_, crate::ipc_error::IpcError>| r.map(|_| ()).unwrap_err().code;

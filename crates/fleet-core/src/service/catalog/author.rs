@@ -18,11 +18,10 @@ use super::layer::{Axis, Layer};
 use super::model::{
     find_placeholders, Asset, AssetSpec, Header, HookAction, Kind, Marketplace, Problem, Scope,
 };
-use super::registry;
 use super::repo::{self, Catalog, RepoStatus};
 use super::sync::secrets::{BUILTIN_PORT, BUILTIN_TOKEN};
 use super::validate::{check_layer_name, check_name, check_resource_path};
-use super::{E_ASSET_NOT_FOUND, E_CATALOG_GIT, E_LINT};
+use super::{CatalogTarget, E_ASSET_NOT_FOUND, E_CATALOG_GIT, E_LINT};
 use crate::ipc_error::codes::{E_INVALID, E_SERIALIZE};
 use crate::ipc_error::IpcError;
 use crate::store::Store;
@@ -609,10 +608,6 @@ pub struct WriteResult {
     pub lint: LintReport,
 }
 
-fn repo_root(store: &Mutex<Store>) -> Result<PathBuf, IpcError> {
-    Ok(PathBuf::from(super::require_config(store)?.repo_path))
-}
-
 /// Only skills and agents are folders on disk, so only they can carry
 /// `resources/…` files.
 fn check_has_resources(kind: Kind) -> Result<(), IpcError> {
@@ -626,38 +621,45 @@ fn check_has_resources(kind: Kind) -> Result<(), IpcError> {
     }
 }
 
-/// A clone of the named asset out of the loaded personal catalog. Borrows
-/// via `with_personal` rather than `registry::personal()?` so only the one
-/// matching `Asset` is ever cloned, not the whole catalog (every other
-/// asset's `resources`, base64'd bytes included). An unloaded catalog and a
-/// present-but-missing asset are the same answer here, same as before this
-/// module read a registry at all: `E_ASSET_NOT_FOUND`, never
+/// A clone of the named asset out of `target`'s loaded catalog. Borrows
+/// via [`CatalogTarget::with`] rather than `registry::personal()?` so only
+/// the one matching `Asset` is ever cloned, not the whole catalog (every
+/// other asset's `resources`, base64'd bytes included). An unloaded catalog
+/// and a present-but-missing asset are the same answer here, same as before
+/// this module read a registry at all: `E_ASSET_NOT_FOUND`, never
 /// `E_CATALOG_NOT_CONFIGURED`.
-fn catalog_asset(kind: Kind, name: &str) -> Result<Asset, IpcError> {
+fn catalog_asset_in(target: CatalogTarget<'_>, kind: Kind, name: &str) -> Result<Asset, IpcError> {
     let not_found = || {
         IpcError::new(
             E_ASSET_NOT_FOUND,
             format!("{} {name} is not in the catalog", kind.as_str()),
         )
     };
-    match registry::with_personal(|c| Ok(c.find(kind, name).cloned())) {
+    match target.with(|c| Ok(c.find(kind, name).cloned())) {
         Ok(found) => found.ok_or_else(not_found),
         Err(e) if e.code == super::E_CATALOG_NOT_CONFIGURED => Err(not_found()),
         Err(e) => Err(e),
     }
 }
 
-/// Lint against the catalog as currently loaded (an unloaded catalog lints
+/// [`catalog_asset_in`] the personal catalog (Rulings PF1: the tests' name).
+#[cfg(test)]
+fn catalog_asset(kind: Kind, name: &str) -> Result<Asset, IpcError> {
+    catalog_asset_in(CatalogTarget::Personal, kind, name)
+}
+
+/// Lint against `target` as currently loaded (an unloaded catalog lints
 /// against an empty one — no rule consults it). Borrows the registry; never
 /// clones the catalog (M1 carry, R16).
-fn lint_in_repo(asset: &Asset, root: &Path) -> LintReport {
+fn lint_in_repo(target: CatalogTarget<'_>, asset: &Asset, root: &Path) -> LintReport {
     let names = secrets_example_names(root);
     let exists = root.join(SECRETS_EXAMPLE).exists();
-    registry::with_personal(|c| Ok(lint(asset, c, &names, exists)))
+    target
+        .with(|c| Ok(lint(asset, c, &names, exists)))
         .unwrap_or_else(|_| lint(asset, &Catalog::default(), &names, exists))
 }
 
-/// Stage `rel_paths`, commit them under `message`, then reload the catalog
+/// Stage `rel_paths`, commit them under `message`, then reload `target`
 /// and return the resulting HEAD.
 ///
 /// A write that changes nothing (saving an asset whose serialised form is
@@ -667,6 +669,7 @@ fn lint_in_repo(asset: &Asset, root: &Path) -> LintReport {
 /// tree neither forces an empty commit nor gets swept into this one. The
 /// catalog is reloaded either way, so the caller's view is always fresh.
 fn commit_and_reload(
+    target: CatalogTarget<'_>,
     root: &Path,
     rel_paths: &[String],
     message: &str,
@@ -678,11 +681,12 @@ fn commit_and_reload(
     } else {
         repo::head(root)?
     };
-    super::load(false, store)?;
+    target.reload(store)?;
     Ok(commit)
 }
 
 fn write_commit_reload(
+    target: CatalogTarget<'_>,
     root: &Path,
     asset: &Asset,
     overwrite: bool,
@@ -691,7 +695,7 @@ fn write_commit_reload(
 ) -> Result<String, IpcError> {
     repo::write_asset(root, asset, overwrite)?;
     let rel = repo::asset_rel_dir(asset.kind(), &asset.header.name);
-    commit_and_reload(root, &[rel], message, store)
+    commit_and_reload(target, root, &[rel], message, store)
 }
 
 /// Create an asset from the kind template, or as a copy of an existing asset
@@ -700,14 +704,23 @@ fn write_commit_reload(
 /// returned but never block a create: a template is a starting point (the
 /// `plugin_ref` template deliberately carries `TODO` errors).
 pub fn create(args: CreateArgs, store: &Mutex<Store>) -> Result<WriteResult, IpcError> {
+    create_in(CatalogTarget::Personal, args, store)
+}
+
+/// [`create`] in `target` (Assets M4, R21).
+pub fn create_in(
+    target: CatalogTarget<'_>,
+    args: CreateArgs,
+    store: &Mutex<Store>,
+) -> Result<WriteResult, IpcError> {
     check_name(&args.name)?;
     if let Some(from) = args.duplicate_from.as_deref() {
         check_name(from)?;
     }
-    let root = repo_root(store)?;
+    let root = target.root(store)?;
     let asset = match args.duplicate_from.as_deref() {
         Some(from) => {
-            let mut a = catalog_asset(args.kind, from)?;
+            let mut a = catalog_asset_in(target, args.kind, from)?;
             a.header.name = args.name.clone();
             a.header.source = None;
             a.header.scope = Scope::Private; // R15: a copy is private until marked
@@ -716,10 +729,10 @@ pub fn create(args: CreateArgs, store: &Mutex<Store>) -> Result<WriteResult, Ipc
         None => template(args.kind, &args.name),
     };
     let message = format!("catalog: create {}/{}", args.kind.as_str(), args.name);
-    let commit = write_commit_reload(&root, &asset, false, &message, store)?;
+    let commit = write_commit_reload(target, &root, &asset, false, &message, store)?;
     Ok(WriteResult {
         commit,
-        lint: lint_in_repo(&asset, &root),
+        lint: lint_in_repo(target, &asset, &root),
     })
 }
 
@@ -727,13 +740,22 @@ pub fn create(args: CreateArgs, store: &Mutex<Store>) -> Result<WriteResult, Ipc
 /// errors (`E_LINT`, `details` = the report). The write overwrites and
 /// prunes `resources/…` files the asset no longer lists.
 pub fn update(args: UpdateArgs, store: &Mutex<Store>) -> Result<WriteResult, IpcError> {
+    update_in(CatalogTarget::Personal, args, store)
+}
+
+/// [`update`] in `target`.
+pub fn update_in(
+    target: CatalogTarget<'_>,
+    args: UpdateArgs,
+    store: &Mutex<Store>,
+) -> Result<WriteResult, IpcError> {
     let asset = args.asset;
     let kind = asset.kind();
     check_name(&asset.header.name)?;
     for r in &asset.resources {
         check_resource_path(&r.rel_path)?;
     }
-    let root = repo_root(store)?;
+    let root = target.root(store)?;
     if !repo::asset_path(&root, kind, &asset.header.name).exists() {
         return Err(IpcError::new(
             E_ASSET_NOT_FOUND,
@@ -744,7 +766,7 @@ pub fn update(args: UpdateArgs, store: &Mutex<Store>) -> Result<WriteResult, Ipc
             ),
         ));
     }
-    let report = lint_in_repo(&asset, &root);
+    let report = lint_in_repo(target, &asset, &root);
     if !report.errors.is_empty() {
         let details = serde_json::to_value(&report)
             .map_err(|e| IpcError::new(E_SERIALIZE, format!("lint report: {e}")))?;
@@ -754,7 +776,7 @@ pub fn update(args: UpdateArgs, store: &Mutex<Store>) -> Result<WriteResult, Ipc
         );
     }
     let message = format!("catalog: update {}/{}", kind.as_str(), asset.header.name);
-    let commit = write_commit_reload(&root, &asset, true, &message, store)?;
+    let commit = write_commit_reload(target, &root, &asset, true, &message, store)?;
     Ok(WriteResult {
         commit,
         lint: report,
@@ -764,12 +786,21 @@ pub fn update(args: UpdateArgs, store: &Mutex<Store>) -> Result<WriteResult, Ipc
 /// Delete an asset's folder (skill / agent) or file, commit the removal and
 /// reload. Hosts that hold it become `orphan` until the next sync.
 pub fn delete_asset(args: AssetRef, store: &Mutex<Store>) -> Result<String, IpcError> {
+    delete_asset_in(CatalogTarget::Personal, args, store)
+}
+
+/// [`delete_asset`] in `target`.
+pub fn delete_asset_in(
+    target: CatalogTarget<'_>,
+    args: AssetRef,
+    store: &Mutex<Store>,
+) -> Result<String, IpcError> {
     check_name(&args.name)?;
-    let root = repo_root(store)?;
+    let root = target.root(store)?;
     repo::remove_asset(&root, args.kind, &args.name)?;
     let rel = repo::asset_rel_dir(args.kind, &args.name);
     let message = format!("catalog: delete {}/{}", args.kind.as_str(), args.name);
-    commit_and_reload(&root, &[rel], &message, store)
+    commit_and_reload(target, &root, &[rel], &message, store)
 }
 
 /// Repo-relative path for a layer file: `"layers/<name>.yaml"`.
@@ -786,8 +817,17 @@ fn layer_rel_path(name: &str) -> String {
 /// otherwise be committed to disk and then silently dropped by
 /// `LayerSet::from_layers` on the very reload this function triggers.
 pub fn write_layer(layer: &Layer, store: &Mutex<Store>) -> Result<String, IpcError> {
+    write_layer_in(CatalogTarget::Personal, layer, store)
+}
+
+/// [`write_layer`] in `target`.
+pub fn write_layer_in(
+    target: CatalogTarget<'_>,
+    layer: &Layer,
+    store: &Mutex<Store>,
+) -> Result<String, IpcError> {
     check_layer_name(&layer.name)?;
-    let root = repo_root(store)?;
+    let root = target.root(store)?;
     if let Err(e) = layer.validate() {
         let details = serde_json::to_value(&e)
             .map_err(|e| IpcError::new(E_SERIALIZE, format!("lint report: {e}")))?;
@@ -804,15 +844,24 @@ pub fn write_layer(layer: &Layer, store: &Mutex<Store>) -> Result<String, IpcErr
     }
     std::fs::write(&path, layer.to_yaml())?;
     let message = layer_commit_message(verb, &layer.name);
-    commit_and_reload(&root, &[rel], &message, store)
+    commit_and_reload(target, &root, &[rel], &message, store)
 }
 
 /// Delete a layer's file, commit the removal and reload. Hosts assigned it
 /// simply stop resolving it, matching how an asset's disappearance is
 /// handled elsewhere.
 pub fn delete_layer(name: &str, store: &Mutex<Store>) -> Result<String, IpcError> {
+    delete_layer_in(CatalogTarget::Personal, name, store)
+}
+
+/// [`delete_layer`] in `target`.
+pub fn delete_layer_in(
+    target: CatalogTarget<'_>,
+    name: &str,
+    store: &Mutex<Store>,
+) -> Result<String, IpcError> {
     check_layer_name(name)?;
-    let root = repo_root(store)?;
+    let root = target.root(store)?;
     let rel = layer_rel_path(name);
     let path = root.join(&rel);
     if !path.is_file() {
@@ -823,7 +872,7 @@ pub fn delete_layer(name: &str, store: &Mutex<Store>) -> Result<String, IpcError
     }
     std::fs::remove_file(&path)?;
     let message = layer_commit_message("delete", name);
-    commit_and_reload(&root, &[rel], &message, store)
+    commit_and_reload(target, &root, &[rel], &message, store)
 }
 
 fn resource_message(kind: Kind, name: &str) -> String {
@@ -833,9 +882,9 @@ fn resource_message(kind: Kind, name: &str) -> String {
 // Both resource operations rewrite the whole asset from the copy in the
 // in-memory registry — its `resources` carry the bytes `load_dir` read, so
 // an overwrite reproduces the untouched files and prunes the rest. That
-// assumes the registry's personal catalog matches the working tree: it
-// holds what the last `catalog::load` saw, every authoring operation ends
-// with one, and the sequence here is synchronous, so the window in which
+// assumes the target's registry entry matches its working tree: it holds
+// what the last load of that catalog saw, every authoring operation ends
+// with one (`CatalogTarget::reload`), and the sequence here is synchronous, so the window in which
 // someone could edit the repo underneath is a single operation. A
 // concurrent outside edit to another of *this asset's* files would be
 // reverted by the rewrite (and show up in the commit); anything else in the
@@ -927,17 +976,26 @@ pub fn add_resource_bytes(
     args: AddResourceBytesArgs,
     store: &Mutex<Store>,
 ) -> Result<WriteResult, IpcError> {
+    add_resource_bytes_in(CatalogTarget::Personal, args, store)
+}
+
+/// [`add_resource_bytes`] in `target`.
+pub fn add_resource_bytes_in(
+    target: CatalogTarget<'_>,
+    args: AddResourceBytesArgs,
+    store: &Mutex<Store>,
+) -> Result<WriteResult, IpcError> {
     check_name(&args.name)?;
     check_has_resources(args.kind)?;
     check_resource_path(&args.rel_path)?;
-    let root = repo_root(store)?;
+    let root = target.root(store)?;
     let len = args.bytes.len() as u64;
     if len > MAX_RESOURCE_BYTES {
         return Err(too_big(&args.rel_path, len));
     }
     let rel_path = args.rel_path;
 
-    let mut asset = catalog_asset(args.kind, &args.name)?;
+    let mut asset = catalog_asset_in(target, args.kind, &args.name)?;
     asset.resources.retain(|r| r.rel_path != rel_path);
     asset.resources.push(super::model::Resource {
         rel_path: rel_path.clone(),
@@ -946,10 +1004,10 @@ pub fn add_resource_bytes(
     asset.resources.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
 
     let message = resource_message(args.kind, &args.name);
-    let commit = write_commit_reload(&root, &asset, true, &message, store)?;
+    let commit = write_commit_reload(target, &root, &asset, true, &message, store)?;
     Ok(WriteResult {
         commit,
-        lint: lint_in_repo(&asset, &root),
+        lint: lint_in_repo(target, &asset, &root),
     })
 }
 
@@ -959,12 +1017,21 @@ pub fn remove_resource(
     args: RemoveResourceArgs,
     store: &Mutex<Store>,
 ) -> Result<WriteResult, IpcError> {
+    remove_resource_in(CatalogTarget::Personal, args, store)
+}
+
+/// [`remove_resource`] in `target`.
+pub fn remove_resource_in(
+    target: CatalogTarget<'_>,
+    args: RemoveResourceArgs,
+    store: &Mutex<Store>,
+) -> Result<WriteResult, IpcError> {
     check_name(&args.name)?;
     check_has_resources(args.kind)?;
     check_resource_path(&args.rel_path)?;
-    let root = repo_root(store)?;
+    let root = target.root(store)?;
 
-    let mut asset = catalog_asset(args.kind, &args.name)?;
+    let mut asset = catalog_asset_in(target, args.kind, &args.name)?;
     let before = asset.resources.len();
     asset.resources.retain(|r| r.rel_path != args.rel_path);
     if asset.resources.len() == before {
@@ -975,17 +1042,26 @@ pub fn remove_resource(
     }
 
     let message = resource_message(args.kind, &args.name);
-    let commit = write_commit_reload(&root, &asset, true, &message, store)?;
+    let commit = write_commit_reload(target, &root, &asset, true, &message, store)?;
     Ok(WriteResult {
         commit,
-        lint: lint_in_repo(&asset, &root),
+        lint: lint_in_repo(target, &asset, &root),
     })
 }
 
 /// Commit whatever is in the working tree (what an import leaves behind).
 /// `E_CATALOG_GIT` when the tree is clean.
 pub fn commit_pending(args: CommitPendingArgs, store: &Mutex<Store>) -> Result<String, IpcError> {
-    let root = repo_root(store)?;
+    commit_pending_in(CatalogTarget::Personal, args, store)
+}
+
+/// [`commit_pending`] in `target`.
+pub fn commit_pending_in(
+    target: CatalogTarget<'_>,
+    args: CommitPendingArgs,
+    store: &Mutex<Store>,
+) -> Result<String, IpcError> {
+    let root = target.root(store)?;
     let message = args
         .message
         .as_deref()
@@ -996,35 +1072,65 @@ pub fn commit_pending(args: CommitPendingArgs, store: &Mutex<Store>) -> Result<S
     if repo::git_status(&root)?.dirty == 0 {
         return Err(IpcError::new(E_CATALOG_GIT, "nothing to commit"));
     }
-    commit_and_reload(&root, &[], &message, store)
+    commit_and_reload(target, &root, &[], &message, store)
 }
 
 /// `git push` the catalog repo, then report the fresh status.
 pub fn push(store: &Mutex<Store>) -> Result<RepoStatus, IpcError> {
-    let root = repo_root(store)?;
+    push_in(CatalogTarget::Personal, store)
+}
+
+/// [`push`] `target`'s checkout.
+pub fn push_in(target: CatalogTarget<'_>, store: &Mutex<Store>) -> Result<RepoStatus, IpcError> {
+    let root = target.root(store)?;
     repo::push(&root)?;
     repo::git_status(&root)
 }
 
 pub fn repo_status(store: &Mutex<Store>) -> Result<RepoStatus, IpcError> {
-    let root = repo_root(store)?;
+    repo_status_in(CatalogTarget::Personal, store)
+}
+
+/// [`repo_status`] of `target`'s checkout.
+pub fn repo_status_in(
+    target: CatalogTarget<'_>,
+    store: &Mutex<Store>,
+) -> Result<RepoStatus, IpcError> {
+    let root = target.root(store)?;
     repo::git_status(&root)
 }
 
 pub fn lint_asset(args: AssetRef, store: &Mutex<Store>) -> Result<LintReport, IpcError> {
+    lint_asset_in(CatalogTarget::Personal, args, store)
+}
+
+/// [`lint_asset`] in `target`.
+pub fn lint_asset_in(
+    target: CatalogTarget<'_>,
+    args: AssetRef,
+    store: &Mutex<Store>,
+) -> Result<LintReport, IpcError> {
     check_name(&args.name)?;
-    let root = repo_root(store)?;
-    let asset = catalog_asset(args.kind, &args.name)?;
-    Ok(lint_in_repo(&asset, &root))
+    let root = target.root(store)?;
+    let asset = catalog_asset_in(target, args.kind, &args.name)?;
+    Ok(lint_in_repo(target, &asset, &root))
 }
 
 /// Every asset linted against the loaded catalog, borrowed from the
 /// registry (R16); an unloaded catalog lints against an empty one.
 pub fn lint_everything(store: &Mutex<Store>) -> Result<LintAll, IpcError> {
-    let root = repo_root(store)?;
+    lint_everything_in(CatalogTarget::Personal, store)
+}
+
+/// [`lint_everything`] over `target`, borrowed (R16).
+pub fn lint_everything_in(
+    target: CatalogTarget<'_>,
+    store: &Mutex<Store>,
+) -> Result<LintAll, IpcError> {
+    let root = target.root(store)?;
     let names = secrets_example_names(&root);
     let exists = root.join(SECRETS_EXAMPLE).exists();
-    match registry::with_personal(|c| Ok(lint_all_with(c, &names, exists))) {
+    match target.with(|c| Ok(lint_all_with(c, &names, exists))) {
         Ok(all) => Ok(all),
         Err(e) if e.code == super::E_CATALOG_NOT_CONFIGURED => {
             Ok(lint_all_with(&Catalog::default(), &names, exists))
@@ -1038,6 +1144,7 @@ mod tests {
     use super::*;
     use crate::service::catalog::lock_registry_for_test;
     use crate::service::catalog::model::{Resource, Source, TargetOverride};
+    use crate::service::catalog::registry;
     use std::path::PathBuf;
 
     // ------------------------------------------------------------ helpers
@@ -2310,5 +2417,64 @@ mod tests {
             catalog_asset(Kind::Skill, "src").unwrap().header.scope,
             Scope::Shared
         );
+    }
+
+    // ------------------------------------------------------ per catalog
+
+    /// Carry 1 (Rulings R21): an authoring call aimed at an org catalog
+    /// writes, commits and reloads that catalog's checkout — personal's
+    /// HEAD never moves.
+    #[test]
+    fn authoring_writes_the_named_catalogs_checkout_only() {
+        let _g = lock_registry_for_test();
+        let personal = init_repo("m4-personal");
+        let acme_root = init_repo("m4-acme");
+        let store = configured_store(&personal);
+        let acme = {
+            let s = store.lock().unwrap();
+            let org = s.add_org("acme", None, false).unwrap();
+            s.upsert_catalog("acme", &acme_root.to_string_lossy(), None, Some(org.id))
+                .unwrap()
+        };
+        crate::service::catalog::load(false, &store).unwrap();
+        crate::service::catalog::load_catalog(acme.id, false, &store).unwrap();
+        let personal_head = git(&personal, &["rev-parse", "HEAD"]);
+        let target = CatalogTarget::Row(&acme);
+
+        create_in(
+            target,
+            CreateArgs {
+                kind: Kind::Skill,
+                name: "ops".into(),
+                duplicate_from: None,
+            },
+            &store,
+        )
+        .unwrap();
+        assert!(acme_root.join("skills/ops/asset.yaml").is_file());
+        assert!(!personal.join("skills/ops").exists());
+        assert_eq!(subjects(&acme_root)[0], "catalog: create skill/ops");
+        assert_eq!(
+            git(&personal, &["rev-parse", "HEAD"]),
+            personal_head,
+            "personal untouched"
+        );
+        assert!(
+            registry::with_catalog_row(&acme, |c| Ok(c.find(Kind::Skill, "ops").is_some()))
+                .unwrap(),
+            "acme reloaded, not personal"
+        );
+
+        write_layer_in(target, &layer_template("ops-core", Axis::Context), &store).unwrap();
+        assert!(acme_root.join("layers/ops-core.yaml").is_file());
+        assert_eq!(repo_status_in(target, &store).unwrap().dirty, 0);
+        let ops = AssetRef {
+            kind: Kind::Skill,
+            name: "ops".into(),
+        };
+        assert!(lint_asset_in(target, ops.clone(), &store).is_ok());
+        delete_asset_in(target, ops, &store).unwrap();
+        assert!(!acme_root.join("skills/ops").exists());
+        assert_eq!(git(&personal, &["rev-parse", "HEAD"]), personal_head);
     }
 }

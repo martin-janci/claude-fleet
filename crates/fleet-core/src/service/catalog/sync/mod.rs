@@ -95,6 +95,12 @@ pub struct SyncRunSummary {
     pub started_at: i64,
     pub finished_at: i64,
     pub hosts: Vec<HostSyncResult>,
+    /// Assets M4, final review I3: SB6's automatic additive sync ran this,
+    /// not a person (nor a card a person applied). The scan tick's
+    /// "everything changed" key skips such runs. Absent (false) on every
+    /// other run, so their stored JSON is unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto: bool,
 }
 
 /// Every catalog in `snapshot`, merged (`registry::union_of`). This is the
@@ -405,6 +411,7 @@ pub async fn plan_sync(
                         speaks_for: Some(eff.speaks_for.clone()),
                         held_back: eff
                             .held_back_for(manifest.assets.values().map(|e| e.catalog.as_str())),
+                        problem_held: eff.problem_held.clone(),
                     };
                     let mut hp = plan::compute_host_plan(
                         planned,
@@ -640,6 +647,27 @@ pub async fn apply_sync_with(
     ssh: &Arc<SshClient>,
     token: CancellationToken,
 ) -> Result<SyncRunSummary, IpcError> {
+    apply_sync_run(args, false, store, ssh, token).await
+}
+
+/// [`apply_sync_with`] for SB6's automatic additive sync: its `sync_runs`
+/// row is marked `auto` (final review I3).
+pub(crate) async fn apply_sync_auto(
+    args: ApplyArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    token: CancellationToken,
+) -> Result<SyncRunSummary, IpcError> {
+    apply_sync_run(args, true, store, ssh, token).await
+}
+
+async fn apply_sync_run(
+    args: ApplyArgs,
+    auto: bool,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+    token: CancellationToken,
+) -> Result<SyncRunSummary, IpcError> {
     let (expires_at, computed) =
         plan::registry_take_with_expiry(&args.plan_id).ok_or_else(stale_plan)?;
 
@@ -732,6 +760,7 @@ pub async fn apply_sync_with(
         started_at,
         finished_at,
         hosts: results,
+        auto,
     };
     // The history entry is best-effort: the host writes have already
     // landed, so losing the `sync_runs` row must not turn a completed sync

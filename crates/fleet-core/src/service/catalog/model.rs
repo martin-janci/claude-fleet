@@ -59,9 +59,7 @@ impl Kind {
         }
     }
 
-    /// Reserved for the sync engine (resolving a scanned/installed path back
-    /// to its `Kind`); not yet called from a non-test build.
-    #[allow(dead_code)]
+    /// The kind whose catalog directory is `dir`.
     pub fn from_dir(dir: &str) -> Option<Kind> {
         Kind::ALL.iter().copied().find(|k| k.dir() == dir)
     }

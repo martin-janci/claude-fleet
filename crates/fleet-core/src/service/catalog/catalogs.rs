@@ -65,23 +65,31 @@ pub fn config_row(row: &CatalogRow) -> CatalogConfigRow {
     }
 }
 
+/// One catalog's store record: its row, owner name, admissions, grantees.
+type CatalogRecord = (CatalogRow, Option<String>, Vec<String>, Vec<String>);
+
+/// Every catalog's store record, under one guard (released before any
+/// registry or disk read).
+fn catalog_rows(store: &Mutex<Store>) -> Result<Vec<CatalogRecord>, IpcError> {
+    let s = lock(store)?;
+    let orgs = s.list_orgs()?;
+    let mut rows = Vec::new();
+    for r in s.list_catalogs()? {
+        let org = r
+            .org_id
+            .and_then(|id| orgs.iter().find(|o| o.id == id).map(|o| o.name.clone()));
+        let admitted = s.catalog_admissions(r.id)?;
+        let granted = s.catalog_grantees(r.id)?;
+        rows.push((r, org, admitted, granted));
+    }
+    Ok(rows)
+}
+
 /// Every catalog with its load state, personal first. Store rows are read
 /// under one guard, released, then the registry is read (store → registry
 /// is never allowed).
 pub fn list_catalogs(store: &Mutex<Store>) -> Result<Vec<CatalogStatus>, IpcError> {
-    let mut rows = Vec::new();
-    {
-        let s = lock(store)?;
-        let orgs = s.list_orgs()?;
-        for r in s.list_catalogs()? {
-            let org = r
-                .org_id
-                .and_then(|id| orgs.iter().find(|o| o.id == id).map(|o| o.name.clone()));
-            let admitted = s.catalog_admissions(r.id)?;
-            let granted = s.catalog_grantees(r.id)?;
-            rows.push((r, org, admitted, granted));
-        }
-    }
+    let rows = catalog_rows(store)?;
     registry::with_catalogs(|m| {
         Ok(rows
             .into_iter()
@@ -111,6 +119,59 @@ pub fn list_catalogs(store: &Mutex<Store>) -> Result<Vec<CatalogStatus>, IpcErro
             })
             .collect())
     })
+}
+
+/// `fleet-hub catalog list` (Assets M4, R23 — M-e): every catalog as its
+/// checkout stands, read only — parsed in place (`repo::load_dir`), never
+/// cloned (`ensure_repo` is not called), never recorded in the store, never
+/// put in the registry. `head_commit`/`last_loaded_at` stay the store's
+/// record of the last load.
+pub fn probe_catalogs(store: &Mutex<Store>) -> Result<Vec<CatalogStatus>, IpcError> {
+    Ok(catalog_rows(store)?
+        .into_iter()
+        .map(|(r, org, admitted, granted)| {
+            let reload = if r.org_id.is_none() {
+                "fleet-hub catalog reload".to_string()
+            } else {
+                format!("fleet-hub catalog reload --catalog {}", r.name)
+            };
+            let root = std::path::Path::new(&r.repo_path);
+            let (state, problem, asset_count) = match root.join(".git").try_exists() {
+                Ok(false) => (
+                    "not_loaded",
+                    Some(format!(
+                        "no checkout at {} yet; `{reload}` clones or loads it",
+                        r.repo_path
+                    )),
+                    0,
+                ),
+                Err(e) => (
+                    "problem",
+                    Some(format!("catalog checkout {}: {e}", r.repo_path)),
+                    0,
+                ),
+                Ok(true) => match repo::load_dir(root) {
+                    Ok(c) => ("loaded", None, c.assets.len()),
+                    Err(e) => ("problem", Some(e.message), 0),
+                },
+            };
+            CatalogStatus {
+                id: r.id,
+                name: r.name,
+                org_id: r.org_id,
+                org,
+                repo_path: r.repo_path,
+                remote_url: r.remote_url,
+                head_commit: r.head_commit,
+                last_loaded_at: r.last_loaded_at,
+                state: state.to_string(),
+                problem,
+                asset_count,
+                admitted,
+                granted,
+            }
+        })
+        .collect())
 }
 
 /// The org named by `catalog add --org` (case-insensitively) as its id;

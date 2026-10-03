@@ -104,6 +104,14 @@
         {
           "type": "field",
           "key": "catalog.scan_max_age_secs"
+        },
+        {
+          "type": "field",
+          "key": "catalog.auto"
+        },
+        {
+          "type": "field",
+          "key": "catalog.auto_push"
         }
       ]
     },
