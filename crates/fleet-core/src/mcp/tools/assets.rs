@@ -276,6 +276,119 @@ impl FleetTools {
         ok_json(&value)
     }
 
+    #[tool(description = "Changeset cards that adopt, sync and fix assets: \
+        list (one in full with id), propose (rebuild from the last scan), \
+        apply (positions picks items; a drift card takes one), undo (the \
+        latest applied card per catalog), dismiss, reject_item. Mutating \
+        actions need a grant on every catalog the card names.")]
+    pub(super) async fn changesets(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<ChangesetsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use catalog::changesets as cs;
+        audit(
+            "changesets",
+            &format!(
+                "action={} id={} caller={}",
+                p.action,
+                p.id.map_or_else(|| "-".to_string(), |i| i.to_string()),
+                caller.label()
+            ),
+        );
+        let personal = catalog::catalogs::PERSONAL;
+        match p.action.as_str() {
+            // PF15: every card names catalogs and hosts across orgs — the
+            // master's, or a person's own unbound full device, as
+            // `list_catalogs`.
+            "list" => {
+                if !(caller.is_master()
+                    || (caller.is_person_device() && caller.mode == TokenMode::Full))
+                {
+                    return Err(mcp_err(
+                        "E_FORBIDDEN",
+                        format!(
+                            "changesets list needs the master token or a full paired client \
+                             bound to no org ({} refused)",
+                            caller.label()
+                        ),
+                        None,
+                    ));
+                }
+                match p.id {
+                    Some(id) => ok_json(&cs::get(id, &self.store).map_err(to_mcp_err)?),
+                    None => ok_json_compact(&cs::list(&self.store).map_err(to_mcp_err)?),
+                }
+            }
+            "propose" => {
+                if !may_admin_catalog(&caller, &self.store, personal)? {
+                    return Err(changesets_forbidden("propose", Some(personal), &caller));
+                }
+                catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+                ok_json_compact(&cs::propose(&self.store).await.map_err(to_mcp_err)?)
+            }
+            "apply" | "undo" | "dismiss" | "reject_item" => {
+                let id = p.id.ok_or_else(|| {
+                    mcp_err(
+                        codes::E_INVALID,
+                        format!("changesets {} needs an id", p.action),
+                        None,
+                    )
+                })?;
+                // The card is read and the grants checked under the lock the
+                // action runs under, so a refresh in between cannot add an
+                // item in a catalog the caller holds no grant for.
+                let busy = cs::authoring_lock().await;
+                let (card, items) = match cs::card(id, &self.store) {
+                    Ok(found) => found,
+                    // R22: a client is not told which cards exist.
+                    Err(e) if e.code == codes::E_NOTFOUND && !caller.is_master() => {
+                        return Err(changesets_forbidden(&p.action, None, &caller));
+                    }
+                    Err(e) => return Err(to_mcp_err(e)),
+                };
+                let writes_hosts =
+                    p.action == "apply" && cs::writes_hosts(&card, &items, p.positions.as_deref());
+                self.check_card_grants(&caller, &p.action, &items, writes_hosts)?;
+                let view = match p.action.as_str() {
+                    "apply" => {
+                        if writes_hosts {
+                            self.confirm_gate(
+                                "apply_sync",
+                                p.confirm_nonce.as_deref(),
+                                &format!("changeset={id}"),
+                                &caller,
+                            )?;
+                        }
+                        catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
+                        let args = cs::apply::ApplyArgs {
+                            id,
+                            positions: p.positions,
+                        };
+                        cs::apply::apply_held(&busy, args, &self.store, &self.ssh).await
+                    }
+                    "undo" => cs::undo::undo_held(&busy, id, &self.store).await,
+                    "dismiss" => cs::undo::dismiss_held(&busy, id, &self.store).await,
+                    _ => {
+                        let positions = p.positions.ok_or_else(|| {
+                            mcp_err(codes::E_INVALID, "reject_item needs positions", None)
+                        })?;
+                        cs::undo::reject_items_held(&busy, id, &positions, &self.store).await
+                    }
+                };
+                ok_json(&view.map_err(to_mcp_err)?)
+            }
+            other => Err(mcp_err(
+                codes::E_INVALID,
+                format!(
+                    "unknown changesets action {other}: \
+                     list|propose|apply|undo|dismiss|reject_item"
+                ),
+                None,
+            )),
+        }
+    }
+
     #[tool(description = "Store a value for a catalog ${NAME} placeholder \
         (global, or per host with host_alias). Master token only. The value \
         is never returned or logged.")]
@@ -484,6 +597,85 @@ impl FleetTools {
         }
         Ok(())
     }
+
+    /// R25: a grant on every catalog the card's items name (none named, as
+    /// a hide-only card: personal), and personal too for an apply that
+    /// writes hosts. A per-host token is refused at the central gate first
+    /// (`NOT_FOR_HOST_TOKENS`) and would never pass here either
+    /// (`may_admin_catalog_row`). R22: a catalog that no longer exists is
+    /// `E_NOTFOUND` for the master and the ungranted refusal for a client.
+    fn check_card_grants(
+        &self,
+        caller: &Caller,
+        action: &str,
+        items: &[crate::store::ChangesetItemRow],
+        writes_hosts: bool,
+    ) -> Result<(), McpError> {
+        let ids: std::collections::BTreeSet<i64> =
+            items.iter().filter_map(|i| i.catalog_id).collect();
+        let rows: Vec<(i64, Option<crate::store::CatalogRow>)> = {
+            let s = self
+                .store
+                .lock()
+                .map_err(|_| mcp_err(codes::E_LOCK, "store mutex poisoned", None))?;
+            ids.iter()
+                .map(|id| s.get_catalog(*id).map(|row| (*id, row)))
+                .collect::<Result<_, _>>()
+                .map_err(|e| to_mcp_err(e.into()))?
+        };
+        let personal = catalog::catalogs::PERSONAL;
+        if (writes_hosts || rows.is_empty()) && !may_admin_catalog(caller, &self.store, personal)? {
+            return Err(changesets_forbidden(action, Some(personal), caller));
+        }
+        for (id, row) in &rows {
+            let Some(row) = row else {
+                if caller.is_master() {
+                    return Err(mcp_err(
+                        codes::E_NOTFOUND,
+                        format!("the card names catalog {id}, which no longer exists"),
+                        None,
+                    ));
+                }
+                return Err(changesets_forbidden(action, None, caller));
+            };
+            let name = if row.org_id.is_none() {
+                personal
+            } else {
+                row.name.as_str()
+            };
+            if !may_admin_catalog_row(caller, &self.store, name, Some(row))? {
+                return Err(changesets_forbidden(action, Some(name), caller));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The `E_FORBIDDEN` for a `changesets` action without the grant it needs,
+/// naming the catalog and the operator's remedy on the hub. `None`: a card
+/// or catalog that does not exist, said the way an ungranted one is, with
+/// no name (R22).
+fn changesets_forbidden(action: &str, catalog: Option<&str>, caller: &Caller) -> McpError {
+    let message = match catalog {
+        Some(name) => {
+            let grant = if name == catalog::catalogs::PERSONAL {
+                "fleet-hub client grant <name> assets".to_string()
+            } else {
+                format!("fleet-hub client grant <name> assets --catalog {name}")
+            };
+            format!(
+                "changesets {action} needs the master token or a paired client granted \
+                 catalog {name} ({} refused); on the hub: {grant}",
+                caller.label()
+            )
+        }
+        None => format!(
+            "changesets {action} needs the master token or a paired client granted every \
+             catalog the card names ({} refused)",
+            caller.label()
+        ),
+    };
+    mcp_err("E_FORBIDDEN", message, None)
 }
 
 /// True when `caller` may touch the catalog `name` whose row the caller has

@@ -8,7 +8,7 @@ use super::*;
 use crate::service::catalog::admin::AdminCall;
 use serde_json::{json, Value};
 
-fn tools(s: Store) -> FleetTools {
+pub(super) fn tools(s: Store) -> FleetTools {
     FleetTools::new(
         Arc::new(Mutex::new(s)),
         Arc::new(SshClient::new()),
@@ -18,7 +18,7 @@ fn tools(s: Store) -> FleetTools {
     )
 }
 
-fn client(id: i64, mode: TokenMode, org_id: Option<i64>) -> Caller {
+pub(super) fn client(id: i64, mode: TokenMode, org_id: Option<i64>) -> Caller {
     Caller {
         host_alias: None,
         client: Some(crate::mcp::auth::ClientRef {
@@ -31,7 +31,7 @@ fn client(id: i64, mode: TokenMode, org_id: Option<i64>) -> Caller {
     }
 }
 
-fn host(alias: &str) -> Caller {
+pub(super) fn host(alias: &str) -> Caller {
     Caller {
         host_alias: Some(alias.into()),
         client: None,
@@ -86,7 +86,7 @@ async fn call_on(
     call_with(t, caller, p).await
 }
 
-fn code_of(r: &Result<CallToolResult, McpError>) -> String {
+pub(super) fn code_of(r: &Result<CallToolResult, McpError>) -> String {
     match r {
         Ok(_) => "OK".into(),
         Err(e) => e.message.split(':').next().unwrap_or_default().to_string(),
@@ -486,7 +486,7 @@ async fn set_host_harnesses_sets_normalises_and_clears() {
 /// `personal` and an `acme` org catalog (neither loadable), host `h` with no
 /// org; `desk` holds personal, `ops` holds acme, `plain` holds nothing.
 /// Returns `(store, desk_id, ops_id, plain_id, acme_id)`.
-fn two_catalog_store() -> (Store, i64, i64, i64, i64) {
+pub(super) fn two_catalog_store() -> (Store, i64, i64, i64, i64) {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
     s.set_catalog_config("/nonexistent/m3-personal", None)
@@ -504,7 +504,7 @@ fn two_catalog_store() -> (Store, i64, i64, i64, i64) {
 }
 
 /// The message of an `Err`, for asserting what a refusal says.
-fn message_of(r: Result<CallToolResult, McpError>) -> String {
+pub(super) fn message_of(r: Result<CallToolResult, McpError>) -> String {
     r.err().map(|e| e.message.to_string()).unwrap_or_default()
 }
 

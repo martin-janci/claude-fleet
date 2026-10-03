@@ -1072,6 +1072,22 @@ pub struct CatalogAdminParams {
     pub catalog: Option<String>,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ChangesetsParams {
+    /// list|propose|apply|undo|dismiss|reject_item
+    pub action: String,
+    /// The card: list shows it in full; apply|undo|dismiss|reject_item need it.
+    #[serde(default)]
+    pub id: Option<i64>,
+    /// apply: items (default all pending but "needs a look"; drift: one).
+    /// reject_item: required.
+    #[serde(default)]
+    pub positions: Option<Vec<i64>>,
+    /// apply of a rollout or restore: nonce of an approved E_CONFIRM_REQUIRED.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
+}
+
 #[derive(serde::Deserialize, schemars::JsonSchema, Default)]
 pub struct UpdateStatusParams {
     /// client:<id>, agent:<alias> or hub:self: its whole decision.

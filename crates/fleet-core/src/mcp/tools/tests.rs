@@ -2161,7 +2161,8 @@ fn capture_default_cap_matches_docs() {
 /// `catalog_admin`, and host identity & health's `merge_host` and
 /// `forget_project`: 95; `update_status` / `update_admin`: 97; `session_tool_detail`: 98 (102 with
 /// the tools main added alongside it; declarative pages' `guide`: 103;
-/// multi-harness F3a's `set_host_harnesses`: 104.)
+/// multi-harness F3a's `set_host_harnesses`: 104; Assets M4's
+/// `changesets`: 105.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -2183,7 +2184,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 104);
+    assert_eq!(served, 105);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3441,7 +3442,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// description and its `catalog` parameter, +40 bytes). Measured at
     /// 70,542 on 2026-10-03 after Assets M4 Task 3 (`catalog_admin`'s
     /// `catalog` parameter names the authoring actions, +19 bytes).
-    const BUDGET_BYTES: usize = 70_642;
+    /// Measured at 71,417 on 2026-10-03 after Assets M4 Task 9 (the
+    /// `changesets` tool and its four parameters, +875 bytes; master only —
+    /// a per-host token is never served it).
+    const BUDGET_BYTES: usize = 71_517;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
