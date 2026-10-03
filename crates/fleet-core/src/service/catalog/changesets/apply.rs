@@ -1012,6 +1012,7 @@ fn record(
                 applied: &applied,
                 skipped: &skipped,
                 verdicts: &verdicts,
+                error: None,
             },
         )
         .map_err(|e| bookkeeping(e.into()))
@@ -1643,9 +1644,9 @@ async fn apply_restore(
 }
 
 /// R15 with PF5: the selected items of hosts that applied are `applied`.
-/// No host failed: the card is `applied` (in one transaction with its
-/// items; every other pending item `skipped`), any skipped host named in
-/// its `error` as a note. Else the card is `failed` naming the hosts that
+/// No host failed: the card is `applied` — in one transaction with its
+/// items (every other pending item `skipped`) and its note, any skipped
+/// host named in `error`. Else the card is `failed` naming the hosts that
 /// failed — answered as the card's view, not as an error, since some hosts
 /// may have changed — and the failed and skipped hosts' items stay
 /// pending, so applying the card again finishes them.
@@ -1681,11 +1682,9 @@ fn finish_host_card(
                 applied: &done,
                 skipped: &rest,
                 verdicts: &[],
+                error: note.as_deref(),
             },
         )?;
-        if let Some(note) = note {
-            s.set_changeset_state(card.id, "applied", Some(&note))?;
-        }
     } else {
         let mut msg = failures.join("; ");
         if let Some(note) = note {

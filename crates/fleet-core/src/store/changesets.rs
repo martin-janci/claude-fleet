@@ -209,12 +209,15 @@ pub struct AppliedRecord<'a> {
     pub applied: &'a [i64],
     pub skipped: &'a [i64],
     pub verdicts: &'a [TriageVerdictRow],
+    /// A note on the applied card (a host card's skipped hosts), written
+    /// with it — `None` clears any earlier error.
+    pub error: Option<&'a str>,
 }
 
 impl Store {
     /// A card's apply recorded in ONE transaction: its verdicts, its items
-    /// `applied` / `skipped`, the card `applied`. Any failure rolls all of
-    /// it back.
+    /// `applied` / `skipped`, the card `applied` with `r.error` as its note.
+    /// Any failure rolls all of it back.
     pub fn record_changeset_applied(&self, id: i64, r: &AppliedRecord<'_>) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         for v in r.verdicts {
@@ -222,7 +225,7 @@ impl Store {
         }
         set_item_states(&tx, id, r.applied, "applied")?;
         set_item_states(&tx, id, r.skipped, "skipped")?;
-        mark_applied(&tx, id, r.applied_at, r.commits, r.layers_snapshot, None)?;
+        mark_applied(&tx, id, r.applied_at, r.commits, r.layers_snapshot, r.error)?;
         tx.commit()
     }
 
@@ -745,6 +748,7 @@ mod tests {
             applied: &[0, 1],
             skipped: &[],
             verdicts: std::slice::from_ref(&bad),
+            error: None,
         };
         assert!(s.record_changeset_applied(card.id, &r).is_err());
         assert_eq!(s.get_changeset(card.id).unwrap().unwrap().state, "proposed");
@@ -763,6 +767,7 @@ mod tests {
             verdicts: &[good],
             applied: &[1],
             skipped: &[0],
+            error: Some("skipped: trn (claude): unreachable"),
             ..r
         };
         s.record_changeset_applied(card.id, &r).unwrap();
@@ -770,6 +775,11 @@ mod tests {
         assert_eq!(
             (row.state.as_str(), row.applied_at),
             ("applied", Some(1_700_000_000_000))
+        );
+        assert_eq!(
+            row.error.as_deref(),
+            Some("skipped: trn (claude): unreachable"),
+            "the note lands in the same transaction"
         );
         let states: Vec<String> = s
             .changeset_items(card.id)
