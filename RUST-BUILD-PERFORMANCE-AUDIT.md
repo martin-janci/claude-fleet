@@ -9,6 +9,27 @@ this repository (method in §6). Each number is real but machine-specific, so
 use the ratios. Estimates are labelled as such, and anything that needs an
 A/B benchmark says so.
 
+> **Follow-up status (2026-10-03).** §1–§25 are the original baseline and are
+> left as measured. Each change implemented since was re-measured, and the
+> results are in the appendices:
+> C (PR #422: validation ladder, `line-tables-only`, desktop `rlib`, SQLite
+> O3, toolchain pin), D (#425: SQLite memstatus off, template test DB),
+> E (#428: contract tests out of fleet-core's build inputs, the agent e2e
+> crate), F (#429: `fleet-fast-check`), G (the test-target split
+> experiment) and H (cargo-nextest, partitions and build-once/run-many).
+> Where a later measurement overturns a recommendation below,
+> that passage carries an *Update* note. For a fleet-core edit on the same
+> 4 vCPU machine, the numbers today are:
+>
+> | | baseline (§1) | now |
+> |---|---:|---:|
+> | inner-loop check | 14 s (`cargo check`) | **12.2–12.6 s** (`cargo fleet-fast-check`) |
+> | full check incl. test code | — | 19 s (`cargo fleet-check`) |
+> | test build after the edit | 39 s | 27–30 s |
+> | `.ts` mirror / `lib.rs` / doc edit, test build | 29–34 s | **0.4 s / 4.8 s / 0.4 s** |
+> | `cargo test --workspace`, warm | 16 min 14 s | **2 min 26 s** |
+> | CI wall per run | 35.5 min | 11–18 min (the Windows leg) |
+
 ## 1. Executive dashboard
 
 ```
@@ -77,6 +98,8 @@ TARGET SIZE                     after build 9.9 GB · + test 21 GB · + check/cl
 | 4 | **Dev debuginfo**: `line-tables-only` and/or no debuginfo for dependencies | probes P1/P2: `line-tables-only`: fleet-core edit **31.4 → 24.2 s (−23 %)**, Tauri edit **14.7 → 8.4 s (−43 %)**, cold 4:00 → 3:25, `target/` 9.9 → 5.8 GB. Deps-only: −10 % on the core edit, 7.4 GB | Low | Low (debugger UX; offer a `dev-debug` profile) |
 | 5 | **CI path filters + dedupe** (docs/frontend-only skip Rust; drop the duplicate Linux fleet-core test run; pin the toolchain) | **≈30–40 % of ≈111 runner-min per run**; fewer unrelated failures | Low | Low |
 | 6 | **Split fleet-core** along store / trackers / MCP / base, and move cross-crate e2e/contract tests into their own test crate | An integration edit stops recompiling 155k LOC. Agent/`lib.rs`/`.ts` edits stop rebuilding the 326k-LOC test target (−29–34 s each, measured as current cost). **Needs per-step A/B** | High (module cycles) | Medium |
+
+*Update (Appendices E, G):* the contract/e2e half of row 6 is done (PR #428). The split half was measured and is **not** worth doing for build speed. Taking every test out of fleet-core's test target at once saves at most 8.5 s of test build and 6.6 s of check, and `fleet-fast-check` already reaches that check ceiling. No single module saves more than 4.4 s, and the one that does needs ≥ 59 private items.
 
 ## 4. Verified architecture
 
@@ -1085,11 +1108,20 @@ selection only gets you as far as "run all of fleet-core". Two options:
 2. **Crate split** (Phase 2): turns module filters into real graph edges, so
    the planner gets correctness from cargo instead of from a path table.
 
+   *Update (Appendix G):* do not split the source tree for CI's sake. Test
+   runtime and test compile cost are nearly unrelated here. `work` and
+   `catalog` run 61–67 s of tests, yet removing them from the compile
+   target saves only 1.3–1.6 s. So CI should parallelise test *execution*:
+   build the one fleet-core test binary once, then shard it across agents
+   (below). That needs no source change.
+
 Pair with **cargo-nextest**: process-per-test isolation, retries for the known
 timing-sensitive flakes, JUnit output for Buildkite's test analytics, and
 `--partition count:i/N` to shard the 12.6 min fleet-core suite across agents.
 A/B before adopting: process-per-test can be slower than libtest's threads
-when per-test setup is cheap.
+when per-test setup is cheap. *Update:* the suite is now 95 s wall, or 310 s
+of summed test time (Appendix G.1), so shard by summed time. Partitioning
+this one binary is the first step for Buildkite, ahead of any crate split.
 
 ### 19.4 Cache architecture
 
@@ -1293,6 +1325,14 @@ reliably without one.
 3. Break fleet-core module cycles, then extract `fleet-base` → `fleet-store`
    → `fleet-trackers` → `fleet-mcp`, measuring after each.
 
+   *Update (Appendix G):* item 1 is done (PR #428). Item 3 is no longer a
+   build-speed measure. The A/B experiment caps its gain at −8.5 s test
+   build / −6.6 s check even if every test left fleet-core, and the check
+   gain is already delivered by `fleet-fast-check`. Do it only for an
+   architectural benefit (a real boundary, tighter CI isolation), never for
+   seconds. Each step still needs a ≥ 3–5 s measured gain on the critical
+   path before it can claim a speed benefit.
+
 * **Expected benefit:** integration/store edits recompile a fraction of
   155k LOC; agent/contract edits stop rebuilding the 326k-LOC test target;
   feature variants collapse. **Effort:** weeks. **Risk:** medium (large
@@ -1378,6 +1418,16 @@ store / trackers (integrations) / MCP / base. That turns the 155k-LOC
 single unit, and its 326k-LOC test unit, into a graph cargo can skip parts
 of, and it gives CI real affected-crate selection.
 
+*Update (Appendices E, G):* the first half paid off. With the contract and
+e2e tests moved out, an edit to a `.ts` mirror, `lib.rs`, a doc or
+fleet-agent costs 0.4–4.8 s, down from 27–29 s. The follow-up A/B experiment
+showed that moving tests by itself does not bring enough wall-clock gain.
+The best single group saves 4.4 s of test build, and only with ≥ 59 private
+items exposed. Removing all of them saves at most 8.5 s, and nothing on
+check beyond what `fleet-fast-check` already gives. The largest remaining
+long-term lever is therefore not a source-tree change. It is the inner-loop
+tiering already in place, plus parallel test *execution* in CI.
+
 **5. How much time is currently wasted by unnecessary workspace-wide builds?**
 Locally, per fleet-core edit: `cargo test --workspace` instead of check +
 targeted test wastes ~16 min. `cargo build` instead of `check` wastes ~18 s.
@@ -1440,6 +1490,9 @@ then module-level test selection. Run on persistent, warm, per-platform
 builders with one feature world per pipeline. Build each artifact once (hub
 binary, test binaries) and reuse it. Keep full suites for merge and nightly,
 and track flaky and slow tests through nextest/JUnit.
+*Update (Appendix G):* parallelise the fleet-core suite by partitioning its
+one test binary (`nextest --partition`, sharded by summed test time) before
+any thought of splitting the source tree for CI.
 
 **13. What should Buildkite explicitly NOT do?**
 Run `cargo build --workspace && cargo test --workspace` on every push.
@@ -2031,3 +2084,209 @@ code are a poor guide here, since the tracker tests are 6.5 % of the test
 code but about 16 % of its test-build cost. Any later split should be chosen
 by measured seconds per module, and should be made only for ≥ 3–5 s off the
 critical path.
+
+## Appendix G — Post-audit test-target split experiment (2026-10-03)
+
+Question: should fleet-core be split (its tests into separate crates, or
+the source into `fleet-base` / `fleet-store` / …) to make the edit loop
+faster? This was measured after PRs #425, #428 and #429. It is a
+measurement only: no code was moved.
+
+### G.1 Method
+
+* **Ceiling by exclusion.** For each group, `#[cfg(any())]` is added in
+  front of every `#[cfg(test)]` test module in the group's subtree. Helpers
+  such as `testkit`, `testgen` and `fake` are kept. This removes the group
+  from fleet-core's test target as if it had moved away at no cost, so the
+  result is an upper bound on what moving it could save. A real move adds
+  the new crate's own compile on the same cores.
+* **The edit.** A private fn is appended to `service/health.rs`, three
+  times per group. Each time, `cargo test --workspace --lib --bins
+  --no-run --timings` (test build) runs first, then `cargo check
+  --workspace --all-targets --timings` (= `fleet-check`). The tree is
+  restored after each group.
+* **Baseline**: six samples, three before and three after the run. Test
+  build 28.2–29.9 s (mean 28.8; the fleet-core lib-test unit 28.3). Check
+  18.5–20.9 s (mean 19.7; the check-test unit 19.2). A delta under about
+  1.5–2 s is therefore within noise: the tracker group measured −2.3 s in
+  Appendix F and −0.9 s here.
+* **Runtime**: one run of the fleet-core test binary with `--report-time`
+  (4 threads). The per-test times are summed per group. The run took 95 s
+  wall, with 310 s of summed test time.
+* **Private API**: the compiler census of Appendix F.2, extended to the
+  largest inline `mod tests` blocks of each group. Each block is compiled
+  outside the crate, and the count is the private production items it
+  needs. The counts are approximate (a few std names are miscounted).
+* **Cross-references** found while excluding, i.e. tests that call
+  another module's test helpers: `pages/flows.rs` → `trackers::admin::tests`,
+  `catalog/repo.rs` and `provision.rs` → `move_session::carry::tests`, and
+  `gc/tidy/tests.rs` → `gc::tests`. The referenced module was kept, and a
+  split would have to untangle these first.
+
+### G.2 Ranking (fleet-core edit, mean of three; Δ against the baseline)
+
+| Group | Δ `fleet-check` | Δ test build | runtime (summed) | private API needed | split difficulty |
+|---|---:|---:|---:|---|---|
+| **all test code (ceiling)** | **−6.6 s** (→ 13.1) | **−8.5 s** (→ 20.3) | 310 s (4,717 tests) | — | — |
+| `service/*.rs` (top-level files, 48 inline modules; `gc.rs` kept) | −2.8 s | **−4.4 s** | 66.9 s (1,418) | ≥ 59 (repair 19, add_project 35, hooks 5) | high: white-box tests in ~40 files |
+| `mcp` | −1.8 s | −2.3 s | 30.5 s (440) | 74 (tests 63, tests_isolation 11) | high |
+| `store` | −1.3 s | −1.9 s | 11.4 s (610) | n/a: its submodules are private, the API is `Store`'s methods | high |
+| `service/sessions` | −1.4 s | −1.8 s | 5.3 s (289) | 58 | high |
+| `service/move_session` (`carry.rs` kept) | −1.6 s | −1.8 s | 10.4 s (231) | 15 | medium (cross-reference) |
+| `service/decide` | −1.6 s | −1.8 s | 4.0 s (155) | 1 | low |
+| `service/work` | −1.0 s | −1.6 s | 67.2 s (284) | 3 (`view_tests` only) | low–medium |
+| `service/catalog` | −1.1 s | −1.3 s | 61.4 s (452) | 11 (`sync/plan` 8, `sync` 3) | medium |
+| `service/trackers` (`admin.rs` kept) | −1.1 s | −0.9 s | 41.8 s (285) | ~10 | low–medium (cross-reference) |
+
+### G.3 What it shows
+
+1. **No group clears a 3–5 s bar on its own, except one that cannot move
+   cleanly.** The top-level `service/*.rs` files save 4.4 s of test build
+   (2.8 s of check). They are 48 inline white-box test modules, and moving
+   them would expose ≥ 59 private production items. Every other group is
+   at or near noise.
+2. **The check ceiling is already reached without a split.** With no test
+   code at all, `fleet-check` would take 13.1 s. `fleet-fast-check` (Appendix
+   F) takes 12.2–12.6 s today, with no source change.
+3. **The test-build ceiling is −8.5 s (28.8 → 20.3 s)**, and only if all
+   ~169k lines of tests left fleet-core and the crates receiving them
+   compiled for free. They would not: they compile on the same four cores,
+   after fleet-core's library (15 s).
+4. **The per-group deltas do not add up.** They sum to about 18 s against
+   the 8.5 s ceiling. Extrapolating from one module overstates the gain.
+5. **Runtime and compile cost are nearly unrelated.** `work` and `catalog`
+   carry 61–67 s of test runtime but only 1.3–1.6 s of compile cost.
+   `store` is the reverse (610 tests, 11 s runtime). For CI the lever is
+   therefore execution parallelism: shard the one test binary (§19.3,
+   *Update*), not the source tree.
+
+**Conclusion.** Splitting fleet-core, or moving its tests into crates, for
+build speed is closed experimentally: it is not worth doing. The inner loop
+is `fleet-fast-check` (12.2–12.6 s). The checkpoint is `fleet-check` (19 s).
+The test build is 27–30 s, and the full suite 2 min 26 s. Below this,
+optimising the source architecture for seconds would cost more in design
+than it returns. A split remains open only for an architectural reason.
+
+## Appendix H — cargo-nextest, partitions and build-once/run-many (2026-10-03)
+
+After PRs #425–#430, test *execution* is the largest step of the slowest CI
+legs. This appendix measures whether cargo-nextest and sharding the suite
+would shorten a PR. It is a measurement only. cargo-nextest 0.9.146 (the
+prebuilt binary) ran from a scratch directory, and nothing in the
+repository or CI changed.
+
+### H.1 `cargo test` vs `cargo nextest run` (4 vCPU Linux, warm, 5,497 tests)
+
+| | run 1 | run 2 | recompiled |
+|---|---:|---:|---:|
+| `cargo test --workspace` | 151.6 s | 142.5 s | — |
+| `cargo nextest run --workspace` | 145.6 s | 146.4 s | 0 crates |
+
+* **Compile overhead: none.** nextest runs the same test binaries `cargo
+  test` builds. Its first listing of the tests takes 5.1 s, later ones
+  0.7 s.
+* **Per-test overhead: +53 % CPU.** fleet-core's summed test time is
+  472–477 s under nextest against 310 s under libtest (Appendix G.1), about
+  35 ms per test. nextest runs every test in its own process, and the
+  template database (Appendix D) is migrated once per process, so here it
+  is migrated once per test. On one machine this is offset by nextest
+  running all binaries at once, where `cargo test` runs them one after
+  another.
+* **The longest single test is 33 s** (`claude-fleet`
+  `backend::routing::tests::a_hub_with_a_skewed_wire_contract_refuses_every_routed_command`).
+  No shard can be shorter than that.
+
+### H.2 Partitions (each shard run on its own, 4 threads, as on a 4 vCPU runner)
+
+The slowest shard sets the wall time:
+
+| mode | 2 shards | 3 shards | 4 shards |
+|---|---:|---:|---:|
+| `count` | 80.4 s | 67.5 s | 51.6 s |
+| `hash` | | | **48.7 s** |
+| `slice` | | | 62.6 s |
+| ideal, balanced by measured time (offline, from the JUnit times) | 71.6 s | 47.7 s | 35.8 s |
+
+Beyond 6 shards the 33 s test is the floor. None of nextest's modes
+balances by time. `hash` is the best of the three at 4 shards and is about
+13 s off the ideal. Splitting by measured time would need filtersets per
+shard generated from the JUnit durations.
+
+### H.3 Stability
+
+* **Repeated full runs.** Every test ran in 9 full-suite equivalents (2
+  `cargo test`, 2 nextest, 5 partition sets): 0 failures.
+* **Timing spread** across those runs, for the tests CLAUDE.md lists as
+  flaky: `scale_work_view` 24.5–26.4 s, `scale_work_today` 6.9–7.4 s,
+  `ring_pressure_default_interval_*` 4.2–4.9 s, `tests_upgrade` 0.2–0.3 s.
+* **Stress run.** The same groups (scale, ring-pressure, upgrade, add_project
+  and rewind, 117 tests) ran with `--stress-count 5 --test-threads 8` on 4
+  cores, i.e. 2× oversubscribed. All 5 iterations passed, at 34–36 s each.
+
+### H.4 Build once, run many (`cargo nextest archive`)
+
+* **The archive.** 306 MB (zstd), created in 16 s from a warm build: 17
+  binaries, 60 files. It extracts in 2–7 s.
+* **Same checkout path.** With a checkout at the build's absolute path,
+  all 5,497 tests pass from the archive (144.5 s).
+* **Different checkout path.** With a plain checkout elsewhere and the
+  original path hidden (a tmpfs mounted over it in a private mount
+  namespace), **150 tests fail**: 146 in fleet-core, mostly the trackers'
+  fixtures and the contract checks, and 4 in the desktop crate. They read
+  files through `env!("CARGO_MANIFEST_DIR")`, a path baked in at compile
+  time (25 sites). nextest's `--workspace-remap` cannot change that.
+  * GitHub Actions uses the same path for every job on one OS, so this
+    works there.
+  * A Buildkite agent's checkout path includes the agent name. Such a
+    pipeline needs a fixed checkout path, or those 25 sites switched to
+    the runtime `CARGO_MANIFEST_DIR` (cargo and nextest both set it when
+    a test runs).
+
+### H.5 The CI side (PR #429's run, the `cargo test` step)
+
+Compile is counted from the step start to the first test binary; run is
+the rest.
+
+| job | compile | test run |
+|---|---:|---:|
+| `rust (ubuntu)` | 1:51 | 2:13 |
+| `rust (macos)`, 3 vCPU | **3:58** | 2:34 |
+| `rust-windows` | 1:50 | **4:20** (desktop 95 s, fleet-core 157 s) |
+| `hub-headless`, the duplicate fleet-core run | 1:43 | 1:34 |
+
+Execution dominates only on Windows. On macOS, compiling against a cold
+cache dominates: rust-cache restores dependencies but strips the workspace
+crates.
+
+### H.6 What 4 shards would give a PR on GitHub-hosted runners (estimate)
+
+Assumed overheads: each shard job adds ~1:15 (runner start, checkout,
+downloading 306 MB, installing nextest, extracting), and the build job
+adds ~0:45 for the archive and its upload.
+
+| leg | test run today | with 4 shards (slowest shard + overhead) | change |
+|---|---:|---:|---|
+| Linux | 2:13 | ~0:45 + ~2:00 | neutral, or worse if clippy stays in the build job |
+| macOS | 2:34 | ~0:50 + ~2:00 | none; the 3:58 compile stays |
+| Windows | 4:20 | ~1:10 + ~2:00 | ~−1 min, *if* nextest's per-process overhead on Windows is not much larger than Linux's +53 %. Windows starts processes more slowly, and this could not be measured here. |
+
+The PR wall time would go from ~11:06 to ~9:40, with the macOS leg then
+critical. The cost is 4 more jobs per OS and more runner-minutes.
+
+### H.7 Conclusion
+
+* Sharding with nextest on GitHub-hosted runners is **not worth it now**:
+  about one minute of PR latency for 4× the jobs.
+* Build-once/run-many is the right shape, but it pays on **persistent,
+  warm builders** (Buildkite, Phase 4). There an edit costs an incremental
+  compile, not 1:50–3:58 against a cold cache, and the shards run only
+  the ~2:13–4:20 of execution. Such a pipeline needs three things:
+  * a fixed checkout path, or the 25 `env!("CARGO_MANIFEST_DIR")` sites
+    moved to the runtime variable;
+  * `hash` partitions, or per-shard filtersets balanced by JUnit time
+    (≈ 36 s at 4 shards);
+  * budget for nextest's +53 % test CPU.
+* A cheaper GitHub Actions step with a larger effect than sharding: move
+  `pnpm tauri build` out of `rust-windows` into its own parallel job. It
+  is ~2.5 min of the Windows critical path, and it would need its own
+  compile.
