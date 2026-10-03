@@ -53,6 +53,24 @@ describe('SubagentBlock', () => {
     expect(screen.queryByTestId('conv-subagent-status')).toBeNull();
   });
 
+  it('a workflow is headed by its own name, not by "subagent"', () => {
+    render(SubagentBlock, {
+      item: item({
+        name: 'Workflow',
+        agent_type: null,
+        description: 'Relaunch T8d then T9 under the new account',
+        result: '{"t8d":{"green":true}}',
+      }),
+      nowMs: 0,
+      live: false,
+    });
+    const head = screen.getByTestId('conv-subagent-head');
+    expect(head.textContent).toContain('workflow');
+    expect(head.textContent).not.toContain('subagent');
+    expect(head.textContent).toContain('Relaunch T8d then T9 under the new account');
+    expect(screen.getByTestId('conv-subagent-result').textContent).toContain('"t8d"');
+  });
+
   it('error is marked', () => {
     render(SubagentBlock, { item: item({ error: true }), nowMs: 0, live: false });
     const block = screen.getByTestId('conv-subagent');

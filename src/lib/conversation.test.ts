@@ -13,6 +13,7 @@ import {
   emptyStateText,
   emptyStateHint,
   relativeTime,
+  blockTypeLabel,
   groupItems,
   toolName,
   toolGroupLabel,
@@ -264,6 +265,26 @@ function subagent(over: Partial<Extract<ConvItem, { kind: 'subagent' }>> = {}) {
     ...over,
   };
 }
+
+describe('blockTypeLabel', () => {
+  const b = (agent_type: string | null, name: string) => blockTypeLabel({ agent_type, name });
+
+  it('leads with the agent type when the call named one', () => {
+    expect(b('Explore', 'Task')).toBe('Explore');
+  });
+
+  it('falls back to "subagent" for the subagent tools and for an older hub', () => {
+    expect(b(null, 'Task')).toBe('subagent');
+    expect(b(null, 'Agent')).toBe('subagent');
+    expect(b(null, '')).toBe('subagent');
+  });
+
+  it('names a block that is not a subagent after its own tool', () => {
+    // The case this exists for: the hub sends a `Workflow` call as a
+    // `subagent` item, and "subagent" is the one word that would be wrong.
+    expect(b(null, 'Workflow')).toBe('workflow');
+  });
+});
 
 describe('groupItems', () => {
   it('keeps text items apart and folds consecutive tool calls together', () => {
@@ -871,6 +892,25 @@ describe('transcriptBackground', () => {
     ]);
     expect(got).toHaveLength(2);
     expect(new Set(got.map((e) => e.key)).size).toBe(2);
+  });
+
+  it('lists a running workflow, which the hub sends as a subagent item', () => {
+    // `Workflow` shares the `subagent` kind (BLOCK_TOOLS in the hub's
+    // transcript.rs), so it is listed from its launch rather than only once
+    // its notification lands — which, for a workflow that runs for hours, is
+    // the difference between the switcher knowing about it and not.
+    const wf = {
+      ...bgAgentItem('toolu_W'),
+      name: 'Workflow',
+      agent_type: null,
+      description: 'Relaunch T8d then T9 under the new account',
+    };
+    const got = transcriptBackground([bgTurn([wf])]);
+    expect(got).toHaveLength(1);
+    expect(got[0].kind).toBe('Workflow');
+    expect(got[0].status).toBe('running');
+    expect(got[0].label).toBe('Relaunch T8d then T9 under the new account');
+    expect(got[0].key).toBe('tool:toolu_W');
   });
 
   it('keys two id-less subagent items apart', () => {

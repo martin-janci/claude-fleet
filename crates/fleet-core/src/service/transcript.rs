@@ -53,13 +53,32 @@ const TOOL_TARGET_MAX_CHARS: usize = 120;
 /// Chars kept of a subagent's final text.
 const SUBAGENT_RESULT_MAX_CHARS: usize = 1_500;
 /// `tool_use` names that get their own [`ConvItem::Subagent`] item instead
-/// of a plain [`ConvItem::Tool`].
-const SUBAGENT_TOOLS: [&str; 2] = ["Task", "Agent"];
+/// of a plain [`ConvItem::Tool`]: a call that is a whole piece of work,
+/// whose result is the part somebody scrolls back for.
+///
+/// `Workflow` is not a subagent — it is a script that orchestrates them —
+/// but it is one of these, and it deliberately shares the `subagent` wire
+/// kind rather than getting one of its own. A workflow runs for hours and
+/// reports once; folded into a run of tool one-liners (and summarised as
+/// `Workflow({"script":"export const meta = …` — its input carries the whole
+/// script) it was the least visible thing in the turn while being the
+/// largest. A new `kind` would have shown as "(unsupported item: workflow)"
+/// on every phone already shipped, exactly the drift
+/// `the_wire_kinds_a_phone_must_also_understand` is about; reusing this one
+/// draws the block on both surfaces with no client change at all.
+const BLOCK_TOOLS: [&str; 3] = ["Task", "Agent", "Workflow"];
+
+/// Of [`BLOCK_TOOLS`], the ones that ALWAYS run in the background: their
+/// `tool_result` is the launch acknowledgement, never the report, so there
+/// is no ack text to recognise — the name is enough.
+const ALWAYS_BACKGROUND_TOOLS: [&str; 1] = ["Workflow"];
 
 /// The `tool_result` of a backgrounded `Agent` call is an acknowledgement
 /// that the agent was launched, not its report — the report arrives later in
 /// a `<task-notification>`. Recognising it keeps the block reading as running
-/// until the real one lands.
+/// until the real one lands. (A foreground `Agent` call's result IS its
+/// report, which is why the text has to be read at all; see
+/// [`ALWAYS_BACKGROUND_TOOLS`] for the tools that need no such test.)
 const AGENT_LAUNCH_ACK: &str = "Async agent launched successfully";
 
 /// Encode a working directory the way Claude Code names its per-project
@@ -262,6 +281,90 @@ pub fn tool_target(_name: &str, input: Option<&serde_json::Value>) -> Option<Str
         }
     }
     None
+}
+
+/// Chars of a `Workflow` script read when looking for its `meta` literal.
+/// The literal is required to be the script's first statement, so a window
+/// is enough and a long script is never scanned.
+const WORKFLOW_META_WINDOW: usize = 1_200;
+
+static WORKFLOW_META_START: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"export\s+const\s+meta\s*=\s*\{").expect("workflow meta regex")
+});
+static WORKFLOW_META_DESCRIPTION: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"\bdescription\s*:\s*['"`]([^'"`\n]{1,200})['"`]"#)
+            .expect("workflow meta description regex")
+    });
+static WORKFLOW_META_NAME: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r#"\bname\s*:\s*['"`]([^'"`\n]{1,200})['"`]"#)
+        .expect("workflow meta name regex")
+});
+
+/// PURE: the label in a `Workflow` script's own `meta` block — its
+/// `description` (the sentence the permission dialog shows), else its
+/// `name`. `None` when the script has no readable `meta` literal.
+///
+/// A deliberately small reader, not a JavaScript parser: the tool's contract
+/// is that `meta` is the first statement and a pure literal with no
+/// variables, calls or interpolation, so the two fields are string literals
+/// at a known place. Anything else reads as absent and the caller falls back
+/// to the call's other inputs — a wrong label would be worse than none.
+fn workflow_meta_label(script: &str) -> Option<String> {
+    let start = WORKFLOW_META_START.find(script)?.end();
+    let rest = &script[start..];
+    // On a char boundary: a script is full of prose (one em dash in an agent
+    // prompt is enough) and slicing bytes would panic.
+    let cut = (0..=rest.len().min(WORKFLOW_META_WINDOW))
+        .rev()
+        .find(|i| rest.is_char_boundary(*i))
+        .unwrap_or(0);
+    let mut window = &rest[..cut];
+    // And never past the literal's own closing brace at the start of a line
+    // (`}` in column 0): past there are the script's agent prompts, which
+    // have `description`s of their own.
+    if let Some(end) = window.find("\n}") {
+        window = &window[..end];
+    }
+    let pick = |re: &regex::Regex| {
+        re.captures(window)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().trim())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    pick(&WORKFLOW_META_DESCRIPTION).or_else(|| pick(&WORKFLOW_META_NAME))
+}
+
+/// What a [`BLOCK_TOOLS`] call says it is doing, for its block's heading.
+///
+/// `Task` / `Agent` carry it in `description`. A `Workflow` call usually
+/// does not — the tool ignores that input and the workflow names itself in
+/// the `meta` literal of the `script` it is handed — so for a workflow the
+/// script is read, then the `name` of a predefined workflow, then its
+/// `scriptPath`. One of those four is almost always there; when none is,
+/// the block still draws, headed by the tool's own name.
+///
+/// Flattened to one line and capped like a tool row's target: a description
+/// is a label, and a block's heading is one line.
+fn block_description(name: &str, input: Option<&serde_json::Value>) -> Option<String> {
+    let map = input?.as_object()?;
+    let str_at = |k: &str| {
+        map.get(k)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    let label = match str_at("description") {
+        Some(d) => d.to_string(),
+        None if name == "Workflow" => str_at("script")
+            .and_then(workflow_meta_label)
+            .or_else(|| str_at("name").map(String::from))
+            .or_else(|| str_at("scriptPath").map(String::from))?,
+        None => return None,
+    };
+    let one = one_line(&label);
+    (!one.is_empty()).then(|| cap_chars(&one, TOOL_TARGET_MAX_CHARS))
 }
 
 /// The text of a tool_result's content (a string, or its text blocks
@@ -974,6 +1077,7 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                     *ended_at = ended;
                                 }
                                 Some(ConvItem::Subagent {
+                                    name,
                                     error,
                                     done,
                                     ended_at,
@@ -981,9 +1085,15 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                     ..
                                 }) => {
                                     *error |= is_err;
-                                    let ack = tool_result_text(b)
-                                        .map(|t| t.trim().starts_with(AGENT_LAUNCH_ACK))
-                                        .unwrap_or(false);
+                                    // A failed result is the call's own end,
+                                    // never a launch: a workflow whose script
+                                    // would not load reports here and nowhere
+                                    // else.
+                                    let ack = !is_err
+                                        && (ALWAYS_BACKGROUND_TOOLS.contains(&name.as_str())
+                                            || tool_result_text(b)
+                                                .map(|t| t.trim().starts_with(AGENT_LAUNCH_ACK))
+                                                .unwrap_or(false));
                                     if ack {
                                         // Backgrounded: this result only says
                                         // the agent started. Leave the block
@@ -1240,17 +1350,14 @@ pub fn parse_conversation(jsonl: &str) -> Vec<ConvTurn> {
                                     tool_items.insert(id.clone(), turn.items.len());
                                 }
                                 let input = b.get("input");
-                                if SUBAGENT_TOOLS.contains(&name.as_str()) {
+                                if BLOCK_TOOLS.contains(&name.as_str()) {
                                     turn.items.push(ConvItem::Subagent {
                                         id,
                                         agent_type: input
                                             .and_then(|v| v.get("subagent_type"))
                                             .and_then(|v| v.as_str())
                                             .map(String::from),
-                                        description: input
-                                            .and_then(|v| v.get("description"))
-                                            .and_then(|v| v.as_str())
-                                            .map(String::from),
+                                        description: block_description(&name, input),
                                         result: None,
                                         error: false,
                                         at: at(),
@@ -3195,6 +3302,202 @@ mod tests {
         };
         assert_eq!(*result, None, "the ack is metadata, not a report");
         assert!(!*done, "the agent is still running until it notifies");
+    }
+
+    /// The script a `Workflow` call is handed, in the shape the tool's own
+    /// contract requires: `meta` first, a pure literal.
+    fn workflow_script() -> String {
+        [
+            "export const meta = {",
+            "  name: 'review-changes',",
+            "  description: 'Review changed files across dimensions, verify each finding',",
+            "  phases: [{ title: 'Review' }, { title: 'Verify' }],",
+            "}",
+            "const DIMENSIONS = [{ key: 'bugs', description: 'not the workflow's own' }]",
+            "return { confirmed: DIMENSIONS }",
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn a_workflow_is_a_block_of_its_own_not_a_folded_tool_line() {
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("relaunch T8d then T9")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_1",
+                "Workflow",
+                serde_json::json!({"script": workflow_script()}),
+            ),
+        ]));
+        let ConvItem::Subagent {
+            name,
+            agent_type,
+            description,
+            done,
+            ..
+        } = &t[0].items[0]
+        else {
+            panic!("expected a block, got {:?}", t[0].items[0]);
+        };
+        assert_eq!(name, "Workflow");
+        assert_eq!(*agent_type, None, "a workflow is not a subagent type");
+        assert_eq!(
+            description.as_deref(),
+            Some("Review changed files across dimensions, verify each finding")
+        );
+        assert!(!*done, "no result yet");
+    }
+
+    #[test]
+    fn a_workflows_result_is_always_only_its_launch() {
+        // Unlike `Agent`, there is no foreground form to tell apart: the tool
+        // returns a run id immediately and the report arrives in a
+        // notification. So the block stays open with no ack text to read.
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_1",
+                "Workflow",
+                serde_json::json!({"script": workflow_script()}),
+            ),
+            tool_result(
+                "2026-09-18T10:00:02Z",
+                "toolu_1",
+                serde_json::json!("Workflow started. runId: wf_abc123"),
+                false,
+            ),
+            task_notification(
+                "2026-09-18T18:00:19Z",
+                "<task-notification>\n<task-id>wf_abc123</task-id>\n\
+                 <tool-use-id>toolu_1</tool-use-id>\n<status>completed</status>\n\
+                 <summary>Workflow finished</summary>\n\
+                 <result>{\"confirmed\":[]}</result>\n</task-notification>",
+            ),
+        ]));
+        let ConvItem::Subagent {
+            result,
+            done,
+            ended_at,
+            ..
+        } = &t[0].items[0]
+        else {
+            panic!("expected a block");
+        };
+        assert_eq!(
+            result.as_deref(),
+            Some("{\"confirmed\":[]}"),
+            "the notification's report, never the run id the launch returned"
+        );
+        assert!(*done);
+        assert_eq!(ended_at.as_deref(), Some("2026-09-18T18:00:19Z"));
+    }
+
+    #[test]
+    fn a_workflow_that_fails_to_start_closes_its_block_there() {
+        // A failed result is the call's own end — nothing will notify — so
+        // the launch-ack rule must not leave it reading as running forever.
+        let t = parse_conversation(&jl(&[
+            user(serde_json::json!("go")),
+            tool_use(
+                "2026-09-18T10:00:01Z",
+                "toolu_1",
+                "Workflow",
+                serde_json::json!({"script": "const meta = 1"}),
+            ),
+            tool_result(
+                "2026-09-18T10:00:02Z",
+                "toolu_1",
+                serde_json::json!("script must begin with `export const meta`"),
+                true,
+            ),
+        ]));
+        let ConvItem::Subagent {
+            result,
+            done,
+            error,
+            description,
+            ..
+        } = &t[0].items[0]
+        else {
+            panic!("expected a block");
+        };
+        assert!(*done);
+        assert!(*error);
+        assert_eq!(
+            result.as_deref(),
+            Some("script must begin with `export const meta`")
+        );
+        assert_eq!(
+            *description, None,
+            "no meta literal, no name, no path: the block is headed by the tool alone"
+        );
+    }
+
+    #[test]
+    fn a_workflow_is_labelled_by_its_own_meta_block() {
+        let label = |v: serde_json::Value| block_description("Workflow", Some(&v));
+        assert_eq!(
+            label(serde_json::json!({"script": workflow_script()})).as_deref(),
+            Some("Review changed files across dimensions, verify each finding"),
+            "meta.description, and not a `description` inside the script's body"
+        );
+        assert_eq!(
+            label(serde_json::json!({"script":
+                "export const meta = { name: 'nightly-sweep' }\nreturn 1"}))
+            .as_deref(),
+            Some("nightly-sweep"),
+            "meta.name when the literal carries no description"
+        );
+        assert_eq!(
+            label(serde_json::json!({"description":"what the caller said","script": workflow_script()}))
+                .as_deref(),
+            Some("what the caller said"),
+            "an explicit description is the caller's own words and wins"
+        );
+        assert_eq!(
+            label(serde_json::json!({"name":"saved-workflow"})).as_deref(),
+            Some("saved-workflow"),
+            "a predefined workflow names itself"
+        );
+        assert_eq!(
+            label(serde_json::json!({"scriptPath":"/tmp/x/wf.mjs"})).as_deref(),
+            Some("/tmp/x/wf.mjs")
+        );
+        assert_eq!(label(serde_json::json!({"args": [1, 2]})), None);
+        // A `Task` / `Agent` call keeps reading only `description`: nothing
+        // else in its input is a label (its `prompt` is the whole brief).
+        assert_eq!(
+            block_description(
+                "Agent",
+                Some(&serde_json::json!({"prompt":"do the thing","name":"x"}))
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_workflow_label_is_one_line_and_capped_on_a_char_boundary() {
+        let long = "é".repeat(TOOL_TARGET_MAX_CHARS + 50);
+        let got = block_description(
+            "Workflow",
+            Some(&serde_json::json!({"script":
+                format!("export const meta = {{\n  description: '{long}',\n}}")})),
+        )
+        .unwrap();
+        assert_eq!(got.chars().count(), TOOL_TARGET_MAX_CHARS + 1);
+        assert!(got.ends_with('…'));
+        // A multi-byte window cut must not panic either (the window is 1 200
+        // bytes into a script of nothing but multi-byte chars).
+        let wide = format!(
+            "export const meta = {{ name: 'ok' }}\n// {}",
+            "ú".repeat(2_000)
+        );
+        assert_eq!(
+            block_description("Workflow", Some(&serde_json::json!({"script": wide}))).as_deref(),
+            Some("ok")
+        );
     }
 
     #[test]
