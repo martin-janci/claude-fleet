@@ -385,6 +385,12 @@ REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
   `no_eprintln_tests::production_code_spawns_through_proc` enforces it.
 - SQLite access goes through `Store` behind a `std::sync::Mutex`. Never hold the
   guard across an `.await`.
+- In tests, `Store::open_in_memory()` / `open_with_bus_in_memory` hand out a
+  copy of a database migrated once per test process (`migrated_template_copy`);
+  a test about the migrations themselves builds its database with
+  `store::testgen` / `migrations_through` instead. The bundled SQLite is built
+  with `SQLITE_DEFAULT_MEMSTATUS=0` (`.cargo/config.toml`), so it takes no
+  process-wide lock per allocation.
 - No blocking I/O under `Mutex<PtyState>` and none on a sync Tauri command (a
   sync command runs on the macOS main thread). PTY input goes to the writer
   thread through its bounded channel — `E_PTY_BUSY` when it is full,

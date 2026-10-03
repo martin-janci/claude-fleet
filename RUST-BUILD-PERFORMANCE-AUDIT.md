@@ -1868,3 +1868,47 @@ The base is `main` at `3849d49`, merged into this branch.
 * Feature-world `target/` separation and the `nl-detect` move were not part
   of this package. They only matter for people mixing `tauri dev` /
   `tauri build` with the canonical commands.
+
+## Appendix D — The test-suite floor: SQLite's global allocation lock and the template database (2026-10-03)
+
+### D.1 Diagnosis (measured on `main` = `eddc8fd`, 4 vCPU)
+
+| Measurement | Result |
+|---|---:|
+| fleet-core suite, warm (`--report-time`) | 7:50, 530 s system time, **42.9 M voluntary context switches** |
+| tests in the 0.5–1.5 s band | 1,693 tests, **68 %** of summed test time |
+| `strace -f -c`, 27 trivial `store::peer_links` tests | **99.7 % of syscall time in `futex`**, ~12,500 calls per test |
+| one `Store::open_in_memory()` (93 migrations), 1 thread | 88 ms (84 ms of it without the per-migration FK checks) |
+| the same, 4 threads at once (what libtest does) | **755 ms wall per open** |
+| the same, 4 threads, `SQLITE_CONFIG_MEMSTATUS` off | **80–84 ms**: the contention is gone |
+| page copy of a migrated database (`sqlite3_backup`) | **0.08 ms** |
+
+Cause: libsqlite3-sys's bundled build leaves `SQLITE_DEFAULT_MEMSTATUS` at 1,
+so every SQLite allocation takes one process-wide mutex. Migrations are
+allocation-heavy, because SQLite re-parses the full 163-object schema after
+each DDL statement, so four test threads queue on that one lock. The audit's
+"~1 s per trivial test" was this lock (§7.4 attributed it to the migrations
+and the `-O0` C code; those were the smaller part).
+
+### D.2 A/B (fleet-core suite only, same binary state, temporary patches)
+
+| Variant | Wall | System | Context switches | Tests |
+|---|---:|---:|---:|---|
+| A0 main | 7:50 | 530 s | 42.9 M | 4,713 pass |
+| A1 `SQLITE_DEFAULT_MEMSTATUS=0` | 2:13 (−72 %) | 12.5 s | 123 k | 4,713 pass |
+| A2 template DB only | 1:37 (−79 %) | 25 s | 1.2 M | 4,713 pass |
+| A3 both | **1:28 (−81 %)** | 12.5 s | 116 k | 4,713 pass |
+
+### D.3 Implemented (this branch), full `cargo test --workspace`
+
+| Commit | Change | `cargo test --workspace` | fleet-core | desktop | hub |
+|---|---|---:|---:|---:|---:|
+| `eddc8fd` (main) | — | 11:40 | 516 s | 140 s | 8.5 s |
+| `2404754` | `[env] LIBSQLITE3_FLAGS = "SQLITE_DEFAULT_MEMSTATUS=0"` in `.cargo/config.toml` (+ `COPY .cargo` in the hub Dockerfile) | **3:15 (−72 %)** | 145 s | 35 s | 4.3 s |
+| `6bdc4de` | test-only template: `Store::open_in_memory()` copies a once-migrated database (`rusqlite::backup`, dev-dependency feature) | **2:26 (−79 %)** | 96 s | 36 s | 4.3 s |
+
+All 5,364 tests pass at each step, and `fmt` and `clippy -D warnings` are
+clean. The memstatus flag also applies to release builds, where it removes
+the same lock from the hub's concurrent connections (its effect there was
+not measured). The remaining fleet-core time is mostly the scale and
+ring-pressure tests (`scale_work_view` ~30 s, four others at 8–12 s each).

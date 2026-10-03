@@ -11,3 +11,14 @@
 fleet-check = "check --workspace --all-targets"
 fleet-test = "test --workspace --lib --bins"
 fleet-lint = "clippy --workspace --all-targets -- -D warnings"
+
+# SQLite's allocation statistics off (SQLITE_DEFAULT_MEMSTATUS=0; the bundled
+# libsqlite3-sys build reads LIBSQLITE3_FLAGS). With them on, every SQLite
+# allocation takes one process-wide mutex, so threads that use SQLite at the
+# same time queue on it: 99.7 % of the fleet-core test suite's syscall time
+# was futex, and a store open took 755 ms on 4 threads against 88 ms on one
+# (RUST-BUILD-PERFORMANCE-AUDIT.md, Appendix D). Nothing in fleet reads
+# sqlite3_memory_used / sqlite3_status. crates/fleet-hub/Dockerfile copies
+# this file so the hub image builds with the same flag.
+[env]
+LIBSQLITE3_FLAGS = "SQLITE_DEFAULT_MEMSTATUS=0"
