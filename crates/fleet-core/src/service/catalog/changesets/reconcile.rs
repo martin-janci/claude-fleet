@@ -507,17 +507,21 @@ pub fn after_scan_pass(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) {
 }
 
 /// R17: run `fut` as a detached task (`rt::try_spawn`; `None`, the future
-/// dropped, with no runtime reachable). A panic in it is caught and logged
+/// dropped and a warning logged, with no runtime reachable). A panic in it is caught and logged
 /// as `what` — it never reaches the caller, the runtime or the next tick.
 pub(crate) fn spawn_logged<F>(what: &'static str, fut: F) -> Option<JoinHandle<()>>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    crate::rt::try_spawn(async move {
+    let handle = crate::rt::try_spawn(async move {
         if AssertUnwindSafe(fut).catch_unwind().await.is_err() {
             tracing::error!("{what} panicked");
         }
-    })
+    });
+    if handle.is_none() {
+        tracing::warn!("{what}: no runtime to run it on; skipped this pass");
+    }
+    handle
 }
 
 #[cfg(test)]

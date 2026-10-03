@@ -1704,9 +1704,10 @@ fn finish_host_card(
 /// 0, with nothing applied or recorded, when nothing is left to do. A fleet
 /// with no applied Rollout (pre-M4) answers 0 without planning anything; a
 /// layer's first rollout is always a card (R16). An asset blocked on a
-/// missing secret waits.
+/// missing secret waits. A host a person rejected on a layer's Rollout card
+/// is left out for that layer ([`rejected_rollouts`]).
 pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result<usize, IpcError> {
-    let (rolled, rows, hosts, configured) = {
+    let (rolled, rejected, rows, hosts, configured) = {
         let s = lock(store)?;
         let rolled = s.rolled_out_layers()?;
         if rolled.is_empty() {
@@ -1714,6 +1715,7 @@ pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
         }
         (
             rolled,
+            rejected_rollouts(&s)?,
             s.list_inventory()?,
             s.list_hosts()?,
             s.list_catalogs()?,
@@ -1734,7 +1736,9 @@ pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
             let Some(cid) = id_of.get(&prov.catalog) else {
                 continue;
             };
-            if !rolled.contains(&(*cid, prov.introduced_by.clone())) {
+            if !rolled.contains(&(*cid, prov.introduced_by.clone()))
+                || rejected.contains(&(*cid, prov.introduced_by.clone(), h.alias.clone()))
+            {
                 continue;
             }
             let Some((kind, name)) = key.split_once('/') else {
@@ -1785,6 +1789,44 @@ pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
         .values()
         .filter(|o| o.applied && o.failed.is_empty())
         .count())
+}
+
+/// Fix round 1 (6): every (catalog, layer, host) whose latest decision on
+/// a Rollout card is a person's rejection of its `sync` item — only a
+/// person rejects an item (`reject_item`); a later applied item for the
+/// same triple lifts it. SB6 never syncs what a person said no to.
+fn rejected_rollouts(s: &Store) -> Result<BTreeSet<(i64, String, String)>, IpcError> {
+    let mut cards = s.list_changesets()?;
+    cards.sort_by_key(|c| c.id);
+    let mut last: BTreeMap<(i64, String, String), bool> = BTreeMap::new();
+    for card in cards
+        .iter()
+        .filter(|c| c.kind == CardKind::Rollout.as_str())
+    {
+        for i in s.changeset_items(card.id)? {
+            if i.action != ItemAction::Sync.as_str() {
+                continue;
+            }
+            let (Some(cid), Some(layer)) =
+                (i.catalog_id, ItemParams::parse(i.params.as_deref()).layer)
+            else {
+                continue;
+            };
+            match i.state.as_str() {
+                "rejected" => {
+                    last.insert((cid, layer, i.name.clone()), true);
+                }
+                "applied" => {
+                    last.insert((cid, layer, i.name.clone()), false);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(last
+        .into_iter()
+        .filter_map(|(k, rejected)| rejected.then_some(k))
+        .collect())
 }
 
 #[cfg(test)]
@@ -3690,6 +3732,107 @@ mod tests {
             err.starts_with("not restored: oci (claude)") && err.contains("unreachable"),
             "{err}"
         );
+    }
+
+    /// An inventory row for `w` on `host` (claude) in `state`.
+    fn w_row(f: &Fleet, host: &str, state: &str) -> AssetInventoryRow {
+        AssetInventoryRow {
+            host_alias: host.into(),
+            harness: "claude".into(),
+            kind: "skill".into(),
+            name: "w".into(),
+            state: state.into(),
+            catalog_hash: None,
+            host_hash: None,
+            scanned_at: 1,
+            managed: false,
+            secret_like: false,
+            fleet_owned: false,
+            catalog_id: Some(f.personal.id),
+        }
+    }
+
+    /// A fake ssh that appends a line to `counter` on every remote call
+    /// whose arguments match the shell `pattern`.
+    fn counting_ssh(bin: &Path, home: &Path, counter: &Path, pattern: &str) -> Arc<SshClient> {
+        ssh_with_home_running(
+            bin,
+            home,
+            &format!(
+                "case \"$*\" in {pattern}) echo x >> '{}';; esac",
+                counter.display()
+            ),
+        )
+    }
+
+    /// R17 / fix round 1 (7): on a pre-M4 fleet (no Rollout ever applied)
+    /// SB6 plans nothing and never reaches a host — even with a layered host
+    /// missing a member.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn sb6_on_a_pre_m4_fleet_never_plans_or_uses_ssh() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        f.store
+            .lock()
+            .unwrap()
+            .replace_host_inventory("oci", "claude", &[w_row(&f, "oci", "missing")])
+            .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let counter = bin.path().join("calls");
+        let ssh = counting_ssh(bin.path(), home.path(), &counter, "*");
+        assert_eq!(auto_additive(&f.store, &ssh).await.unwrap(), 0);
+        assert!(!counter.exists(), "no ssh call at all");
+        assert_eq!(last_run(&f), None);
+    }
+
+    /// Fix round 1 (6): a host a person rejected on a layer's Rollout card is
+    /// left out by SB6 for that layer — it is never even planned; once the
+    /// rejection is lifted, SB6 plans it again.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn sb6_leaves_out_a_host_a_person_rejected() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci", "trn"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let id = rollout_card(
+            &f,
+            &[
+                sync_item("core", p, "oci", &["skill/w"]),
+                sync_item("core", p, "trn", &["skill/w"]),
+            ],
+        );
+        f.store
+            .lock()
+            .unwrap()
+            .set_changeset_item_states(id, &[1], "rejected")
+            .unwrap();
+        let v = apply_all(&f, id, &ssh).await.unwrap();
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        assert_eq!(item_states(&v), ["applied", "rejected"]);
+        f.store
+            .lock()
+            .unwrap()
+            .replace_host_inventory("trn", "claude", &[w_row(&f, "trn", "missing")])
+            .unwrap();
+
+        let bin2 = tempfile::tempdir().unwrap();
+        let counter = bin2.path().join("trn-calls");
+        let ssh = counting_ssh(bin2.path(), home.path(), &counter, "*'-- trn '*");
+        assert_eq!(auto_additive(&f.store, &ssh).await.unwrap(), 0);
+        assert!(!counter.exists(), "trn was never planned");
+
+        f.store
+            .lock()
+            .unwrap()
+            .set_changeset_item_states(id, &[1], "pending")
+            .unwrap();
+        auto_additive(&f.store, &ssh).await.unwrap();
+        assert!(counter.exists(), "without the rejection SB6 plans trn");
     }
 
     /// A drift card on `skill/w` at `host`: take_host (0), restore (1).
