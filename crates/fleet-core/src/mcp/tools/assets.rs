@@ -204,6 +204,26 @@ impl FleetTools {
             ),
         );
         let (mut call, touches) = parsed?;
+        // R22 (M-d): a named catalog's row is read once, here; the gate and
+        // `run` both use it. The master naming an unknown catalog for a
+        // per-catalog call is told so now — it must never fall through to
+        // personal; a client gets the ungranted refusal below, as before.
+        // (`admit`/`unadmit_catalog` name theirs in args and keep their own
+        // not-found answer.)
+        let target: Option<crate::store::CatalogRow> = match &touches {
+            Touches::Catalog(name) if name != catalog::catalogs::PERSONAL => {
+                let row = lookup_catalog(&self.store, name)?;
+                if row.is_none() && caller.is_master() && call.is_per_catalog() {
+                    return Err(mcp_err(
+                        codes::E_NOTFOUND,
+                        format!("no catalog named {name}; list them with list_catalogs"),
+                        None,
+                    ));
+                }
+                row
+            }
+            _ => None,
+        };
         let allowed = match &touches {
             // Every catalog's paths, remotes and grantees, across orgs: the
             // master's, or a person's own unbound full device.
@@ -211,7 +231,9 @@ impl FleetTools {
                 caller.is_master() || (caller.is_person_device() && caller.mode == TokenMode::Full)
             }
             Touches::MasterOnly(_) => caller.is_master(),
-            Touches::Catalog(name) => may_admin_catalog(&caller, &self.store, name)?,
+            Touches::Catalog(name) => {
+                may_admin_catalog_row(&caller, &self.store, name, target.as_ref())?
+            }
         };
         if !allowed {
             return Err(forbidden(&touches, &caller));
@@ -246,15 +268,9 @@ impl FleetTools {
             }
         }
         self.prepare_admin_call(&mut call, p.confirm_nonce.as_deref(), &caller)?;
-        let value = catalog::admin::run(
-            call,
-            p.catalog.as_deref(),
-            &self.store,
-            &self.ssh,
-            &self.reg,
-        )
-        .await
-        .map_err(to_mcp_err)?;
+        let value = catalog::admin::run(call, target.as_ref(), &self.store, &self.ssh, &self.reg)
+            .await
+            .map_err(to_mcp_err)?;
         ok_json(&value)
     }
 
@@ -465,18 +481,20 @@ impl FleetTools {
     }
 }
 
-/// True when `caller` may touch the catalog named `catalog` (spec:
-/// `may_admin_catalog(caller, catalog_id)`): the master, or a live `full`
+/// True when `caller` may touch the catalog `name` whose row the caller has
+/// already read (`row`; `None` for personal or an unknown name) — spec:
+/// `may_admin_catalog(caller, catalog_id)`. The master, or a live `full`
 /// paired client, bound to no org, holding a grant on it (personal: the
-/// assets grant, R2). Read from the store on every call, so an un-grant or a
-/// revoke holds from the next call on. A per-host token never may: a host's
-/// Claude editing what Sync then writes to every host is exactly what the
-/// master gate exists to prevent. An unknown name is "no" for a client, so
-/// the refusal does not tell it which catalogs exist.
-fn may_admin_catalog(
+/// assets grant, R2). Read from the store on every call, so an un-grant or
+/// a revoke holds from the next call on. A per-host token never may: a
+/// host's Claude editing what Sync then writes to every host is exactly
+/// what the master gate exists to prevent. An unknown name is "no" for a
+/// client, so the refusal does not tell it which catalogs exist.
+fn may_admin_catalog_row(
     caller: &Caller,
     store: &std::sync::Mutex<Store>,
-    catalog: &str,
+    name: &str,
+    row: Option<&crate::store::CatalogRow>,
 ) -> Result<bool, McpError> {
     if caller.is_master() {
         return Ok(true);
@@ -487,16 +505,40 @@ fn may_admin_catalog(
     let s = store
         .lock()
         .map_err(|_| mcp_err(codes::E_LOCK, "store mutex poisoned", None))?;
-    let ok = if catalog == catalog::catalogs::PERSONAL {
+    let ok = if name == catalog::catalogs::PERSONAL {
         s.client_is_assets_admin(c.id)
     } else {
-        match s.get_catalog_by_name(catalog) {
-            Ok(Some(row)) => s.client_may_admin_catalog(c.id, row.id),
-            Ok(None) => Ok(false),
-            Err(e) => Err(e),
+        match row {
+            Some(r) => s.client_may_admin_catalog(c.id, r.id),
+            None => Ok(false),
         }
     };
     ok.map_err(|e| to_mcp_err(e.into()))
+}
+
+/// [`may_admin_catalog_row`] by name, for a caller that has not read the row.
+fn may_admin_catalog(
+    caller: &Caller,
+    store: &std::sync::Mutex<Store>,
+    name: &str,
+) -> Result<bool, McpError> {
+    if caller.is_master() || name == catalog::catalogs::PERSONAL {
+        return may_admin_catalog_row(caller, store, name, None);
+    }
+    let row = lookup_catalog(store, name)?;
+    may_admin_catalog_row(caller, store, name, row.as_ref())
+}
+
+/// The catalog row named `name`, if any.
+fn lookup_catalog(
+    store: &std::sync::Mutex<Store>,
+    name: &str,
+) -> Result<Option<crate::store::CatalogRow>, McpError> {
+    let s = store
+        .lock()
+        .map_err(|_| mcp_err(codes::E_LOCK, "store mutex poisoned", None))?;
+    s.get_catalog_by_name(name)
+        .map_err(|e| to_mcp_err(e.into()))
 }
 
 /// Whether no catalog is configured under `name` any more (`personal` is

@@ -1064,10 +1064,10 @@ pub struct CatalogAdminParams {
     /// apply_sync: nonce of an approved E_CONFIRM_REQUIRED.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
-    /// config|load|list_layers|set_host_layers: catalog name (default
-    /// personal). remove/admit/unadmit_catalog: only the name in args.
-    /// add/remove_catalog: master only.
-    /// Others refuse it (authoring until M4; the rest are not per catalog).
+    /// Catalog name (default personal) for config|load|list_layers|
+    /// set_host_layers and the authoring actions; configure is personal
+    /// only. remove/admit/unadmit_catalog: only the name in args.
+    /// add/remove_catalog: master only. Fleet-wide actions refuse it.
     #[serde(default)]
     pub catalog: Option<String>,
 }

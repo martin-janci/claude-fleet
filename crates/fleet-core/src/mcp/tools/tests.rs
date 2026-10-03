@@ -3437,8 +3437,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// +352 bytes). Measured at 70,523 on 2026-10-02 after merging `main`
     /// into Assets M3 (70,483, +92 bytes) and the final review's M-c
     /// (`remove_catalog` is master-only, said in `catalog_admin`'s
-    /// description and its `catalog` parameter, +40 bytes).
-    const BUDGET_BYTES: usize = 70_623;
+    /// description and its `catalog` parameter, +40 bytes). Measured at
+    /// 70,542 on 2026-10-03 after Assets M4 Task 3 (`catalog_admin`'s
+    /// `catalog` parameter names the authoring actions, +19 bytes).
+    const BUDGET_BYTES: usize = 70_642;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

@@ -560,15 +560,15 @@ async fn each_action_needs_a_grant_on_the_catalog_it_touches() {
         "parity"
     );
 
+    // R21: authoring is per catalog — the grant decides, not the action
+    // (a granted client reaching acme's checkout:
+    // `a_granted_client_authors_in_the_named_catalogs_checkout`).
+    let r = call_on(&t, &desk, "repo_status", None, Some("acme")).await;
+    assert_eq!(code_of(&r), "E_FORBIDDEN");
+    assert!(message_of(r).contains("--catalog acme"), "names the remedy");
+
     // PF16: the refusal is the catalog parameter's, not a parse failure.
     let m = Caller::master();
-    let create = json!({ "kind": "skill", "name": "x" });
-    let r = call_on(&t, &m, "create_asset", Some(create), Some("acme")).await;
-    assert_eq!(code_of(&r), "E_INVALID");
-    assert!(
-        message_of(r).contains("M4"),
-        "authoring is personal-only until M4"
-    );
     let r = call_on(&t, &m, "plan_sync", Some(json!({})), Some("acme")).await;
     assert_eq!(code_of(&r), "E_INVALID");
     assert!(message_of(r).contains("not per catalog"), "fleet-wide");
@@ -594,6 +594,118 @@ async fn each_action_needs_a_grant_on_the_catalog_it_touches() {
         .is_some());
     let r = call(&t, &m, "remove_catalog", Some(rm), None).await;
     assert_eq!(code_of(&r), "OK", "{:?}", r.err());
+}
+
+/// R22 (M-d): the master naming a catalog that does not exist is told so at
+/// the gate — the call never falls through to personal.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn the_master_naming_an_unknown_catalog_gets_not_found() {
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let (s, ..) = two_catalog_store();
+    let t = tools(s);
+    let r = call_on(&t, &Caller::master(), "repo_status", None, Some("ghost")).await;
+    assert_eq!(code_of(&r), "E_NOTFOUND");
+    assert!(message_of(r).contains("no catalog named ghost"));
+}
+
+/// A git checkout holding `catalog.yaml` and a file naming `tag`, so two of
+/// them never share a HEAD.
+fn git_catalog(tag: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!("fleet-mcp-catalog-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+    std::fs::write(root.join("TAG"), tag).unwrap();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["config", "user.email", "t@t"],
+        &["config", "user.name", "t"],
+        &["add", "."],
+        &["commit", "-q", "-m", "init"],
+    ] {
+        let o = crate::proc::std_command("git")
+            .args(args)
+            .current_dir(&root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+    root
+}
+
+fn git_head(root: &std::path::Path) -> String {
+    let o = crate::proc::std_command("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&o.stdout).trim().to_string()
+}
+
+fn json_of(r: Result<CallToolResult, McpError>) -> Value {
+    let r = r.unwrap_or_else(|e| panic!("{}", e.message));
+    let text = r.content[0].as_text().expect("text content").text.clone();
+    serde_json::from_str(&text).expect("tool result is JSON")
+}
+
+/// R21 (carry 1): a client granted only acme authors in acme's checkout —
+/// what it reads and writes is acme's, personal's HEAD never moves — and
+/// the same client still cannot touch personal.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn a_granted_client_authors_in_the_named_catalogs_checkout() {
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let personal = git_catalog("m4-personal");
+    let acme_root = git_catalog("m4-acme");
+    let s = Store::open_in_memory().unwrap();
+    s.set_catalog_config(&personal.to_string_lossy(), None)
+        .unwrap();
+    let org = s.add_org("acme", None, false).unwrap();
+    let acme = s
+        .upsert_catalog("acme", &acme_root.to_string_lossy(), None, Some(org.id))
+        .unwrap();
+    let ops = s.insert_client_token("ops", "bb22", "full").unwrap();
+    s.set_client_catalog_grant("ops", acme.id, true).unwrap();
+    let t = tools(s);
+    let ops = client(ops.id, TokenMode::Full, None);
+    let personal_head = git_head(&personal);
+    let acme_head = git_head(&acme_root);
+    assert_ne!(personal_head, acme_head);
+
+    let status = json_of(call_on(&t, &ops, "repo_status", None, Some("acme")).await);
+    assert_eq!(
+        status["head"],
+        acme_head.as_str(),
+        "acme's checkout answered"
+    );
+
+    let create = json!({ "kind": "skill", "name": "ops" });
+    let made = json_of(call_on(&t, &ops, "create_asset", Some(create), Some("acme")).await);
+    assert_eq!(made["commit"], git_head(&acme_root).as_str());
+    assert!(acme_root.join("skills/ops/asset.yaml").is_file());
+    assert!(!personal.join("skills/ops").exists());
+    assert_eq!(git_head(&personal), personal_head, "personal untouched");
+    let got = json_of(
+        call_on(
+            &t,
+            &ops,
+            "get_asset",
+            Some(json!({ "kind": "skill", "name": "ops" })),
+            Some("acme"),
+        )
+        .await,
+    );
+    assert_eq!(got["asset"]["name"], "ops", "{got}");
+
+    let r = call_on(&t, &ops, "repo_status", None, None).await;
+    assert_eq!(
+        code_of(&r),
+        "E_FORBIDDEN",
+        "the acme grant is not personal's"
+    );
 }
 
 /// R11: `list_catalogs` needs no grant (but a per-host token never reaches
@@ -798,20 +910,24 @@ async fn an_acme_only_client_cannot_plan_or_apply() {
 }
 
 /// Fix round 1: a client cannot tell an unknown catalog from one it is not
-/// granted — the refusal is the same but for the name it was given.
+/// granted — the refusal is the same but for the name it was given. R22:
+/// the authoring actions too, now that they take a catalog (M4).
 #[tokio::test]
 async fn an_unknown_catalog_reads_like_an_ungranted_one() {
     let (s, desk, _ops, _plain, _acme) = two_catalog_store();
     let t = tools(s);
     let desk = client(desk, TokenMode::Full, None);
-    let known = call_on(&t, &desk, "config", None, Some("acme")).await;
-    let unknown = call_on(&t, &desk, "config", None, Some("nope")).await;
-    assert_eq!(code_of(&known), "E_FORBIDDEN");
-    assert_eq!(code_of(&unknown), "E_FORBIDDEN");
-    assert_eq!(
-        message_of(unknown),
-        message_of(known).replace("acme", "nope")
-    );
+    for action in ["config", "repo_status"] {
+        let known = call_on(&t, &desk, action, None, Some("acme")).await;
+        let unknown = call_on(&t, &desk, action, None, Some("nope")).await;
+        assert_eq!(code_of(&known), "E_FORBIDDEN", "{action}");
+        assert_eq!(code_of(&unknown), "E_FORBIDDEN", "{action}");
+        assert_eq!(
+            message_of(unknown),
+            message_of(known).replace("acme", "nope"),
+            "{action}"
+        );
+    }
 }
 
 /// Fix round 1: the catalog-set actions refuse a `catalog` parameter they

@@ -13,7 +13,7 @@
 //! Who may call it is the tool's business, not this module's: the master, or
 //! a paired client the operator granted the catalog each call touches
 //! ([`AdminCall::touches`]; `fleet-hub client grant <name> assets [--catalog
-//! NAME]`).
+//! NAME]`); the authoring calls address any catalog since Assets M4.
 
 use super::author::{
     self, AddResourceBytesArgs, AssetRef, CommitPendingArgs, CreateArgs, RemoveResourceArgs,
@@ -24,11 +24,11 @@ use super::layer::{Axis, Layer};
 use super::model::Kind;
 use super::sync::{self, ApplyArgs, PlanArgs};
 use super::validate::{check_layer_name, check_name, check_secret_name};
-use super::{ConfigureArgs, ImportArgs};
+use super::{CatalogTarget, ConfigureArgs, ImportArgs};
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::ssh::SshClient;
-use crate::store::Store;
+use crate::store::{CatalogRow, Store};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
@@ -208,7 +208,8 @@ impl AdminCall {
         )
     }
 
-    /// The calls the tool's `catalog` parameter addresses (R10).
+    /// The calls the tool's `catalog` parameter addresses (M3 R10; the
+    /// authoring calls since M4, R21).
     pub fn is_per_catalog(&self) -> bool {
         matches!(
             self,
@@ -216,15 +217,6 @@ impl AdminCall {
                 | AdminCall::Load(_)
                 | AdminCall::ListLayers
                 | AdminCall::SetHostLayers(_)
-        )
-    }
-
-    /// The calls that read or write the personal checkout — personal-only
-    /// until M4's changeset apply gives them a per-catalog target (R10).
-    fn is_authoring(&self) -> bool {
-        matches!(
-            self,
-            AdminCall::Configure(_)
                 | AdminCall::GetAsset(_)
                 | AdminCall::Template(_)
                 | AdminCall::CreateAsset(_)
@@ -288,15 +280,6 @@ impl AdminCall {
                          --org <org>)"
                     ),
                 )),
-                Some(other) if c.is_authoring() => Err(IpcError::new(
-                    codes::E_INVALID,
-                    format!(
-                        "{} works on the personal catalog only until changesets (Assets M4); edit \
-                         catalog {other}'s checkout with git and run `fleet-hub catalog reload \
-                         --catalog {other}`",
-                        c.action()
-                    ),
-                )),
                 Some(other) => Err(IpcError::new(
                     codes::E_INVALID,
                     format!(
@@ -329,42 +312,43 @@ fn json<T: Serialize>(v: T) -> Result<serde_json::Value, IpcError> {
         .map_err(|e| IpcError::new(codes::E_SERIALIZE, format!("encode the answer: {e}")))
 }
 
-/// Run one call against this process's catalog and answer the same value
+/// Run one call against this process's catalogs and answer the same value
 /// the matching desktop command returns, as JSON. Every argument check the
 /// desktop command makes is made here too: the arguments may have come over
-/// the wire. `catalog` is the tool's parameter: [`AdminCall::touches`]
-/// refuses one the call cannot honour before anything runs.
+/// the wire. `catalog` is the row the tool's gate resolved for a named
+/// catalog (R22: read once, so the gate and the run cannot disagree);
+/// `None` is personal. [`AdminCall::touches`] refuses a parameter the call
+/// cannot honour before anything runs.
 pub async fn run(
     call: AdminCall,
-    catalog: Option<&str>,
+    catalog: Option<&CatalogRow>,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
     reg: &Arc<CancellationRegistry>,
 ) -> Result<serde_json::Value, IpcError> {
-    call.touches(catalog)?;
-    // A per-catalog call naming a catalog other than personal (R10).
-    let named = match catalog {
-        Some(name) if name != PERSONAL && call.is_per_catalog() => {
-            Some(catalogs::catalog_named(name, store)?)
-        }
-        _ => None,
+    call.touches(catalog.map(|r| r.name.as_str()))?;
+    // A per-catalog call naming a catalog other than personal (R10, R21).
+    let named = catalog.filter(|r| r.org_id.is_some() && call.is_per_catalog());
+    let target = match named {
+        Some(row) => CatalogTarget::Row(row),
+        None => CatalogTarget::Personal,
     };
     match call {
-        AdminCall::Config => match &named {
+        AdminCall::Config => match named {
             Some(row) => json(Some(catalogs::config_row(row))),
             None => json(super::config(store)?),
         },
         AdminCall::Configure(a) => json(super::configure(a, store)?),
         // R18: no catalog named = personal, then every other one caught up.
-        AdminCall::Load(a) => match &named {
+        AdminCall::Load(a) => match named {
             Some(row) => json(super::load_catalog(row.id, a.pull, store)?),
             None => json(super::load_all(a.pull, store)?),
         },
         AdminCall::GetAsset(a) => {
             check_name(&a.name)?;
-            json(super::get_asset(a.kind, &a.name, store)?)
+            json(super::get_asset_in(target, a.kind, &a.name, store)?)
         }
-        AdminCall::ListLayers => match &named {
+        AdminCall::ListLayers => match named {
             Some(row) => json(super::list_layers_for(row, store)?),
             None => json(super::list_layers(store)?),
         },
@@ -373,7 +357,7 @@ pub async fn run(
         AdminCall::SetHostLayers(a) => {
             let contexts: Vec<&str> = a.contexts.iter().map(String::as_str).collect();
             let role = a.role.as_deref();
-            match &named {
+            match named {
                 Some(row) => json(super::set_host_layers_for(
                     &a.host_alias,
                     row,
@@ -398,12 +382,12 @@ pub async fn run(
             check_layer_name(&a.name)?;
             json(author::layer_template(&a.name, a.axis))
         }
-        AdminCall::WriteLayer(a) => json(author::write_layer(&a.layer, store)?),
-        AdminCall::DeleteLayer(a) => json(author::delete_layer(&a.name, store)?),
+        AdminCall::WriteLayer(a) => json(author::write_layer_in(target, &a.layer, store)?),
+        AdminCall::DeleteLayer(a) => json(author::delete_layer_in(target, &a.name, store)?),
         AdminCall::Inventory => json(super::inventory(store)?),
         AdminCall::ImportHost(a) => {
             let token = lock(store)?.get_setting(crate::mcp::SETTING_TOKEN)?;
-            json(super::import_host(a, store, ssh, token.as_deref()).await?)
+            json(super::import_host_into(target, a, store, ssh, token.as_deref()).await?)
         }
         AdminCall::PlanSync(a) => json(sync::plan_sync(a, store, ssh).await?),
         AdminCall::ApplySync(a) => json(sync::apply_sync(a, store, ssh, reg).await?),
@@ -419,16 +403,16 @@ pub async fn run(
         }
         // The authoring calls check their own names and paths, before they
         // read the config or touch the checkout.
-        AdminCall::CreateAsset(a) => json(author::create(a, store)?),
-        AdminCall::UpdateAsset(a) => json(author::update(*a, store)?),
-        AdminCall::DeleteAsset(a) => json(author::delete_asset(a, store)?),
-        AdminCall::AddResourceBytes(a) => json(author::add_resource_bytes(a, store)?),
-        AdminCall::RemoveResource(a) => json(author::remove_resource(a, store)?),
-        AdminCall::LintAsset(a) => json(author::lint_asset(a, store)?),
-        AdminCall::LintAll => json(author::lint_everything(store)?),
-        AdminCall::CommitPending(a) => json(author::commit_pending(a, store)?),
-        AdminCall::Push => json(author::push(store)?),
-        AdminCall::RepoStatus => json(author::repo_status(store)?),
+        AdminCall::CreateAsset(a) => json(author::create_in(target, a, store)?),
+        AdminCall::UpdateAsset(a) => json(author::update_in(target, *a, store)?),
+        AdminCall::DeleteAsset(a) => json(author::delete_asset_in(target, a, store)?),
+        AdminCall::AddResourceBytes(a) => json(author::add_resource_bytes_in(target, a, store)?),
+        AdminCall::RemoveResource(a) => json(author::remove_resource_in(target, a, store)?),
+        AdminCall::LintAsset(a) => json(author::lint_asset_in(target, a, store)?),
+        AdminCall::LintAll => json(author::lint_everything_in(target, store)?),
+        AdminCall::CommitPending(a) => json(author::commit_pending_in(target, a, store)?),
+        AdminCall::Push => json(author::push_in(target, store)?),
+        AdminCall::RepoStatus => json(author::repo_status_in(target, store)?),
         AdminCall::Template(a) => {
             check_name(&a.name)?;
             json(author::template(a.kind, &a.name))
@@ -654,8 +638,11 @@ mod tests {
             AdminCall::Push.touches(Some("personal")).unwrap(),
             Touches::Catalog("personal".into())
         );
-        let e = AdminCall::Push.touches(Some("acme")).unwrap_err();
-        assert!(e.message.contains("M4"), "{}", e.message);
+        assert_eq!(
+            AdminCall::Push.touches(Some("acme")).unwrap(),
+            Touches::Catalog("acme".into()),
+            "authoring is per catalog since M4 (R21)"
+        );
         // M-g: configure points at add_catalog, not at an M4 git edit.
         let configure: AdminCall = serde_json::from_value(
             serde_json::json!({ "action": "configure", "args": { "repo_path": "/x" } }),
