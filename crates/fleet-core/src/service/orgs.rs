@@ -847,12 +847,14 @@ pub fn scopes(
     let rows: Vec<SessionRow> = s
         .list_all_sessions()?
         .into_iter()
-        // `sees_org` is NOT implied by `sees_session_row`: for a per-host
-        // token the org half of that predicate asks only about the HOST, so
-        // this is the clause that keeps another org's row on its own host out
-        // of the tally. The row-shaped org predicate that used to stand here
-        // as well WAS implied, and said so twice (multi-user M1, T10).
-        .filter(|r| r.status != "ghost" && scope.sees_org(r.org_id))
+        // Two org clauses, and both earn their place: `sees_row_org_only` is
+        // the host/org answer (see the ORG_HALF_SITES note on this file's
+        // other sites — an internal-and-narrowed scope is fenced by it alone),
+        // and `sees_org` is what keeps another org's row on a per-host token's
+        // OWN host out of the tally, which the first does not ask.
+        // Org half; `view.sees_session_row` on the next line is the person
+        // half.
+        .filter(|r| r.status != "ghost" && scope.sees_row_org_only(r) && scope.sees_org(r.org_id))
         .filter(|r| view.sees_session_row(r).is_visible())
         .collect();
     let red = crate::service::health::context_red_pct(&s);

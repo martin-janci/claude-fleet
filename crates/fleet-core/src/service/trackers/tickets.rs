@@ -185,6 +185,8 @@ fn live_ids(
     };
     Ok(live_work_on(s, k, s.item_org(item.id)?)?
         .into_iter()
+        // Org half; the next line, `sees_session_row`, is the person half.
+        .filter(|(_, r)| reader.org.sees_row_org_only(r))
         .filter(|(_, r)| reader.sees_session_row(r).is_visible())
         .map(|(_, r)| r.id)
         .collect())

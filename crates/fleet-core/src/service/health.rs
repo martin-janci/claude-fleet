@@ -1512,9 +1512,26 @@ mod tests {
                 .collect()
         };
 
-        // A person who owns none of the fixture's rows: the T10 Org arm
-        // narrows to zero sessions for them, and the reference must agree.
+        // A person who owns none of the fixture's rows, as an ORG-BOUND
+        // device: the T10 Org arm narrows to zero sessions for them, and the
+        // reference must agree. Built through `Caller::view_scope`, which is
+        // the one constructor (`view_scope_tests::only_caller_view_scope_constructs_a_view_scope`).
         let nobodys_person = s.create_person("nobody", None).unwrap().id;
+        let nobodys_scope = crate::mcp::auth::Caller {
+            host_alias: None,
+            client: Some(crate::mcp::auth::ClientRef {
+                id: 99,
+                name: "nobodys-bound-phone".into(),
+                trusted: false,
+                org_id: Some(a.id),
+                person_id: Some(nobodys_person),
+            }),
+            mode: crate::mcp::auth::TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
+        }
+        .view_scope(&s)
+        .unwrap();
         let views = [
             HealthView::Fleet,
             HealthView::Host {
@@ -1541,17 +1558,7 @@ mod tests {
                 org: b.id,
                 sees_unassigned: false,
             })),
-            HealthView::Org(crate::service::view_scope::ViewScope::for_caller(
-                OrgScope::Org {
-                    org: a.id,
-                    sees_unassigned: true,
-                },
-                Some(nobodys_person),
-                Default::default(),
-                None,
-                None,
-                false,
-            )),
+            HealthView::Org(nobodys_scope.clone()),
             HealthView::Blank,
             // Multi-user M1 (T8d). `internal()` sees every row, so this case
             // proves the arm's PLUMBING is equivalent to the reference; the

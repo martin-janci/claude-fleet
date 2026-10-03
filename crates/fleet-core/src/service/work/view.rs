@@ -2206,14 +2206,17 @@ pub fn session_tasks(
         let s = lock(store)?;
         Graph::load_for(&s, view)?
     };
-    // `Graph::load_for` has already emptied the person-invisible rows out of
-    // `g.sessions`, and its org half ran inside the same predicate, so a
-    // `get` that answers at all answers a row this caller may see. The
-    // org-only filter that used to stand here as well said the same thing a
-    // second time, in a weaker form (multi-user M1, T10).
+    // `Graph::load_for` empties the person-invisible rows out of
+    // `g.sessions`. The org half still has to be asked here, and T10 proved
+    // it by deleting the call: `ViewScope::sees_session_facts` returns at its
+    // first clause for the hub's own reader, before the org boundary, so an
+    // internal-and-narrowed scope is fenced by this and nothing else.
     let row = g
         .sessions
         .get(&session_id)
+        // Org half; the person half is `Graph::load_for`'s `hidden_sessions`,
+        // which has already emptied this map of rows this caller may not see.
+        .filter(|r| scope.sees_row_org_only(r))
         .ok_or_else(|| crate::service::orgs::not_found("session", session_id))?;
     let built = build_tasks(&g, scope);
     let others = active_tasks_by_session(&built);

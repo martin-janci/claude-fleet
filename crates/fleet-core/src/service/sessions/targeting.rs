@@ -55,7 +55,11 @@ pub fn related_sessions_scoped(
     let mut rows = s
         .list_related_sessions(args.session_id)
         .map_err(IpcError::from)?;
-    rows.retain(|r| view.sees_session_row(r).is_visible());
+    // The org half and the person half, in one line: `sees_session_row` is
+    // the person half and composes the org answer for a caller-built scope,
+    // while `sees_row_org_only` is what still fences an internal-and-narrowed
+    // reader (see `scope_guard_tests::ORG_HALF_SITES`).
+    rows.retain(|r| scope.sees_row_org_only(r) && view.sees_session_row(r).is_visible());
     for r in rows.iter_mut() {
         scope.redact_row_org_only(r);
     }

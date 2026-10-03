@@ -3934,9 +3934,17 @@ mod tests {
             .rename_session_row("alpha", "dev-a", "dev-b", t)
             .unwrap_err();
         assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+        // Multi-user M1 (T10): the lost row's id is NOT in the message — it
+        // may be another person's row, and `dev-b` is the caller's own
+        // argument. What the refusal must still say is which name is taken.
         assert!(
-            err.message.contains(&format!("id {lost}")),
+            err.message.contains("dev-b belongs to a lost session"),
             "{}",
+            err.message
+        );
+        assert!(
+            !err.message.contains(&format!("id {lost}")),
+            "no row id: {}",
             err.message
         );
         assert_eq!(

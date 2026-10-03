@@ -1158,8 +1158,10 @@ pub fn report_on(
         .list_all_sessions()?
         .into_iter()
         .filter(|r| host.is_none_or(|h| r.host_alias == h))
-        // Whose row it is (multi-user M1, T7), which composes the org
-        // answer a second filter here used to repeat (T10).
+        // Org half; `view.sees_session_row` on the next line is the person
+        // half.
+        .filter(|r| scope.sees_row_org_only(r))
+        // And whose row it is (multi-user M1, T7).
         .filter(|r| view.sees_session_row(r).is_visible())
         .filter(|r| !r.usage.totals().is_zero())
         .filter(|r| since.is_none_or(|t| r.usage.usage_updated_at.is_some_and(|u| u >= t)))

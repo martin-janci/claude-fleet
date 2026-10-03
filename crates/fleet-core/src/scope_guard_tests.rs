@@ -1472,10 +1472,23 @@ fn calls_org_only_session_predicate(line: &str) -> bool {
 ///
 /// So the deletion is replaced by something that keeps working: a call that
 /// nobody has triaged fails here, every time, rather than once at the moment
-/// the shim went away. The 7 calls that were pure REDUNDANCY — an org
-/// predicate standing beside a person predicate that already composes it, so
-/// a reader could not tell whether it contributed anything — were deleted by
-/// T10 instead, and are not in this table because they are not in the code.
+/// the shim went away.
+///
+/// **One reading this table killed, and it is worth recording because it is
+/// the obvious one.** Eight of these calls sit directly beside a person
+/// predicate that composes the org answer, and T10 first read them as pure
+/// REDUNDANCY and deleted them. They are not redundant, and the suite said
+/// so in four places: [`crate::service::view_scope::ViewScope::sees_session_facts`]
+/// returns at its FIRST clause for the hub's own reader —
+/// [`crate::service::view_scope::ViewScope::internal`] — **before** the org
+/// boundary. So for a scope that is internal AND narrowed
+/// (`ViewScope::internal().with_org(..)`: `work::nudge`'s hook reader, and
+/// every org-level test in the work graph) the person predicate answers
+/// `true` unconditionally and these calls are the only org fence there is.
+/// Deleting them widened every such reader silently. The lesson for the next
+/// reader of this table: "a person predicate runs beside it" does not imply
+/// "the org call is dead", because one scope shape skips the person
+/// predicate's org clause entirely.
 const ORG_HALF_SITES: &[OrgHalf] = &[
     OrgHalf {
         file: "crates/fleet-core/src/service/view_scope.rs",
@@ -1628,6 +1641,72 @@ const ORG_HALF_SITES: &[OrgHalf] = &[
         person_half: "`require_person_sees`, which runs beside this and never \
                       inside it (its own doc says so)",
     },
+    OrgHalf {
+        file: "crates/fleet-core/src/service/work/today.rs",
+        func: "today",
+        nth: 0,
+        code: "Some(h) => r.host_alias == h && scope.sees_row_org_only(r),",
+        person_half: "`view.sees_session_row` on the next filter. BOTH halves \
+                      run here on purpose and T10 proved it by deleting this \
+                      one: `ViewScope::sees_session_facts` returns at its FIRST \
+                      clause for the hub's own reader, before the org \
+                      boundary, so an internal-and-narrowed scope \
+                      (`ViewScope::internal().with_org(..)`) is fenced by this \
+                      call and nothing else",
+    },
+    OrgHalf {
+        file: "crates/fleet-core/src/service/work/today.rs",
+        func: "today",
+        nth: 1,
+        code: "None => scope.sees_row_org_only(r),",
+        person_half: "the same `view.sees_session_row`, for a caller with no \
+                      host binding",
+    },
+    OrgHalf {
+        file: "crates/fleet-core/src/service/orgs.rs",
+        func: "scopes",
+        nth: 0,
+        code: ".filter(|r| r.status != \"ghost\" && scope.sees_row_org_only(r) && scope.sees_org(r.org_id))",
+        person_half: "`view.sees_session_row` on the next filter. `sees_org` \
+                      beside it is a THIRD question neither asks: another \
+                      org's row on a per-host token's own host",
+    },
+    OrgHalf {
+        file: "crates/fleet-core/src/service/usage.rs",
+        func: "report_on",
+        nth: 0,
+        code: ".filter(|r| scope.sees_row_org_only(r))",
+        person_half: "`view.sees_session_row` on the next filter",
+    },
+    OrgHalf {
+        file: "crates/fleet-core/src/service/sessions/targeting.rs",
+        func: "related_sessions_scoped",
+        nth: 0,
+        code: "rows.retain(|r| scope.sees_row_org_only(r) && view.sees_session_row(r).is_visible());",
+        person_half: "`view.sees_session_row`, in the same expression",
+    },
+    OrgHalf {
+        file: "crates/fleet-core/src/service/trackers/tickets.rs",
+        func: "live_ids",
+        nth: 0,
+        code: ".filter(|(_, r)| reader.org.sees_row_org_only(r))",
+        person_half: "`reader.sees_session_row` on the next filter",
+    },
+    OrgHalf {
+        file: "crates/fleet-core/src/service/work/card.rs",
+        func: "card",
+        nth: 0,
+        code: "scope.sees_row_org_only(&row) && reader.sees_session_row(&row).is_visible()",
+        person_half: "`reader.sees_session_row`, in the same expression",
+    },
+    OrgHalf {
+        file: "crates/fleet-core/src/service/work/view.rs",
+        func: "session_tasks",
+        nth: 0,
+        code: ".filter(|r| scope.sees_row_org_only(r))",
+        person_half: "`Graph::load_for`'s `hidden_sessions`, which has already \
+                      emptied `g.sessions` of the rows this caller may not see",
+    },
 ];
 
 /// Every production call of the two org-only session predicates, keyed like a
@@ -1680,10 +1759,10 @@ fn org_half_sites() -> Vec<Site> {
 #[test]
 fn every_org_only_session_predicate_call_names_its_person_half() {
     let sites = org_half_sites();
-    // 17 today. A floor, so a predicate that quietly stops matching fails
+    // 25 today. A floor, so a predicate that quietly stops matching fails
     // HERE rather than making the test pass vacuously.
     assert!(
-        sites.len() > 12,
+        sites.len() > 20,
         "the scan found only {} calls of the org-only session predicates; it \
          has stopped working, which would make this whole test pass vacuously",
         sites.len()

@@ -361,17 +361,33 @@ pub fn today(
     let s = lock(store)?;
     let operator = crate::service::operator::operator_ref(&s);
 
-    // Live rows: whose row it is, what was shared with this caller, and
-    // §4.4's host clauses — one predicate, which COMPOSES the org answer
-    // (`ViewScope::sees_session_facts` opens with the org boundary and the
-    // host arm refuses another host's row outright). The org/host filter
-    // that used to stand beside it was a second copy of that answer, and a
-    // reader could not tell whether it contributed anything (multi-user M1,
-    // T10).
+    // Live rows: a per-host token reads its own host's, redacted to its org.
+    //
+    // NOT redundant beside `sees_session_row`, which composes the
+    // org answer for every CALLER-built scope (multi-user M1, T10):
+    // `ViewScope::sees_session_facts` returns at its FIRST clause for
+    // the hub's own reader, BEFORE the org boundary, so a scope that
+    // is internal and narrowed (`ViewScope::internal().with_org(..)`,
+    // the shape a hook reader and every org-level test use) is fenced
+    // by its org through THIS call and nothing else. T10 deleted it as
+    // a duplicate and the suite caught it; the deletion silently
+    // widened every such reader. Its row in
+    // `scope_guard_tests::ORG_HALF_SITES` names the person half.
     let mut rows: Vec<SessionRow> = s
         .list_all_sessions()?
         .into_iter()
         .filter(|r| counts(r, operator.as_ref()))
+        // The org half; `view.sees_session_row` just below is the person
+        // half, and composes this for every caller-built scope.
+        .filter(|r| match scope.host() {
+            // Org half; `sees_session_row` below is the person half.
+            Some(h) => r.host_alias == h && scope.sees_row_org_only(r),
+            // `All` sees every row; a bound client (M14) its org's. Org
+            // half again; `sees_session_row` below is the person half.
+            None => scope.sees_row_org_only(r),
+        })
+        // And the PERSON half, which no org scope carries: whose row it is,
+        // what was shared with this caller, and §4.4's host clauses.
         .filter(|r| view.sees_session_row(r).is_visible())
         .collect();
     for r in &mut rows {

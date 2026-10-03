@@ -369,7 +369,13 @@ pub fn card(
             s.get_session_by_id(session_id)
                 .ok()
                 .flatten()
-                .is_some_and(|row| reader.sees_session_row(&row).is_visible())
+                .is_some_and(|row| {
+                    // The org half beside the person half: `sees_session_row`
+                    // composes the org answer for a caller-built scope, and
+                    // `sees_row_org_only` is what still fences an
+                    // internal-and-narrowed reader.
+                    scope.sees_row_org_only(&row) && reader.sees_session_row(&row).is_visible()
+                })
         });
     let status_category = super::status::effective_status(
         &item.status_category,
