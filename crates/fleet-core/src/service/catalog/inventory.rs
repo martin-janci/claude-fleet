@@ -49,8 +49,22 @@ fn scan_failed(host: &str, out: &std::process::Output) -> crate::ipc_error::IpcE
     };
     crate::ipc_error::IpcError::new(
         codes::E_SCAN,
-        format!("{host}: scan script exited {code}: {said}"),
+        format!("{host}: scan script exited {code}: {}", in_words(&said)),
     )
+}
+
+/// A bare `##` marker said in words, so an operator does not have to go and
+/// read the shell script to find out what happened.
+///
+/// `##TRUNCATED` is the one that reaches a person: the import dump hit the
+/// 64 MiB cap on the host and the script stopped there.
+fn in_words(said: &str) -> String {
+    match said.trim() {
+        "##TRUNCATED" => {
+            "the dump exceeded 64 MiB on the host and was cut short (##TRUNCATED)".to_string()
+        }
+        other => other.to_string(),
+    }
 }
 
 /// How much of a script's own output an error quotes.
@@ -668,6 +682,9 @@ mod tests {
         };
         let e = scan_failed("oci", &out("##FILE a\nQUJD\n##TRUNCATED\n", ""));
         assert!(e.message.contains("##TRUNCATED"), "{}", e.message);
+        // And in WORDS, not only as the marker: the operator reading this has
+        // no reason to know what `##TRUNCATED` is.
+        assert!(e.message.contains("exceeded 64 MiB"), "{}", e.message);
         assert!(
             !e.message.contains("QUJD"),
             "not the dump itself: {}",

@@ -93,6 +93,17 @@ const AG_HOME_DIR: &str = "~/.local/share/ag";
 const AG_BIN_DIR: &str = "~/.local/bin";
 /// The alias every provisioned host gets: `cl` = Claude Code without
 /// permission prompts, the same launch fleet's panes use.
+/// The `cl` alias provisioning asks the installer to add.
+///
+/// It is CONTENT provisioning ships, so it is in [`fingerprint()`]: without it
+/// a change to the alias was invisible to every already-provisioned host, and
+/// since the installer keeps an existing `cl` key by name alone the alias was
+/// effectively write-once per host.
+///
+/// Its right-hand side must stay the launch `tmux::CL_FALLBACK` would make for
+/// itself — a pane that finds a `cl` shim and a pane that does not have to end
+/// up running the same thing. `the_shim_and_the_pane_fallback_launch_alike`
+/// holds the two together.
 const AG_CL_ALIAS: &str = "cl=claude --yolo";
 /// SSH connect budget for running the installer (it copies a dozen small
 /// files and runs `ag shims` + `ag doctor`); the command's wall clock
@@ -114,7 +125,7 @@ label this session; it defines when to fire and how to look up your `host_alias`
 
 /// SHA-256 over everything provisioning ships that is CONTENT (not a
 /// secret, not a URL): both skills, the managed CLAUDE.md body, the
-/// hook shape, and the ag launcher. Stored per host by
+/// hook shape, the ag launcher and its `cl` alias. Stored per host by
 /// `set_host_provisioned`; a host whose stored value differs is
 /// `provision_stale` (hosts F1: every host ran skills from 15 hub
 /// upgrades ago, and nothing compared).
@@ -126,7 +137,7 @@ pub fn fingerprint() -> &'static str {
             .map(|(path, body)| format!("{path}\u{0}{body}\u{0}"))
             .collect();
         crate::mcp::auth::sha256_hex(&format!(
-            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}",
+            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}\u{0}{AG_CL_ALIAS}",
             crate::service::hooks_install::hook_shape()
         ))
     })
@@ -349,6 +360,24 @@ fn mark_provisioned(store: &Mutex<Store>, host: &str, warning: Option<&str>, owe
     }
 }
 
+/// PURE: which of `rows` [`spawn_reprovision_stale`] will refresh.
+///
+/// Apart from the spawn so the SELECTION can be tested without a runtime, an
+/// SSH client or a sleep. It is the only mechanism that delivers `ag` to hosts
+/// that were provisioned before F2, so each of its three conditions is load
+/// bearing: a host that was never provisioned is left to its first
+/// provisioning (which does the whole job, secrets included); an unreachable
+/// one would only fail and burn the retry; and a host whose fingerprint
+/// matches this build has nothing owed. `active_hosts` drops a hidden host, as
+/// it does for every host loop.
+pub(crate) fn stale_hosts(rows: Vec<crate::store::HostRow>, local_enabled: bool) -> Vec<String> {
+    crate::service::hosts::active_hosts(rows, local_enabled)
+        .into_iter()
+        .filter(|h| h.provisioned && h.reachable && h.provision_stale)
+        .map(|h| h.alias)
+        .collect()
+}
+
 /// Refresh every reachable, non-hidden host whose stored fingerprint is
 /// not this build's, `delay` after start (the first reconcile pass has
 /// refreshed `reachable` by then). Content only: unattended and secret-free.
@@ -361,14 +390,10 @@ pub fn spawn_reprovision_stale(
     crate::rt::spawn(async move {
         tokio::time::sleep(delay).await;
         let stale: Vec<String> = match store.lock() {
-            Ok(s) => crate::service::hosts::active_hosts(
+            Ok(s) => stale_hosts(
                 s.list_hosts().unwrap_or_default(),
                 crate::service::hub::local_host_enabled(),
-            )
-            .into_iter()
-            .filter(|h| h.provisioned && h.reachable && h.provision_stale)
-            .map(|h| h.alias)
-            .collect(),
+            ),
             Err(_) => return,
         };
         for host in stale {
@@ -823,7 +848,9 @@ pub async fn provision_ag(ssh: &dyn SshExec, host: &str) -> Option<String> {
         }
     }
     match crate::ssh::run_shell(ssh, host, &ag_install_script(), AG_INSTALL_TIMEOUT).await {
-        Ok(out) if out.status.success() => None,
+        Ok(out) if out.status.success() => {
+            installer_findings(&String::from_utf8_lossy(&out.stdout))
+        }
         // "incomplete", not "not installed": `install.sh` exits 5 from several
         // points AFTER it has copied the tree — a foreign `ag` already on
         // $AG_BIN_DIR, an $AG_HOME it may not own, a failing `ag shims` — and
@@ -844,6 +871,31 @@ pub async fn provision_ag(ssh: &dyn SshExec, host: &str) -> Option<String> {
             capped(&e.message)
         )),
     }
+}
+
+/// What the installer DIAGNOSED on a successful install, as a warning.
+///
+/// `install.sh` ends by running `ag doctor || true` and printing the PATH
+/// remedy when `~/.local/bin` is not on PATH — and the success arm read
+/// neither, so the installer's own diagnosis was computed on the host and
+/// thrown away. A host where `ag` is installed and not on PATH, or whose
+/// harness will not run, reported a clean provisioning and then fell back to
+/// plain `claude` for ever with nothing saying why.
+///
+/// `None` when it found nothing, so a healthy install still has no warning.
+fn installer_findings(stdout: &str) -> Option<String> {
+    let found: Vec<&str> = stdout
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| l.starts_with("FAIL ") || l.starts_with("install.sh: add "))
+        .collect();
+    if found.is_empty() {
+        return None;
+    }
+    Some(capped(&format!(
+        "ag launcher installed, with findings: {}",
+        found.join(" | ")
+    )))
 }
 
 /// Ensure `~/.claude/CLAUDE.md` on `host` contains the claude-fleet managed
@@ -2143,7 +2195,7 @@ mod tests {
             .map(|(p, b)| format!("{p}\u{0}{b}\u{0}"))
             .collect();
         let expected = crate::mcp::auth::sha256_hex(&format!(
-            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}",
+            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}\u{0}{AG_CL_ALIAS}",
             crate::service::hooks_install::hook_shape()
         ));
         assert_eq!(fp, expected);
@@ -2161,6 +2213,18 @@ mod tests {
         assert_ne!(
             fp, without_ag,
             "an ag change must make hosts provision_stale"
+        );
+        // And the `cl` alias is content too. It used to be shipped and NOT
+        // fingerprinted, so a change to it was invisible to every host that
+        // was already provisioned — and since the installer keeps an existing
+        // `cl` key by name alone, the alias was effectively write-once.
+        let without_alias = crate::mcp::auth::sha256_hex(&format!(
+            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}",
+            crate::service::hooks_install::hook_shape()
+        ));
+        assert_ne!(
+            fp, without_alias,
+            "a change to the cl alias must make hosts provision_stale"
         );
     }
 
@@ -3353,6 +3417,167 @@ mod tests {
             .collect();
         assert!(touched.is_empty(), "no ag calls expected: {touched:?}");
         tunnels.stop_all();
+    }
+
+    /// And on the CONTENT-ONLY path, which is the one the unattended
+    /// post-upgrade sweep actually runs (`spawn_reprovision_stale`). The
+    /// off-switch was tested only through `provision_host_with_token`, so the
+    /// guard the sweep passes through had no test of its own — and the sweep is
+    /// where an operator who turned ag off would most want to be obeyed,
+    /// because nobody is watching it.
+    #[tokio::test]
+    async fn provision_content_only_skips_ag_when_install_ag_is_off() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("h1", Some("h1")).unwrap();
+            s.update_host_probe("h1", true, None, None, 1).unwrap();
+            s.upsert_host_token("h1", TOKEN).unwrap();
+            s.set_host_provisioned("h1", true).unwrap();
+            s.set_setting(crate::service::settings::PROVISION_INSTALL_AG, "false")
+                .unwrap();
+        }
+        // A fake whose ag installer would FAIL if it were reached, so a
+        // silently-still-running step shows up as a warning rather than as a
+        // pass.
+        let fake = host_whose_ag_install_fails();
+        let warning = provision_content_only(&store, &fake, "h1", &base())
+            .await
+            .unwrap();
+        assert_eq!(warning, None, "ag is off: nothing to warn about");
+        let touched: Vec<String> = fake
+            .calls()
+            .iter()
+            .map(Call::command)
+            .filter(|c| c.contains(".local") || c.contains("ag-src"))
+            .collect();
+        assert!(touched.is_empty(), "no ag calls expected: {touched:?}");
+        let row = store.lock().unwrap().get_host_row("h1").unwrap().unwrap();
+        assert!(
+            !row.provision_stale,
+            "a run that skipped a step it was told to skip is not owed a retry"
+        );
+    }
+
+    /// A bare [`crate::store::HostRow`] for the sweep's own tests.
+    fn sweep_row(alias: &str) -> crate::store::HostRow {
+        crate::store::HostRow {
+            alias: alias.to_string(),
+            ssh_alias: None,
+            reachable: false,
+            claude_version: None,
+            tmux_version: None,
+            hidden: false,
+            last_pinged_at: None,
+            account_uuid: None,
+            provisioned: false,
+            transport: "ssh".to_string(),
+            org_id: None,
+            claude_version_at: None,
+            disk_home_free_kb: None,
+            disk_home_total_kb: None,
+            disk_tmp_free_kb: None,
+            load_1m: None,
+            mem_avail_kb: None,
+            uptime_secs: None,
+            health_at: None,
+            last_hook_at: None,
+            agent_version: None,
+            provisioned_at: None,
+            provision_stale: false,
+            provision_warning: None,
+            harnesses: None,
+        }
+    }
+
+    /// Which hosts the unattended sweep picks, without a runtime or a sleep.
+    ///
+    /// `spawn_reprovision_stale` is the only mechanism that delivers ag to a
+    /// host provisioned before F2, and its selection had no test at all. Each
+    /// of the three conditions excludes a host for its own reason, so each one
+    /// gets a row here.
+    #[test]
+    fn the_unattended_sweep_picks_only_hosts_that_are_owed_and_reachable() {
+        let row = |alias: &str, provisioned: bool, reachable: bool, stale: bool| {
+            let mut h = sweep_row(alias);
+            h.provisioned = provisioned;
+            h.reachable = reachable;
+            h.provision_stale = stale;
+            h
+        };
+        let rows = vec![
+            row("owed", true, true, true),
+            // Never provisioned: its FIRST provisioning does the whole job,
+            // secrets included, and this sweep is content-only.
+            row("never", false, true, true),
+            // Unreachable: the pass would only fail and burn the retry.
+            row("down", true, false, true),
+            // This build's fingerprint already: nothing owed.
+            row("fresh", true, true, false),
+        ];
+
+        assert_eq!(stale_hosts(rows, true), vec!["owed".to_string()]);
+    }
+
+    /// A hidden host is skipped, as it is by every host loop.
+    #[test]
+    fn the_unattended_sweep_skips_a_hidden_host() {
+        let mut hidden = sweep_row("shelf");
+        hidden.provisioned = true;
+        hidden.reachable = true;
+        hidden.provision_stale = true;
+        hidden.hidden = true;
+
+        assert_eq!(stale_hosts(vec![hidden], true), Vec::<String>::new());
+    }
+
+    /// The `cl` the shim installs and the `cl` a pane defines for itself must
+    /// launch the same thing.
+    ///
+    /// Two unrelated literals carried it — `AG_CL_ALIAS` here and
+    /// `tmux::CL_FALLBACK` there — with nothing holding them together, so a
+    /// pane on a host WITH the shim and a pane on a host without it could
+    /// silently run different commands.
+    #[test]
+    fn the_shim_and_the_pane_fallback_launch_alike() {
+        let launch = AG_CL_ALIAS
+            .split_once('=')
+            .expect("AG_CL_ALIAS is name=command")
+            .1;
+        assert_eq!(launch, "claude --yolo");
+        assert!(
+            crate::tmux::CL_FALLBACK.contains(launch),
+            "the pane fallback must run `{launch}`: {}",
+            crate::tmux::CL_FALLBACK
+        );
+    }
+
+    /// The installer's own diagnosis reaches the operator.
+    ///
+    /// `install.sh` ends with `ag doctor || true` and prints the PATH remedy,
+    /// and the success arm read neither — so a host where ag is installed and
+    /// not on PATH reported a clean provisioning and then fell back to plain
+    /// `claude` for ever with nothing saying why.
+    #[test]
+    fn a_successful_install_still_reports_what_the_doctor_found() {
+        assert_eq!(
+            installer_findings("install.sh: installed ag to /x\nok    claude: /usr/bin/claude"),
+            None
+        );
+
+        let found = installer_findings(
+            "install.sh: installed ag to /x\n             ok    claude: /usr/bin/claude\n\
+             FAIL  /home/u/.local/bin is not on PATH — fix: add  export PATH=...\n\
+             install.sh: add /home/u/.local/bin to your PATH to use ag\n",
+        )
+        .expect("a finding");
+        assert!(found.contains("not on PATH"), "{found}");
+        assert!(found.contains("add /home/u/.local/bin"), "{found}");
+        assert!(
+            !found.contains("ok    claude"),
+            "only the findings, not the whole log: {found}"
+        );
+        assert!(found.len() <= WARNING_MAX_CHARS, "capped: {}", found.len());
     }
 
     /// M11b: a content-only refresh whose ag install fails is still a

@@ -5,10 +5,40 @@
 
 ag_cmd_doctor() {
   local bad=0 h p v d dir name f rp t line ag_path
+  # ITSELF, first. Doctor checked harnesses, PATH, shadowing and shims and
+  # never that its own tree was whole — so it was green on an install whose
+  # launch path was broken, which is the one thing it exists to rule out. `ag`
+  # refuses outright when `lib/` is missing entirely; this catches the partial
+  # tree, where enough loaded for doctor to run and `ag_launch` did not.
+  for f in args config harness launch shims util; do
+    if ! [ -r "$AG_ROOT/lib/$f.sh" ]; then
+      echo "FAIL  $AG_ROOT/lib/$f.sh is missing or unreadable — fix: re-run install.sh"
+      bad=1
+    fi
+  done
+  if type ag_launch >/dev/null 2>&1; then
+    echo "ok    ag can launch a harness"
+  else
+    echo "FAIL  ag_launch is not defined — this install cannot launch anything; fix: re-run install.sh"
+    bad=1
+  fi
+  f=$(ag_config_file)
+  if [ -e "$f" ] && ! [ -r "$f" ]; then
+    echo "FAIL  $f exists but cannot be read — fix: chmod +r $f"
+    bad=1
+  fi
   for h in $(ag_harnesses); do
     if p=$(ag_bin "$h"); then
-      v=$("$p" --version 2>/dev/null | head -n 1)
-      echo "ok    $h: $p${v:+ ($v)}"
+      # The version is the proof it RUNS. `ag_bin` now requires `-x`, so a
+      # failure here is a binary that is executable and still will not start —
+      # a broken install, a wrong architecture — and reporting "ok" for it
+      # sent the person to look anywhere but at the harness.
+      if v=$("$p" --version 2>/dev/null | head -n 1) && [ -n "$v" ]; then
+        echo "ok    $h: $p ($v)"
+      else
+        echo "FAIL  $h: $p will not run (--version failed) — fix: re-install it: $(ag_load_driver "$h" && drv_install_hint)"
+        bad=1
+      fi
     else
       echo "--    $h: not installed (install: $(ag_load_driver "$h" && drv_install_hint))"
     fi

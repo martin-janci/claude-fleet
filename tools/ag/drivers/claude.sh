@@ -1,8 +1,14 @@
 # shellcheck shell=bash
 # Driver: Claude Code (`claude`). https://code.claude.com/docs
 
+# `command -v` alone is not enough: in bash it returns a PATH entry that is
+# not EXECUTABLE (verified: rc 0 and the path printed for a chmod -x file), so
+# a half-finished install — an interrupted download, a file restored without
+# its mode — reported the harness as present and then failed at launch with a
+# permission error nothing had predicted.
 drv_bin() {
-  command -v claude 2>/dev/null
+  local p
+  p=$(command -v claude 2>/dev/null) && [ -x "$p" ] && printf '%s\n' "$p"
 }
 
 drv_install_hint() {

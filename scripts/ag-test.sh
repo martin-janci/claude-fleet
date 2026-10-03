@@ -435,6 +435,60 @@ if [ "$(cat "$H5/.local/bin/cl")" = "echo mine" ]; then pass "install: the forei
 if grep -q 'ag shims reported a problem' "$ROOT/inst.log"; then pass "install: prints the shims-failure message"; else fail "install: no shims-failure message: $(cat "$ROOT/inst.log")"; fi
 if grep -q 'installed ag to' "$ROOT/inst.log"; then pass "install: still installs the tree + symlink despite the shims failure"; else fail "install: no install-succeeded message: $(cat "$ROOT/inst.log")"; fi
 
+# --- installer: an `ag` that cannot RUN is not a successful install ----------
+# Exit 5 from `ag shims` (a foreign file in the way, above) is deliberately
+# non-fatal. 126 and 127 are not: they mean the installed `ag` is not
+# executable or is not there, which is the install itself being broken — and
+# swallowing them alongside the 5 let an unusable install exit 0 and report
+# success to fleet. A bad shebang is how that is provoked here: the file is
+# copied and chmod'd exactly as a good one, and the kernel refuses it.
+H5b="$ROOT/home5b"; mkdir -p "$H5b"
+BADSRC="$ROOT/src-badshebang"; mkdir -p "$BADSRC"
+cp -R "$REPO/tools/ag/lib" "$REPO/tools/ag/drivers" "$BADSRC/"
+printf '#!/nonexistent/interpreter\necho never\n' >"$BADSRC/ag"
+out=$(env -u AG_CONFIG -u AG_BIN_DIR -u AG_HOME HOME="$H5b" XDG_CONFIG_HOME= \
+  PATH="$FAKE:/usr/bin:/bin" bash "$REPO/tools/ag/install.sh" --from "$BADSRC" 2>&1); rc=$?
+if [ $rc != 0 ]; then pass "install: a copied ag that cannot run fails the install"; else fail "install: exit 0 on an unrunnable ag: $out"; fi
+if printf '%s' "$out" | grep -q "the install is broken"; then pass "install: says the install is broken, not that shims complained"; else fail "install: wrong message: $out"; fi
+
+# --- doctor: it checks ITSELF ------------------------------------------------
+# Doctor checked harnesses, PATH, shadowing and shims and never that its own
+# tree was whole, so it was green on an install whose launch path was broken —
+# the one thing it exists to rule out. `launch.sh` is the file to remove: ag
+# still loads (it refuses only an empty or absent lib/), doctor still runs, and
+# `ag_launch` is gone.
+PARTIAL="$ROOT/partial"; mkdir -p "$PARTIAL"
+cp -R "$REPO/tools/ag/lib" "$REPO/tools/ag/drivers" "$PARTIAL/"
+cp "$AG" "$PARTIAL/ag"; chmod 755 "$PARTIAL/ag"
+rm -f "$PARTIAL/lib/launch.sh"
+PATH="$BIN:$FAKE:/usr/bin:/bin" "$PARTIAL/ag" doctor >"$ROOT/doctor" 2>&1; rc=$?
+if [ $rc != 0 ]; then pass "doctor: a partial lib/ exits non-zero"; else fail "doctor: exit 0 on a partial lib/: $(cat "$ROOT/doctor")"; fi
+if grep -q 'FAIL.*lib/launch.sh is missing' "$ROOT/doctor"; then pass "doctor: names the missing library file"; else fail "doctor: no missing-file line: $(cat "$ROOT/doctor")"; fi
+if grep -q 'FAIL.*ag_launch is not defined' "$ROOT/doctor"; then pass "doctor: says this install cannot launch anything"; else fail "doctor: no ag_launch line: $(cat "$ROOT/doctor")"; fi
+PATH="$BIN:$FAKE:/usr/bin:/bin" "$AG" doctor >"$ROOT/doctor" 2>&1
+if grep -q '^ok    ag can launch a harness' "$ROOT/doctor"; then pass "doctor: a whole tree says it can launch"; else fail "doctor: no launch-ok line: $(cat "$ROOT/doctor")"; fi
+
+# --- doctor / drv_bin: found is not the same as runnable ---------------------
+# bash's `command -v` returns a PATH entry that is not EXECUTABLE (verified:
+# rc 0 and the path printed for a chmod -x file), so a half-finished install
+# read as present and then failed at launch with a permission error nothing
+# had predicted.
+chmod -x "$FAKE/claude"
+PATH="$BIN:$FAKE:/usr/bin:/bin" "$AG" doctor >"$ROOT/doctor" 2>&1
+if grep -q '^--    claude: not installed' "$ROOT/doctor"; then pass "doctor: a non-executable harness is not installed"; else fail "doctor: non-exec claude: $(cat "$ROOT/doctor")"; fi
+if ! grep -q '^ok    claude:' "$ROOT/doctor"; then pass "doctor: and is never reported ok"; else fail "doctor: reported a non-executable claude as ok"; fi
+chmod 755 "$FAKE/claude"
+# Executable and still will not start: that is a FAIL, not a silent ok. The
+# version line is the proof it runs, and its failure used to be swallowed.
+printf '#!/bin/sh\nexit 1\n' >"$FAKE/claude"; chmod 755 "$FAKE/claude"
+PATH="$BIN:$FAKE:/usr/bin:/bin" "$AG" doctor >"$ROOT/doctor" 2>&1; rc=$?
+if [ $rc != 0 ] && grep -q 'FAIL  claude: .* will not run' "$ROOT/doctor"; then
+  pass "doctor: a harness that will not run is a FAIL"
+else
+  fail "doctor: broken-binary check: exit $rc: $(cat "$ROOT/doctor")"
+fi
+mkfake claude
+
 # --- installer: --alias --------------------------------------------------------------
 H7="$ROOT/home7"; mkdir -p "$H7"
 inst "$H7" --alias 'cl=claude --yolo'; rc=$?

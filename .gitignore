@@ -18,12 +18,24 @@ vite.config.ts.timestamp-*
 # Claude Code session state, its per-session worktrees (checkouts of this same
 # repo — tens of GB) and local MCP wiring. Only settings.local.json used to be
 # ignored, so `git status` showed `?? .claude/` and a `git add -A` would try to
-# stage the whole worktree tree. Nothing under .claude/ is tracked but hooks/
-# (the web session's SessionStart setup); to share another file from it, add
-# a `!` negation line below. `.claude/*`, not `.claude/`: git cannot re-include
-# a path whose parent directory is itself excluded.
+# stage the whole worktree tree.
+#
+# FOUR things under .claude/ are shared, and each needs its own negation: the
+# comment here used to say "nothing but hooks/", which was false of the repo it
+# was written in — `settings.json`, `helpers/` and `skills/graft/` were all
+# tracked AND ignored, so `git add -A` silently dropped any NEW file added
+# beside them, `settings.json`'s own hooks depend on `helpers/`, and the drop
+# was invisible (git does not re-report an already-tracked path). To share
+# another file from .claude/, add its own `!` line.
+#
+# `.claude/*`, not `.claude/`: git cannot re-include a path whose parent
+# directory is itself excluded. `settings.local.json` — the per-machine file
+# this rule started out as — stays ignored, as do the worktrees.
 .claude/*
 !.claude/hooks/
+!.claude/helpers/
+!.claude/skills/
+!.claude/settings.json
 .mcp.json
 
 # ripgrep-only overrides (re-admits the gitignored graft/ tree to search)

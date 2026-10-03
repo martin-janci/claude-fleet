@@ -7,7 +7,9 @@
 
 drv_bin() {
   local p
-  if p=$(command -v codex 2>/dev/null); then
+  # `-x` as well as found: bash's `command -v` returns a PATH entry that is not
+  # executable, which read as "installed" and then failed at launch.
+  if p=$(command -v codex 2>/dev/null) && [ -x "$p" ]; then
     printf '%s\n' "$p"
     return 0
   fi

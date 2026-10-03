@@ -1033,6 +1033,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/093_host_inventory_scanned_at.sql"),
         already_applied: Some(hosts_has_inventory_scanned_at),
     },
+    // `DROP INDEX IF EXISTS` is idempotent on its own, so no guard.
+    Migration {
+        version: 94,
+        sql: include_str!("../../migrations/094_drop_unusable_proposal_index.sql"),
+        already_applied: None,
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -4260,6 +4266,82 @@ mod tests {
             .execute_batch("DELETE FROM schema_version WHERE version >= 92;")
             .unwrap();
         s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// Migration 087: the two unmanaged-inventory flags, on a POPULATED
+    /// pre-087 database.
+    ///
+    /// 080, 081, 086 and 093 each have one of these and 087 did not, which is
+    /// the gap: its two `ADD COLUMN`s are `NOT NULL DEFAULT 0`, and what an
+    /// upgrade must give an EXISTING row is exactly what a fresh-database test
+    /// cannot say anything about.
+    #[test]
+    fn migration_087_adds_the_inventory_flags_and_is_safe_to_rerun() {
+        let s = store_at_version(86);
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias, reachable) VALUES ('pine', 1);
+                 INSERT INTO asset_inventory
+                     (host_alias, harness, kind, name, state, scanned_at, managed)
+                 VALUES ('pine', 'claude', 'skill', 'a', 'unmanaged', 500, 0);",
+            )
+            .unwrap();
+        assert!(!asset_inventory_has_fleet_owned(&s.conn).unwrap());
+
+        s.migrate().unwrap();
+
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(asset_inventory_has_fleet_owned(&s.conn).unwrap());
+        // A row that existed before the flags did reads FALSE for both: an
+        // upgrade must not declare an unknown asset secret-like (which would
+        // withhold it from every host) or fleet-owned (which would scrub it).
+        let (secret, owned): (i64, i64) = s
+            .conn
+            .query_row(
+                "SELECT secret_like, fleet_owned FROM asset_inventory WHERE name = 'a'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((secret, owned), (0, 0));
+
+        // the ADD COLUMNs are not idempotent, so the guard carries a re-run
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 87;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// Migration 094: the partial index 086 added and no query could use.
+    #[test]
+    fn migration_094_drops_the_unusable_proposal_index() {
+        let s = store_at_version(93);
+        let present = |s: &Store| -> i64 {
+            s.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                     WHERE type = 'index' AND name = 'idx_work_items_proposals'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(present(&s), 1, "086 created it");
+
+        s.migrate().unwrap();
+
+        assert_eq!(present(&s), 0);
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+
+        // `DROP INDEX IF EXISTS` needs no guard: a re-run is a no-op, and a
+        // database created after this migration never had the index.
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 94;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(present(&s), 0);
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     }
 

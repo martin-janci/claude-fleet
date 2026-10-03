@@ -13,6 +13,13 @@
 # the user's (a foreign $AG_BIN_DIR/NAME, or another NAME on PATH); a
 # symlinked config is never edited (it is managed elsewhere). Repeatable.
 #
+# "another NAME on PATH" means the PATH THIS SHELL CAN SEE. Under fleet's
+# provisioning that is a non-interactive `bash -lc`, which sources the login
+# profile but not an interactive rc file — so a NAME whose directory is added
+# only by ~/.bashrc is invisible here and the alias is added over it. The
+# remedy is the same either way: drop the alias from [alias] and remove
+# $AG_BIN_DIR/NAME (docs/hub.md names the paths).
+#
 # The whole body lives in main(), called only at the very last line: a
 # `curl | bash` download truncated mid-script then defines an incomplete
 # main and never calls it, instead of running a half-written script.
@@ -190,7 +197,7 @@ EOF
 
   # --alias: add each alias unless the config already defines that name,
   # the user already has a command of that name, or the config is a symlink.
-  local shim found
+  local shim found rc
   for a in ${ALIASES[@]+"${ALIASES[@]}"}; do
     name=${a%%=*}
     val=${a#*=}
@@ -247,11 +254,23 @@ EOF
     echo "install.sh: added alias $name = $val"
   done
 
-  # `ag shims` failing (e.g. a foreign file blocking one alias) is not fatal
-  # to the install: the core install (tree + symlink + config) already
-  # succeeded, so still run doctor and the PATH hint, and still exit 0.
-  if ! AG_CONFIG=$CONFIG AG_BIN_DIR=$AG_BIN_DIR "$AG_HOME/ag" shims </dev/null; then
-    echo "install.sh: ag shims reported a problem above — install continues; fix it and re-run \`ag shims\`" >&2
+  # `ag shims` complaining about one alias (exit 5: a foreign file in the way)
+  # is not fatal to the install — the tree, the symlink and the config already
+  # succeeded. ANY OTHER code is: 126 and 127 mean `$AG_HOME/ag` is not
+  # executable or is not there, which is the install itself being broken, and
+  # swallowing those alongside the 5 let an unusable install exit 0 and report
+  # success to fleet.
+  # `rc=$?` must not sit under an `if !`: the negation is what `$?` then
+  # reports (0), which read every failure as "exit 0 — broken".
+  rc=0
+  AG_CONFIG=$CONFIG AG_BIN_DIR=$AG_BIN_DIR "$AG_HOME/ag" shims </dev/null || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 5 ]; then
+      echo "install.sh: ag shims reported a problem above — install continues; fix it and re-run \`ag shims\`" >&2
+    else
+      echo "install.sh: $AG_HOME/ag cannot run (exit $rc) — the install is broken" >&2
+      return 5
+    fi
   fi
   AG_CONFIG=$CONFIG AG_BIN_DIR=$AG_BIN_DIR "$AG_HOME/ag" doctor </dev/null || true
   case ":$PATH:" in

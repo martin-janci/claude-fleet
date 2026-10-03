@@ -1612,6 +1612,170 @@ async fn dispatch_task_into_a_blocked_worker_fails_the_task_and_sends_nothing() 
     );
 }
 
+/// The TOOL wires the job into the work graph, which only hand-written unit
+/// calls to `mirror_dispatched` had covered.
+///
+/// A blocked worker is the vehicle, because the mirror happens BEFORE delivery
+/// — which is the right order and worth pinning: a job that could not be
+/// delivered is still a thing to see in the work graph, under the work it was
+/// asked for. `tasks::tests` proves what `mirror_dispatched` computes; this
+/// proves `dispatch_task` calls it, with the requester it was given.
+#[tokio::test]
+async fn dispatch_task_mirrors_the_job_under_the_requesters_work() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    let requester = s
+        .upsert_session("dev-req", "local", Some(pid), None, 1, 1, "running", None)
+        .unwrap();
+    let worker = s
+        .upsert_session(
+            "dev-worker",
+            "local",
+            Some(pid),
+            None,
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+    // The requester is on a native item, confirmed and primary — the shape
+    // `mirror_dispatched` reads to find the parent.
+    let parent = s
+        .create_native_item(&crate::store::NativeItem {
+            title: "Ship v1",
+            ..Default::default()
+        })
+        .unwrap();
+    s.link_session_work(
+        requester,
+        crate::store::WorkTarget::Item(parent.id),
+        "manual",
+    )
+    .unwrap();
+    // The worker is blocked, so delivery refuses after the mirror.
+    s.record_notification_hook_for_row(
+        worker,
+        crate::service::pane_intel::ClaudeStatus::Blocked,
+        None,
+    )
+    .unwrap();
+
+    let t = test_tools(s);
+    t.dispatch_task(
+        Extension(Caller::master()),
+        Parameters(DispatchTaskParams {
+            worker_session_id: Some(worker),
+            new_worker: None,
+            prompt: "Write the changelog".into(),
+            requester_session_id: Some(requester),
+            raw: false,
+            confirm_nonce: None,
+        }),
+    )
+    .await
+    .expect_err("a blocked worker cannot be dispatched into");
+
+    let s = t.store.lock().unwrap();
+    let task = s.list_tasks(None, None, None, 10).unwrap().pop().unwrap();
+    let item = s
+        .work_item_for_task(task.id)
+        .unwrap()
+        .expect("the job is mirrored into the work graph");
+    assert_eq!(
+        item.parent_id,
+        Some(parent.id),
+        "an agent subtask of the requester's own work"
+    );
+    assert_eq!(item.origin.as_deref(), Some("agent"));
+    // The worker's link to the job is a secondary one: its PRIMARY stays the
+    // work it inherited from the requester, so group-by-work still puts the two
+    // sessions together.
+    let links = s.session_work_links(worker).unwrap();
+    assert!(
+        links
+            .iter()
+            .any(|l| l.item_id == Some(item.id) && l.state == "confirmed" && !l.is_primary),
+        "{links:?}"
+    );
+    assert_eq!(
+        links.iter().find(|l| l.is_primary).and_then(|l| l.item_id),
+        Some(parent.id),
+        "the inherited primary is untouched: {links:?}"
+    );
+}
+
+/// `work_link { action: propose }`'s `proposed_by`, on both of its branches.
+///
+/// The tool derives it from a named `session_id` — through the same gate as any
+/// session argument, so another host's session is refused rather than written —
+/// and falls back to the caller's own label. Neither branch had a test, so the
+/// name recorded against an agent's proposal, which is what a person reads
+/// before accepting it, was free to be anything.
+#[tokio::test]
+async fn a_proposals_proposer_is_the_named_session_or_the_caller() {
+    use crate::service::work::WorkLinkArgs;
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("hosta").unwrap();
+    s.upsert_host("hostb").unwrap();
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    let on_a = s
+        .upsert_session("dev-a", "hosta", Some(pid), None, 1, 1, "running", None)
+        .unwrap();
+    let on_b = s
+        .upsert_session("dev-b", "hostb", Some(pid), None, 1, 1, "running", None)
+        .unwrap();
+    s.set_friendly_name("hosta", "dev-a", Some("the API work"))
+        .unwrap();
+    let parent = s
+        .create_native_item(&crate::store::NativeItem {
+            title: "Ship v1",
+            ..Default::default()
+        })
+        .unwrap();
+    // hosta's own scope has to SEE the parent, or the proposal is refused
+    // before the proposer is derived at all.
+    s.link_session_work(on_a, crate::store::WorkTarget::Item(parent.id), "manual")
+        .unwrap();
+    let t = test_tools(s);
+    let propose = |title: &str, session: Option<i64>| WorkLinkArgs {
+        action: "propose".into(),
+        session_id: session,
+        parent: Some(format!("item:{}", parent.id)),
+        title: Some(title.into()),
+        why: Some("it needs doing".into()),
+        ..Default::default()
+    };
+
+    // Named, and the caller's own: the session's friendly name and its host.
+    let a = host_caller("hosta", TokenMode::Full);
+    let v = result_json(
+        &t.work_link(Extension(a.clone()), Parameters(propose("one", Some(on_a))))
+            .await
+            .expect("propose"),
+    );
+    assert_eq!(v["proposed_by"], "the API work · hosta");
+
+    // Named, and ANOTHER host's: refused, so the name is never written either.
+    forbidden(
+        t.work_link(Extension(a.clone()), Parameters(propose("two", Some(on_b))))
+            .await
+            .unwrap_err(),
+    );
+
+    // Unnamed: the caller's own label.
+    let v = result_json(
+        &t.work_link(Extension(a), Parameters(propose("three", None)))
+            .await
+            .expect("propose"),
+    );
+    assert_eq!(
+        v["proposed_by"],
+        host_caller("hosta", TokenMode::Full).label()
+    );
+}
+
 /// F3: `dispatch_task` gates `requester_session_id` so an agent cannot file
 /// work as somebody else. `new_bg_session` takes the same field and must gate
 /// it the same way — the guard fires before any SSH is attempted.
