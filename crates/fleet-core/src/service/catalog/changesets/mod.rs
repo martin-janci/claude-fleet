@@ -30,9 +30,15 @@ pub(crate) static APPLY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const
 /// [`APPLY_LOCK`], so an edit waits for an apply or undo in flight instead
 /// of landing mid-apply — where the apply would commit it as the card's, or
 /// its failure reset would delete it. Only one process shares it (R27).
-pub async fn authoring_lock() -> tokio::sync::MutexGuard<'static, ()> {
+pub async fn authoring_lock() -> ApplyGuard {
     APPLY_LOCK.lock().await
 }
+
+/// A held [`APPLY_LOCK`]. The `*_held` card actions take one as proof, for
+/// a caller that must check the card under the same lock the action runs
+/// under — the MCP tool's grant check, so no refresh between the check and
+/// the action can add an item in a catalog the caller holds no grant for.
+pub type ApplyGuard = tokio::sync::MutexGuard<'static, ()>;
 
 /// Closed cards `list` shows next to every open one.
 pub const RECENT_CLOSED: usize = 20;

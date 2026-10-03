@@ -46,8 +46,8 @@
 
 use super::apply::{propose_follow_up, rollout_summary, stamp_gap_hashes};
 use super::{
-    applied_catalogs, changes_catalog, is_open, later_card, CardKind, ChangesetView, Decider,
-    ItemAction, ItemParams, APPLY_LOCK,
+    applied_catalogs, changes_catalog, is_open, later_card, ApplyGuard, CardKind, ChangesetView,
+    Decider, ItemAction, ItemParams, APPLY_LOCK,
 };
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::catalog::repo;
@@ -62,7 +62,16 @@ use std::sync::Mutex;
 
 /// Undo card `id` and answer it as it now stands.
 pub async fn undo(id: i64, store: &Mutex<Store>) -> Result<ChangesetView, IpcError> {
-    let _busy = APPLY_LOCK.lock().await;
+    let busy = APPLY_LOCK.lock().await;
+    undo_held(&busy, id, store).await
+}
+
+/// [`undo`] for a caller already holding [`APPLY_LOCK`].
+pub async fn undo_held(
+    _busy: &ApplyGuard,
+    id: i64,
+    store: &Mutex<Store>,
+) -> Result<ChangesetView, IpcError> {
     let (card, items) = super::card(id, store)?;
     refuse_unless_undoable(&card, &items)?;
     let touched = applied_catalogs(&items);
@@ -583,7 +592,16 @@ fn trim_follow_up(
 
 /// A person's no to the whole card: every pending item rejected (R9).
 pub async fn dismiss(id: i64, store: &Mutex<Store>) -> Result<ChangesetView, IpcError> {
-    let _busy = APPLY_LOCK.lock().await;
+    let busy = APPLY_LOCK.lock().await;
+    dismiss_held(&busy, id, store).await
+}
+
+/// [`dismiss`] for a caller already holding [`APPLY_LOCK`].
+pub async fn dismiss_held(
+    _busy: &ApplyGuard,
+    id: i64,
+    store: &Mutex<Store>,
+) -> Result<ChangesetView, IpcError> {
     let (card, items) = super::card(id, store)?;
     refuse_unless_open(&card)?;
     let pending: Vec<i64> = items
@@ -602,7 +620,17 @@ pub async fn reject_items(
     positions: &[i64],
     store: &Mutex<Store>,
 ) -> Result<ChangesetView, IpcError> {
-    let _busy = APPLY_LOCK.lock().await;
+    let busy = APPLY_LOCK.lock().await;
+    reject_items_held(&busy, id, positions, store).await
+}
+
+/// [`reject_items`] for a caller already holding [`APPLY_LOCK`].
+pub async fn reject_items_held(
+    _busy: &ApplyGuard,
+    id: i64,
+    positions: &[i64],
+    store: &Mutex<Store>,
+) -> Result<ChangesetView, IpcError> {
     let (card, items) = super::card(id, store)?;
     refuse_unless_open(&card)?;
     if positions.is_empty() {

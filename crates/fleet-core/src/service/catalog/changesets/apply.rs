@@ -21,7 +21,9 @@
 //! it (R27).
 
 use super::rules::{gap_hash, LayerGap, NEEDS_A_LOOK, UPDATE};
-use super::{is_open, CardKind, ChangesetView, Decider, ItemAction, ItemParams, APPLY_LOCK};
+use super::{
+    is_open, ApplyGuard, CardKind, ChangesetView, Decider, ItemAction, ItemParams, APPLY_LOCK,
+};
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::catalog::import::slugify;
 use crate::service::catalog::layer::{split_key, Axis, Layer};
@@ -60,7 +62,17 @@ pub async fn apply(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<ChangesetView, IpcError> {
-    let _busy = APPLY_LOCK.lock().await;
+    let busy = APPLY_LOCK.lock().await;
+    apply_held(&busy, args, store, ssh).await
+}
+
+/// [`apply`] for a caller already holding [`APPLY_LOCK`].
+pub async fn apply_held(
+    _busy: &ApplyGuard,
+    args: ApplyArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<ChangesetView, IpcError> {
     let (card, items) = super::card(args.id, store)?;
     if !is_open(&card.state) {
         return Err(IpcError::new(
