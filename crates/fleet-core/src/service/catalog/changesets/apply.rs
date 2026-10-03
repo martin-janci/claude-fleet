@@ -3667,7 +3667,8 @@ mod tests {
             .unwrap();
         let home = tempfile::tempdir().unwrap();
         host_skill(home.path(), "w", "Edited on the host, long enough.");
-        let codex = home.path().join(".codex/skills/w/SKILL.md");
+        // Codex's skills live in ~/.agents/skills since F3c.
+        let codex = home.path().join(".agents/skills/w/SKILL.md");
         std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
         let theirs = "---\nname: w\ndescription: Codex's own copy, long enough.\n---\nMine.\n";
         std::fs::write(&codex, theirs).unwrap();
