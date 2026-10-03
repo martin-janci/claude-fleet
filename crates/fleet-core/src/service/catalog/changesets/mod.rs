@@ -11,7 +11,7 @@ pub(crate) mod testkit;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::settings;
-use crate::store::{ChangesetItemRow, ChangesetRow, NewChangesetItem, Store};
+use crate::store::{CatalogRow, ChangesetItemRow, ChangesetRow, NewChangesetItem, Store};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
@@ -315,6 +315,16 @@ pub struct ChangesetSummary {
 /// R3: a card that can still be applied (and that the pass refreshes).
 pub fn is_open(state: &str) -> bool {
     matches!(state, "proposed" | "failed")
+}
+
+/// Each configured catalog's id by the label effective sets and sync plans
+/// name it by (`personal` for the personal catalog, else its name) — how a
+/// provenance or an action's `catalog` maps back to a row (R-b: one helper,
+/// for reconcile and SB6 alike).
+pub(crate) fn catalog_ids_by_label(rows: &[CatalogRow]) -> BTreeMap<String, i64> {
+    rows.iter()
+        .map(|r| (super::effective::label_of(r.org_id, &r.name), r.id))
+        .collect()
 }
 
 fn not_found(id: i64) -> IpcError {

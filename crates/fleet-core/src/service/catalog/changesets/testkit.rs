@@ -104,9 +104,11 @@ pub(crate) fn ssh_with_home_running(bin_dir: &Path, home: &Path, before: &str) -
 }
 
 /// A store with `personal` (a fresh checkout, loaded) and reachable hosts.
+/// The store is an `Arc` so the scan tick's hook (`after_scan_pass`) can
+/// take it too; everything else borrows it as `&Mutex<Store>`.
 #[cfg(unix)]
 pub(crate) struct Fleet {
-    pub store: Mutex<Store>,
+    pub store: Arc<Mutex<Store>>,
     pub personal: CatalogRow,
     pub personal_root: PathBuf,
     dirs: Vec<tempfile::TempDir>,
@@ -125,7 +127,7 @@ impl Fleet {
             s.update_host_probe(h, true, None, None, 1).unwrap();
         }
         let personal = s.personal_catalog().unwrap().unwrap();
-        let store = Mutex::new(s);
+        let store = Arc::new(Mutex::new(s));
         crate::service::catalog::load_catalog(personal.id, false, &store).unwrap();
         Fleet {
             store,

@@ -2,7 +2,9 @@
 //! the cards (spec: "A reconcile pass runs after each scan-tick pass and on
 //! demand"). Synchronous: store, then registry, never SSH. Store rows are
 //! read under one guard that is dropped before the registry is read, and the
-//! writes take a fresh guard (store → registry is never allowed).
+//! writes take a fresh guard (store → registry is never allowed). The scan
+//! tick's hook ([`after_scan_pass`]) runs the pass, then hands SB6's host
+//! sync (which does SSH) to a detached task.
 
 use super::rules::{
     self, CatalogFacts, DriftFacts, HostFacts, LayerFacts, LayerGap, RulesInput, SubjectItem,
@@ -15,13 +17,18 @@ use crate::service::catalog::identity::{self, AssetIdentity, IdentityClass};
 use crate::service::catalog::repo::Catalog;
 use crate::service::catalog::{effective, registry};
 use crate::service::settings;
+use crate::ssh::SshClient;
 use crate::store::{
     now_unix, AssetInventoryRow, CatalogRow, ChangesetItemRow, ChangesetRow, HostLayerRow,
     NewChangesetItem, Store, TriageVerdictRow,
 };
+use futures_util::FutureExt;
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio::task::JoinHandle;
 
 /// What one pass wrote.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -372,17 +379,7 @@ fn layer_gaps(
     rows: &[AssetInventoryRow],
     rolled_out: &BTreeSet<(i64, String)>,
 ) -> Vec<LayerGap> {
-    let id_of: BTreeMap<String, i64> = configured
-        .iter()
-        .map(|r| {
-            let label = if r.org_id.is_none() {
-                "personal".to_string()
-            } else {
-                r.name.clone()
-            };
-            (label, r.id)
-        })
-        .collect();
+    let id_of = super::catalog_ids_by_label(configured);
     let missing: BTreeSet<(&str, &str, &str)> = rows
         .iter()
         .filter(|r| r.harness == "claude" && r.state == "missing")
@@ -450,10 +447,12 @@ fn subject_of_row(card: &ChangesetRow, items: &[ChangesetItemRow]) -> String {
 static STORE_UNREADABLE_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// The scan tick's hook (R19, carry 4): with `catalog.auto` on, one pass —
-/// unless an apply holds `APPLY_LOCK`, in which case this pass is skipped
-/// (the tick never waits). Errors are logged, never returned: the tick's own
-/// bookkeeping (`owed`, `seen`) is not this pass's business.
-pub fn after_scan_pass(store: &Arc<Mutex<Store>>) {
+/// skipped, never awaited, while an apply holds `APPLY_LOCK` — then SB6's
+/// additive sync, detached ([`spawn_logged`]) so the tick never waits for
+/// SSH, and skipped likewise when the lock is taken by then (R17). Errors
+/// and a panic in SB6 are logged; the tick's `owed`/`seen` are never
+/// touched.
+pub fn after_scan_pass(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) {
     let auto = match lock(store) {
         Ok(s) => settings::get_bool(&s, settings::CATALOG_AUTO),
         Err(e) => {
@@ -474,21 +473,51 @@ pub fn after_scan_pass(store: &Arc<Mutex<Store>>) {
     if !auto {
         return;
     }
-    let Ok(_busy) = APPLY_LOCK.try_lock() else {
-        tracing::debug!("changesets: an apply is running; this pass's reconcile is skipped");
-        return;
-    };
-    match reconcile(store, true) {
-        Ok(r) if r != ReconcileReport::default() => tracing::info!(
-            inserted = r.inserted,
-            refreshed = r.refreshed,
-            withdrawn = r.withdrawn,
-            hidden = r.hidden,
-            "changesets: reconciled"
-        ),
-        Ok(_) => {}
-        Err(e) => tracing::warn!("changesets: reconcile failed: {}", e.message),
+    {
+        let Ok(_busy) = APPLY_LOCK.try_lock() else {
+            tracing::debug!("changesets: an apply is running; this pass's reconcile is skipped");
+            return;
+        };
+        match reconcile(store, true) {
+            Ok(r) if r != ReconcileReport::default() => tracing::info!(
+                inserted = r.inserted,
+                refreshed = r.refreshed,
+                withdrawn = r.withdrawn,
+                hidden = r.hidden,
+                "changesets: reconciled"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("changesets: reconcile failed: {}", e.message),
+        }
     }
+    let (store, ssh) = (Arc::clone(store), Arc::clone(ssh));
+    spawn_logged("catalog.auto: the additive sync", async move {
+        let Ok(_busy) = APPLY_LOCK.try_lock() else {
+            tracing::debug!(
+                "catalog.auto: an apply is running; this pass's additive sync is skipped"
+            );
+            return;
+        };
+        match super::apply::auto_additive(&store, &ssh).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(hosts = n, "catalog.auto: additive sync applied"),
+            Err(e) => tracing::warn!("catalog.auto: additive sync failed: {}", e.message),
+        }
+    });
+}
+
+/// R17: run `fut` as a detached task (`rt::try_spawn`; `None`, the future
+/// dropped, with no runtime reachable). A panic in it is caught and logged
+/// as `what` — it never reaches the caller, the runtime or the next tick.
+pub(crate) fn spawn_logged<F>(what: &'static str, fut: F) -> Option<JoinHandle<()>>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    crate::rt::try_spawn(async move {
+        if AssertUnwindSafe(fut).catch_unwind().await.is_err() {
+            tracing::error!("{what} panicked");
+        }
+    })
 }
 
 #[cfg(test)]
@@ -955,13 +984,14 @@ mod tests {
     async fn with_auto_off_the_tick_writes_nothing_and_propose_brings_hide_items() {
         let _g = lock_registry_for_test();
         let (store, _) = fleet_store(vec![]);
+        let ssh = Arc::new(SshClient::new());
         settings::set(&store.lock().unwrap(), settings::CATALOG_AUTO, "false").unwrap();
         put(
             &store,
             "oci",
             vec![unmanaged("oci", "w"), fleet_hook("oci")],
         );
-        after_scan_pass(&store);
+        after_scan_pass(&store, &ssh);
         assert!(store.lock().unwrap().list_changesets().unwrap().is_empty());
 
         let cards = super::super::propose(&store).await.unwrap();
@@ -978,6 +1008,7 @@ mod tests {
     fn a_poisoned_store_makes_the_hook_return_without_panicking() {
         let _g = lock_registry_for_test();
         let (store, _) = fleet_store(vec![]);
+        let ssh = Arc::new(SshClient::new());
         put(&store, "oci", vec![unmanaged("oci", "w")]);
         let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = store.lock().unwrap();
@@ -985,8 +1016,8 @@ mod tests {
         }));
         assert!(poison.is_err());
         assert!(store.is_poisoned());
-        after_scan_pass(&store);
-        after_scan_pass(&store);
+        after_scan_pass(&store, &ssh);
+        after_scan_pass(&store, &ssh);
         assert!(STORE_UNREADABLE_LOGGED.load(Ordering::Relaxed));
         let s = store.lock().unwrap_or_else(|e| e.into_inner());
         assert!(s.list_changesets().unwrap().is_empty(), "nothing written");
@@ -999,19 +1030,28 @@ mod tests {
     async fn the_tick_pass_never_waits_for_an_apply() {
         let _g = lock_registry_for_test();
         let (store, _) = fleet_store(vec![]);
+        let ssh = Arc::new(SshClient::new());
         put(
             &store,
             "oci",
             (0..3).map(|n| unmanaged("oci", &format!("s{n}"))).collect(),
         );
         let busy = super::super::APPLY_LOCK.lock().await;
-        after_scan_pass(&store);
+        after_scan_pass(&store, &ssh);
         assert!(
             store.lock().unwrap().list_changesets().unwrap().is_empty(),
             "skipped, not waited"
         );
         drop(busy);
-        after_scan_pass(&store);
+        after_scan_pass(&store, &ssh);
         assert_eq!(store.lock().unwrap().list_changesets().unwrap().len(), 1);
+    }
+
+    /// R17: a panic in SB6's detached task is caught and logged — the task
+    /// itself ends normally, so nothing reaches the tick or the runtime.
+    #[tokio::test]
+    async fn a_panic_in_the_detached_sync_only_logs() {
+        let h = spawn_logged("test sync", async { panic!("SB6 blew up") }).expect("a runtime");
+        assert!(h.await.is_ok(), "the panic did not escape the task");
     }
 }

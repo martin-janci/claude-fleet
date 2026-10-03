@@ -196,11 +196,13 @@ pub fn spawn_catalog_scan_tick(
             }
             // Assets M4 (R19): the reconcile pass — cards, automatic hides —
             // after every pass that got this far (a personal catalog is
-            // loaded). It never waits: an apply in flight skips it, and it
-            // never touches `owed` or `seen`. A panic in it is logged and
-            // stops only this pass's reconcile, never the tick loop.
+            // loaded), then SB6's additive sync as a detached task (R17). It
+            // never waits: an apply in flight skips both, and it never
+            // touches `owed` or `seen`. A panic in it is logged and stops
+            // only this pass's reconcile (or that one SB6 run), never the
+            // tick loop.
             if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                super::changesets::reconcile::after_scan_pass(&store)
+                super::changesets::reconcile::after_scan_pass(&store, &ssh)
             }))
             .is_err()
             {

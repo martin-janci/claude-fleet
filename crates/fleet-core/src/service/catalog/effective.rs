@@ -175,7 +175,7 @@ impl EffectiveSet {
 /// `personal` is always named "personal", whatever a hand-built catalog
 /// says (schema CHECK: the no-org catalog's name IS "personal"), so a
 /// manifest entry's default catalog always matches it.
-fn label_of(org_id: Option<i64>, name: &str) -> String {
+pub(crate) fn label_of(org_id: Option<i64>, name: &str) -> String {
     if org_id.is_none() {
         "personal".to_string()
     } else {
