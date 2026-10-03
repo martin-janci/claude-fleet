@@ -188,17 +188,47 @@ fn short(sha: &str) -> &str {
 /// recorded BEFORE the write, so a write that fails half-way is still its
 /// own — the directories it created, in order, and the commit it made. A
 /// failed apply undoes exactly these and nothing else; a file it did not
-/// record is never its own, whatever folder it sits in.
+/// record is never its own, whatever folder it sits in. Round 3: a file is
+/// claimed only if it is absent, or tracked at the catalog's pre-apply HEAD
+/// and still unchanged — so nobody's edit or new file is ever folded into
+/// the apply's own.
 #[derive(Debug, Default)]
 struct Progress {
+    /// Each touched catalog's HEAD before the apply.
+    pre: BTreeMap<i64, String>,
     written: BTreeMap<i64, BTreeSet<String>>,
     dirs: BTreeMap<i64, Vec<String>>,
     commits: BTreeMap<i64, String>,
 }
 
 impl Progress {
-    fn wrote(&mut self, catalog_id: i64, file: String) {
-        self.written.entry(catalog_id).or_default().insert(file);
+    /// Make `rel` this apply's own before its first write or delete: it must
+    /// be absent, or tracked at `pre` and unchanged since; anything else —
+    /// someone's edit, someone's new file, an ignored file at that path — is
+    /// foreign, and nothing is written (`E_INVALID_STATE` naming the path).
+    fn claim(&mut self, catalog_id: i64, root: &Path, rel: &str) -> Result<(), IpcError> {
+        if self
+            .written
+            .get(&catalog_id)
+            .is_some_and(|w| w.contains(rel))
+        {
+            return Ok(());
+        }
+        let present = std::fs::symlink_metadata(root.join(rel)).is_ok();
+        if present {
+            let pre = self.pre.get(&catalog_id).map(String::as_str).unwrap_or("");
+            if !repo::unchanged_since(root, pre, rel)? {
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!("{rel} was changed during the apply, not by it; it is left as it is"),
+                ));
+            }
+        }
+        self.written
+            .entry(catalog_id)
+            .or_default()
+            .insert(rel.to_string());
+        Ok(())
     }
 
     /// `rel_dir` and its parents under `root`, recording each one made.
@@ -217,7 +247,7 @@ impl Progress {
         Ok(())
     }
 
-    /// Record `rel`, make its directory, write it.
+    /// Claim `rel`, make its directory, write it.
     fn write_file(
         &mut self,
         catalog_id: i64,
@@ -225,7 +255,7 @@ impl Progress {
         rel: &str,
         bytes: &[u8],
     ) -> Result<(), IpcError> {
-        self.wrote(catalog_id, rel.to_string());
+        self.claim(catalog_id, root, rel)?;
         if let Some((dir, _)) = rel.rsplit_once('/') {
             self.make_dir(catalog_id, root, dir)?;
         }
@@ -292,7 +322,10 @@ async fn apply_catalog(
         .into_iter()
         .filter(|r| touched.contains(&r.catalog_id))
         .collect();
-    let mut progress = Progress::default();
+    let mut progress = Progress {
+        pre: pre.clone(),
+        ..Default::default()
+    };
     let steps = run_steps(
         card,
         selected,
@@ -393,6 +426,29 @@ fn undo_catalog(row: &CatalogRow, pre: &str, progress: &Progress) -> Option<Stri
         return None;
     }
     let root = Path::new(&row.repo_path);
+    // Round 3: HEAD at "our" commit is ours only when that commit sits
+    // directly on the recorded pre-apply HEAD.
+    if let Some(c) = own {
+        match repo::parent_of(root, c) {
+            Ok(parent) if parent == pre => {}
+            Ok(parent) => {
+                return Some(format!(
+                    "manual cleanup needed in {}: this apply's commit {} sits on {}, not on {} \
+                     (nothing there was reset)",
+                    row.name,
+                    short(c),
+                    short(&parent),
+                    short(pre)
+                ))
+            }
+            Err(e) => {
+                return Some(format!(
+                    "catalog {} could not be checked before its reset: {} — fix by hand",
+                    row.name, e.message
+                ))
+            }
+        }
+    }
     let mut heads = vec![pre];
     heads.extend(own.map(String::as_str));
     match repo::foreign_changes(root, &heads, ours) {
@@ -595,7 +651,7 @@ async fn run_steps(
                 let tracked = repo::tracked_files(root, started, &[rel_asset.as_str()])
                     .map_err(|e| fail(item, e))?;
                 for f in tracked.difference(&new_files) {
-                    progress.wrote(row.id, f.clone());
+                    progress.claim(row.id, root, f).map_err(|e| fail(item, e))?;
                     match std::fs::remove_file(root.join(f)) {
                         Ok(()) => {}
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -634,11 +690,15 @@ async fn run_steps(
             .ok_or_else(|| fail_in(layer, IpcError::new(codes::E_INVALID_STATE, "no catalog")))?;
         let root = Path::new(&row.repo_path);
         check_layer_name(layer).map_err(|e| fail_in(layer, e))?;
+        let yaml = layer_with_members(root, layer, add).map_err(|e| fail_in(layer, e))?;
         progress
-            .make_dir(row.id, root, "layers")
+            .write_file(
+                row.id,
+                root,
+                &format!("layers/{layer}.yaml"),
+                yaml.as_bytes(),
+            )
             .map_err(|e| fail_in(layer, e))?;
-        progress.wrote(row.id, format!("layers/{layer}.yaml"));
-        add_layer_members(root, layer, add).map_err(|e| fail_in(layer, e))?;
     }
 
     // 2c. Scope: the card's set_scope items, then the named look items an
@@ -852,9 +912,10 @@ fn set_scope(
     Ok(())
 }
 
-/// Add `add` to `layers/<name>.yaml`, creating a context layer when there is
-/// none (R6). Never removes a member.
-fn add_layer_members(root: &Path, name: &str, add: &BTreeSet<String>) -> Result<(), IpcError> {
+/// `layers/<name>.yaml` with `add` added — a new context layer when there is
+/// none (R6). Never removes a member. The caller writes it (through
+/// `Progress::write_file`, so a file someone changed meanwhile is refused).
+fn layer_with_members(root: &Path, name: &str, add: &BTreeSet<String>) -> Result<String, IpcError> {
     check_layer_name(name)?;
     let path = root.join("layers").join(format!("{name}.yaml"));
     let mut layer = if path.is_file() {
@@ -871,9 +932,7 @@ fn add_layer_members(root: &Path, name: &str, add: &BTreeSet<String>) -> Result<
     layer
         .validate()
         .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
-    std::fs::create_dir_all(root.join("layers"))?;
-    std::fs::write(&path, layer.to_yaml())?;
-    Ok(())
+    Ok(layer.to_yaml())
 }
 
 /// Step 5's bookkeeping, after every commit landed, in ONE store
@@ -2467,5 +2526,135 @@ mod tests {
         assert_eq!(w.header.description, "The catalog's own long description.");
         assert_eq!(head(&f.personal_root), before);
         assert_eq!(super::super::get(id, &f.store).unwrap().state, "failed");
+    }
+
+    const PERSON_EDIT: &str =
+        "kind: skill\nname: x\ndescription: Edited by a person meanwhile, long enough.\n";
+
+    /// Round 3 (a, b): `x` is committed; the card imports `w` and sets
+    /// `x`'s scope; a person edits `x/asset.yaml` while the import runs.
+    /// The scope write refuses to claim the edited file, so the item fails
+    /// as foreign — with or without a later failure (`ghost`) — and the edit
+    /// is neither committed nor overwritten.
+    async fn scope_edit_meets_a_person_edit(with_ghost: bool) {
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        f.commit_files(
+            &f.personal_root,
+            p,
+            &[
+                (
+                    "skills/x/asset.yaml",
+                    "kind: skill\nname: x\ndescription: The catalog's own long description.\n",
+                ),
+                ("skills/x/body.md", "Steps.\n"),
+            ],
+        );
+        let home = tempfile::tempdir().unwrap();
+        host_skill(home.path(), "w", DESC);
+        let bin = tempfile::tempdir().unwrap();
+        let yaml = f.personal_root.join("skills/x/asset.yaml");
+        let ssh = ssh_with_home_running(
+            bin.path(),
+            home.path(),
+            &format!("printf '%s' '{PERSON_EDIT}' > '{}'", yaml.display()),
+        );
+        let mut items = vec![
+            import("core", p, "w", "oci"),
+            item(
+                "core",
+                Some(p),
+                "skill",
+                "x",
+                ItemAction::SetScope,
+                ItemParams {
+                    scope: Some("shared".into()),
+                    member: Some("skill/x".into()),
+                    ..Default::default()
+                },
+            ),
+        ];
+        if with_ghost {
+            items.push(assign("ghost", p, "oci"));
+        }
+        let id = new_card(&f, &items);
+        let before = head(&f.personal_root);
+        let err = apply_all(&f, id, &ssh).await.unwrap_err();
+        assert!(
+            err.message
+                .starts_with("core: skills/x/asset.yaml was changed during the apply, not by it"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message
+                .contains("manual cleanup needed in personal: skills/x/asset.yaml"),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            std::fs::read_to_string(&yaml).unwrap(),
+            PERSON_EDIT,
+            "the edit survives"
+        );
+        assert_eq!(head(&f.personal_root), before, "nothing committed");
+        let v = super::super::get(id, &f.store).unwrap();
+        assert_eq!(
+            (v.state.as_str(), v.error.as_deref()),
+            ("failed", Some(err.message.as_str()))
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_person_edit_to_a_scoped_asset_survives_a_failed_apply() {
+        let _g = lock_registry_for_test();
+        scope_edit_meets_a_person_edit(true).await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_person_edit_to_a_scoped_asset_is_never_committed_as_ours() {
+        let _g = lock_registry_for_test();
+        scope_edit_meets_a_person_edit(false).await;
+    }
+
+    /// Round 3 (c): a person's file created mid-import at a path the import
+    /// writes is not overwritten.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_person_file_at_an_import_target_is_not_overwritten() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        host_skill(home.path(), "w", DESC);
+        let bin = tempfile::tempdir().unwrap();
+        let body = f.personal_root.join("skills/w/body.md");
+        let ssh = ssh_with_home_running(
+            bin.path(),
+            home.path(),
+            &format!(
+                "mkdir -p '{0}/skills/w' && echo theirs > '{0}/skills/w/body.md'",
+                f.personal_root.display()
+            ),
+        );
+        let id = new_card(&f, &[import("core", p, "w", "oci")]);
+        let before = head(&f.personal_root);
+        let err = apply_all(&f, id, &ssh).await.unwrap_err();
+        assert!(
+            err.message
+                .starts_with("core: skills/w/body.md was changed during the apply, not by it"),
+            "{}",
+            err.message
+        );
+        assert_eq!(std::fs::read_to_string(&body).unwrap(), "theirs\n");
+        assert_eq!(head(&f.personal_root), before);
+        assert!(
+            err.message
+                .contains("manual cleanup needed in personal: skills/w/body.md"),
+            "{}",
+            err.message
+        );
     }
 }

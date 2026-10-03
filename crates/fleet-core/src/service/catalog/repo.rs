@@ -159,7 +159,12 @@ struct CatalogFile {
 /// status into an `E_CATALOG_GIT`.
 fn git_output(dir: &Path, args: &[&str]) -> Result<std::process::Output, IpcError> {
     let mut cmd = crate::proc::std_command("git");
-    cmd.args(args).current_dir(dir);
+    // Every path this module hands git is a literal file or directory
+    // name, never a pattern: `layers/[a].yaml` must not also match
+    // `layers/a.yaml` (Assets M4, Task 6 review round 3).
+    cmd.args(args)
+        .current_dir(dir)
+        .env("GIT_LITERAL_PATHSPECS", "1");
     // Tests must not depend on (or be broken by) the host's own global git
     // config or identity environment: isolate every git invocation the
     // production code makes from both. This has no effect on release builds
@@ -542,6 +547,36 @@ pub fn tracked_files(
         .filter(|f| !f.is_empty())
         .map(str::to_string)
         .collect())
+}
+
+/// Whether the file `rel` is tracked at `rev` and the working tree's copy
+/// is still exactly that blob (Assets M4 round 3: the only state in which an
+/// apply may claim and rewrite or delete an existing file). A symlink,
+/// a directory or an untracked or ignored file is never "unchanged".
+pub fn unchanged_since(root: &Path, rev: &str, rel: &str) -> Result<bool, IpcError> {
+    check_rev(rev)?;
+    let entry = git(root, &["ls-tree", rev, "--", rel])?;
+    let Some((meta, _)) = entry.lines().next().and_then(|l| l.split_once('\t')) else {
+        return Ok(false);
+    };
+    let mut parts = meta.split_whitespace();
+    let (Some(mode), Some(kind), Some(blob)) = (parts.next(), parts.next(), parts.next()) else {
+        return Ok(false);
+    };
+    if kind != "blob" || mode == "120000" {
+        return Ok(false);
+    }
+    match std::fs::symlink_metadata(root.join(rel)) {
+        Ok(m) if m.is_file() => {}
+        _ => return Ok(false),
+    }
+    Ok(git(root, &["hash-object", "--", rel])? == blob)
+}
+
+/// The first parent of commit `sha`.
+pub fn parent_of(root: &Path, sha: &str) -> Result<String, IpcError> {
+    check_rev(sha)?;
+    git(root, &["rev-parse", &format!("{sha}^")])
 }
 
 /// Every file on disk under `rel_dir` (relative to `root`), whatever git
@@ -2125,5 +2160,36 @@ mod tests {
             ["foreign.txt", "skills/w/notes.md"]
         );
         assert!(commit_paths(root, "noop", &ours).unwrap().is_none());
+    }
+
+    /// Round 3: an existing file is "unchanged" only while it is the blob
+    /// `rev` tracks; paths are literal, never patterns; a commit's parent.
+    #[test]
+    fn unchanged_since_literal_pathspecs_and_parent_of() {
+        use std::collections::BTreeSet;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "*.local\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let base = commit(root, "init").unwrap();
+        assert!(unchanged_since(root, &base, "catalog.yaml").unwrap());
+        std::fs::write(root.join("catalog.yaml"), "edited\n").unwrap();
+        assert!(!unchanged_since(root, &base, "catalog.yaml").unwrap());
+        std::fs::write(root.join("x.local"), "ignored\n").unwrap();
+        assert!(!unchanged_since(root, &base, "x.local").unwrap());
+        assert!(!unchanged_since(root, &base, "absent.txt").unwrap());
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+
+        std::fs::create_dir_all(root.join("layers")).unwrap();
+        std::fs::write(root.join("layers/[a].yaml"), "ours\n").unwrap();
+        std::fs::write(root.join("layers/a.yaml"), "theirs\n").unwrap();
+        let ours: BTreeSet<String> = ["layers/[a].yaml".to_string()].into();
+        let mine = commit_paths(root, "fleet: x", &ours).unwrap().unwrap();
+        let files = git(root, &["show", "--name-only", "--format=", "HEAD"]).unwrap();
+        assert_eq!(files, "layers/[a].yaml", "a bracket is not a glob");
+        assert_eq!(parent_of(root, &mine).unwrap(), base);
+        assert!(parent_of(root, "--help").is_err());
     }
 }
