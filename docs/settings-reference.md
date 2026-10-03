@@ -135,6 +135,8 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 |---|---|---|---|
 | `catalog.scan_check_secs` | `3600` | seconds, shown in minutes, `0` = off | How often fleet looks for hosts whose asset scan is stale, and rescans them. Under five minutes is raised to five. Applies after a restart. |
 | `catalog.scan_max_age_secs` | `86400` | seconds, shown in hours | A host's assets are rescanned once its last scan is older than this, and every host after the catalog or a sync changes. |
+| `catalog.auto` | `true` | on / off | After each asset scan, hide fleet's own and Claude's internal assets, propose changeset cards, and install or update assets on hosts for layers already rolled out once. Never overwrites or removes. |
+| `catalog.auto_push` | `false` | on / off | Push the catalog repo right after a changeset card commits to it or is undone. Off: push it yourself. |
 
 ## update
 
