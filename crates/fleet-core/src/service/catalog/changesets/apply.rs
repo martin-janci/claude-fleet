@@ -1333,19 +1333,22 @@ fn missing_secrets(
 
 /// How one host's card sync went, over its harnesses: `failed` — a pair
 /// that failed or partly applied (PF5: only these fail a card); `skipped`
-/// — a pair not planned or not applied (unreachable, scan failed), which is
-/// reported, not a failure; `applied` — a pair applied.
+/// — a pair not planned (unreachable, scan failed), which is reported, not
+/// a failure; `applied` — a pair applied something; `nothing` — a pair was
+/// planned and nothing the card may do was left on it (never applied).
 #[derive(Debug, Default)]
 struct HostOutcome {
     applied: bool,
+    nothing: bool,
     failed: Vec<String>,
     skipped: Vec<String>,
 }
 
 impl HostOutcome {
-    /// The host's items count as applied.
+    /// The host's items count as applied: no pair failed, and one applied
+    /// or had nothing left to do.
     fn ok(&self) -> bool {
-        self.applied && self.failed.is_empty()
+        self.failed.is_empty() && (self.applied || self.nothing)
     }
 
     fn failed(why: String) -> HostOutcome {
@@ -1358,11 +1361,14 @@ impl HostOutcome {
 
 /// Plan each host in `wants` (PF4: `allow_unlayered`, since the plan is
 /// narrowed to the card's assets anyway), narrow it to what `filter` lets
-/// the card write, park the result as one plan and apply it under its own
-/// token (R27). With `gate_secrets`, an asset of the card blocked on a
-/// missing secret refuses the whole sync first (`E_SECRET_MISSING`, as
-/// `apply_sync` without `force_partial`); without it (SB6) that asset just
-/// waits. Answers each host's [`HostOutcome`].
+/// the card write, park what is left as one plan and apply it under its own
+/// token (R27). A pair that was not planned is reported `skipped`, and one
+/// narrowed to nothing is `nothing` — neither is parked or applied, so a
+/// sync with nothing to write never rescans a host, writes a `sync_runs`
+/// row or emits progress (fix round 1, I1). With `gate_secrets`, an asset
+/// of the card blocked on a missing secret refuses the whole sync first
+/// (`E_SECRET_MISSING`, as `apply_sync` without `force_partial`); without it
+/// (SB6) that asset just waits. Answers each host's [`HostOutcome`].
 async fn sync_hosts(
     wants: &BTreeMap<String, BTreeSet<String>>,
     catalogs: &BTreeSet<String>,
@@ -1407,10 +1413,18 @@ async fn sync_hosts(
             );
             continue;
         }
+        let o = out.entry(host.clone()).or_default();
         for mut hp in parked.hosts {
             missing.extend(missing_secrets(&hp, assets, catalogs));
             narrow(&mut hp, filter, assets, catalogs);
-            plans.push(hp);
+            if hp.status != "planned" {
+                let why = hp.detail.clone().unwrap_or_else(|| hp.status.clone());
+                o.skipped.push(format!("{host} ({}): {why}", hp.harness));
+            } else if hp.actions.is_empty() {
+                o.nothing = true;
+            } else {
+                plans.push(hp);
+            }
         }
     }
     if gate_secrets && !missing.is_empty() {
@@ -1567,9 +1581,18 @@ async fn apply_restore(
         host.clone(),
         BTreeSet::from([format!("{}/{}", item.kind, item.name)]),
     )]);
-    let outcome = sync_hosts(&wants, &catalogs, OpFilter::Restore, true, store, ssh)
+    let mut outcome = sync_hosts(&wants, &catalogs, OpFilter::Restore, true, store, ssh)
         .await
         .map_err(|e| fail_host_card(card, e, store))?;
+    // A restore that wrote nothing did not restore: the drift card stays
+    // open rather than closing on a no-op.
+    let o = outcome.entry(host.clone()).or_default();
+    if o.failed.is_empty() && !o.applied {
+        o.failed.push(format!(
+            "nothing to restore on {host}: {}/{} has no update or overwrite planned there",
+            item.kind, item.name
+        ));
+    }
     finish_host_card(card, items, &[item], &outcome, move |_| host.clone(), store)
 }
 
@@ -1632,7 +1655,8 @@ fn finish_host_card(
 /// introduced and a host lacks (`missing`), has an older fleet copy of
 /// (`drifted` and managed — an unmanaged drifted copy could only be
 /// overwritten, which SB6 never does) or has unmanaged but identical
-/// (`in_sync`, adopted). Answers how many hosts applied cleanly. A fleet
+/// (`in_sync`, adopted). Answers how many hosts it applied something on —
+/// 0, with nothing applied or recorded, when nothing is left to do. A fleet
 /// with no applied Rollout (pre-M4) answers 0 without planning anything; a
 /// layer's first rollout is always a card (R16). An asset blocked on a
 /// missing secret waits.
@@ -1703,7 +1727,10 @@ pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
             tracing::debug!(host = %host, "catalog.auto: {why}");
         }
     }
-    Ok(outcome.values().filter(|o| o.ok()).count())
+    Ok(outcome
+        .values()
+        .filter(|o| o.applied && o.failed.is_empty())
+        .count())
 }
 
 #[cfg(test)]
@@ -3431,14 +3458,139 @@ mod tests {
             "the overwrite did not"
         );
 
-        // SB6 finds `edited` drifted and managed: it plans the host and
-        // drops the overwrite just the same.
-        assert_eq!(auto_additive(&f.store, &ssh).await.unwrap(), 1);
+        // SB6 finds `edited` drifted and managed: it plans the host, drops
+        // the overwrite just the same, and with nothing left applies
+        // nothing — no sync run recorded (fix round 1, I1).
+        let runs = last_run(&f);
+        assert_eq!(auto_additive(&f.store, &ssh).await.unwrap(), 0);
+        assert_eq!(last_run(&f), runs, "a no-op pass writes no sync_runs row");
         assert_eq!(
             std::fs::read_to_string(skills.join("edited/SKILL.md")).unwrap(),
             hand
         );
         assert!(skills.join("gone/SKILL.md").is_file());
+    }
+
+    /// The newest `sync_runs` row's id.
+    fn last_run(f: &Fleet) -> Option<i64> {
+        f.store
+            .lock()
+            .unwrap()
+            .last_sync_run()
+            .unwrap()
+            .map(|r| r.id)
+    }
+
+    /// A store with `w` in layer `core`, assigned to every host in `hosts`.
+    fn fleet_with_core(hosts: &[&str]) -> Fleet {
+        let f = Fleet::new(hosts);
+        let p = f.personal.id;
+        f.commit_files(
+            &f.personal_root,
+            p,
+            &[
+                ("skills/w/asset.yaml", skill_yaml("w").as_str()),
+                ("skills/w/body.md", "Steps.\n"),
+                (
+                    "layers/core.yaml",
+                    "kind: layer\nname: core\naxis: context\nmembers:\n- skill/w\n",
+                ),
+            ],
+        );
+        {
+            let s = f.store.lock().unwrap();
+            for h in hosts {
+                s.set_host_layers_for(h, p, None, &["core"]).unwrap();
+            }
+        }
+        f
+    }
+
+    /// I1: a Rollout whose narrowed plan is empty (the host already has
+    /// everything) is applied — the host counts as done — without applying
+    /// anything: no sync_runs row.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_rollout_with_nothing_left_to_do_applies_without_a_sync_run() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let first = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+        assert_eq!(apply_all(&f, first, &ssh).await.unwrap().state, "applied");
+        let runs = last_run(&f);
+        assert!(runs.is_some(), "the first rollout synced");
+
+        let again = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+        let v = apply_all(&f, again, &ssh).await.unwrap();
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        assert_eq!(item_states(&v), ["applied"]);
+        assert_eq!(last_run(&f), runs, "nothing applied, nothing recorded");
+    }
+
+    /// I1: a restore with no update or overwrite planned for its asset (the
+    /// host has no copy: that would be a create) fails, naming the host —
+    /// it never closes the drift card on a no-op.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_restore_with_nothing_to_restore_fails() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let id = drift_card(&f, p, "oci");
+        let v = restore(&f, id, &ssh).await;
+        assert_eq!(v.state, "failed");
+        assert_eq!(item_states(&v), ["pending", "pending"]);
+        let err = v.error.unwrap_or_default();
+        assert!(err.starts_with("nothing to restore on oci"), "{err}");
+        assert!(!home.path().join(".claude/skills/w").exists());
+        assert_eq!(last_run(&f), None, "nothing applied");
+    }
+
+    /// A drift card on `skill/w` at `host`: take_host (0), restore (1).
+    fn drift_card(f: &Fleet, cid: i64, host: &str) -> i64 {
+        let drift = |action| {
+            item(
+                "drift",
+                Some(cid),
+                "skill",
+                "w",
+                action,
+                ItemParams {
+                    host: Some(host.into()),
+                    hash: Some("e".into()),
+                    ..Default::default()
+                },
+            )
+        };
+        f.store
+            .lock()
+            .unwrap()
+            .insert_changeset(
+                "drift",
+                &format!("skill/w differs on {host} from catalog personal"),
+                &[drift(ItemAction::TakeHost), drift(ItemAction::Restore)],
+            )
+            .unwrap()
+            .id
+    }
+
+    async fn restore(f: &Fleet, id: i64, ssh: &Arc<SshClient>) -> ChangesetView {
+        apply(
+            ApplyArgs {
+                id,
+                positions: Some(vec![1]),
+            },
+            &f.store,
+            ssh,
+        )
+        .await
+        .unwrap()
     }
 
     /// R15 + PF4: a drift restore puts the catalog copy back on one host —
