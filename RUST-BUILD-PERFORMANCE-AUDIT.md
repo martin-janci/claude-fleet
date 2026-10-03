@@ -15,8 +15,9 @@ A/B benchmark says so.
 > C (PR #422: validation ladder, `line-tables-only`, desktop `rlib`, SQLite
 > O3, toolchain pin), D (#425: SQLite memstatus off, template test DB),
 > E (#428: contract tests out of fleet-core's build inputs, the agent e2e
-> crate), F (#429: `fleet-fast-check`) and G (the test-target split
-> experiment). Where a later measurement overturns a recommendation below,
+> crate), F (#429: `fleet-fast-check`), G (the test-target split
+> experiment) and H (cargo-nextest, partitions and build-once/run-many).
+> Where a later measurement overturns a recommendation below,
 > that passage carries an *Update* note. For a fleet-core edit on the same
 > 4 vCPU machine, the numbers today are:
 >
@@ -2165,3 +2166,127 @@ is `fleet-fast-check` (12.2–12.6 s). The checkpoint is `fleet-check` (19 s).
 The test build is 27–30 s, and the full suite 2 min 26 s. Below this,
 optimising the source architecture for seconds would cost more in design
 than it returns. A split remains open only for an architectural reason.
+
+## Appendix H — cargo-nextest, partitions and build-once/run-many (2026-10-03)
+
+After PRs #425–#430, test *execution* is the largest step of the slowest CI
+legs. This appendix measures whether cargo-nextest and sharding the suite
+would shorten a PR. It is a measurement only. cargo-nextest 0.9.146 (the
+prebuilt binary) ran from a scratch directory, and nothing in the
+repository or CI changed.
+
+### H.1 `cargo test` vs `cargo nextest run` (4 vCPU Linux, warm, 5,497 tests)
+
+| | run 1 | run 2 | recompiled |
+|---|---:|---:|---:|
+| `cargo test --workspace` | 151.6 s | 142.5 s | — |
+| `cargo nextest run --workspace` | 145.6 s | 146.4 s | 0 crates |
+
+* **Compile overhead: none.** nextest runs the same test binaries `cargo
+  test` builds. Its first listing of the tests takes 5.1 s, later ones
+  0.7 s.
+* **Per-test overhead: +53 % CPU.** fleet-core's summed test time is
+  472–477 s under nextest against 310 s under libtest (Appendix G.1), about
+  35 ms per test. nextest runs every test in its own process, and the
+  template database (Appendix D) is migrated once per process, so here it
+  is migrated once per test. On one machine this is offset by nextest
+  running all binaries at once, where `cargo test` runs them one after
+  another.
+* **The longest single test is 33 s** (`claude-fleet`
+  `backend::routing::tests::a_hub_with_a_skewed_wire_contract_refuses_every_routed_command`).
+  No shard can be shorter than that.
+
+### H.2 Partitions (each shard run on its own, 4 threads, as on a 4 vCPU runner)
+
+The slowest shard sets the wall time:
+
+| mode | 2 shards | 3 shards | 4 shards |
+|---|---:|---:|---:|
+| `count` | 80.4 s | 67.5 s | 51.6 s |
+| `hash` | | | **48.7 s** |
+| `slice` | | | 62.6 s |
+| ideal, balanced by measured time (offline, from the JUnit times) | 71.6 s | 47.7 s | 35.8 s |
+
+Beyond 6 shards the 33 s test is the floor. None of nextest's modes
+balances by time. `hash` is the best of the three at 4 shards and is about
+13 s off the ideal. Splitting by measured time would need filtersets per
+shard generated from the JUnit durations.
+
+### H.3 Stability
+
+* **Repeated full runs.** Every test ran in 9 full-suite equivalents (2
+  `cargo test`, 2 nextest, 5 partition sets): 0 failures.
+* **Timing spread** across those runs, for the tests CLAUDE.md lists as
+  flaky: `scale_work_view` 24.5–26.4 s, `scale_work_today` 6.9–7.4 s,
+  `ring_pressure_default_interval_*` 4.2–4.9 s, `tests_upgrade` 0.2–0.3 s.
+* **Stress run.** The same groups (scale, ring-pressure, upgrade, add_project
+  and rewind, 117 tests) ran with `--stress-count 5 --test-threads 8` on 4
+  cores, i.e. 2× oversubscribed. All 5 iterations passed, at 34–36 s each.
+
+### H.4 Build once, run many (`cargo nextest archive`)
+
+* **The archive.** 306 MB (zstd), created in 16 s from a warm build: 17
+  binaries, 60 files. It extracts in 2–7 s.
+* **Same checkout path.** With a checkout at the build's absolute path,
+  all 5,497 tests pass from the archive (144.5 s).
+* **Different checkout path.** With a plain checkout elsewhere and the
+  original path hidden (a tmpfs mounted over it in a private mount
+  namespace), **150 tests fail**: 146 in fleet-core, mostly the trackers'
+  fixtures and the contract checks, and 4 in the desktop crate. They read
+  files through `env!("CARGO_MANIFEST_DIR")`, a path baked in at compile
+  time (25 sites). nextest's `--workspace-remap` cannot change that.
+  * GitHub Actions uses the same path for every job on one OS, so this
+    works there.
+  * A Buildkite agent's checkout path includes the agent name. Such a
+    pipeline needs a fixed checkout path, or those 25 sites switched to
+    the runtime `CARGO_MANIFEST_DIR` (cargo and nextest both set it when
+    a test runs).
+
+### H.5 The CI side (PR #429's run, the `cargo test` step)
+
+Compile is counted from the step start to the first test binary; run is
+the rest.
+
+| job | compile | test run |
+|---|---:|---:|
+| `rust (ubuntu)` | 1:51 | 2:13 |
+| `rust (macos)`, 3 vCPU | **3:58** | 2:34 |
+| `rust-windows` | 1:50 | **4:20** (desktop 95 s, fleet-core 157 s) |
+| `hub-headless`, the duplicate fleet-core run | 1:43 | 1:34 |
+
+Execution dominates only on Windows. On macOS, compiling against a cold
+cache dominates: rust-cache restores dependencies but strips the workspace
+crates.
+
+### H.6 What 4 shards would give a PR on GitHub-hosted runners (estimate)
+
+Assumed overheads: each shard job adds ~1:15 (runner start, checkout,
+downloading 306 MB, installing nextest, extracting), and the build job
+adds ~0:45 for the archive and its upload.
+
+| leg | test run today | with 4 shards (slowest shard + overhead) | change |
+|---|---:|---:|---|
+| Linux | 2:13 | ~0:45 + ~2:00 | neutral, or worse if clippy stays in the build job |
+| macOS | 2:34 | ~0:50 + ~2:00 | none; the 3:58 compile stays |
+| Windows | 4:20 | ~1:10 + ~2:00 | ~−1 min, *if* nextest's per-process overhead on Windows is not much larger than Linux's +53 %. Windows starts processes more slowly, and this could not be measured here. |
+
+The PR wall time would go from ~11:06 to ~9:40, with the macOS leg then
+critical. The cost is 4 more jobs per OS and more runner-minutes.
+
+### H.7 Conclusion
+
+* Sharding with nextest on GitHub-hosted runners is **not worth it now**:
+  about one minute of PR latency for 4× the jobs.
+* Build-once/run-many is the right shape, but it pays on **persistent,
+  warm builders** (Buildkite, Phase 4). There an edit costs an incremental
+  compile, not 1:50–3:58 against a cold cache, and the shards run only
+  the ~2:13–4:20 of execution. Such a pipeline needs three things:
+  * a fixed checkout path, or the 25 `env!("CARGO_MANIFEST_DIR")` sites
+    moved to the runtime variable;
+  * `hash` partitions, or per-shard filtersets balanced by JUnit time
+    (≈ 36 s at 4 shards);
+  * budget for nextest's +53 % test CPU.
+* A cheaper GitHub Actions step with a larger effect than sharding: move
+  `pnpm tauri build` out of `rust-windows` into its own parallel job. It
+  is ~2.5 min of the Windows critical path, and it would need its own
+  compile.
