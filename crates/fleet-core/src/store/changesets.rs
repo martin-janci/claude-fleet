@@ -144,7 +144,100 @@ fn insert_items(conn: &rusqlite::Connection, id: i64, items: &[NewChangesetItem]
     Ok(())
 }
 
+fn set_item_states(
+    conn: &rusqlite::Connection,
+    id: i64,
+    positions: &[i64],
+    state: &str,
+) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "UPDATE changeset_items SET state = ?3 WHERE changeset_id = ?1 AND position = ?2",
+    )?;
+    for p in positions {
+        stmt.execute(rusqlite::params![id, p, state])?;
+    }
+    Ok(())
+}
+
+fn upsert_verdict(conn: &rusqlite::Connection, v: &TriageVerdictRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO asset_triage_verdicts \
+           (catalog_id, kind, name, content_hash, verdict, decider, decided_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+         ON CONFLICT (kind, name, content_hash) DO UPDATE SET \
+           catalog_id = excluded.catalog_id, verdict = excluded.verdict, \
+           decider = excluded.decider, decided_at = excluded.decided_at \
+         WHERE asset_triage_verdicts.decider != 'person' OR excluded.decider = 'person'",
+        rusqlite::params![
+            v.catalog_id,
+            v.kind,
+            v.name,
+            v.content_hash,
+            v.verdict,
+            v.decider,
+            v.decided_at
+        ],
+    )?;
+    Ok(())
+}
+
+fn mark_applied(
+    conn: &rusqlite::Connection,
+    id: i64,
+    applied_at: i64,
+    commits: &str,
+    layers_snapshot: &str,
+    error: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE changesets SET state = 'applied', applied_at = ?2, commits = ?3, \
+         layers_snapshot = ?4, error = ?5 WHERE id = ?1",
+        rusqlite::params![id, applied_at, commits, layers_snapshot, error],
+    )?;
+    Ok(())
+}
+
+/// Everything an apply records once its commits landed (Assets M4, Task 6
+/// review): written by [`Store::record_changeset_applied`] in one
+/// transaction, so the card is applied with all of it or with none of it.
+#[derive(Debug, Clone, Default)]
+pub struct AppliedRecord<'a> {
+    /// Unix **milliseconds** (Rulings PF13).
+    pub applied_at: i64,
+    pub commits: &'a str,
+    pub layers_snapshot: &'a str,
+    pub applied: &'a [i64],
+    pub skipped: &'a [i64],
+    pub verdicts: &'a [TriageVerdictRow],
+}
+
 impl Store {
+    /// A card's apply recorded in ONE transaction: its verdicts, its items
+    /// `applied` / `skipped`, the card `applied`. Any failure rolls all of
+    /// it back.
+    pub fn record_changeset_applied(&self, id: i64, r: &AppliedRecord<'_>) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for v in r.verdicts {
+            upsert_verdict(&tx, v)?;
+        }
+        set_item_states(&tx, id, r.applied, "applied")?;
+        set_item_states(&tx, id, r.skipped, "skipped")?;
+        mark_applied(&tx, id, r.applied_at, r.commits, r.layers_snapshot, None)?;
+        tx.commit()
+    }
+
+    /// A failed apply (Rulings R12), in ONE transaction: `pending` items back
+    /// to pending, the card `failed` with `error`.
+    pub fn fail_changeset(&self, id: i64, pending: &[i64], error: &str) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        set_item_states(&tx, id, pending, "pending")?;
+        tx.execute(
+            "UPDATE changesets SET state = 'failed', error = ?2 WHERE id = ?1",
+            rusqlite::params![id, error],
+        )?;
+        tx.commit()
+    }
+
     /// A new `proposed` card with its items, in one transaction.
     /// `created_at` is stamped in Unix seconds.
     pub fn insert_changeset(
@@ -282,24 +375,12 @@ impl Store {
         layers_snapshot: &str,
         error: Option<&str>,
     ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE changesets SET state = 'applied', applied_at = ?2, commits = ?3, \
-             layers_snapshot = ?4, error = ?5 WHERE id = ?1",
-            rusqlite::params![id, applied_at, commits, layers_snapshot, error],
-        )?;
-        Ok(())
+        mark_applied(&self.conn, id, applied_at, commits, layers_snapshot, error)
     }
 
     pub fn set_changeset_item_states(&self, id: i64, positions: &[i64], state: &str) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        {
-            let mut stmt = tx.prepare(
-                "UPDATE changeset_items SET state = ?3 WHERE changeset_id = ?1 AND position = ?2",
-            )?;
-            for p in positions {
-                stmt.execute(rusqlite::params![id, p, state])?;
-            }
-        }
+        set_item_states(&tx, id, positions, state)?;
         tx.commit()
     }
 
@@ -308,25 +389,7 @@ impl Store {
     /// overturns a person's verdict", Rulings R10); a person may replace
     /// anything.
     pub fn upsert_triage_verdict(&self, v: &TriageVerdictRow) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO asset_triage_verdicts \
-               (catalog_id, kind, name, content_hash, verdict, decider, decided_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
-             ON CONFLICT (kind, name, content_hash) DO UPDATE SET \
-               catalog_id = excluded.catalog_id, verdict = excluded.verdict, \
-               decider = excluded.decider, decided_at = excluded.decided_at \
-             WHERE asset_triage_verdicts.decider != 'person' OR excluded.decider = 'person'",
-            rusqlite::params![
-                v.catalog_id,
-                v.kind,
-                v.name,
-                v.content_hash,
-                v.verdict,
-                v.decider,
-                v.decided_at
-            ],
-        )?;
-        Ok(())
+        upsert_verdict(&self.conn, v)
     }
 
     pub fn triage_verdicts(&self) -> Result<Vec<TriageVerdictRow>> {
@@ -648,5 +711,86 @@ mod tests {
         );
         let items = s.changeset_items(done.id).unwrap();
         assert_eq!((items[0].catalog_id, items[1].catalog_id), (None, Some(p)));
+    }
+
+    /// Task 6 review: an apply's bookkeeping is one transaction — a failing
+    /// write leaves the card and its items exactly as they were; a failed
+    /// apply puts its items back to pending and fails the card together.
+    #[test]
+    fn an_apply_is_recorded_whole_or_not_at_all() {
+        let (s, p) = store();
+        let card = s
+            .insert_changeset(
+                "new",
+                "New",
+                &[
+                    item("core", "import", Some(p), None),
+                    item("hidden", "hide", None, None),
+                ],
+            )
+            .unwrap();
+        let bad = TriageVerdictRow {
+            catalog_id: Some(9999),
+            kind: "hook".into(),
+            name: "stop".into(),
+            content_hash: "h".into(),
+            verdict: "ignored".into(),
+            decider: "rule".into(),
+            decided_at: 1,
+        };
+        let r = AppliedRecord {
+            applied_at: 1_700_000_000_000,
+            commits: "{}",
+            layers_snapshot: "[]",
+            applied: &[0, 1],
+            skipped: &[],
+            verdicts: std::slice::from_ref(&bad),
+        };
+        assert!(s.record_changeset_applied(card.id, &r).is_err());
+        assert_eq!(s.get_changeset(card.id).unwrap().unwrap().state, "proposed");
+        assert!(s
+            .changeset_items(card.id)
+            .unwrap()
+            .iter()
+            .all(|i| i.state == "pending"));
+        assert!(s.triage_verdicts().unwrap().is_empty());
+
+        let good = TriageVerdictRow {
+            catalog_id: None,
+            ..bad.clone()
+        };
+        let r = AppliedRecord {
+            verdicts: &[good],
+            applied: &[1],
+            skipped: &[0],
+            ..r
+        };
+        s.record_changeset_applied(card.id, &r).unwrap();
+        let row = s.get_changeset(card.id).unwrap().unwrap();
+        assert_eq!(
+            (row.state.as_str(), row.applied_at),
+            ("applied", Some(1_700_000_000_000))
+        );
+        let states: Vec<String> = s
+            .changeset_items(card.id)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.state)
+            .collect();
+        assert_eq!(states, ["skipped", "applied"]);
+        assert_eq!(s.triage_verdicts().unwrap().len(), 1);
+
+        let other = s
+            .insert_changeset("new", "Other", &[item("core", "import", Some(p), None)])
+            .unwrap();
+        s.set_changeset_item_states(other.id, &[0], "applied")
+            .unwrap();
+        s.fail_changeset(other.id, &[0], "core: boom").unwrap();
+        let row = s.get_changeset(other.id).unwrap().unwrap();
+        assert_eq!(
+            (row.state.as_str(), row.error.as_deref()),
+            ("failed", Some("core: boom"))
+        );
+        assert_eq!(s.changeset_items(other.id).unwrap()[0].state, "pending");
     }
 }
