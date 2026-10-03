@@ -382,8 +382,10 @@ Index by area (names only; see the reference for details):
   the grants and the gate are read from exactly the items it runs (with no
   `positions`, every pending item but "needs a look"): applying a rollout
   or a restore also needs the personal grant and passes the `apply_sync`
-  confirm gate, whose request names the card, its kind and each item, so
-  an approval covers only that content. A client naming a card that does
+  confirm gate, whose request names the card, its kind and each item with
+  a short hash of its content, so an approval covers only that content (a
+  card refreshed to new content, even for the same hosts and assets, asks
+  again). A client naming a card that does
   not exist gets the same `E_FORBIDDEN` as an ungranted one, and a client
   holding no grant at all gets one refusal for every card; the master gets
   `E_NOTFOUND`. A failed apply commits nothing; a card never removes

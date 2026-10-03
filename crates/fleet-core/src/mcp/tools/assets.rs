@@ -700,9 +700,12 @@ impl FleetTools {
 }
 
 /// What a person approves for a host-writing card apply (fix round 1): the
-/// card, its kind and each selected item — e.g. `changeset 12 (drift):
-/// restore #1 skill/w on oci` — so an approval covers this content only; a
-/// card refreshed or re-picked since asks again.
+/// card, its kind and each selected item with the first 12 characters of
+/// its gap or content hash — e.g. `changeset 12 (drift): restore #1
+/// skill/w on oci [3f2a9c01b7de]`. An approval is matched on this text, so
+/// it covers this card's kind, positions, hosts, assets and content: a
+/// card re-picked since, or refreshed to new content (even with the same
+/// assets and hosts — final review, Task 9), asks again.
 fn confirm_summary(
     card: &crate::store::ChangesetRow,
     selected: &[&crate::store::ChangesetItemRow],
@@ -711,9 +714,14 @@ fn confirm_summary(
         .iter()
         .map(|i| {
             let params = catalog::changesets::ItemParams::parse(i.params.as_deref());
+            let hash = params
+                .hash
+                .as_deref()
+                .map(|h| format!(" [{}]", h.get(..12).unwrap_or(h)))
+                .unwrap_or_default();
             match i.action.as_str() {
                 "sync" => format!(
-                    "sync #{} {} to {} ({})",
+                    "sync #{} {} to {} ({}){hash}",
                     i.position,
                     i.grp,
                     i.name,
@@ -721,7 +729,7 @@ fn confirm_summary(
                 ),
                 action => {
                     let on = params.host.map(|h| format!(" on {h}")).unwrap_or_default();
-                    format!("{action} #{} {}/{}{on}", i.position, i.kind, i.name)
+                    format!("{action} #{} {}/{}{on}{hash}", i.position, i.kind, i.name)
                 }
             }
         })
@@ -879,4 +887,59 @@ fn forbidden(touches: &catalog::admin::Touches, caller: &Caller) -> McpError {
 fn parse_kind(s: &str) -> Result<catalog::model::Kind, McpError> {
     serde_json::from_value(serde_json::Value::String(s.to_string()))
         .map_err(|_| mcp_err(codes::E_INVALID, format!("unknown asset kind '{s}'"), None))
+}
+
+#[cfg(test)]
+mod confirm_summary_tests {
+    use super::confirm_summary;
+    use crate::store::{ChangesetItemRow, ChangesetRow};
+
+    fn card() -> ChangesetRow {
+        ChangesetRow {
+            id: 7,
+            kind: "rollout".into(),
+            summary: "Roll out core to oci".into(),
+            state: "proposed".into(),
+            created_at: 1,
+            applied_at: None,
+            commits: None,
+            layers_snapshot: None,
+            error: None,
+        }
+    }
+
+    fn sync(hash: &str) -> ChangesetItemRow {
+        ChangesetItemRow {
+            changeset_id: 7,
+            position: 0,
+            grp: "core".into(),
+            catalog_id: Some(1),
+            kind: "host".into(),
+            name: "oci".into(),
+            action: "sync".into(),
+            params: Some(format!(
+                r#"{{"layer":"core","assets":["skill/w"],"hash":"{hash}"}}"#
+            )),
+            decider: "rule".into(),
+            state: "pending".into(),
+        }
+    }
+
+    /// Final review (Task 9 park): a refresh that changes only an item's
+    /// gap/content hash changes what the person approves, so an earlier
+    /// approval never covers the new content.
+    #[test]
+    fn the_summary_is_bound_to_each_items_hash() {
+        let a = sync("0123456789abcdef0123");
+        let b = sync("fedcba9876543210fedc");
+        let (sa, sb) = (
+            confirm_summary(&card(), &[&a]),
+            confirm_summary(&card(), &[&b]),
+        );
+        assert_ne!(sa, sb);
+        assert_eq!(
+            sa,
+            "changeset 7 (rollout): sync #0 core to oci (skill/w) [0123456789ab]"
+        );
+    }
 }

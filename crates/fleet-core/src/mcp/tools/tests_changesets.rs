@@ -397,7 +397,7 @@ async fn a_drift_restore_applied_without_positions_needs_personal_and_confirmati
     assert_eq!(
         *asked_for.lock().unwrap(),
         vec![format!(
-            "changeset {} (drift): restore #1 skill/w on oci",
+            "changeset {} (drift): restore #1 skill/w on oci [h2]",
             drift.id
         )],
         "the approval names what runs"
