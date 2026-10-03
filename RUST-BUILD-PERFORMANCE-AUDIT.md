@@ -1789,3 +1789,82 @@ P4b-run-store-sqliteO3 623 passed; 0 failed; 0 ignored; 0 measured; 3958 filtere
 ```
 
 </details>
+
+## Appendix C — A/B series, 2026-10-02/03 (implemented on this branch)
+
+The Phase 1 package was applied one commit at a time. After each commit the
+same suite was re-run on the same 4 vCPU machine, with the methodology of
+§6 and the harness of Appendix A. Build mode and test mode each ran on a
+fresh `target/`. Edit numbers are the mean of the edit and restore samples,
+which agreed within ±10 %. Acceptance criteria were fixed before measuring.
+The base is `main` at `3849d49`, merged into this branch.
+
+| Step | Commit | Change |
+|---|---|---|
+| 0 | `926b15c` | Pin `rust-toolchain.toml`, every `dtolnay/rust-toolchain@` and the hub Dockerfile to **1.99.0**; `check-version-consistency.sh` fails when they disagree |
+| 1 | `29d2e4e` | `.cargo/config.toml` aliases `cargo fleet-check` / `fleet-test` / `fleet-lint` (all `--workspace`, test targets → one feature world); the CLAUDE.md validation ladder; `REGEN_*` commands moved to it |
+| 2 | `e8df4e0` | `[profile.dev] debug = "line-tables-only"`, plus a `dev-debug` profile with full DWARF |
+| 3 | `9275c52` | `src-tauri` `crate-type = ["rlib"]` (no staticlib/cdylib) |
+| 4 | `b19cba1` | `[profile.dev.package.libsqlite3-sys] opt-level = 3` |
+
+### C.1 Build and test-build (cumulative; s0 = baseline on the pinned toolchain)
+
+| Metric | s0 pin | s2 line-tables | s3 rlib | s4 SQLite O3 | s0 → s4 |
+|---|---:|---:|---:|---:|---:|
+| cold `cargo build --workspace` | 4:11 | 3:10 | 2:59 | 3:36 | −14 % |
+| fleet-core edit → `cargo build --workspace` | 36.8 s | 28.2 s | 18.7 s | **17.7 s** | **−52 %** |
+| Tauri command edit → `cargo build --workspace` | 16.1 s | 7.8 s | 4.7 s | **4.8 s** | **−70 %** |
+| cold `cargo test --workspace --no-run` | 4:40 | 4:08 | 4:11 | 4:23 | −6 % |
+| fleet-core edit → `cargo test --workspace --no-run` | 36.5 s | 29.1 s | 30.1 s | 30.2 s | −17 % |
+| **`cargo test --workspace` (run, warm)** | **17:24** | — | — | **11:33** | **−34 %** |
+| └ fleet-core lib tests | 734 s | — | — | 532 s | −27 % |
+| └ desktop lib tests | 204 s | — | — | 138 s | −32 % |
+| └ fleet-hub tests | 14.6 s | — | — | 8.7 s | −40 % |
+| `target/` after build (mode-isolated) | 11 GB | 6.4 GB | 5.4 GB | 5.5 GB | −50 % |
+| debug desktop binary / staticlib / cdylib | 737 MB / 1.97 GB / 583 MB | 273 MB / 885 MB / 126 MB | 273 MB / — / — | 283 MB / — / — | |
+| fmt + clippy `-D warnings` + all 5,492 tests | pass | | | pass | |
+
+### C.2 Agent session (cold target, first validation, then two edit rounds on fleet-core)
+
+| Sequence | Total | `target/` | edit round: validate + module test (+ build) | + lint |
+|---|---:|---:|---:|---:|
+| old mixed habits (`build --workspace`, `check -p fleet-core`, `test -p fleet-core --lib <f>`, clippy) on s1 | 785 s | 18 GB | 79.1 s | 169 s |
+| canonical (`fleet-check`, `fleet-test -- <f>`, `fleet-lint`) on s1 | 690 s (−12 %) | 20 GB | 62.6 s | 153 s |
+| canonical on s4 (all steps) | **675 s (−14 %)** | **14 GB (−22 %)** | **51.6 s (−35 %)** | 139 s (−18 %) |
+
+### C.3 Verdicts against the pre-set criteria
+
+* **Step 0 (pin):** accepted. Functional criterion met on 1.99.0.
+* **Step 1 (canonical mode):** accepted on time (−12 % total, −21 % per edit
+  round). The size criterion failed on its own (+11 %): the first `fleet-test`
+  compiles the whole workspace's test graph, desktop crate included (4:27,
+  447 units), where the old habit compiled only fleet-core's. With steps 2–3
+  in place the canonical session is 22 % *smaller* than the old one.
+* **Step 2 (line-tables-only):** accepted. −23 % fleet-core edit, −52 % Tauri
+  edit, −24 % cold build, −42 % `target/`.
+* **Step 3 (rlib only):** accepted. A further −34 % fleet-core edit and −40 %
+  Tauri edit. `pnpm tauri build --debug --bundles deb` still produces a .deb
+  with the binary. **Not yet verified on macOS/Windows bundles**; that needs
+  CI (`rust-windows` builds the NSIS installer) on a PR.
+* **Step 4 (SQLite O3):** accepted. Full suite −34 %, all tests green. **Cost:**
+  the SQLite C compile grew from 6.7 s to **63 s** and sits on the cold
+  critical path (fleet-core waits for rusqlite): **+37 s per cold build /
+  fresh worktree / cold `fleet-check`** (2:41 → 3:10). It pays for itself
+  after one full test run. `opt-level = 1` or `2` may keep most of the
+  runtime gain for less compile time; that is an untested follow-up.
+
+### C.4 What the new numbers say about the next step
+
+* The edit loop is no longer dominated by link output. A fleet-core edit's
+  build is now ~18 s, of which fleet-core's own frontend is ~12–15 s.
+  Further gains on that path need fleet-core itself to shrink (the Phase 2
+  split) or the parallel frontend (Phase 5).
+* `cargo fleet-lint` (~88 s per fleet-core edit) is now the most expensive
+  routine step. It re-lints fleet-core's 326k-LOC test target. Keep it at
+  commit time, not per edit, as the ladder says.
+* Test execution is still the largest block at 11.5 min. The next
+  measured-first candidate is the migrate-once template database (§7.4),
+  since ~half of the remaining per-test cost was kernel time in probe P4.
+* Feature-world `target/` separation and the `nl-detect` move were not part
+  of this package. They only matter for people mixing `tauri dev` /
+  `tauri build` with the canonical commands.
