@@ -702,6 +702,11 @@ pub async fn resolve_start(
                 Some(item) if item_visible(scope, &s, &item)? => item,
                 _ => return Err(orgs::not_found("work item", id)),
             };
+            if item.origin.as_deref() == Some("proposed")
+                && item.proposal_state.as_deref() != Some("accepted")
+            {
+                return Err(IpcError::new(codes::E_INVALID, "accept the proposal first"));
+            }
             let key = item.key.clone().ok_or_else(|| {
                 IpcError::new(codes::E_INVALID, "that work item has no key to start from")
             })?;
@@ -1339,6 +1344,88 @@ fn link_started(
     Ok((s.get_session_by_id(row.id)?, queued))
 }
 
+/// A native item (design 2026-09-29) starts where it belongs and with what
+/// was written: an unset project comes from the item, else its parent's;
+/// an unset brief is the parent's (a ticket's own description, fenced as
+/// every start brief is) followed by the item's title and notes. Anything
+/// else starts exactly as asked.
+fn with_native_defaults(
+    store: &Mutex<Store>,
+    args: &StartArgs,
+    scope: &OrgScope,
+) -> Result<StartArgs, IpcError> {
+    let Some(id) = args.item_id else {
+        return Ok(args.clone());
+    };
+    let s = lock(store)?;
+    let Some(item) = s.get_work_item(id)? else {
+        return Ok(args.clone());
+    };
+    if !matches!(
+        item.origin.as_deref(),
+        Some("manual" | "proposed" | "agent")
+    ) {
+        return Ok(args.clone());
+    }
+    // The parent's title, brief and project reach the new session only when
+    // this caller may see the parent (another org's ticket text must not
+    // ride a subtask's start brief across the org fence).
+    let parent = match item
+        .parent_id
+        .map(|p| s.get_work_item(p))
+        .transpose()?
+        .flatten()
+    {
+        Some(p) if item_visible(scope, &s, &p)? => Some(p),
+        _ => None,
+    };
+    let mut out = args.clone();
+    if out.project_id.is_none() {
+        out.project_id = item
+            .project_id
+            .or_else(|| parent.as_ref().and_then(|p| p.project_id));
+    }
+    if out.brief.is_none() {
+        let own = match item.notes.as_deref().filter(|n| !n.trim().is_empty()) {
+            Some(n) => format!("{}\n\n{n}", item.title),
+            None => item.title.clone(),
+        };
+        out.brief = Some(match &parent {
+            Some(p) => {
+                let head = match p.key.as_deref() {
+                    Some(k) => format!("{k} {}", p.title),
+                    None => p.title.clone(),
+                };
+                let desc = s
+                    .work_item_meta(p.id)?
+                    .description
+                    .filter(|d| !d.trim().is_empty())
+                    .map(|d| {
+                        crate::mcp::guard::fence_untrusted(
+                            &d,
+                            "a tracker ticket",
+                            crate::service::work::view::DESCRIPTION_MAX_CHARS,
+                        )
+                    });
+                let task = match desc {
+                    Some(d) => format!("## Task {head}\n\n{d}"),
+                    None => format!("## Task {head}"),
+                };
+                let brief = format!(
+                    "{task}\n\n## Subtask {}\n\n{own}",
+                    item.key.as_deref().unwrap_or_default()
+                );
+                brief
+                    .chars()
+                    .take(crate::service::work::handover::BRIEF_MAX_CHARS)
+                    .collect()
+            }
+            None => own,
+        });
+    }
+    Ok(out)
+}
+
 /// `work_link { action: start }` end to end over the real `new_session`.
 pub async fn start_work(
     store: &Arc<Mutex<Store>>,
@@ -1348,6 +1435,9 @@ pub async fn start_work(
     view: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
 ) -> Result<SessionRow, IpcError> {
+    // Main's native-subtask defaults, under M1's `ViewScope`: the step needs
+    // only the org half, which is what `with_native_defaults` takes.
+    let args = &with_native_defaults(store, args, &view.org)?;
     let plan = plan_start(store, args, view, net).await?;
     let brief = match (&args.brief, args.with_brief) {
         (Some(b), _) => Some(b.clone()),

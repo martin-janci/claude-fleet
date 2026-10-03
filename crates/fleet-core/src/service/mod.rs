@@ -25,6 +25,7 @@ pub mod diagnostics;
 pub mod evidence;
 pub mod fresh;
 pub mod gc;
+pub mod guides;
 pub mod health;
 pub mod hooks;
 pub mod hooks_install;

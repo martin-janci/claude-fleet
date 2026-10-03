@@ -477,7 +477,7 @@ impl ViewScope {
     /// 1. **A surviving `sessions` row decides**, through [`Self::may_own`] —
     ///    past work is the `own` tier (spec §4.3 invariant 5), and this arm
     ///    is what makes `work_link { resume | summarize }` answer the same
-    ///    way `session_transcript` answers for the same row. Migration 087's
+    ///    way `session_transcript` answers for the same row. Migration 095's
     ///    triggers record a `conversation_owners` row only `WHEN
     ///    NEW.owner_person_id IS NOT NULL`, so every reconcile-discovered
     ///    session has a real transcript and NO owner record: without this arm

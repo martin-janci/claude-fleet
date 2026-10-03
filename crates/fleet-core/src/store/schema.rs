@@ -371,9 +371,9 @@ fn client_tokens_has_assets_admin(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 086 (multi-user M1): `client_tokens`
+/// `already_applied` guard of migration 094 (multi-user M1): `client_tokens`
 /// already has `person_id`. That `ALTER TABLE ... ADD COLUMN` is the one
-/// statement in 086 that is not idempotent — the table, both indexes and the
+/// statement in 094 that is not idempotent — the table, both indexes and the
 /// trigger are `IF NOT EXISTS`, and both writes are conditional — so the
 /// column being there means the whole migration is.
 fn client_tokens_has_person(conn: &Connection) -> rusqlite::Result<bool> {
@@ -385,7 +385,7 @@ fn client_tokens_has_person(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 089 (multi-user M1, T9d): the one
+/// `already_applied` guard of migration 097 (multi-user M1, T9d): the one
 /// `ADD COLUMN` in the script. The trigger is `IF NOT EXISTS` and the
 /// backfill `UPDATE`s are idempotent, so only the column needs the guard.
 fn tasks_has_detached_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -397,8 +397,8 @@ fn tasks_has_detached_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 087 (multi-user M1): `sessions`
-/// already has `visibility`, the LAST of 087's two `ADD COLUMN`s — the
+/// `already_applied` guard of migration 095 (multi-user M1): `sessions`
+/// already has `visibility`, the LAST of 095's two `ADD COLUMN`s — the
 /// `work_items_has_status_set_at` convention. Everything else in the script
 /// is `IF NOT EXISTS` or a `DROP`/`CREATE` of the row-version trigger, and
 /// the two `ADD COLUMN`s are the statements that cannot be written
@@ -421,6 +421,60 @@ fn sessions_has_visibility(conn: &Connection) -> rusqlite::Result<bool> {
 fn work_items_has_status_set_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'status_set_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 086 (shared work context).
+fn work_items_has_origin(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'origin'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 091 (`catalog_id` on
+/// `asset_inventory`; `host_layers` is rebuilt unconditionally by the same
+/// migration, keyed off this column since `ADD COLUMN` is not idempotent).
+fn asset_inventory_has_catalog_id(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('asset_inventory') WHERE name = 'catalog_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 087 (`secret_like` / `fleet_owned`
+/// on `asset_inventory`).
+fn asset_inventory_has_fleet_owned(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('asset_inventory') WHERE name = 'fleet_owned'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 089 (`hosts.harnesses`,
+/// multi-harness F3a).
+fn hosts_has_harnesses(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'harnesses'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 092.
+fn hosts_has_provision_warning(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'provision_warning'",
         [],
         |r| r.get(0),
     )?;
@@ -964,13 +1018,69 @@ const MIGRATIONS: &[Migration] = &[
         85,
         include_str!("../../migrations/085_work_unlinks_item_index.sql"),
     ),
+    // Multi-user M1's four scripts were written as 086-089 and RENUMBERED to
+    // 094-097 when `main` was merged: `main` had meanwhile shipped 086-093
+    // (shared work context, inventory flags, guides, host harnesses, the
+    // catalogs). The scripts themselves are unchanged — the two sets touch
+    // disjoint tables (M1: `people`, `sessions`, `session_grants`, `tasks`) —
+    // so the renumber is the whole of it. A database an earlier M1 build
+    // already opened recorded 86-89 for THESE scripts and will skip `main`'s
+    // 086-093; that is the collision `repair_skipped_main_migrations` below
+    // has handled twice before, and M1 has no repair arm yet (see
+    // MERGE-REPORT.md).
+    // Shared work context (design 2026-09-29): origin, project, notes, job
+    // and proposal columns on `work_items`. The ADD COLUMNs are not
+    // idempotent, so the same guard 084 uses; the backfill and indexes are.
+    Migration {
+        version: 86,
+        sql: include_str!("../../migrations/086_shared_work_context.sql"),
+        already_applied: Some(work_items_has_origin),
+    },
+    // Assets S1a: `secret_like` / `fleet_owned` on `asset_inventory`.
+    Migration {
+        version: 87,
+        sql: include_str!("../../migrations/087_inventory_flags.sql"),
+        already_applied: Some(asset_inventory_has_fleet_owned),
+    },
+    // Declarative pages, guides: `guide_proposals`. A new table and index,
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(88, include_str!("../../migrations/088_guides.sql")),
+    // Multi-harness F3a: which harnesses the asset catalog syncs on a host
+    // (NULL = auto). ADD COLUMN is not idempotent: the same guard 087 uses.
+    Migration {
+        version: 89,
+        sql: include_str!("../../migrations/089_host_harnesses.sql"),
+        already_applied: Some(hosts_has_harnesses),
+    },
+    // Assets S1b M1: `catalogs`, backfilled from `catalog_config` as
+    // `personal`. CREATE IF NOT EXISTS + INSERT OR IGNORE: safe to re-run.
+    Migration::plain(90, include_str!("../../migrations/090_catalogs.sql")),
+    // Assets S1b M2: `catalog_id` on `host_layers` (rebuilt) and
+    // `asset_inventory`.
+    Migration {
+        version: 91,
+        sql: include_str!("../../migrations/091_catalog_ids.sql"),
+        already_applied: Some(asset_inventory_has_catalog_id),
+    },
+    // The warning a degraded provisioning left behind, so it survives the
+    // call that produced it. ADD COLUMN is not idempotent: the same guard
+    // 087 and 089 use.
+    Migration {
+        version: 92,
+        sql: include_str!("../../migrations/092_host_provision_warning.sql"),
+        already_applied: Some(hosts_has_provision_warning),
+    },
+    // Assets S1b M3: `host_catalogs` (admissions) and `client_catalog_grants`
+    // (personal backfilled from `assets_admin_at`). IF NOT EXISTS + INSERT
+    // OR IGNORE: safe to re-run.
+    Migration::plain(93, include_str!("../../migrations/093_catalog_access.sql")),
     // Multi-user M1 (T1): `people`, `client_tokens.person_id` with its own
     // narrow auth-epoch trigger, this hub's personal owner, and the backfill
     // that leaves no live device person-less. Guarded: the ADD COLUMN is the
     // one statement here that is not idempotent.
     Migration {
-        version: 86,
-        sql: include_str!("../../migrations/086_people.sql"),
+        version: 94,
+        sql: include_str!("../../migrations/094_people.sql"),
         already_applied: Some(client_tokens_has_person),
     },
     // Multi-user M1 (T3): `sessions.owner_person_id` / `visibility`,
@@ -981,8 +1091,8 @@ const MIGRATIONS: &[Migration] = &[
     // script — it is `backfill_session_owner`, after the collision repair,
     // for migration 080's reason.
     Migration {
-        version: 87,
-        sql: include_str!("../../migrations/087_session_owner.sql"),
+        version: 95,
+        sql: include_str!("../../migrations/095_session_owner.sql"),
         already_applied: Some(sessions_has_visibility),
     },
     // Multi-user M1 (T4): `session_grants` — the owner's explicit, revocable,
@@ -991,14 +1101,14 @@ const MIGRATIONS: &[Migration] = &[
     // statement is `IF NOT EXISTS` and there is no ADD COLUMN, so re-running
     // the script changes nothing. The rules it cannot express as constraints
     // are in `store/session_grants.rs`.
-    Migration::plain(88, include_str!("../../migrations/088_session_grants.sql")),
+    Migration::plain(96, include_str!("../../migrations/096_session_grants.sql")),
     // Multi-user M1 (T9d): `tasks.detached_at` plus the `AFTER DELETE ON
     // sessions` trigger that NULLs a reaped session's id out of both ends and
     // stamps the task, so a recycled `sessions.id` can never make another
     // person's task read as theirs. Guarded: the ADD COLUMN.
     Migration {
-        version: 89,
-        sql: include_str!("../../migrations/089_tasks_detach.sql"),
+        version: 97,
+        sql: include_str!("../../migrations/097_tasks_detach.sql"),
         already_applied: Some(tasks_has_detached_at),
     },
 ];
@@ -1155,7 +1265,7 @@ impl Store {
         )
     }
 
-    /// Migration 087's backfill: on a hub with exactly ONE person, every
+    /// Migration 095's backfill: on a hub with exactly ONE person, every
     /// session fleet itself started becomes that person's, and private.
     ///
     /// **Why it is Rust and not an `UPDATE` in the script.** Migration 080
@@ -1163,7 +1273,7 @@ impl Store {
     /// trigger, which names `lost_reason` — a column that on a
     /// conversations-branch database exists only once
     /// [`Store::repair_skipped_main_migrations`] has added it, and that runs
-    /// *after* every pending migration. An inline `UPDATE` in 087 aborts
+    /// *after* every pending migration. An inline `UPDATE` in 095 aborts
     /// such an upgrade with `no such column: lost_reason`. So this runs
     /// beside [`Store::backfill_stale_demoted`], after the repair.
     ///
@@ -1184,7 +1294,7 @@ impl Store {
     /// `unclaimed`, which is a count and nothing else.
     ///
     /// `(SELECT id FROM people WHERE is_personal_owner = 1) IS NOT NULL`
-    /// looks redundant beside the count — migration 086 mints the flagged
+    /// looks redundant beside the count — migration 094 mints the flagged
     /// row — and is there so that a database where the one person is
     /// somehow not the flagged owner attributes NOTHING rather than
     /// stamping `private` with a NULL owner, which no caller could ever
@@ -1385,6 +1495,7 @@ mod tests {
         "tasks",
         "worktree_parent_fingerprints",
         "catalog_config",
+        "catalogs",
         "asset_inventory",
         "catalog_secrets",
         "catalog_secrets_host",
@@ -2362,6 +2473,284 @@ mod tests {
         assert_eq!(scanned_at, 7, "the inventory row survives a re-run");
     }
 
+    /// 090 on a database stopped at 089 with a `catalog_config` row: the row
+    /// becomes the `personal` catalog, and a re-run changes nothing.
+    #[test]
+    fn migration_90_copies_catalog_config_into_personal() {
+        let old = Store::open_in_memory().expect("open");
+        old.conn
+            .execute_batch(
+                "DROP TABLE catalogs;\
+                 INSERT INTO catalog_config (id, repo_path, remote_url, head_commit, last_loaded_at) \
+                   VALUES (1, '/r', 'git@a:b.git', 'h1', 5);\
+                 DELETE FROM schema_version WHERE version >= 90;",
+            )
+            .unwrap();
+        old.migrate().expect("090 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let p = old.personal_catalog().unwrap().expect("personal row");
+        assert_eq!((p.name.as_str(), p.repo_path.as_str()), ("personal", "/r"));
+        assert_eq!(p.remote_url.as_deref(), Some("git@a:b.git"));
+        assert_eq!(
+            (p.head_commit.as_deref(), p.last_loaded_at, p.org_id),
+            (Some("h1"), Some(5), None)
+        );
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 90;")
+            .unwrap();
+        old.migrate().expect("re-running 090 is safe");
+        assert_eq!(
+            old.list_catalogs().unwrap().len(),
+            1,
+            "no second personal row"
+        );
+    }
+
+    /// 091 on a database stopped at 090: existing host_layers rows and managed
+    /// inventory rows get the personal catalog's id; a re-run is safe; the
+    /// copy preserves axis/position/active, not just the key columns; and
+    /// the migrated table still enforces one active role per `(host,
+    /// catalog)` while letting two different catalogs each have their own.
+    #[test]
+    fn migration_91_backfills_catalog_ids() {
+        let old = Store::open_in_memory().expect("open");
+        old.set_catalog_config("/p", None).unwrap();
+        let personal = old.personal_catalog().unwrap().unwrap().id;
+        old.upsert_host("h").unwrap();
+        // Recreate the 090 shape of host_layers and drop the new inventory
+        // column. Non-default axis/position/active values (a context layer,
+        // inactive) so the copy is checked on more than the key columns.
+        old.conn
+            .execute_batch(
+                "DROP TABLE host_layers;\
+                 CREATE TABLE host_layers (host_alias TEXT NOT NULL REFERENCES hosts(alias), layer_name TEXT NOT NULL, \
+                   axis TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, \
+                   PRIMARY KEY (host_alias, layer_name));\
+                 INSERT INTO host_layers (host_alias, layer_name, axis, position, active) \
+                   VALUES ('h', 'core', 'role', 2, 1);\
+                 INSERT INTO host_layers (host_alias, layer_name, axis, position, active) \
+                   VALUES ('h', 'extra', 'context', 5, 0);\
+                 ALTER TABLE asset_inventory DROP COLUMN catalog_id;\
+                 INSERT INTO asset_inventory (host_alias, harness, kind, name, state, scanned_at, managed) \
+                   VALUES ('h','claude','skill','a','in_sync',1,1), ('h','claude','skill','u','unmanaged',1,0);\
+                 DELETE FROM schema_version WHERE version >= 91;",
+            )
+            .unwrap();
+        old.migrate().expect("091");
+        // `get_host_layers_for` only returns active rows, so read `extra`
+        // (inactive) straight from the table to check its copy too.
+        let rows = old.get_host_layers_for("h", personal).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            (
+                rows[0].layer_name.as_str(),
+                rows[0].axis.as_str(),
+                rows[0].position,
+                rows[0].active
+            ),
+            ("core", "role", 2, true),
+            "axis/position/active survive the copy"
+        );
+        let extra: (String, i64, bool) = old
+            .conn
+            .query_row(
+                "SELECT axis, position, active FROM host_layers \
+                 WHERE host_alias='h' AND layer_name='extra'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
+            )
+            .unwrap();
+        assert_eq!(extra, ("context".to_string(), 5, false));
+        let inv = old.list_inventory().unwrap();
+        assert_eq!(
+            inv.iter().find(|r| r.name == "a").unwrap().catalog_id,
+            Some(personal)
+        );
+        assert_eq!(inv.iter().find(|r| r.name == "u").unwrap().catalog_id, None);
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 91;")
+            .unwrap();
+        old.migrate().expect("re-running 091 is safe");
+        assert_eq!(old.get_host_layers("h").unwrap().len(), 1);
+
+        // The migrated (not freshly created) table still enforces one active
+        // role per (host, catalog): a second active role in `personal` is
+        // rejected...
+        let dup_in_personal = old.conn.execute(
+            "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis, position, active) \
+             VALUES ('h', ?1, 'core2', 'role', 0, 1)",
+            rusqlite::params![personal],
+        );
+        assert!(
+            dup_in_personal.is_err(),
+            "a second active role in the same catalog must be rejected"
+        );
+        // ...but a second catalog gets its own slot: one active role each,
+        // both accepted.
+        old.conn
+            .execute(
+                "INSERT INTO orgs (id, name, created_at) VALUES (77, 'acme', 0)",
+                [],
+            )
+            .unwrap();
+        old.conn
+            .execute(
+                "INSERT INTO catalogs (name, repo_path, org_id, created_at) \
+                 VALUES ('acme', '/acme', 77, 0)",
+                [],
+            )
+            .unwrap();
+        let acme: i64 = old
+            .conn
+            .query_row("SELECT id FROM catalogs WHERE name='acme'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        old.conn
+            .execute(
+                "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis, position, active) \
+                 VALUES ('h', ?1, 'acme-core', 'role', 0, 1)",
+                rusqlite::params![acme],
+            )
+            .expect("a different catalog gets its own active-role slot");
+        let dup_in_acme = old.conn.execute(
+            "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis, position, active) \
+             VALUES ('h', ?1, 'acme-core2', 'role', 0, 1)",
+            rusqlite::params![acme],
+        );
+        assert!(
+            dup_in_acme.is_err(),
+            "two active roles in the same (host, catalog) must still be rejected"
+        );
+    }
+
+    /// A `host_layers` row already dangling before 091 (its `hosts` row gone,
+    /// as a hand edit with `foreign_keys = OFF` can leave) must not resurface
+    /// as a brand-new "added" FK violation after 091's copy-out/drop/recreate
+    /// rebuild. The rebuild renumbers FK ids (the `hosts` FK moves from fkid
+    /// 0 to fkid 1 on the new two-FK table) and reassigns rowids, both of
+    /// which `apply_migrations` uses to tell "pre-existing" from "added" —
+    /// so a naive copy would turn an old, harmless dangling row into a fatal
+    /// startup error (final-review I1). 091 copies forward only rows whose
+    /// host still exists, so the dangling row is dropped, never carried.
+    #[test]
+    fn migration_91_drops_a_preexisting_dangling_host_layers_row() {
+        let old = store_at_version(90);
+        // Raw SQL, not `set_catalog_config`: at version 90 there is no
+        // `client_catalog_grants` table for its grant backfill to write to.
+        old.conn
+            .execute_batch(
+                "INSERT INTO catalogs (name, repo_path, org_id, created_at) VALUES ('personal', '/p', NULL, 0);",
+            )
+            .unwrap();
+        // Raw SQL, not `upsert_host`: a typed host read selects HOST_COLUMNS,
+        // which names every column of the CURRENT schema, so calling it on a
+        // store pinned to an older version breaks as soon as any later
+        // migration adds a host column. The 089 test inserts this way for the
+        // same reason; this test is about `host_layers`, not the host API.
+        old.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias, reachable) VALUES ('h', 1);\
+                 INSERT INTO host_layers (host_alias, layer_name, axis) VALUES ('h', 'core', 'role');\
+                 PRAGMA foreign_keys = OFF;\
+                 INSERT INTO host_layers (host_alias, layer_name, axis) VALUES ('ghost', 'core', 'role');",
+            )
+            .unwrap();
+        old.migrate()
+            .expect("a pre-existing dangling host_layers row must not brick startup");
+        old.conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let rows = old.get_host_layers("h").unwrap();
+        assert_eq!(rows.len(), 1, "the real row survives");
+        let ghost: i64 = old
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM host_layers WHERE host_alias = 'ghost'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ghost, 0, "the dangling row is not carried forward");
+    }
+
+    /// 093 on a database stopped at 092: every client with `assets_admin_at`
+    /// gets a grant on `personal` at that time (spec, Migration step 3); a
+    /// client without one gets none; re-running is a no-op.
+    #[test]
+    fn migration_93_backfills_personal_grants_from_assets_admin_at() {
+        let old = store_at_version(92);
+        old.conn
+            .execute_batch(
+                "INSERT INTO catalogs (name, repo_path, org_id, created_at) VALUES ('personal', '/p', NULL, 0);\
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at) \
+                   VALUES ('desk', 'h1', 'full', 1, 77);\
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at) VALUES ('plain', 'h2', 'full', 1);",
+            )
+            .unwrap();
+        old.migrate().expect("093");
+        let grants = |s: &Store| -> Vec<(String, i64)> {
+            s.conn
+                .prepare(
+                    "SELECT t.name, g.granted_at FROM client_catalog_grants g \
+                     JOIN client_tokens t ON t.id = g.client_id ORDER BY t.name",
+                )
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(grants(&old), vec![("desk".to_string(), 77)]);
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 93;")
+            .unwrap();
+        old.migrate().expect("re-running 093 is safe");
+        assert_eq!(grants(&old).len(), 1);
+    }
+
+    /// No personal catalog yet: nothing to attach a grant to, so 093 writes
+    /// none (the grant waits in `assets_admin_at`, Rulings R2).
+    #[test]
+    fn migration_93_without_a_personal_catalog_backfills_nothing() {
+        let old = store_at_version(92);
+        old.conn
+            .execute_batch(
+                "INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at) \
+                   VALUES ('desk', 'h1', 'full', 1, 77);",
+            )
+            .unwrap();
+        old.migrate().expect("093");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let n: i64 = old
+            .conn
+            .query_row("SELECT COUNT(*) FROM client_catalog_grants", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    /// M2 carry 6 / Rulings R1: 091 must not assume `host_layers` exists — a
+    /// database from the 033 collision family can reach 091 without it, and
+    /// `repair_skipped_main_migrations` (which recreates it) runs only after
+    /// every pending migration.
+    #[test]
+    fn migration_91_recreates_a_missing_host_layers_table() {
+        let old = store_at_version(90);
+        old.conn.execute_batch("DROP TABLE host_layers;").unwrap();
+        old.migrate()
+            .expect("091 must not assume host_layers exists");
+        let n: i64 = old
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('host_layers') WHERE name = 'catalog_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
     /// 034 on a database stopped at 033 with a host row: `transport` is
     /// added, defaulting to `ssh` for the existing row. Rolling the recorded
     /// version back and migrating again (tests do this to simulate re-running
@@ -2382,6 +2771,12 @@ mod tests {
                 "INSERT INTO host_layers (host_alias, layer_name, axis) \
                  VALUES ('h', 'base', 'role');",
             )
+            .unwrap();
+        // 091 attaches a pre-existing host_layers row to the personal
+        // catalog; without a `catalog_config` row to seed it, 090 creates no
+        // personal catalog and the row would be dropped by 091's rebuild.
+        old.conn
+            .execute_batch("INSERT INTO catalog_config (id, repo_path) VALUES (1, '/p');")
             .unwrap();
         old.migrate().expect("merged head on a released main DB");
         assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
@@ -2431,16 +2826,22 @@ mod tests {
         old.conn
             .execute_batch("INSERT INTO hosts (alias) VALUES ('h');")
             .unwrap();
+        // host_layers now carries a NOT NULL catalog_id (091): a catalog
+        // must exist before a row can reference one.
+        old.set_catalog_config("/p", None).unwrap();
+        let personal = old.personal_catalog().unwrap().unwrap().id;
         old.conn
-            .execute_batch(
-                "INSERT INTO host_layers (host_alias, layer_name, axis) \
-                 VALUES ('h', 'base', 'role');",
+            .execute(
+                "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis) \
+                 VALUES ('h', ?1, 'base', 'role');",
+                [personal],
             )
             .expect("host_layers exists and accepts a row");
         // …and its unique-active-role index came with it.
-        let err = old.conn.execute_batch(
-            "INSERT INTO host_layers (host_alias, layer_name, axis) \
-             VALUES ('h', 'other', 'role');",
+        let err = old.conn.execute(
+            "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis) \
+             VALUES ('h', ?1, 'other', 'role');",
+            [personal],
         );
         assert!(err.is_err(), "the active-role index is in place");
         // The column the branch had already added was not added twice.
@@ -3477,7 +3878,7 @@ mod tests {
                 // Migration 074: its own trigger,
                 // `auth_epoch_client_tokens_assets_admin`.
                 "assets_admin_at",
-                // Multi-user M1 (migration 086): its own trigger,
+                // Multi-user M1 (migration 094): its own trigger,
                 // `auth_epoch_client_tokens_person`. Whose device this is
                 // decides which sessions the caller may read at all, so a
                 // re-binding MUST invalidate every cached caller.
@@ -3521,7 +3922,7 @@ mod tests {
         assert_eq!(s.active_client_tokens().unwrap()[0].org_id, Some(b.id));
     }
 
-    /// Multi-user M1 (migration 086): re-binding a paired device to another
+    /// Multi-user M1 (migration 094): re-binding a paired device to another
     /// person — or unbinding it — changes WHOSE token it is, and therefore
     /// which sessions the caller may read at all. It must invalidate every
     /// cached caller, or a device handed to a colleague would go on reading
@@ -3529,11 +3930,11 @@ mod tests {
     #[test]
     fn binding_a_client_to_a_person_bumps_the_auth_epoch() {
         let s = Store::open_in_memory().unwrap();
-        let owner = s.personal_owner_id().unwrap().expect("086 mints one");
+        let owner = s.personal_owner_id().unwrap().expect("094 mints one");
         let ada = s.create_person("ada", None).unwrap();
         s.insert_client_token("phone", &"0".repeat(64), "full")
             .unwrap();
-        // A device paired AFTER the upgrade starts person-less: 086's
+        // A device paired AFTER the upgrade starts person-less: 094's
         // backfill only reaches the rows that were there when it ran, and
         // binding the new one is T2's pairing change.
         assert_eq!(s.active_client_tokens().unwrap()[0].person_id, None);
@@ -3576,7 +3977,7 @@ mod tests {
         assert_eq!(binding(&s), Some(ada.id));
     }
 
-    /// Migration 086 on a populated v85 database: every LIVE DEVICE comes
+    /// Migration 094 on a populated v93 database: every LIVE DEVICE comes
     /// out of the upgrade bound to this hub's personal owner (no row is left
     /// at the `person: None` privilege level), a revoked row is left exactly
     /// as it was, a `peer` and an `updater` row are left person-less because
@@ -3585,8 +3986,8 @@ mod tests {
     /// back and migrating again — which the guard turns into a record-only
     /// pass — changes nothing.
     #[test]
-    fn migration_086_on_a_populated_v85_database_is_safe_to_rerun() {
-        const SEED_AT: i64 = 85;
+    fn migration_094_on_a_populated_v93_database_is_safe_to_rerun() {
+        const SEED_AT: i64 = 93;
         let s = store_at_version(SEED_AT);
         s.conn
             .execute_batch(
@@ -3604,7 +4005,7 @@ mod tests {
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
 
-        let owner = s.personal_owner_id().unwrap().expect("086 mints one");
+        let owner = s.personal_owner_id().unwrap().expect("094 mints one");
         assert_eq!(s.list_people().unwrap().len(), 1);
         let unowned: i64 = s
             .conn
@@ -3651,14 +4052,14 @@ mod tests {
         }
 
         // Re-migrate over a schema that already has the column: the guard
-        // records the version and runs not one of 086's statements — no
+        // records the version and runs not one of 094's statements — no
         // second owner, no rename undone, no binding rewritten.
         s.rename_person(owner, Some("Martin"), None).unwrap();
         s.set_client_person("phone", None).unwrap();
         s.conn
             .execute_batch("DELETE FROM schema_version WHERE version >= 86;")
             .unwrap();
-        s.migrate().expect("re-running 086 is safe");
+        s.migrate().expect("re-running 094 is safe");
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         assert_eq!(s.list_people().unwrap().len(), 1, "no second owner");
         assert_eq!(s.personal_owner_id().unwrap(), Some(owner));
@@ -3679,7 +4080,7 @@ mod tests {
         assert_eq!(rows, 4, "the re-run touched no rows");
     }
 
-    /// Migration 087 on a populated v86 database: the two columns arrive
+    /// Migration 095 on a populated v94 database: the two columns arrive
     /// with the safe default, the backfill attributes exactly the rows fleet
     /// started (`started_at IS NOT NULL`) to the hub's one person and leaves
     /// a reconcile-discovered row `unclaimed`, each attributed row's
@@ -3689,8 +4090,8 @@ mod tests {
     /// deletion, and rolling the recorded version back and migrating again —
     /// which the guard turns into a record-only pass — changes nothing.
     #[test]
-    fn migration_087_on_a_populated_v86_database_is_safe_to_rerun() {
-        const SEED_AT: i64 = 86;
+    fn migration_095_on_a_populated_v94_database_is_safe_to_rerun() {
+        const SEED_AT: i64 = 94;
         let s = store_at_version(SEED_AT);
         s.conn
             .execute_batch(
@@ -3713,7 +4114,7 @@ mod tests {
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
 
-        let owner = s.personal_owner_id().unwrap().expect("086 mints one");
+        let owner = s.personal_owner_id().unwrap().expect("094 mints one");
         let row = |s: &Store, name: &str| -> (Option<i64>, String, i64) {
             s.conn
                 .query_row(
@@ -3738,7 +4139,7 @@ mod tests {
             "a row reconcile found is nobody's: unclaimed, and untouched"
         );
 
-        // The conversation-owner record: written by 087's UPDATE trigger
+        // The conversation-owner record: written by 095's UPDATE trigger
         // when the backfill gave the row an owner, and only for a row that
         // has both halves.
         let owners: Vec<(String, i64)> = {
@@ -3800,7 +4201,7 @@ mod tests {
         );
 
         // Re-migrate over a schema that already has the columns: the guard
-        // records the version and runs not one of 087's statements, and the
+        // records the version and runs not one of 095's statements, and the
         // backfill — which is outside the script and therefore DOES run
         // again — matches no row.
         s.conn
@@ -3831,13 +4232,13 @@ mod tests {
             .unwrap()
     }
 
-    /// 087's backfill attributes NOTHING once the hub has more than one
+    /// 095's backfill attributes NOTHING once the hub has more than one
     /// person: there is no fact saying which of them started a pre-M1 row,
     /// and the upgrade widens nothing (rule 7). Those rows stay `unclaimed`,
     /// which is a per-host count and not one byte more.
     #[test]
-    fn the_087_backfill_attributes_nothing_on_a_hub_with_two_people() {
-        let s = store_at_version(86);
+    fn the_095_backfill_attributes_nothing_on_a_hub_with_two_people() {
+        let s = store_at_version(94);
         s.conn
             .execute_batch(
                 "INSERT INTO hosts (alias) VALUES ('h');
@@ -3865,7 +4266,7 @@ mod tests {
         );
     }
 
-    /// Migration 088 on a populated database: the table and its three indexes
+    /// Migration 096 on a populated database: the table and its three indexes
     /// arrive, the grants a hub already holds survive a second open, and the
     /// NULL-safe live index still fires afterwards.
     ///
@@ -3874,8 +4275,8 @@ mod tests {
     /// `Migration::plain` with no `already_applied` guard — this is the test
     /// that says so rather than the comment claiming it.
     #[test]
-    fn migration_088_on_a_populated_database_is_safe_to_rerun() {
-        const SEED_AT: i64 = 87;
+    fn migration_096_on_a_populated_database_is_safe_to_rerun() {
+        const SEED_AT: i64 = 95;
         let s = store_at_version(SEED_AT);
         s.conn
             .execute_batch("INSERT INTO hosts (alias) VALUES ('h');")
@@ -3934,7 +4335,7 @@ mod tests {
         s.conn
             .execute_batch("DELETE FROM schema_version WHERE version >= 88;")
             .unwrap();
-        s.migrate().expect("re-running 088 is safe");
+        s.migrate().expect("re-running 096 is safe");
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
         assert_eq!(grants(&s), before, "the re-run touched no grant");
 
@@ -3973,7 +4374,7 @@ mod tests {
         };
         // The baseline is whatever the rest of the chain left, not 0: a
         // later migration that legitimately re-binds a token moves the
-        // counter too (086's backfill binds this live row to the hub's
+        // counter too (094's backfill binds this live row to the hub's
         // personal owner). What this test pins is the DELTA — one token
         // write bumps it once, and re-running 060 does not reset it.
         let base = read_epoch(&s);
@@ -4065,7 +4466,7 @@ mod tests {
     /// trigger.
     ///
     /// SQLite has no ALTER TRIGGER, so "add a line" means re-issuing the
-    /// whole body in a new migration; 087 is the newest such re-issue (065,
+    /// whole body in a new migration; 095 is the newest such re-issue (065,
     /// 082 before it), and this test is the one that fails if a column is
     /// added without one.
     #[test]
@@ -4429,6 +4830,109 @@ mod tests {
         assert_eq!(rv2, rv, "the stamp is bookkeeping: no row_version bump");
         s.conn
             .execute_batch("DELETE FROM schema_version WHERE version >= 81;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_086_adds_the_shared_work_columns_backfills_origin_and_is_safe_to_rerun() {
+        let s = store_at_version(85);
+        s.conn
+            .execute_batch(
+                "INSERT INTO work_items (source, key, title, created_at, updated_at) VALUES ('local', 'OPS', 'named', 1, 1);
+                 INSERT INTO work_items (source, key, title, created_at, updated_at) VALUES ('jira', 'TK-1', 'ticket', 1, 1);",
+            )
+            .unwrap();
+        assert!(!work_items_has_origin(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let got: Vec<(String, String)> = s
+            .conn
+            .prepare("SELECT title, origin FROM work_items ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            got,
+            vec![
+                ("named".into(), "manual".into()),
+                ("ticket".into(), "detected".into())
+            ]
+        );
+        for col in [
+            "project_id",
+            "notes",
+            "task_id",
+            "proposal_state",
+            "proposed_by",
+            "proposal_why",
+        ] {
+            let n: i64 = s
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = ?1",
+                    [col],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "{col}");
+        }
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 86;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_089_adds_hosts_harnesses_as_auto_and_is_safe_to_rerun() {
+        let s = store_at_version(88);
+        s.conn
+            .execute_batch("INSERT INTO hosts (alias, reachable) VALUES ('h', 1);")
+            .unwrap();
+        assert!(!hosts_has_harnesses(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(hosts_has_harnesses(&s.conn).unwrap());
+        let v: Option<String> = s
+            .conn
+            .query_row("SELECT harnesses FROM hosts WHERE alias = 'h'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(v, None, "an existing host starts on auto");
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 89;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_092_adds_the_provision_warning_as_none_and_is_safe_to_rerun() {
+        let s = store_at_version(91);
+        s.conn
+            .execute_batch("INSERT INTO hosts (alias, reachable, provisioned) VALUES ('h', 1, 1);")
+            .unwrap();
+        assert!(!hosts_has_provision_warning(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(hosts_has_provision_warning(&s.conn).unwrap());
+        let v: Option<String> = s
+            .conn
+            .query_row(
+                "SELECT provision_warning FROM hosts WHERE alias = 'h'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, None, "an existing host carries no warning");
+        // the ADD COLUMN is not idempotent, so a re-run must be guarded
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 92;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);

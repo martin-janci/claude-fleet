@@ -52,6 +52,13 @@ export interface HostRow {
    * counts. Absent, too, from a hub older than M1.
    */
   unclaimed_sessions?: number | null;
+  /** Harnesses the asset catalog syncs here (multi-harness F3a): null or absent
+   *  = auto (Claude, plus Codex where a scan finds it); a list always holds claude. */
+  harnesses?: string[] | null;
+  /** What the last provisioning warned about, when it delivered the content but
+   *  degraded part way (the ag launcher did not install, say). Cleared by the
+   *  next clean run; absent from an older hub. */
+  provision_warning?: string | null;
 }
 
 /** The volatile half of a host row, as `host:pinged` carries it. */
@@ -168,6 +175,32 @@ export async function hideHost(
   if (r.ok) {
     rows.accept(r.value);
   }
+  return r;
+}
+
+/** Codex's place in a host's harness set: `auto` = `harnesses` null (Codex
+ *  where the scan finds it), `on` / `off` = an explicit list. */
+export type HarnessMode = 'auto' | 'on' | 'off';
+
+export function codexModeOf(h: Pick<HostRow, 'harnesses'>): HarnessMode {
+  if (h.harnesses == null) return 'auto';
+  return h.harnesses.includes('codex') ? 'on' : 'off';
+}
+
+/** The `harnesses` value a mode stores; Claude is always in an explicit list. */
+export function harnessesFor(mode: HarnessMode): string[] | null {
+  if (mode === 'auto') return null;
+  return mode === 'on' ? ['claude', 'codex'] : ['claude'];
+}
+
+export async function setHostHarnesses(
+  alias: string,
+  harnesses: string[] | null,
+): Promise<Result<HostRow>> {
+  const r = await invokeCmd<HostRow>('catalog_set_host_harnesses', {
+    args: { host_alias: alias, harnesses },
+  });
+  if (r.ok) rows.accept(r.value);
   return r;
 }
 

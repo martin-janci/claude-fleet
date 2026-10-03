@@ -6,14 +6,15 @@ pub mod claude;
 pub mod codex;
 
 use super::model::{find_placeholders, sha256_hex, Asset, Kind};
+use super::sync::plan::ActionOp;
 use crate::ipc_error::IpcError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
-/// Reserved: enumerates supported harness ids without building the whole
-/// registry via `all()`. Nothing calls this outside tests yet.
-#[allow(dead_code)]
+/// Every harness id the catalog knows, in the order an explicit
+/// `hosts.harnesses` list is normalised to. Read by the lint (`targets.<h>`)
+/// and by `harness_set` (multi-harness F3a).
 pub const HARNESS_IDS: &[&str] = &["claude", "codex"];
 
 /// A file the harness would write on the host. `path` uses `~/` for the home dir.
@@ -139,12 +140,90 @@ impl RenderPlan {
     }
 }
 
-/// What a host scan found: file hashes keyed by `~/`-relative path, and parsed
-/// JSON config files keyed the same way.
+/// What a host scan found: file hashes keyed by `~/`-relative path, parsed
+/// JSON config files keyed the same way, and whether the scan saw the
+/// harness itself on the host.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct HostSnapshot {
     pub files: BTreeMap<String, String>,
     pub configs: BTreeMap<String, serde_json::Value>,
+    /// A `##PRESENT` line was in the scan output (multi-harness F3a). Only
+    /// a scan that probes for its harness prints one — Codex's does (the
+    /// `codex` CLI on PATH, `~/.codex/auth.json` or `~/.codex/sessions`);
+    /// Claude's does not, and `harness_set::harness_gate` never asks for
+    /// Claude.
+    pub present: bool,
+    /// Multi-harness F3c: every directory the scan found to be a symlink,
+    /// `~/`-relative path → its target as `readlink` printed it (control
+    /// characters dropped, at most 256 characters). Only Codex's scan
+    /// reports any (`##LINK`); `sync::plan` refuses every write, adopt or
+    /// removal under one (`Harness::symlink_reason`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub links: BTreeMap<String, String>,
+}
+
+/// One installed asset with what a scan can say about it without the
+/// catalog: a content hash (so identical copies on different hosts are
+/// recognisable), whether it looks like it carries a secret, and whether
+/// fleet itself put it there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledAsset {
+    pub kind: Kind,
+    pub name: String,
+    pub hash: Option<String>,
+    pub secret_like: bool,
+    pub fleet_owned: bool,
+}
+
+/// JSON with every object's keys sorted, recursively: a stable input for
+/// hashing whatever order the host wrote.
+pub fn canonical_json(v: &serde_json::Value) -> String {
+    fn sorted(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(m) => {
+                let mut keys: Vec<&String> = m.keys().collect();
+                keys.sort();
+                let mut out = serde_json::Map::new();
+                for k in keys {
+                    out.insert(k.clone(), sorted(&m[k]));
+                }
+                serde_json::Value::Object(out)
+            }
+            serde_json::Value::Array(a) => serde_json::Value::Array(a.iter().map(sorted).collect()),
+            other => other.clone(),
+        }
+    }
+    sorted(v).to_string()
+}
+
+/// sha256 over `<relative path>=<file hash>` lines for every file under
+/// `prefix` (which ends in `/`), sorted by path. `None` when there is none.
+pub fn dir_hash(snap: &HostSnapshot, prefix: &str) -> Option<String> {
+    let mut lines: Vec<String> = snap
+        .files
+        .iter()
+        .filter_map(|(p, h)| p.strip_prefix(prefix).map(|rel| format!("{rel}={h}")))
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    lines.sort();
+    Some(super::model::sha256_hex(lines.join("\n").as_bytes()))
+}
+
+/// Does an MCP server entry look like it carries a credential?
+pub fn mcp_secret_like(v: &serde_json::Value) -> bool {
+    let non_empty = |k: &str| {
+        v.get(k)
+            .and_then(|o| o.as_object())
+            .is_some_and(|o| !o.is_empty())
+    };
+    let url_secret = v.get("url").and_then(|u| u.as_str()).is_some_and(|u| {
+        ["token=", "key=", "secret="]
+            .iter()
+            .any(|s| u.to_lowercase().contains(s))
+    });
+    non_empty("env") || non_empty("headers") || url_secret
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -174,9 +253,40 @@ pub trait Harness: Send + Sync {
     fn parse_scan(&self, stdout: &str) -> Result<HostSnapshot, IpcError>;
     /// Every asset (kind, name) the snapshot shows as installed.
     fn installed(&self, snap: &HostSnapshot) -> Vec<(Kind, String)>;
+    /// `installed()` with a content hash and flags per asset. The default
+    /// knows nothing beyond the identity.
+    fn installed_detail(&self, snap: &HostSnapshot) -> Vec<InstalledAsset> {
+        self.installed(snap)
+            .into_iter()
+            .map(|(kind, name)| InstalledAsset {
+                kind,
+                name,
+                hash: None,
+                secret_like: false,
+                fleet_owned: false,
+            })
+            .collect()
+    }
     /// Home-relative path (`~/...`) to the manifest file this harness uses
     /// to track which merges/files the sync engine applied.
     fn manifest_path(&self) -> &'static str;
+    /// Why an action touching a path under `link` — a directory the scan
+    /// reported as a symlink to `target` (`HostSnapshot::links`) — is
+    /// refused (multi-harness F3c). Only a scan that reports links ever
+    /// makes the planner ask. `op` is the action's own op, taken *before*
+    /// `sync::plan` blocks it: a `Remove` (deleting something) reads
+    /// differently from every other op (writing or adopting something).
+    fn symlink_reason(&self, link: &str, target: &str, op: ActionOp) -> String {
+        let verb = if op == ActionOp::Remove {
+            "remove"
+        } else {
+            "write"
+        };
+        format!(
+            "{link} is a symlink (to {target}); fleet won't {verb} {} files through it — replace it with a real directory",
+            self.id()
+        )
+    }
     /// Apply `merges` then `remove` to `existing`'s parsed content and
     /// return the full new file text (with a trailing newline). An empty
     /// `existing` means an empty document.
@@ -407,6 +517,18 @@ pub fn is_hex_hash(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// A `##LINK` target as a plan reason may show it: host output, so control
+/// characters are dropped and it is capped at 256 characters; an empty one
+/// (a `readlink` that printed nothing) reads as unknown.
+fn link_target(raw: &str) -> String {
+    let t: String = raw.chars().filter(|c| !c.is_control()).take(256).collect();
+    if t.is_empty() {
+        "an unknown target".to_string()
+    } else {
+        t
+    }
+}
+
 /// Generalised `parse_scan`: `##HASHES` lines, then `##CONFIG <path>` blocks
 /// whose base64 body is decoded by `decode(path, bytes)` (a harness plugs in
 /// its own format — Claude's is plain JSON), then a required `##END`
@@ -414,6 +536,22 @@ pub fn is_hex_hash(s: &str) -> bool {
 /// gathered so far must not be trusted as complete: `E_SCAN`). A hash line
 /// whose path is `-` (a hasher invoked with no file argument, reading
 /// stdin) is skipped rather than recorded as a real file.
+///
+/// `##LINK <path>` (multi-harness F3c) works the same way as a `##CONFIG`
+/// block: the line right after it is UNCONDITIONALLY its target, whatever
+/// that line's own content is — even another `##`-prefixed marker, even
+/// empty — never split out of the `##LINK` line itself, so a directory
+/// whose own name happens to contain `" -> "` cannot corrupt the parsed
+/// path. A target that happens to print e.g. `##PRESENT` is kept
+/// (sanitised) as that literal text, not mistaken for the presence marker.
+/// A path outside `~/` names nothing fleet writes: it and its target line
+/// are both dropped, but the target line is still consumed — so a line
+/// that would otherwise look like a `<hash>  <path>` hash line is never
+/// recorded as a file. Only true end-of-input right after `##LINK <path>`,
+/// with no line at all following it, cannot be swallowed this way: that
+/// reads as `link_target("")`, "an unknown target" (and, same as any
+/// truncated scan, `##END` never arrives either, so the whole parse still
+/// fails as `E_SCAN`).
 pub fn parse_scan_blocks(
     stdout: &str,
     decode: &dyn Fn(&str, &[u8]) -> Option<Value>,
@@ -421,8 +559,18 @@ pub fn parse_scan_blocks(
     use base64::Engine;
     let mut snap = HostSnapshot::default();
     let mut current_config: Option<String> = None;
+    // Outer `Some` = "the next line is this link's target"; inner
+    // `Some(path)` keeps it, `None` drops it (a non-`~/` path) — either way
+    // the next line is consumed and never reinterpreted as anything else.
+    let mut current_link: Option<Option<String>> = None;
     let mut saw_end = false;
     for line in stdout.lines() {
+        if let Some(pending) = current_link.take() {
+            if let Some(path) = pending {
+                snap.links.insert(path, link_target(line));
+            }
+            continue;
+        }
         if line == "##END" {
             saw_end = true;
             current_config = None;
@@ -430,6 +578,19 @@ pub fn parse_scan_blocks(
         }
         if line == "##HASHES" {
             current_config = None;
+            continue;
+        }
+        if line == "##PRESENT" {
+            snap.present = true;
+            current_config = None;
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("##LINK ") {
+            current_config = None;
+            // A path outside `~/` names nothing fleet writes and is
+            // dropped — but the next line (its target) is still consumed
+            // above, just not kept.
+            current_link = Some(path.starts_with("~/").then(|| path.to_string()));
             continue;
         }
         if let Some(path) = line.strip_prefix("##CONFIG ") {
@@ -467,6 +628,14 @@ pub fn parse_scan_blocks(
             }
             snap.files.insert(format!("~/{path}"), hash.to_string());
         }
+    }
+    // The scan was cut off right after naming a link, with no line at all
+    // after it (not even `##END`): unknown. `saw_end` is false here too, so
+    // the snapshot is about to be discarded as `E_SCAN` anyway — this only
+    // matters for a caller that inspects `links` without checking the
+    // `Result` first.
+    if let Some(Some(path)) = current_link.take() {
+        snap.links.insert(path, link_target(""));
     }
     if !saw_end {
         return Err(IpcError::new(
@@ -635,5 +804,101 @@ mod tests {
         assert!(by_id("codex").is_some());
         assert!(by_id("nope").is_none());
         assert_eq!(all().len(), 2);
+    }
+
+    /// `##PRESENT` (multi-harness F3a) says the scan saw the harness itself
+    /// on the host; its absence says it did not. It is neither a hash line
+    /// nor a config body, wherever it appears.
+    #[test]
+    fn parse_scan_blocks_reads_the_presence_line() {
+        let present = parse_scan_blocks(
+            "##PRESENT\n##HASHES\naaaa  .codex/skills/s/SKILL.md\n##END\n",
+            &|_, _| None,
+        )
+        .unwrap();
+        assert!(present.present);
+        assert_eq!(present.files.len(), 1);
+        let absent = parse_scan_blocks("##HASHES\n##END\n", &|_, _| None).unwrap();
+        assert!(!absent.present);
+    }
+
+    /// `##LINK <path>`, then its target on the next line (multi-harness
+    /// F3c), records a symlinked directory: a path not under `~/` is
+    /// ignored (its target line is still consumed), a target loses control
+    /// characters, an empty one reads as unknown, and none is a hash line.
+    #[test]
+    fn parse_scan_blocks_reads_symlinked_dirs() {
+        let snap = parse_scan_blocks(
+            "##LINK ~/.agents/skills\n/home/u/.claude/skills\n##LINK ~/.codex/skills\n\n##LINK /etc/x\n/y\n##LINK ~/.agents/skills/a b\n../x\u{7}y\n##HASHES\n##END\n",
+            &|_, _| None,
+        )
+        .unwrap();
+        assert_eq!(
+            snap.links,
+            BTreeMap::from([
+                (
+                    "~/.agents/skills".to_string(),
+                    "/home/u/.claude/skills".to_string()
+                ),
+                ("~/.agents/skills/a b".to_string(), "../xy".to_string()),
+                (
+                    "~/.codex/skills".to_string(),
+                    "an unknown target".to_string()
+                ),
+            ])
+        );
+        assert!(snap.files.is_empty());
+    }
+
+    /// EXTRA (F3c controller ruling): the target is always the line right
+    /// after `##LINK <path>`, never split out of that line with `" -> "` —
+    /// so a directory whose own name contains that exact substring parses
+    /// intact instead of corrupting the path.
+    #[test]
+    fn parse_scan_blocks_a_link_path_may_contain_the_old_separator_literally() {
+        let snap = parse_scan_blocks(
+            "##LINK ~/.agents/skills/a -> b\n/x/y\n##HASHES\n##END\n",
+            &|_, _| None,
+        )
+        .unwrap();
+        assert_eq!(
+            snap.links,
+            BTreeMap::from([("~/.agents/skills/a -> b".to_string(), "/x/y".to_string())])
+        );
+    }
+
+    /// M4 (F3c review fix round 1): the line right after `##LINK <path>` is
+    /// unconditionally its target, even when that line itself looks like
+    /// the `##PRESENT` marker — it must not be mistaken for one.
+    #[test]
+    fn parse_scan_blocks_a_links_target_that_looks_like_present_is_not_parsed_as_present() {
+        let snap = parse_scan_blocks(
+            "##LINK ~/.agents/skills\n##PRESENT\n##HASHES\n##END\n",
+            &|_, _| None,
+        )
+        .unwrap();
+        assert!(
+            !snap.present,
+            "the marker-looking line was consumed as a target, not a directive"
+        );
+        assert_eq!(
+            snap.links,
+            BTreeMap::from([("~/.agents/skills".to_string(), "##PRESENT".to_string())])
+        );
+    }
+
+    /// M4: a link outside `~/` is dropped, but its target line is still
+    /// consumed — so a line that would otherwise look like a valid
+    /// `<hash>  <path>` hash line is never recorded as a file.
+    #[test]
+    fn parse_scan_blocks_a_non_tilde_links_target_line_is_not_parsed_as_a_hash_line() {
+        let hash = "a".repeat(64);
+        let snap = parse_scan_blocks(
+            &format!("##LINK /etc/x\n{hash}  some/file\n##HASHES\n##END\n"),
+            &|_, _| None,
+        )
+        .unwrap();
+        assert!(snap.links.is_empty());
+        assert!(snap.files.is_empty(), "{:?}", snap.files);
     }
 }

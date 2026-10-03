@@ -29,7 +29,10 @@ pub use model::Page;
 
 /// Every page spec, data source shape, resource and page action: what
 /// `list_pages` answers on the desktop and the hub (P6, for a phone).
-/// Compiled in, so the same for every caller that may see pages.
+/// Compiled in, so the same for every caller that may see pages. Embed pages
+/// are not in it: they place items in the desktop's own screens, which read
+/// them from `src/lib/pages/embeds.generated.json` (generated from the same
+/// specs), so a phone never sees them.
 #[derive(Debug, serde::Serialize)]
 pub struct PagesBundle {
     pub pages: &'static [Page],
@@ -40,7 +43,7 @@ pub struct PagesBundle {
 
 pub fn bundle() -> PagesBundle {
     PagesBundle {
-        pages: all(),
+        pages: navigable(),
         sources: sources::SOURCES,
         resources: resources::RESOURCES,
         actions: actions::PAGE_ACTIONS,
@@ -96,10 +99,39 @@ pub const PAGE_FILES: &[(&str, &str)] = &[
         "settings.review.json",
         include_str!("../../pages/settings.review.json"),
     ),
+    ("guides.json", include_str!("../../pages/guides.json")),
     ("usage.json", include_str!("../../pages/usage.json")),
     (
         "usage.work.json",
         include_str!("../../pages/usage.work.json"),
+    ),
+    (
+        "usage.accounts.json",
+        include_str!("../../pages/usage.accounts.json"),
+    ),
+    (
+        "embed.host_detail.json",
+        include_str!("../../pages/embed.host_detail.json"),
+    ),
+    (
+        "embed.hosts_group_title.json",
+        include_str!("../../pages/embed.hosts_group_title.json"),
+    ),
+    (
+        "embed.hosts_group.json",
+        include_str!("../../pages/embed.hosts_group.json"),
+    ),
+    (
+        "embed.new_session_chip.json",
+        include_str!("../../pages/embed.new_session_chip.json"),
+    ),
+    (
+        "embed.new_session_host.json",
+        include_str!("../../pages/embed.new_session_host.json"),
+    ),
+    (
+        "embed.status_footer.json",
+        include_str!("../../pages/embed.status_footer.json"),
     ),
 ];
 
@@ -129,6 +161,23 @@ pub fn all() -> &'static [Page] {
             })
             .collect()
     })
+}
+
+/// The pages a person navigates to: every page but the embeds.
+pub fn navigable() -> &'static [Page] {
+    static NAV: OnceLock<Vec<Page>> = OnceLock::new();
+    NAV.get_or_init(|| {
+        all()
+            .iter()
+            .filter(|p| p.layout != model::Layout::Embed)
+            .cloned()
+            .collect()
+    })
+}
+
+/// The embed pages, one per filled slot.
+pub fn embeds() -> impl Iterator<Item = &'static Page> {
+    all().iter().filter(|p| p.layout == model::Layout::Embed)
 }
 
 pub fn get(id: &str) -> Option<&'static Page> {

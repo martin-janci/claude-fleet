@@ -541,6 +541,8 @@ impl FleetTools {
                 // The worker does the requester's work (work graph M2.2).
                 let _ = s.inherit_worker_work(worker.id, req);
             }
+            // The job shows as an agent subtask of the requester's work.
+            tasks::mirror_dispatched(&s, &task, p.requester_session_id, worker.id);
             if let Some(cid) = worker.claude_session_id.as_deref() {
                 let _ = s.set_task_worker_claude_id(task.id, cid);
             }
@@ -944,8 +946,10 @@ impl FleetTools {
         a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never \
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
         kill when dirty). set_status {item_id, status}: a person's status for \
-        work with no ticket. Work view: primary:false links a secondary; \
-        expected_* guard (E_CONFLICT).")]
+        work with no ticket. create {title, parent?, notes?}: a task or \
+        subtask. propose {parent, title, why?}: a subtask a person accepts \
+        or rejects {item_id, no session_id}. Work view: primary:false links \
+        a secondary; expected_* guard (E_CONFLICT).")]
     pub(super) async fn work_link(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1161,6 +1165,70 @@ impl FleetTools {
             }
             return ok_json(
                 &crate::service::work::dismiss_reopened(&args, &self.store).map_err(to_mcp_err)?,
+            );
+        }
+        // Shared work context (design 2026-09-29): native tasks, subtasks
+        // and agent proposals. The scope gates are inside.
+        if args.action == "create" {
+            return ok_json(
+                &crate::service::work::local::create_task(&args, &self.store, &scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "propose" {
+            // The proposer is the caller's own session when it names one
+            // (through the same gate as any session argument, so another
+            // host's session name is never written or echoed), else the
+            // caller's label.
+            let proposer = match args.session_id {
+                Some(sid) => {
+                    let r = self.resolve_target_row(
+                        &caller,
+                        Some(sid),
+                        None,
+                        None,
+                        // `drive`, like every other `work` action that
+                        // writes a row about one session: the proposal is
+                        // STORED in this session's name, so a caller who
+                        // may only watch it cannot put words in its mouth.
+                        Reach::Drive,
+                        "the session",
+                    )?;
+                    let name = r.friendly_name.unwrap_or(r.tmux_name);
+                    format!("{name} · {}", r.host_alias)
+                }
+                None => caller.label(),
+            };
+            return ok_json(
+                &crate::service::work::local::propose(&args, &self.store, &scope, &proposer)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        // A proposal decision is `accept` or `reject` with nothing else named;
+        // `reject` WITH a session, a link or a key is the link decision, which
+        // falls through to the shared tail below and takes its `Reach::Drive`.
+        //
+        // Spelled with `matches!` rather than `args.action == "reject"`: that
+        // literal is how `mcp::tools::tests`' `umbrella_arms` finds the ARM
+        // that serves an action, and a bare one in this CONDITION made the
+        // scanner read `reject` as having its own arm — hiding the fact that
+        // its session-addressed shape is gated by the tail, which is the claim
+        // `WORK_ACTION_REACH` and `WORK_LINK_TAIL_ACTIONS` carry for it.
+        // Identical in behaviour: the `if` short-circuits on `accept`, so
+        // widening this binding to cover `accept` changes no outcome.
+        let proposal_decision = args.session_id.is_none()
+            && args.link_id.is_none()
+            && args.key.is_none()
+            && matches!(args.action.as_str(), "accept" | "reject");
+        if args.action == "accept" || proposal_decision {
+            return ok_json(
+                &crate::service::work::local::decide(
+                    &args,
+                    &self.store,
+                    &scope,
+                    args.action == "accept",
+                )
+                .map_err(to_mcp_err)?,
             );
         }
         if args.action == "name" {
@@ -1622,7 +1690,7 @@ impl FleetTools {
     /// with neither passes.
     ///
     /// That order matters for an `unclaimed` row, and it is the half this gate
-    /// first shipped without. Migration 087's triggers record an owner only
+    /// first shipped without. Migration 095's triggers record an owner only
     /// `WHEN NEW.owner_person_id IS NOT NULL`, so every reconcile-discovered
     /// session has a real transcript and NO record — and
     /// `conversation_owner_allows` answers `None => true`. On a hub with two

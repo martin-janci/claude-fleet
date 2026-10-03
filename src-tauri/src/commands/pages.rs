@@ -8,7 +8,7 @@
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::{lock, IpcError};
 use fleet_core::pages::{self, sources};
-use fleet_core::service::settings_review;
+use fleet_core::service::{guides, settings_review};
 use fleet_core::store::Store;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -171,6 +171,43 @@ pub async fn setting_history(
     routed::setting_history(&backend, &store, key, limit).await
 }
 
+// ── guides (declarative pages, layout L9) ───────────────────────────────────
+//
+// A guide an agent proposed (`guide { propose }` on the control API) joins
+// the pages once a person approves it. On a paired desktop the guides are
+// the hub's, and the hub decides whether this device may approve.
+
+/// The live guides, the proposals waiting, and whether this desktop may
+/// decide them (always, standalone).
+#[tauri::command]
+pub async fn list_guides(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<guides::GuidesView, IpcError> {
+    routed::list_guides(&backend, &store).await
+}
+
+/// Approve (or reject) one guide proposal, as the person at this desktop.
+#[tauri::command]
+pub async fn decide_guide(
+    id: i64,
+    approve: bool,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<guides::GuidesView, IpcError> {
+    routed::decide_guide(&backend, &store, id, approve).await
+}
+
+/// Take a live guide off the pages.
+#[tauri::command]
+pub async fn remove_guide(
+    page_id: String,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<guides::GuidesView, IpcError> {
+    routed::remove_guide(&backend, &store, page_id).await
+}
+
 pub(crate) mod routed {
     use super::*;
     use fleet_core::service::settings::{self, Actor};
@@ -248,6 +285,51 @@ pub(crate) mod routed {
                 .await
             }
             None => settings_review::decide(&*lock(store)?, &accept, &reject),
+        }
+    }
+
+    pub async fn list_guides(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+    ) -> Result<guides::GuidesView, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("list_guides", &json!({ "action": "list" })).await,
+            None => guides::view(&*lock(store)?, true),
+        }
+    }
+
+    pub async fn decide_guide(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        id: i64,
+        approve: bool,
+    ) -> Result<guides::GuidesView, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route(
+                    "decide_guide",
+                    &json!({ "action": "decide", "id": id, "approve": approve }),
+                )
+                .await
+            }
+            None => guides::decide(&*lock(store)?, id, approve, Actor::Person),
+        }
+    }
+
+    pub async fn remove_guide(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        page_id: String,
+    ) -> Result<guides::GuidesView, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route(
+                    "remove_guide",
+                    &json!({ "action": "remove", "page_id": page_id }),
+                )
+                .await
+            }
+            None => guides::remove(&*lock(store)?, &page_id, Actor::Person),
         }
     }
 

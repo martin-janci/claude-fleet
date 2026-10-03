@@ -211,4 +211,14 @@ describe('WorkFiltersBar', () => {
     await flush();
     expect(calls('delete_work_view')[1]).toEqual({ view_id: 1, expected_version: 4 });
   });
+
+  it('in the List layout the Archived switch is off-limits: Done shows them', async () => {
+    render(WorkFiltersBar, { orgs, trackers, listLayout: true });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-filters-open'));
+    await flush();
+    const sw = screen.getByTestId('work-filter-archived') as HTMLButtonElement;
+    expect(sw.disabled).toBe(true);
+    expect(sw.title).toBe('In List view, Done shows them');
+  });
 });

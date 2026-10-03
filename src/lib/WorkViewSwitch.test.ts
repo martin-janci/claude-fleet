@@ -38,10 +38,12 @@ describe('Sessions | Work switch', () => {
     expect(screen.queryByTestId('sidebar-search')).toBeNull();
     // The footer (New session) stays in both.
     expect(screen.getByTestId('new-session-footer')).toBeTruthy();
-    // So does the global chrome: Refresh, Tasks, Settings, collapse.
-    for (const id of ['sidebar-refresh', 'tasks-open', 'settings-open', 'sidebar-collapse']) {
+    // So does the global chrome: Refresh, Settings, collapse.
+    for (const id of ['sidebar-refresh', 'settings-open', 'sidebar-collapse']) {
       expect(screen.getByTestId(id)).toBeTruthy();
     }
+    // The ☑ Tasks popover is gone: delegated jobs live in the Work list.
+    expect(screen.queryByTestId('tasks-open')).toBeNull();
     // The Sessions list's own filters step aside: none of them narrows the
     // Work tree, which has its own.
     for (const id of ['needs-you-filter', 'select-mode', 'filters-open', 'scope-select']) {

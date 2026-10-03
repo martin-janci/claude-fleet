@@ -1,0 +1,47 @@
+// The Work tab's List layout (design 2026-09-29): one `work_tree` read
+// grouped by status in the client — To do, Doing, Done (last 7 days) — with
+// native subtasks and agent jobs nested under a listed parent.
+import type { WorkTask } from './work_view';
+
+export const DONE_WINDOW_SECS = 7 * 86_400;
+
+export interface TaskNode {
+  task: WorkTask;
+  children: WorkTask[];
+}
+export interface StatusSections {
+  todo: TaskNode[];
+  doing: TaskNode[];
+  done: TaskNode[];
+}
+
+function sectionOf(t: WorkTask): keyof StatusSections {
+  const live = (t.counts?.active ?? 0) > 0;
+  if (live || t.status_category === 'in_progress') return 'doing';
+  if (t.status_category === 'done') return 'done';
+  return 'todo';
+}
+
+const newestFirst = (a: WorkTask, b: WorkTask) => (b.last_activity_at ?? 0) - (a.last_activity_at ?? 0);
+
+export function groupTasksByStatus(tasks: WorkTask[], nowSecs: number): StatusSections {
+  const byId = new Map(tasks.map((t) => [t.task_id, t]));
+  const kids = new Map<string, WorkTask[]>();
+  const roots: WorkTask[] = [];
+  for (const t of tasks) {
+    const p = t.parent_task_id ? byId.get(t.parent_task_id) : undefined;
+    if (p) kids.set(p.task_id, [...(kids.get(p.task_id) ?? []), t]);
+    else roots.push(t);
+  }
+  const out: StatusSections = { todo: [], doing: [], done: [] };
+  for (const t of [...roots].sort(newestFirst)) {
+    const s = sectionOf(t);
+    if (s === 'done' && (t.last_activity_at ?? 0) < nowSecs - DONE_WINDOW_SECS) continue;
+    out[s].push({ task: t, children: [...(kids.get(t.task_id) ?? [])].sort(newestFirst) });
+  }
+  return out;
+}
+
+export function displayTitle(t: WorkTask): string {
+  return t.title || t.key || t.task_id;
+}

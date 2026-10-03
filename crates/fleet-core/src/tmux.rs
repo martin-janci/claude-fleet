@@ -1211,14 +1211,21 @@ pub(crate) fn scrollback_start(lines: u32) -> String {
     format!("-{lines}")
 }
 
-/// Inline stand-in for the user's `cl` wrapper (`~/bin/cl`, documented as
-/// `exec claude --dangerously-skip-permissions "$@"`), defined only when no
-/// `cl` is on PATH. The pane runs in the environment of the tmux CLIENT that
-/// created the session — for the hub that is a non-interactive `bash -lc`
-/// over SSH — so a `cl` that only exists in interactive shells (a zsh alias,
-/// a `.zshrc`-only PATH entry) is simply not there. POSIX `sh` syntax: tmux
-/// runs the pane command under `default-shell -c`, whatever that shell is.
-pub(crate) const CL_FALLBACK: &str = r#"if ! command -v cl >/dev/null 2>&1; then cl() { claude --dangerously-skip-permissions "$@"; }; fi;"#;
+/// Inline stand-in for `cl`, defined only when no `cl` is on PATH. The pane
+/// runs in the environment of the tmux CLIENT that created the session —
+/// for the hub that is a non-interactive `bash -lc` over SSH — so a `cl`
+/// that only exists in interactive shells (a zsh alias, a `.zshrc`-only
+/// PATH entry) is simply not there. POSIX `sh` syntax: tmux runs the pane
+/// command under `default-shell -c`, whatever that shell is.
+///
+/// Preference order: the user's own `cl`; else fleet's provisioned `ag`
+/// launcher at its absolute install path (F2 — not bare `ag`, which may be
+/// The Silver Searcher, and `~/.local/bin` may be missing from the cached
+/// toolchain PATH), as `ag claude --yolo`; else plain
+/// `claude --dangerously-skip-permissions`. All three take the same flags
+/// (`--resume`, `--session-id`, `--continue`, `--name`, `--model`,
+/// `--effort`), so the chain below is identical whichever one runs.
+pub(crate) const CL_FALLBACK: &str = r#"if ! command -v cl >/dev/null 2>&1; then if [ -x "$HOME/.local/share/ag/ag" ]; then cl() { "$HOME/.local/share/ag/ag" claude --yolo "$@"; }; else cl() { claude --dangerously-skip-permissions "$@"; }; fi; fi;"#;
 
 /// The pane command for a Claude ("work"/"review") session. With a known
 /// session id: resume it, else create it under that id, else a bare `cl` — an
@@ -1233,9 +1240,10 @@ pub(crate) const CL_FALLBACK: &str = r#"if ! command -v cl >/dev/null 2>&1; then
 /// once two sessions share a directory.
 ///
 /// The command starts with [`CL_FALLBACK`]: the user's own `cl` wins when it
-/// is on PATH, otherwise an inline `claude --dangerously-skip-permissions`
-/// stands in. Without it a host whose `cl` lives only in interactive shells
-/// printed "command not found: cl" and dropped straight to the login shell.
+/// is on PATH, otherwise fleet's provisioned `ag` launcher, else an inline
+/// `claude --dangerously-skip-permissions`, stands in. Without it a host
+/// whose `cl` lives only in interactive shells printed "command not found:
+/// cl" and dropped straight to the login shell.
 pub fn pane_command_for(claude_session_id: Option<&str>, tmux_name: &str) -> String {
     pane_command_with(claude_session_id, tmux_name, &ClaudeLaunch::default())
 }
@@ -1941,6 +1949,15 @@ mod tests {
     /// fake `claude` recorded. `with_cl` also puts a fake `cl` on PATH.
     #[cfg(unix)]
     fn run_pane_command(shell: &str, cmd: &str, with_cl: bool) -> Vec<String> {
+        run_pane_command_opts(shell, cmd, with_cl, false)
+    }
+
+    /// [`run_pane_command`], optionally with a fake provisioned launcher at
+    /// `$HOME/.local/share/ag/ag` (`$HOME` is the temp dir). Like the fake
+    /// `claude`, it records its argv and fails a `--resume` so the chain
+    /// has to reach `--session-id`.
+    #[cfg(unix)]
+    fn run_pane_command_opts(shell: &str, cmd: &str, with_cl: bool, with_ag: bool) -> Vec<String> {
         use super::fake_exec::{write_exec, PROBE_GUARD};
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("argv.log");
@@ -1964,6 +1981,18 @@ mod tests {
                 "cl",
                 format!(
                     "#!/bin/sh\n{PROBE_GUARD}printf 'cl %s\\n' \"$*\" >> '{}'\nexit 0\n",
+                    log.display()
+                ),
+            );
+        }
+        if with_ag {
+            let ag_dir = dir.path().join(".local/share/ag");
+            std::fs::create_dir_all(&ag_dir).unwrap();
+            write_exec(
+                &ag_dir,
+                "ag",
+                &format!(
+                    "#!/bin/sh\n{PROBE_GUARD}printf 'ag %s\\n' \"$*\" >> '{}'\ncase \"$*\" in *--resume*) exit 1;; esac\nexit 0\n",
                     log.display()
                 ),
             );
@@ -2045,6 +2074,49 @@ mod tests {
             assert_eq!(
                 argv,
                 vec!["claude --dangerously-skip-permissions --continue --name dev-x".to_string()],
+                "{shell}"
+            );
+        }
+    }
+
+    /// F2: a host fleet provisioned has `ag` at `$HOME/.local/share/ag/ag`;
+    /// with no `cl` on PATH the pane command goes through it, with `--yolo`
+    /// (the same bypass as the plain-claude fallback).
+    #[cfg(unix)]
+    #[test]
+    fn pane_command_uses_the_provisioned_ag_when_cl_is_missing() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        for shell in available_shells() {
+            let argv =
+                run_pane_command_opts(shell, &pane_command_for(Some(id), "dev-x"), false, true);
+            assert_eq!(
+                argv,
+                vec![
+                    format!("ag claude --yolo --resume {id} --name dev-x"),
+                    format!("ag claude --yolo --session-id {id} --name dev-x"),
+                ],
+                "{shell}"
+            );
+            let argv = run_pane_command_opts(shell, &pane_command_for(None, "dev-x"), false, true);
+            assert_eq!(
+                argv,
+                vec!["ag claude --yolo --continue --name dev-x".to_string()],
+                "{shell}"
+            );
+        }
+    }
+
+    /// The user's own `cl` still wins over a provisioned `ag`.
+    #[cfg(unix)]
+    #[test]
+    fn pane_command_prefers_the_users_cl_over_a_provisioned_ag() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        for shell in available_shells() {
+            let argv =
+                run_pane_command_opts(shell, &pane_command_for(Some(id), "dev-x"), true, true);
+            assert_eq!(
+                argv,
+                vec![format!("cl --resume {id} --name dev-x")],
                 "{shell}"
             );
         }

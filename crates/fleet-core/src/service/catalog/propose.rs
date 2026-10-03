@@ -266,6 +266,7 @@ mod tests {
             host_hash: None,
             scanned_at: 1,
             managed: false,
+            ..Default::default()
         };
         lock(&store)
             .unwrap()

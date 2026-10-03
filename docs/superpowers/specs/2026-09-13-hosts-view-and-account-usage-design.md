@@ -119,6 +119,8 @@ Master–detail. The list is grouped by account; usage is shown once per group.
 
 ## Showing usage
 
+> **Since declarative pages P4d (2026-09-29):** every surface below is drawn by the page catalog's `account_usage` item through embed pages (`crates/fleet-core/pages/embed.*.json`, views in `src/lib/pages/usage/`). The rules here still bind: they live in the pure model (`account_usage.ts`, `usage_glance.ts`, `hosts_view.ts`), which every view calls.
+
 - **Wording leads with left:** `8% left`; in the detail `92% used` follows,
   muted. Never a bare percentage.
 - **Bars fill with used**, matching the existing context-% bar.

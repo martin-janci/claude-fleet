@@ -1453,7 +1453,7 @@ pub(super) struct ClientSummary {
     /// (`catalog_admin`, migration 074); absent: not granted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) assets_admin_at: Option<i64>,
-    /// WHOSE device this is (multi-user M1, migration 086); absent: nobody's,
+    /// WHOSE device this is (multi-user M1, migration 094); absent: nobody's,
     /// which means it sees no private session at all. `fleet-hub client list`
     /// prints it, and `fleet-hub client bind-person` changes it.
     #[serde(skip_serializing_if = "Option::is_none")]

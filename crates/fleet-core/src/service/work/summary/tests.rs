@@ -547,13 +547,13 @@ async fn one_summary_per_host_at_a_time() {
 fn a_summary_plan_refuses_another_persons_link_as_an_unknown_one() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     assert!(s.sole_enabled_person().unwrap().is_none(), "two people");
     let id = s
         .upsert_session("dev-o-r--abc-1", "h", None, None, 1, 1, "running", None)
         .unwrap();
-    // Claimed BEFORE the conversation is bound, so migration 087's trigger
+    // Claimed BEFORE the conversation is bound, so migration 095's trigger
     // records the owner: once the row is reaped that record is the only
     // handle left, and it is what `sees_past_conversation` reads.
     assert!(s.claim_if_unclaimed(id, Some(ada)).unwrap());

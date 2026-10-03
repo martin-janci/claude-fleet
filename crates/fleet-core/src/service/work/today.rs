@@ -576,6 +576,13 @@ mod tests {
                 fetched_at: None,
                 unavailable_at: None,
                 unavailable_reason: None,
+                origin: None,
+                project_id: None,
+                notes: None,
+                task_id: None,
+                proposal_state: None,
+                proposed_by: None,
+                proposal_why: None,
             },
             org_id: None,
         }

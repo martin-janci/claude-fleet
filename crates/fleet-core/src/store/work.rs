@@ -189,6 +189,25 @@ pub struct WorkItemRow {
     /// not_found_or_no_permission | tracker_removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<String>,
+    // --- shared work context (migration 086); all default, so an older
+    // hub's row still reads.
+    /// manual | proposed | agent | detected (`None` reads as detected).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// The dispatched job an `agent` item mirrors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<i64>,
+    /// proposed | accepted | rejected (origin `proposed` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_why: Option<String>,
 }
 
 /// One session ↔ work link. `participant_id` is `None` once the retired
@@ -530,12 +549,13 @@ pub(super) const ITEM_COLUMNS: &str =
     "id, source, key, title, url, status_category, created_at, updated_at, \
      tracker_id, external_id, aliases, kind, hierarchy_level, status_name, resolution, parent_id, \
      assignees, iteration, updated_ext, status_changed_at, fetched_at, unavailable_at, \
-     unavailable_reason, status_set_by, status_set_at";
+     unavailable_reason, status_set_by, status_set_at, origin, project_id, notes, task_id, \
+     proposal_state, proposed_by, proposal_why";
 
 /// How many columns [`ITEM_COLUMNS`] names. A query that appends its own
 /// columns after the list indexes them as `ITEM_COLUMN_COUNT + n` — never a
 /// literal, because a literal silently shifts when a column is added here.
-pub(super) const ITEM_COLUMN_COUNT: usize = 25;
+pub(super) const ITEM_COLUMN_COUNT: usize = 32;
 
 /// A JSON array column as a list; anything unreadable is empty.
 fn json_list(raw: Option<String>) -> Vec<String> {
@@ -570,6 +590,13 @@ pub(super) fn map_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemRow> {
         unavailable_reason: r.get(22)?,
         status_set_by: r.get(23)?,
         status_set_at: r.get(24)?,
+        origin: r.get(25)?,
+        project_id: r.get(26)?,
+        notes: r.get(27)?,
+        task_id: r.get(28)?,
+        proposal_state: r.get(29)?,
+        proposed_by: r.get(30)?,
+        proposal_why: r.get(31)?,
     })
 }
 
@@ -629,8 +656,8 @@ impl Store {
             }
         }
         self.conn.execute(
-            "INSERT INTO work_items (source, key, title, created_at, updated_at) \
-             VALUES ('local', ?1, ?2, ?3, ?3)",
+            "INSERT INTO work_items (source, key, title, origin, created_at, updated_at) \
+             VALUES ('local', ?1, ?2, 'manual', ?3, ?3)",
             rusqlite::params![key, title, now],
         )?;
         let id = self.conn.last_insert_rowid();

@@ -355,7 +355,7 @@ fn only_caller_view_scope_constructs_a_view_scope() {
 fn caller_view_scope_follows_the_table() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h-a").unwrap();
-    let owner = s.personal_owner_id().unwrap().expect("086 mints one");
+    let owner = s.personal_owner_id().unwrap().expect("094 mints one");
 
     let master = Caller::master().view_scope(&s).unwrap();
     assert_eq!(master.person, Some(owner));

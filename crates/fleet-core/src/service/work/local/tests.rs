@@ -320,3 +320,164 @@ fn local_items_list_what_the_scope_sees_with_live_counts() {
         vec![(on_b, 0)]
     );
 }
+
+// ── Shared work context (design 2026-09-29): create, propose, decide ──
+
+fn args(action: &str) -> WorkLinkArgs {
+    WorkLinkArgs {
+        action: action.into(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn an_unscoped_caller_creates_a_task_and_a_subtask() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let all = OrgScope::All;
+    let t = create_task(
+        &WorkLinkArgs {
+            title: Some("Release notes".into()),
+            ..args("create")
+        },
+        &store,
+        &all,
+    )
+    .unwrap();
+    let sub = create_task(
+        &WorkLinkArgs {
+            title: Some("Changelog".into()),
+            parent: Some(format!("item:{}", t.id)),
+            ..args("create")
+        },
+        &store,
+        &all,
+    )
+    .unwrap();
+    assert_eq!(sub.parent_id, Some(t.id));
+}
+
+#[test]
+fn a_parent_is_item_colon_id() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let e = create_task(
+        &WorkLinkArgs {
+            title: Some("x".into()),
+            parent: Some("TASK-1".into()),
+            ..args("create")
+        },
+        &store,
+        &OrgScope::All,
+    )
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+}
+
+#[test]
+fn a_host_token_may_not_create_a_standalone_task() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let scope = OrgScope::for_host(&s, "h").unwrap();
+    let store = Mutex::new(s);
+    let e = create_task(
+        &WorkLinkArgs {
+            title: Some("x".into()),
+            ..args("create")
+        },
+        &store,
+        &scope,
+    )
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_FORBIDDEN);
+}
+
+#[test]
+fn a_host_token_adds_a_subtask_only_under_work_it_sees() {
+    let fx = fixture();
+    let (mine, _) = lock(&fx.store)
+        .unwrap()
+        .name_session_work(fx.s_a, Some("MINE-1"), "mine")
+        .unwrap();
+    let (theirs, _) = lock(&fx.store)
+        .unwrap()
+        .name_session_work(fx.s_b, Some("THEIRS-1"), "theirs")
+        .unwrap();
+    let a = host(&fx, "h-a");
+    let sub = |parent: i64| WorkLinkArgs {
+        title: Some("step".into()),
+        parent: Some(format!("item:{parent}")),
+        ..args("create")
+    };
+    let ok = create_task(&sub(mine.id), &fx.store, &a).unwrap();
+    assert_eq!(ok.parent_id, Some(mine.id));
+    let e = create_task(&sub(theirs.id), &fx.store, &a).unwrap_err();
+    assert_eq!(e.code, codes::E_NOTFOUND);
+    let unknown = create_task(&sub(999_999), &fx.store, &a).unwrap_err();
+    assert_eq!(
+        e.message.replace(&theirs.id.to_string(), "<X>"),
+        unknown.message.replace("999999", "<X>"),
+        "another host's parent reads as an unknown one"
+    );
+}
+
+#[test]
+fn a_host_token_proposes_under_work_its_own_session_does_but_cannot_decide() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let sid = s
+        .upsert_session("w", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let (item, _) = s.name_session_work(sid, Some("OPS-1"), "ops").unwrap();
+    let scope = OrgScope::for_host(&s, "h").unwrap();
+    let store = Mutex::new(s);
+    let p = propose(
+        &WorkLinkArgs {
+            title: Some("Add a test".into()),
+            parent: Some(format!("item:{}", item.id)),
+            why: Some("no coverage".into()),
+            ..args("propose")
+        },
+        &store,
+        &scope,
+        "w · h",
+    )
+    .unwrap();
+    assert_eq!(p.proposal_state.as_deref(), Some("proposed"));
+    let e = decide(
+        &WorkLinkArgs {
+            item_id: Some(p.id),
+            ..args("accept")
+        },
+        &store,
+        &scope,
+        true,
+    )
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_FORBIDDEN);
+    let ok = decide(
+        &WorkLinkArgs {
+            item_id: Some(p.id),
+            ..args("accept")
+        },
+        &store,
+        &OrgScope::All,
+        true,
+    )
+    .unwrap();
+    assert_eq!(ok.proposal_state.as_deref(), Some("accepted"));
+}
+
+#[test]
+fn propose_needs_a_parent() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let e = propose(
+        &WorkLinkArgs {
+            title: Some("x".into()),
+            ..args("propose")
+        },
+        &store,
+        &OrgScope::All,
+        "me",
+    )
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+}

@@ -531,12 +531,13 @@ fn build_app(
 /// Test-only: the real app — the real [`authorize`] layer over the real
 /// routes — on an in-memory store.
 ///
-/// It exists for `crate::agent::ws`'s tests, which dial `/agent` over a real
-/// socket and must go through the SAME auth as production rather than a
-/// hand-built router that could differ from it. `/mcp` answers a stub, since
-/// nothing here drives a tool call.
-#[cfg(test)]
-pub(crate) fn test_app(
+/// It exists for `crate::agent::ws`'s tests and the `fleet-agent-e2e` crate
+/// (through the `testkit` feature), which dial `/agent` over a real socket
+/// and must go through the SAME auth as production rather than a hand-built
+/// router that could differ from it. `/mcp` answers a stub, since nothing
+/// here drives a tool call.
+#[cfg(any(test, feature = "testkit"))]
+pub fn test_app(
     store: Arc<Mutex<Store>>,
     master: &str,
     agent_state: crate::agent::ws::AgentWsState,
@@ -1180,7 +1181,7 @@ mod tests {
             assert!(kiosk.trusted_at.is_none(), "the plain pairing is not");
             // Multi-user M1: both pairings named the hub's own owner, and
             // both rows came out bound to it.
-            let owner = s.personal_owner_id().unwrap().expect("086 mints one");
+            let owner = s.personal_owner_id().unwrap().expect("094 mints one");
             assert_eq!(desk.person_id, Some(owner));
             assert_eq!(kiosk.person_id, Some(owner));
         }

@@ -1,0 +1,22 @@
+{
+  "spec": "fleet.page/1",
+  "id": "embed.new_session_chip",
+  "title": "New session: host chip",
+  "intro": "Each host chip's account headroom, under the alias.",
+  "layout": "embed",
+  "slot": "new_session_chip",
+  "sections": [
+    {
+      "title": "Usage",
+      "items": [
+        {
+          "type": "account_usage",
+          "source": {
+            "id": "accounts.usage"
+          },
+          "view": "chip"
+        }
+      ]
+    }
+  ]
+}

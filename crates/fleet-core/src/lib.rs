@@ -5,6 +5,11 @@
 //! `service/` is the transport-agnostic command logic, `store/` the SQLite
 //! layer, `ssh`/`tmux` the host transport, `mcp/` the control API server.
 
+// `#[async_trait]` expands each async trait method into a `#[must_use]` fn that
+// returns a boxed future, which is already `#[must_use]`; clippy 1.99 flags that
+// macro output as `double_must_use`. It is not code we wrote — allow it crate-wide.
+#![allow(clippy::double_must_use)]
+
 pub mod agent;
 pub mod app_version;
 pub mod cancel;
@@ -26,6 +31,8 @@ mod no_eprintln_tests;
 pub mod pages;
 pub mod proc;
 pub mod projects;
+#[cfg(test)]
+mod repo_files;
 pub mod repo_url;
 pub mod rt;
 #[cfg(test)]

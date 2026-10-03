@@ -3,7 +3,7 @@
 //! layout can hold. A renderer implements exactly this catalog; a new widget
 //! or layout capability is a code change here, never a spec feature.
 
-use super::model::{Item, Layout, Widget};
+use super::model::{Item, Layout, Slot, UsageView, Widget};
 use crate::service::settings::Kind;
 
 /// The widget a setting of `kind` renders as when a spec names none.
@@ -49,6 +49,7 @@ pub fn item_type(item: &Item) -> &'static str {
         Item::Link { .. } => "link",
         Item::Custom { .. } => "custom",
         Item::Action { .. } => "action",
+        Item::AccountUsage { .. } => "account_usage",
     }
 }
 
@@ -74,10 +75,19 @@ pub fn layout_item_types(layout: Layout) -> &'static [&'static str] {
         ],
         Layout::Cards => &["stat", "record", "notice", "link"],
         Layout::DataPage => &[
-            "stat", "record", "table", "chart", "action", "notice", "link",
+            "stat",
+            "record",
+            "table",
+            "chart",
+            "account_usage",
+            "action",
+            "notice",
+            "link",
         ],
+        Layout::Embed => &["account_usage"],
         Layout::MasterDetail => &["field", "notice", "custom"],
         Layout::ReviewApply => &["notice", "link"],
+        Layout::Guide => &["field", "stat", "record", "action", "notice", "link"],
         Layout::Flow | Layout::ObjectEditor => &[],
     }
 }
@@ -96,7 +106,36 @@ pub const LAYOUTS: &[Layout] = &[
     Layout::Cards,
     Layout::ReviewApply,
     Layout::DataPage,
+    Layout::Embed,
+    Layout::Guide,
 ];
+
+/// Every slot an `embed` page can fill.
+pub const SLOTS: &[Slot] = &[
+    Slot::HostDetail,
+    Slot::HostsGroupTitle,
+    Slot::HostsGroup,
+    Slot::NewSessionChip,
+    Slot::NewSessionHost,
+    Slot::StatusFooter,
+];
+
+/// The `account_usage` views a slot can hold: what fits the space and the
+/// context the screen hands it (a host, an account, or the whole fleet).
+pub fn slot_views(slot: Slot) -> &'static [UsageView] {
+    match slot {
+        Slot::HostDetail => &[UsageView::Block],
+        Slot::HostsGroupTitle => &[UsageView::Freshness],
+        Slot::HostsGroup => &[UsageView::Bars],
+        Slot::NewSessionChip => &[UsageView::Chip],
+        Slot::NewSessionHost => &[UsageView::Line, UsageView::Warning],
+        Slot::StatusFooter => &[UsageView::Footer],
+    }
+}
+
+/// The views an `account_usage` item on a page (not in a slot) can take:
+/// a page shows every account, so only the views that name their account.
+pub const PAGE_USAGE_VIEWS: &[UsageView] = &[UsageView::Block];
 
 /// Every widget.
 pub const WIDGETS: &[Widget] = &[

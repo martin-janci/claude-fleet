@@ -433,7 +433,56 @@ const SCOPE_GUARDS: &[Guard] = &[
               in an `E_EXISTS` reply, an id `work { local_items }` lists to \
               everyone (T9e, sentence written at the guard). The gate itself \
               no longer passes an item with no CONFIRMED link: \
-              `an_unlinked_local_item_is_nobodys_to_rename_or_set`",
+              `an_unlinked_local_item_is_nobodys_to_rename_or_set`. A FOURTH \
+              caller arrived with shared work context: `visible_parent`, which \
+              asks it about the PARENT a `create` / `propose` names — an item \
+              question again, and its own rows below say so",
+    },
+    Guard {
+        file: "crates/fleet-core/src/service/work/local.rs",
+        func: "create_task",
+        nth: 0,
+        code: "None if !scope.is_all() => {",
+        verdict: Verdict::OrgBoundary,
+        why: "this is the org boundary, not a privacy fence: a STANDALONE task \
+              has no links and no sessions, so there is no row and no person to \
+              fence — the refusal is about authority to add top-level work, \
+              which only an unscoped caller (the desktop, the master) has",
+    },
+    Guard {
+        file: "crates/fleet-core/src/service/work/local.rs",
+        func: "create_task",
+        nth: 1,
+        code: "Some(p) if !scope.is_all() => visible_parent(&s, scope, p)?,",
+        verdict: Verdict::OrgBoundary,
+        why: "this is the org boundary, not a privacy fence: it asks whether \
+              the PARENT ITEM exists for this caller, through \
+              `local_item_visible` / `item_visible` — the same item question \
+              those rows classify, on an item's key and title, which are work \
+              data and survive the person fence exactly as `task_visible`'s do",
+    },
+    Guard {
+        file: "crates/fleet-core/src/service/work/local.rs",
+        func: "propose",
+        nth: 0,
+        code: "if !scope.is_all() {",
+        verdict: Verdict::OrgBoundary,
+        why: "the same parent-item question as `create_task` #1, for a \
+              proposed subtask. This is the org boundary, not a privacy fence; \
+              the person half of a proposal is at the tool layer, where the \
+              session that gets the credit passes `resolve_target_row` at \
+              `Reach::Drive` before `proposer` is built",
+    },
+    Guard {
+        file: "crates/fleet-core/src/service/work/local.rs",
+        func: "decide",
+        nth: 0,
+        code: "if !scope.is_all() {",
+        verdict: Verdict::OrgBoundary,
+        why: "this is the org boundary, not a privacy fence: deciding a \
+              proposal is a PERSON's act by design (an agent never accepts its \
+              own), so every scoped caller — per-host token and bound client \
+              alike — is refused outright and no row is reached to fence",
     },
     // ---- service/work/describe.rs ---------------------------------------
     Guard {
@@ -589,6 +638,17 @@ const SCOPE_GUARDS: &[Guard] = &[
         why: "the same org check on the link a snooze flag goes to",
     },
     // ---- service/work/view.rs -------------------------------------------
+    Guard {
+        file: "crates/fleet-core/src/service/work/view.rs",
+        func: "native_work",
+        nth: 0,
+        code: "if !scope.is_all() && !label.is_some_and(|(_, visible)| *visible) {",
+        verdict: Verdict::OrgBoundary,
+        why: "this is the org boundary, not a privacy fence: whether a \
+              scoped caller is told the PROJECT a subtask sits in. The \
+              session half of this very function is person-fenced by \
+              `hidden_sessions` (its two `ORG_HALF_SITES` rows)",
+    },
     Guard {
         file: "crates/fleet-core/src/service/work/view.rs",
         func: "link_visible",
@@ -1550,6 +1610,25 @@ const ORG_HALF_SITES: &[OrgHalf] = &[
         person_half: "the same `link_person_visible`, whose third arm judges a \
                       reaped participant's recorded conversations through \
                       `sees_past_conversation`",
+    },
+    OrgHalf {
+        file: "crates/fleet-core/src/service/work/view.rs",
+        func: "native_work",
+        nth: 0,
+        code: ".is_some_and(|r| scope.sees_row_org_only(r))",
+        person_half: "`hidden_sessions`: `native_work` is reached only from \
+                      `task`, which builds the graph with `Graph::load_for`, so \
+                      every person-invisible row is already out of `g.sessions` \
+                      and a lookup in it cannot answer for one",
+    },
+    OrgHalf {
+        file: "crates/fleet-core/src/service/work/view.rs",
+        func: "native_work",
+        nth: 1,
+        code: ".filter(|r| scope.sees_row_org_only(r))",
+        person_half: "the same `hidden_sessions`, for the job's worker: the row \
+                      comes out of the same `g.sessions` the person fence \
+                      emptied",
     },
     OrgHalf {
         file: "crates/fleet-core/src/service/work/view.rs",

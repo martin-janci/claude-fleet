@@ -129,9 +129,9 @@ fn the_chain_from_pre_work_graph_to_latest_is_fast_complete_and_sound() {
     // No migration after 044 updates a session row (row_version would bump).
     //
     // Multi-user M1 changed what this line means, so the number is quoted
-    // deliberately rather than merely re-asserted. 087's attribution of
+    // deliberately rather than merely re-asserted. 095's attribution of
     // pre-M1 rows is `Store::backfill_session_owner`, which runs *after* the
-    // chain and after 087 re-issued the row-version trigger to watch
+    // chain and after 095 re-issued the row-version trigger to watch
     // `owner_person_id` / `visibility` — so an attributed row's
     // `row_version` DOES move, by exactly one, and should: an open client
     // holding a cached row has to learn that its visibility changed.
@@ -250,7 +250,7 @@ fn the_chain_from_pre_work_graph_to_latest_is_fast_complete_and_sound() {
         assert_eq!(count(&store, sql), 0, "{what} was backfilled");
     }
 
-    // Multi-user M1 (086 + 087): the hub comes out of the upgrade with
+    // Multi-user M1 (094 + 095): the hub comes out of the upgrade with
     // exactly one person — its personal owner — and every session fleet
     // itself started belongs to her and is private. The second half is
     // vacuously true here (see the `started_at` note above) and is pinned
@@ -264,7 +264,7 @@ fn the_chain_from_pre_work_graph_to_latest_is_fast_complete_and_sound() {
     // `CHECK` makes that value unrepresentable, which is stronger than any
     // `SELECT COUNT(*)` (spec §4.3, Q10).
     let people = store.list_people().unwrap();
-    assert_eq!(people.len(), 1, "086 mints exactly one person");
+    assert_eq!(people.len(), 1, "094 mints exactly one person");
     let owner = store.personal_owner_id().unwrap().expect("the owner");
     assert_eq!(people[0].id, owner);
     assert_eq!(
@@ -512,7 +512,7 @@ fn deleting_an_upgraded_session_journals_its_conversations() {
     integrity_ok(&store);
 }
 
-/// Multi-user M1, 087's backfill, on the realistic upgrade path and with a
+/// Multi-user M1, 095's backfill, on the realistic upgrade path and with a
 /// population to attribute.
 ///
 /// `store::testgen` deliberately rebuilds v0.2.37's schema and writes no
@@ -524,7 +524,7 @@ fn deleting_an_upgraded_session_journals_its_conversations() {
 /// * a row fleet started becomes the hub's one person's, and `private`;
 /// * a row reconcile found keeps NULL and `unclaimed` — the upgrade widens
 ///   nothing (rule 7), and nobody is guessed for it;
-/// * each attributed row's `row_version` moves by exactly one, because 087
+/// * each attributed row's `row_version` moves by exactly one, because 095
 ///   re-issued the trigger to watch both columns and a client with a cached
 ///   row must learn its visibility changed;
 /// * the durable conversation-owner record is written for every attributed
@@ -564,7 +564,7 @@ fn the_m1_backfill_attributes_the_rows_fleet_started_and_only_those() {
     assert!(with_conversation > 0);
 
     store.migrate().expect("upgrade");
-    let owner = store.personal_owner_id().unwrap().expect("086 mints one");
+    let owner = store.personal_owner_id().unwrap().expect("094 mints one");
 
     let attributed = count(
         &store,

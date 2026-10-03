@@ -49,9 +49,9 @@ Parameters: `max_lines`, `scrollback_lines`, `session_id`
 
 ### `catalog_admin`
 
-The Assets tab's catalog operations as one tool. Master or a client granted `assets`.
+The Assets tab's catalog operations as one tool, plus the set of catalogs and host admissions. Master, or a client granted the catalog the action touches; list_catalogs an unbound one, add/remove_catalog the master.
 
-Parameters: `action`, `args`, `confirm_nonce`
+Parameters: `action`, `args`, `catalog`, `confirm_nonce`
 
 ### `decide_setting_proposals`
 
@@ -113,6 +113,12 @@ Operator settings (ticks, GC, playbooks, projects roots, move, usage, reports, w
 
 Parameters: `describe`
 
+### `guide`
+
+Settings guides. catalog: what one may name; validate / propose a spec (a person approves); list; decide / remove: master or trusted device.
+
+Parameters: `action`, `approve`, `id`, `page_id`, `spec`, `why`
+
 ### `hide_host`
 
 Hide or show a host (hidden: skipped by reconcile). Returns the host row.
@@ -121,9 +127,9 @@ Parameters: `alias`, `hidden`
 
 ### `import_assets`
 
-Import a host's Claude config (~/.claude skills, agents, hooks, ~/.claude.json MCP servers, installed plugins) into the catalog working tree as IR assets. Never overwrites; collisions are reported. Only host_alias `local`.
+Import a host's Claude config (~/.claude skills, agents, hooks, ~/.claude.json MCP servers, installed plugins) into the catalog working tree as IR assets. Never overwrites; collisions are reported. Any host: `local` reads this machine, others are read over SSH. `only` limits it to `<kind>:<name>` assets. Master or a client granted `assets`.
 
-Parameters: `dry_run`, `host_alias`
+Parameters: `dry_run`, `host_alias`, `only`
 
 ### `inbox`
 
@@ -257,9 +263,9 @@ Parameters: `session_id`
 
 ### `plan_sync`
 
-Compute a sync plan: scan the hosts, compare every catalog asset with what is installed, and return per-host actions (create | update | overwrite | adopt | remove | plugin_install | plugin_update | noop | blocked) plus a plan_id for apply_sync. plugin_update fires when a pinned plugin's catalog version changes; a host left on the old version stays blocked. orphan: in the host's fleet manifest, no longer in the catalog. Nothing is written.
+Compute a sync plan: scan the hosts, compare every catalog asset with what is installed, and return per-host actions (create | update | overwrite | adopt | remove | plugin_install | plugin_update | noop | blocked) plus a plan_id for apply_sync. plugin_update fires when a pinned plugin's catalog version changes; a host left on the old version stays blocked. orphan: in the host's fleet manifest, no longer in the catalog. A remote host with no layers assigned is skipped (it would otherwise get the whole catalog) unless allow_unlayered is set. Nothing is written.
 
-Parameters: `host_alias`, `kind`, `name`
+Parameters: `allow_unlayered`, `host_alias`, `kind`, `name`
 
 ### `probe_host`
 
@@ -379,7 +385,7 @@ Parameters: `action`, `confirm_nonce`, `session_id`
 
 ### `resolve_preview`
 
-One host's effective asset set after its role and contexts resolve, with provenance: the layer that introduced each asset, the ones that overrode it, and the one that excluded anything missing. Nothing is written. Requires catalog_configure + catalog_load in the app.
+One host's effective asset set after its role and contexts resolve: provenance, what was excluded and why, every refused asset (scope or collision), every private asset an org host withheld silently, and each held-back catalog with why. Nothing is written. Requires catalog_configure + catalog_load in the app.
 
 Parameters: `host_alias`
 
@@ -491,6 +497,12 @@ Set the session's friendly display name, once per task by the in-session agent (
 
 Parameters: `friendly_name`, `host_alias`, `session_id`, `tmux_name`
 
+### `set_host_harnesses`
+
+Choose which harnesses the asset catalog syncs on one host. harnesses null = auto: Claude, plus Codex where a scan finds the codex CLI, ~/.codex/auth.json or ~/.codex/sessions, or where fleet already manages Codex assets. Otherwise a list that must include "claude"; ["claude"] turns Codex off, and the next sync then removes what fleet installed for Codex there. Edits fleet state only. Master token only.
+
+Parameters: `harnesses`, `host_alias`
+
 ### `set_host_layers`
 
 Replace a host's layer assignment: one optional role plus context layers. Edits fleet state only, never catalog files. Requires a configured catalog (in the app, or `fleet-hub catalog set` on a hub). Master token only.
@@ -587,9 +599,9 @@ Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `color`
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo). handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo). handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. create {title, parent?, notes?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
 
-Parameters: `action`, `brief`, `confirm_nonce`, `days`, `decisions`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `impact_token`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `note`, `on`, `org_id`, `primary`, `project_id`, `project_ids`, `rule`, `rule_id`, `session_id`, `source`, `status`, `task_id`, `title`, `url`, `view`, `view_id`, `with_brief`, `worktree`
+Parameters: `action`, `brief`, `confirm_nonce`, `days`, `decisions`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `impact_token`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `note`, `notes`, `on`, `org_id`, `parent`, `primary`, `project_id`, `project_ids`, `rule`, `rule_id`, `session_id`, `source`, `status`, `task_id`, `title`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -639,6 +651,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work::list_local_work_items`
 - `commands::work::name_session_work`
 - `commands::work::rename_work_item`
+- `commands::work::create_work_task`
+- `commands::work::accept_work_proposal`
+- `commands::work::reject_work_proposal`
 - `commands::work_view::work_tree`
 - `commands::work_view::work_task`
 - `commands::work_view::work_session_tasks`
@@ -712,6 +727,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::pages::flow_cancel`
 - `commands::pages::setting_proposals`
 - `commands::pages::decide_setting_proposals`
+- `commands::pages::list_guides`
+- `commands::pages::decide_guide`
+- `commands::pages::remove_guide`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::tasks::list_tasks`
@@ -779,6 +797,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::assets::catalog_resolve_preview`
 - `commands::assets::catalog_propose_layers`
 - `commands::assets::catalog_set_host_layers`
+- `commands::assets::catalog_set_host_harnesses`
 - `commands::assets::catalog_layer_template`
 - `commands::assets::catalog_write_layer`
 - `commands::assets::catalog_delete_layer`

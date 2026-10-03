@@ -10,6 +10,54 @@ on:
   # gets exercised once against main before anyone relies on it.
   workflow_dispatch:
 
+# ONE LIVE RUN PER REF. Every push to main and every PR push used to start a
+# complete run — ten jobs, the macOS, Windows and hub legs among them, around
+# 17-19 minutes each warm — and nothing ever cancelled the run a newer commit
+# had already superseded. On 2026-10-03 three PRs merged inside 90 seconds, so
+# four full runs were alive at once (#425's, plus main at 47787ac, 7dadde8 and
+# db1a869) against a runner pool that cannot serve them. Jobs in the newest
+# main run sat queued 1-3 minutes before `Set up job`, waiting on two runs
+# whose verdict nobody would ever read, and a reviewer watching the PR saw
+# spinners that did not move. That is the "CI is stuck" this block fixes.
+#
+# A PULL REQUEST cancels its own older run: once a new commit exists, the
+# previous one's answer is about code that is gone, so it is pure waste.
+# `github.ref` is `refs/pull/<n>/merge` here, so the group is per PR and two
+# different PRs never cancel each other.
+#
+# A PUSH TO MAIN does NOT cancel — it queues. Each merge commit keeps its own
+# recorded verdict (nothing else re-tests main between releases), and queueing
+# is what actually frees the runners: the superseded runs finish one at a time
+# instead of three abreast. workflow_dispatch is grouped with the ref it is
+# dispatched at and likewise never cancels.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# THE OTHER HALF OF "STUCK" IS `timeout-minutes`, ON EVERY JOB BELOW. Not one
+# job declared it, so all of them inherited GitHub's default of SIX HOURS: a
+# job that deadlocks rather than fails holds its runner for the rest of the
+# morning, and with the pool already full every other run queues behind it —
+# the block above cannot help, because a cancelled run frees nothing while the
+# hung job is the one still holding the slot. A hang is a real risk in this
+# workspace and not a hypothetical one: the test suites are threaded and share
+# a process-wide SQLite lock, and the e2e leg starts tmux sessions and daemons.
+#
+# Each ceiling is roughly 3x the warm, uncontended time measured on main
+# (run 37101119677, 2026-10-03) — far enough above a slow cold-cache run to
+# never fire on a healthy job, and low enough that a hang costs one job, not
+# a morning:
+#
+#   job                  measured   ceiling
+#   version-consistency      0:10        15
+#   ag                       0:16        15
+#   frontend             2:06-4:39        30
+#   rust                16:45-17:33       60
+#   rust-windows            18:49         60
+#   hub-headless            16:39         60
+#
+# Raise one when the work in it legitimately grows; do not remove it.
+
 jobs:
   # The six version carriers scripts/release.sh rewrites, plus the four
   # Cargo.lock member entries it syncs, must all hold the same string — and
@@ -21,6 +69,7 @@ jobs:
   # --expect-tag, so the pushed tag is checked too.
   version-consistency:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - run: scripts/check-version-consistency.sh
@@ -68,6 +117,7 @@ jobs:
   # runs it under the stock /bin/bash 3.2 — the whole point of ag's
   # bash-3.2 rules — because the test pins PATH to $FAKE:/usr/bin:/bin.
   ag:
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -82,6 +132,7 @@ jobs:
         run: shellcheck -s bash tools/ag/ag tools/ag/lib/*.sh tools/ag/drivers/*.sh tools/ag/install.sh scripts/ag-test.sh
 
   rust:
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -101,7 +152,7 @@ jobs:
             libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev \
             libssl-dev libayatana-appindicator3-dev librsvg2-dev \
             libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -128,12 +179,13 @@ jobs:
   # platform-specific and stay on the Linux leg of `rust` above.
   rust-windows:
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       # Before checkout: .gitattributes already pins LF, this keeps a runner
       # default from ever turning a generated file or a fixture into CRLF.
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -185,9 +237,10 @@ jobs:
   # and, later, fleet-agent depend on it.
   hub-headless:
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
@@ -268,6 +321,7 @@ jobs:
           retention-days: 7
 
   frontend:
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

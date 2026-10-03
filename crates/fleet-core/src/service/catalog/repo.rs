@@ -6,13 +6,35 @@ use super::{E_ASSET_EXISTS, E_ASSET_NOT_FOUND, E_CATALOG_GIT, E_CATALOG_PARSE};
 use crate::ipc_error::codes::E_INVALID;
 use crate::ipc_error::IpcError;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u64 = 1;
 
+/// A pointer to the catalog an asset actually came from, on a composed
+/// (effective / union) catalog — see `Catalog::origin`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogRef {
+    pub id: i64,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Catalog {
+    /// `catalogs.id`; 0 in tests that build one by hand and never install it
+    /// under the registry. `#[serde(default)]` because `Catalog` travels the
+    /// wire nested in `resolve::Resolution` (`catalog_resolve_preview`'s
+    /// answer): a hub older than Assets S1b never sends this field, and a
+    /// desktop newer than its hub must still parse the answer rather than
+    /// error with `E_PARSE`.
+    #[serde(default)]
+    pub id: i64,
+    /// `catalogs.name` ("personal", …); default `""` until `load` sets it.
+    #[serde(default)]
+    pub name: String,
+    /// `catalogs.org_id`; `None` is the personal catalog.
+    #[serde(default)]
+    pub org_id: Option<i64>,
     pub assets: Vec<Asset>,
     pub problems: Vec<Problem>,
     pub head: String,
@@ -20,6 +42,33 @@ pub struct Catalog {
     /// Layer definitions from `layers/*.yaml`. Empty ⇒ no layering, and
     /// every host resolves to the whole catalog (backward compatibility).
     pub layers: crate::service::catalog::layer::LayerSet,
+    /// `<kind>/<name>` → the catalog that asset came from, on a composed
+    /// (effective / union) catalog. Empty on a catalog loaded from one repo:
+    /// then every asset is from `self`. `#[serde(default)]` because `Catalog`
+    /// travels the wire nested in `resolve::Resolution`: a hub older than
+    /// Assets M2 never sends this field.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub origin: BTreeMap<String, CatalogRef>,
+    /// Assets M3: why this catalog could not be loaded — a registry *problem
+    /// entry* (no assets, one `Problem`), kept so the other catalogs still
+    /// load (spec, Runtime) and so a sync never reads its absence as "every
+    /// asset dropped" (Rulings R5, R6). `None` on every loaded catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load_error: Option<String>,
+    /// Assets M3 (PF13): the store row's `repo_path`+`remote_url` this
+    /// problem entry was stamped against (NUL-joined; never shown to a
+    /// user — display uses `problems[0].path`/`message`), so `ensure_fresh`
+    /// retries a broken catalog once `catalog add` re-points it even when
+    /// `head_commit`/`last_loaded_at` stay `NULL` before and after (true of
+    /// a catalog that has never successfully loaded). `None` on every
+    /// loaded catalog. Fix round 1, item 4: purely internal bookkeeping for
+    /// `ensure_fresh`'s own freshness check — `#[serde(skip)]`, not
+    /// `#[serde(default)]`, so it never travels the wire at all (in
+    /// particular, never inside `resolve::Resolution`, which nests a
+    /// `Catalog`); deserializing always lands on `Catalog::default()`'s
+    /// `None` regardless of what a peer sends.
+    #[serde(skip)]
+    pub load_error_stamp: Option<String>,
 }
 
 impl Catalog {
@@ -27,6 +76,19 @@ impl Catalog {
         self.assets
             .iter()
             .find(|a| a.kind() == kind && a.header.name == name)
+    }
+
+    /// Which catalog `kind/name` came from: `origin`, else this catalog
+    /// itself (a catalog loaded straight from one repo has no `origin`
+    /// entries — every asset on it is its own).
+    pub fn origin_of(&self, kind: Kind, name: &str) -> CatalogRef {
+        self.origin
+            .get(&format!("{}/{name}", kind.as_str()))
+            .cloned()
+            .unwrap_or_else(|| CatalogRef {
+                id: self.id,
+                name: self.name.clone(),
+            })
     }
 }
 
@@ -103,13 +165,43 @@ fn test_git_isolation(cmd: &mut std::process::Command) {
 fn git(dir: &Path, args: &[&str]) -> Result<String, IpcError> {
     let out = git_output(dir, args)?;
     if !out.status.success() {
-        return Err(
-            IpcError::new(E_CATALOG_GIT, format!("git {}: failed", args.join(" "))).with_details(
-                serde_json::json!({ "stderr": String::from_utf8_lossy(&out.stderr).trim() }),
-            ),
-        );
+        // Final review I1: a clone's remote may carry `user:token@`, and this
+        // message becomes a problem entry's `load_error` and an asset tool's
+        // error — never echo the userinfo.
+        let message = redact_url_userinfo(&format!("git {}: failed", args.join(" ")));
+        let stderr = redact_url_userinfo(String::from_utf8_lossy(&out.stderr).trim());
+        return Err(IpcError::new(E_CATALOG_GIT, message)
+            .with_details(serde_json::json!({ "stderr": stderr })));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `text` with the userinfo of every `scheme://user[:pass]@host` URL in it
+/// replaced by `***` (`scheme://***@host`), so an error that echoes a remote
+/// never echoes its credentials. Anything that is not such a URL is left as
+/// it is.
+pub(crate) fn redact_url_userinfo(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("://") {
+        let (head, tail) = rest.split_at(i + 3);
+        out.push_str(head);
+        // The authority ends at the first `/`, whitespace or quote.
+        let end = tail
+            .find(|c: char| c == '/' || c.is_whitespace() || c == '\'' || c == '"')
+            .unwrap_or(tail.len());
+        let authority = &tail[..end];
+        match authority.rfind('@') {
+            Some(at) => {
+                out.push_str("***");
+                out.push_str(&authority[at..]);
+            }
+            None => out.push_str(authority),
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The directory to run `git clone` from for a clone target of `path`: the
@@ -744,6 +836,30 @@ mod tests {
     use super::*;
     use crate::service::catalog::model::{Asset, Kind, Resource};
     use std::fs;
+
+    /// Final review I1: a remote's userinfo never survives into a git error.
+    #[test]
+    fn redact_url_userinfo_hides_credentials_and_keeps_the_rest() {
+        assert_eq!(
+            redact_url_userinfo("git clone -q https://u:secret@host/r.git /srv/acme: failed"),
+            "git clone -q https://***@host/r.git /srv/acme: failed"
+        );
+        assert_eq!(
+            redact_url_userinfo("fatal: unable to access 'https://tok@h:8443/x/': 401"),
+            "fatal: unable to access 'https://***@h:8443/x/': 401"
+        );
+        // Two URLs, one without userinfo; an scp-style remote has no scheme.
+        assert_eq!(
+            redact_url_userinfo("a ssh://git:pw@g.example/r b https://plain.example/r c"),
+            "a ssh://***@g.example/r b https://plain.example/r c"
+        );
+        assert_eq!(
+            redact_url_userinfo("git@github.com:o/r.git"),
+            "git@github.com:o/r.git"
+        );
+        assert_eq!(redact_url_userinfo("https://u:p@h"), "https://***@h");
+        assert_eq!(redact_url_userinfo(""), "");
+    }
 
     fn tmp(name: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!("fleet-catalog-{name}-{}", std::process::id()));

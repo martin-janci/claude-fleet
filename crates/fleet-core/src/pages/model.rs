@@ -43,6 +43,10 @@ pub struct Page {
     /// above the list: notices and custom items only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub list_items: Vec<Item>,
+    /// An `embed` page's place in a hand-built screen (`Slot`). Only an
+    /// embed page names one, and each slot has at most one page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<Slot>,
     /// A `review_apply` page's proposals: what the page lists for a person
     /// to apply or reject.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,6 +95,10 @@ pub enum ReviewSource {
     /// { propose: true }`): `setting_proposals`, applied or rejected with
     /// `decide_setting_proposals`.
     Settings,
+    /// Guides an agent proposed (`guide { propose }`, `service::guides`):
+    /// approved or rejected one at a time; an approved one joins the pages
+    /// under this one.
+    Guides,
 }
 
 /// The prepared layouts (design §4). A layout decides spacing, saving
@@ -114,6 +122,61 @@ pub enum Layout {
     ReviewApply,
     /// L7: stats, charts and tables over data sources.
     DataPage,
+    /// L8: items placed inside a hand-built screen at a named `slot`
+    /// rather than a page of their own. Never in the page tree.
+    Embed,
+    /// L9: a step-by-step guide. Each section is one step, shown one at a
+    /// time with Back / Next; a step's `when` skips it. Its fields are a
+    /// path through settings whose home is another page, saved as they
+    /// change: a guide never owns a setting. A guide may also be stored at
+    /// runtime (`service::guides`), proposed by an agent and approved by a
+    /// person.
+    Guide,
+}
+
+/// The places in hand-built screens an `embed` page fills. Closed: each is
+/// a spot in the desktop's own UI with the context it hands its items
+/// (`catalog::slot_views` says which items each one takes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "snake_case")]
+pub enum Slot {
+    /// Host detail, under the account: context the host and its account.
+    HostDetail,
+    /// A Hosts-list account group's title line, after its name.
+    HostsGroupTitle,
+    /// A Hosts-list account group's header, right side.
+    HostsGroup,
+    /// Each host chip in the New-session dialog, under the alias.
+    NewSessionChip,
+    /// Under the New-session dialog's host chips: the selected host.
+    NewSessionHost,
+    /// The window's status footer, right end.
+    StatusFooter,
+}
+
+/// How an `account_usage` item draws an account's plan headroom. The
+/// wording, staleness and severity rules are the same in every view (the
+/// hosts-view design's "Showing usage" and "Staleness and failure").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "snake_case")]
+pub enum UsageView {
+    /// The full block: status lines, the 5-hour and weekly rows with pace,
+    /// per-model rows, the source and age, and a floor-respecting refresh.
+    Block,
+    /// The plan tier and a freshness mark.
+    Freshness,
+    /// The 5-hour and weekly mini bars with % left and reset.
+    Bars,
+    /// One short headroom label (a host chip).
+    Chip,
+    /// One full sentence for the selected host.
+    Line,
+    /// A warning when the selected host's account is low; nothing otherwise.
+    Warning,
+    /// The status footer's one segment for the whole fleet.
+    Footer,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -188,6 +251,10 @@ pub enum Item {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
+    /// An account's plan headroom from an `account_usage` source, drawn as
+    /// `view`. On a page it shows every account; in an embed slot, the
+    /// slot's host or account.
+    AccountUsage { source: SourceRef, view: UsageView },
     /// A static callout.
     Notice { tone: Tone, text: String },
     /// A hand-written component registered in code: the one escape hatch

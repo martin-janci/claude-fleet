@@ -465,6 +465,40 @@ impl Store {
         Ok(())
     }
 
+    /// Set which harnesses the asset catalog syncs on a host (multi-harness
+    /// F3a, migration 089): `None` = auto, `Some` = exactly this list, stored
+    /// as JSON. The list is stored as given —
+    /// `service::catalog::harness_set::set_host_harnesses` validates and
+    /// normalises it first. An unknown alias is `E_NOTFOUND`, as in
+    /// `set_host_transport`.
+    pub fn set_host_harnesses(
+        &self,
+        alias: &str,
+        harnesses: Option<&[String]>,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        let json = match harnesses {
+            Some(list) => Some(serde_json::to_string(list).map_err(|e| {
+                crate::ipc_error::IpcError::new(
+                    codes::E_SERIALIZE,
+                    format!("encode harnesses: {e}"),
+                )
+            })?),
+            None => None,
+        };
+        let n = self.conn.execute(
+            "UPDATE hosts SET harnesses=?1 WHERE alias=?2",
+            rusqlite::params![json, alias],
+        )?;
+        if n == 0 {
+            return Err(crate::ipc_error::IpcError::new(
+                codes::E_NOTFOUND,
+                format!("host {alias} not found"),
+            ));
+        }
+        self.emit_host(alias, |bus, row| bus.host_probed(row))?;
+        Ok(())
+    }
+
     /// Mark a host provisioned (or not). With `true` the content fingerprint
     /// this build ships and the time are recorded too (migration 078), so
     /// `HostRow::provision_stale` can compare on every later read; with
@@ -487,6 +521,46 @@ impl Store {
                 rusqlite::params![alias],
             )?;
         }
+        Ok(())
+    }
+
+    /// Record how the last provisioning went, beyond "it ran".
+    ///
+    /// `warning: None` is a clean run: the fingerprint `set_host_provisioned`
+    /// just stamped stands, and any previous warning is cleared.
+    ///
+    /// `warning: Some(_)` keeps the text, so it survives the call that
+    /// produced it and can reach `fleet_health` and the host's Attention row.
+    ///
+    /// `owed_retry` is a SEPARATE question from whether there is a warning,
+    /// and the two must not be conflated. It forgets the fingerprint, so
+    /// `HostRow::provision_stale` (`provisioned && fingerprint != current`)
+    /// turns true and `spawn_reprovision_stale` picks the host up again.
+    /// Set it for a step that MIGHT succeed next time — a failed `ag`
+    /// install. Do NOT set it for a warning about a persistent condition of
+    /// the host itself, such as WSL needing mirrored networking: that recurs
+    /// until the operator changes their WSL config, so retrying would leave
+    /// the host forever stale and re-provisioned on every tick. Such a
+    /// warning is still worth keeping — it just is not a reason to retry.
+    ///
+    /// `provisioned` / `provisioned_at` are left alone either way: the
+    /// content WAS delivered.
+    pub fn record_host_provision_outcome(
+        &self,
+        alias: &str,
+        warning: Option<&str>,
+        owed_retry: bool,
+    ) -> Result<(), rusqlite::Error> {
+        if owed_retry {
+            self.conn.execute(
+                "UPDATE hosts SET provision_fingerprint=NULL WHERE alias=?1",
+                rusqlite::params![alias],
+            )?;
+        }
+        self.conn.execute(
+            "UPDATE hosts SET provision_warning=?1 WHERE alias=?2",
+            rusqlite::params![warning, alias],
+        )?;
         Ok(())
     }
 
@@ -544,7 +618,11 @@ impl Store {
                 "wt_path, parent_fp, recorded_at",
             ),
             ("dismissed_agents", "claude_session_id, dismissed_at"),
-            ("host_layers", "layer_name, axis, position, active"),
+            (
+                "host_layers",
+                "catalog_id, layer_name, axis, position, active",
+            ),
+            ("host_catalogs", "catalog_id, admitted_at"),
             ("catalog_secrets_host", "name, value, updated_at"),
         ] {
             tx.execute(
@@ -1032,6 +1110,25 @@ mod tests {
         assert!(!row.provisioned && !row.provision_stale && row.provisioned_at.is_none());
     }
 
+    /// Migration 093: a merged host keeps its admissions, like its layer
+    /// assignments (M2 fix round 1).
+    #[test]
+    fn merge_host_alias_carries_admissions() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        s.upsert_host("mac").unwrap();
+        s.set_catalog_config("/p", None).unwrap();
+        let org = s.add_org("acme", None, false).unwrap();
+        let acme = s
+            .upsert_catalog("acme", "/a", None, Some(org.id))
+            .unwrap()
+            .id;
+        s.admit_host_catalog("local", acme).unwrap();
+        s.merge_host_alias("local", "mac").unwrap();
+        assert_eq!(s.host_admissions("mac").unwrap(), vec![acme]);
+        assert!(s.host_admissions("local").unwrap().is_empty());
+    }
+
     /// data-sync F2/F5: the `local` → `mac` rename left 249 worktree rows
     /// and 6 duplicate agent rows on a hidden alias nothing merged.
     #[test]
@@ -1039,6 +1136,28 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("local").unwrap();
         s.insert_host("mac", Some("mac")).unwrap();
+        // Layer assignments in two catalogs on the merged-away host: both
+        // must arrive under `into` carrying their own `catalog_id` (a
+        // NOT NULL column with no default — `INSERT OR IGNORE` silently
+        // drops any row missing it instead of erroring).
+        s.set_catalog_config("/p", None).unwrap();
+        let personal = s.personal_catalog().unwrap().unwrap().id;
+        let org = s.add_org("acme", None, false).unwrap().id;
+        s.conn_for_test()
+            .execute(
+                "INSERT INTO catalogs (name, repo_path, org_id, created_at) VALUES ('acme', '/a', ?1, 0)",
+                [org],
+            )
+            .unwrap();
+        let acme: i64 = s
+            .conn_for_test()
+            .query_row("SELECT id FROM catalogs WHERE name='acme'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        s.set_host_layers("local", Some("core"), &[]).unwrap();
+        s.set_host_layers_for("local", acme, Some("ops"), &["extra"])
+            .unwrap();
         let pid = s.upsert_project("o", "r", "/Users/m/o/r").unwrap();
         let wt = s
             .upsert_worktree_on(
@@ -1142,6 +1261,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(d, 1);
+        // Both catalogs' layer assignments arrived under `into` with their
+        // own catalog id, and nothing is left on `from`.
+        let p = s.get_host_layers_for("mac", personal).unwrap();
+        assert_eq!(
+            p.iter().map(|r| r.layer_name.as_str()).collect::<Vec<_>>(),
+            vec!["core"]
+        );
+        let a = s.get_host_layers_for("mac", acme).unwrap();
+        assert_eq!(a.len(), 2);
+        assert!(a.iter().all(|r| r.catalog_id == acme));
+        assert_eq!(s.get_host_layers("mac").unwrap().len(), 3);
+        assert!(s.get_host_layers("local").unwrap().is_empty());
     }
 
     #[test]
@@ -1352,6 +1483,7 @@ mod tests {
     fn delete_host_removes_its_layer_assignment() {
         let s = Store::open_in_memory().unwrap();
         s.insert_host("h", Some("h")).unwrap();
+        s.set_catalog_config("/p", None).unwrap();
         s.set_host_layers("h", Some("workstation"), &["papayapos"])
             .unwrap();
         assert_eq!(s.get_host_layers("h").unwrap().len(), 2);
@@ -1927,5 +2059,41 @@ mod tests {
             s.get_host_identity("ghost").unwrap(),
             StoredIdentity::default()
         );
+    }
+
+    /// Multi-harness F3a: a new host is on auto (`None`); a list round-trips
+    /// through its JSON column, `None` clears it again, every write emits the
+    /// row, and an unknown alias is `E_NOTFOUND`.
+    #[test]
+    fn set_host_harnesses_round_trips_a_list_and_auto() {
+        let bus = Arc::new(crate::events::RecordingEventBus::new());
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        assert_eq!(
+            s.get_host_row("h").unwrap().unwrap().harnesses,
+            None,
+            "a new host is on auto"
+        );
+        bus.take();
+        let both = vec!["claude".to_string(), "codex".to_string()];
+        s.set_host_harnesses("h", Some(both.as_slice())).unwrap();
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().harnesses, Some(both));
+        assert!(bus.take().contains(&"host:probed:h".to_string()));
+        s.set_host_harnesses("h", None).unwrap();
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().harnesses, None);
+        let err = s.set_host_harnesses("nope", None).unwrap_err();
+        assert_eq!(err.code, "E_NOTFOUND");
+    }
+
+    /// A stored value that is not a JSON string array (hand-edited, or from a
+    /// future schema) reads as auto instead of failing every host read.
+    #[test]
+    fn an_unreadable_harnesses_value_reads_as_auto() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        s.conn
+            .execute("UPDATE hosts SET harnesses='not json' WHERE alias='h'", [])
+            .unwrap();
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().harnesses, None);
     }
 }

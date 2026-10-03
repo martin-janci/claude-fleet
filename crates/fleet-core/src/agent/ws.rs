@@ -276,7 +276,7 @@ struct Limits {
 enum BeatSource {
     Every(Duration),
     /// Each `send_modify` on the sender is one beat for every connection.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testkit"))]
     Manual(Arc<tokio::sync::watch::Sender<u64>>),
 }
 
@@ -288,7 +288,7 @@ impl BeatSource {
                 next: Instant::now() + *every,
                 every: *every,
             },
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testkit"))]
             BeatSource::Manual(tx) => Ticker::Manual(tx.subscribe()),
         }
     }
@@ -309,7 +309,7 @@ enum Ticker {
         next: Instant,
         every: Duration,
     },
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testkit"))]
     Manual(tokio::sync::watch::Receiver<u64>),
 }
 
@@ -322,7 +322,7 @@ impl Ticker {
                 // caught up on the next one, not replayed in a tight loop.
                 *next = Instant::now() + *every;
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testkit"))]
             Ticker::Manual(rx) => {
                 if rx.changed().await.is_err() {
                     std::future::pending::<()>().await;
@@ -342,7 +342,7 @@ impl Ticker {
                 *next = now + *every;
                 true
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testkit"))]
             Ticker::Manual(rx) => {
                 if !rx.has_changed().unwrap_or(false) {
                     return false;
@@ -396,9 +396,10 @@ impl AgentWsState {
         self
     }
 
-    /// Heartbeats fired by the test through `beats`, instead of by a clock.
-    #[cfg(test)]
-    pub(crate) fn with_manual_beats(mut self, beats: Arc<tokio::sync::watch::Sender<u64>>) -> Self {
+    /// Heartbeats fired by the test through `beats`, instead of by a clock
+    /// (`testkit` for the `fleet-agent-e2e` crate).
+    #[cfg(any(test, feature = "testkit"))]
+    pub fn with_manual_beats(mut self, beats: Arc<tokio::sync::watch::Sender<u64>>) -> Self {
         self.limits.beats = BeatSource::Manual(beats);
         self
     }

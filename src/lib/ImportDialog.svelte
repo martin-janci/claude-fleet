@@ -1,18 +1,27 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { importHost, type ImportReport } from './assets';
   import { hosts } from './hosts';
   import Modal from './Modal.svelte';
 
-  let { onclose, ondone }: { onclose: () => void; ondone: () => void } = $props();
+  let {
+    host = 'local',
+    only = [],
+    onclose,
+    ondone,
+  }: { host?: string; only?: string[]; onclose: () => void; ondone: () => void } = $props();
 
-  let hostAlias = $state('local');
+  // Preset once, at open: the dialog does not track a later change to the
+  // `host` prop (the caller opens a fresh instance each time anyway, via
+  // AssetsPanel's `{#if showImport}`).
+  let hostAlias = $state(untrack(() => host));
   let report = $state<ImportReport | null>(null);
   let error = $state<string | null>(null);
   let busy = $state(false);
 
   async function run(dryRun: boolean) {
     busy = true; error = null;
-    const r = await importHost(hostAlias, dryRun);
+    const r = await importHost(hostAlias, dryRun, only);
     busy = false;
     if (!r.ok) { error = r.error.message; return; }
     report = r.value;
@@ -26,10 +35,11 @@
     <label>Host
       <select bind:value={hostAlias} data-testid="import-host">
         {#each $hosts.filter((h) => !h.hidden) as h (h.alias)}
-          <option value={h.alias} disabled={h.alias !== 'local'}>{h.alias}{h.alias !== 'local' ? ' (local only in this version)' : ''}</option>
+          <option value={h.alias}>{h.alias}</option>
         {/each}
       </select>
     </label>
+    {#if only.length > 0}<p class="muted" data-testid="import-only">Only: {only.join(', ')}</p>{/if}
     {#if error}<p class="error">{error}</p>{/if}
     {#if report}
       <h4>{report.dry_run ? 'Would create' : 'Created'} {report.created.length}</h4>

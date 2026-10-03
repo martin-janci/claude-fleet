@@ -217,6 +217,14 @@ one-to-many use `broadcast_prompt { host?, project_id?, status?, prompt }` —
 `status` filters on `claude_status` (e.g. `"idle"`); work sessions only,
 controller excluded.
 
+## Tasks, subtasks and proposals (shared work context)
+
+- `work_link { action: "create", title, parent?: "item:<id>", project_id?, notes? }` — a native task `TASK-<id>`, or a subtask under `parent`. A standalone task needs the desktop or the master token; a per-host token may add subtasks under a task its own sessions work on.
+- `work_link { action: "propose", parent, title, notes?, why? }` — propose a subtask. A person accepts or rejects it; you cannot. At most 10 open proposals per task; a rejected title is not accepted again.
+- `work_link { action: "start", item_id }` on a subtask starts it in its project with the parent ticket's brief followed by the subtask's title and notes.
+- Every `dispatch_task` job shows as an agent subtask under the requester's task and follows the job's state.
+- Your `TaskCreate` / `TaskUpdate` steps are captured on the task page as "per the agent". They never mark anything done — the task's status and evidence do.
+
 ## Delegating work — tasks
 
 When a piece of work should run in another session and you want its outcome

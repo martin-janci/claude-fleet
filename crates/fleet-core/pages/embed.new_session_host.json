@@ -1,0 +1,29 @@
+{
+  "spec": "fleet.page/1",
+  "id": "embed.new_session_host",
+  "title": "New session: selected host",
+  "intro": "The selected host's headroom in a sentence, and a warning when its account is low.",
+  "layout": "embed",
+  "slot": "new_session_host",
+  "sections": [
+    {
+      "title": "Usage",
+      "items": [
+        {
+          "type": "account_usage",
+          "source": {
+            "id": "accounts.usage"
+          },
+          "view": "line"
+        },
+        {
+          "type": "account_usage",
+          "source": {
+            "id": "accounts.usage"
+          },
+          "view": "warning"
+        }
+      ]
+    }
+  ]
+}

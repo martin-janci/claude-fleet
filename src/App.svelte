@@ -6,6 +6,7 @@
   import Pane from './lib/Pane.svelte';
   import Resizer from './lib/Resizer.svelte';
   import { healthCheck, type Health } from './lib/ipc';
+  import { appVersion, loadAppVersion, versionLine } from './lib/app_version';
   import { setContextRedPct } from './lib/attention';
   import { trackersHealth, trackersSummary } from './lib/tracker_health';
   import Sidebar from './lib/Sidebar.svelte';
@@ -36,7 +37,7 @@
   import { loadAccounts, applyAccountEvents, accounts } from './lib/accounts';
   import { loadTasks, applyTaskEvents } from './lib/tasks';
   import { loadAccountUsage, applyAccountUsageEvents, accountUsage } from './lib/account_usage_store';
-  import { footerUsage } from './lib/usage_glance';
+  import EmbedSlot from './lib/pages/EmbedSlot.svelte';
   import { mergeInventoryRow, clearInventoryFor, loadAssets, syncProgress, repoStatus } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
   import { accessOf, applyGrantChanges, loadMyGrants } from './lib/access';
@@ -159,6 +160,17 @@
   });
 
   let health = $state<Health | null>(null);
+  // Which version belongs to whom. `health` is the FLEET in front of the
+  // reader — this app's own numbers standalone, the hub's over the wire —
+  // so the footer labels it rather than leaving one `v…` to mean either.
+  const versions = $derived(
+    versionLine({
+      app: $appVersion,
+      health,
+      remote: $hubStatus.remote,
+      hubUrl: $hubStatus.url,
+    }),
+  );
   const trackersLine = $derived(trackersSummary($trackersHealth));
   let healthError = $state<string | null>(null);
   // Bootstrap (initial list_* fetches) failures. These used to be swallowed,
@@ -224,6 +236,11 @@
     // be an error toast on every launch for a panel that does not apply), and
     // the footer names the hub it is a window onto.
     await loadHubStatus();
+    // Not awaited and never fatal: the version is for the footer and for a
+    // bug report, and `versionLine` says less rather than guessing when it
+    // is missing. Before the `unavailable` return below, so a window that
+    // reaches no hub at all can still say which app it is.
+    void loadAppVersion();
     // A hub is configured but this launch could not use it. The backend owns
     // nothing and refuses every fleet command, so each load below would only
     // add an error toast under the banner that already explains all of them.
@@ -647,7 +664,6 @@
     const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 30_000);
     return () => clearInterval(t);
   });
-  const usageFooter = $derived(footerUsage($hosts, $accounts, $accountUsage, nowSec));
 
   // What the agent is told about where the person is standing. `branch` has
   // no plumbing in App.svelte today (no per-session/current-branch state to
@@ -1054,10 +1070,12 @@
   {:else if bootstrapError}
     <span class="err" data-testid="bootstrap-error">{bootstrapError}</span>
   {:else if health}
-    <!-- In remote mode this is the HUB's version, database and schema, not
+    <!-- In remote mode these are the HUB's version, database and schema, not
          this app's — `health_check` routes to the hub's `fleet_health`. The
-         badge beside it is what says whose. -->
-    <span>v{health.version} · db: {health.db_ready ? 'ok' : 'fail'} · schema {health.schema_version}</span>
+         line says so itself now (`app 0.4.5 · hub 0.4.6 · …`): the badge
+         beside it names WHICH hub, which was never the same as saying whose
+         version the reader is looking at. -->
+    <span data-testid="footer-version" title={versions.title}>{versions.text}</span>
     {#if trackersLine}
       <!-- Work graph M12.4: the tracker roll-up, re-read by TrackerAttention. -->
       <button
@@ -1070,6 +1088,12 @@
       >
     {/if}
   {:else if $hubStatus.unavailable}
+    <!-- No health to report, so no hub version and no schema — but which app
+         this is stays worth saying, and it is the first thing anyone asks
+         when the hub it was paired to will not come up. -->
+    {#if $appVersion}
+      <span data-testid="footer-version" title={versions.title}>{versions.text}</span>
+    {/if}
     <!-- Not "connecting…": nothing is, and nothing will until Settings. -->
     <button
       type="button"
@@ -1102,17 +1126,17 @@
       >
     {/if}
   {/if}
-  {#if usageFooter}
-    <button
-      type="button"
-      class="usage-seg tone-{usageFooter.tone}"
-      data-testid="footer-usage"
-      data-state={usageFooter.state}
-      aria-label={usageFooter.ariaLabel}
-      title={usageFooter.ariaLabel}
-      onclick={() => openHosts(usageFooter.host)}>{usageFooter.text}</button
-    >
-  {/if}
+  <!-- The usage segment is the embed page `embed.status_footer`. -->
+  <EmbedSlot
+    slot="status_footer"
+    ctx={{
+      now: nowSec,
+      hosts: $hosts,
+      accounts: $accounts,
+      snapshots: $accountUsage,
+      onopenhost: (host) => openHosts(host),
+    }}
+  />
 </footer>
 
 <style>
@@ -1160,23 +1184,6 @@
     white-space: nowrap;
     max-width: 40vw;
   }
-  .usage-seg {
-    margin-left: auto;
-    background: transparent;
-    border: none;
-    padding: 0 0.3rem;
-    font: inherit;
-    font-variant-numeric: tabular-nums;
-    color: var(--fg);
-    cursor: pointer;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .usage-seg:hover { text-decoration: underline; }
-  .usage-seg.tone-muted { color: var(--fg-muted); }
-  .usage-seg.tone-warn { color: var(--usage-warn); }
-  .usage-seg.tone-alarm { color: var(--usage-crit); }
 
   /* Collapsed-pane strip: a thin always-visible vertical button. Same
      visual language for both sidebar and center collapse so the user

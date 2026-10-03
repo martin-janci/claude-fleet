@@ -29,7 +29,7 @@
 //! must not take the writer's lock to answer it. It is read here, on the same
 //! read-only connection and the same pass as the token rows, and then
 //! remembered: the flagged `people` row is written exactly twice in the life
-//! of a database (by migration 086 and by `ensure_personal_owner`), so it is
+//! of a database (by migration 094 and by `ensure_personal_owner`), so it is
 //! not something the auth epoch has to track.
 //!
 //! A `None` is **never** remembered. A hub that cannot say whose it is is
@@ -131,7 +131,7 @@ impl TokenCache {
     ///
     /// Not keyed on the auth epoch, and deliberately so: nothing in the
     /// `people` table is a bearer token, and the flagged row is written by
-    /// migration 086 and by `ensure_personal_owner` only — an id that has
+    /// migration 094 and by `ensure_personal_owner` only — an id that has
     /// been answered once does not change under a running hub. A `None` is
     /// not remembered, so a hub that is missing the row asks again on every
     /// request and picks the id up the moment one exists.

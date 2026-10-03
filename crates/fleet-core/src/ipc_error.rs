@@ -26,6 +26,8 @@ pub mod codes {
     /// checkout already at the destination path…) — the inverse of
     /// `E_NOTFOUND`.
     pub const E_EXISTS: &str = "E_EXISTS";
+    /// A per-object limit was reached (open proposals on one work item…).
+    pub const E_LIMIT: &str = "E_LIMIT";
     /// The `gh` CLI failed: not installed, unauthenticated, or exited
     /// non-zero, or its JSON output could not be parsed.
     pub const E_GH: &str = "E_GH";

@@ -307,7 +307,7 @@ pub struct SessionRow {
     /// `outcome::PR_EVIDENCE_STALE_SECS` describes the past.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_checked_at: Option<i64>,
-    /// Whose session this is (migration 087, multi-user M1): the `people`
+    /// Whose session this is (migration 095, multi-user M1): the `people`
     /// row that owns it. `None` for a row nobody can speak for — one
     /// reconcile discovered on a host, or a pre-M1 row fleet did not create
     /// (`visibility = 'unclaimed'`).
@@ -328,7 +328,7 @@ pub struct SessionRow {
     /// Hence no `skip_serializing_if` on either field.
     #[serde(default)]
     pub owner_person_id: Option<i64>,
-    /// [`VISIBILITY_PRIVATE`] or [`VISIBILITY_UNCLAIMED`] (migration 087,
+    /// [`VISIBILITY_PRIVATE`] or [`VISIBILITY_UNCLAIMED`] (migration 095,
     /// whose `CHECK` admits nothing else — in particular no `'org'`, which
     /// the owner removed from M1 because the schema's only referent for
     /// "the org can see it" is a column an admin binds their own device to;
@@ -342,19 +342,19 @@ pub struct SessionRow {
     pub visibility: String,
 }
 
-/// `sessions.visibility` (migration 087): private to its owner, and to the
+/// `sessions.visibility` (migration 095): private to its owner, and to the
 /// people the owner has granted `watch` or `drive` to. The default for
 /// anything a person starts through fleet.
 pub const VISIBILITY_PRIVATE: &str = "private";
 
-/// `sessions.visibility` (migration 087): nobody can speak for this row —
+/// `sessions.visibility` (migration 095): nobody can speak for this row —
 /// reconcile found it on a host, or it predates M1 and fleet did not create
 /// it. An out-of-scope caller learns a per-host COUNT of these and not one
 /// byte more (spec §4.3); claiming one needs proof of host access.
 pub const VISIBILITY_UNCLAIMED: &str = "unclaimed";
 
 /// [`SessionRow::visibility`] when a frame carries no `visibility` key at
-/// all: a hub built before migration 087, or a row read from one.
+/// all: a hub built before migration 095, or a row read from one.
 ///
 /// **It must be a named function.** A bare `#[serde(default)]` on a `String`
 /// yields `String::default()` — the empty string — which is neither
@@ -950,6 +950,21 @@ pub struct HostRow {
     /// `None`, which is the closed answer either way.
     #[serde(default)]
     pub unclaimed_sessions: Option<i64>,
+    /// Which harnesses the asset catalog syncs on this host (multi-harness
+    /// F3a, migration 089). `None` = auto: Claude, plus Codex where a scan
+    /// finds it or fleet already manages Codex assets there. `Some` = exactly
+    /// these (always including `claude`). Per-field default: an older hub
+    /// omits it.
+    #[serde(default)]
+    pub harnesses: Option<Vec<String>>,
+    /// What the last provisioning warned about, when it delivered the content
+    /// but degraded part way — the `ag` launcher did not install, say
+    /// (migration 092). Cleared by the next clean run; `None` is "nothing
+    /// wrong with the last run". Returned to the caller AND kept here,
+    /// because the call that produced it is long gone by the time an operator
+    /// looks. Per-field default: an older hub omits it.
+    #[serde(default)]
+    pub provision_warning: Option<String>,
 }
 
 /// The volatile half of a host row, as `host:pinged` carries it (host
@@ -1003,7 +1018,8 @@ pub(super) const HOST_COLUMNS: &str =
     "alias, ssh_alias, reachable, claude_version, tmux_version, hidden, \
      last_pinged_at, account_uuid, provisioned, transport, org_id, claude_version_at, \
      disk_home_free_kb, disk_home_total_kb, disk_tmp_free_kb, load_1m, mem_avail_kb, \
-     uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint";
+     uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint, \
+     harnesses, provision_warning";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -1040,6 +1056,14 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         // `service::hosts::list_hosts` fills it in per request, for the
         // callers R5-d entitles to it.
         unclaimed_sessions: None,
+        // Migration 089. A value that is not a JSON string array reads as
+        // auto rather than failing the whole row.
+        harnesses: row
+            .get::<_, Option<String>>(23)?
+            .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()),
+        // Migration 091: what the last provisioning warned about, if it
+        // degraded. Cleared by the next clean run.
+        provision_warning: row.get(24)?,
     })
 }
 
@@ -1165,10 +1189,10 @@ pub struct ClientTokenRow {
     /// (migration 074, `fleet-hub client grant <name> assets`): the hub's
     /// `catalog_admin` tool answers it as it answers the master.
     pub assets_admin_at: Option<i64>,
-    /// Whose device this is (multi-user M1, migration 086): the `people` row
+    /// Whose device this is (multi-user M1, migration 094): the `people` row
     /// this token belongs to. `None` is the `person: None` privilege level —
     /// a caller nobody owns — which every gate must refuse and no scope can
-    /// resolve; migration 086 leaves no live row in that state, and
+    /// resolve; migration 094 leaves no live row in that state, and
     /// `Store::set_client_person` is the only thing that puts one back.
     /// Deliberately no foreign key: deleting a person leaves the token bound
     /// to an id nothing has (fail closed), never widened.
@@ -1246,7 +1270,7 @@ pub struct TaskRow {
     #[serde(skip_serializing, default)]
     pub worker_claude_session_id: Option<String>,
     /// When a session this task names was DELETED, so the task's ends no
-    /// longer identify anybody (migration 089, multi-user M1 T9d).
+    /// longer identify anybody (migration 097, multi-user M1 T9d).
     ///
     /// `sessions.id` is reused, and a task outlives its sessions, so an id
     /// kept past the row's death would make the task read as belonging to
@@ -1273,6 +1297,31 @@ pub struct CatalogConfigRow {
     pub last_loaded_at: Option<i64>,
 }
 
+/// A catalog: a source with an owner (migration 090). `org_id: None` is the
+/// personal catalog — exactly one such row exists (schema `CHECK`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CatalogRow {
+    pub id: i64,
+    pub name: String,
+    pub repo_path: String,
+    pub remote_url: Option<String>,
+    pub org_id: Option<i64>,
+    pub head_commit: Option<String>,
+    pub last_loaded_at: Option<i64>,
+}
+
+/// What `Store::remove_catalog` dropped along with the row (migration 093,
+/// Rulings R13): the catalog's layer assignments, admissions and grants all
+/// go by `ON DELETE CASCADE`. The checkout on disk is never touched.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CatalogRemoval {
+    pub id: i64,
+    pub name: String,
+    pub layer_rows: usize,
+    pub admissions: usize,
+    pub grants: usize,
+}
+
 /// Drift state of one catalog asset on one host for one harness
 /// (migration 030). `state` is one of in_sync | drifted | missing |
 /// unmanaged | unsupported.
@@ -1288,6 +1337,16 @@ pub struct AssetInventoryRow {
     pub scanned_at: i64,
     /// Whether the host's fleet manifest names this asset (migration 031).
     pub managed: bool,
+    /// Its config looks like it carries a credential (migration 087).
+    #[serde(default)]
+    pub secret_like: bool,
+    /// Fleet provisioned it: its own hooks, MCP entry or skills (087).
+    #[serde(default)]
+    pub fleet_owned: bool,
+    /// Which catalog this asset came from (migration 091). `None` for an
+    /// `unmanaged`/`orphan` row, which names nothing the catalog defines.
+    #[serde(default)]
+    pub catalog_id: Option<i64>,
 }
 
 /// A secret name known to the sync engine (migration 031). Never carries the
@@ -1647,13 +1706,13 @@ mod tests {
     }
 
     /// The inverse of the test above, and the privacy-critical one
-    /// (migration 087, spec §3.7): a `SessionRow` parsed from a frame with
+    /// (migration 095, spec §3.7): a `SessionRow` parsed from a frame with
     /// **no `visibility` key at all** — an older hub, or a replayed frame
     /// from before the column — reads [`VISIBILITY_UNCLAIMED`].
     ///
     /// This is what the named `#[serde(default = "visibility_unclaimed")]`
     /// buys. A bare `#[serde(default)]` on a `String` yields the empty
-    /// string, which is neither value 087's `CHECK` admits and so matches no
+    /// string, which is neither value 095's `CHECK` admits and so matches no
     /// arm any fence writes — the one default that fails OPEN. The assertion
     /// is therefore on the VALUE, not on parsing having succeeded: parsing
     /// succeeds either way, which is exactly why this test has to exist.
@@ -1678,7 +1737,7 @@ mod tests {
         );
         obj.remove("owner_person_id");
         let back: SessionRow = serde_json::from_value(json)
-            .expect("a pre-087 hub's session row must still deserialize");
+            .expect("a pre-095 hub's session row must still deserialize");
         assert_eq!(
             back.visibility, VISIBILITY_UNCLAIMED,
             "a missing visibility reads `unclaimed`, never the empty string"
@@ -1698,7 +1757,7 @@ mod tests {
     /// Neither field carries `skip_serializing_if`, and `visibility` must
     /// not: `BroadcastEventBus::emit` runs `strip_nulls` before a frame
     /// enters the replay ring, so an unowned row's `owner_person_id` is
-    /// ABSENT on the stream and indistinguishable from a pre-087 hub's.
+    /// ABSENT on the stream and indistinguishable from a pre-095 hub's.
     /// `visibility` is NOT NULL and is therefore the only key a fence can
     /// safely read (spec §3.7).
     #[test]
@@ -1961,6 +2020,22 @@ mod tests {
                     true,
                     "derived stamp, working session",
                 );
+            }
+            // a job's status ('task'), with a working session: final.
+            {
+                let s = Store::open_in_memory().unwrap();
+                let sid = seed(&s, "task");
+                let item = s.create_local_work_item(Some("X-6"), "t").unwrap();
+                s.link_session_work(sid, WorkTarget::Item(item.id), "manual")
+                    .unwrap();
+                s.conn_ref()
+                    .execute(
+                        "UPDATE work_items SET status_category = 'todo', status_set_by = 'task' WHERE id = ?1",
+                        rusqlite::params![item.id],
+                    )
+                    .unwrap();
+                mark_working(&s, sid, "c-x-6");
+                agree(&s, "task", item.id, true, "job status, working session");
             }
             // live-lift on a local item
             {

@@ -1,0 +1,22 @@
+{
+  "spec": "fleet.page/1",
+  "id": "embed.status_footer",
+  "title": "Status footer: usage",
+  "intro": "The fleet's usage in one footer segment; it opens the Hosts view.",
+  "layout": "embed",
+  "slot": "status_footer",
+  "sections": [
+    {
+      "title": "Usage",
+      "items": [
+        {
+          "type": "account_usage",
+          "source": {
+            "id": "accounts.usage"
+          },
+          "view": "footer"
+        }
+      ]
+    }
+  ]
+}

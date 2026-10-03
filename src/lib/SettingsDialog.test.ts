@@ -408,6 +408,9 @@ describe('SettingsDialog — generated pages (declarative pages P3)', () => {
     expect(await screen.findByTestId('settings-nav-settings.automation')).toBeInTheDocument();
     expect(screen.getByTestId('settings-nav-general').getAttribute('aria-current')).toBe('page');
     expect(screen.getByTestId('hub-section')).toBeInTheDocument();
+    // The app-vs-hub versions line is about a pairing; standalone there is
+    // one program and the footer already names its version.
+    expect(screen.queryByTestId('hub-versions')).toBeNull();
     for (const id of ['settings', 'settings.limits', 'settings.work', 'settings.decisions', 'usage']) {
       expect(screen.getByTestId(`settings-nav-${id}`)).toBeInTheDocument();
     }

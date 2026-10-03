@@ -90,7 +90,7 @@ pub struct ClientRef {
     /// `fleet-hub client bind-person`). It decides which sessions this
     /// connection may see at all, so it rides on the caller rather than
     /// being looked up per tool, and a re-binding bumps the auth epoch
-    /// (migration 086) so the change holds from the device's next request.
+    /// (migration 094) so the change holds from the device's next request.
     ///
     /// `None` is a device the migration's backfill did not reach and no
     /// pairing has bound — unmintable since T2 (`pair_client` defaults to

@@ -11,7 +11,7 @@
   import { hosts } from './hosts';
   import { accounts } from './accounts';
   import { accountUsage } from './account_usage_store';
-  import { hostChipUsage, lowHeadroomWarning, selectedUsageLine } from './usage_glance';
+  import EmbedSlot from './pages/EmbedSlot.svelte';
 
   let {
     active,
@@ -44,24 +44,6 @@
   const snapshotOf = (uuid: string | null) => (uuid ? ($accountUsage[uuid] ?? null) : null);
 
   const selected = $derived(showUsage ? (visible.find((h) => h.alias === active) ?? null) : null);
-  const selectedLine = $derived(
-    selected
-      ? selectedUsageLine(selected, accountOf(selected.account_uuid), snapshotOf(selected.account_uuid), now, locale, timeZone)
-      : null,
-  );
-  const warning = $derived(
-    selected
-      ? lowHeadroomWarning(
-          selected,
-          $hosts,
-          accountOf(selected.account_uuid),
-          snapshotOf(selected.account_uuid),
-          now,
-          locale,
-          timeZone,
-        )
-      : null,
-  );
 </script>
 
 <span class="label" id={labelId}>Host</span>
@@ -79,18 +61,29 @@
     >
       <span class="alias">{h.alias}</span>
       {#if showUsage}
-        <span class="usage" data-testid="chip-usage"
-          >{hostChipUsage(h, accountOf(h.account_uuid), snapshotOf(h.account_uuid), now, locale, timeZone)}</span
-        >
+        <!-- The chip's headroom is the embed page `embed.new_session_chip`. -->
+        <EmbedSlot
+          slot="new_session_chip"
+          ctx={{ now, locale, timeZone, host: h, account: accountOf(h.account_uuid), snapshot: snapshotOf(h.account_uuid) }}
+        />
       {/if}
     </button>
   {/each}
 </div>
-{#if selectedLine}
-  <p class="selected-line" data-testid="host-usage-line">{selectedLine}</p>
-{/if}
-{#if warning}
-  <p class="warning" role="status" data-testid="host-usage-warning">{warning}</p>
+{#if selected}
+  <!-- The selected host's line and warning: `embed.new_session_host`. -->
+  <EmbedSlot
+    slot="new_session_host"
+    ctx={{
+      now,
+      locale,
+      timeZone,
+      host: selected,
+      hosts: $hosts,
+      account: accountOf(selected.account_uuid),
+      snapshot: snapshotOf(selected.account_uuid),
+    }}
+  />
 {/if}
 
 <style>
@@ -113,22 +106,5 @@
     gap: 0.05rem;
     border-radius: 6px;
     text-align: left;
-  }
-  .usage {
-    font-family: system-ui, sans-serif;
-    font-size: 0.68rem;
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-  }
-  .selected-line {
-    margin: 0;
-    font-size: 0.72rem;
-    color: var(--fg-muted);
-    font-variant-numeric: tabular-nums;
-  }
-  .warning {
-    margin: 0;
-    font-size: 0.75rem;
-    color: var(--usage-crit);
   }
 </style>

@@ -14,6 +14,7 @@ mod catalog;
 mod clients;
 mod conversations;
 mod decisions;
+mod guides;
 mod hosts_accounts;
 mod layers;
 mod nl_census;
@@ -51,6 +52,7 @@ mod work_journal;
 mod work_local;
 mod work_retention;
 mod work_status;
+mod work_tasks;
 mod work_tidy;
 mod work_usage;
 mod work_view;
@@ -67,6 +69,7 @@ pub use decisions::{
     DECISION_FOLLOWUPS, DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_NO_BASELINE,
     DECISION_PERSON_FOLLOWUPS, DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
 };
+pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
 pub use layers::HostLayerRow;
 pub use nl_census::{
     CensusItem, CensusJournal, CensusPair, CensusPrompt, NL_CENSUS_JOURNAL_KINDS,
@@ -124,12 +127,14 @@ pub use work_detect::{
     DetectionState, WITHDRAWN_CARRIED, WITHDRAWN_DECAY, WITHDRAWN_REASONS, WITHDRAWN_WITHDRAW,
     WORK_SUGGESTION_WITHDRAWN,
 };
+pub use work_journal::StepView;
 pub use work_journal::{
     JournalRow, COMPACT_SUMMARY_CAP, COMPACT_SUMMARY_MAX_CHARS, JOURNAL_KINDS, PROGRESS_CAP,
 };
 pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_MAX_CHARS};
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
 pub use work_status::STATUS_CATEGORIES;
+pub use work_tasks::{job_status, NativeItem, Proposal, PROPOSALS_OPEN_CAP, TASK_KEY_PREFIX};
 pub use work_tidy::ReopenedWork;
 pub use work_usage::{DetectionCounts, JournalCounts};
 pub use work_view::{
@@ -391,6 +396,41 @@ fn restrict_before_open(path: &std::path::Path) {
     }
 }
 
+/// A fresh in-memory database holding a copy of one that every migration ran
+/// on once per test process (see [`Store::open_in_memory`]). The template is
+/// built by the real `migrate()`, so it is exactly what a migrated store
+/// holds; the copy is SQLite's online backup, a page copy that takes well
+/// under a millisecond.
+#[cfg(test)]
+fn migrated_template_copy() -> Result<Connection> {
+    use std::sync::{Mutex, OnceLock};
+    static TEMPLATE: OnceLock<Mutex<Connection>> = OnceLock::new();
+    let template = TEMPLATE.get_or_init(|| {
+        let store = Store {
+            conn: Connection::open_in_memory().expect("open the template database"),
+            bus: StoreBus::new(Arc::new(NoopEventBus)),
+            kills: Default::default(),
+            owner_intent: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
+            instance: next_instance(),
+            peer_generations: Default::default(),
+        };
+        store.migrate().expect("migrate the template database");
+        let Store { conn, .. } = store;
+        Mutex::new(conn)
+    });
+    let template = template
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut copy = Connection::open_in_memory()?;
+    rusqlite::backup::Backup::new(&template, &mut copy)?.run_to_completion(
+        i32::MAX,
+        std::time::Duration::ZERO,
+        None,
+    )?;
+    Ok(copy)
+}
+
 impl Store {
     pub fn open_with_bus(path: &std::path::Path, bus: Arc<dyn EventBus>) -> Result<Self> {
         restrict_before_open(path);
@@ -453,25 +493,23 @@ impl Store {
         })
     }
 
+    /// An in-memory store for a test. Its database is a copy of one that went
+    /// through every migration once per test process
+    /// ([`migrated_template_copy`]); `migrate()` then runs on the copy as
+    /// usual, where it only re-runs the idempotent bootstrap and repairs.
+    /// Replaying all migrations per store cost ~90 ms, about a thousand times
+    /// per run (RUST-BUILD-PERFORMANCE-AUDIT.md, Appendix D). A test about
+    /// the migrations themselves builds its database another way
+    /// (`store::testgen`, `migrations_through`).
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
-        let store = Self {
-            conn,
-            bus: StoreBus::new(Arc::new(NoopEventBus)),
-            kills: Default::default(),
-            owner_intent: Default::default(),
-            message_notify: Arc::new(tokio::sync::Notify::new()),
-            instance: next_instance(),
-            peer_generations: Default::default(),
-        };
-        store.migrate()?;
-        Ok(store)
+        Self::open_with_bus_in_memory(Arc::new(NoopEventBus))
     }
 
+    /// [`Store::open_in_memory`] with the caller's event bus.
     #[cfg(test)]
     pub fn open_with_bus_in_memory(bus: Arc<dyn EventBus>) -> Result<Self> {
-        let conn = Connection::open_in_memory()?;
+        let conn = migrated_template_copy()?;
         let store = Self {
             conn,
             bus: StoreBus::new(bus),

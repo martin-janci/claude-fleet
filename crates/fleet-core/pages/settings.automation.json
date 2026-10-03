@@ -95,6 +95,19 @@
       ]
     },
     {
+      "title": "Assets",
+      "items": [
+        {
+          "type": "field",
+          "key": "catalog.scan_check_secs"
+        },
+        {
+          "type": "field",
+          "key": "catalog.scan_max_age_secs"
+        }
+      ]
+    },
+    {
       "title": "Reconcile tick",
       "advanced": true,
       "collapsible": true,
@@ -120,6 +133,10 @@
         {
           "type": "field",
           "key": "provision.force_git_tree"
+        },
+        {
+          "type": "field",
+          "key": "provision.install_ag"
         }
       ]
     }

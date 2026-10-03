@@ -1,13 +1,18 @@
 # syntax=docker/dockerfile:1
-FROM rust:1-bookworm AS build
+FROM rust:1.99.0-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+# .cargo/config.toml carries LIBSQLITE3_FLAGS: the image builds SQLite the
+# same way every other build does.
+COPY .cargo ./.cargo
 COPY crates ./crates
 COPY src-tauri/Cargo.toml ./src-tauri/Cargo.toml
 # The workspace lists src-tauri; give cargo an empty lib so resolution
 # succeeds without building the desktop crate.
 RUN mkdir -p src-tauri/src && echo '' > src-tauri/src/lib.rs
 COPY skills ./skills
+# provision.rs embeds the ag launcher (include_str!).
+COPY tools/ag ./tools/ag
 COPY src/lib/names.json ./src/lib/names.json
 # The context has no .git, so build.rs takes the build identity from these
 # (hub-image.yml passes them; a local `docker build` gets unknown / local).

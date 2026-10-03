@@ -2,6 +2,7 @@
 //! catalog assets, persist per-asset drift states.
 
 use super::harness::{json_get, ConfigMerge, Harness, HostSnapshot, MergeMode};
+use super::harness_set::{gated_catalog, harness_gate, HarnessFacts};
 use super::model::{sha256_hex, Kind};
 use super::repo::Catalog;
 use super::sync::manifest::Manifest;
@@ -151,7 +152,8 @@ pub async fn scan_host_harness(
 }
 
 /// Scan every non-hidden reachable host (or just `only_host`) with every
-/// harness that supports scanning, persisting rows per (host, harness).
+/// harness that supports scanning, persisting per (host, harness) the rows
+/// `harness_set::harness_gate` lets through.
 /// Per-host failures never abort the others (mirrors `provision_hosts`).
 pub async fn scan_hosts(
     store: &Mutex<Store>,
@@ -164,17 +166,16 @@ pub async fn scan_hosts(
             .map_err(|_| crate::ipc_error::IpcError::lock())?;
         s.list_hosts()?
     };
-    let catalog = {
-        let g = super::CATALOG
-            .read()
-            .map_err(|_| crate::ipc_error::IpcError::new(codes::E_LOCK, "catalog lock poisoned"))?;
-        g.clone().ok_or_else(|| {
-            crate::ipc_error::IpcError::new(
-                super::E_CATALOG_NOT_CONFIGURED,
-                "catalog not loaded; call catalog_load",
-            )
-        })?
-    };
+    // Assets M2: every loaded catalog's assets, not just personal's — a
+    // host that never accepts an org catalog still has its own asset drift
+    // reported the same as before; `compute_states` stamps each row with
+    // whichever catalog it actually came from.
+    let catalog = super::registry::union_all()?.ok_or_else(|| {
+        crate::ipc_error::IpcError::new(
+            super::E_CATALOG_NOT_CONFIGURED,
+            "catalog not loaded; call catalog_load",
+        )
+    })?;
     let mut results = Vec::new();
     for h in hosts {
         if h.hidden || only_host.is_some_and(|o| o != h.alias) {
@@ -209,6 +210,8 @@ pub async fn scan_hosts(
                 continue;
             }
         };
+        // Multi-harness F3a: the host's own harness choice (`None` = auto).
+        let configured = h.harnesses.clone();
         for harness in super::harness::all() {
             if harness.scan_script().is_none() {
                 continue;
@@ -217,15 +220,24 @@ pub async fn scan_hosts(
             match scan_host_harness(ssh, &h.alias, harness.as_ref()).await {
                 Ok(snap) => {
                     let manifest = Manifest::from_snapshot(&snap, harness.manifest_path());
-                    let rows = compute_states(
-                        &catalog,
-                        harness.as_ref(),
-                        &h.alias,
-                        &snap,
-                        &manifest,
-                        &secrets,
-                        scanned_at,
+                    // `Off` persists no rows (clearing stale ones); `Retiring`
+                    // only fleet's own installs, as orphans.
+                    let gate = harness_gate(
+                        harness.id(),
+                        configured.as_deref(),
+                        HarnessFacts::of(&snap, &manifest),
                     );
+                    let rows = gated_catalog(gate, &catalog).map_or_else(Vec::new, |c| {
+                        compute_states(
+                            c,
+                            harness.as_ref(),
+                            &h.alias,
+                            &snap,
+                            &manifest,
+                            &secrets,
+                            scanned_at,
+                        )
+                    });
                     total += rows.len();
                     match store.lock() {
                         Ok(s) => {
@@ -352,6 +364,21 @@ pub fn compute_states(
                 .assets
                 .contains_key(&Manifest::key(asset.kind(), &asset.header.name)),
             scanned_at,
+            // Assets M2: which catalog this asset came from. `origin_of`
+            // falls back to `catalog` itself when there is only one loaded
+            // catalog (no `origin` entries), so a personal-only fleet still
+            // stamps the personal catalog's own id — never `None` for a
+            // catalog asset, restoring what the migration 091 backfill set
+            // and every rescan since had been silently erasing. `.filter(|&i|
+            // i > 0)`: id `0` is the registry's "stands for personal"
+            // convention for a hand-built catalog that was never actually
+            // installed under the store's real id (see `registry.rs`) — it
+            // names no real `catalogs` row, so stamping it would just be a
+            // different spelling of the FK hazard `replace_host_inventory`'s
+            // own `SELECT`-guarded insert defends against; `None` here is
+            // honest about "the real id is not known".
+            catalog_id: Some(catalog.origin_of(asset.kind(), &asset.header.name).id)
+                .filter(|&id| id > 0),
             ..Default::default()
         };
         let rendered = match harness.render(asset) {
@@ -444,7 +471,8 @@ pub fn compute_states(
     // `orphan` (fleet put it there, and the next sync removes it) says
     // strictly more than `unmanaged`.
     let mut orphans: Vec<AssetInventoryRow> = Vec::new();
-    for (key, _entry) in manifest.orphans(catalog) {
+    // None (R8): the inventory decides nothing; only the plan keeps held entries.
+    for (key, _entry) in manifest.orphans(catalog, None) {
         // A key that names no kind cannot be displayed as an asset row; the
         // sync plan skips it for the same reason.
         let Some((kind, name)) = Manifest::split_key(key) else {
@@ -460,6 +488,7 @@ pub fn compute_states(
             host_hash: None,
             scanned_at,
             managed: true,
+            ..Default::default()
         });
     }
     // Both the catalog name and the install name (when `install_as` is set,
@@ -481,8 +510,8 @@ pub fn compute_states(
         .iter()
         .map(|a| (a.kind(), a.header.name.clone()))
         .collect();
-    for (kind, name) in harness.installed(snap) {
-        let key = (kind, name.clone());
+    for a in harness.installed_detail(snap) {
+        let key = (a.kind, a.name.clone());
         if !install_names.contains(&key) && catalog_names.contains(&key) {
             // Suppressed, and not because the host holds what the catalog
             // renders: this identifier is some asset's *catalog* name while
@@ -491,8 +520,8 @@ pub fn compute_states(
             // (see the primary-key note above). Say so at least once.
             tracing::debug!(
                 host = host_alias,
-                kind = kind.as_str(),
-                identifier = %name,
+                kind = a.kind.as_str(),
+                identifier = %a.name,
                 "installed identifier collides with a catalog name; not reported as unmanaged"
             );
         }
@@ -500,18 +529,21 @@ pub fn compute_states(
             && !catalog_names.contains(&key)
             && !orphans
                 .iter()
-                .any(|o| o.kind == kind.as_str() && o.name == name)
+                .any(|o| o.kind == a.kind.as_str() && o.name == a.name)
         {
             rows.push(AssetInventoryRow {
                 host_alias: host_alias.to_string(),
                 harness: harness.id().to_string(),
-                kind: kind.as_str().to_string(),
-                name,
+                kind: a.kind.as_str().to_string(),
+                name: a.name,
                 state: AssetState::Unmanaged.as_str().into(),
                 catalog_hash: None,
-                host_hash: None,
+                host_hash: a.hash,
                 scanned_at,
                 managed: false,
+                secret_like: a.secret_like,
+                fleet_owned: a.fleet_owned,
+                catalog_id: None,
             });
         }
     }
@@ -676,12 +708,74 @@ mod tests {
             7,
         );
         assert_eq!(
+            rows.iter().find(|r| r.name == "h").unwrap().state,
+            "unsupported",
+            "codex renders no hooks"
+        );
+        assert_eq!(
             rows.iter().find(|r| r.name == "gone").unwrap().state,
-            "unsupported"
+            "missing",
+            "codex renders agents since F3b"
         );
         assert_eq!(
             rows.iter().find(|r| r.name == "s").unwrap().state,
             "missing"
+        );
+    }
+
+    /// A carry-forward from Task 1's review: `compute_states` used to write
+    /// `catalog_id: None` unconditionally on every row (via
+    /// `..Default::default()`), silently erasing migration 091's backfill on
+    /// the very first rescan. Every catalog-asset row — whatever its state —
+    /// must instead carry the id of the catalog it came from, while an
+    /// `unmanaged` row (nothing the catalog defines) stays `None`. With a
+    /// single catalog loaded, `Catalog::origin_of` has no `origin` entries to
+    /// consult and falls back to the catalog itself, so this also proves the
+    /// personal-only case stamps the personal catalog's own id rather than
+    /// `None`.
+    #[test]
+    fn compute_states_stamps_the_catalog_id_on_every_catalog_asset_row_and_none_on_unmanaged() {
+        let mut cat = Catalog {
+            id: 42,
+            name: "acme".into(),
+            ..Default::default()
+        };
+        let mut skill = Asset::from_yaml(None, "kind: skill\nname: s\ndescription: d\n").unwrap();
+        skill.body = "b\n".into();
+        cat.assets.push(skill.clone());
+        cat.assets
+            .push(Asset::from_yaml(None, "kind: agent\nname: gone\ndescription: d\n").unwrap());
+
+        let claude = Claude;
+        let skill_plan = claude.render(&skill).unwrap();
+        let skill_hash = crate::service::catalog::model::sha256_hex(&skill_plan.files[0].bytes);
+        let mut snap = HostSnapshot::default();
+        snap.files
+            .insert("~/.claude/skills/s/SKILL.md".into(), skill_hash);
+        // A stray directory the catalog does not define at all.
+        snap.files
+            .insert("~/.claude/skills/extra/SKILL.md".into(), "zzz".into());
+
+        let rows = compute_states(
+            &cat,
+            &claude,
+            "local",
+            &snap,
+            &Manifest::default(),
+            &empty(),
+            1,
+        );
+        let s = rows.iter().find(|r| r.name == "s").unwrap();
+        assert_eq!(s.state, "in_sync");
+        assert_eq!(s.catalog_id, Some(42), "an in_sync catalog-asset row");
+        let gone = rows.iter().find(|r| r.name == "gone").unwrap();
+        assert_eq!(gone.state, "missing");
+        assert_eq!(gone.catalog_id, Some(42), "a missing catalog-asset row");
+        let extra = rows.iter().find(|r| r.name == "extra").unwrap();
+        assert_eq!(extra.state, "unmanaged");
+        assert_eq!(
+            extra.catalog_id, None,
+            "an unmanaged row names nothing the catalog defines"
         );
     }
 
@@ -866,6 +960,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unmanaged_rows_carry_hash_and_flags() {
+        let cat = Catalog::default();
+        let mut snap = HostSnapshot::default();
+        snap.files
+            .insert("~/.claude/skills/extra/SKILL.md".into(), "aa".into());
+        snap.files.insert(
+            "~/.claude/skills/claude-fleet-control/SKILL.md".into(),
+            "bb".into(),
+        );
+        let rows = compute_states(
+            &cat,
+            &Claude,
+            "local",
+            &snap,
+            &Manifest::default(),
+            &empty(),
+            1,
+        );
+        let extra = rows.iter().find(|r| r.name == "extra").unwrap();
+        assert_eq!(extra.state, "unmanaged");
+        assert_eq!(
+            extra.host_hash.as_deref(),
+            Some(crate::service::catalog::model::sha256_hex(b"SKILL.md=aa").as_str())
+        );
+        assert!(!extra.fleet_owned);
+        assert!(
+            rows.iter()
+                .find(|r| r.name == "claude-fleet-control")
+                .unwrap()
+                .fleet_owned
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn run_host_script_local_executes_bash() {
@@ -930,15 +1058,14 @@ mod tests {
     }
 
     // `CATALOG_TEST_LOCK` only serialises tests against the process-global
-    // `CATALOG`; it guards no resource the async runtime itself needs, so
-    // holding it across `scan_hosts`'s awaits is safe despite the lint.
+    // catalog registry; it guards no resource the async runtime itself
+    // needs, so holding it across `scan_hosts`'s awaits is safe despite the
+    // lint.
     #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn scan_hosts_scans_local_and_persists_rows() {
-        let _g = crate::service::catalog::CATALOG_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _g = crate::service::catalog::lock_registry_for_test();
         let root = std::env::temp_dir().join(format!("fleet-catalog-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("skills/s")).unwrap();
@@ -949,11 +1076,31 @@ mod tests {
         )
         .unwrap();
         std::fs::write(root.join("skills/s/body.md"), "b\n").unwrap();
-        let cat = crate::service::catalog::repo::load_dir(&root).unwrap();
-        *crate::service::catalog::CATALOG.write().unwrap() = Some(cat);
 
         let store = std::sync::Mutex::new(crate::store::Store::open_in_memory().unwrap());
         store.lock().unwrap().insert_host("local", None).unwrap();
+        // `asset_inventory.catalog_id` (Assets M2) is a real foreign key into
+        // `catalogs(id)`: the registered catalog needs the STORE's real
+        // personal id, not the registry's "id 0 stands for personal"
+        // convention (which only `host_layers` resolution understands) —
+        // production's `load` does this via `set_catalog_config` + `load`;
+        // mirrored here by hand since this test bypasses both.
+        store
+            .lock()
+            .unwrap()
+            .set_catalog_config("/p", None)
+            .unwrap();
+        let personal_id = store
+            .lock()
+            .unwrap()
+            .personal_catalog()
+            .unwrap()
+            .unwrap()
+            .id;
+        let mut cat = crate::service::catalog::repo::load_dir(&root).unwrap();
+        cat.id = personal_id;
+        crate::service::catalog::registry::install(cat).unwrap();
+
         let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
         let results = scan_hosts(&store, &ssh, Some("local")).await.unwrap();
         assert_eq!(results.len(), 1);
@@ -1084,5 +1231,77 @@ mod tests {
             5,
         );
         assert_eq!(rows[0].state, "drifted");
+    }
+
+    /// Restores `HOME` when the test (or a panic) ends. Copied from
+    /// `sync::apply`'s test module, which cannot export it.
+    #[cfg(unix)]
+    struct HomeGuard(Option<String>);
+    #[cfg(unix)]
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    /// F3a: `scan_hosts` keeps no Codex rows for a host that turned Codex
+    /// off, even with Codex detected (`~/.codex/sessions`); back on auto,
+    /// the same host is inventoried for Codex again.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn scan_hosts_follows_the_hosts_harness_choice() {
+        let _g = crate::service::catalog::lock_registry_for_test();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        std::fs::create_dir_all(home.path().join(".codex/sessions")).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("skills/s")).unwrap();
+        std::fs::write(root.path().join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::write(
+            root.path().join("skills/s/asset.yaml"),
+            "kind: skill\nname: s\ndescription: d\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("skills/s/body.md"), "b\n").unwrap();
+
+        let store = std::sync::Mutex::new(crate::store::Store::open_in_memory().unwrap());
+        let personal_id = {
+            let s = store.lock().unwrap();
+            s.insert_host("local", None).unwrap();
+            s.set_host_harnesses("local", Some(&["claude".to_string()][..]))
+                .unwrap();
+            // See `scan_hosts_scans_local_and_persists_rows`: `catalog_id`
+            // is a real foreign key, so the registered catalog needs the
+            // store's real personal id.
+            s.set_catalog_config("/p", None).unwrap();
+            s.personal_catalog().unwrap().unwrap().id
+        };
+        let mut cat = crate::service::catalog::repo::load_dir(root.path()).unwrap();
+        cat.id = personal_id;
+        crate::service::catalog::registry::install(cat).unwrap();
+        let ssh = std::sync::Arc::new(crate::ssh::SshClient::new());
+        let results = scan_hosts(&store, &ssh, Some("local")).await.unwrap();
+        assert_eq!(results[0].status, "scanned", "{:?}", results[0].detail);
+        let rows = store.lock().unwrap().list_inventory().unwrap();
+        assert!(rows.iter().any(|r| r.harness == "claude" && r.name == "s"));
+        assert!(rows.iter().all(|r| r.harness != "codex"), "{rows:?}");
+
+        store
+            .lock()
+            .unwrap()
+            .set_host_harnesses("local", None)
+            .unwrap();
+        scan_hosts(&store, &ssh, Some("local")).await.unwrap();
+        let rows = store.lock().unwrap().list_inventory().unwrap();
+        assert!(
+            rows.iter()
+                .any(|r| r.harness == "codex" && r.name == "s" && r.state == "missing"),
+            "{rows:?}"
+        );
     }
 }

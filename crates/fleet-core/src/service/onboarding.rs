@@ -185,6 +185,8 @@ mod tests {
             provisioned_at: None,
             provision_stale: false,
             unclaimed_sessions: None,
+            provision_warning: None,
+            harnesses: None,
         }
     }
 

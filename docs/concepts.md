@@ -91,7 +91,7 @@ tasks are never suggested.
 Skills, subagents, hooks, MCP servers and plugin references can be kept in a
 git repo in a harness-neutral format and managed from the **Assets** tab.
 Fleet loads the repo on the controller, renders every asset the way each
-harness expects it (Claude Code fully; Codex CLI for skills and MCP servers),
+harness expects it (Claude Code fully; Codex CLI for skills, subagents and MCP servers),
 scans hosts read-only for what is actually installed, and shows each asset
 as in sync, drifted, missing or unsupported per host. Assets found on a host
 but not in the catalog are listed as unmanaged and can be imported.
@@ -110,6 +110,66 @@ unmanaged; when the original identifier is not itself a valid install name
 `install_as` and the report lists it as a warning instead. The asset editor
 exposes an "Installs as" field for the kinds that support it, and the detail
 view shows "installs as `<name>`" when one is set.
+
+**Harnesses per host.** Claude Code is synced on every host. Codex is synced
+only where the host has it: by default (*auto*) where the scan finds the
+`codex` CLI on the PATH, Codex's login (`~/.codex/auth.json`) or its session
+logs (`~/.codex/sessions`) — never `~/.codex` alone, which a Codex sync
+creates itself — or where fleet already manages Codex assets
+(`~/.codex/.fleet-assets.json` names some). Host
+detail's **Codex** control — `auto` / `on` / `off`, the `set_host_harnesses`
+tool (`null` = auto, or a list that always includes `claude`) — overrides
+it. A host with Codex turned off that still holds what fleet installed for
+Codex is *retiring*: its Codex plan only removes those assets, and once
+they are gone Codex is neither planned nor listed there. Every reachable
+host is still scanned for Codex, since the scan is what detects it. A
+catalog agent becomes a Codex subagent at `~/.codex/agents/<install
+name>.toml` — `name`, `description`, `developer_instructions` (the
+prompt), `model` only when `targets.codex.model` is set (no tier mapping),
+plus `targets.codex.extra`; `targets.codex.render_as: skill` renders it as
+a Codex skill instead, and the lint refuses such an agent whose install
+name a skill also uses. Codex subagents have no tool allowlist, so an
+agent's `tools` do not apply there (the Codex preview says so). A `${NAME}`
+secret inside a subagent's TOML is substituted as a TOML string value, so
+any characters in the secret are safe there.
+
+*Upgrading to per-host harnesses.* A host that fleet has already synced Codex
+assets to keeps Codex on under *auto* (its manifest names them) and gains
+Codex subagents on its next sync — every catalog agent now also lands in
+`~/.codex/agents/`. To retire Codex there instead, set Codex to `off` in
+Host detail: the next sync removes only what fleet installed. A Codex MCP
+server merge re-serializes `~/.codex/config.toml`, dropping its comments
+(a limitation that predates this change).
+
+*Codex skills live in `~/.agents/skills`.* Codex reads user skills from
+`~/.agents/skills/<install name>/` (a directory several agent CLIs share),
+not from `~/.codex/skills`, which it keeps for its own built-ins
+(`.system`). Fleet renders Codex skills — and an agent with
+`targets.codex.render_as: skill` — there. A host synced by an older fleet
+moves on its next sync: the plan writes each fleet-managed Codex skill to
+`~/.agents/skills/` and deletes the copy its manifest names under
+`~/.codex/skills/` (a `.fleet-bak-*` backup of it stays beside it), so
+Codex starts seeing them. Nothing else under `~/.codex/skills` is touched —
+not `.system`, not a skill you put there yourself. Codex cannot see such a
+skill, so fleet no longer lists it either; move it to `~/.agents/skills/`
+to use it. Where `~/.agents/skills` already holds a same-named skill fleet
+did not write, the plan adopts it when identical and otherwise shows an
+`overwrite`, as for any unmanaged copy. If `~/.agents`, `~/.agents/skills`,
+a skill directory in it, or `~/.codex/skills` is a symlink — some setups
+point `~/.agents/skills` at `~/.claude/skills` — every Codex action that
+would write, adopt or delete through it is `blocked`, with the link's
+target in the reason: Codex's copy would replace Claude's, and the two
+would undo each other on every sync. Replace the link with a real
+directory, or turn Codex off for that host (for `~/.codex/skills` only the
+first helps). Only links on the Codex side are detected so far: a link
+from Claude's side into `~/.agents/skills` (say `~/.claude/skills/<name>`
+pointing at `~/.agents/skills/<name>`) is not, and Claude and Codex would
+then both write one file — don't link Claude skills into
+`~/.agents/skills`; detecting this is planned. A plan also blocks any
+action whose file another harness's plan on the same host would write too.
+A skill fleet withholds from a host, or one that is blocked, while its
+manifest entry still points at `~/.codex/skills` stays there — where Codex
+no longer reads it — until the block is resolved.
 
 **Sync** is plan-first: `plan_sync` scans the selected hosts and computes
 which assets to create, update, overwrite, adopt, or remove, returning a plan

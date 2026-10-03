@@ -968,7 +968,7 @@ fn the_mode_vocabulary_is_the_stores() {
     );
     assert!(migration.contains(&check), "{check} not in 069");
     // The TS mirror lists the same words.
-    let ts = include_str!("../../../../../src/lib/fleet_settings.ts");
+    let ts = crate::repo_files::read("src/lib/fleet_settings.ts");
     let line = ts
         .lines()
         .find(|l| l.starts_with("export const DECIDE_MODES = ["))

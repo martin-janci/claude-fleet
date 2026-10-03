@@ -92,6 +92,11 @@
       "items": [
         {
           "type": "link",
+          "page": "usage.accounts",
+          "label": "Claude accounts"
+        },
+        {
+          "type": "link",
           "page": "usage.work",
           "label": "Work graph usage"
         },
