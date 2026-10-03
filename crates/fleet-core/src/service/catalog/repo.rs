@@ -764,8 +764,12 @@ pub fn reset_hard(root: &Path, rev: &str) -> Result<(), IpcError> {
 }
 
 /// `git revert` one commit (Assets M4 undo, SB5), with the synthetic
-/// identity `commit` falls back to. A conflict aborts the revert, leaving
-/// the tree as it was, and is the error. Answers the new HEAD.
+/// identity `commit` falls back to. A revert that fails (a conflict) is
+/// aborted (`git revert --abort`), which puts HEAD, index and tree back,
+/// and is the error; when the abort fails too and a revert is still in
+/// progress the error says so. Callers verify the tree themselves
+/// ([`revert_in_progress`], [`head`], [`is_clean`]) — this never forces
+/// anything. Answers the new HEAD.
 pub fn revert(root: &Path, sha: &str) -> Result<String, IpcError> {
     check_rev(sha)?;
     let mut args: Vec<&str> = Vec::new();
@@ -779,10 +783,84 @@ pub fn revert(root: &Path, sha: &str) -> Result<String, IpcError> {
     }
     args.extend(["revert", "--no-edit", sha]);
     if let Err(e) = git(root, &args) {
-        let _ = git(root, &["revert", "--abort"]);
+        if let Err(a) = git(root, &["revert", "--abort"]) {
+            if revert_in_progress(root) {
+                let why = a
+                    .details
+                    .as_ref()
+                    .and_then(|d| d.get("stderr"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let mut both = IpcError::new(
+                    &e.code,
+                    format!("{}; `git revert --abort` failed too: {why}", e.message),
+                );
+                both.details = e.details.clone();
+                return Err(both);
+            }
+        }
         return Err(e);
     }
     head(root)
+}
+
+/// Whether commit `ancestor` is in `of`'s history (both hex shas).
+pub fn is_ancestor(root: &Path, ancestor: &str, of: &str) -> Result<bool, IpcError> {
+    check_rev(ancestor)?;
+    check_rev(of)?;
+    let out = git_output(root, &["merge-base", "--is-ancestor", ancestor, of])?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(
+            IpcError::new(E_CATALOG_GIT, "git merge-base --is-ancestor failed").with_details(
+                serde_json::json!({ "stderr": String::from_utf8_lossy(&out.stderr).trim() }),
+            ),
+        ),
+    }
+}
+
+/// Whether a `git revert` is stopped half-way in `root` (`REVERT_HEAD`
+/// exists).
+pub fn revert_in_progress(root: &Path) -> bool {
+    git(root, &["rev-parse", "-q", "--verify", "REVERT_HEAD"]).is_ok()
+}
+
+/// The files that differ between commits `from` and `to` (relative,
+/// `/`-separated, no rename detection): what a commit on `from` that made
+/// `to` wrote or deleted.
+pub fn files_between(
+    root: &Path,
+    from: &str,
+    to: &str,
+) -> Result<std::collections::BTreeSet<String>, IpcError> {
+    check_rev(from)?;
+    check_rev(to)?;
+    let out = git_output(
+        root,
+        &[
+            "diff-tree",
+            "-r",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            from,
+            to,
+        ],
+    )?;
+    if !out.status.success() {
+        return Err(
+            IpcError::new(E_CATALOG_GIT, "git diff-tree failed").with_details(
+                serde_json::json!({ "stderr": String::from_utf8_lossy(&out.stderr).trim() }),
+            ),
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|f| !f.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 pub fn asset_path(root: &Path, kind: Kind, name: &str) -> PathBuf {
@@ -2029,6 +2107,43 @@ mod tests {
             revert(root, "--help").is_err(),
             "only a hex sha reaches git"
         );
+    }
+
+    /// Assets M4 undo's git helpers: the files a commit wrote, ancestry,
+    /// and a conflicting revert aborted with no revert left in progress.
+    #[test]
+    fn files_between_ancestry_and_an_aborted_revert() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let base = commit(root, "init").unwrap();
+        std::fs::create_dir_all(root.join("skills/w")).unwrap();
+        std::fs::write(root.join("skills/w/body.md"), "a\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let added = commit(root, "add w").unwrap();
+        assert_eq!(
+            files_between(root, &base, &added)
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["skills/w/body.md"]
+        );
+        assert!(is_ancestor(root, &base, &added).unwrap());
+        assert!(!is_ancestor(root, &added, &base).unwrap());
+        assert!(
+            is_ancestor(root, "--help", &added).is_err(),
+            "only hex shas"
+        );
+
+        std::fs::write(root.join("skills/w/body.md"), "b\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let edited = commit(root, "edit w").unwrap();
+        assert!(revert(root, &added).is_err(), "modify/delete conflicts");
+        assert!(!revert_in_progress(root));
+        assert_eq!(head(root).unwrap(), edited);
+        assert!(is_clean(root).unwrap());
     }
 
     /// The failure reset never deletes what git ignores (controller ruling

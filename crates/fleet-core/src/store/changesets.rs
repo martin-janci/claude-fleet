@@ -316,6 +316,71 @@ impl Store {
         Ok(true)
     }
 
+    /// An undo recorded in ONE transaction (Assets M4, Rulings R20): each
+    /// of `catalogs`' `host_layers` put back from `snapshot` (replacing that
+    /// catalog's rows, hosts deleted since skipped — see
+    /// [`Store::restore_host_layers`]) and the card `undone` with its error
+    /// cleared — only while it is `applied`. `false`, and nothing written,
+    /// when it is not. `applied_at` keeps the apply's time (milliseconds,
+    /// PF13); an undo stamps no time of its own.
+    pub fn record_changeset_undone(
+        &self,
+        id: i64,
+        catalogs: &[i64],
+        snapshot: &[super::HostLayerRow],
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "UPDATE changesets SET state = 'undone', error = NULL WHERE id = ?1 AND state = 'applied'",
+            [id],
+        )?;
+        if n == 0 {
+            return Ok(false);
+        }
+        for c in catalogs {
+            super::layers::restore_rows(&tx, *c, snapshot)?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// A person's no (Assets M4, Rulings R9/R10) in ONE transaction, only
+    /// while the card is open (`proposed` or `failed`): `verdicts`
+    /// recorded, the items at `positions` `rejected`, and the card
+    /// `dismissed` when `close`. `false`, and nothing written, when the card
+    /// is not open.
+    pub fn reject_changeset_items(
+        &self,
+        id: i64,
+        positions: &[i64],
+        verdicts: &[TriageVerdictRow],
+        close: bool,
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let open: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM changesets WHERE id = ?1 AND state IN ('proposed', 'failed')",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if open.is_none() {
+            return Ok(false);
+        }
+        for v in verdicts {
+            upsert_verdict(&tx, v)?;
+        }
+        set_item_states(&tx, id, positions, "rejected")?;
+        if close {
+            tx.execute(
+                "UPDATE changesets SET state = 'dismissed' WHERE id = ?1",
+                [id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Withdraw an OPEN card (R2): `dismissed` with `error`, only while it
     /// is `proposed` or `failed` — a card that was applied, undone or
     /// dismissed meanwhile stays as it is. `true` when it was withdrawn.
@@ -529,6 +594,88 @@ mod tests {
         );
         s.set_changeset_state(card.id, "undone", None).unwrap();
         assert_eq!(s.get_changeset(card.id).unwrap().unwrap().state, "undone");
+    }
+
+    /// Assets M4 undo / reject: each writes only while the card is in the
+    /// state it expects — an undo only an applied card (restoring its
+    /// catalogs' host_layers with it), a rejection only an open one.
+    #[test]
+    fn an_undo_and_a_rejection_write_only_in_the_state_they_expect() {
+        let (s, p) = store();
+        s.upsert_host("oci").unwrap();
+        let card = s
+            .insert_changeset(
+                "new",
+                "New",
+                &[item("core", "import", Some(p), Some(r#"{"hash":"h"}"#))],
+            )
+            .unwrap();
+        s.set_host_layers_for("oci", p, None, &["core"]).unwrap();
+        assert!(!s.record_changeset_undone(card.id, &[p], &[]).unwrap());
+        assert_eq!(
+            s.get_host_layers_for("oci", p).unwrap().len(),
+            1,
+            "nothing written"
+        );
+        s.mark_changeset_applied(card.id, 5, "{}", "[]", Some("note"))
+            .unwrap();
+        let verdict = TriageVerdictRow {
+            catalog_id: Some(p),
+            kind: "skill".into(),
+            name: "w".into(),
+            content_hash: "h".into(),
+            verdict: "rejected".into(),
+            decider: "person".into(),
+            decided_at: 1,
+        };
+        assert!(!s
+            .reject_changeset_items(card.id, &[0], std::slice::from_ref(&verdict), true)
+            .unwrap());
+        assert!(s.triage_verdicts().unwrap().is_empty(), "nothing written");
+        assert!(s.record_changeset_undone(card.id, &[p], &[]).unwrap());
+        let undone = s.get_changeset(card.id).unwrap().unwrap();
+        assert_eq!(
+            (undone.state.as_str(), undone.error, undone.applied_at),
+            ("undone", None, Some(5))
+        );
+        assert!(
+            s.get_host_layers_for("oci", p).unwrap().is_empty(),
+            "back to the empty snapshot"
+        );
+
+        let open = s
+            .insert_changeset(
+                "new",
+                "New",
+                &[
+                    item("core", "import", Some(p), None),
+                    item("core", "set_scope", Some(p), None),
+                ],
+            )
+            .unwrap();
+        assert!(s
+            .reject_changeset_items(open.id, &[0], &[verdict], false)
+            .unwrap());
+        let row = s.get_changeset(open.id).unwrap().unwrap();
+        let states: Vec<String> = s
+            .changeset_items(open.id)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.state)
+            .collect();
+        assert_eq!(
+            (row.state.as_str(), states),
+            (
+                "proposed",
+                vec!["rejected".to_string(), "pending".to_string()]
+            )
+        );
+        assert_eq!(s.triage_verdicts().unwrap().len(), 1);
+        assert!(s.reject_changeset_items(open.id, &[1], &[], true).unwrap());
+        assert_eq!(
+            s.get_changeset(open.id).unwrap().unwrap().state,
+            "dismissed"
+        );
     }
 
     /// PF14: the replace and the re-reject are one transaction — a failure

@@ -124,36 +124,50 @@ impl Store {
     /// (Assets M4: undo and a failed apply, Rulings R12/R20). Rows of other
     /// catalogs in `rows` are ignored; a row whose host has been deleted
     /// since is skipped. Answers how many rows were written.
+    ///
+    /// It REPLACES the catalog's rows: every host's assignments in that
+    /// catalog become the snapshot's, so a layer change made in that catalog
+    /// after the snapshot (by hand, or for a host the snapshot does not name)
+    /// is undone too.
     pub fn restore_host_layers(
         &self,
         catalog_id: i64,
         rows: &[HostLayerRow],
     ) -> Result<usize, rusqlite::Error> {
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM host_layers WHERE catalog_id = ?1",
-            [catalog_id],
-        )?;
-        let mut n = 0;
-        {
-            let mut insert = tx.prepare(
-                "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis, position, active) \
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6 WHERE EXISTS (SELECT 1 FROM hosts WHERE alias = ?1)",
-            )?;
-            for r in rows.iter().filter(|r| r.catalog_id == catalog_id) {
-                n += insert.execute(rusqlite::params![
-                    r.host_alias,
-                    catalog_id,
-                    r.layer_name,
-                    r.axis,
-                    r.position,
-                    r.active as i64
-                ])?;
-            }
-        }
+        let n = restore_rows(&tx, catalog_id, rows)?;
         tx.commit()?;
         Ok(n)
     }
+}
+
+/// [`Store::restore_host_layers`] on `conn`, inside the caller's
+/// transaction (an undo records it with the card's state, Assets M4).
+pub(super) fn restore_rows(
+    conn: &rusqlite::Connection,
+    catalog_id: i64,
+    rows: &[HostLayerRow],
+) -> Result<usize, rusqlite::Error> {
+    conn.execute(
+        "DELETE FROM host_layers WHERE catalog_id = ?1",
+        [catalog_id],
+    )?;
+    let mut n = 0;
+    let mut insert = conn.prepare(
+        "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis, position, active) \
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6 WHERE EXISTS (SELECT 1 FROM hosts WHERE alias = ?1)",
+    )?;
+    for r in rows.iter().filter(|r| r.catalog_id == catalog_id) {
+        n += insert.execute(rusqlite::params![
+            r.host_alias,
+            catalog_id,
+            r.layer_name,
+            r.axis,
+            r.position,
+            r.active as i64
+        ])?;
+    }
+    Ok(n)
 }
 
 #[cfg(test)]

@@ -1156,7 +1156,7 @@ fn merge_sync_items(
 /// PF10: every sync item carries its layer's gap hash — the hash the rules
 /// hold a Rollout verdict by (`("layer", "<catalog>/<layer>", gap_hash)`),
 /// so dismissing a follow-up holds like dismissing a rule-made card.
-fn stamp_gap_hashes(items: &mut [NewChangesetItem]) {
+pub(super) fn stamp_gap_hashes(items: &mut [NewChangesetItem]) {
     let mut by_layer: BTreeMap<(Option<i64>, String), Vec<LayerGap>> = BTreeMap::new();
     for i in items.iter() {
         by_layer
@@ -1181,7 +1181,7 @@ fn stamp_gap_hashes(items: &mut [NewChangesetItem]) {
 }
 
 /// "Roll out <layers> to <hosts>", the rules' wording for one layer.
-fn rollout_summary(items: &[NewChangesetItem]) -> String {
+pub(super) fn rollout_summary(items: &[NewChangesetItem]) -> String {
     let groups: BTreeSet<&str> = items.iter().map(|i| i.grp.as_str()).collect();
     let hosts: BTreeSet<&str> = items.iter().map(|i| i.name.as_str()).collect();
     format!(

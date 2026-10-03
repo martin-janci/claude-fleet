@@ -8,6 +8,7 @@ pub mod reconcile;
 pub mod rules;
 #[cfg(test)]
 pub(crate) mod testkit;
+pub mod undo;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::settings;
