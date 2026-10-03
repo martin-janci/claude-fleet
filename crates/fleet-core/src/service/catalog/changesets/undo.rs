@@ -125,7 +125,7 @@ pub async fn undo(id: i64, store: &Mutex<Store>) -> Result<ChangesetView, IpcErr
                     ),
                 ));
             }
-            if let Some(path) = in_the_way(root, sha)? {
+            if let Some(path) = in_the_way(root, sha, &at)? {
                 return Err(IpcError::new(
                     codes::E_INVALID_STATE,
                     format!(
@@ -251,14 +251,22 @@ struct Reverted<'a> {
     dirs: Vec<String>,
 }
 
-/// Fix round 1 (Critical): a path reverting `sha` would write that is
-/// already on disk — `git revert` silently replaces an IGNORED file where it
-/// re-creates one the card's commit deleted, and `is_clean` never reports
-/// ignored files. Every file the commit deleted must be absent, and each of
-/// its parents absent or a real directory; else the first one in the way.
-fn in_the_way(root: &Path, sha: &str) -> Result<Option<String>, IpcError> {
+/// Fix rounds 1–2 (Critical): a path reverting `sha` may write that is
+/// already on disk outside git's view. `git revert` silently replaces an
+/// IGNORED file where it re-creates one — a file the card's commit deleted
+/// (round 1), or one it edited that a later commit deleted, where the
+/// modify/delete conflict writes the old version over it and the abort then
+/// deletes it (round 2) — and `is_clean` never reports ignored files. So
+/// every path the commit touched that is NOT tracked at `head` (a tracked
+/// one is covered by the clean check) must be absent, and each of its
+/// parents absent or a real directory; else the first one in the way.
+/// Refusing a revert that would not have conflicted is fine.
+fn in_the_way(root: &Path, sha: &str, head: &str) -> Result<Option<String>, IpcError> {
     let parent = repo::parent_of(root, sha)?;
-    for f in repo::files_deleted_between(root, &parent, sha)? {
+    let touched = repo::files_between(root, &parent, sha)?;
+    let paths: Vec<&str> = touched.iter().map(String::as_str).collect();
+    let tracked = repo::tracked_files(root, head, &paths)?;
+    for f in touched.into_iter().filter(|f| !tracked.contains(f)) {
         for (i, _) in f.match_indices('/') {
             match std::fs::symlink_metadata(root.join(&f[..i])) {
                 Ok(m) if m.is_dir() => {}
@@ -1320,6 +1328,74 @@ mod tests {
             "the person's own\n"
         );
         assert_eq!(head(root), before);
+        assert_eq!(super::super::get(id, &f.store).unwrap().state, "applied");
+    }
+
+    /// Fix round 2: the card's commit EDITED a tracked `.bak` file; a
+    /// person's later commit deleted it and re-created it, now ignored. The
+    /// revert would meet a modify/delete conflict, write the card's parent
+    /// version over the person's file, and its abort would delete it — so
+    /// undo refuses first, and the file stays as the person left it.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn an_ignored_file_where_a_conflicting_revert_would_write_refuses_the_undo() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        let root = &f.personal_root;
+        std::fs::create_dir_all(root.join("skills/w")).unwrap();
+        for (rel, body) in [
+            (".gitignore", "*.bak\n"),
+            (
+                "skills/w/asset.yaml",
+                "kind: skill\nname: w\ndescription: The catalog's own long description.\n",
+            ),
+            ("skills/w/body.md", "Old steps.\n"),
+            ("skills/w/notes.bak", "v1\n"),
+        ] {
+            std::fs::write(root.join(rel), body).unwrap();
+        }
+        git(root, &["add", "-f", "."]);
+        git(root, &["commit", "-q", "-m", "seed"]);
+        std::fs::write(root.join("skills/w/notes.bak"), "v2\n").unwrap();
+        git(root, &["commit", "-qam", "fleet: Edit w"]);
+        let sha = head(root);
+        let id = {
+            let s = f.store.lock().unwrap();
+            let card = s
+                .insert_changeset("new", "Edit w", &[import("core", p, "w")])
+                .unwrap();
+            s.set_changeset_item_states(card.id, &[0], "applied")
+                .unwrap();
+            s.mark_changeset_applied(card.id, 1_000, &format!(r#"{{"{p}":"{sha}"}}"#), "[]", None)
+                .unwrap();
+            card.id
+        };
+        git(root, &["rm", "-q", "skills/w/notes.bak"]);
+        git(root, &["commit", "-q", "-m", "drop notes"]);
+        std::fs::write(root.join("skills/w/notes.bak"), "the person's own\n").unwrap();
+        assert!(clean(root), "an ignored file is not a change");
+        let before = head(root);
+
+        let err = undo(id, &f.store).await.unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID_STATE);
+        assert!(
+            err.message.contains("skills/w/notes.bak exists on disk"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("nothing was changed"),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("skills/w/notes.bak")).unwrap(),
+            "the person's own\n"
+        );
+        assert_eq!(head(root), before);
+        assert!(clean(root));
         assert_eq!(super::super::get(id, &f.store).unwrap().state, "applied");
     }
 
