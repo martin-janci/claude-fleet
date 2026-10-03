@@ -86,6 +86,16 @@ in `App.test.ts` and `clipboard_native.test.ts` — that is a dependency gap, no
 code error. (`localStorage` is polyfilled in `vitest.setup.ts`; there are no
 known pre-existing frontend test failures.)
 
+Known Rust flakes — timing-sensitive, so they fail on a loaded box; re-run
+alone before blaming your change: `rewind::tests::the_removal_script_leaves_a_tree_a_live_pane_is_in`,
+`work::scale_tests::*`, the `CHAIN_BUDGET` migration tests in
+`store/schema/tests_upgrade.rs`, and `service::add_project`. Not a flake:
+`cargo test -p fleet-core --lib -- --test-threads=1` takes 23–25 minutes
+(4.5k tests; measured on mercury, 2026-10-02), so a `timeout 600` wrapper
+kills it mid-run and the last `test … ...` line names whichever test was in
+flight — a slow run, not a hang. Run it in parallel (the default), or give a
+sequential run a 30-minute budget.
+
 ## Releasing
 
 Releases are cut manually with `scripts/release.sh <new-version>` — it bumps
