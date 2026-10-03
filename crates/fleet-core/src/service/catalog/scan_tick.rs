@@ -1,6 +1,7 @@
 //! Assets S1a: rescan hosts without anyone pressing Scan. Hourly by
 //! default, it rescans every reachable host whose inventory is older than a
-//! day, and all of them after the catalog HEAD or a sync changed.
+//! day, and all of them after the catalog HEAD or a sync changed. After each
+//! pass it runs the changeset reconcile pass (Assets M4).
 
 use crate::ssh::SshClient;
 use crate::store::Store;
@@ -193,6 +194,11 @@ pub fn spawn_catalog_scan_tick(
                     }
                 }
             }
+            // Assets M4 (R19): the reconcile pass — cards, automatic hides —
+            // after every pass that got this far (a personal catalog is
+            // loaded). It never waits: an apply in flight skips it, and it
+            // never touches `owed` or `seen`.
+            super::changesets::reconcile::after_scan_pass(&store);
             seen = Some(now_key);
         }
     }))
