@@ -124,7 +124,12 @@ describe('health in remote mode', () => {
     }
   });
 
-  it('still shows version, db and schema when the hub answers', async () => {
+  // The footer used to print the hub's answer as a bare `v9.9.9`, which in
+  // remote mode is the version of a machine at the other end of the wire
+  // wearing this app's clothes. Both are named now (`app_version.ts`), and
+  // the hub's version keeps the label the rest of the line belongs to: the
+  // database and the schema beside it are the hub's too.
+  it('names the hub’s version as the hub’s, and this app’s beside it', async () => {
     const { restore } = await routeInvoke((cmd) => {
       if (cmd === 'hub_status') return remote;
       if (cmd === 'health_check') {
@@ -134,7 +139,38 @@ describe('health in remote mode', () => {
     });
     try {
       render(App);
-      await waitFor(() => expect(screen.getByText(/v9\.9\.9/)).toBeInTheDocument());
+      // `0.0.0-test` is the `getVersion()` stand-in from `vitest.setup.ts`.
+      await waitFor(() =>
+        expect(screen.getByTestId('footer-version').textContent).toBe(
+          'app 0.0.0-test · hub 9.9.9 · db: ok · schema 41',
+        ),
+      );
+      expect(screen.getByTestId('footer-version').title).toContain('hub 9.9.9 is https://fleet.example.com');
+    } finally {
+      restore();
+    }
+  });
+});
+
+// The other half of the version line: standalone there is one program, so
+// naming a hub would be inventing one.
+describe('the footer’s version line', () => {
+  it('standalone names this app alone, with no hub', async () => {
+    const { restore } = await routeInvoke((cmd) => {
+      if (cmd === 'hub_status') return STANDALONE;
+      if (cmd === 'health_check') return { version: '0.4.5', db_ready: true, schema_version: 90 };
+      return undefined;
+    });
+    try {
+      render(App);
+      // `0.0.0-test` is `getVersion()`'s stand-in (`vitest.setup.ts`); the
+      // `0.4.5` the health mock answers is the SAME version standalone, and
+      // the fallback that uses it is covered in `app_version.test.ts`.
+      await waitFor(() =>
+        expect(screen.getByTestId('footer-version').textContent).toBe('app 0.0.0-test · db: ok · schema 90'),
+      );
+      expect(screen.getByTestId('footer-version').textContent).not.toContain('hub');
+      expect(screen.getByTestId('footer-version').title).toContain('This app owns the fleet');
     } finally {
       restore();
     }

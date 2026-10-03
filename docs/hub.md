@@ -2495,8 +2495,13 @@ standalone exactly as before.
   a laptop that slept and woke on another network looks like.
 - **The fleet is the hub's.** No reconcile tick, no account-usage poll and no
   embedded control API in the desktop; two brains for one fleet is the failure
-  this mode exists to prevent. The footer's version, database and schema are
-  the hub's too — the badge beside them says whose.
+  this mode exists to prevent. The footer's database and schema are the hub's
+  too, and the version line names both sides — `app 0.4.5 · hub 0.4.6 · db:
+  ok · schema 90`, where everything after `app …` is the hub's. Settings →
+  Hub repeats the two in words. They are allowed to differ: the hub and its
+  clients are released separately, and what decides whether they can talk is
+  the wire contract (an unacceptable one gets the banner above), not matching
+  version numbers.
 - **Projects are added through the hub.** "＋ Add project…" clones or
   creates the repository on the host you pick, with that host's `git` and
   `gh`; the new row arrives like any other change. Cancel stops the desktop
