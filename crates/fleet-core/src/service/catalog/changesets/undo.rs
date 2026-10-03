@@ -17,8 +17,13 @@
 //!   `ignored` verdicts; only its catalog commits and host_layers go back.
 //! - A layer stays "rolled out" (plan P27). If the card's follow-up Rollout
 //!   was already applied, `rolled_out_layers` still names the layer after
-//!   the undo, so SB6 keeps treating it as rolled out; the copies the
-//!   rollout put on hosts stay there (R14: never removed).
+//!   the undo, so SB6 keeps treating it as rolled out. The undo itself
+//!   never touches a host, but the copies that Rollout installed or adopted
+//!   keep their manifest entries while the catalog no longer has the
+//!   asset, so the next ordinary sync a person runs would REMOVE them (with
+//!   a backup) — including copies the person had before fleet adopted them
+//!   (final review I4). The undo's answer warns, naming each such asset and
+//!   its hosts ([`orphans`]).
 //!
 //! Data safety (PF7, the apply's lessons): under [`APPLY_LOCK`] every
 //! touched checkout must be clean — every untracked file counts, whatever
@@ -50,6 +55,7 @@ use super::{
     Decider, ItemAction, ItemParams, APPLY_LOCK,
 };
 use crate::ipc_error::{codes, lock, IpcError};
+use crate::service::catalog::import::slugify;
 use crate::service::catalog::repo;
 use crate::service::settings;
 use crate::store::{
@@ -474,6 +480,18 @@ fn after_undo(
         .collect();
     let written = lock(store).and_then(|s| {
         let reverted: BTreeSet<i64> = done.iter().map(|r| r.row.id).collect();
+        match orphans(items, &reverted, &s) {
+            Ok(o) if !o.is_empty() => warnings.push(format!(
+                "fleet manages these copies and the catalog no longer has them, so the next \
+                 sync would remove them (with a backup): {}",
+                o.join("; ")
+            )),
+            Ok(_) => {}
+            Err(e) => warnings.push(format!(
+                "could not check for copies the next sync would remove: {}",
+                e.message
+            )),
+        }
         if let Err(e) = trim_follow_up(card.id, items, &reverted, &s) {
             warnings.push(format!("withdraw its follow-up rollout: {}", e.message));
         }
@@ -495,6 +513,50 @@ fn after_undo(
             e.message
         );
     }
+}
+
+/// Final review I4: the assets this undo took out of a catalog (its applied
+/// imports, in the catalogs it reverted) that a host holds as fleet's own —
+/// a manifest entry, typically from the card's follow-up Rollout adopting
+/// the copy the person already had. With the asset gone from the catalog,
+/// the next ordinary sync plans a Remove for each (with a backup); undo
+/// never touches hosts, so it says so instead, as `kind/name on h1, h2`.
+fn orphans(
+    items: &[ChangesetItemRow],
+    reverted: &BTreeSet<i64>,
+    s: &Store,
+) -> Result<Vec<String>, IpcError> {
+    let imported: BTreeSet<(i64, String, String)> = items
+        .iter()
+        .filter(|i| i.state == "applied" && i.action == ItemAction::Import.as_str())
+        .filter_map(|i| {
+            let cid = i.catalog_id.filter(|c| reverted.contains(c))?;
+            Some((cid, i.kind.clone(), slugify(&i.name)))
+        })
+        .collect();
+    if imported.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut held: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for r in s.list_inventory()?.into_iter().filter(|r| r.managed) {
+        let named = imported.iter().any(|(cid, kind, slug)| {
+            *kind == r.kind && *slug == slugify(&r.name) && r.catalog_id.is_none_or(|c| c == *cid)
+        });
+        if named {
+            held.entry(format!("{}/{}", r.kind, slugify(&r.name)))
+                .or_default()
+                .insert(r.host_alias);
+        }
+    }
+    Ok(held
+        .into_iter()
+        .map(|(key, hosts)| {
+            format!(
+                "{key} on {}",
+                hosts.into_iter().collect::<Vec<_>>().join(", ")
+            )
+        })
+        .collect())
 }
 
 /// PF11: take the assets this undo removed — the members its applied
@@ -1165,6 +1227,60 @@ mod tests {
         assert_eq!(
             undo(id, &f.store).await.unwrap_err().code,
             codes::E_INVALID_STATE
+        );
+    }
+
+    /// Final review I4: the card's follow-up Rollout adopted the host's
+    /// copy (a manifest entry); after the undo the catalog no longer has the
+    /// asset, so the next ordinary sync would remove that copy. The undo
+    /// still goes through, and its answer warns, naming the asset and host.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn undoing_a_card_whose_rollout_adopted_copies_names_the_orphans() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let (home, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        host_skill(home.path(), "w", DESC);
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let id = applied_card(&f, &ssh, "w").await;
+        let rollout = f
+            .store
+            .lock()
+            .unwrap()
+            .list_changesets()
+            .unwrap()
+            .into_iter()
+            .find(|c| c.kind == "rollout")
+            .expect("a follow-up rollout")
+            .id;
+        let args = super::super::apply::ApplyArgs {
+            id: rollout,
+            positions: None,
+        };
+        let v = super::super::apply::apply(args, &f.store, &ssh)
+            .await
+            .unwrap();
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        assert!(
+            f.store
+                .lock()
+                .unwrap()
+                .list_inventory()
+                .unwrap()
+                .iter()
+                .any(|r| r.host_alias == "oci" && r.name == "w" && r.managed),
+            "the rollout adopted oci's copy"
+        );
+
+        let v = undo(id, &f.store).await.unwrap();
+        assert_eq!(v.state, "undone");
+        let note = v.error.unwrap_or_default();
+        assert!(note.contains("skill/w") && note.contains("oci"), "{note}");
+        assert!(note.contains("next sync"), "{note}");
+        assert!(
+            home.path().join(".claude/skills/w/SKILL.md").is_file(),
+            "undo never touches hosts"
         );
     }
 

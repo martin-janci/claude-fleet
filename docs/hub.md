@@ -2279,7 +2279,12 @@ catalog alone and the card says "manual cleanup needed". `undo` reverts the
 latest applied card in each catalog and puts back that catalog's host layer
 assignments as they were before the apply, without touching hosts. Undo
 does not un-hide what the card hid, and a layer the card's Rollout already
-synced stays rolled out (its copies stay on the hosts). Undo replaces the
+synced stays rolled out. Undo itself leaves every host alone, but the copies
+that Rollout installed or adopted keep fleet's manifest entries while the
+catalog no longer has those assets, so the next ordinary sync would remove
+them (with a backup) — even copies a host had before fleet adopted them.
+The undo's answer warns, naming each such asset and its hosts; to keep a
+copy, put the asset back in the catalog before syncing. Undo replaces the
 catalog's whole set of host layer assignments, so a layer change made there
 after the apply is lost too. A card never overwrites or removes on a host,
 except a Drift card's restore, which a person picks for one asset on one
