@@ -28,7 +28,7 @@ use super::{
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::catalog::import::slugify;
 use crate::service::catalog::layer::{split_key, Axis, Layer};
-use crate::service::catalog::model::{Kind, Scope};
+use crate::service::catalog::model::{Header, Kind, Scope, TargetOverride};
 use crate::service::catalog::sync::plan::{Action, ActionOp, HostPlan, SyncPlan};
 use crate::service::catalog::sync::{self, ApplyArgs as SyncApplyArgs, PlanArgs};
 use crate::service::catalog::validate::{check_layer_name, check_name};
@@ -587,9 +587,10 @@ async fn run_steps(
     // R13 / R15: each group is imported into a private staging directory
     // first, then copied into the checkout file by file, each file recorded
     // before it is written. take_host replaces the catalog copy's TRACKED
-    // files (never an untracked or ignored one beside them) and keeps its
-    // scope — and refuses when someone else changed that asset meanwhile.
-    let mut kept_scope: Vec<(&CatalogRow, Kind, Scope, &ChangesetItemRow)> = Vec::new();
+    // files (never an untracked or ignored one beside them) and keeps the
+    // catalog header's metadata ([`keep_header`]) — and refuses when
+    // someone else changed that asset meanwhile.
+    let mut kept: Vec<(&CatalogRow, Kind, Header, &ChangesetItemRow)> = Vec::new();
     for ((_, host), group) in &imports {
         let row = row_of(group[0])?;
         let root = Path::new(&row.repo_path);
@@ -728,7 +729,7 @@ async fn run_steps(
                     ));
                 }
                 let old = repo::read_asset(root, kind, &item.name).map_err(|e| fail(item, e))?;
-                kept_scope.push((row, kind, old.header.scope, item));
+                kept.push((row, kind, old.header, item));
                 let tracked = repo::tracked_files(root, started, &[rel_asset.as_str()])
                     .map_err(|e| fail(item, e))?;
                 for f in tracked.difference(&new_files) {
@@ -749,8 +750,8 @@ async fn run_steps(
             }
         }
     }
-    for (row, kind, scope, item) in &kept_scope {
-        set_scope(progress, row, *kind, &item.name, *scope).map_err(|e| fail(item, e))?;
+    for (row, kind, old, item) in &kept {
+        keep_header(progress, row, *kind, &item.name, old).map_err(|e| fail(item, e))?;
     }
 
     // 2b. Layer files: the members this card adds.
@@ -968,6 +969,54 @@ fn look_shares<'a>(
                 })
         })
         .collect())
+}
+
+/// Final review I5: after a take_host copied the host's files over the
+/// catalog copy, put back the catalog header's metadata. The host copy
+/// supplies the content — body, resources, the kind's fields, the
+/// description (part of the rendered file the drift was measured on) and
+/// Claude's own target fields (`targets.claude.model` / `extra`, which come
+/// from its frontmatter). Everything else is the catalog's and is kept:
+/// `scope`, `version`, `tags`, `install_as`, `source`, every other
+/// harness's `targets` entry (`codex.enabled: false` stays) and Claude's
+/// `enabled` / `render_as`. Rewrites the yaml file only (the one file it
+/// records), and only when that changes it.
+fn keep_header(
+    progress: &mut Progress,
+    row: &CatalogRow,
+    kind: Kind,
+    name: &str,
+    old: &Header,
+) -> Result<(), IpcError> {
+    let root = Path::new(&row.repo_path);
+    let mut a = repo::read_asset(root, kind, name)?;
+    let mut header = old.clone();
+    header.description = a.header.description.clone();
+    let host_claude = a.header.targets.remove("claude");
+    let claude = header.targets.entry("claude".to_string()).or_default();
+    match host_claude {
+        Some(t) => {
+            claude.model = t.model;
+            claude.extra = t.extra;
+        }
+        None => {
+            claude.model = None;
+            claude.extra.clear();
+        }
+    }
+    if header.targets.get("claude") == Some(&TargetOverride::default()) {
+        header.targets.remove("claude");
+    }
+    if a.header != header {
+        a.header = header;
+        let rel = if kind.is_folder() {
+            format!("{}/asset.yaml", repo::asset_rel_path(kind, name))
+        } else {
+            repo::asset_rel_path(kind, name)
+        };
+        progress.write_file(row.id, root, &rel, a.to_yaml().as_bytes())?;
+    }
+    Ok(())
 }
 
 /// Set one asset's `scope`, rewriting its yaml file only (the one file it
@@ -2646,6 +2695,57 @@ mod tests {
             v.items.iter().map(|i| i.state.as_str()).collect::<Vec<_>>(),
             ["applied", "skipped"]
         );
+    }
+
+    /// Final review I5: take_host takes the content the host copy supplies
+    /// (description, body, Claude's own fields) and keeps the catalog
+    /// header's scope, targets for other harnesses, tags, version and
+    /// install_as — `targets.codex.enabled: false` survives.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn take_host_keeps_the_catalog_headers_metadata() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        f.commit_files(
+            &f.personal_root,
+            p,
+            &[
+                (
+                    "skills/w/asset.yaml",
+                    "kind: skill\nname: w\nversion: '3'\ndescription: The catalog's own long \
+                     description.\ntags:\n- ops\ninstall_as: w-host\nscope: shared\ntargets:\n  \
+                     codex:\n    enabled: false\n    model: gpt-x\n",
+                ),
+                ("skills/w/body.md", "Old steps.\n"),
+            ],
+        );
+        let home = tempfile::tempdir().unwrap();
+        host_skill(home.path(), "w", "Edited on the host, long enough.");
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let id = drift_card(&f, p, "oci");
+        let v = apply(
+            ApplyArgs {
+                id,
+                positions: Some(vec![0]),
+            },
+            &f.store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        let w = repo::read_asset(&f.personal_root, Kind::Skill, "w").unwrap();
+        assert_eq!(w.header.description, "Edited on the host, long enough.");
+        assert!(w.body.contains("Steps for w."), "{}", w.body);
+        assert_eq!(w.header.scope, Scope::Shared);
+        assert_eq!(w.header.version, "3");
+        assert_eq!(w.header.tags, ["ops"]);
+        assert_eq!(w.header.install_as.as_deref(), Some("w-host"));
+        let codex = w.header.targets.get("codex").expect("codex target kept");
+        assert!(!codex.enabled);
+        assert_eq!(codex.model.as_deref(), Some("gpt-x"));
     }
 
     /// Task 4 review carry (M2): a "needs a look" import named in
