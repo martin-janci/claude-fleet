@@ -245,6 +245,10 @@ struct Progress {
     written: BTreeMap<i64, BTreeSet<String>>,
     dirs: BTreeMap<i64, Vec<String>>,
     commits: BTreeMap<i64, String>,
+    /// Final review I2: imported files the checkout's ignore rules match,
+    /// as `<catalog>: <path>` — never written, never named to `git add`;
+    /// the applied card's note names them.
+    ignored: Vec<String>,
 }
 
 impl Progress {
@@ -387,7 +391,14 @@ async fn apply_catalog(
         steps.and_then(|()| record(card, items, selected, &progress.commits, &snapshot, store));
     match outcome {
         Ok(()) => {
-            after_commits(card, selected, &rows, &progress.commits, store);
+            after_commits(
+                card,
+                selected,
+                &rows,
+                &progress.commits,
+                &progress.ignored,
+                store,
+            );
             Ok(())
         }
         Err(failure) => Err(fail_card(
@@ -662,7 +673,7 @@ async fn run_steps(
         let started = pre[&row.id].as_str();
         for (item, kind, slug) in plan {
             let rel_asset = repo::asset_rel_path(kind, &slug);
-            let new_files: BTreeSet<String> = if kind.is_folder() {
+            let mut new_files: BTreeSet<String> = if kind.is_folder() {
                 repo::files_on_disk(staging.path(), &rel_asset)
                     .map_err(|e| fail(item, e))?
                     .into_iter()
@@ -670,6 +681,30 @@ async fn run_steps(
             } else {
                 BTreeSet::from([rel_asset.clone()])
             };
+            // Final review I2: a file the checkout ignores (a `.DS_Store`
+            // under a global excludesFile) would make `git add` fail the
+            // card. A clone would not have it anyway: a resource is left
+            // out and named on the card; anything else the asset needs is
+            // a failure that says why.
+            let ignored = repo::ignored_paths(root, &new_files).map_err(|e| fail(item, e))?;
+            let resources = format!("{rel_asset}/resources/");
+            if let Some(needed) = ignored.iter().find(|p| !p.starts_with(&resources)) {
+                return Err(fail(
+                    item,
+                    IpcError::new(
+                        codes::E_INVALID_STATE,
+                        format!(
+                            "{needed} is ignored by catalog {}'s gitignore, so {}/{} cannot \
+                             be committed; change the ignore rules, then apply again",
+                            row.name, item.kind, item.name
+                        ),
+                    ),
+                ));
+            }
+            for f in &ignored {
+                new_files.remove(f);
+                progress.ignored.push(format!("{}: {f}", row.name));
+            }
             if item.action == ItemAction::TakeHost.as_str() {
                 let inside = |p: &str| p == rel_asset || p.starts_with(&format!("{rel_asset}/"));
                 let theirs: Vec<String> = repo::changed_paths(root)
@@ -1046,15 +1081,23 @@ fn record(
 /// Step 5's follow-through on an applied card: reload, push when
 /// `catalog.auto_push` (SB4, R18), propose the follow-up Rollout (R14).
 /// None of these un-applies the card: each failure is a warning in its
-/// `error` (R12).
+/// `error` (R12), as are the imported files the checkout ignores
+/// (`ignored`, final review I2), which were left out.
 fn after_commits(
     card: &ChangesetRow,
     selected: &[&ChangesetItemRow],
     rows: &[CatalogRow],
     commits: &BTreeMap<i64, String>,
+    ignored: &[String],
     store: &Mutex<Store>,
 ) {
     let mut warnings = Vec::new();
+    if !ignored.is_empty() {
+        warnings.push(format!(
+            "not imported, as the catalog's gitignore matches them: {}",
+            ignored.join(", ")
+        ));
+    }
     for row in rows {
         if let Err(e) = crate::service::catalog::load_catalog(row.id, false, store) {
             warnings.push(format!("reload {}: {}", row.name, e.message));
@@ -2171,6 +2214,46 @@ mod tests {
             rollout.summary.starts_with("Roll out core to oci"),
             "{}",
             rollout.summary
+        );
+    }
+
+    /// Final review I2: a file in the host's skill folder that the
+    /// checkout's own `.gitignore` matches (a Finder `.DS_Store`) is never
+    /// written or named to `git add` — the card applies, the file is not
+    /// committed, and the card's note names it.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn an_ignored_host_file_is_skipped_with_a_warning() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        f.commit_files(&f.personal_root, p, &[(".gitignore", ".DS_Store\n")]);
+        let home = tempfile::tempdir().unwrap();
+        host_skill(home.path(), "w", DESC);
+        std::fs::write(home.path().join(".claude/skills/w/.DS_Store"), "finder").unwrap();
+        std::fs::write(home.path().join(".claude/skills/w/notes.txt"), "keep").unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let id = new_card(
+            &f,
+            &[import("core", p, "w", "oci"), assign("core", p, "oci")],
+        );
+        let v = apply_all(&f, id, &ssh).await.unwrap();
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        let files = git(&f.personal_root, &["ls-files", "skills/w"]);
+        assert!(files.contains("skills/w/resources/notes.txt"), "{files}");
+        assert!(!files.contains(".DS_Store"), "{files}");
+        assert!(
+            !f.personal_root
+                .join("skills/w/resources/.DS_Store")
+                .exists(),
+            "never written either"
+        );
+        assert!(repo::is_clean(&f.personal_root).unwrap());
+        let note = v.error.unwrap_or_default();
+        assert!(
+            note.contains("skills/w/resources/.DS_Store") && note.contains("gitignore"),
+            "{note}"
         );
     }
 

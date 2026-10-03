@@ -405,6 +405,69 @@ pub fn stage_paths(root: &Path, rel_paths: &[String]) -> Result<(), IpcError> {
     }
 }
 
+/// Final review I2: which of `rel_paths` (relative FILE paths, present or
+/// not) the checkout's ignore rules match — `.gitignore` files, `.git/info/
+/// exclude` and the user's `core.excludesFile` — so a caller never names an
+/// ignored path to `git add` (which exits 1 on one). A tracked path is never
+/// reported (git does not ignore what it tracks). Paths go over stdin, NUL
+/// separated: `check-ignore` takes no pathspec magic, so this one command
+/// runs without `GIT_LITERAL_PATHSPECS`, and a name is matched as a name.
+pub fn ignored_paths(
+    root: &Path,
+    rel_paths: &std::collections::BTreeSet<String>,
+) -> Result<std::collections::BTreeSet<String>, IpcError> {
+    use std::io::Write;
+    if rel_paths.is_empty() {
+        return Ok(Default::default());
+    }
+    let mut cmd = crate::proc::std_command("git");
+    cmd.args(["check-ignore", "--stdin", "-z"])
+        .current_dir(root)
+        .env_remove("GIT_LITERAL_PATHSPECS")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(test)]
+    test_git_isolation(&mut cmd);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| IpcError::new(E_CATALOG_GIT, format!("spawn git: {e}")))?;
+    let mut input = Vec::new();
+    for p in rel_paths {
+        input.extend_from_slice(p.as_bytes());
+        input.push(0);
+    }
+    let writer = child.stdin.take().map(|mut stdin| {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        })
+    });
+    let out = child
+        .wait_with_output()
+        .map_err(|e| IpcError::new(E_CATALOG_GIT, format!("git check-ignore: {e}")))?;
+    if let Some(w) = writer {
+        let _ = w.join();
+    }
+    // 0: some are ignored; 1: none are; anything else is a real failure.
+    match out.status.code() {
+        Some(0) | Some(1) => {}
+        _ => {
+            return Err(
+                IpcError::new(E_CATALOG_GIT, "git check-ignore: failed").with_details(
+                    serde_json::json!({
+                        "stderr": redact_url_userinfo(String::from_utf8_lossy(&out.stderr).trim())
+                    }),
+                ),
+            )
+        }
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|p| !p.is_empty() && rel_paths.contains(*p))
+        .map(str::to_string)
+        .collect())
+}
+
 /// Whether the index differs from HEAD for `rel_paths` (for the whole index
 /// when empty) — i.e. whether a commit limited to those paths would record
 /// anything. `git diff --cached --quiet` exits 0 when there is nothing
