@@ -147,6 +147,20 @@ pub mod codes {
     /// on a fleet-admin tool, a denied confirmation, an upload path that
     /// was never dropped onto the window).
     pub const E_FORBIDDEN: &str = "E_FORBIDDEN";
+    /// A per-host token addressed a session on its OWN host that it cannot
+    /// prove it is standing in (multi-user M1, spec §4.4): the row is not
+    /// `unclaimed` and the request's `X-Fleet-Pane` does not name it.
+    ///
+    /// Its own code rather than `E_NOTFOUND`, because it is the everyday
+    /// mistake rather than an attack: one token authenticates every Claude
+    /// on a host, so an agent that opened a second pane in the same tmux
+    /// window — or whose row was reconciled onto a new pane id — reaches
+    /// here with a perfectly real session id. A bare "not found" would send
+    /// it hunting for a session it can see in `tmux list-sessions`. It is
+    /// not an existence oracle either: a token with shell access to the
+    /// host can already enumerate its tmux sessions, and this says nothing
+    /// about WHOSE the row is or what is in it.
+    pub const E_PANE_UNPROVEN: &str = "E_PANE_UNPROVEN";
     /// The caller exceeded a per-caller rate limit (`broadcast_prompt`);
     /// `details.retry_after_secs` says when to retry.
     pub const E_RATE_LIMITED: &str = "E_RATE_LIMITED";

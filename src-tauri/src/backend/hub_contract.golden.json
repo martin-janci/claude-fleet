@@ -178,6 +178,7 @@
       "model",
       "notes",
       "org_id",
+      "owner_person_id",
       "parent_session_id",
       "pending_input",
       "pr_url",
@@ -205,6 +206,7 @@
       "usage_model",
       "usage_output_tokens",
       "usage_updated_at",
+      "visibility",
       "work",
       "work_rejected",
       "work_rev",
@@ -333,6 +335,7 @@
       "ssh_alias",
       "tmux_version",
       "transport",
+      "unclaimed_sessions",
       "uptime_secs"
     ],
     "HostWorktrees": [
@@ -437,6 +440,7 @@
       "model",
       "notes",
       "org_id",
+      "owner_person_id",
       "parent_session_id",
       "pending_input",
       "pr_url",
@@ -464,6 +468,7 @@
       "usage_model",
       "usage_output_tokens",
       "usage_updated_at",
+      "visibility",
       "work",
       "work_rejected",
       "work_rev",
@@ -524,6 +529,7 @@
     ],
     "WorktreeOccupant": [
       "host_alias",
+      "session_id",
       "tmux_name"
     ],
     "WorktreeRow": [

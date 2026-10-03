@@ -12,7 +12,7 @@
 //! link, never from a filter):
 //!
 //! * a link is visible when its org is ([`OrgScope::sees_org`]) and so is
-//!   its session: the live row ([`OrgScope::sees_row`]), or for a past
+//!   its session: the live row ([`OrgScope::sees_row_org_only`]), or for a past
 //!   session its snapshot's host and org — for a per-host token only its own
 //!   host's past sessions (M2's fence);
 //! * a task with an org of its own (a tracker's, or a local item's, M14) is
@@ -480,17 +480,118 @@ pub(crate) struct Graph {
     /// "someone is working on this" never leaks through a task the caller
     /// can otherwise see.
     pub(crate) working_session_items: BTreeSet<i64>,
+    /// Session rows that EXIST and this reader may not see (multi-user M1,
+    /// T7) — the ids [`Self::load_for`] took out of [`Self::sessions`].
+    ///
+    /// Kept as a set rather than simply dropped, because "no row" and "a row
+    /// you may not see" answer differently: a link whose live session is
+    /// merely absent from the graph is judged by its snapshot (`snap_host`,
+    /// `snap_org_id`) and would be shown with a name out of the snapshot,
+    /// which is the leak this fence exists to close. [`Self::link_visible`]
+    /// refuses such a link outright.
+    pub(crate) hidden_sessions: BTreeSet<i64>,
+    /// `work_links.id` of every link this reader may not see **whose live
+    /// participant is gone** (multi-user M1, T9b) — the ENDED half of
+    /// [`Self::hidden_sessions`].
+    ///
+    /// It exists because [`Self::hidden_sessions`] could only ever answer for
+    /// a link that still names a row. `ViewLink.session_id` is NULL for every
+    /// link of a reaped session (`store/work_view.rs`'s `LEFT JOIN
+    /// participants p … AND p.retired_at IS NULL`), so such a link skipped
+    /// the fence, fell through to the snapshot arm and was then passed by
+    /// `scope.is_all()` — i.e. served, by its `snap_name` / `snap_host` /
+    /// `snap_branch`, to every paired client bound to no org. Both sets are
+    /// filled by [`crate::service::orgs::link_person_visible_at`], which is
+    /// the one statement of the rule, so the Work view and `work { links }`
+    /// cannot answer differently for the same link.
+    pub(crate) hidden_links: BTreeSet<i64>,
 }
 
 impl Graph {
+    /// The ORG-only load: for the reads and writes that answer a TASK and
+    /// never a session row — `service::work::structure`'s rules, saved
+    /// views, placements and org moves, whose exemptions are written down in
+    /// `mcp::tools::tests`'s `WORK_ACTION_NO_GATE`.
+    ///
+    /// Every Work-view read that answers session rows takes
+    /// [`Self::load_for`] instead.
     pub(crate) fn load(s: &Store, scope: &OrgScope) -> Result<Graph, IpcError> {
-        let sessions: HashMap<i64, SessionRow> = s
+        Self::build(s, scope, None)
+    }
+
+    /// The load every Work-view READ uses: the caller's WHOLE scope, so a
+    /// session this person may not see is not in the graph at all and no
+    /// projection built off the graph can carry it (multi-user M1, T7) —
+    /// **for both shapes a session reaches a projection in**: a LIVE row
+    /// (taken out of [`Graph::sessions`] into [`Graph::hidden_sessions`]) and
+    /// an ENDED link whose participant has been reaped, which has no live row
+    /// to take out and is listed in [`Graph::hidden_links`] instead (T9b).
+    ///
+    /// The second half was missing, and the doc promised it anyway: `tree`,
+    /// `task`, `review` and `org_impact` all rest on this sentence.
+    pub(crate) fn load_for(
+        s: &Store,
+        view: &crate::service::view_scope::ViewScope,
+    ) -> Result<Graph, IpcError> {
+        Self::build(s, &view.org, Some(view))
+    }
+
+    fn build(
+        s: &Store,
+        scope: &OrgScope,
+        view: Option<&crate::service::view_scope::ViewScope>,
+    ) -> Result<Graph, IpcError> {
+        let mut sessions: HashMap<i64, SessionRow> = s
             .list_all_sessions()?
             .into_iter()
             .map(|r| (r.id, r))
             .collect();
+        // The PERSON fence, before anything is derived from a row: whose row
+        // it is, what was shared with this caller, and §4.4's host clauses —
+        // none of which an `OrgScope` can express (it is `All` for the master
+        // and for every paired client bound to no org alike).
+        let hidden_sessions: BTreeSet<i64> = match view {
+            Some(v) => {
+                let hidden: BTreeSet<i64> = sessions
+                    .values()
+                    .filter(|r| !v.sees_session_row(r).is_visible())
+                    .map(|r| r.id)
+                    .collect();
+                sessions.retain(|id, _| !hidden.contains(id));
+                hidden
+            }
+            None => BTreeSet::new(),
+        };
+        let sessions = sessions;
+        let links = s.work_view_links()?;
+        // The ENDED half of the same fence, through the one predicate
+        // (multi-user M1, T9b). A link whose participant has been reaped has
+        // no live row above to take out of the graph, so it is named here;
+        // `link_visible` and `impact_of` test both sets before the snapshot
+        // arm. The memo makes a page cost one lookup per distinct
+        // conversation, and `is_internal` keeps the hub's own readers (and
+        // the scale fixture, which loads with `ViewScope::internal`) on the
+        // old cost.
+        let hidden_links: BTreeSet<i64> = match view {
+            Some(v) if !v.is_internal() => {
+                let mut seen: std::collections::BTreeMap<String, bool> = Default::default();
+                let mut hidden = BTreeSet::new();
+                for l in &links {
+                    if l.session_id.is_some() {
+                        continue;
+                    }
+                    if !crate::service::orgs::link_person_visible_memo(
+                        s, v, &l.link, None, &mut seen,
+                    )? {
+                        hidden.insert(l.link.id);
+                    }
+                }
+                hidden
+            }
+            _ => BTreeSet::new(),
+        };
         // Fence the live signal by scope: a pair whose session this scope
-        // cannot see (`OrgScope::sees_row`, the same check `link_visible`
+        // cannot see (`OrgScope::sees_row_org_only`, the same check `link_visible`
         // uses) does not lift its item, even though the raw query found it.
         let working_session_items: BTreeSet<i64> = s
             .work_items_with_working_session()?
@@ -498,7 +599,12 @@ impl Graph {
             .filter(|(_, session_id)| {
                 sessions
                     .get(session_id)
-                    .is_some_and(|row| scope.sees_row(row))
+                    // `hidden_sessions` above has already emptied every
+                    // person-invisible row out of `sessions` when a
+                    // `ViewScope` was supplied; this clause is what still
+                    // fences the org-only `Graph::load` path, whose readers
+                    // answer tasks and never a session row.
+                    .is_some_and(|row| scope.sees_row_org_only(row))
             })
             .map(|(item_id, _)| item_id)
             .collect();
@@ -509,7 +615,7 @@ impl Graph {
                 .into_iter()
                 .map(|i| (i.item.id, i))
                 .collect(),
-            links: s.work_view_links()?,
+            links,
             sessions,
             trackers: s.list_trackers()?.into_iter().map(|t| (t.id, t)).collect(),
             orgs: s.list_orgs()?,
@@ -522,7 +628,22 @@ impl Graph {
             rules: s.work_rules()?,
             context_red_pct: crate::service::health::context_red_pct(s),
             working_session_items,
+            hidden_sessions,
+            hidden_links,
         })
+    }
+
+    /// Is this link one the reader may not see — its LIVE row fenced, or (for
+    /// a link whose participant is gone) its recorded conversations fenced?
+    ///
+    /// **The one clause every projection built off a link must ask first**
+    /// (multi-user M1, T9b). It must run before the snapshot arms, which
+    /// would otherwise name the session by `snap_name` and its machine by
+    /// `snap_host` — exactly what the fence withholds.
+    pub(crate) fn link_hidden(&self, l: &ViewLink) -> bool {
+        l.session_id
+            .is_some_and(|id| self.hidden_sessions.contains(&id))
+            || self.hidden_links.contains(&l.link.id)
     }
 
     /// An item's own org: its tracker's, or a local item's (M14) —
@@ -597,25 +718,42 @@ impl Graph {
 
     /// May `scope` see this link (its org and its session)?
     fn link_visible(&self, scope: &OrgScope, l: &ViewLink) -> bool {
+        // The person fence first, and before the `is_all()` shortcut: a link
+        // whose session this reader may not see is refused whatever its org
+        // says, and must NOT fall through to the snapshot arm below, which
+        // would judge it by `snap_host` and show it by its snapshot name
+        // (multi-user M1, T7; the ENDED half is T9b's `hidden_links`).
+        if self.link_hidden(l) {
+            return false;
+        }
+        // This is the org boundary, not a privacy fence: and it is deliberately placed AFTER
+        // `link_hidden`, so the person fence runs first and this shortcut can never skip it.
         if scope.is_all() {
             return true;
         }
         if !scope.sees_org(self.link_org(l)) {
             return false;
         }
+        // Each arm below is the ORG half only; `link_hidden` at the top of
+        // this function is the person half, and it runs before the
+        // `is_all()` shortcut precisely so it cannot be skipped.
         match self.row_of(l) {
             Some(row) => match scope {
                 // M2's fence: a host's past work is its own host's.
                 OrgScope::Host { alias, .. } if l.link.ended_at.is_some() => {
-                    row.host_alias == *alias && scope.sees_row(row)
+                    // Org half; `link_hidden` is the person half.
+                    row.host_alias == *alias && scope.sees_row_org_only(row)
                 }
-                _ => scope.sees_row(row),
+                // Org half; `link_hidden` is the person half.
+                _ => scope.sees_row_org_only(row),
             },
             None => {
                 let host = l.link.snap_host.as_deref().unwrap_or_default();
                 match scope {
                     OrgScope::Host { alias, .. } => host == alias,
-                    _ => scope.sees_session(host, l.link.org_id),
+                    // The snapshot arm's org half; `link_hidden`'s
+                    // `hidden_links` half covers exactly this shape.
+                    _ => scope.sees_session_org_only(host, l.link.org_id),
                 }
             }
         }
@@ -735,6 +873,10 @@ fn build_tasks<'g>(g: &'g Graph, scope: &OrgScope) -> Vec<Built<'g>> {
 }
 
 fn task_visible(g: &Graph, scope: &OrgScope, b: &Built<'_>) -> bool {
+    // This is the org boundary, not a privacy fence: it decides whether the TASK appears, and a
+    // task's key and title are work data — the same answer `local.rs::person_visible_links`
+    // writes down for a local item. Every link and session UNDER the task is person-fenced
+    // (`b.visible`, built from `link_visible`).
     if scope.is_all() {
         return true;
     }
@@ -744,6 +886,11 @@ fn task_visible(g: &Graph, scope: &OrgScope, b: &Built<'_>) -> bool {
     }
     let shown = b.visible.iter().any(|(_, st)| *st != "rejected");
     match scope {
+        // This is the org boundary, not a privacy fence: the same answer as
+        // this function's first guard, in its other spelling — whether the
+        // TASK appears. A task's key and title are work data and survive the
+        // person fence exactly as a local item's do, while every link and
+        // session under it is person-fenced by `Graph::build`.
         OrgScope::All => true,
         // M3's fence: a host reads only work its own host did.
         OrgScope::Host { .. } => b.on_own_host,
@@ -1548,6 +1695,9 @@ fn visible_trackers(g: &Graph, scope: &OrgScope, tasks: &[WorkTask]) -> Vec<Trac
         .trackers
         .values()
         .filter(|t| match scope {
+            // This is the org boundary, not a privacy fence: which COMPANIES'
+            // trackers a brief names. A `TrackerBrief` is a tracker's id,
+            // name and kind — org configuration, no session.
             OrgScope::All => true,
             OrgScope::Org { .. } => scope.sees_org(t.org_id),
             // A host names only the trackers of the work it reads.
@@ -1776,10 +1926,18 @@ fn section_pages(
 }
 
 /// `work { action: tree, filters?, cursor?, limit?, per_task? }`.
-pub fn tree(store: &Mutex<Store>, scope: &OrgScope, args: &TreeArgs) -> Result<TreePage, IpcError> {
+///
+/// Takes the caller's whole [`ViewScope`] (multi-user M1, T7): the tree names
+/// every session of every task, which spec §4.3 calls content.
+pub fn tree(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+    args: &TreeArgs,
+) -> Result<TreePage, IpcError> {
+    let scope = &view.org;
     let g = {
         let s = lock(store)?;
-        Graph::load(&s, scope)?
+        Graph::load_for(&s, view)?
     };
     tree_of(&g, scope, args)
 }
@@ -1845,10 +2003,18 @@ pub(crate) fn find_task(
 }
 
 /// `work { action: task, task_id }`.
-pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<TaskDetail, IpcError> {
+///
+/// The whole [`ViewScope`] (multi-user M1, T7): one task's detail lists every
+/// session of that task.
+pub fn task(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+    task_id: &str,
+) -> Result<TaskDetail, IpcError> {
+    let scope = &view.org;
     let g = {
         let s = lock(store)?;
-        Graph::load(&s, scope)?
+        Graph::load_for(&s, view)?
     };
     let (task, aliases) = find_task(&g, scope, task_id, true)?;
     let item = task.item_id.and_then(|i| g.items.get(&i));
@@ -1960,6 +2126,17 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
     // not a scoped caller's to learn (an unassigned task is placed by
     // bound clients of several orgs, M14.1c).
     let placement = g.placements.get(&task.task_id).cloned().map(|mut p| {
+        // This is the org boundary, not a privacy fence: `Placement.updated_by` is a device
+        // label on shared work structure, and an unassigned task is placed by bound clients of
+        // several orgs — which is the reason it is withheld.
+        //
+        // **Open, and recorded as an owner decision** (T9c found it, T9d put
+        // it in the table: `scope_guard_tests::OPEN_QUESTIONS`, so the
+        // classification itself carries the question instead of only the
+        // prose beside it). The narrower question is whether a PERSON's own
+        // device should learn another person's DEVICE NAME: for such a
+        // caller `is_all()` is true and the label is withheld from nobody.
+        // The eight rules do not cover device identity.
         if !scope.is_all() {
             p.updated_by = None;
         }
@@ -2021,17 +2198,22 @@ fn item_status(g: &Graph, i: &ViewItem) -> Option<String> {
 /// with its task.
 pub fn session_tasks(
     store: &Mutex<Store>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     session_id: i64,
 ) -> Result<SessionTasks, IpcError> {
+    let scope = &view.org;
     let g = {
         let s = lock(store)?;
-        Graph::load(&s, scope)?
+        Graph::load_for(&s, view)?
     };
+    // `Graph::load_for` has already emptied the person-invisible rows out of
+    // `g.sessions`, and its org half ran inside the same predicate, so a
+    // `get` that answers at all answers a row this caller may see. The
+    // org-only filter that used to stand here as well said the same thing a
+    // second time, in a weaker form (multi-user M1, T10).
     let row = g
         .sessions
         .get(&session_id)
-        .filter(|r| scope.sees_row(r))
         .ok_or_else(|| crate::service::orgs::not_found("session", session_id))?;
     let built = build_tasks(&g, scope);
     let others = active_tasks_by_session(&built);
@@ -2305,13 +2487,14 @@ pub(crate) fn review_of(
 /// the caller may decide.
 pub fn review(
     store: &Mutex<Store>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     cursor: Option<&str>,
     limit: Option<usize>,
 ) -> Result<ReviewPage, IpcError> {
+    let scope = &view.org;
     let g = {
         let s = lock(store)?;
-        Graph::load(&s, scope)?
+        Graph::load_for(&s, view)?
     };
     review_of(&g, scope, cursor, limit)
 }

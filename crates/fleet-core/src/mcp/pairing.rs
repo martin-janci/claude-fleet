@@ -51,6 +51,38 @@ const MAX_BODY: usize = 4 * 1024;
 /// throttled at least as hard as a known one — never less.
 const UNKNOWN_PEER: &str = "unknown";
 
+/// What one `pair_client` call asks for. A struct rather than six
+/// positionals: the list has grown once per feature (trust, then the org,
+/// then the person) and a sixth `Option<i64>` in a row of them is how a
+/// caller puts the org where the person goes.
+#[derive(Clone, Copy)]
+pub struct MintRequest<'a> {
+    pub name: &'a str,
+    pub mode: &'a str,
+    /// Pair as a device the operator vouches for
+    /// (`client_tokens.trusted_at`): its prompts are delivered unmarked.
+    pub trusted: bool,
+    /// Bind to this org the moment it pairs (work graph M14).
+    pub org_id: Option<i64>,
+    /// WHOSE device this is (multi-user M1), by NAME.
+    ///
+    /// A name and not an id because the `people` row is created at
+    /// **redemption**: [`PendingPairings`] is in-process memory, so a code
+    /// minted and never walked to the phone must not leave an orphan person
+    /// behind. The name's shape is validated at mint all the same, so the
+    /// operator reads the error at their own terminal rather than the phone
+    /// reading it minutes later.
+    ///
+    /// `None` only for a `peer` or `updater` code: a linked hub and
+    /// `fleet-updater` are not anybody's device, and
+    /// `Store::set_client_person` refuses both. Every ordinary pairing
+    /// carries a person — `pair_client` defaults it to the hub's personal
+    /// owner rather than minting a person-less token.
+    pub person: Option<&'a str>,
+    /// How long the code stays valid; it also dies on first use.
+    pub ttl: Duration,
+}
+
 /// One minted, not-yet-used pairing code.
 #[derive(Clone)]
 pub struct PairingRequest {
@@ -63,11 +95,17 @@ pub struct PairingRequest {
     /// The org the client is bound to once paired (work graph M14,
     /// `fleet-hub pair --org`); `None`: unbound.
     pub org_id: Option<i64>,
+    /// The person the client is bound to once paired (multi-user M1,
+    /// `fleet-hub pair --person`), by name — see [`MintRequest::person`].
+    pub person: Option<String>,
     pub expires_at: Instant,
 }
 
 /// The code is a credential: a `{:?}` in a log line or an error message must
-/// not spell it out. Everything else about a pairing is safe to print.
+/// not spell it out. Everything else about a pairing is safe to print — a
+/// person's name included: it is what the operator typed at their own
+/// terminal, and seeing it in a log line is how they notice a typo made a
+/// second colleague.
 impl std::fmt::Debug for PairingRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PairingRequest")
@@ -75,6 +113,7 @@ impl std::fmt::Debug for PairingRequest {
             .field("name", &self.name)
             .field("mode", &self.mode)
             .field("trusted", &self.trusted)
+            .field("person", &self.person)
             .field("expires_at", &self.expires_at)
             .finish()
     }
@@ -166,6 +205,7 @@ struct Pending {
     mode: String,
     trusted: bool,
     org_id: Option<i64>,
+    person: Option<String>,
     expires_at: Instant,
 }
 
@@ -187,28 +227,17 @@ impl PendingPairings {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Mint a fresh code for `name`/`mode` (and whether the client is to be
-    /// `trusted`), valid for `ttl`. Sweeps expired entries first, so the map
-    /// cannot grow without bound on a hub where codes are minted and never
-    /// redeemed.
-    pub fn mint(&self, name: &str, mode: &str, trusted: bool, ttl: Duration) -> PairingRequest {
-        self.mint_bound(name, mode, trusted, None, ttl)
-    }
-
-    /// [`Self::mint`] for a client that is bound to `org_id` the moment it
-    /// pairs (work graph M14): the binding rides on the code, like `trusted`,
-    /// so there is no window in which the new client reads every org.
-    pub fn mint_bound(
-        &self,
-        name: &str,
-        mode: &str,
-        trusted: bool,
-        org_id: Option<i64>,
-        ttl: Duration,
-    ) -> PairingRequest {
+    /// Mint a fresh code for `req`, valid for its `ttl`. Sweeps expired
+    /// entries first, so the map cannot grow without bound on a hub where
+    /// codes are minted and never redeemed.
+    ///
+    /// Everything the pairing is to become rides on the code — trust, the
+    /// org, the person — so there is no window in which the new client is
+    /// live but unbound.
+    pub fn mint(&self, req: MintRequest<'_>) -> PairingRequest {
         let now = Instant::now();
         self.sweep(now);
-        let expires_at = now + ttl;
+        let expires_at = now + req.ttl;
         let mut pending = self.lock();
         // A 40-bit collision is not going to happen; redrawing costs nothing
         // and keeps `insert` from silently stealing another client's code.
@@ -221,19 +250,21 @@ impl PendingPairings {
         pending.insert(
             code.clone(),
             Pending {
-                name: name.to_string(),
-                mode: mode.to_string(),
-                trusted,
-                org_id,
+                name: req.name.to_string(),
+                mode: req.mode.to_string(),
+                trusted: req.trusted,
+                org_id: req.org_id,
+                person: req.person.map(str::to_string),
                 expires_at,
             },
         );
         PairingRequest {
             code,
-            name: name.to_string(),
-            mode: mode.to_string(),
-            trusted,
-            org_id,
+            name: req.name.to_string(),
+            mode: req.mode.to_string(),
+            trusted: req.trusted,
+            org_id: req.org_id,
+            person: req.person.map(str::to_string),
             expires_at,
         }
     }
@@ -266,6 +297,7 @@ impl PendingPairings {
             mode: entry.mode,
             trusted: entry.trusted,
             org_id: entry.org_id,
+            person: entry.person,
             expires_at: entry.expires_at,
         })
     }
@@ -471,6 +503,24 @@ pub async fn handle_pair(
                 Some(org) => s.set_client_org(&row.name, Some(org)),
                 None => Ok(row),
             })
+            .and_then(|row| match req.person.as_deref() {
+                // And WHOSE device it is (multi-user M1). The `people` row
+                // is created HERE, at redemption, not at mint: a code minted
+                // and never walked to the phone must not leave an orphan
+                // person behind. An existing live person of that name is
+                // reused, which is what makes "pair my second phone" and
+                // "pair a colleague's laptop" the same command.
+                Some(person) => {
+                    let row_id = match s.get_person_by_name(person)? {
+                        Some(p) => p.id,
+                        None => s.create_person(person, None)?.id,
+                    };
+                    s.set_client_person(&row.name, Some(row_id))
+                }
+                // A `peer` link and an `updater` token are nobody's device;
+                // `pair_client` refuses `person` for both.
+                None => Ok(row),
+            })
     };
     match inserted {
         Ok(row) => {
@@ -478,6 +528,7 @@ pub async fn handle_pair(
                 client = %row.name,
                 mode = %row.mode,
                 trusted = row.trusted_at.is_some(),
+                person = ?row.person_id,
                 "[mcp] paired a client"
             );
             // The ONE response that ever carries the plaintext token. Tell
@@ -490,6 +541,7 @@ pub async fn handle_pair(
                     "mode": row.mode,
                     "trusted": row.trusted_at.is_some(),
                     "org_id": row.org_id,
+                    "person_id": row.person_id,
                     "hub": state.base_url.as_str(),
                 })),
             )
@@ -513,11 +565,31 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// The plain mint these tests want: a device of the hub's own owner,
+    /// bound to no org. Spelled once here so a test reads as "a code for
+    /// `phone`, `full`, not trusted" rather than as a six-field literal.
+    fn mint(
+        p: &PendingPairings,
+        name: &str,
+        mode: &str,
+        trusted: bool,
+        ttl: Duration,
+    ) -> PairingRequest {
+        p.mint(MintRequest {
+            name,
+            mode,
+            trusted,
+            org_id: None,
+            person: Some("owner"),
+            ttl,
+        })
+    }
+
     #[test]
     fn a_code_is_eight_crockford_chars_and_unique() {
         let p = PendingPairings::new();
-        let a = p.mint("phone", "full", false, Duration::from_secs(600));
-        let b = p.mint("tablet", "full", false, Duration::from_secs(600));
+        let a = mint(&p, "phone", "full", false, Duration::from_secs(600));
+        let b = mint(&p, "tablet", "full", false, Duration::from_secs(600));
         assert_eq!(a.code.len(), 8);
         assert!(
             a.code
@@ -532,7 +604,7 @@ mod tests {
     #[test]
     fn a_code_works_once() {
         let p = PendingPairings::new();
-        let req = p.mint("phone", "readonly", false, Duration::from_secs(600));
+        let req = mint(&p, "phone", "readonly", false, Duration::from_secs(600));
         let got = p.consume(&req.code).expect("first use");
         assert_eq!(got.name, "phone");
         assert_eq!(got.mode, "readonly");
@@ -542,7 +614,7 @@ mod tests {
     #[test]
     fn an_expired_code_is_refused_and_swept() {
         let p = PendingPairings::new();
-        let req = p.mint("phone", "full", false, Duration::from_millis(1));
+        let req = mint(&p, "phone", "full", false, Duration::from_millis(1));
         std::thread::sleep(Duration::from_millis(5));
         assert!(p.consume(&req.code).is_none());
     }
@@ -574,10 +646,10 @@ mod tests {
     #[test]
     fn minting_sweeps_expired_codes() {
         let p = PendingPairings::new();
-        let live = p.mint("kept", "full", false, Duration::from_secs(600));
-        p.mint("stale", "full", false, Duration::from_millis(1));
+        let live = mint(&p, "kept", "full", false, Duration::from_secs(600));
+        mint(&p, "stale", "full", false, Duration::from_millis(1));
         std::thread::sleep(Duration::from_millis(5));
-        p.mint("fresh", "full", false, Duration::from_secs(600));
+        mint(&p, "fresh", "full", false, Duration::from_secs(600));
         assert_eq!(p.len(), 2, "the expired code must have been swept");
         assert!(p.consume(&live.code).is_some(), "a live code still works");
         assert_eq!(p.len(), 1, "consuming frees the slot");
@@ -589,7 +661,7 @@ mod tests {
     #[test]
     fn debug_never_prints_the_code() {
         let p = PendingPairings::new();
-        let req = p.mint("phone", "full", false, Duration::from_secs(600));
+        let req = mint(&p, "phone", "full", false, Duration::from_secs(600));
         let rendered = format!("{req:?}");
         assert!(
             !rendered.contains(&req.code),
@@ -597,6 +669,10 @@ mod tests {
         );
         assert!(rendered.contains("phone"), "{rendered}");
         assert!(rendered.contains("<redacted>"), "{rendered}");
+        // A person's name is not a secret and is deliberately printable: a
+        // log line naming it is how the operator notices a typo made a
+        // second colleague instead of pairing their own second device.
+        assert!(rendered.contains("owner"), "{rendered}");
     }
 
     /// The attempt budget is keyed on the source address. Behind the shipped
@@ -687,8 +763,8 @@ mod tests {
     #[test]
     fn a_code_carries_its_trust_grant() {
         let p = PendingPairings::new();
-        let vouched = p.mint("desk", "full", true, Duration::from_secs(600));
-        let plain = p.mint("phone", "full", false, Duration::from_secs(600));
+        let vouched = mint(&p, "desk", "full", true, Duration::from_secs(600));
+        let plain = mint(&p, "phone", "full", false, Duration::from_secs(600));
         assert!(vouched.trusted && !plain.trusted);
         assert!(p.consume(&vouched.code).unwrap().trusted);
         assert!(!p.consume(&plain.code).unwrap().trusted);
@@ -700,12 +776,46 @@ mod tests {
         );
     }
 
+    /// The person rides on the code exactly as the trust grant does
+    /// (multi-user M1): the device is bound the moment it pairs, so there is
+    /// no window in which it is live and belongs to nobody. The row itself
+    /// is created at redemption — see [`MintRequest::person`] — so an
+    /// abandoned code leaves nothing behind.
+    #[test]
+    fn a_code_carries_the_person_it_will_be_paired_for() {
+        let p = PendingPairings::new();
+        let colleague = p.mint(MintRequest {
+            name: "ada-laptop",
+            mode: "full",
+            trusted: false,
+            org_id: None,
+            person: Some("ada"),
+            ttl: Duration::from_secs(600),
+        });
+        // A hub link is nobody's device, and carries no person.
+        let link = p.mint(MintRequest {
+            name: "hub-b",
+            mode: "peer",
+            trusted: false,
+            org_id: None,
+            person: None,
+            ttl: Duration::from_secs(600),
+        });
+        assert_eq!(colleague.person.as_deref(), Some("ada"));
+        assert_eq!(link.person, None);
+        assert_eq!(
+            p.consume(&colleague.code).unwrap().person.as_deref(),
+            Some("ada")
+        );
+        assert_eq!(p.consume(&link.code).unwrap().person, None);
+    }
+
     /// Codes are minted per request, so two clients never share one.
     #[test]
     fn each_code_carries_its_own_name_and_mode() {
         let p = PendingPairings::new();
-        let a = p.mint("phone", "full", false, Duration::from_secs(600));
-        let b = p.mint("kiosk", "readonly", false, Duration::from_secs(600));
+        let a = mint(&p, "phone", "full", false, Duration::from_secs(600));
+        let b = mint(&p, "kiosk", "readonly", false, Duration::from_secs(600));
         let got_b = p.consume(&b.code).expect("kiosk");
         assert_eq!(
             (got_b.name.as_str(), got_b.mode.as_str()),
@@ -716,5 +826,8 @@ mod tests {
             (got_a.name.as_str(), got_a.mode.as_str()),
             ("phone", "full")
         );
+        // …and its person, which the helper above sets for both.
+        assert_eq!(got_a.person.as_deref(), Some("owner"));
+        assert_eq!(got_b.person.as_deref(), Some("owner"));
     }
 }

@@ -138,6 +138,10 @@ pub async fn send_message_scoped(
     // an unknown one — checked BEFORE the address is resolved, whose own
     // "retired" answer would otherwise tell the two apart. Another fleet's
     // address is not in any local org: it goes on to the link.
+    // This is the org boundary, not a privacy fence: which ORG's session an address may name.
+    // The PERSON half of the same recipient is `support::require_message_recipient`, at the tool
+    // layer and at `Reach::Drive` — the gate that was missing when a phone could type into any
+    // pane in the fleet.
     if !scope.is_all() {
         if let Some(Ok(crate::service::address::Addr::Session { fleet, host, name })) =
             args.to_addr.as_deref().map(crate::service::address::parse)
@@ -146,7 +150,10 @@ pub async fn send_message_scoped(
             if fleet.is_none() || fleet == local {
                 let s = lock(store)?;
                 if let Some(row) = s.get_session(&name, &host)? {
-                    if !scope.sees_row(&row) {
+                    // The org half; the person half is
+                    // `support::require_message_recipient` at the tool layer
+                    // (multi-user M1, T10's ORG_HALF_SITES row).
+                    if !scope.sees_row_org_only(&row) {
                         return Err(IpcError::new(
                             codes::E_PARTICIPANT_UNKNOWN,
                             format!("no session {name} on {host}"),
@@ -167,10 +174,14 @@ pub async fn send_message_scoped(
             return send_remote(args, link_id, &addr, &fleet, store);
         }
     };
+    // This is the org boundary, not a privacy fence: the same org question for a recipient named
+    // by id, with the same person half at the tool layer.
     if !scope.is_all() {
         let s = lock(store)?;
         if let Some(to) = s.get_session_by_id(to_session_id)? {
-            if !scope.sees_row(&to) {
+            // As above: the org half, with `require_message_recipient` as the
+            // person half at the tool layer.
+            if !scope.sees_row_org_only(&to) {
                 return Err(
                     match args.to_addr.as_deref().map(crate::service::address::parse) {
                         Some(Ok(crate::service::address::Addr::Session { host, name, .. })) => {
@@ -713,7 +724,10 @@ pub fn peer_status(
     // An isolated org's session (D7) reads exactly as a missing one.
     let row = s
         .get_session_by_id(session_id)?
-        .filter(|r| scope.sees_row(r))
+        // The org half. The person half is `resolve_row_person_gated(..,
+        // Reach::Read, ..)` in `mcp::tools::messaging::peer_status`, which
+        // runs before this call (multi-user M1, T9b/T10).
+        .filter(|r| scope.sees_row_org_only(r))
         .ok_or_else(|| {
             IpcError::new(
                 codes::E_NOTFOUND,

@@ -24,7 +24,7 @@ use crate::service::gc::tidy::{
     self as planner, TidyAction, TidyCandidate, TidyConfig, TidyContext, TidyReason, TidySession,
 };
 use crate::service::gc::{needs_safe_remove, GcExec};
-use crate::service::orgs::OrgScope;
+use crate::service::orgs::{self, OrgScope};
 use crate::service::settings;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -188,10 +188,29 @@ fn link_visible(scope: &OrgScope, s: &TidySession, link_id: Option<i64>) -> bool
 
 /// `work { action: tidy }`. A per-host token sees only its own host's
 /// candidates, and never another org's.
-pub fn work_tidy(store: &Mutex<Store>, scope: &OrgScope, now: i64) -> Result<TidyReport, IpcError> {
+///
+/// Multi-user M1 (T7): and never another PERSON's. `TidyCandidate` carries
+/// `session_id`, `host_alias` and `tmux_name` per row, so the whole
+/// [`ViewScope`] cuts the list, not only its org half — the plan itself is
+/// still computed over every session (`Snapshot::sessions`), because the
+/// safety signals a candidate carries, `shares_worktree` first among them,
+/// are about the MACHINE and would read "nothing else is in this tree" if a
+/// row the caller cannot see were dropped before the planner ran.
+pub fn work_tidy(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+    now: i64,
+) -> Result<TidyReport, IpcError> {
+    let scope = &view.org;
     let snap = Snapshot::take(store)?;
     let mut candidates = snap.plan(now);
-    candidates.retain(|c| in_scope(scope, &c.host_alias, c.org_id));
+    candidates.retain(|c| {
+        in_scope(scope, &c.host_alias, c.org_id)
+            && snap
+                .sessions
+                .iter()
+                .any(|t| t.row.id == c.session_id && view.sees_session_row(&t.row).is_visible())
+    });
     // A session of the caller's org can carry another org's ticket (a
     // forced cross-org link): the session is the caller's, the ticket not.
     for c in &mut candidates {
@@ -211,18 +230,87 @@ pub fn work_tidy(store: &Mutex<Store>, scope: &OrgScope, now: i64) -> Result<Tid
 
 /// `work { action: reopened }`. A per-host token reads only work whose
 /// newest past session ran on its host and whose item its org sees.
+///
+/// Multi-user M1 (T8d): and the counts are one person's. The row that
+/// exempted this arm read "work-ITEM counts … and the host of the newest past
+/// session: the per-host count shape rule 6 allows", and it refuted itself in
+/// its own second clause — `last_host` is `snap_host` of ONE specific
+/// session (`store::work_tidy`'s `ORDER BY ended_at DESC … LIMIT 1`), not a
+/// count of anything, and rule 6's allowance is a per-host count of
+/// `unclaimed` rows while §4.3's positive list for a session private to
+/// somebody else is "nothing at all". `live_sessions` is worse than it looks:
+/// `Graph::build` fences that exact "someone is working on this" bit BY
+/// PERSON, deliberately and with a comment saying why, so leaving it open here
+/// would have the hub call one signal private in the Work view and public in
+/// Attention.
+///
+/// So all three session-derived fields are recomputed from the links whose
+/// session this caller may see ([`orgs::link_person_visible`]): the two counts
+/// over the visible links only, and `last_host` ONLY when the newest past link
+/// of all is itself visible — the host of "the newest one I am allowed to see"
+/// would still answer a question about the ones I am not. An item with no
+/// visible link left drops out entirely; the item's own fields (key, title,
+/// status, url) stay, because a tracker ticket is item data and not a session.
 pub fn reopened(
     store: &Mutex<Store>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<Vec<crate::store::ReopenedWork>, IpcError> {
-    let mut rows = lock(store)?.reopened_work()?;
+    let scope = &view.org;
+    let s = lock(store)?;
+    let mut rows = s.reopened_work()?;
     if let Some(h) = scope.host() {
         rows.retain(|r| r.last_host.as_deref() == Some(h) && scope.sees_org(r.org_id));
+    // This is the org boundary, not a privacy fence: a bound client reads its own orgs' reopened
+    // work. The three session-derived fields are recomputed below from the person-visible links
+    // only.
     } else if !scope.is_all() {
         // A bound client (M14): work of its orgs.
         rows.retain(|r| scope.sees_org(r.org_id));
     }
-    Ok(rows)
+    if view.is_internal() {
+        return Ok(rows);
+    }
+    let all = s.work_view_links()?;
+    let mut out = Vec::with_capacity(rows.len());
+    for mut r in rows {
+        let mut past = 0u32;
+        let mut live = 0u32;
+        // (ended_at, link id) of the newest past link, whether it is visible,
+        // and the host it recorded.
+        let mut newest: Option<((i64, i64), bool, Option<String>)> = None;
+        for l in all
+            .iter()
+            .filter(|l| l.link.item_id == Some(r.item_id) && l.link.state == "confirmed")
+        {
+            let visible = orgs::link_person_visible(&s, view, &l.link)?;
+            match l.link.ended_at {
+                Some(ended) => {
+                    if visible {
+                        past += 1;
+                    }
+                    let key = (ended, l.link.id);
+                    if newest.as_ref().is_none_or(|(k, _, _)| *k < key) {
+                        newest = Some((key, visible, l.link.snap_host.clone()));
+                    }
+                }
+                None => {
+                    if visible {
+                        live += 1;
+                    }
+                }
+            }
+        }
+        r.past_sessions = past;
+        r.live_sessions = live;
+        r.last_host = newest
+            .and_then(|(_, visible, host)| visible.then_some(host))
+            .flatten();
+        if past == 0 && live == 0 {
+            continue;
+        }
+        out.push(r);
+    }
+    Ok(out)
 }
 
 /// Record a tidy action on the session's timeline (`gc_tidied`) and in its
@@ -412,6 +500,17 @@ async fn apply_one(
         }
         "archive" => {
             // A per-host token stamps only the links it sees (work graph M5).
+            // This is the org boundary, not a privacy fence: which of the
+            // session's links an archive stamps, by org. The session itself
+            // came through `Reach::Drive`, per item — the tool layer's
+            // per-item gate reads `match item.action { "kill" | "safe_kill"
+            // => Reach::Own, _ => Reach::Drive }`, and `archive` is one of
+            // the UI-only bookkeeping actions in the `_` arm. (T9c's comment
+            // and table row both said `Reach::Own` here, which is the arm
+            // the two KILLS take; the person gate is applied either way, so
+            // this was a false piece of stated evidence rather than a leak —
+            // and "in words a reader can check" is worth nothing if the
+            // words are wrong. T9d.)
             let only = if scope.is_all() {
                 None
             } else {
@@ -430,6 +529,8 @@ async fn apply_one(
             lock(store)?.archive_session_links(s.row.id, only.as_deref())?;
             Ok("archived")
         }
+        // This is the org boundary, not a privacy fence: the same org question about the link a
+        // snooze or never flag goes to.
         "snooze" | "never" if !scope.is_all() && !link_visible(scope, s, item.link_id) => {
             Err(IpcError::new(
                 codes::E_NOTFOUND,
@@ -479,6 +580,20 @@ async fn apply_one(
     }
 }
 
+/// How many items one `tidy_apply` call may ASK about. The caller's own
+/// count, before any per-item gate thins it: the multi-user M1 gate drops
+/// the items it refuses (`work_link`'s handler), and a batch every item of
+/// which was refused is still a batch that was asked, not an empty one.
+pub fn check_apply_items(asked: usize) -> Result<(), IpcError> {
+    if asked == 0 || asked > APPLY_MAX_ITEMS {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("tidy_apply takes 1..={APPLY_MAX_ITEMS} items"),
+        ));
+    }
+    Ok(())
+}
+
 /// `work_link { action: tidy_apply, items }`: a batch. Every item is
 /// reported; one failing never stops the rest.
 pub async fn tidy_apply(
@@ -488,12 +603,7 @@ pub async fn tidy_apply(
     scope: &OrgScope,
     now: i64,
 ) -> Result<TidyApplyReport, IpcError> {
-    if items.is_empty() || items.len() > APPLY_MAX_ITEMS {
-        return Err(IpcError::new(
-            codes::E_INVALID,
-            format!("tidy_apply takes 1..={APPLY_MAX_ITEMS} items"),
-        ));
-    }
+    check_apply_items(items.len())?;
     let snap = Snapshot::take(store)?;
     let plan = snap.plan(now);
     let mut report = TidyApplyReport::default();

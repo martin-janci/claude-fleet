@@ -10,6 +10,7 @@ import type { AssetInventoryRow, CatalogSummary, SyncProgress } from './assets';
 import type { MoveProgress } from './moveProgress';
 import type { TrackerRow, WorkEvent, WorkItemRow } from './trackers';
 import { parseWorkChanged, type WorkChanged } from './work_view';
+import { parseGrantChanged, type GrantChanged } from './access';
 
 /**
  * How long a flush waits for more events after the first one arrives. Tauri
@@ -82,6 +83,15 @@ export type RowEventHandlers = {
   /** One call per flush with every `update:changed` (update design §11: ids
    *  only), in order: re-read `update_status`. */
   onUpdateChanged?: (changes: UpdateChanged[]) => void;
+  /**
+   * One call per flush with every well-formed `grant:changed` (multi-user M1:
+   * ids only), in order. A grant mutates no `sessions` column, so sharing and
+   * revoking emit NOTHING a row event could carry — this frame is how a
+   * client keeps its own grant set current (`access.ts::applyGrantChanges`)
+   * without re-fetching, and it is what makes a revoke close an attached
+   * terminal rather than waiting for a re-list.
+   */
+  onGrantChanged?: (changes: GrantChanged[]) => void;
 };
 
 /** The payload of `update:changed`: what moved, never the row itself. */
@@ -121,7 +131,8 @@ type Queued =
   | { name: 'work:tracker_removed'; payload: { id: number } }
   | { name: 'work:changed'; payload: unknown }
   | { name: 'settings:changed'; payload: { key: string } }
-  | { name: 'update:changed'; payload: UpdateChanged };
+  | { name: 'update:changed'; payload: UpdateChanged }
+  | { name: 'grant:changed'; payload: unknown };
 
 /**
  * Subscribe to every row-change event from the backend. Returns a single
@@ -162,6 +173,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     const workChanges: WorkChanged[] = [];
     const settingsKeys: string[] = [];
     const updateChanges: UpdateChanged[] = [];
+    const grantChanges: GrantChanged[] = [];
     for (const ev of batch) {
       switch (ev.name) {
         case 'session:created':
@@ -265,6 +277,11 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
           }
           break;
         }
+        case 'grant:changed': {
+          const g = parseGrantChanged(ev.payload);
+          if (g) grantChanges.push(g);
+          break;
+        }
       }
     }
     if (sessionEvents.length > 0) handlers.onSessionEvents?.(sessionEvents);
@@ -279,6 +296,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     if (workChanges.length > 0) handlers.onWorkChanged?.(workChanges);
     if (settingsKeys.length > 0) handlers.onSettingsChanged?.(settingsKeys);
     if (updateChanges.length > 0) handlers.onUpdateChanged?.(updateChanges);
+    if (grantChanges.length > 0) handlers.onGrantChanged?.(grantChanges);
   };
 
   const enqueue = (ev: Queued) => {
@@ -319,6 +337,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     workChanged: !!handlers.onWorkChanged,
     settingsChanged: !!handlers.onSettingsChanged,
     updateChanged: !!handlers.onUpdateChanged,
+    grantChanged: !!handlers.onGrantChanged,
   };
 
   const sub = <N extends Queued['name']>(
@@ -359,6 +378,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('work:changed', wanted.workChanged),
     sub('settings:changed', wanted.settingsChanged),
     sub('update:changed', wanted.updateChanged),
+    sub('grant:changed', wanted.grantChanged),
   ]);
   return () => {
     disposed = true;

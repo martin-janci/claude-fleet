@@ -38,7 +38,7 @@
 //!   `handover` is for.
 
 use crate::ipc_error::{codes, lock, IpcError};
-use crate::service::orgs::{self, OrgScope};
+use crate::service::orgs::{self};
 use crate::service::settings;
 use crate::ssh::SshExec;
 use crate::store::Store;
@@ -213,19 +213,62 @@ impl Drop for HostSlot {
     }
 }
 
-/// Everything the store says, under one short lock: the ended link, its
-/// host and last conversation, the fences.
-fn plan(s: &Store, key: &str, link_id: i64, scope: &OrgScope) -> Result<SummaryPlan, IpcError> {
+/// What an ended link says about the conversation a summary would read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PastConversation {
+    /// The key in its one spelling ([`crate::store::normalize_work_ref`]).
+    pub key: String,
+    pub host: String,
+    pub claude_session_id: String,
+}
+
+/// What a link this caller may not summarise answers, and the same thing a
+/// `link_id` naming no ended link answers: `E_NOTFOUND` on the LINK.
+///
+/// A function rather than a closure because the owner gate at the MCP layer
+/// (multi-user M1, T7) refuses with it too, and the two sentences must be
+/// one sentence — a link whose conversation belongs to another person has to
+/// read exactly like a link that does not exist.
+pub fn no_such_link(key: &str, link_id: i64) -> IpcError {
+    IpcError::new(
+        codes::E_NOTFOUND,
+        format!("{key} has no ended work link {link_id}"),
+    )
+}
+
+/// PURE of the network: the ended link's host and last conversation, under
+/// this scope's org and host fences.
+///
+/// The half of [`plan`] that runs before anything is spent, exposed because
+/// the owner gate needs the conversation id BEFORE the model call
+/// (multi-user M1, T7): `summarize` is addressed by a link, so choke point
+/// 2's session gate never sees it, and the person it must be checked against
+/// is the one T3's `conversation_owners` recorded. [`plan`] calls this, so
+/// there is exactly one place a link is resolved.
+pub fn planned_conversation(
+    s: &Store,
+    key: &str,
+    link_id: i64,
+    reader: &crate::service::view_scope::ViewScope,
+) -> Result<PastConversation, IpcError> {
+    let scope = &reader.org;
     orgs::require_key(s, scope, key)?;
     let key = crate::store::normalize_work_ref(key)?;
     let mut ended = s.ended_work_links_for_key(&key)?;
-    orgs::scope_links(s, scope, &mut ended)?;
-    let not_found = || {
-        IpcError::new(
-            codes::E_NOTFOUND,
-            format!("{key} has no ended work link {link_id}"),
-        )
-    };
+    // `scope_links_for`, the ONE ended-link predicate, not the org-only
+    // `scope_links` (multi-user M1, T9c). The DATA was always person-gated
+    // at the choke point above — `require_conversation_person` runs on the
+    // id this function returns — but the REFUSALS below are not data and
+    // they are a wire answer all the same: for another person's ended link
+    // this function used to reach "that past session recorded no host"
+    // (`E_INVALID`), "that session's transcripts were purged with its
+    // project" or "that past session recorded no conversation"
+    // (`E_NO_TRANSCRIPT`), where a link id naming nothing answers
+    // `no_such_link`'s `E_NOTFOUND`. That is a cross-person
+    // existence-and-resumability oracle, one call per id, and it breaks the
+    // doctrine stated on `no_such_link`: the two must be one sentence.
+    orgs::scope_links_for(s, reader, &mut ended)?;
+    let not_found = || no_such_link(&key, link_id);
     let link = ended
         .into_iter()
         .find(|l| l.id == link_id)
@@ -258,6 +301,26 @@ fn plan(s: &Store, key: &str, link_id: i64, scope: &OrgScope) -> Result<SummaryP
         )
     })?;
     crate::validate::claude_session_id(&claude_session_id)?;
+    Ok(PastConversation {
+        key,
+        host,
+        claude_session_id,
+    })
+}
+
+/// Everything the store says, under one short lock: the ended link, its
+/// host and last conversation, the fences.
+fn plan(
+    s: &Store,
+    key: &str,
+    link_id: i64,
+    reader: &crate::service::view_scope::ViewScope,
+) -> Result<SummaryPlan, IpcError> {
+    let PastConversation {
+        key,
+        host,
+        claude_session_id,
+    } = planned_conversation(s, key, link_id, reader)?;
     if s.session_with_claude_id(&host, &claude_session_id)?
         .is_some()
     {
@@ -285,11 +348,11 @@ pub async fn summarize(
     exec: &dyn SshExec,
     key: &str,
     link_id: i64,
-    scope: &OrgScope,
+    reader: &crate::service::view_scope::ViewScope,
 ) -> Result<SummaryOutcome, IpcError> {
     let p = {
         let s = lock(store)?;
-        plan(&s, key, link_id, scope)?
+        plan(&s, key, link_id, reader)?
     };
     let script = summary_script(p.stored_path.as_deref(), &p.claude_session_id, &p.model)
         .map_err(|e| IpcError::new(codes::E_INVALID, e))?;

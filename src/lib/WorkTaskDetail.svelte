@@ -20,6 +20,7 @@
   import { changedAny, describeEvidence, onWorkChangedDebounced, resumeWork } from './work';
   import { providerInfo, startWork, unavailableLabel } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
+  import { sessionIdBlocked } from './share';
   import { hubConnection } from './hub_connection';
   import WorkPlaceDialog from './WorkPlaceDialog.svelte';
   import WorkOrgDialog from './WorkOrgDialog.svelte';
@@ -154,6 +155,24 @@
   });
   const liveLink = $derived(grouped.active.find((l) => l.session_id != null && $sessions.some((r) => r.id === l.session_id)) ?? null);
   const lastPast = $derived(grouped.past.find((l) => l.resumable !== false) ?? null);
+  /**
+   * Continue is `resume_work { mode: 'last' }`: it re-opens the PAST session's
+   * Claude conversation in a new session of this person's — a take-over of
+   * somebody's transcript, which is why `share.ts` gives `resume_work` the
+   * `own` tier beside `rewind_conversation`.
+   *
+   * Multi-user M1 (F2c). It was gated on `hubActionBlocked('start_work', …)`
+   * alone, which answers only "is the link up": nothing asked WHOSE
+   * conversation this is. The question is about the SOURCE session, not the
+   * task and not the session the resume would create, so it is asked by that
+   * link's `session_id` — and `$sessionIdBlocked` fails closed when the row
+   * cannot be resolved, because on a fleet this client does not own, a row it
+   * cannot see is one it may not act on.
+   */
+  const continueShareBlocked = $derived($sessionIdBlocked(lastPast?.session_id ?? null, 'resume_work'));
+  /** The hub half first (it ROUTES), then the access half — the precedence
+   *  `share.ts` documents. */
+  const continueBlocked = $derived(startBlocked ?? continueShareBlocked);
   const ruleName = $derived(task?.group?.rule_id != null ? (rules.find((r) => r.id === task.group.rule_id)?.name ?? null) : null);
   const matchingRules = $derived((detail?.rules ?? []).map((id) => rules.find((r) => r.id === id)?.name ?? `rule ${id}`));
 
@@ -188,6 +207,12 @@
     const t = task;
     const l = lastPast;
     if (!t?.key || !l || acting) return;
+    // Re-asked at the write, not only on the button: the task panel stays open
+    // across a revoke, and `grant:changed` moves no field of this task.
+    if (continueBlocked !== null) {
+      actionError = continueBlocked;
+      return;
+    }
     acting = true;
     actionError = null;
     existingSession = null;
@@ -337,8 +362,8 @@
         class="btn"
         type="button"
         data-testid="work-task-continue"
-        disabled={!task.key || !lastPast || acting || startBlocked !== null}
-        title={startBlocked ?? (!task.key ? 'Only work with a key can be resumed' : lastPast ? `Resume the last conversation of ${lastPast.name ?? 'the last session'}` : 'No past session to continue')}
+        disabled={!task.key || !lastPast || acting || continueBlocked !== null}
+        title={continueBlocked ?? (!task.key ? 'Only work with a key can be resumed' : lastPast ? `Resume the last conversation of ${lastPast.name ?? 'the last session'}` : 'No past session to continue')}
         onclick={() => void continueWork()}>Continue</button
       >
       <button

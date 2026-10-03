@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
@@ -12,7 +12,11 @@ vi.mock('./sessions', async () => {
 });
 
 import ForkSheet, { NEW_WORKTREE_OLD_HUB } from './ForkSheet.svelte';
-import { rewindConversation } from './sessions';
+import { rewindConversation, sessions } from './sessions';
+import { session } from './hosts_fixture';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
+import { resetAccessForTests, setMyGrants } from './access';
 
 const mockedRewind = rewindConversation as unknown as ReturnType<typeof vi.fn>;
 
@@ -101,5 +105,91 @@ describe('ForkSheet', () => {
     await settle();
     expect(onclose).not.toHaveBeenCalled();
     expect(screen.getByText('session not found')).toBeTruthy();
+  });
+});
+
+// ── Multi-user M1 (F2a): this sheet IS the confirmation ─────────────────────
+//
+// `ReplyActions`' Fork button composes both halves, but there is no second
+// "are you sure?" on top of this sheet (spec §5.2), so a reason arriving while
+// it is open — a revoke, a narrowed grant — has to reach Fork itself.
+// `rewind_conversation` is `own` in `share.ts::SESSION_TIER`: a fork leaves a
+// permanent verbatim copy of the owner's transcript behind and creates a branch
+// and a worktree on the owner's host. The lookup is on the `sessionId` prop,
+// which is all this component is given.
+describe('ForkSheet access gate (multi-user M1)', () => {
+  const paired: HubStatus = {
+    ...STANDALONE,
+    remote: true,
+    url: 'https://fleet.example.com',
+    configured_url: 'https://fleet.example.com',
+  };
+  const row = (owner: number) =>
+    session('mefistos', 'dev-api', { id: 1, visibility: 'private', owner_person_id: owner });
+  const confirm = () => screen.getByTestId('fork-confirm') as HTMLButtonElement;
+  const props = { sessionId: 1, anchor: 'a1', suggestedName: 'f', onclose: () => {} };
+
+  beforeEach(() => {
+    mockedRewind.mockResolvedValue({ ok: true, value: { id: 2 } });
+    hubStatus.set(paired);
+    hubConnection.set({ state: 'connected' });
+    resetAccessForTests();
+  });
+
+  afterEach(() => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+    sessions.set([]);
+    resetAccessForTests();
+  });
+
+  it('the owner forks on a paired desktop (the positive control)', async () => {
+    sessions.set([row(7)]);
+    setMyGrants(7, []);
+    render(ForkSheet, { props });
+    await settle();
+    expect(confirm().disabled).toBe(false);
+    await fireEvent.click(confirm());
+    await settle();
+    expect(mockedRewind).toHaveBeenCalledTimes(1);
+  });
+
+  for (const level of ['watch', 'drive'] as const) {
+    it(`a ${level} grantee cannot fork — the copy outlives the grant`, async () => {
+      sessions.set([row(42)]);
+      setMyGrants(7, [{ session_id: 1, level }]);
+      render(ForkSheet, { props });
+      await settle();
+      expect(confirm().disabled).toBe(true);
+      expect(screen.getByText(/only the session’s owner/i)).toBeTruthy();
+      await fireEvent.click(confirm());
+      await settle();
+      expect(mockedRewind).not.toHaveBeenCalled();
+    });
+  }
+
+  it('a revoke arriving while the sheet is open reaches Fork', async () => {
+    sessions.set([row(7)]);
+    setMyGrants(7, []);
+    render(ForkSheet, { props });
+    await settle();
+    expect(confirm().disabled).toBe(false);
+    // The owner's row is reassigned (a move drops grants and re-owns the row):
+    // no grant frame, just the row's own column.
+    sessions.set([row(42)]);
+    await settle();
+    expect(confirm().disabled).toBe(true);
+    await fireEvent.click(confirm());
+    await settle();
+    expect(mockedRewind).not.toHaveBeenCalled();
+  });
+
+  it('standalone is untouched, even with no row for the id at all', async () => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+    sessions.set([]);
+    render(ForkSheet, { props });
+    await settle();
+    expect(confirm().disabled).toBe(false);
   });
 });

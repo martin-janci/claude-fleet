@@ -32,6 +32,8 @@ impl FleetTools {
             p.session_id,
             p.host_alias.as_deref(),
             p.name.as_deref(),
+            // `own`: it destroys the owner's work (spec §4.3, invariant 5).
+            Reach::Own,
             "the session to kill",
         )?;
         self.confirm_gate(
@@ -74,6 +76,9 @@ impl FleetTools {
             p.session_id,
             p.host_alias.as_deref(),
             p.tmux_name.as_deref(),
+            // `own`: `safe_kill_session` is a kill with a commit-and-push in
+            // front of it, and the spec's invariant names both.
+            Reach::Own,
             "the session to retire",
         )?;
         self.confirm_gate(
@@ -110,6 +115,9 @@ impl FleetTools {
             p.session_id,
             p.host_alias.as_deref(),
             p.old_name.as_deref(),
+            // `own`: the tmux name is the row's identity and the spec's
+            // invariant names `rename_session` — the label is content.
+            Reach::Own,
             "the session to rename",
         )?;
         let args = sessions::RenameSessionArgs {
@@ -143,6 +151,10 @@ impl FleetTools {
             p.session_id,
             p.host_alias.as_deref(),
             p.tmux_name.as_deref(),
+            // `drive`, NOT `own`: `friendly_name` is fleet's own metadata about
+            // the row, not the tmux name the `own` tier protects. The desktop's
+            // `SESSION_TIER` makes the same split for the same reason.
+            Reach::Drive,
             "the session to label",
         )?;
         let args = sessions::SetFriendlyNameArgs {
@@ -174,6 +186,9 @@ impl FleetTools {
             p.session_id,
             p.host_alias.as_deref(),
             p.name.as_deref(),
+            // `own`: it re-creates the session (spec §4.3, invariant 5). A
+            // `drive` grantee may make the machine work, not dispose of it.
+            Reach::Own,
             "the session to restart",
         )?;
         // The operator's restarts (a kill and a start) need a person (D12).
@@ -227,15 +242,24 @@ impl FleetTools {
         };
         // Fence the target the way every other session-addressed write does
         // (`restart_session` above, `move_session`, `spawn_review`): resolve
-        // the row through the store FIRST, so a per-host token cannot rewind
-        // another host's session, and apply D7's org boundary on top — a
-        // session the caller may not see answers as a missing one.
-        self.require_visible_session(&caller, p.session_id)?;
+        // the row through the store, so a per-host token cannot rewind
+        // another host's session, and apply the org boundary and the person
+        // gate on top — a session the caller may not see answers as a
+        // missing one.
+        //
+        // This was TWO gates until multi-user M1's T7: a
+        // `require_visible_session` call sat in front of the resolve,
+        // checking the org boundary for a scoped caller and nothing at all
+        // for anyone else. `resolve_target_row` now carries both, with the
+        // reach.
         let row = self.resolve_target_row(
             &caller,
             Some(p.session_id),
             None,
             None,
+            // `own`: fork, rewind and retry alike make a permanent verbatim
+            // copy of the transcript (spec §4.3, invariant 5).
+            Reach::Own,
             "the session to rewind",
         )?;
         // Both modes need a person when the operator asks (D12): rewind
@@ -290,6 +314,11 @@ impl FleetTools {
             Some(args.source_session_id),
             None,
             None,
+            // `own`: `spawn_review` creates a session in the owner's worktree on
+            // the owner's host, with a terminal (spec §4.3, invariant 5). The
+            // new session inherits the SOURCE's owner, never the caller's
+            // (invariant 6), which T5 wired.
+            Reach::Own,
             "the session to review",
         )?;
         self.confirm_gate(
@@ -395,6 +424,10 @@ impl FleetTools {
             p.session_id,
             p.host_alias.as_deref(),
             p.name.as_deref(),
+            // `drive`: it unregisters a worktree entry, re-paths a row and
+            // respawns a pane — writes to the machine, not a copy, a relocation
+            // or a destruction, so it is not in the spec's `own` list.
+            Reach::Drive,
             "the session to repair",
         )?;
         // Explicit repair can unregister a worktree entry, re-path a row and
@@ -468,6 +501,11 @@ impl FleetTools {
             Some(p.session_id),
             None,
             None,
+            // `own`: a move relocates the working tree, Claude directory and
+            // project memory onto a host the caller names, where they are the
+            // unix owner (spec §4.3, and the `move_session` section beneath it).
+            // The grants on the source row are dropped by the move itself.
+            Reach::Own,
             "the session to move",
         )?;
         require_move_hosts(&caller, &row.host_alias, &p.target_host_alias)?;
@@ -532,6 +570,10 @@ impl FleetTools {
             Some(p.session_id),
             None,
             None,
+            // `own`: `resolve_move` finishes or undoes a move by KILLING one of
+            // the two sessions. It is the move's second half, and cannot be
+            // narrower than the move.
+            Reach::Own,
             "the partial move to resolve",
         )?;
         self.confirm_gate(

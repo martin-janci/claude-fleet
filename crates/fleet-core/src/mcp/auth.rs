@@ -85,6 +85,18 @@ pub struct ClientRef {
     /// data ([`crate::service::orgs::OrgScope::Org`]). `None`: unbound, every
     /// org (the org is a view, as for the master).
     pub org_id: Option<i64>,
+    /// WHOSE device this is (multi-user M1, `client_tokens.person_id`): the
+    /// `people` row the operator paired it for (`fleet-hub pair --person`,
+    /// `fleet-hub client bind-person`). It decides which sessions this
+    /// connection may see at all, so it rides on the caller rather than
+    /// being looked up per tool, and a re-binding bumps the auth epoch
+    /// (migration 086) so the change holds from the device's next request.
+    ///
+    /// `None` is a device the migration's backfill did not reach and no
+    /// pairing has bound — unmintable since T2 (`pair_client` defaults to
+    /// the hub's personal owner) and treated as *nobody* everywhere, never
+    /// as *everybody*.
+    pub person_id: Option<i64>,
 }
 
 /// The authenticated identity behind a request, derived from the bearer
@@ -106,15 +118,61 @@ pub struct Caller {
     /// `set_secret` stay unreachable from a paired device.
     pub client: Option<ClientRef>,
     pub mode: TokenMode,
+    /// The tmux pane the caller is speaking from (`X-Fleet-Pane`, `%17`), as
+    /// [`crate::mcp::hooks::pane_header`] validated it — multi-user M1's pane
+    /// proof (plan revision 6, R6-i). It reaches the hub on the CONNECTION,
+    /// through the `claude-fleet` MCP entry's `"X-Fleet-Pane":
+    /// "${TMUX_PANE:-}"` header (`service::provision::merge_mcp_entry`), so
+    /// every tool can evaluate "the one row whose pane it can prove it is in"
+    /// rather than only the three that could have taken an argument.
+    ///
+    /// `None` for a caller that sends no header — a phone, a host
+    /// provisioned before M1, an agent outside tmux — which proves no pane
+    /// and is refused wherever the proof is what would have let it through.
+    ///
+    /// **It is a CLAIM, not an identity.** Any caller can put any well-formed
+    /// `%N` in that header — the provisioned MCP entry is where the honest
+    /// ones get it, not a channel only they have — so this field is worth
+    /// nothing until it is matched against a row fleet wrote itself
+    /// (`sessions.tmux_pane_id`), and it must never widen a caller's reach on
+    /// its own: it can only pick out, from what the caller may already see,
+    /// the one row whose pane it claims to be in. A claim that matches no row
+    /// is simply no proof. What a MATCHING claim is worth is in turn bounded
+    /// by the deployment: any process that can run `tmux list-panes` on the
+    /// host can enumerate every pane id there, so it proves host access, not
+    /// pane occupancy (see `docs/hub.md`).
+    pub pane: Option<String>,
+    /// Whether this caller is the hub's personal owner: the master token, or
+    /// a paired device whose [`ClientRef::person_id`] is
+    /// `Store::personal_owner_id()`.
+    ///
+    /// Answered ONCE, where the token is resolved and the store rows are
+    /// already in hand, because [`crate::mcp::guard::access_allows`] — the
+    /// gate that reads it — is shared with
+    /// `crate::mcp::tools::present::visible_to`, which takes a `&Caller` and
+    /// nothing else and runs over the whole router on every served list. A
+    /// store read there would be a lock per request (R6-l).
+    ///
+    /// `false` on a hub that cannot say who its owner is
+    /// (`personal_owner_id()` answered `None`): T1's fail-closed rule held
+    /// here, so the fleet's settings are refused rather than served to
+    /// whoever asked.
+    pub is_personal_owner: bool,
 }
 
 impl Caller {
-    /// The master-token caller: no host binding, no client, full mode.
+    /// The master-token caller: no host binding, no client, full mode — and
+    /// the hub's personal owner, which is what the master token IS on a hub
+    /// that knows whose it is. [`resolve_token`] clears that flag on a hub
+    /// whose `people` row is missing (T1's fail-closed rule), so this
+    /// constructor is the healthy shape rather than an assumption.
     pub fn master() -> Self {
         Caller {
             host_alias: None,
             client: None,
             mode: TokenMode::Full,
+            pane: None,
+            is_personal_owner: true,
         }
     }
 
@@ -131,13 +189,34 @@ impl Caller {
     }
 
     /// True for a person's own paired device: a paired client bound to no
-    /// org, and not a hub link. The fleet-wide settings tools
-    /// ([`crate::mcp::guard::Access::Person`]) answer it; a per-host token or
-    /// an org-bound client is never one.
+    /// org, and not a machine token. The fleet-wide settings tools
+    /// ([`crate::mcp::guard::Access::Person`] and
+    /// [`crate::mcp::guard::Access::PersonDevice`]) answer it; a per-host
+    /// token or an org-bound client is never one.
+    ///
+    /// The mode test is [`TokenMode::is_single_purpose`], which is exactly
+    /// this distinction and covers `Updater` as well as `Peer` — an updater
+    /// token is `fleet-updater` acting for this hub, not a human's phone, and
+    /// spelling out one of the two modes let it through every gate that keys
+    /// on a person's device. This predicate answers WHAT the caller is, never
+    /// WHOSE it is: a gate that means "the hub's owner's own device" reads
+    /// [`Caller::is_personal_owner`] alongside it.
     pub fn is_person_device(&self) -> bool {
         self.host_alias.is_none()
-            && self.mode != TokenMode::Peer
+            && !self.mode.is_single_purpose()
             && self.client.as_ref().is_some_and(|c| c.org_id.is_none())
+    }
+
+    /// WHO this caller is, as a `people` row id (multi-user M1): the person
+    /// whose device it is.
+    ///
+    /// `None` for the master token — whose person is the hub's personal
+    /// owner, a store read rather than something the connection carries; see
+    /// `crate::mcp::tools::fleet::owner_for`, which is the one place that
+    /// mapping is made — and `None` for a per-host token, which is an agent
+    /// on a machine and not a person at all.
+    pub fn person(&self) -> Option<i64> {
+        self.client.as_ref().and_then(|c| c.person_id)
     }
 
     /// True for the UX agent's operator session: the paired client token
@@ -199,9 +278,93 @@ impl Caller {
         }
     }
 
-    /// True when this caller reads through an org boundary: a per-host
-    /// token, or a paired client bound to an org (work graph M14). The
-    /// result gate redacts every answer such a caller receives.
+    /// The multi-user scope for this caller (M1, T6) — the ONE place a
+    /// caller becomes a [`ViewScope`], beside (never replacing)
+    /// [`Self::org_scope`], whose answer it wraps.
+    ///
+    /// | Caller | `person` | `host` | Sees |
+    /// |---|---|---|---|
+    /// | master | `Store::personal_owner_id()` | — | its own rows, its grants, its org rows — and a REFUSING scope when that answers `None` |
+    /// | client with a `person_id` | that person | — | as above |
+    /// | client with no `person_id` | `None` | — | a REFUSING scope |
+    /// | per-host token | `None` | `Some(alias)` | `unclaimed` rows on its own host, plus the one row this request's pane proves |
+    ///
+    /// Three things this function is careful about, each of them a hole if
+    /// written the obvious way:
+    ///
+    /// * **`person: None` refuses, it does not widen.** The master's person
+    ///   is a store read, not something the connection carries, and T1's
+    ///   rule is that a hub which cannot say whose it is serves nobody
+    ///   rather than everybody. A per-host token has no person at all — a
+    ///   machine is not a person — and reaches its rows through
+    ///   [`ViewScope::sees_session_row`]'s host clauses instead. The hub's
+    ///   own readers never come through here: they build
+    ///   [`ViewScope::internal`] directly, which is why "the hub does its
+    ///   work" and "a caller sees everything" are no longer one value.
+    /// * **The pane proof is resolved here, once per request**, and only
+    ///   for a per-host token: for anyone else it could only *add* a row to
+    ///   what they may already see, and `Caller::pane` is a claim any
+    ///   caller can write, never an identity. `find_session_by_pane`
+    ///   already filters on the host, excludes ghosts and answers `None` on
+    ///   an ambiguous pane, so nothing here has to re-derive that.
+    /// * **Everything is read off the handle the caller passes in.** A
+    ///   scope built through the read pool while the rows come from the
+    ///   writer races a grant created between the two — which is a revoked
+    ///   share still being served, or a fresh one not yet honoured.
+    ///
+    /// [`ViewScope`]: crate::service::view_scope::ViewScope
+    /// [`ViewScope::internal`]: crate::service::view_scope::ViewScope::internal
+    /// [`ViewScope::sees_session_row`]: crate::service::view_scope::ViewScope::sees_session_row
+    pub fn view_scope(
+        &self,
+        store: &crate::store::Store,
+    ) -> Result<crate::service::view_scope::ViewScope, crate::ipc_error::IpcError> {
+        use crate::service::view_scope::{GrantSet, ViewScope};
+        let org = self.org_scope(store)?;
+        let person = match (&self.host_alias, &self.client) {
+            // A machine's token speaks for a machine.
+            (Some(_), _) => None,
+            // Whose device this is; `None` on a device no pairing bound,
+            // which is a refusing scope and not a privileged one.
+            (None, Some(c)) => c.person_id,
+            // The master: the hub's personal owner, or nobody.
+            (None, None) => store.personal_owner_id()?,
+        };
+        let grants = match person {
+            Some(p) => GrantSet::from_map(store.grants_for_person(p)?),
+            None => GrantSet::default(),
+        };
+        let proven_session = match (&self.host_alias, &self.pane) {
+            (Some(alias), Some(pane)) => store.find_session_by_pane(alias, pane)?.map(|row| row.id),
+            _ => None,
+        };
+        // R5-d, and the rule that keeps a single-person install whole: the
+        // one live person on the hub still sees the `unclaimed` rows they
+        // could see yesterday. False for a person-less caller, so it can
+        // never widen one.
+        let sole_person =
+            matches!((person, store.sole_enabled_person()?), (Some(p), Some(o)) if p == o);
+        Ok(ViewScope::for_caller(
+            org,
+            person,
+            grants,
+            self.host_alias.clone(),
+            proven_session,
+            sole_person,
+        ))
+    }
+
+    /// True when this caller reads through an ORG boundary: a per-host
+    /// token, or a paired client bound to an org (work graph M14).
+    ///
+    /// It is NOT "is this caller restricted at all", and must never be used
+    /// as one: it is false for the master and for every paired client bound
+    /// to no org, both of which multi-user M1 restricts by PERSON. The
+    /// result gate used to hang off this predicate and therefore never ran
+    /// for a person's own phone (`tools/support.rs::fence_result_via`), and
+    /// `require_visible_session` / the old `resolve_reader` had the same
+    /// hole; a gate that means "restricted" reads
+    /// [`Caller::view_scope`] instead.
     pub fn is_scoped(&self) -> bool {
         self.host_alias.is_some() || self.client.as_ref().is_some_and(|c| c.org_id.is_some())
     }
@@ -257,15 +420,27 @@ pub fn bearer_token(header: Option<&HeaderValue>) -> Option<&str> {
 ///
 /// `client_tokens` must be the *live* rows — `Store::active_client_tokens`,
 /// which drops revoked ones — so a revoked pairing can never resolve.
+///
+/// `personal_owner` is `Store::personal_owner_id()` (multi-user M1), read
+/// beside the token rows and passed in rather than looked up here: this
+/// function has no store, and [`Caller::is_personal_owner`] must be answered
+/// exactly once per request, where the rows already are. `None` — a hub that
+/// cannot say whose it is — makes NOBODY the personal owner, the master
+/// included: fail closed, loudly, rather than treating an unknown owner as
+/// everybody.
 pub fn resolve_token(
     presented: &str,
     master: &str,
     host_tokens: &[HostTokenRow],
     client_tokens: &[ClientTokenRow],
+    personal_owner: Option<i64>,
 ) -> Option<Caller> {
     let mut found: Option<Caller> = None;
     if !master.is_empty() && constant_time_eq(presented.as_bytes(), master.as_bytes()) {
-        found = Some(Caller::master());
+        found = Some(Caller {
+            is_personal_owner: personal_owner.is_some(),
+            ..Caller::master()
+        });
     }
     for row in host_tokens {
         if !row.token.is_empty() && constant_time_eq(presented.as_bytes(), row.token.as_bytes()) {
@@ -273,6 +448,10 @@ pub fn resolve_token(
                 host_alias: Some(row.host_alias.clone()),
                 client: None,
                 mode: TokenMode::parse(&row.mode),
+                pane: None,
+                // A machine's token is never a person, so it is never the
+                // person who owns this hub.
+                is_personal_owner: false,
             });
         }
     }
@@ -290,12 +469,25 @@ pub fn resolve_token(
                     name: row.name.clone(),
                     trusted: row.trusted_at.is_some(),
                     org_id: row.org_id,
+                    person_id: row.person_id,
                 }),
                 mode: TokenMode::parse_client(&row.mode),
+                pane: None,
+                is_personal_owner: is_the_personal_owner(row.person_id, personal_owner),
             });
         }
     }
     found
+}
+
+/// Whether a paired device's `person_id` is the hub's personal owner.
+///
+/// Spelled out rather than written `person_id == personal_owner`, because two
+/// `None`s must NOT compare equal here: a device bound to nobody on a hub
+/// that knows nobody would otherwise resolve as the owner's own and reach the
+/// whole fleet's settings.
+fn is_the_personal_owner(person_id: Option<i64>, personal_owner: Option<i64>) -> bool {
+    matches!((person_id, personal_owner), (Some(p), Some(o)) if p == o)
 }
 
 /// True if `value` (a `Host`-header authority — `host` or `host:port`, IPv6
@@ -395,19 +587,28 @@ pub fn check_origin(headers: &HeaderMap, allowed: &[String]) -> Result<(), Statu
 /// Authorize an incoming request and identify its caller. `Err` carries the
 /// status to return: `403` for a cross-origin / DNS-rebinding attempt, `401`
 /// for a missing or unknown bearer token. `allowed` must already be normalized
-/// ([`normalize_allowed_hosts`]) — see [`check_origin`].
+/// ([`normalize_allowed_hosts`]) — see [`check_origin`]. `personal_owner` is
+/// the hub's `people` row id, read beside the token rows — see
+/// [`resolve_token`] for why it is an argument and not a lookup.
 pub fn check_request(
     headers: &HeaderMap,
     master_token: &str,
     host_tokens: &[HostTokenRow],
     client_tokens: &[ClientTokenRow],
     allowed: &[String],
+    personal_owner: Option<i64>,
 ) -> Result<Caller, StatusCode> {
     check_origin(headers, allowed)?;
     let presented =
         bearer_token(headers.get(header::AUTHORIZATION)).ok_or(StatusCode::UNAUTHORIZED)?;
-    resolve_token(presented, master_token, host_tokens, client_tokens)
-        .ok_or(StatusCode::UNAUTHORIZED)
+    resolve_token(
+        presented,
+        master_token,
+        host_tokens,
+        client_tokens,
+        personal_owner,
+    )
+    .ok_or(StatusCode::UNAUTHORIZED)
 }
 
 /// The `Peer` gate shared by `/events` and `/report`: neither route is
@@ -431,9 +632,52 @@ pub(crate) fn refuses_peer(caller: &Caller) -> Option<axum::response::Response> 
     Some((StatusCode::FORBIDDEN, body).into_response())
 }
 
+/// One PERSON's own device, as a [`ViewScope`] — a paired client bound to no
+/// org, which is the caller multi-user M1 exists to fence.
+///
+/// Test-only, and it lives here rather than in each test module because this
+/// file holds the ONE constructor from a request
+/// (`view_scope_tests::only_caller_view_scope_constructs_a_view_scope` keeps
+/// it that way): it builds a `Caller` and asks `Caller::view_scope`, so a
+/// service-layer test gets the real thing — grants read from the store,
+/// `sole_person` answered by the store — instead of a hand-built struct that
+/// could disagree with the resolver.
+#[cfg(test)]
+pub(crate) fn device_view(
+    store: &crate::store::Store,
+    person: i64,
+) -> crate::service::view_scope::ViewScope {
+    Caller {
+        host_alias: None,
+        client: Some(ClientRef {
+            id: 11,
+            name: "phone".into(),
+            trusted: false,
+            org_id: None,
+            person_id: Some(person),
+        }),
+        mode: TokenMode::Full,
+        pane: None,
+        is_personal_owner: false,
+    }
+    .view_scope(store)
+    .expect("the scope reads")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hub's personal owner as these tests see it (multi-user M1). Any
+    /// id would do: what every assertion turns on is whether a caller's
+    /// person IS this one, so one constant named once beats a literal
+    /// repeated at forty call sites.
+    const OWNER: Option<i64> = Some(1);
+
+    /// A hub that cannot say whose it is — `Store::personal_owner_id()`
+    /// answered `None`. Nobody is the personal owner then, the master
+    /// included (T1's fail-closed rule).
+    const NO_OWNER: Option<i64> = None;
 
     fn host_row(alias: &str, token: &str, mode: &str) -> HostTokenRow {
         HostTokenRow {
@@ -448,7 +692,7 @@ mod tests {
     fn a_trusted_row_resolves_to_a_trusted_client_ref() {
         let mut row = client_row(3, "mac-desktop", "tok", "full");
         row.trusted_at = Some(1_700_000_000);
-        let c = resolve_token("tok", "master", &[], &[row]).expect("resolves");
+        let c = resolve_token("tok", "master", &[], &[row], OWNER).expect("resolves");
         assert!(c.is_client() && !c.is_master());
         assert!(c.is_trusted_client());
         assert!(c.client.as_ref().unwrap().trusted);
@@ -457,6 +701,7 @@ mod tests {
             "master",
             &[],
             &[client_row(3, "phone", "tok", "full")],
+            OWNER,
         )
         .unwrap();
         assert!(!plain.is_trusted_client());
@@ -475,13 +720,14 @@ mod tests {
             trusted_at: None,
             org_id: None,
             assets_admin_at: None,
+            person_id: None,
         }
     }
 
     #[test]
     fn a_client_token_resolves_to_a_client_caller_that_is_not_master() {
         let rows = vec![client_row(7, "phone", "tok-phone", "full")];
-        let c = resolve_token("tok-phone", "s3cret", &[], &rows).unwrap();
+        let c = resolve_token("tok-phone", "s3cret", &[], &rows, OWNER).unwrap();
         assert!(!c.is_master(), "a client must never count as the master");
         assert!(c.is_client());
         assert_eq!(c.label(), "client:phone");
@@ -507,7 +753,7 @@ mod tests {
         ];
         let hosts = vec![host_row("mefistos", "tok-mef", "full")];
         let who = |tok: &str| {
-            resolve_token(tok, "s3cret", &hosts, &clients)
+            resolve_token(tok, "s3cret", &hosts, &clients, OWNER)
                 .unwrap()
                 .work_decider()
         };
@@ -521,10 +767,12 @@ mod tests {
     fn a_readonly_client_keeps_its_mode_and_an_unknown_token_resolves_to_nothing() {
         let rows = vec![client_row(1, "tablet", "tok-t", "readonly")];
         assert_eq!(
-            resolve_token("tok-t", "s3cret", &[], &rows).unwrap().mode,
+            resolve_token("tok-t", "s3cret", &[], &rows, OWNER)
+                .unwrap()
+                .mode,
             TokenMode::Readonly
         );
-        assert!(resolve_token("nope", "s3cret", &[], &rows).is_none());
+        assert!(resolve_token("nope", "s3cret", &[], &rows, OWNER).is_none());
     }
 
     #[test]
@@ -532,10 +780,10 @@ mod tests {
         let clients = vec![client_row(1, "phone", "tok-phone", "full")];
         let hosts = vec![host_row("mefistos", "tok-mef", "full")];
         assert_eq!(
-            resolve_token("s3cret", "s3cret", &hosts, &clients).unwrap(),
+            resolve_token("s3cret", "s3cret", &hosts, &clients, OWNER).unwrap(),
             Caller::master()
         );
-        let h = resolve_token("tok-mef", "s3cret", &hosts, &clients).unwrap();
+        let h = resolve_token("tok-mef", "s3cret", &hosts, &clients, OWNER).unwrap();
         assert_eq!(h.host_alias.as_deref(), Some("mefistos"));
         assert!(!h.is_client());
     }
@@ -556,7 +804,7 @@ mod tests {
             ("host", "127.0.0.1:4180"),
             ("authorization", "Bearer tok-phone"),
         ]);
-        let c = check_request(&h, "s3cret", &[], &clients, &[]).unwrap();
+        let c = check_request(&h, "s3cret", &[], &clients, &[], OWNER).unwrap();
         assert!(!c.is_master());
         assert!(c.is_client());
         assert_eq!(c.label(), "client:phone");
@@ -593,36 +841,43 @@ mod tests {
             host_row("weird", "tok-weird", "not-a-mode"),
         ];
         assert_eq!(
-            resolve_token("master-tok", "master-tok", &hosts, &[]),
+            resolve_token("master-tok", "master-tok", &hosts, &[], OWNER),
             Some(Caller::master())
         );
         assert_eq!(
-            resolve_token("tok-mef", "master-tok", &hosts, &[]),
+            resolve_token("tok-mef", "master-tok", &hosts, &[], OWNER),
             Some(Caller {
                 host_alias: Some("mefistos".into()),
                 client: None,
-                mode: TokenMode::Full
+                mode: TokenMode::Full,
+                pane: None,
+                is_personal_owner: false,
             })
         );
         assert_eq!(
-            resolve_token("tok-tur", "master-tok", &hosts, &[]),
+            resolve_token("tok-tur", "master-tok", &hosts, &[], OWNER),
             Some(Caller {
                 host_alias: Some("turanga".into()),
                 client: None,
-                mode: TokenMode::Readonly
+                mode: TokenMode::Readonly,
+                pane: None,
+                is_personal_owner: false,
             })
         );
         // Unknown mode strings fail closed to readonly.
         assert_eq!(
-            resolve_token("tok-weird", "master-tok", &hosts, &[])
+            resolve_token("tok-weird", "master-tok", &hosts, &[], OWNER)
                 .unwrap()
                 .mode,
             TokenMode::Readonly
         );
-        assert_eq!(resolve_token("nope", "master-tok", &hosts, &[]), None);
+        assert_eq!(
+            resolve_token("nope", "master-tok", &hosts, &[], OWNER),
+            None
+        );
         // An empty configured token never matches an empty presented one.
         assert_eq!(
-            resolve_token("", "", &[host_row("h", "", "full")], &[]),
+            resolve_token("", "", &[host_row("h", "", "full")], &[], OWNER),
             None
         );
         // …nor an empty hash on a client row.
@@ -642,7 +897,9 @@ mod tests {
                     trusted_at: None,
                     org_id: None,
                     assets_admin_at: None,
-                }]
+                    person_id: None,
+                }],
+                OWNER,
             ),
             None
         );
@@ -669,14 +926,14 @@ mod tests {
         // not `parse_client`.
         let hosts = [host_row("hub-a", "tok-hub", "peer")];
         assert_eq!(
-            resolve_token("tok-hub", "master-tok", &hosts, &[])
+            resolve_token("tok-hub", "master-tok", &hosts, &[], OWNER)
                 .unwrap()
                 .mode,
             TokenMode::Readonly
         );
         // A client row with mode "peer" resolves to `TokenMode::Peer`.
         let clients = vec![client_row(9, "hub-b", "tok-client", "peer")];
-        let c = resolve_token("tok-client", "master-tok", &[], &clients).unwrap();
+        let c = resolve_token("tok-client", "master-tok", &[], &clients, OWNER).unwrap();
         assert_eq!(c.mode, TokenMode::Peer);
         assert!(c.is_client());
         assert!(!c.is_master());
@@ -691,6 +948,8 @@ mod tests {
             host_alias: Some("mefistos".into()),
             client: None,
             mode: TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
         };
         assert!(!c.is_master());
         assert!(!c.is_client());
@@ -772,7 +1031,7 @@ mod tests {
             ("authorization", "Bearer s3cret"),
         ]);
         assert_eq!(
-            check_request(&h, "s3cret", &[], &[], &[]),
+            check_request(&h, "s3cret", &[], &[], &[], OWNER),
             Ok(Caller::master())
         );
     }
@@ -786,6 +1045,7 @@ mod tests {
             &[host_row("mefistos", "tok-mef", "readonly")],
             &[],
             &[],
+            OWNER,
         )
         .unwrap();
         assert_eq!(caller.host_alias.as_deref(), Some("mefistos"));
@@ -796,19 +1056,19 @@ mod tests {
     fn check_request_allows_non_browser_client_without_origin() {
         // A CLI MCP client sends no Origin — only the token gates it.
         let h = headers(&[("authorization", "Bearer s3cret")]);
-        assert!(check_request(&h, "s3cret", &[], &[], &[]).is_ok());
+        assert!(check_request(&h, "s3cret", &[], &[], &[], OWNER).is_ok());
     }
 
     #[test]
     fn check_request_rejects_wrong_token_with_401() {
         let h = headers(&[("host", "127.0.0.1:4180"), ("authorization", "Bearer nope")]);
         assert_eq!(
-            check_request(&h, "s3cret", &[], &[], &[]),
+            check_request(&h, "s3cret", &[], &[], &[], OWNER),
             Err(StatusCode::UNAUTHORIZED)
         );
         let none = headers(&[("host", "127.0.0.1:4180")]);
         assert_eq!(
-            check_request(&none, "s3cret", &[], &[], &[]),
+            check_request(&none, "s3cret", &[], &[], &[], OWNER),
             Err(StatusCode::UNAUTHORIZED)
         );
     }
@@ -822,7 +1082,7 @@ mod tests {
             ("authorization", "Bearer s3cret"),
         ]);
         assert_eq!(
-            check_request(&h, "s3cret", &[], &[], &[]),
+            check_request(&h, "s3cret", &[], &[], &[], OWNER),
             Err(StatusCode::FORBIDDEN)
         );
         assert_eq!(check_origin(&h, &[]), Err(StatusCode::FORBIDDEN));
@@ -833,7 +1093,7 @@ mod tests {
         // Host header carrying the attacker's domain (rebound to 127.0.0.1).
         let h = headers(&[("host", "evil.com"), ("authorization", "Bearer s3cret")]);
         assert_eq!(
-            check_request(&h, "s3cret", &[], &[], &[]),
+            check_request(&h, "s3cret", &[], &[], &[], OWNER),
             Err(StatusCode::FORBIDDEN)
         );
     }
@@ -857,7 +1117,8 @@ mod tests {
             "s3cret",
             &[],
             &[],
-            &allowed
+            &allowed,
+            OWNER,
         )
         .is_ok());
         assert!(check_request(
@@ -865,7 +1126,8 @@ mod tests {
             "s3cret",
             &[],
             &[],
-            &allowed
+            &allowed,
+            OWNER,
         )
         .is_ok());
         assert!(check_request(
@@ -873,7 +1135,8 @@ mod tests {
             "s3cret",
             &[],
             &[],
-            &allowed
+            &allowed,
+            OWNER,
         )
         .is_ok());
         // Loopback keeps working with a non-empty list.
@@ -882,7 +1145,8 @@ mod tests {
             "s3cret",
             &[],
             &[],
-            &allowed
+            &allowed,
+            OWNER,
         )
         .is_ok());
         // Not listed → 403 before the token is looked at.
@@ -892,7 +1156,8 @@ mod tests {
                 "s3cret",
                 &[],
                 &[],
-                &allowed
+                &allowed,
+                OWNER,
             ),
             Err(StatusCode::FORBIDDEN)
         );
@@ -902,7 +1167,8 @@ mod tests {
                 "s3cret",
                 &[],
                 &[],
-                &allowed
+                &allowed,
+                OWNER,
             ),
             Err(StatusCode::FORBIDDEN)
         );
@@ -913,7 +1179,8 @@ mod tests {
                 "s3cret",
                 &[],
                 &[],
-                &[]
+                &[],
+                OWNER,
             ),
             Err(StatusCode::FORBIDDEN)
         );
@@ -923,5 +1190,101 @@ mod tests {
     fn normalize_allowed_hosts_trims_lowercases_and_drops_empties() {
         let out = normalize_allowed_hosts(&[" A.Example.com ".into(), "".into(), "b:8443".into()]);
         assert_eq!(out, vec!["a.example.com".to_string(), "b:8443".to_string()]);
+    }
+
+    /// Multi-user M1: the device a request came in on says WHOSE it is, and
+    /// two devices paired for the same person resolve to the same id — that
+    /// is the whole of "two phones are one colleague".
+    #[test]
+    fn a_clients_person_travels_on_the_caller_and_two_devices_share_one() {
+        let mut phone = client_row(1, "phone", "tok-phone", "full");
+        let mut laptop = client_row(2, "laptop", "tok-laptop", "full");
+        phone.person_id = Some(9);
+        laptop.person_id = Some(9);
+        let rows = vec![phone, laptop];
+        let who = |tok: &str| {
+            resolve_token(tok, "master-tok", &[], &rows, OWNER)
+                .expect("resolves")
+                .person()
+        };
+        assert_eq!(who("tok-phone"), Some(9));
+        assert_eq!(who("tok-laptop"), Some(9));
+        // A revoked token never reaches `resolve_token` at all — the caller
+        // passes `active_client_tokens` — so nothing resolves for it.
+        assert!(resolve_token("tok-gone", "master-tok", &[], &rows, OWNER).is_none());
+        // Neither the master nor a per-host token carries a person: the
+        // master's is the hub's personal owner, a store read
+        // (`mcp::tools::fleet::owner_for`), and a host's token is an agent.
+        assert_eq!(
+            resolve_token("master-tok", "master-tok", &[], &rows, OWNER)
+                .unwrap()
+                .person(),
+            None
+        );
+        let hosts = [host_row("mefistos", "tok-mef", "full")];
+        assert_eq!(
+            resolve_token("tok-mef", "master-tok", &hosts, &rows, OWNER)
+                .unwrap()
+                .person(),
+            None
+        );
+    }
+
+    /// T2a's boolean, answered where the token is resolved: the master and
+    /// the owner's own device are the personal owner; a SECOND person's
+    /// device, a person-less device and a per-host token are not. The gate
+    /// (`guard::access_allows`) reads only this, so it takes no store lock.
+    #[test]
+    fn only_the_master_and_the_owners_own_device_are_the_personal_owner() {
+        let mut mine = client_row(1, "laptop", "tok-mine", "full");
+        mine.person_id = Some(1);
+        let mut theirs = client_row(2, "their-phone", "tok-theirs", "full");
+        theirs.person_id = Some(2);
+        let orphan = client_row(3, "orphan", "tok-orphan", "full");
+        let rows = vec![mine, theirs, orphan];
+        let hosts = [host_row("mefistos", "tok-mef", "full")];
+        let owns = |tok: &str| {
+            resolve_token(tok, "master-tok", &hosts, &rows, OWNER)
+                .expect("resolves")
+                .is_personal_owner
+        };
+        assert!(owns("master-tok"), "the master is the fleet's owner");
+        assert!(owns("tok-mine"), "the owner's own paired device");
+        assert!(!owns("tok-theirs"), "a second person's device is not");
+        assert!(
+            !owns("tok-orphan"),
+            "a device bound to nobody is nobody, never everybody"
+        );
+        assert!(!owns("tok-mef"), "a machine's token is not a person");
+
+        // A hub that cannot say whose it is: nobody is the owner, the master
+        // included. Two `None`s must not compare equal — the orphan device
+        // is the case that would otherwise walk straight in.
+        let nobody = |tok: &str| {
+            resolve_token(tok, "master-tok", &hosts, &rows, NO_OWNER)
+                .expect("resolves")
+                .is_personal_owner
+        };
+        assert!(!nobody("master-tok"));
+        assert!(!nobody("tok-mine"));
+        assert!(!nobody("tok-orphan"));
+    }
+
+    /// The pane proof rides on the connection (R6-i), so a freshly resolved
+    /// caller carries none: `mcp::authorize` stamps it from `X-Fleet-Pane`
+    /// after the token has resolved. Nothing in T2 reads it.
+    #[test]
+    fn a_resolved_caller_carries_no_pane_until_authorize_stamps_one() {
+        let rows = vec![client_row(1, "phone", "tok-phone", "full")];
+        let hosts = [host_row("mefistos", "tok-mef", "full")];
+        for tok in ["master-tok", "tok-phone", "tok-mef"] {
+            assert_eq!(
+                resolve_token(tok, "master-tok", &hosts, &rows, OWNER)
+                    .unwrap()
+                    .pane,
+                None,
+                "{tok}"
+            );
+        }
     }
 }

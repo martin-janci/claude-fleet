@@ -35,6 +35,23 @@ export interface HostRow {
   provisioned_at?: number | null;
   /** Provisioned, but with content older than this build ships (or unknown). */
   provision_stale?: boolean;
+  /**
+   * How many sessions on this host nobody has claimed (multi-user M1).
+   *
+   * An `unclaimed` session is one fleet did not start — a tmux session the
+   * reconcile pass found — and spec §4.3 says the only thing an out-of-scope
+   * caller may learn about one is a **count**. So this is the count, and there
+   * are deliberately no rows behind it anywhere: rendering them would be the
+   * metadata leak the number exists to avoid (rule 6).
+   *
+   * **Frequently absent, and `null` is not zero** (R5-d): on a hub with more
+   * than one person the backend serves `null` rather than a number, because a
+   * zero is itself a claim about the host that would let a second person infer
+   * one. A surface must render nothing at all for `null` — not `0`, not a dash
+   * — and `fleet-hub session unclaimed` is then the only way a human sees the
+   * counts. Absent, too, from a hub older than M1.
+   */
+  unclaimed_sessions?: number | null;
 }
 
 /** The volatile half of a host row, as `host:pinged` carries it. */

@@ -11,7 +11,10 @@
 //!   when its org is the host's or unassigned; a host with no org sees
 //!   unassigned work only ([`OrgScope::sees_org`]);
 //! * sessions are fenced too, but only between orgs that turned
-//!   `isolate_sessions` on (decision D7, default off) — [`OrgScope::sees_session`].
+//!   `isolate_sessions` on (decision D7, default off) —
+//!   [`OrgScope::sees_session_org_only`]. Since multi-user M1 that is only
+//!   the ORG half of a session read; the person half lives in
+//!   [`crate::service::view_scope::ViewScope`], which wraps this type.
 //!
 //! The scope is computed in exactly one place, `Caller::org_scope` (MCP), and
 //! is `All` for every Tauri command (the desktop is the master; a paired
@@ -65,6 +68,16 @@ pub enum OrgScope {
         /// The host's org; `None` sees unassigned data only.
         org: Option<i64>,
         /// Orgs with `isolate_sessions` on (D7).
+        ///
+        /// **No longer consulted for session visibility** (multi-user M1,
+        /// plan T6): [`OrgScope::sees_session_org_only`]'s host arm is now
+        /// "its own host's rows, and nothing else", which hides strictly
+        /// more than D7 ever did for a per-host token — every other host's
+        /// rows, isolating org or not. The set is still read with the scope
+        /// (and still administered through `work_admin`) because it is the
+        /// recorded intent of an org, and M2's memberships are where a
+        /// reader for it comes back; nothing in M1 may widen a caller on
+        /// the strength of it.
         isolated: BTreeSet<i64>,
     },
 }
@@ -90,12 +103,22 @@ impl OrgScope {
     }
 
     pub fn is_all(&self) -> bool {
+        // This is the org boundary, not a privacy fence — and this is where
+        // the whole class comes from: `All` is "no ORG fence", which is NOT
+        // "no fence". The master, a person's own device and a paired client
+        // bound to no org all resolve to it, so a privacy question asked of
+        // this predicate is asked of nobody. The person half is
+        // `ViewScope`, and `scope_guard_tests` classifies every caller that
+        // reads this one.
         matches!(self, OrgScope::All)
     }
 
     /// The host a per-host token is bound to.
     pub fn host(&self) -> Option<&str> {
         match self {
+            // This is the org boundary, not a privacy fence: it reports the
+            // scope's own HOST BINDING, which only a per-host token has. An
+            // accessor, not a decision about anybody's data.
             OrgScope::All | OrgScope::Org { .. } => None,
             OrgScope::Host { alias, .. } => Some(alias),
         }
@@ -114,6 +137,10 @@ impl OrgScope {
     /// unassigned data while its org's `bound_sees_unassigned` is on (D31).
     pub fn sees_org(&self, org: Option<i64>) -> bool {
         match self {
+            // This is the org boundary, not a privacy fence: it is the org
+            // boundary itself, asked of an ORG id and nothing else. Every
+            // session answer that composes it also takes the person half
+            // (`ViewScope::sees_session_row`).
             OrgScope::All => true,
             OrgScope::Host { org: mine, .. } => org.is_none() || org == *mine,
             OrgScope::Org {
@@ -131,33 +158,54 @@ impl OrgScope {
         self.sees_org(l.org_id)
     }
 
-    /// Session isolation (D7). A host always sees its own host's sessions
-    /// and unassigned ones; another org's session is hidden when either org
-    /// isolates sessions.
-    pub fn sees_session(&self, row_host: &str, row_org: Option<i64>) -> bool {
+    /// The ORG half of "may this caller see that session" — and, since
+    /// multi-user M1, only the org half. The person half is
+    /// [`crate::service::view_scope::ViewScope::sees_session_row`], which
+    /// composes this with ownership, grants and the pane proof; the name
+    /// says `_org_only` so that no call site can go on believing this one
+    /// answers the whole question (plan T6; T10 removes it outright).
+    ///
+    /// * `All`: everything, as before.
+    /// * `Org` (a bound client, M14): strict — another org's session never
+    ///   reaches it, isolated or not; an unassigned one only under D31.
+    /// * `Host` (a per-host token): **its own host's rows, and nothing
+    ///   else.**
+    ///
+    /// The host arm was re-derived rather than trimmed clause by clause.
+    /// It used to read `row_host == alias || row_org.is_none() || row_org ==
+    /// *org`, with a permissive `!(theirs || mine)` fall-through under it —
+    /// three unconditional wins, the widest of which let a host token in
+    /// org X read every session of org X on **every** host in the fleet.
+    /// Deleting one or two of them would have left the arm closer to `All`
+    /// than to the rule a host token is supposed to have, so the rule is
+    /// written out instead: a machine's token speaks for that machine.
+    ///
+    /// D7 (`isolate_sessions`) is subsumed rather than dropped: its whole
+    /// effect for a host token was to hide OTHER hosts' rows, and those are
+    /// now hidden unconditionally. The flag still fences a stream
+    /// (`mcp/events_route.rs`) and still means what it meant for everyone
+    /// else.
+    pub fn sees_session_org_only(&self, row_host: &str, row_org: Option<i64>) -> bool {
         match self {
+            // This is the org boundary, not a privacy fence, and the `_org_only`
+            // in the name is the whole contract: this answers "may this
+            // caller read this company's rows", and the PERSON half is
+            // `ViewScope::sees_session_row` / `sees_session_facts`, which
+            // every caller-facing path applies next to it. Called straight
+            // only where there is no person to ask about.
             OrgScope::All => true,
-            // Strict for a bound client: another org's session never reaches
-            // it, isolated or not (M14); an unassigned one only under D31.
             OrgScope::Org { .. } => self.sees_org(row_org),
-            OrgScope::Host {
-                alias,
-                org,
-                isolated,
-            } => {
-                if row_host == alias || row_org.is_none() || row_org == *org {
-                    return true;
-                }
-                let theirs = row_org.is_some_and(|o| isolated.contains(&o));
-                let mine = org.is_some_and(|o| isolated.contains(&o));
-                !(theirs || mine)
-            }
+            OrgScope::Host { alias, .. } => row_host == alias,
         }
     }
 
-    /// [`Self::sees_session`] over a row.
-    pub fn sees_row(&self, row: &SessionRow) -> bool {
-        self.sees_session(&row.host_alias, row.org_id)
+    /// [`Self::sees_session_org_only`] over a row — the same half-answer in
+    /// the shape most call sites have. The person half is
+    /// [`crate::service::view_scope::ViewScope::sees_session_row`], and every
+    /// production CALLER of this is a row in `scope_guard_tests`'
+    /// `ORG_HALF_SITES`, which names where that half runs for each one.
+    pub fn sees_row_org_only(&self, row: &SessionRow) -> bool {
+        self.sees_session_org_only(&row.host_alias, row.org_id)
     }
 
     /// Take out of a session row the work data this scope may not read: all
@@ -166,7 +214,9 @@ impl OrgScope {
     /// with no org of their own, which only the sidebar's fallback
     /// recognition reads — and `work_rev` (a digest over every link) never
     /// reach a scoped caller.
-    pub fn redact_row(&self, row: &mut SessionRow) {
+    pub fn redact_row_org_only(&self, row: &mut SessionRow) {
+        // This is the org boundary, not a privacy fence: this function answers half the
+        // question, and its name says which half.
         if self.is_all() {
             return;
         }
@@ -191,7 +241,7 @@ impl OrgScope {
         }
     }
 
-    /// [`Self::redact_row`] over serialised output: every JSON object that
+    /// [`Self::redact_row_org_only`] over serialised output: every JSON object that
     /// is a session row (it has `tmux_name` and a work field) anywhere in
     /// `v`. `session_org` answers a row object's org — the MCP gate looks it
     /// up by `id` (a projection may have dropped `org_id`); an event frame
@@ -201,6 +251,8 @@ impl OrgScope {
         v: &mut serde_json::Value,
         session_org: &dyn Fn(&serde_json::Map<String, serde_json::Value>) -> Option<i64>,
     ) {
+        // This is the org boundary, not a privacy fence: as for `redact_row_org_only` above: the
+        // org half, by name.
         if self.is_all() {
             return;
         }
@@ -318,6 +370,14 @@ pub fn scope_links(
 ) -> Result<(), IpcError> {
     s.fill_link_orgs(links)?;
     match scope {
+        // This is the org boundary, not a privacy fence: `scope_links` is
+        // the ORG-only link pager, as its callers' own names say. The person
+        // half is `scope_links_for`, which composes this with
+        // `link_person_visible` — and the classified `link_session_visible`
+        // guard below is this function's child. Written as
+        // `if scope.is_all() { return Ok(()); }` it would have needed a row
+        // from the first round; it was spelled as a match arm, which is why
+        // the scan now reads the discriminant too (T9d).
         OrgScope::All => {}
         OrgScope::Host { alias, .. } => links.retain(|l| {
             scope.sees_link(l) && (l.ended_at.is_none() || l.snap_host.as_deref() == Some(alias))
@@ -335,6 +395,195 @@ pub fn scope_links(
     Ok(())
 }
 
+/// May `view`'s PERSON see the session behind link `l` (multi-user M1, T8d)?
+///
+/// The person half of [`link_session_visible`], and a separate function for
+/// the reason the whole of `ViewScope` is a separate type: the org half's
+/// first line is `scope.is_all()`, which is TRUE for the master AND for every
+/// paired client bound to no org — i.e. for every ordinary person's own phone
+/// or laptop, the caller M1 exists to fence. A `work { links }` page was
+/// filtered by the org half alone and therefore by nothing at all for such a
+/// caller, which handed a second person's readonly device `snap_tmux`,
+/// `snap_name`, `snap_branch`, `snap_worktree`, `snap_pr_url` and
+/// `snap_claude_ids` for every recently ended link on the hub.
+///
+/// Three arms, in this order, and they are the three
+/// [`ViewScope::sees_past_conversation`] asks, for the same reason — two
+/// mechanisms answering one question must not disagree:
+///
+/// 1. **A live participant decides**, through
+///    [`ViewScope::sees_session_row`]. This covers a live link and a link
+///    that ended on a session still running, the two cases where there is a
+///    row to judge. A participant naming a row that is GONE is refused
+///    rather than falling through to the snapshot arm: the snapshot is what
+///    the fence exists to withhold, so it must never stand in for the row
+///    (the same discipline `Graph::link_visible` applies to
+///    `hidden_sessions`).
+/// 2. **Else the conversations the link ran in decide.** An ended link whose
+///    session was reaped is all snapshot, and the only durable handle on
+///    whose work it was is `conversation_owners`, keyed by the conversation
+///    ids the link itself recorded (`claude_session_id` and the
+///    `snap_claude_ids` array). EVERY recorded id must be this caller's — a
+///    link that ran two conversations, one of them somebody else's, is
+///    somebody else's work.
+/// 3. **Else nothing is recorded at all**: no live participant and not one
+///    conversation id. There is no record to judge, and the answer is rule
+///    7's and nothing wider (multi-user M1, T9c) —
+///    [`ViewScope::is_sole_person`] or a per-host token passes, every other
+///    caller is refused.
+///
+///    It used to pass for everybody, on the reading that such a link can
+///    only be a pre-M1 one whose row was reaped long ago. That reading was
+///    wrong, and the loop below is why: with `session_id == None` and no
+///    conversation id the `for` body never runs, so the function fell
+///    through to `Ok(true)` — fail-OPEN, for the one shape it has nothing to
+///    judge. The shape is reachable on a fleet running M1 today: migration
+///    046's retire trigger fills `snap_claude_ids` only
+///    `HAVING COUNT(*) > 0`, and `work_links.claude_session_id` is NULL both
+///    for a session that never had one (a `new_shell_session` row, a Claude
+///    session reaped before its first SessionStart hook) and for
+///    `Store::link_session_work_at`'s insert, which never sets the column.
+///    So an ordinary private session, linked to work and then reaped, handed
+///    every person in the org its `snap_host` / `snap_tmux` / `snap_name` /
+///    `snap_branch` / `snap_pr_url` through `work { links }`, `today`,
+///    `tree` and `resume_plan`.
+///
+///    Rule 7 is kept where it is actually about rule 7:
+///    [`ViewScope::is_sole_person`] is the predicate M1 already uses for
+///    "this install cannot tell two people apart, so nothing may narrow for
+///    it", and it is false for a person-less caller and false the moment a
+///    second person exists. A per-host token passes for the other reason —
+///    §4.4 gives it a HOST's reach and no person dimension at all, and the
+///    org/host fence it does answer to ([`scope_links`], M2's own-host
+///    clause for an ended link) has already run.
+///
+/// A failed read is never a pass: the error propagates.
+///
+/// [`ViewScope::sees_past_conversation`]: crate::service::view_scope::ViewScope::sees_past_conversation
+/// [`ViewScope::sees_session_row`]: crate::service::view_scope::ViewScope::sees_session_row
+pub fn link_person_visible(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    l: &WorkLinkRow,
+) -> Result<bool, IpcError> {
+    link_person_visible_at(s, view, l, s.link_session_id(l)?)
+}
+
+/// **[`link_person_visible`] with the link's live session already resolved —
+/// the ONE body of the rule, and the entry point every page-shaped reader
+/// takes** (multi-user M1, T9b).
+///
+/// `session_id` is the link's LIVE participant's session, i.e. exactly what
+/// [`crate::store::Store::link_session_id`] answers and exactly what
+/// `ViewLink.session_id` already holds (both are
+/// `participants … AND retired_at IS NULL`). Taking it as an argument is the
+/// point: the Work view's `Graph` has it in hand already, and before this
+/// existed it wrote its own half of the rule — one that tested a LIVE id and
+/// fell through to the snapshot for everything else, so every link of a
+/// reaped session (`session_id IS NULL`) was judged by `OrgScope` alone and
+/// served by its snapshot name. Two fences for one question is how the ENDED
+/// half of a session's life came to be fenced differently from the LIVE half,
+/// five separate ways; there is now one.
+///
+/// `seen` memoises [`crate::service::view_scope::ViewScope::sees_past_conversation`]
+/// across the links of one page, so a page costs one lookup per DISTINCT
+/// conversation rather than one per link. Pass a fresh map for a single link.
+pub fn link_person_visible_at(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    l: &WorkLinkRow,
+    session_id: Option<i64>,
+) -> Result<bool, IpcError> {
+    link_person_visible_memo(s, view, l, session_id, &mut BTreeMap::new())
+}
+
+/// [`link_person_visible_at`] with the conversation memo supplied; see there.
+pub fn link_person_visible_memo(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    l: &WorkLinkRow,
+    session_id: Option<i64>,
+    seen: &mut BTreeMap<String, bool>,
+) -> Result<bool, IpcError> {
+    if view.is_internal() {
+        return Ok(true);
+    }
+    if let Some(sid) = session_id {
+        return Ok(match s.get_session_by_id(sid)? {
+            Some(row) => view.sees_session_row(&row).is_visible(),
+            None => false,
+        });
+    }
+    let cids = link_conversations(l);
+    // Arm 3, written as a branch rather than as the loop's fall-through: a
+    // link with nothing recorded has no record to judge, and the `for` below
+    // silently answering `true` for it is what made this fail open. See the
+    // doc comment.
+    if cids.is_empty() {
+        return Ok(view.host.is_some() || view.is_sole_person());
+    }
+    for cid in cids {
+        let ok = match seen.get(&cid) {
+            Some(v) => *v,
+            None => {
+                let v = view.sees_past_conversation(s, &cid)?;
+                seen.insert(cid, v);
+                v
+            }
+        };
+        if !ok {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Every Claude conversation id one link recorded: the one it was decided in
+/// and the snapshot's whole array. Deduplicated, so a link that names the
+/// same id twice costs one lookup.
+pub(crate) fn link_conversations(l: &WorkLinkRow) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Some(c) = l.claude_session_id.clone() {
+        out.push(c);
+    }
+    if let Some(ids) = l
+        .snap_claude_ids
+        .as_deref()
+        .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
+    {
+        out.extend(ids);
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// [`scope_links`] with the caller's WHOLE scope: the org fence, then the
+/// person fence ([`link_person_visible`]) on every link that survived it.
+///
+/// The one every READ of a link page takes. `scope_links` stays for the
+/// writes, which name one link the caller already reached by id.
+pub fn scope_links_for(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    links: &mut Vec<WorkLinkRow>,
+) -> Result<(), IpcError> {
+    scope_links(s, &view.org, links)?;
+    if view.is_internal() {
+        return Ok(());
+    }
+    let mut seen: BTreeMap<String, bool> = BTreeMap::new();
+    let mut keep = Vec::with_capacity(links.len());
+    for l in links.drain(..) {
+        let sid = s.link_session_id(&l)?;
+        if link_person_visible_memo(s, view, &l, sid, &mut seen)? {
+            keep.push(l);
+        }
+    }
+    *links = keep;
+    Ok(())
+}
+
 /// May `scope` see the session behind link `l`: the live session's row, or
 /// for an ended link the snapshot's host and org. A link with no session
 /// left to name (a swept participant, no snapshot) names nothing.
@@ -343,6 +592,9 @@ pub fn link_session_visible(
     scope: &OrgScope,
     l: &WorkLinkRow,
 ) -> Result<bool, IpcError> {
+    // This is the org boundary, not a privacy fence: the org half of a link's session fence.
+    // `link_person_visible` is the person half and `scope_links_for` composes the two; a caller
+    // that reads a PAGE of links takes both.
     if scope.is_all() {
         return Ok(true);
     }
@@ -350,12 +602,17 @@ pub fn link_session_visible(
     // session (no snapshot yet).
     if let Some(sid) = s.link_session_id(l)? {
         return Ok(match s.get_session_by_id(sid)? {
-            Some(row) => scope.sees_row(&row),
+            // The org half of a live participant; `link_person_visible` is
+            // the person half and `scope_links_for` composes the two.
+            Some(row) => scope.sees_row_org_only(&row),
             None => false,
         });
     }
     let (host, org) = s.link_snapshot_place(l.id)?;
-    Ok(scope.sees_session(host.as_deref().unwrap_or_default(), org))
+    // The snapshot arm, org half again: `link_person_visible`'s third arm
+    // judges a reaped participant's recorded conversations through
+    // `sees_past_conversation`.
+    Ok(scope.sees_session_org_only(host.as_deref().unwrap_or_default(), org))
 }
 
 /// The first item carrying `key` (in [`Store::work_items_by_key`]'s order)
@@ -371,6 +628,8 @@ pub fn visible_item_for_key(
     scope: &OrgScope,
     key: &str,
 ) -> Result<Option<WorkItemRow>, IpcError> {
+    // This is the org boundary, not a privacy fence: it asks which ORG's item a shared key
+    // resolves to. An item is a ticket, not a session.
     if scope.is_all() {
         return s.work_item_by_key(key);
     }
@@ -394,6 +653,7 @@ pub fn org_item_for_key(
     scope: &OrgScope,
     key: &str,
 ) -> Result<Option<WorkItemRow>, IpcError> {
+    // This is the org boundary, not a privacy fence: the same item question, with no host fence.
     if scope.is_all() {
         return s.work_item_by_key(key);
     }
@@ -409,6 +669,27 @@ pub fn org_item_for_key(
 /// resume it)? When the key's item is inside its orgs, and some of the
 /// work — a live link on a session of its host, or a past one whose session
 /// ran there — is visible to it. One refusal whether the key exists or not.
+///
+/// **DECIDED, multi-user M1 (T10): this is an org-authority question and it
+/// is correctly asked of the org alone.** T9b/T9c disclosed a "key-level
+/// residual" here — that a second person could learn *this key has some
+/// work on it* from the absence of `E_NOTFOUND` — and T10 traced it and
+/// found it is not in this function:
+///
+/// * for a per-host token and for an org-bound client (which goes to
+///   [`require_key_bound`]) the question answered is "does this key have
+///   work inside YOUR host / YOUR org", and that is the org boundary doing
+///   its job;
+/// * for every other caller — including a person's own device, whose
+///   `OrgScope` is `All` — `scope.host()` is `None` and this returns
+///   `Ok(())` **unconditionally**. It discloses nothing, because it decides
+///   nothing: the read it precedes is person-fenced downstream
+///   ([`scope_links_for`], which composes [`link_session_visible`] with
+///   `link_person_visible`).
+///
+/// So the residual the two earlier rounds attributed partly here belongs
+/// wholly to `work::work_purge_impact`, whose `OPEN_QUESTIONS` row says so
+/// since T10. There is no owner decision owed at this function.
 pub fn require_key(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcError> {
     if let OrgScope::Org { .. } = scope {
         return require_key_bound(s, scope, key);
@@ -541,7 +822,20 @@ pub struct ScopeEntry {
 /// then an owner pseudo-scope per project owner whose sessions no org
 /// covers, then the unassigned rest when there is any. A host-bound caller
 /// sees only its org and unassigned work.
-pub fn scopes(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<ScopeEntry>, IpcError> {
+///
+/// **Takes the caller's WHOLE [`crate::service::view_scope::ViewScope`]**
+/// (multi-user M1, T9b), not only its org half. `ScopeEntry.session_count`
+/// and `.needs_you` are counts OVER SESSION ROWS, and rule 6's allowance is
+/// a per-host count of `unclaimed` rows — not a per-org, per-owner tally of
+/// every person's live work with "how much of it is blocked or stuck" beside
+/// it. Fenced by the org scope alone these were fleet-wide, because
+/// `OrgScope::All` is what the master AND every paired client bound to no
+/// org resolve to.
+pub fn scopes(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+) -> Result<Vec<ScopeEntry>, IpcError> {
+    let scope = &view.org;
     let s = lock(store)?;
     let orgs = s.list_orgs()?;
     let projects: BTreeMap<i64, String> = s
@@ -553,7 +847,13 @@ pub fn scopes(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<ScopeEntry>,
     let rows: Vec<SessionRow> = s
         .list_all_sessions()?
         .into_iter()
-        .filter(|r| r.status != "ghost" && scope.sees_row(r) && scope.sees_org(r.org_id))
+        // `sees_org` is NOT implied by `sees_session_row`: for a per-host
+        // token the org half of that predicate asks only about the HOST, so
+        // this is the clause that keeps another org's row on its own host out
+        // of the tally. The row-shaped org predicate that used to stand here
+        // as well WAS implied, and said so twice (multi-user M1, T10).
+        .filter(|r| r.status != "ghost" && scope.sees_org(r.org_id))
+        .filter(|r| view.sees_session_row(r).is_visible())
         .collect();
     let red = crate::service::health::context_red_pct(&s);
     let needs = |r: &SessionRow| crate::service::attention::needs_attention_with(r, red).is_some();
@@ -902,10 +1202,18 @@ fn site_label(site_url: &str) -> Option<String> {
 ///   GitHub `acme` are one company more often than not).
 ///
 /// Empty for a per-host token: it cannot act on any of it.
+///
+/// `OrgSuggestion.sessions` ("Live sessions the rule would place") is a count
+/// over session ROWS, so this takes the caller's whole
+/// [`crate::service::view_scope::ViewScope`] too — see [`scopes`] for why the
+/// org half alone fences nobody's own device.
 pub fn org_suggestions(
     store: &Mutex<Store>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<Vec<OrgSuggestion>, IpcError> {
+    let scope = &view.org;
+    // This is the org boundary, not a privacy fence: only a caller that may CREATE an org is
+    // offered one to create. The person half is below, on every row a suggestion counts.
     if !scope.is_all() {
         return Ok(Vec::new());
     }
@@ -930,6 +1238,10 @@ pub fn org_suggestions(
     let mut uncovered: BTreeMap<String, (String, usize)> = BTreeMap::new();
     for r in s.list_all_sessions()? {
         if r.status == "ghost" || r.org_id.is_some() {
+            continue;
+        }
+        // The PERSON half: a suggestion counts the rows this caller may see.
+        if !view.sees_session_row(&r).is_visible() {
             continue;
         }
         let Some(owner) = r.project_id.and_then(|p| owners.get(&p)) else {

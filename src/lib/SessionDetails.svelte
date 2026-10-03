@@ -52,6 +52,8 @@
     STUCK_COLOR,
   } from './attention';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
+  import { accessOf } from './access';
+  import { shareSheetFor, sessionBlocked } from './share';
   import { hubConnection } from './hub_connection';
 
   let { session }: { session: SessionRow } = $props();
@@ -60,24 +62,77 @@
   // pre-flight git inspect and the one-step discard-and-kill both act over
   // this machine's SSH connection, and dismiss_agent_session's job is done
   // instead by the hub's own kill_session.
-  const inspectSafeKillBlocked = $derived(hubBlock('inspect_safe_kill', $hubStatus));
-  const discardKillBlocked = $derived(hubBlock('discard_kill_session', $hubStatus));
-  const dismissAgentBlocked = $derived(hubBlock('dismiss_agent_session', $hubStatus));
+  // Every one of these composes TWO predicates since multi-user M1: the hub's
+  // (`hubBlock` / `hubActionBlocked`, which take an action name and no session)
+  // and this client's access to THIS row (`$sessionBlocked`). They are composed
+  // with `??` rather than merged into one call, because a predicate that took
+  // both would let a call site pass the action and forget the session and still
+  // read as allowed. The hub's half wins when both answer: "a client never
+  // administers the fleet" is true of every session, and so the more useful
+  // sentence than "this one is not yours". Read through the `$sessionBlocked`
+  // STORE, not the bare function, so a revoke or a narrow re-disables these
+  // without a re-list — a grant change moves no column on the row.
+  const inspectSafeKillBlocked = $derived(
+    hubBlock('inspect_safe_kill', $hubStatus) ?? $sessionBlocked(session, 'inspect_safe_kill'),
+  );
+  const discardKillBlocked = $derived(
+    hubBlock('discard_kill_session', $hubStatus) ?? $sessionBlocked(session, 'discard_kill_session'),
+  );
+  const dismissAgentBlocked = $derived(
+    hubBlock('dismiss_agent_session', $hubStatus) ??
+      $sessionBlocked(session, 'dismiss_agent_session'),
+  );
 
   // These route to the hub, so they stay enabled on a hub client — but only
   // while the live connection to it is up (`hubActionBlocked`).
-  const killBlocked = $derived(hubActionBlocked('kill_session', $hubStatus, $hubConnection));
-  const restartBlocked = $derived(hubActionBlocked('restart_session', $hubStatus, $hubConnection));
-  const recreateBlocked = $derived(hubActionBlocked('recreate_session', $hubStatus, $hubConnection));
-  const moveBlocked = $derived(moveBlockedReason($hubStatus, $hubConnection));
-  const repairBlocked = $derived(hubActionBlocked('repair_session', $hubStatus, $hubConnection));
-  const renameBlocked = $derived(hubActionBlocked('rename_session', $hubStatus, $hubConnection));
+  const killBlocked = $derived(
+    hubActionBlocked('kill_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'kill_session'),
+  );
+  const restartBlocked = $derived(
+    hubActionBlocked('restart_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'restart_session'),
+  );
+  const recreateBlocked = $derived(
+    hubActionBlocked('recreate_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'recreate_session'),
+  );
+  const moveBlocked = $derived(
+    moveBlockedReason($hubStatus, $hubConnection) ?? $sessionBlocked(session, 'move_session'),
+  );
+  const repairBlocked = $derived(
+    hubActionBlocked('repair_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'repair_session'),
+  );
+  const renameBlocked = $derived(
+    hubActionBlocked('rename_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'rename_session'),
+  );
   const setFriendlyNameBlocked = $derived(
-    hubActionBlocked('set_friendly_name', $hubStatus, $hubConnection),
+    hubActionBlocked('set_friendly_name', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'set_friendly_name'),
   );
   const safeKillClaudeBlocked = $derived(
-    hubActionBlocked('safe_kill_session', $hubStatus, $hubConnection),
+    hubActionBlocked('safe_kill_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'safe_kill_session'),
   );
+  /** Send prompt and Review both act on the owner's session — one types into
+   *  the pane (`drive`), one creates a session in the owner's worktree with a
+   *  terminal of its own, which spec §4.3 puts in the `own` tier. */
+  const sendPromptBlocked = $derived(
+    hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'send_prompt'),
+  );
+  const reviewBlocked = $derived(
+    hubActionBlocked('spawn_review', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'spawn_review'),
+  );
+  /** Share… — owner only, and the sheet says so again on the inside. The hub
+   *  half is deliberately absent here: `session_share` is not in `hub.ts`'s
+   *  `ROUTED_ACTIONS` yet (task F3 adds it, after the Rust side has landed and
+   *  regenerated `hub_verdicts.generated.json`), and adding it from here would
+   *  turn a pure-pnpm run red. */
+  const shareBlocked = $derived($sessionBlocked(session, 'session_share'));
 
   // Look up the parent project (if any) for context.
   const parentProject = $derived(
@@ -108,6 +163,15 @@
 
   // Local-only for v0.2 (Phase 4 will branch on host_alias for remote attach).
   const attachCommand = $derived(`tmux attach -t ${session.tmux_name}`);
+
+  // Multi-user M1: "sharing never confers a terminal" (spec §4.3 invariant 4)
+  // covers this section too, and it is the easiest one to miss, because
+  // nothing here invokes anything — it hands over the incantation and the
+  // tmux name, which §4.3 counts as content, and the person types it into
+  // their own shell where no hub can refuse it. So the section is gated on
+  // the same derived answer the terminal pane is, through `$accessOf` so a
+  // revoke takes it away without a re-list.
+  const detailsOwned = $derived($accessOf(session) === 'own');
 
   // Past a month the relative form stops being useful; show the date.
   function formatRelative(unix: number): string {
@@ -180,6 +244,7 @@
   // Inactive bg agent: drop the row. The backend emits `session:removed`,
   // which removes it from the store (and clears the selection).
   async function onRemoveFromList() {
+    if (dismissAgentBlocked !== null) return;
     const r = await dismissAgentSession(session.id);
     if (!r.ok) pushError(r.error, 'Remove failed');
   }
@@ -195,6 +260,7 @@
     confirmingRestart = false;
   }
   async function onRestart() {
+    if (restartBlocked !== null) return;
     confirmingRestart = false;
     const r = await restartSession(session.host_alias, session.tmux_name);
     if (!r.ok) pushError(r.error, 'Restart failed');
@@ -215,6 +281,7 @@
     confirmingRepair = false;
   }
   async function onRepair() {
+    if (repairBlocked !== null) return;
     confirmingRepair = false;
     if (repairing) return;
     repairing = true;
@@ -271,6 +338,10 @@
   let busy = $state(false);
 
   async function askSafeKill() {
+    // Re-asked at the call, not only on the control (multi-user M1, F2b): the
+    // confirmation these sit behind stays on screen, and a grant can be
+    // narrowed while it does.
+    if (inspectSafeKillBlocked !== null) return;
     inspection = null;
     inspectError = null;
     confirmingSafeKill = true;
@@ -291,6 +362,7 @@
   // "Let Claude commit it" path: current behavior — send the marker-baked
   // prompt and wait for the Stop hook to finalize.
   async function doSafeKillViaClaude() {
+    if (safeKillClaudeBlocked !== null) return;
     busy = true;
     const r = await safeKillSession(session.host_alias, session.tmux_name);
     busy = false;
@@ -305,6 +377,7 @@
   // Clean+pushed fast path: backend just removes the worktree + kills tmux,
   // no Claude involvement. `force=false` so a surprise dirty file errors out.
   async function doDirectRemove() {
+    if (discardKillBlocked !== null) return;
     busy = true;
     const r = await discardKillSession(session.host_alias, session.tmux_name, false);
     busy = false;
@@ -320,6 +393,7 @@
   // Explicit discard: user has seen the dirty list / unpushed warning and
   // chose to drop the work anyway.
   async function doDiscardAndKill() {
+    if (discardKillBlocked !== null) return;
     busy = true;
     const r = await discardKillSession(session.host_alias, session.tmux_name, true);
     busy = false;
@@ -338,6 +412,7 @@
     confirmingKill = false;
   }
   async function doKill() {
+    if (killBlocked !== null) return;
     confirmingKill = false;
     const r = await killSession(session.host_alias, session.tmux_name);
     if (r.ok) {
@@ -361,6 +436,14 @@
 
   function openMove() {
     transferSheetFor.set(session.id);
+  }
+
+  // Share… : the app's one Share sheet does the work (ShareSheet + share.ts),
+  // exactly the way Move to host… opens the Transfer sheet. This button only
+  // opens it; the recipient, the level, the live grant list and the two
+  // consequences a sharer is deciding without being told all live there.
+  function openShare() {
+    shareSheetFor.set(session.id);
   }
 
   // Recovery, long after the transfer: the durable record is the session's
@@ -402,7 +485,7 @@
   const unresolvedWaitRec = $derived(unresolvedWait(timelineEvents));
 
   function openMoveBack() {
-    if (!moveBackOrigin) return;
+    if (!moveBackOrigin || moveBlocked !== null) return;
     startMove(session, moveBackOrigin.fromHost, { keepSource: false });
   }
 
@@ -413,7 +496,7 @@
   // recorded event before the sheet opens, keyed the same way it is (source
   // id when known, else target id) so the sheet opens on the run it just made.
   function openFinishOrUndo() {
-    if (!unresolvedMove) return;
+    if (!unresolvedMove || moveBlocked !== null) return;
     adoptPartial(unresolvedMove, session.tmux_name);
     transferSheetFor.set(unresolvedMove.sourceSessionId ?? session.id);
   }
@@ -423,12 +506,13 @@
    *  if a live one already exists), then the sheet opens on it — Cancel and
    *  the reason it ended live there, not in this panel. */
   function openWait() {
-    if (!unresolvedWaitRec) return;
+    if (!unresolvedWaitRec || moveBlocked !== null) return;
     adoptWait(unresolvedWaitRec, session.tmux_name);
     transferSheetFor.set(unresolvedWaitRec.sessionId);
   }
 
   async function doRecreate() {
+    if (recreateBlocked !== null) return;
     confirmingRecreate = false;
     const r = await recreateSession(session.id);
     if (!r.ok) {
@@ -632,7 +716,7 @@
     onEvents={(e) => (timelineEvents = e)}
   />
 
-  {#if !hasNoPane(session)}
+  {#if !hasNoPane(session) && detailsOwned}
     <section class="block">
       <h3>Attach from another terminal</h3>
       <div class="cmd-row">
@@ -687,11 +771,23 @@
         </button>
       {/if}
       {#if session.kind !== 'shell'}
-        <button class="ghost" onclick={openComposer} data-testid="send-prompt-from-details">
+        <button
+          class="ghost"
+          onclick={openComposer}
+          disabled={sendPromptBlocked !== null}
+          title={sendPromptBlocked ?? ''}
+          data-testid="send-prompt-from-details"
+        >
           → Send prompt
         </button>
       {/if}
-      <button class="ghost" onclick={() => (reviewOpen = true)} data-testid="open-review">
+      <button
+        class="ghost"
+        onclick={() => (reviewOpen = true)}
+        disabled={reviewBlocked !== null}
+        title={reviewBlocked ?? ''}
+        data-testid="open-review"
+      >
         🔍 Review
       </button>
       <button
@@ -714,21 +810,60 @@
           ⇄ Move to host…
         </button>
       {/if}
+      <button
+        class="ghost"
+        onclick={openShare}
+        disabled={shareBlocked !== null}
+        title={shareBlocked ?? 'Share this session with one person — watch or drive, revocable, and never a terminal'}
+        data-testid="share-from-details"
+      >
+        👥 Share…
+      </button>
+      <!-- The rest of the move LIFECYCLE, gated on the same `moveBlocked` as
+           "Move to host…" above: spec §4.3 puts the whole lifecycle in the
+           `own` tier, so moving back, finishing, undoing and resuming a wait
+           are the owner's exactly as starting one is. They used to be the one
+           set of move controls with no gate at all — a grantee could finish or
+           undo the owner's half-done move, which kills a session. -->
       {#if moveBackOrigin}
-        <button class="ghost" onclick={openMoveBack} data-testid="details-move-back">
+        <button
+          class="ghost"
+          onclick={openMoveBack}
+          disabled={moveBlocked !== null}
+          title={moveBlocked ?? 'Move this session back to the host it came from'}
+          data-testid="details-move-back"
+        >
           ⇄ Move back to {moveBackOrigin.fromHost}
         </button>
       {/if}
       {#if unresolvedMove}
-        <button class="ghost" onclick={openFinishOrUndo} data-testid="details-finish-move">
+        <button
+          class="ghost"
+          onclick={openFinishOrUndo}
+          disabled={moveBlocked !== null}
+          title={moveBlocked ?? 'Open the Transfer sheet to finish this move'}
+          data-testid="details-finish-move"
+        >
           Finish the move to {unresolvedMove.toHost}
         </button>
-        <button class="ghost" onclick={openFinishOrUndo} data-testid="details-undo-move">
+        <button
+          class="ghost"
+          onclick={openFinishOrUndo}
+          disabled={moveBlocked !== null}
+          title={moveBlocked ?? 'Open the Transfer sheet to undo this move'}
+          data-testid="details-undo-move"
+        >
           Undo the move
         </button>
       {/if}
       {#if unresolvedWaitRec}
-        <button class="ghost" onclick={openWait} data-testid="details-resume-wait">
+        <button
+          class="ghost"
+          onclick={openWait}
+          disabled={moveBlocked !== null}
+          title={moveBlocked ?? 'Open the Transfer sheet for this pending move'}
+          data-testid="details-resume-wait"
+        >
           ⇄ Waiting to move to {unresolvedWaitRec.toHost}
         </button>
       {/if}

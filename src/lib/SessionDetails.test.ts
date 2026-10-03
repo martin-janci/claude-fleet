@@ -28,6 +28,9 @@ import { projects } from './projects';
 import { sessions, type SessionRow } from './sessions';
 import { get } from 'svelte/store';
 import { moves, resetMovesForTest, startMove, resolveMoveRun, transferSheetFor } from './moves';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
+import { shareSheetFor } from './share';
 
 const sampleSession = {
   id: 1,
@@ -57,6 +60,12 @@ beforeEach(() => {
   accounts.set([]);
   projects.set([]);
   sessions.set([]);
+  // Standalone, which is what every test here assumes: the desktop owns its
+  // fleet, so the multi-user derivation answers `own` for every row and the
+  // panel looks exactly as it did before M1.
+  hubStatus.set({ ...STANDALONE });
+  resetAccessForTests();
+  shareSheetFor.set(null);
 });
 
 describe('SessionDetails', () => {
@@ -815,5 +824,242 @@ describe('SessionDetails recovery actions from the timeline', () => {
     await waitFor(() => expect(inv()).toHaveBeenCalled());
     await tick();
     expect(queryByTestId('details-resume-wait')).toBeNull();
+  });
+});
+
+
+// Multi-user M1: "sharing never confers a terminal" (spec §4.3 invariant 4)
+// reaches further than `pty_open`. This section hands over the incantation and
+// the tmux name — which §4.3 counts as content — for the person to paste into
+// their own shell, where no hub is in the path and nothing can refuse it. It
+// invokes nothing, which is exactly why it is easy to miss.
+describe('SessionDetails attach command against a grant', () => {
+  const ME = 7;
+  const OTHER = 9;
+  const remote: HubStatus = {
+    ...STANDALONE,
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+  };
+  const theirs = { ...sampleSession, id: 31, owner_person_id: OTHER, visibility: 'private' as const };
+
+  it('an owned session still offers it, on a paired desktop as on a standalone one', async () => {
+    hubStatus.set(remote);
+    setMyGrants(ME, []);
+    const mine = { ...sampleSession, id: 32, owner_person_id: ME, visibility: 'private' as const };
+    render(SessionDetails, { props: { session: mine } });
+    await tick();
+    expect(screen.getByTestId('attach-command').textContent).toBe('tmux attach -t dev-foo');
+    expect(screen.getByTestId('copy-attach')).toBeTruthy();
+  });
+
+  it.each([['watch'], ['drive']] as const)(
+    'a %s-granted session offers neither the command nor the copy button',
+    async (level) => {
+      hubStatus.set(remote);
+      setMyGrants(ME, [{ session_id: theirs.id, level }]);
+      render(SessionDetails, { props: { session: theirs } });
+      await tick();
+      expect(screen.queryByTestId('attach-command')).toBeNull();
+      expect(screen.queryByTestId('copy-attach')).toBeNull();
+    },
+  );
+
+  it('takes it away on a revoke with no row event, and never says the row has no pane', async () => {
+    hubStatus.set(remote);
+    setMyGrants(ME, [{ session_id: theirs.id, level: 'drive' }]);
+    render(SessionDetails, { props: { session: theirs } });
+    await tick();
+    expect(screen.queryByTestId('attach-command')).toBeNull();
+    // Still absent after the revoke — and the panel's other sections are
+    // untouched, so the gate is the section's own and not a pane-less row's.
+    applyGrantChanges([{ session_id: theirs.id, person_id: ME, level: null }]);
+    await tick();
+    expect(screen.queryByTestId('attach-command')).toBeNull();
+    expect(screen.getByTestId('session-host')).toBeTruthy();
+  });
+});
+
+describe('SessionDetails Share… and the per-session action gate (multi-user M1)', () => {
+  const ME = 7;
+  const remote: HubStatus = {
+    ...STANDALONE,
+    remote: true,
+    url: 'https://fleet.example.com',
+    client_name: 'laptop',
+    configured_url: 'https://fleet.example.com',
+    configured_client_name: 'laptop',
+  };
+  const mine = { ...sampleSession, id: 41, owner_person_id: ME, visibility: 'private' as const };
+  const theirs = { ...sampleSession, id: 42, owner_person_id: 9, visibility: 'private' as const };
+  const dis = (testid: string) => (screen.getByTestId(testid) as HTMLButtonElement).disabled;
+
+  it('opens the app’s one Share sheet, the way Move to host… opens the Transfer sheet', async () => {
+    shareSheetFor.set(null);
+    render(SessionDetails, { props: { session: mine } });
+    await tick();
+    const btn = screen.getByTestId('share-from-details') as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    await fireEvent.click(btn);
+    expect(get(shareSheetFor)).toBe(41);
+  });
+
+  it('a grantee is offered Share… only as a disabled control with the reason on it', async () => {
+    // "A grantee cannot grant on" (spec §4.3 invariant 2), in front of the
+    // control rather than at the click.
+    hubStatus.set(remote);
+    setMyGrants(ME, [{ session_id: theirs.id, level: 'drive' }]);
+    render(SessionDetails, { props: { session: theirs } });
+    await tick();
+    expect(dis('share-from-details')).toBe(true);
+    expect(screen.getByTestId('share-from-details').title).toMatch(/only the session’s owner/i);
+  });
+
+  it('a driver keeps Send prompt and loses the own-tier actions', async () => {
+    hubStatus.set(remote);
+    setMyGrants(ME, [{ session_id: theirs.id, level: 'drive' }]);
+    render(SessionDetails, { props: { session: theirs } });
+    await tick();
+    expect(dis('send-prompt-from-details')).toBe(false);
+    for (const t of [
+      'kill-from-details',
+      'restart-from-details',
+      'recreate-from-details',
+      'rename-from-details',
+      'open-review',
+      'safe-kill-from-details',
+    ]) {
+      expect(dis(t), t).toBe(true);
+    }
+    // The label is fleet's own metadata about the row, not the tmux name the
+    // `own` tier protects: a driver may still change it.
+    expect(dis('label-from-details')).toBe(false);
+  });
+
+  it('a watcher loses Send prompt too, and a narrow takes it away with no row event', async () => {
+    hubStatus.set(remote);
+    setMyGrants(ME, [{ session_id: theirs.id, level: 'drive' }]);
+    render(SessionDetails, { props: { session: theirs } });
+    await tick();
+    expect(dis('send-prompt-from-details')).toBe(false);
+    // A narrow moves no column on the row: the only thing that changes is the
+    // grant map, which is exactly why this re-disables without a re-list.
+    applyGrantChanges([{ session_id: theirs.id, person_id: ME, level: 'watch' }]);
+    await tick();
+    expect(dis('send-prompt-from-details')).toBe(true);
+    expect(screen.getByTestId('send-prompt-from-details').title).toMatch(/needs drive/i);
+    expect(dis('label-from-details')).toBe(true);
+  });
+
+  // Spec §4.3 puts the whole move LIFECYCLE in the `own` tier, and "Move to
+  // host…" was gated on that from F2 — but the four controls that move a
+  // session BACK, finish a half-done move, undo one, or reopen a pending wait
+  // had no gate at all, so a grantee could finish or undo the owner's move,
+  // which kills a session. Same `moveBlocked`, same four controls.
+  const MOVED = [
+    {
+      id: 1,
+      session_id: 42,
+      at: 1700000000,
+      kind: 'session_moved',
+      detail: JSON.stringify({ from_host: 'alpha', to_host: 'beta', claude_session_id: 'c1' }),
+      claude_session_id: null,
+    },
+  ];
+  const PARTIAL = [
+    {
+      id: 1,
+      session_id: 42,
+      at: 1700000000,
+      kind: 'session_move_partial',
+      detail: JSON.stringify({
+        step: 'killing the source s on alpha',
+        from_host: 'alpha',
+        to_host: 'beta',
+        from_session_id: 41,
+        to_session_id: 42,
+      }),
+      claude_session_id: null,
+    },
+  ];
+  const WAITING = [
+    {
+      id: 1,
+      session_id: 42,
+      at: 1700000000,
+      kind: 'session_move_waiting',
+      detail: JSON.stringify({ to_host: 'beta', deadline: 1700000600 }),
+      claude_session_id: null,
+    },
+  ];
+
+  function withHistory(events: unknown[]) {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
+      cmd === 'session_history' ? events : undefined,
+    );
+  }
+
+  it('a grantee cannot move back, finish, undo or resume a wait', async () => {
+    hubStatus.set(remote);
+    setMyGrants(ME, [{ session_id: theirs.id, level: 'drive' }]);
+    (startMove as ReturnType<typeof vi.fn>).mockReset();
+    for (const [events, testid] of [
+      [MOVED, 'details-move-back'],
+      [PARTIAL, 'details-finish-move'],
+      [PARTIAL, 'details-undo-move'],
+      [WAITING, 'details-resume-wait'],
+    ] as const) {
+      withHistory(events as unknown[]);
+      transferSheetFor.set(null);
+      const { unmount } = render(SessionDetails, { props: { session: theirs } });
+      await waitFor(() => expect(screen.getByTestId(testid)).toBeTruthy());
+      expect(dis(testid), testid).toBe(true);
+      expect(screen.getByTestId(testid).title, testid).toMatch(/only the session’s owner/i);
+      // And a click that lands anyway neither starts a move nor opens the sheet.
+      await fireEvent.click(screen.getByTestId(testid));
+      await tick();
+      expect(startMove, testid).not.toHaveBeenCalled();
+      expect(get(transferSheetFor), testid).toBeNull();
+      unmount();
+    }
+  });
+
+  it('the owner keeps all four, on the same rows', async () => {
+    hubStatus.set(remote);
+    setMyGrants(ME, []);
+    for (const [events, testid] of [
+      [MOVED, 'details-move-back'],
+      [PARTIAL, 'details-finish-move'],
+      [PARTIAL, 'details-undo-move'],
+      [WAITING, 'details-resume-wait'],
+    ] as const) {
+      withHistory(events as unknown[]);
+      const { unmount } = render(SessionDetails, {
+        props: { session: { ...theirs, owner_person_id: ME } },
+      });
+      await waitFor(() => expect(screen.getByTestId(testid)).toBeTruthy());
+      expect(dis(testid), testid).toBe(false);
+      unmount();
+    }
+  });
+
+  it('leaves a standalone desktop’s panel exactly as it was', async () => {
+    // The single-user shape: no `my_grants` answer at all, and every control
+    // still enabled — `access.ts`'s rule 1 is what makes that true.
+    render(SessionDetails, { props: { session: theirs } });
+    await tick();
+    for (const t of [
+      'kill-from-details',
+      'restart-from-details',
+      'recreate-from-details',
+      'send-prompt-from-details',
+      'open-review',
+      'share-from-details',
+    ]) {
+      expect(dis(t), t).toBe(false);
+    }
   });
 });

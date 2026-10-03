@@ -897,13 +897,22 @@ so no proxy, access log or scroll-back of your terminal ever holds a
 credential. Codes live in the hub's memory only, so restarting the daemon
 voids every outstanding one. Mint a new one and walk back to the phone.
 
-Three options:
+Four options:
 
 ```bash
 fleet-hub pair --name kiosk --mode readonly   # observe only; the default is full
 fleet-hub pair --name phone --ttl 120         # seconds the code stays valid (30–3600)
 fleet-hub pair --name mac-desktop --trusted   # its prompts reach agents unmarked (see *Clients*)
+fleet-hub pair --name ada-laptop --person ada # whose device it is (see *Clients*)
 ```
+
+**`--person` is optional, and its default is you.** Omitted, the device is
+paired to this hub's own owner — so pairing your own second phone needs
+nothing new. Name a person and the device is theirs instead: it sees their
+sessions and the ones they have been shared, and no others. The person is
+created on first use, so handing a laptop to a new colleague is one command.
+`--person` is not for `--mode peer` or `--mode updater`: neither is anybody's
+device.
 
 Pairing needs a **running** hub (`fleet-hub serve`): the code only means
 something inside the process that will redeem it. `fleet-hub pair` reads the
@@ -939,6 +948,8 @@ fleet-hub client trust mac-desktop
 fleet-hub client untrust mac-desktop
 fleet-hub client bind contractor-phone 2
 fleet-hub client unbind contractor-phone
+fleet-hub client bind-person ada-laptop ada
+fleet-hub client unbind-person ada-laptop
 fleet-hub client grant mac-desktop assets
 fleet-hub client ungrant mac-desktop assets
 ```
@@ -1017,6 +1028,23 @@ What a client may do:
   fleet's settings** (`set_setting`, and applying or rejecting proposals):
   an untrusted device reads them and can only propose. See *Proposed
   settings and their history* below.
+- **Whose device it is** (multi-user M1). A paired device belongs to one
+  **person**, and a person's sessions are private to them: the device sees
+  their sessions and the ones they have been shared, and no others.
+  `fleet-hub pair --person <person>` says whose it is at pairing;
+  `fleet-hub client bind-person <name> <person>` hands an already-paired
+  device over afterwards, and `fleet-hub client unbind-person <name>` takes
+  it back — the device stays paired (only `client revoke` ends that) but
+  belongs to nobody and then sees no private session at all. The person is
+  created the first time you name them, so a new colleague's laptop is one
+  command. Both `bind-person` and `unbind-person` write `state.db` directly,
+  so neither needs a running hub, and both take effect from that device's
+  next request (an open event stream ends at its next beat). Leaving
+  `--person` out pairs the device to **this hub's own owner**, which is what
+  makes pairing your own second phone need nothing new; a peer hub link and
+  an updater token are nobody's device and are refused either way. Only the
+  hub owner's own device reaches the fleet's settings — see *On a paired
+  device* under *Configuration*.
 - **Bound to an org** (work graph M14.1b). `fleet-hub pair --name <name>
   --org <org id>`, or `fleet-hub client bind <name> <org id>` later
   (`work_admin { action: "assign_client", name, org_id }`; no `org_id` and
@@ -1025,7 +1053,10 @@ What a client may do:
   view (`work { tree | task | session_tasks | review | rules | rule_preview
   | views }`), tickets, Today, conversations, `list_sessions`, every
   session-addressed tool, `fleet_health`'s trackers, spend and counts, and
-  every `/events` frame. Whether it also sees *unassigned* work and sessions
+  every `/events` frame. An org-bound client is still somebody's *device*, so
+  the person fence applies inside the org as well: its `fleet_health` session
+  counts, per-host spend and `hosts[]` cover the sessions that device's person
+  owns or was granted, not every session in the org. Whether it also sees *unassigned* work and sessions
   (no org) is the org's switch `bound_sees_unassigned` (decision D31): on by
   default, as a host sees them; the master turns it off with `fleet-hub org
   set <id> --bound-sees-unassigned off` (`work_admin { action: "update_org",
@@ -1801,18 +1832,27 @@ would actually break — a field removed or renamed, never an addition — and a
 hub built before this field existed sends nothing, which a client reads as
 revision `0`. See *Version skew* below for what a client does with it.
 
-Each row frame carries an `id:` of the form `<generation>-<seq>`. A client
-that reconnects sends the last one back as `Last-Event-ID` (or as
-`?since=<id>`, for the proxies that strip the header) and the hub replays what
-it missed instead of making it re-list everything. The `ready` frame answers
-`"resumed": true` when it honoured the id, and `false` when it could not —
-because the gap was longer than the history kept (512 events, roughly thirteen
-minutes of a busy fleet's churn) or because the hub has restarted since the id
-was minted, which the `generation` half is there to catch. `false` means
+Each row frame carries an `id:` of the form `<generation>-<seq>`, where `seq`
+counts the frames **this connection** was served. A client that reconnects
+sends the last one back as `Last-Event-ID` (or as `?since=<id>`, for the
+proxies that strip the header), and the `ready` frame answers `"resumed"`:
+`true` if the hub honoured the id, `false` if it did not. `false` means
 re-list; it is never a reason to assume continuity.
 
+**Today the answer is always `false`.** A reconnecting client re-lists
+instead of being handed the events it missed. The replay history exists and
+the hub's own internal readers use it, but it is not served to a `GET
+/events` caller: a frame out of the history describes the fleet as it WAS,
+and judging it under the reconnecting caller's present permissions needs an
+identity for its subject that the row's id alone does not give — `sessions`
+ids are reused, so an id kept past a row's death resolves to whoever holds
+it next. Refusing the replay is the one answer that needs no such identity.
+Giving sessions a hub-minted birth marker would let the resume come back;
+until that is decided, every reconnect costs a re-list, and the shape on the
+wire (`resumed: false`) is the one clients have always handled.
+
 The desktop does this: it sends the last row frame id it applied, re-lists
-only when `ready` says `resumed: false`, and then also re-fetches projects,
+when `ready` says `resumed: false`, and then also re-fetches projects,
 worktrees and work in the window.
 
 `?fields=id,claude_status,…` keeps only those keys in each frame's payload.
@@ -1825,6 +1865,86 @@ The stream sits behind the same bearer token as `/mcp` (a change stream names
 sessions, hosts, projects and prompts), and a caller may hold eight of them at
 once. A subscriber that falls far enough behind gets one `lagged` frame and
 the stream closes — reconnect and re-list rather than assume continuity.
+
+### What a stream carries, and whose
+
+A stream shows you exactly what the tools show you: every `session:*` frame
+is judged, frame by frame, against the same answer `list_sessions` gives that
+caller. So a second person's device following `/events` sees the sessions they
+own, the ones shared with them, and nothing else — the stream is not a way
+round the gate, and there is no caller for whom the judgement is skipped
+except the hub's own internal readers.
+
+The same goes for the frames that name a session without being one:
+`task:updated` (which carries a task's `prompt`, `result` and `error`) is
+judged by the sessions at its two ends, `move:progress` by the session being
+moved, and `session:killed` by the facts it carries — that frame fires after
+the row is deleted, so it brings its own `host_alias`, `visibility` and
+`owner_person_id` along, as additional keys next to the `id` every client has
+always read. Every other kind (`host:*`, `project:*`, `worktree:*`,
+`account*`, `asset_inventory:*`, `catalog:*`, `sync:*`) carries no session
+content and is not narrowed per person; `work:*`, `settings:*`, `update:*` and
+`grant:changed` never reach a per-host token or a client bound to an org at
+all.
+
+**No frame out of the replay history is served to you.** A `Last-Event-ID`
+is answered `resumed: false` and your client re-lists — see *Events* above
+for why. A frame in the history describes the fleet as it was, and there is
+no sound way to judge it under your present permissions, so none is sent.
+
+**A session that leaves your view is announced.** Your own permissions
+changing ends the stream (see *Sharing, revoking, and the fifteen-second
+bound* below), but a session can leave your view without anything about YOU
+changing: its host moves to another org, it is claimed by somebody, or its
+visibility changes. When that happens on a session you have already been
+served a frame about, the stream sends one `session:killed` with that `id`
+and stops mentioning it — so your client removes the row instead of
+displaying it for ever. It is the same frame a real kill sends, on purpose:
+"the session is still running, you have just lost access" is not something
+the hub tells you. A session you were never served a frame about is never
+announced either, so the frame is not a way to learn that a row exists.
+
+**The frame `id:` counts what you were served, and nothing else.** The `seq`
+half is this connection's own counter: a frame the fence dropped takes no
+number, so the ids you receive run 1, 2, 3 whatever else the fleet is doing.
+It used to be the hub's global counter, which let a client that may see one
+session out of fifty measure the fleet's aggregate frame rate from the gaps
+between its ids. That was the price of one shared replay history keyed on
+that counter; with the history served to nobody, the price is not paid any
+more. For the same reason, the `lagged` frame tells you that you fell behind
+and no longer tells you by how many frames — the count is the same
+fleet-wide number.
+
+### Sharing, revoking, and the fifteen-second bound
+
+`grant:changed` — `{session_id, person_id, level}`, with `level: null` for a
+revoke — is how a client keeps its own set of shares current. Sharing a
+session emits two frames: the `session:updated` that carries the row (which
+is how a new recipient's client learns the row exists at all) and this one.
+Both reach the person the grant names and the session's owner, and nobody
+else.
+
+**A change to what you may see ENDS your open streams rather than widening or
+narrowing them in place.** When a session is shared with you, or a share of
+yours is revoked, or your device is re-bound to another person or another
+org, every stream that device has open is closed; the client reconnects, is
+told `"resumed": false`, and re-lists. That is deliberate: re-listing repairs
+the client's whole picture, where a frame would only have corrected one row of
+it.
+
+**The bound is the keep-alive beat: at most 15 s.** Each beat re-reads the
+caller's scope and ends the stream if it moved. The hub also keeps two
+in-process counters (one for org moves, one for grant changes) and re-reads
+immediately when either has moved, so in practice the stream drops on the very
+next frame — but those counters are process-local, so a change made by another
+process is noticed on the beat and not before. Treat 15 s as the guarantee and
+the rest as an optimisation.
+
+Revoking a DEVICE and revoking a SHARE are separate mechanisms, deliberately:
+`fleet-hub client revoke` stops the token (and the stream notices on the same
+beat, through a different check), while revoking a share leaves the device
+paired and only narrows what it may see. Neither is expressed in terms of the
+other.
 
 ## Error reports
 
@@ -2079,16 +2199,18 @@ fleet-hub settings history work.recent_days [--limit N] [--json]
 
 **On a paired device** (declarative pages P6). The desktop paired with this
 hub shows these settings in its own Settings pages, read and written
-through the hub: `get_settings` and `set_setting` answer the master and a
-person's own paired device — a client bound to no org; never a per-host
-token or an org-bound client. A device of either mode reads them; a `full`
-device proposes; a device you **trust** (`fleet-hub client trust <name>`)
-changes them and decides proposals, recorded in the history as `person
-(client <name>)`. The desktop's review uses `setting_proposals`,
-`setting_history` and `decide_setting_proposals`, served to a paired device
-and not to the master; a phone can read the page specs with `list_pages`.
-A page's data items (usage, retention) and page actions stay on a
-standalone desktop: a paired desktop shows the settings only.
+through the hub: `get_settings` and `set_setting` answer the master and the
+hub OWNER's own paired device — a client bound to no org whose person is
+this hub's owner (multi-user M1); never a per-host token, an org-bound
+client, or a colleague's device paired to the same hub. A device of either
+mode reads them; a `full` device proposes; a device you **trust**
+(`fleet-hub client trust <name>`) changes them and decides proposals,
+recorded in the history as `person (client <name>)`. The desktop's review
+uses `setting_proposals`, `setting_history` and `decide_setting_proposals`,
+served to the owner's own paired device and not to the master; a phone can
+read the page specs with `list_pages`. A page's data items (usage,
+retention) and page actions stay on a standalone desktop: a paired desktop
+shows the settings only.
 
 These read and write `state.db` directly, as the person at the console:
 an applied proposal is recorded with actor `person` and its id. Every write
@@ -2705,6 +2827,33 @@ deliberately.
   untrusted input and is never typed into a pane: the only thing it can do
   to a pane is wake an idle session with a fixed one-line nudge, never the
   remote text itself. See *Link two hubs* above.
+- **`pair_client --person` is an operator capability, and the privacy model
+  does not fence the holder of the master token.** A session started through
+  fleet is private to its owner, and that holds against an *organisation*
+  admin: there is no override, audited or not. It does not hold against
+  whoever runs the hub. The master token mints a single-use pairing code for
+  any named person (`fleet-hub pair --person <name>`, or the `pair_client`
+  tool), `POST /pair` ties redemption to nobody, and the operator can
+  therefore redeem a code themselves and hold a `full` client token whose
+  person is a colleague's — which sees that colleague's private sessions.
+  Nothing is being hidden by saying so: an operator already holds the
+  database and a shell on the hub. What the hub records is the `pair_client`
+  audit line, not a per-session access record. Give the master token to the
+  people you would give the database to, and nobody else.
+- **A peer link is an operator-to-operator channel, and it is NOT fenced by
+  person.** On a hub with several people (*Who owns a session*), a message
+  arriving over a link resolves its recipient by fleet address —
+  `<fleet>/<host>/<session>` — and lands in that session's inbox, with a
+  timeline row and, when the sender asked to wake it, the fixed nudge into
+  its pane, whoever owns the session. There is deliberately no person check
+  on that path: a peer token names no person, and the operator who ran
+  `fleet-hub pair --mode peer` is the one the privacy model puts out of scope
+  — they hold the hub's master token and its database already. What this
+  means in practice: **do not link a hub to one whose operator you would not
+  give a device on your own hub.** `fleet-hub peer remove <name>` ends it,
+  and an addressed session that does not exist answers
+  `E_PARTICIPANT_UNKNOWN`, so a link can also probe which session names
+  exist on this hub.
 - **A peer's own words cannot forge the marker that quotes them.** If a
   message body from another fleet happens to contain a line matching
   fleet's own untrusted-content marker, that line is neutralised (prefixed

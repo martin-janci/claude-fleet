@@ -169,6 +169,15 @@ fn decide(action: &str, session_id: i64, link_id: i64) -> WorkLinkArgs {
 
 // --- the commands --------------------------------------------------------------
 
+/// The standalone desktop's reader (multi-user M1): one person at the
+/// keyboard, so the Work view's reads run with the hub's own unrestricted
+/// scope exactly as they did before people existed. A desktop PAIRED to a hub
+/// never reaches these branches — it routes to the hub, which builds the
+/// caller's own [`ViewScope`].
+fn internal_view() -> fleet_core::service::view_scope::ViewScope {
+    fleet_core::service::view_scope::ViewScope::internal()
+}
+
 #[tauri::command]
 pub async fn work_tree(
     args: WorkTreeCmdArgs,
@@ -352,7 +361,7 @@ pub(crate) mod routed {
             Some(hub) => hub.route("work_tree", &wire).await,
             None => view::tree(
                 store,
-                &OrgScope::All,
+                &internal_view(),
                 &TreeArgs {
                     filters: args.filters.unwrap_or_default(),
                     cursor: args.cursor,
@@ -376,7 +385,7 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_task", &wire).await,
-            None => view::task(store, &OrgScope::All, &args.task_id),
+            None => view::task(store, &internal_view(), &args.task_id),
         }
     }
 
@@ -391,7 +400,7 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_session_tasks", &wire).await,
-            None => view::session_tasks(store, &OrgScope::All, args.session_id),
+            None => view::session_tasks(store, &internal_view(), args.session_id),
         }
     }
 
@@ -407,7 +416,7 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_review", &wire).await,
-            None => view::review(store, &OrgScope::All, args.cursor.as_deref(), args.limit),
+            None => view::review(store, &internal_view(), args.cursor.as_deref(), args.limit),
         }
     }
 
@@ -460,7 +469,9 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_org_impact", &wire).await,
-            None => structure::org_impact(store, &OrgScope::All, &args.task_id, Some(args.org_id)),
+            None => {
+                structure::org_impact(store, &internal_view(), &args.task_id, Some(args.org_id))
+            }
         }
     }
 
@@ -549,7 +560,7 @@ pub(crate) mod routed {
             Some(hub) => hub.route("place_work", &wire).await,
             None => structure::place(
                 store,
-                &OrgScope::All,
+                &internal_view(),
                 &args.task_id,
                 Some(&args.group),
                 args.note.as_deref(),
@@ -575,7 +586,7 @@ pub(crate) mod routed {
             Some(hub) => hub.route("assign_work_org", &wire).await,
             None => structure::assign_org(
                 store,
-                &OrgScope::All,
+                &internal_view(),
                 &args.task_id,
                 Some(args.org_id),
                 Some(&args.impact_token),

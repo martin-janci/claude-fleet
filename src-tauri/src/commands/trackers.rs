@@ -435,7 +435,7 @@ pub(crate) mod routed {
                 args.view.as_deref(),
                 args.query.as_deref(),
                 args.limit,
-                &fleet_core::service::orgs::OrgScope::All,
+                &fleet_core::service::view_scope::ViewScope::internal(),
             ),
         }
     }
@@ -458,7 +458,7 @@ pub(crate) mod routed {
                 tickets::lookup(
                     store,
                     &args.reference,
-                    &fleet_core::service::orgs::OrgScope::All,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
                     &default_net(),
                 )
                 .await
@@ -498,7 +498,7 @@ pub(crate) mod routed {
                     reg,
                     &fleet_core::service::work::start_args(&wire),
                     &args.project_ids,
-                    &fleet_core::service::orgs::OrgScope::All,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
                     &default_net(),
                 )
                 .await
@@ -536,7 +536,7 @@ pub(crate) mod routed {
                     ssh,
                     reg,
                     &fleet_core::service::work::start_args(&wire),
-                    &fleet_core::service::orgs::OrgScope::All,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
                     &default_net(),
                 )
                 .await

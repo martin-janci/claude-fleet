@@ -1,5 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -7,6 +7,9 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import ReviewDialog from './ReviewDialog.svelte';
 import { DEFAULT_REVIEW_PROMPT, type SessionRow } from './sessions';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
+import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
 
 const source: SessionRow = {
   id: 1, tmux_name: 'dev-source', host_alias: 'local',
@@ -50,5 +53,93 @@ describe('ReviewDialog', () => {
     await fireEvent.input(ta, { target: { value: '   ' } });
     await tick();
     expect((screen.getByTestId('review-start') as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+// ── Multi-user M1 (F2a): the dialog re-asks on confirm ──────────────────────
+//
+// `SessionDetails`' Review… button composes both halves; this dialog asked the
+// hub's alone, so a reason that arrived WHILE it was open — a revoke, a
+// narrowed grant — never reached Start review. `spawn_review` is `own` in
+// `share.ts::SESSION_TIER`: it starts a session in the owner's worktree with a
+// terminal of its own.
+describe('ReviewDialog access gate (multi-user M1)', () => {
+  const paired: HubStatus = {
+    ...STANDALONE,
+    remote: true,
+    url: 'https://fleet.example.com',
+    configured_url: 'https://fleet.example.com',
+  };
+  const theirs = { ...source, visibility: 'private', owner_person_id: 42 } as SessionRow;
+  const mine = { ...source, visibility: 'private', owner_person_id: 7 } as SessionRow;
+  const start = () => screen.getByTestId('review-start') as HTMLButtonElement;
+  const spawns = () =>
+    (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'spawn_review');
+
+  beforeEach(() => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue({ ...source, id: 2 });
+    hubStatus.set(paired);
+    hubConnection.set({ state: 'connected' });
+    resetAccessForTests();
+  });
+
+  afterEach(() => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+    resetAccessForTests();
+  });
+
+  it('the owner still starts a review on a paired desktop', async () => {
+    setMyGrants(7, []);
+    render(ReviewDialog, { props: { source: mine, onClose: () => {} } });
+    await tick();
+    expect(start().disabled).toBe(false);
+    expect(screen.queryByTestId('review-blocked')).toBeNull();
+    await fireEvent.click(start());
+    for (let i = 0; i < 6; i++) await tick();
+    expect(spawns()).toHaveLength(1);
+  });
+
+  for (const level of ['watch', 'drive'] as const) {
+    it(`a ${level} grantee cannot start one, and the dialog says so in text`, async () => {
+      setMyGrants(7, [{ session_id: 1, level }]);
+      render(ReviewDialog, { props: { source: theirs, onClose: () => {} } });
+      await tick();
+      expect(start().disabled).toBe(true);
+      expect(screen.getByTestId('review-blocked').textContent).toMatch(
+        /only the session’s owner/i,
+      );
+      await fireEvent.click(start());
+      for (let i = 0; i < 6; i++) await tick();
+      expect(spawns()).toHaveLength(0);
+    });
+  }
+
+  it('a revoke arriving while the dialog is open reaches Start review', async () => {
+    // The point of the fix: the opener was gated, the dialog was not, and a
+    // grant can move between the click that opened it and the click that
+    // starts. No row event is involved — only the grant map, which is why the
+    // dialog has to read it through the STORE.
+    setMyGrants(7, [{ session_id: 1, level: 'drive' }]);
+    render(ReviewDialog, { props: { source: theirs, onClose: () => {} } });
+    await tick();
+    expect(start().disabled).toBe(true);
+    // And the sentence changes with the state rather than going stale.
+    expect(screen.getByTestId('review-blocked').textContent).toMatch(/only the session’s owner/i);
+    applyGrantChanges([{ session_id: 1, person_id: 7, level: null }]);
+    await tick();
+    expect(start().disabled).toBe(true);
+    expect(screen.getByTestId('review-blocked').textContent).toMatch(/belongs to someone else/i);
+    await fireEvent.click(start());
+    for (let i = 0; i < 6; i++) await tick();
+    expect(spawns()).toHaveLength(0);
+  });
+
+  it('standalone is untouched: no grants, Start review stays live', async () => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+    render(ReviewDialog, { props: { source: theirs, onClose: () => {} } });
+    await tick();
+    expect(start().disabled).toBe(false);
   });
 });

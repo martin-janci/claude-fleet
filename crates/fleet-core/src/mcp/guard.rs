@@ -52,13 +52,20 @@ pub enum Access {
     /// (send / kill / new_session across hosts stay allowed by design), not
     /// fleet admin.
     Client,
-    /// Reachable by the master and by a PERSON's own paired device: a paired
-    /// client bound to no org (the desktop paired with `fleet-hub pair`, a
-    /// phone). Never a per-host token — its Claude is fenced to its host's
-    /// org, and these tools are fleet-wide — nor a client bound to an org
-    /// (M14). The fleet's settings (declarative pages P6): what the hub's
-    /// GC, playbooks and limits do to the sessions that device shows. A
-    /// write needs more than this row; see `set_setting`.
+    /// Reachable by the master and by THE HUB'S OWNER's own paired device: a
+    /// paired client bound to no org (the desktop paired with `fleet-hub
+    /// pair`, a phone) whose person is `Store::personal_owner_id()`. Never a
+    /// per-host token — its Claude is fenced to its host's org, and these
+    /// tools are fleet-wide — nor a client bound to an org (M14), nor (since
+    /// multi-user M1) a SECOND person's device. The fleet's settings
+    /// (declarative pages P6): what the hub's GC, playbooks and limits do to
+    /// the sessions that device shows. A write needs more than this row; see
+    /// `set_setting`.
+    ///
+    /// "Whose settings are these?" stays an M2 question: M1's answer is that
+    /// the fleet's settings belong to the fleet's owner, which is the state a
+    /// single-person hub was already in. What M1 changes is that a colleague
+    /// paired to the same hub no longer inherits them.
     Person,
     /// [`Access::Person`], but not served to the master: the operator has
     /// `fleet-hub settings` on the hub machine, and every byte of the
@@ -72,11 +79,42 @@ pub enum Access {
 /// predicate the call gate (`enforce_admin`) and the served list
 /// (`visible_to`) share. A tool with no row is the master's alone (fail
 /// closed).
+///
+/// **This function takes no store and must not grow one** (multi-user M1,
+/// R6-l). It is shared with `crate::mcp::tools::present::visible_to`, which
+/// has a `&Caller` and nothing else and runs over the whole router on every
+/// served list, so a lookup here would be a lock per request. Everything it
+/// needs about WHO the caller is was resolved once, where the token was
+/// resolved: [`crate::mcp::Caller::is_personal_owner`].
 pub fn access_allows(caller: &crate::mcp::Caller, tool: &str) -> bool {
     match policy(tool).map(|p| p.access) {
         Some(Access::Client) => true,
-        Some(Access::Person) => caller.is_master() || caller.is_person_device(),
-        Some(Access::PersonDevice) => caller.is_person_device(),
+        // Multi-user M1 (T2a): the hub's OWNER, not any person. Without the
+        // boolean this arm read "any paired device bound to no org", which
+        // on a hub with a second person handed that person the whole fleet's
+        // settings. The boolean is false when the hub cannot say who its
+        // owner is, so that state refuses rather than opens.
+        Some(Access::Person) => {
+            caller.is_personal_owner && (caller.is_master() || caller.is_person_device())
+        }
+        // Two conjuncts, narrowing two different axes, and BOTH are needed:
+        //
+        // - `is_personal_owner` narrows WHOSE device it is. Without it this
+        //   arm read "any paired device bound to no org", so on a hub with a
+        //   second person that colleague's phone reached
+        //   `decide_setting_proposals` — which applies a proposed settings
+        //   change to the whole fleet. Same hole as `Access::Person` had, one
+        //   arm down.
+        // - `is_person_device` narrows WHAT the caller is: a paired client,
+        //   which is what keeps the MASTER out of this arm by design (the
+        //   operator has `fleet-hub settings` on the hub machine, and every
+        //   byte of the master's tool surface is budgeted —
+        //   `the_served_definition_budget_stays_bounded`). It also keeps out
+        //   a per-host token, an org-bound client and a single-purpose token.
+        //
+        // A device that reaches these still has to be trusted to write
+        // anything (`settings_writer`).
+        Some(Access::PersonDevice) => caller.is_personal_owner && caller.is_person_device(),
         Some(Access::Master) | None => caller.is_master(),
     }
 }

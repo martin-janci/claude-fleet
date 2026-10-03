@@ -21,6 +21,7 @@
   import { rewindConversation } from './sessions';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { sessionIdBlocked } from './share';
   import { finalizeBranchSlug, validateBranchName } from './branch-slug';
 
   let {
@@ -52,8 +53,32 @@
     return validateBranchName(slug);
   });
 
-  // The hub link can drop while the sheet is open.
-  const blocked = $derived(hubActionBlocked('rewind_conversation', $hubStatus, $hubConnection));
+  /**
+   * The hub link can drop while the sheet is open — and so can a grant
+   * (multi-user M1, F2a). `rewind_conversation` is `own` in
+   * `share.ts::SESSION_TIER`: a fork leaves a permanent verbatim copy of the
+   * owner's transcript behind, and creates a worktree and a branch on the
+   * owner's host, so it is barred for a `drive` grantee too.
+   *
+   * The resolution is `share.ts::sessionIdBlocked`'s (F2e), because this sheet
+   * is handed a `sessionId` and nothing else: it resolves the row the same way
+   * a hand-rolled `$sessions.find` did, but a MISS fails closed with
+   * `UNKNOWN_SESSION_REASON` instead of handing `$sessionBlocked` an `undefined`
+   * — which answers `null` = allowed, collapsing this gate to the hub half
+   * alone on exactly the two rows a fork must not be offered for (somebody
+   * else's, or gone). A standalone desktop still answers `null`, where the
+   * master owns every row.
+   *
+   * The button that opens it (`ReplyActions`' Fork, through
+   * `ConversationPanel`) composes the same pair, but this sheet IS the
+   * confirmation — there is no second one — so a reason arriving while it is
+   * open has to reach Fork itself, and `fork()` re-reads it rather than
+   * trusting the disabled attribute.
+   */
+  const blocked = $derived(
+    hubActionBlocked('rewind_conversation', $hubStatus, $hubConnection) ??
+      $sessionIdBlocked(sessionId, 'rewind_conversation'),
+  );
   const canSubmit = $derived(!busy && !blocked && nameProblem === null);
 
   async function fork() {

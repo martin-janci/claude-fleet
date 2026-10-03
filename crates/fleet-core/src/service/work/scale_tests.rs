@@ -145,10 +145,10 @@ fn scale_list_sessions_with_work_fields() {
             .list_all_sessions()
             .unwrap()
             .into_iter()
-            .filter(|r| scope.sees_row(r))
+            .filter(|r| scope.sees_row_org_only(r))
             .collect();
         for r in &mut v {
-            scope.redact_row(r);
+            scope.redact_row_org_only(r);
         }
         v
     };
@@ -174,27 +174,55 @@ fn scale_list_sessions_with_work_fields() {
 fn scale_work_today() {
     let f = fixture().lock().unwrap_or_else(|e| e.into_inner());
     let store = &f.store;
-    let all = OrgScope::All;
-    let (t, sql) = traced(store, || super::today::today(store, None, &all).unwrap());
+    let (t, sql) = traced(store, || {
+        super::today::today(
+            store,
+            None,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap()
+    });
     assert!(!t.groups.is_empty());
     // `tracker_items` reads every item of every tracker through the
     // tracker index (a SEARCH per tracker): the cache is the input.
     assert_no_full_scans(store, "work { today }", &sql);
     let (_, p95) = measure("work { today } (All, since midnight-ish)", || {
-        super::today::today(store, None, &all).unwrap()
+        super::today::today(
+            store,
+            None,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap()
     });
     budget("today (All)", p95, 2_000.0);
 
     let month = f.now - 30 * 86_400;
-    let t = super::today::today(store, Some(month), &all).unwrap();
+    let t = super::today::today(
+        store,
+        Some(month),
+        &crate::service::view_scope::ViewScope::internal(),
+    )
+    .unwrap();
     assert!(!t.shipped.is_empty(), "a month ships something");
     let (_, p95) = measure("work { today } (All, since 30 days)", || {
-        super::today::today(store, Some(month), &all).unwrap()
+        super::today::today(
+            store,
+            Some(month),
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap()
     });
     budget("today (All, 30 days)", p95, 2_000.0);
 
     let scope = host_scope(store);
-    let (t, sql) = traced(store, || super::today::today(store, None, &scope).unwrap());
+    let (t, sql) = traced(store, || {
+        super::today::today(
+            store,
+            None,
+            &crate::service::view_scope::ViewScope::internal().with_org(scope.clone()),
+        )
+        .unwrap()
+    });
     assert!(t
         .groups
         .iter()
@@ -202,7 +230,12 @@ fn scale_work_today() {
         .all(|s| s.host_alias == "h01"));
     assert_no_full_scans(store, "work { today } per host", &sql);
     let (_, p95) = measure("work { today } (per-host h01)", || {
-        super::today::today(store, None, &scope).unwrap()
+        super::today::today(
+            store,
+            None,
+            &crate::service::view_scope::ViewScope::internal().with_org(scope.clone()),
+        )
+        .unwrap()
     });
     budget("today (per-host)", p95, 2_000.0);
 }
@@ -214,31 +247,79 @@ fn scale_work_tickets() {
     let store = &f.store;
     let all = OrgScope::All;
     let (page, sql) = traced(store, || {
-        tickets(store, None, None, None, None, &all).unwrap()
+        tickets(
+            store,
+            None,
+            None,
+            None,
+            None,
+            &crate::service::view_scope::org_only_view(&all),
+        )
+        .unwrap()
     });
     assert_eq!(page.len(), 50);
     assert_no_full_scans(store, "work { tickets }", &sql);
     let (_, p95) = measure("work { tickets } (first page of 50)", || {
-        tickets(store, None, None, None, None, &all).unwrap()
+        tickets(
+            store,
+            None,
+            None,
+            None,
+            None,
+            &crate::service::view_scope::org_only_view(&all),
+        )
+        .unwrap()
     });
     budget("tickets (page)", p95, 1_000.0);
 
     let (_, p95) = measure("work { tickets, limit: 200 }", || {
-        tickets(store, None, None, None, Some(200), &all).unwrap()
+        tickets(
+            store,
+            None,
+            None,
+            None,
+            Some(200),
+            &crate::service::view_scope::org_only_view(&all),
+        )
+        .unwrap()
     });
     budget("tickets (200)", p95, 1_500.0);
 
-    let mine = tickets(store, None, Some("mine"), None, Some(200), &all).unwrap();
+    let mine = tickets(
+        store,
+        None,
+        Some("mine"),
+        None,
+        Some(200),
+        &crate::service::view_scope::org_only_view(&all),
+    )
+    .unwrap();
     assert!(!mine.is_empty());
     let (_, p95) = measure("work { tickets, view: mine }", || {
-        tickets(store, None, Some("mine"), None, Some(200), &all).unwrap()
+        tickets(
+            store,
+            None,
+            Some("mine"),
+            None,
+            Some(200),
+            &crate::service::view_scope::org_only_view(&all),
+        )
+        .unwrap()
     });
     budget("tickets (mine)", p95, 1_000.0);
 
     // A lookup by key: the whole cache read, one hit.
     let key = f.hot_key.clone();
     let (hit, sql) = traced(store, || {
-        tickets(store, None, None, Some(&key), Some(5), &all).unwrap()
+        tickets(
+            store,
+            None,
+            None,
+            Some(&key),
+            Some(5),
+            &crate::service::view_scope::org_only_view(&all),
+        )
+        .unwrap()
     });
     assert!(hit
         .iter()
@@ -249,17 +330,41 @@ fn scale_work_tickets() {
     );
     assert_no_full_scans(store, "work { tickets, query }", &sql);
     let (_, p95) = measure("work { tickets, query: <key> }", || {
-        tickets(store, None, None, Some(&key), Some(5), &all).unwrap()
+        tickets(
+            store,
+            None,
+            None,
+            Some(&key),
+            Some(5),
+            &crate::service::view_scope::org_only_view(&all),
+        )
+        .unwrap()
     });
     budget("tickets (query)", p95, 1_000.0);
 
     let scope = host_scope(store);
     let (_, sql) = traced(store, || {
-        tickets(store, None, None, None, None, &scope).unwrap()
+        tickets(
+            store,
+            None,
+            None,
+            None,
+            None,
+            &crate::service::view_scope::org_only_view(&scope),
+        )
+        .unwrap()
     });
     assert_no_full_scans(store, "work { tickets } per host", &sql);
     let (_, p95) = measure("work { tickets } (per-host h01)", || {
-        tickets(store, None, None, None, None, &scope).unwrap()
+        tickets(
+            store,
+            None,
+            None,
+            None,
+            None,
+            &crate::service::view_scope::org_only_view(&scope),
+        )
+        .unwrap()
     });
     budget("tickets (per-host)", p95, 1_500.0);
 }
@@ -268,14 +373,23 @@ fn scale_work_tickets() {
 fn scale_tidy_planner() {
     let f = fixture().lock().unwrap_or_else(|e| e.into_inner());
     let store = &f.store;
-    let all = OrgScope::All;
     let (report, sql) = traced(store, || {
-        super::tidy::work_tidy(store, &all, f.now).unwrap()
+        super::tidy::work_tidy(
+            store,
+            &crate::service::view_scope::ViewScope::internal(),
+            f.now,
+        )
+        .unwrap()
     });
     assert!(!report.candidates.is_empty());
     assert_no_full_scans(store, "work { tidy }", &sql);
     let (_, p95) = measure("work { tidy } (read + plan, all candidates)", || {
-        super::tidy::work_tidy(store, &all, f.now).unwrap()
+        super::tidy::work_tidy(
+            store,
+            &crate::service::view_scope::ViewScope::internal(),
+            f.now,
+        )
+        .unwrap()
     });
     budget("tidy (All)", p95, 2_000.0);
 
@@ -298,10 +412,20 @@ fn scale_tidy_planner() {
     budget("plan_tidy", p95, 500.0);
 
     let scope = host_scope(store);
-    let r = super::tidy::work_tidy(store, &scope, f.now).unwrap();
+    let r = super::tidy::work_tidy(
+        store,
+        &crate::service::view_scope::ViewScope::internal().with_org(scope.clone()),
+        f.now,
+    )
+    .unwrap();
     assert!(r.candidates.iter().all(|c| c.host_alias == "h01"));
     let (_, p95) = measure("work { tidy } (per-host h01)", || {
-        super::tidy::work_tidy(store, &scope, f.now).unwrap()
+        super::tidy::work_tidy(
+            store,
+            &crate::service::view_scope::ViewScope::internal().with_org(scope.clone()),
+            f.now,
+        )
+        .unwrap()
     });
     budget("tidy (per-host)", p95, 2_000.0);
 }
@@ -606,12 +730,22 @@ fn scale_work_view() {
     use crate::service::work::view::{review, task, tree, IdOrWord, TreeArgs, WorkTreeFilters};
     let f = fixture().lock().unwrap_or_else(|e| e.into_inner());
     let store = &f.store;
-    let first = tree(store, &OrgScope::All, &TreeArgs::default()).unwrap();
+    let first = tree(
+        store,
+        &crate::service::view_scope::ViewScope::internal(),
+        &TreeArgs::default(),
+    )
+    .unwrap();
     assert!(first.total > 4_000, "every item is a task: {}", first.total);
     assert_eq!(first.tasks.len(), 50);
     assert!(first.next_cursor.is_some());
     let (_, p95) = measure("work tree, first page (All)", || {
-        tree(store, &OrgScope::All, &TreeArgs::default()).unwrap()
+        tree(
+            store,
+            &crate::service::view_scope::ViewScope::internal(),
+            &TreeArgs::default(),
+        )
+        .unwrap()
     });
     budget("work tree first page (All)", p95, 3_000.0);
 
@@ -624,7 +758,12 @@ fn scale_work_view() {
         ..Default::default()
     };
     let (_, p95) = measure("work tree, open with an active session", || {
-        tree(store, &OrgScope::All, &filtered).unwrap()
+        tree(
+            store,
+            &crate::service::view_scope::ViewScope::internal(),
+            &filtered,
+        )
+        .unwrap()
     });
     budget("work tree filtered", p95, 3_000.0);
 
@@ -635,7 +774,7 @@ fn scale_work_view() {
     for _ in 0..3 {
         let p = tree(
             store,
-            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
             &TreeArgs {
                 filters: WorkTreeFilters {
                     group: Some(group.clone()),
@@ -661,7 +800,12 @@ fn scale_work_view() {
 
     let host = host_scope(store);
     let (_, p95) = measure("work tree, a per-host token", || {
-        tree(store, &host, &TreeArgs::default()).unwrap()
+        tree(
+            store,
+            &crate::service::view_scope::ViewScope::internal().with_org(host.clone()),
+            &TreeArgs::default(),
+        )
+        .unwrap()
     });
     budget("work tree (host)", p95, 3_000.0);
     let bound = OrgScope::Org {
@@ -671,7 +815,7 @@ fn scale_work_view() {
     let (page, p95) = {
         let p = tree(
             store,
-            &bound,
+            &crate::service::view_scope::ViewScope::internal().with_org(bound.clone()),
             &TreeArgs {
                 filters: WorkTreeFilters {
                     org: Some(IdOrWord::Id(2)),
@@ -682,7 +826,12 @@ fn scale_work_view() {
         )
         .unwrap();
         let (_, p95) = measure("work tree, a client bound to org 1", || {
-            tree(store, &bound, &TreeArgs::default()).unwrap()
+            tree(
+                store,
+                &crate::service::view_scope::ViewScope::internal().with_org(bound.clone()),
+                &TreeArgs::default(),
+            )
+            .unwrap()
         });
         (p, p95)
     };
@@ -694,11 +843,22 @@ fn scale_work_view() {
 
     let hot = first.tasks[0].task_id.clone();
     let (_, p95) = measure("work task detail", || {
-        task(store, &OrgScope::All, &hot).unwrap()
+        task(
+            store,
+            &crate::service::view_scope::ViewScope::internal(),
+            &hot,
+        )
+        .unwrap()
     });
     budget("work task", p95, 3_000.0);
     let (_, p95) = measure("work review inbox", || {
-        review(store, &OrgScope::All, None, None).unwrap()
+        review(
+            store,
+            &crate::service::view_scope::ViewScope::internal(),
+            None,
+            None,
+        )
+        .unwrap()
     });
     budget("work review", p95, 3_000.0);
 }

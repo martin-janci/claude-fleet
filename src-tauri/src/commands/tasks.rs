@@ -7,6 +7,7 @@ use crate::backend::FleetBackend;
 use fleet_core::ipc_error::lock;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::tasks;
+use fleet_core::service::view_scope::ViewScope;
 use fleet_core::store::{Store, TaskRow};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -53,7 +54,21 @@ pub(crate) mod routed {
                     .await
             }
             None => {
-                tasks::list_tasks_for(store, requester_session_id, state.as_deref(), limit, None)
+                // Standalone, the desktop IS the local operator: it reads
+                // through `ViewScope::internal`, the hub's own reader, and
+                // not through a caller scope (multi-user M1, T6 — "the hub
+                // does its work" and "a caller sees everything" are
+                // deliberately different values). Paired with a hub the arm
+                // above routes instead, and the hub applies the person
+                // scope of the token this desktop pairs with.
+                tasks::list_tasks_for(
+                    store,
+                    requester_session_id,
+                    state.as_deref(),
+                    limit,
+                    None,
+                    &ViewScope::internal(),
+                )
             }
         }
     }

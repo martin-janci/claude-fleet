@@ -1,7 +1,7 @@
 // "Name this work…" (work graph M11.1): the dialog, the row's menu entry,
 // and the optimistic title patch of a rename.
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { get } from 'svelte/store';
 import { tick } from 'svelte';
 
@@ -13,6 +13,9 @@ import { hosts } from './hosts';
 import { session } from './hosts_fixture';
 import { sessions, type SessionRow } from './sessions';
 import { LOCAL_WORK_TITLE_MAX, patchWorkItemTitle, workTitleError } from './work';
+import { hubStatus, STANDALONE } from './hub';
+import { hubConnection } from './hub_connection';
+import { resetAccessForTests, setMyGrants } from './access';
 
 const live = (over: Partial<SessionRow> = {}): SessionRow =>
   session('mefistos', 'dev-foo', { id: 7, status: 'running', ...over });
@@ -327,5 +330,123 @@ describe('the row work menu', () => {
     await openMenu();
     expect(screen.getByTestId('work-name')).toBeTruthy();
     expect(screen.queryByTestId('work-rename')).toBeNull();
+  });
+});
+
+// Multi-user M1, F2b: the dialog is handed session IDS and wrote without
+// asking either half. It resolves the rows out of the store and narrows per
+// target — and re-asks, since it stays open across a narrowing. `rename` mode
+// has no session at all, so its answer arrives as the `accessBlocked` prop.
+describe('NameWorkDialog access gate (multi-user M1)', () => {
+  const REMOTE = {
+    ...STANDALONE,
+    remote: true,
+    url: 'https://fleet.example.com',
+    configured_url: 'https://fleet.example.com',
+  };
+  const ME = 7;
+  const THEM = 9;
+
+  beforeEach(() => {
+    resetAccessForTests();
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+  });
+
+  afterEach(() => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+    resetAccessForTests();
+  });
+
+  async function type(title: string) {
+    await fireEvent.input(screen.getByTestId('name-work-title'), { target: { value: title } });
+    await tick();
+  }
+
+  it('names work only for the ticked sessions this client may drive', async () => {
+    const mine = live({ id: 1, owner_person_id: ME });
+    const theirs = live({ id: 2, owner_person_id: THEM, tmux_name: 'dev-theirs' });
+    sessions.set([mine, theirs]);
+    setMyGrants(ME, [{ session_id: 2, level: 'watch' }]);
+    // The write answers a named row; without it `nameWorkForSessions` reads
+    // `work` off nothing and leaves an unhandled rejection in the run.
+    vi.mocked(invoke).mockResolvedValue(named(1));
+    render(NameWorkDialog, {
+      props: {
+        target: {
+          mode: 'name',
+          sessions: [
+            { id: 1, label: 'dev-foo' },
+            { id: 2, label: 'dev-theirs' },
+          ],
+        },
+        onclose: vi.fn(),
+      },
+    });
+    await tick();
+    expect(screen.getByTestId('name-work-not-mine').textContent).toMatch(/1 of the ticked/);
+    await type('Ops cleanup');
+    await fireEvent.click(screen.getByTestId('name-work-submit'));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('name_session_work', {
+        args: { session_id: 1, title: 'Ops cleanup' },
+      }),
+    );
+    // The watched session is never linked to the new item either.
+    expect(invoke).not.toHaveBeenCalledWith('link_session_work', expect.anything());
+  });
+
+  it('refuses outright when no ticked session is this client’s', async () => {
+    const theirs = live({ id: 2, owner_person_id: THEM });
+    sessions.set([theirs]);
+    setMyGrants(ME, [{ session_id: 2, level: 'watch' }]);
+    render(NameWorkDialog, {
+      props: {
+        target: { mode: 'name', sessions: [{ id: 2, label: 'dev-theirs' }] },
+        onclose: vi.fn(),
+      },
+    });
+    await tick();
+    await type('Ops cleanup');
+    const submit = screen.getByTestId('name-work-submit') as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    expect(screen.getByTestId('name-work-blocked').textContent).toMatch(/watch is read-only/i);
+    await fireEvent.click(submit);
+    await tick();
+    expect(invoke).not.toHaveBeenCalledWith('name_session_work', expect.anything());
+  });
+
+  it('the owner keeps it', async () => {
+    const mine = live({ id: 1, owner_person_id: ME });
+    sessions.set([mine]);
+    setMyGrants(ME, []);
+    render(NameWorkDialog, {
+      props: { target: { mode: 'name', sessions: [{ id: 1, label: 'dev-foo' }] }, onclose: vi.fn() },
+    });
+    await tick();
+    await type('Ops cleanup');
+    expect((screen.getByTestId('name-work-submit') as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByTestId('name-work-blocked')).toBeNull();
+  });
+
+  it('rename mode takes its answer from the caller, which holds the row', async () => {
+    sessions.set([]);
+    setMyGrants(ME, []);
+    render(NameWorkDialog, {
+      props: {
+        target: { mode: 'rename', itemId: 40, title: 'Ops cleanup' },
+        onclose: vi.fn(),
+        accessBlocked: 'Shared with you to watch. Watch is read-only.',
+      },
+    });
+    await tick();
+    await type('Something else');
+    const submit = screen.getByTestId('name-work-submit') as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+    expect(screen.getByTestId('name-work-blocked').textContent).toMatch(/read-only/i);
+    await fireEvent.click(submit);
+    await tick();
+    expect(invoke).not.toHaveBeenCalledWith('rename_work_item', expect.anything());
   });
 });

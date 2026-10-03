@@ -21,6 +21,21 @@
 //! What is NOT cached: the master token. It was, and stays, the value the
 //! server was started with (`start_with_listener`'s `token`); `fleet-hub token
 //! regenerate` takes effect on the next start, as before.
+//!
+//! # The hub's personal owner rides along
+//!
+//! Multi-user M1 needs one more fact per request — `Store::personal_owner_id()`,
+//! which decides [`crate::mcp::Caller::is_personal_owner`] — and `authorize`
+//! must not take the writer's lock to answer it. It is read here, on the same
+//! read-only connection and the same pass as the token rows, and then
+//! remembered: the flagged `people` row is written exactly twice in the life
+//! of a database (by migration 086 and by `ensure_personal_owner`), so it is
+//! not something the auth epoch has to track.
+//!
+//! A `None` is **never** remembered. A hub that cannot say whose it is is
+//! mis-provisioned; it must keep asking, so that the next `ensure_personal_owner`
+//! — or an operator's repair — takes effect without a restart, and it fails
+//! closed meanwhile (T1).
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::store::{ClientTokenRow, HostTokenRow, ReadPool};
@@ -45,6 +60,10 @@ pub struct TokenCache {
     snapshot: Mutex<Snapshot>,
     /// Per client id, when `authorize` last stamped its `last_seen_at`.
     touched: Mutex<HashMap<i64, i64>>,
+    /// The hub's personal owner (multi-user M1), once it has been read.
+    /// `None` means "not known yet, ask again" — never "this hub has none",
+    /// which is why the module docs above forbid caching a `None`.
+    owner: Mutex<Option<i64>>,
 }
 
 impl TokenCache {
@@ -56,6 +75,7 @@ impl TokenCache {
             pool,
             snapshot: Mutex::new(snapshot),
             touched: Mutex::new(HashMap::new()),
+            owner: Mutex::new(None),
         })
     }
 
@@ -69,16 +89,28 @@ impl TokenCache {
         })
     }
 
-    /// The per-host and live client token rows as of now.
+    /// The per-host and live client token rows as of now, and the hub's
+    /// personal owner — everything `auth::check_request` needs, off one
+    /// pooled connection.
     ///
     /// `Err` only when the read-only connection cannot answer (every pooled
     /// connection poisoned, a SQLite error): the caller then reads the
     /// tables through the writer, as `authorize` did before the cache —
     /// failing over to the authoritative path, never to a stale snapshot.
     #[allow(clippy::type_complexity)]
-    pub fn tokens(&self) -> Result<(Arc<Vec<HostTokenRow>>, Arc<Vec<ClientTokenRow>>), IpcError> {
+    pub fn tokens(
+        &self,
+    ) -> Result<
+        (
+            Arc<Vec<HostTokenRow>>,
+            Arc<Vec<ClientTokenRow>>,
+            Option<i64>,
+        ),
+        IpcError,
+    > {
         let conn = self.pool.get().ok_or_else(no_connection)?;
         let current = lock(conn)?.auth_epoch()?;
+        let owner = self.personal_owner(conn)?;
         let mut snap = self.snapshot.lock().unwrap_or_else(|p| p.into_inner());
         if snap.epoch != current {
             // Epoch and rows in one read transaction: the rows are the ones
@@ -91,7 +123,28 @@ impl TokenCache {
                 clients: Arc::new(clients),
             };
         }
-        Ok((Arc::clone(&snap.hosts), Arc::clone(&snap.clients)))
+        Ok((Arc::clone(&snap.hosts), Arc::clone(&snap.clients), owner))
+    }
+
+    /// The hub's personal owner, read through `conn` the first time and
+    /// remembered after.
+    ///
+    /// Not keyed on the auth epoch, and deliberately so: nothing in the
+    /// `people` table is a bearer token, and the flagged row is written by
+    /// migration 086 and by `ensure_personal_owner` only — an id that has
+    /// been answered once does not change under a running hub. A `None` is
+    /// not remembered, so a hub that is missing the row asks again on every
+    /// request and picks the id up the moment one exists.
+    fn personal_owner(&self, conn: &Mutex<crate::store::Store>) -> Result<Option<i64>, IpcError> {
+        let known = *self.owner.lock().unwrap_or_else(|p| p.into_inner());
+        if known.is_some() {
+            return Ok(known);
+        }
+        let read = lock(conn)?.personal_owner_id()?;
+        if read.is_some() {
+            *self.owner.lock().unwrap_or_else(|p| p.into_inner()) = read;
+        }
+        Ok(read)
     }
 
     /// Whether client `id` is due a `last_seen_at` stamp at `now`. Marks it

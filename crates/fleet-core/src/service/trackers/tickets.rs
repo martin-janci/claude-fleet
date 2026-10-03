@@ -121,6 +121,11 @@ pub(crate) fn item_visible(
     item: &WorkItemRow,
 ) -> Result<bool, IpcError> {
     match scope {
+        // This is the org boundary, not a privacy fence: which COMPANY's
+        // work item this is. An item is not a session — its key and title
+        // are item data — and every session field hung off it is
+        // person-fenced where it is read (`tickets::live_ids` takes the
+        // whole `ViewScope`).
         OrgScope::All => Ok(true),
         OrgScope::Org { .. } => Ok(scope.sees_org(s.item_org(item.id)?)),
         OrgScope::Host { alias, .. } => {
@@ -154,15 +159,33 @@ fn live_work_on(
     Ok(out)
 }
 
-/// The live sessions working on `item` that the scope may see (D7: an
+/// The live sessions working on `item` that the reader may see (D7: an
 /// isolated org's session is not named to a host outside it).
-fn live_ids(s: &Store, scope: &OrgScope, item: &WorkItemRow) -> Result<Vec<i64>, IpcError> {
+///
+/// **The WHOLE [`ViewScope`], not its org half** (multi-user M1, T9c).
+/// `Ticket.live_session_ids` is a list of session ids — spec §4.3 content,
+/// and the same "somebody is working on this" bit `Graph::build`
+/// person-fences one directory away — and the org half it used to be
+/// filtered by (`OrgScope::sees_row_org_only`) is `true` for `OrgScope::All`,
+/// i.e. for the master AND for every paired client bound to no org. So
+/// `work { tickets }` enumerated the ids of every private live session on
+/// each shared ticket to a second person's phone. T8's result gate cannot
+/// net it either: the ids are a bare integer array, and
+/// `view_scope::looks_like_session_row` needs an object with `host_alias`
+/// and `tmux_name`.
+///
+/// [`ViewScope`]: crate::service::view_scope::ViewScope
+fn live_ids(
+    s: &Store,
+    reader: &crate::service::view_scope::ViewScope,
+    item: &WorkItemRow,
+) -> Result<Vec<i64>, IpcError> {
     let Some(k) = item.key.as_deref() else {
         return Ok(Vec::new());
     };
     Ok(live_work_on(s, k, s.item_org(item.id)?)?
         .into_iter()
-        .filter(|(_, r)| scope.sees_row(r))
+        .filter(|(_, r)| reader.sees_session_row(r).is_visible())
         .map(|(_, r)| r.id)
         .collect())
 }
@@ -201,10 +224,10 @@ pub fn tickets(
     view: Option<&str>,
     query: Option<&str>,
     limit: Option<usize>,
-    scope: &OrgScope,
+    reader: &crate::service::view_scope::ViewScope,
 ) -> Result<Vec<Ticket>, IpcError> {
     let s = lock(store)?;
-    tickets_in(&s, tracker_id, view, query, limit, scope)
+    tickets_in(&s, tracker_id, view, query, limit, reader)
 }
 
 /// [`tickets`] under a store guard the caller already holds — the hook path
@@ -215,8 +238,9 @@ pub(crate) fn tickets_in(
     view: Option<&str>,
     query: Option<&str>,
     limit: Option<usize>,
-    scope: &OrgScope,
+    reader: &crate::service::view_scope::ViewScope,
 ) -> Result<Vec<Ticket>, IpcError> {
+    let scope = &reader.org;
     let allowed = allowed(scope, s)?;
     let trackers = s.list_trackers()?;
     let now = crate::service::catalog::now_secs();
@@ -249,7 +273,7 @@ pub(crate) fn tickets_in(
                 continue;
             }
         }
-        let live = live_ids(s, scope, &item)?;
+        let live = live_ids(s, reader, &item)?;
         out.push(Ticket {
             item,
             live_session_ids: live,
@@ -353,15 +377,18 @@ fn recognise(s: &Store, reference: &str) -> Result<(Option<TrackerRow>, String, 
 pub async fn lookup(
     store: &Mutex<Store>,
     reference: &str,
-    scope: &OrgScope,
+    reader: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
 ) -> Result<Ticket, IpcError> {
+    let scope = &reader.org;
     let (tracker, key, by_url) = {
         let s = lock(store)?;
         match recognise(&s, reference) {
             Ok(r) => r,
             // Which sites are connected is not a host token's to learn: an
             // unknown site answers as an invisible key does.
+            // This is the org boundary, not a privacy fence: which tracker SITES are connected
+            // is an org question.
             Err(e) if e.code == codes::E_NOTFOUND && !scope.is_all() => {
                 return Err(orgs::not_visible_to(scope, reference.trim()));
             }
@@ -379,6 +406,8 @@ pub async fn lookup(
         // several): that URL names one site's ticket, and another site's
         // item with the same key is a different ticket — it stays
         // ambiguous, as before.
+        // This is the org boundary, not a privacy fence: which org's cache answers a bare key
+        // when two sites hold the same one.
         (_, false) if !scope.is_all() => {
             let s = lock(store)?;
             let mut found = None;
@@ -402,6 +431,8 @@ pub async fn lookup(
             }
             // A bound client (M14) may make the hub fetch only from a tracker
             // of its own orgs.
+            // This is the org boundary, not a privacy fence: which tracker this caller may make
+            // the hub fetch from.
             if !scope.is_all() && !tracker.as_ref().is_some_and(|t| scope.sees_org(t.org_id)) {
                 return Err(orgs::not_visible_to(scope, &key));
             }
@@ -469,7 +500,7 @@ pub async fn lookup(
         t.as_ref(),
         crate::service::catalog::now_secs(),
     );
-    let live = live_ids(&s, scope, &item)?;
+    let live = live_ids(&s, reader, &item)?;
     // The key may end up in DescribeOffer::Key, which fence_ticket puts in
     // fleet's own notice line: flatten it like every other tracker line does
     // (defuse alone does not fold a newline).
@@ -489,6 +520,9 @@ pub async fn lookup(
             describe_offer(t.as_ref(), flat_key.as_deref()),
         ),
         // A person reads it on a phone or the desktop (bound or not): as is.
+        // This is the org boundary, not a privacy fence: what is trimmed for
+        // a per-host token is a TICKET's description — the tracker's own
+        // text, which belongs to a company and names no session.
         OrgScope::All | OrgScope::Org { .. } => d,
     });
     Ok(Ticket {
@@ -529,6 +563,15 @@ pub struct StartArgs {
     /// (a per-host token, the operator) `agent_started`. The desktop's is
     /// always a person's (the default).
     pub decider: Decider,
+    /// WHOSE the started session is (multi-user M1, T5): the `people` row of
+    /// the caller who asked for the start, `None` for a caller that is no
+    /// person (a per-host token, the operator) or for a hub that cannot say.
+    ///
+    /// Never on the wire — these args are built from a tool's own parameters
+    /// and this field is filled from `Caller`, never from JSON — because a
+    /// value a caller could set would be a way to start a session in somebody
+    /// else's name.
+    pub owner: Option<i64>,
 }
 
 /// Where a start lands and what it is called.
@@ -555,6 +598,11 @@ pub struct StartPlan {
     /// Never on the wire: a plan read back is a person's.
     #[serde(skip)]
     pub decider: Decider,
+    /// Whose the started session is ([`StartArgs::owner`]). `#[serde(skip)]`
+    /// for the same reason `decider` is: a plan a client hands back must not
+    /// be able to name an owner.
+    #[serde(skip)]
+    pub owner: Option<i64>,
 }
 
 /// `slug(key + " " + title)`: lower case, `[a-z0-9-]`, runs collapsed, at
@@ -619,11 +667,11 @@ pub fn start_name(key: &str, title: &str) -> String {
 pub async fn plan_start(
     store: &Mutex<Store>,
     args: &StartArgs,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
 ) -> Result<StartPlan, IpcError> {
-    let ticket = resolve_start(store, args, scope, net).await?;
-    plan_resolved(store, args, scope, &ticket)
+    let ticket = resolve_start(store, args, view, net).await?;
+    plan_resolved(store, args, view, &ticket)
 }
 
 /// The ticket a start names, resolved once: its key, title and (when a
@@ -640,9 +688,10 @@ pub struct StartTicket {
 pub async fn resolve_start(
     store: &Mutex<Store>,
     args: &StartArgs,
-    scope: &OrgScope,
+    reader: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
 ) -> Result<StartTicket, IpcError> {
+    let scope = &reader.org;
     let (key, title, item_id) = match (args.item_id, args.reference.as_deref()) {
         (Some(id), None) => {
             let s = lock(store)?;
@@ -656,7 +705,7 @@ pub async fn resolve_start(
             })?;
             (key, item.title, Some(id))
         }
-        (None, Some(r)) => match lookup(store, r, scope, net).await {
+        (None, Some(r)) => match lookup(store, r, reader, net).await {
             Ok(t) => (
                 t.item.key.clone().unwrap_or_else(|| r.to_string()),
                 t.item.title,
@@ -690,17 +739,32 @@ fn host_fence(h: &str) -> IpcError {
     )
 }
 
-/// `E_EXISTS` naming `row` (or not, when the scope cannot see it — an
-/// isolated org's session is not named to a host outside it, D7). `what`
+/// `E_EXISTS` naming `row` (or not, when the caller cannot see it — an
+/// isolated org's session is not named to a host outside it, D7; another
+/// PERSON's session is not named to anybody, multi-user M1 T9b). `what`
 /// qualifies the session ("on branch x"); `then` is what to do about it.
+///
+/// **The fence is [`crate::service::view_scope::ViewScope`], not its org
+/// half.** The long form prints the occupant's friendly-or-tmux name and its
+/// host, and `OrgScope::All` is what every paired client bound to no org
+/// resolves to — so `work_link { start, key: PAY-123 }` answered with another
+/// person's session name and machine. The `details` object IS netted by T8's
+/// result gate (`session_id` + `host_alias` + `tmux_name` → a row shape), but
+/// the TEXT block is not: `support::rewrite_json_content` skips any content
+/// block that will not parse as JSON. The sibling path was hardened against
+/// exactly this (`repo.rs`'s `E_WORKTREE_BUSY` prints a COUNT, never a
+/// host or a tmux name); this one was missed.
+///
+/// An invisible occupant is then indistinguishable from a merely-busy key,
+/// which is the point: the bare sentence is no oracle either way.
 fn already_running(
     key: &str,
     row: &SessionRow,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     what: &str,
     then: &str,
 ) -> IpcError {
-    if !scope.sees_row(row) {
+    if !view.sees_session_row(row).is_visible() {
         return IpcError::new(codes::E_EXISTS, format!("{key} already has a live session"));
     }
     IpcError::new(
@@ -727,9 +791,10 @@ fn already_running(
 pub fn plan_resolved(
     store: &Mutex<Store>,
     args: &StartArgs,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     ticket: &StartTicket,
 ) -> Result<StartPlan, IpcError> {
+    let scope = &view.org;
     let StartTicket {
         key,
         title,
@@ -749,7 +814,7 @@ pub fn plan_resolved(
         .iter()
         .find(|(_, r)| !args.per_project || r.project_id == args.project_id)
     {
-        return Err(already_running(&key, row, scope, "", "jump to it"));
+        return Err(already_running(&key, row, view, "", "jump to it"));
     }
     // Where this kind of work last ran: a GitHub issue's own repository's
     // project first, else the newest link with the same key prefix.
@@ -870,6 +935,14 @@ pub fn plan_resolved(
         .into_iter()
         .find(|w| w.project_id == project_id && w.name == branch)
         .map(|w| w.id);
+    // A start whose branch slug matches an EXISTING checkout lands its pane
+    // in that checkout — so `work_link { start }` acts on an existing row
+    // after all, and takes the same landing gate `new_session` /
+    // `new_shell_session` take (multi-user M1, T9b; the hole T8d's blocker 5
+    // closed, reopened one arm over). `new_worktree` is untouched: a tree
+    // that does not exist yet has no occupants, and `worktree_id` is `None`
+    // on that path.
+    crate::service::sessions::require_may_land_in_worktree(&s, view, worktree_id)?;
     if args.per_project {
         // A live session already on this branch in this project, linked or
         // not: a retry after a spawn whose link failed must not start a
@@ -885,7 +958,7 @@ pub fn plan_resolved(
             return Err(already_running(
                 &key,
                 row,
-                scope,
+                view,
                 &format!(" on branch {branch}"),
                 "jump to it",
             ));
@@ -914,6 +987,7 @@ pub fn plan_resolved(
         worktree_id,
         per_project: args.per_project,
         decider: args.decider,
+        owner: args.owner,
     })
 }
 
@@ -1099,7 +1173,7 @@ pub async fn start_with<F, Fut>(
     store: &Arc<Mutex<Store>>,
     plan: &StartPlan,
     brief: Option<String>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     spawn: F,
 ) -> Result<(SessionRow, bool), IpcError>
 where
@@ -1116,11 +1190,11 @@ where
         // `plan_start`'s guard ran before the claim: a start that claimed,
         // linked and released since is caught here, before the spawn.
         if let Some(other) = rival(&s, plan, None)? {
-            return Err(already_running(&plan.key, &other, scope, "", "jump to it"));
+            return Err(already_running(&plan.key, &other, view, "", "jump to it"));
         }
         claim
     };
-    let one = start_one(store, plan, brief, scope, spawn).await?;
+    let one = start_one(store, plan, brief, view, spawn).await?;
     match one.warning {
         Some(e) => {
             let mut d = e.details.clone().unwrap_or_else(|| serde_json::json!({}));
@@ -1150,7 +1224,7 @@ pub async fn start_one<F, Fut>(
     store: &Arc<Mutex<Store>>,
     plan: &StartPlan,
     brief: Option<String>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     spawn: F,
 ) -> Result<StartOutcome, IpcError>
 where
@@ -1173,9 +1247,20 @@ where
         resume_claude_session_id: None,
         model: None,
         effort: None,
+        // Whose the started session is (multi-user M1, T5): the caller who
+        // asked for the start (`StartArgs::owner`, filled from `Caller` at
+        // the tool), and the hub's own person only for a path that genuinely
+        // has no caller — the operator's own starts, the catalog's author
+        // session, the desktop. Without the first half, a second person's
+        // `work_link { start }` created a session owned by the HUB's owner:
+        // readable by somebody who did not ask for it, and `null` in the
+        // answer to the person who did (T8 drops the row they may not see).
+        owner_person_id: plan
+            .owner
+            .or_else(|| crate::service::sessions::hub_personal_owner(store)),
     };
     let row = spawn(args).await?;
-    match link_started(store, plan, brief, scope, &row) {
+    match link_started(store, plan, brief, view, &row) {
         Ok((linked, queued)) => Ok(StartOutcome {
             row: linked.unwrap_or(row),
             queued,
@@ -1207,7 +1292,7 @@ fn link_started(
     store: &Arc<Mutex<Store>>,
     plan: &StartPlan,
     brief: Option<String>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     row: &SessionRow,
 ) -> Result<(Option<SessionRow>, bool), IpcError> {
     let s = lock(store)?;
@@ -1221,7 +1306,7 @@ fn link_started(
         return Err(already_running(
             &plan.key,
             &other,
-            scope,
+            view,
             "",
             &format!(
                 "the session this start made ({}) is not linked to it",
@@ -1258,10 +1343,10 @@ pub async fn start_work(
     ssh: &Arc<crate::ssh::SshClient>,
     reg: &Arc<crate::cancel::CancellationRegistry>,
     args: &StartArgs,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
 ) -> Result<SessionRow, IpcError> {
-    let plan = plan_start(store, args, scope, net).await?;
+    let plan = plan_start(store, args, view, net).await?;
     let brief = match (&args.brief, args.with_brief) {
         (Some(b), _) => Some(b.clone()),
         // The brief is read by the new session's Claude: never another
@@ -1269,7 +1354,7 @@ pub async fn start_work(
         (None, true) if brief_visible_on(store, &plan)? => Some(ticket_brief(store, &plan)?),
         (None, _) => None,
     };
-    let (row, queued) = start_with(store, &plan, brief, scope, |a| {
+    let (row, queued) = start_with(store, &plan, brief, view, |a| {
         crate::service::sessions::new_session(a, store.as_ref(), ssh, reg)
     })
     .await?;
@@ -1454,7 +1539,7 @@ pub async fn start_many<F, Fut, P>(
     store: &Arc<Mutex<Store>>,
     args: &StartArgs,
     project_ids: &[i64],
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
     deadline: tokio::time::Instant,
     mut spawn: F,
@@ -1466,7 +1551,7 @@ where
     P: FnMut(&SessionRow, &str),
 {
     let ids = multi_start_ids(args.project_id, project_ids)?;
-    let ticket = resolve_start(store, args, scope, net).await?;
+    let ticket = resolve_start(store, args, view, net).await?;
     // One claim for the whole batch (work graph M14), taken before the
     // siblings are planned so their guards see any start that won before
     // it: another start or resume of the key waits for the batch to end.
@@ -1482,7 +1567,7 @@ where
             per_project: true,
             ..args.clone()
         };
-        match plan_resolved(store, &one, scope, &ticket) {
+        match plan_resolved(store, &one, view, &ticket) {
             Ok(p) => plans.push(p),
             Err(e) if e.code == codes::E_EXISTS => out.skipped.push(StartSkip {
                 project_id: *pid,
@@ -1517,7 +1602,7 @@ where
             }
         };
         let one =
-            tokio::time::timeout_at(deadline, start_one(store, plan, brief, scope, &mut spawn))
+            tokio::time::timeout_at(deadline, start_one(store, plan, brief, view, &mut spawn))
                 .await
                 .unwrap_or_else(|_| {
                     Err(IpcError::new(
@@ -1554,14 +1639,14 @@ pub async fn start_work_many(
     reg: &Arc<crate::cancel::CancellationRegistry>,
     args: &StartArgs,
     project_ids: &[i64],
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
 ) -> Result<MultiStart, IpcError> {
     start_many(
         store,
         args,
         project_ids,
-        scope,
+        view,
         net,
         tokio::time::Instant::now() + MULTI_START_BUDGET,
         |a| crate::service::sessions::new_session(a, store.as_ref(), ssh, reg),

@@ -419,6 +419,8 @@ fn sample_session_row() -> SessionRow {
         work_rev: 0,
         pr_evidence: None,
         pr_checked_at: None,
+        owner_person_id: None,
+        visibility: fleet_core::store::VISIBILITY_UNCLAIMED.into(),
         parent_session_id: None,
         tags: vec!["review".into()],
         row_version: 0,

@@ -184,6 +184,24 @@ export interface SessionRow {
   /** The session's org (work graph M5): the most specific org rule, else
    *  its host's org. Absent = unassigned (or a hub older than M5). */
   org_id?: number | null;
+  // ── Multi-user M1: who owns the row, and who may be shown it ────────────
+  // Both are caller-INDEPENDENT facts about the session, which is the whole
+  // reason they are on the row at all: the event bus serialises a bare
+  // `SessionRow` with no caller, and `row_store.ts` replaces a held row
+  // wholesale, so a per-caller field here would be erased by the next
+  // routine `session:updated` (R6-j). What this client may DO with the row
+  // is derived from these two plus its own identity, in `access.ts`.
+  /** The person who started the session, absent on an `unclaimed` row and on
+   *  a hub older than M1. Absent is NOT ownership: `strip_nulls` removes a
+   *  null on the way out, so absent and unowned are indistinguishable here
+   *  and `access.ts` treats both as "not mine". */
+  owner_person_id?: number | null;
+  /** `private` — the default for anything a person starts through fleet — or
+   *  `unclaimed`, the safe holding state for a row fleet did not create (a
+   *  tmux session reconcile found). There is deliberately **no `'org'`** in
+   *  M1: team sharing needs memberships and arrives in M2, and a third value
+   *  here would be a reader nobody defined. Absent from a hub older than M1. */
+  visibility?: 'private' | 'unclaimed';
   /** A digest of the versions and ids of the session's live (non-ended)
    *  work links (work graph M14): it moves whenever any of them changes —
    *  added, removed, primary, state — a secondary link too. Absent = 0 (no
@@ -579,6 +597,145 @@ export async function repairSession(
   return invokeCmd<RepairReport>('repair_session', {
     args: { session_id: sessionId, explicit: opts.explicit ?? false },
   });
+}
+
+/**
+ * A read-only snapshot of a session's tmux pane, as plain text.
+ *
+ * Added to the desktop for the WATCHER (multi-user M1, R5-e): sharing never
+ * confers a terminal, so a person a session is shared with has no `pty_open`
+ * and needs some view of the live pane that the hub can actually revoke. This
+ * is it — a routed read, enforced on the hub per request, with no SSH of its
+ * own from this machine. The owner does not use it: they attach.
+ *
+ * `scrollback_lines` asks for history above the visible pane; the backend
+ * clamps it and caps the reply, prefixing a `[capture_session: showing the
+ * last N of M lines …]` note when it had to cut.
+ */
+export async function captureSession(
+  sessionId: number,
+  opts: { scrollback_lines?: number; max_lines?: number } = {},
+): Promise<Result<string>> {
+  const args: { session_id: number; scrollback_lines?: number; max_lines?: number } = {
+    session_id: sessionId,
+  };
+  if (opts.scrollback_lines !== undefined) args.scrollback_lines = opts.scrollback_lines;
+  if (opts.max_lines !== undefined) args.max_lines = opts.max_lines;
+  return invokeCmd<string>('capture_session', { args });
+}
+
+// ── sharing a session (multi-user M1) ───────────────────────────────────────
+//
+// Three mutations and one read, all four routed to the hub's own tools. They
+// live here, beside the other mutation wrappers, because three of them answer
+// with the session row and so go through `acceptCommandRow` like every other
+// mutation — the optimistic patch that keeps a surface from waiting a reconcile
+// tick for its own click.
+//
+// What they deliberately do NOT patch is the GRANT LIST: that is
+// `session_access`'s answer (for the owner, in the Share sheet) and
+// `access.ts`'s own map (for the recipient, patched by `grant:changed`), and
+// neither of those lives on a row. A grant mutates no `sessions` column, which
+// is the whole reason `grant:changed` exists.
+//
+// `my_grants` is deliberately **not** here: it belongs to `src/lib/access.ts`,
+// which owns this client's own identity and grant set and patches no row.
+
+/**
+ * One live grant on a session, as `session_access` lists them — the sharer's
+ * view of who they have shared with.
+ *
+ * `level` is read as a plain string on purpose: a level this build does not
+ * know must still be *shown* (the owner has to be able to see and revoke it),
+ * which is the opposite of `access.ts`'s rule for the client's OWN grants,
+ * where an unknown level is dropped so it can never be acted on.
+ */
+export interface SessionGrant {
+  session_id: number;
+  /** The recipient. M1 has person recipients only — `org_id` stays in the
+   *  schema for M2 and is refused by the store until then. */
+  person_id: number | null;
+  /** The recipient's name, when the hub sends one; the id is the fallback. */
+  person_name?: string | null;
+  person_display_name?: string | null;
+  /** `watch` | `drive`, tolerantly. */
+  level: string;
+  /** The person who granted it, and when (unix seconds). */
+  granted_by?: number | null;
+  granted_at?: number | null;
+}
+
+/**
+ * Share this session with one person at `watch` or `drive`.
+ *
+ * Owner only, enforced on the hub (and in the store, against the row's own
+ * `owner_person_id`); the Share sheet's own gate is the UI half of the same
+ * rule. There is **no org recipient in M1** — team sharing needs memberships
+ * and arrives in M2 — so there is no `org` argument to pass and nothing in the
+ * sheet offers a team.
+ */
+export async function shareSession(
+  sessionId: number,
+  person: string,
+  level: 'watch' | 'drive',
+): Promise<Result<SessionRow | null>> {
+  const r = await invokeCmd<SessionRow | null>('session_share', {
+    args: { session_id: sessionId, person, level },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
+/** Revoke one person's grant on this session. Owner only. */
+export async function unshareSession(
+  sessionId: number,
+  person: string,
+): Promise<Result<SessionRow | null>> {
+  const r = await invokeCmd<SessionRow | null>('session_unshare', {
+    args: { session_id: sessionId, person },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
+/**
+ * Lower one person's grant from `drive` to `watch`.
+ *
+ * There is deliberately no wrapper that raises one, because there is no tool
+ * that raises one: a grant only ever moves downward (spec §4.3 invariant 3),
+ * and "re-home the grant to me" is a privacy bypass wearing a grant's clothes.
+ * Widening is done by revoking and sharing again, which is a decision the
+ * owner takes explicitly.
+ */
+export async function narrowShare(
+  sessionId: number,
+  person: string,
+): Promise<Result<SessionRow | null>> {
+  const r = await invokeCmd<SessionRow | null>('session_narrow', {
+    args: { session_id: sessionId, person },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
+/**
+ * The live grants on one session — the Share sheet's list.
+ *
+ * Named `fetchSessionAccess`, not `sessionAccess`: `access.ts` already exports
+ * a `sessionAccess`, the pure per-row derivation, and the two are imported
+ * into the same components. One is "what may I do with this row", the other is
+ * "who has this owner shared it with"; sharing a name between them would be a
+ * reader's trap and, in `SessionDetails.svelte`, an actual collision.
+ *
+ * Answers an array, never null: "shared with nobody" is the ordinary case and
+ * an empty list is how it reads.
+ */
+export async function fetchSessionAccess(sessionId: number): Promise<Result<SessionGrant[]>> {
+  const r = await invokeCmd<SessionGrant[] | null>('session_access', {
+    args: { session_id: sessionId },
+  });
+  if (!r.ok) return r;
+  return { ok: true, value: r.value ?? [] };
 }
 
 export interface NewSessionArgs {

@@ -98,6 +98,11 @@ struct PartialRecord {
     step: Option<String>,
     to_host: Option<String>,
     from_host: Option<String>,
+    /// The source's tmux name as the move recorded it (multi-user M1, T9d).
+    /// `None` for a partial written before this field existed, which
+    /// [`refuse_if_differs`] treats as "nothing recorded, nothing to check"
+    /// — the same way it treats every other absent field.
+    from_tmux_name: Option<String>,
     from_session_id: Option<i64>,
     to_session_id: Option<i64>,
     cause_code: Option<String>,
@@ -296,17 +301,46 @@ fn source_id_for(target: &SessionRow, partial: &PartialRecord) -> Result<i64, Ip
     }
 }
 
-fn fetch_source(store: &Mutex<Store>, source_id: i64) -> Result<SessionRow, IpcError> {
+/// The source row, resolved by id and then CHECKED against the identifying
+/// fields the partial recorded.
+///
+/// **An id is not an identity** (multi-user M1, T9d). `sessions.id` is
+/// `INTEGER PRIMARY KEY` with no `AUTOINCREMENT` and reconcile hard-deletes
+/// a ghosted row, so a source ghosted and reaped between the partial and the
+/// resolution leaves its rowid to the next session created on that host.
+/// This used to cross-check `from_host` alone — true of any session on the
+/// machine — and `finish` then KILLED what it resolved while `undo` restored
+/// it. The target side was always held to id AND host AND tmux name; this is
+/// the same check on the other half, which is all it ever needed.
+fn fetch_source(
+    store: &Mutex<Store>,
+    target_id: i64,
+    source_id: i64,
+    partial: &PartialRecord,
+) -> Result<SessionRow, IpcError> {
     let row = {
         let s = lock(store)?;
         s.get_session_by_id(source_id)?
     };
-    row.ok_or_else(|| {
+    let source = row.ok_or_else(|| {
         IpcError::new(
             codes::E_NOTFOUND,
             format!("the source session {source_id} no longer exists"),
         )
-    })
+    })?;
+    refuse_if_differs(
+        target_id,
+        "from_host",
+        partial.from_host.as_deref(),
+        &source.host_alias,
+    )?;
+    refuse_if_differs(
+        target_id,
+        "from_tmux_name",
+        partial.from_tmux_name.as_deref(),
+        &source.tmux_name,
+    )?;
+    Ok(source)
 }
 
 /// Accept the move: kill the source, record it complete. See the module
@@ -350,13 +384,7 @@ async fn finish(
     })?;
 
     let source_id = source_id_for(&target, &partial)?;
-    let source = fetch_source(store, source_id)?;
-    refuse_if_differs(
-        target.id,
-        "from_host",
-        partial.from_host.as_deref(),
-        &source.host_alias,
-    )?;
+    let source = fetch_source(store, target.id, source_id, &partial)?;
 
     let claude_id = target
         .claude_session_id
@@ -461,13 +489,7 @@ async fn undo(
     }
 
     let source_id = source_id_for(&target, &partial)?;
-    let source = fetch_source(store, source_id)?;
-    refuse_if_differs(
-        target.id,
-        "from_host",
-        partial.from_host.as_deref(),
-        &source.host_alias,
-    )?;
+    let source = fetch_source(store, target.id, source_id, &partial)?;
 
     // The kill only — no worktree, transcript, carried file or script of any
     // kind touches the target.
@@ -598,6 +620,7 @@ mod tests {
             "step": "killing the source dev-o-r--feat on alpha",
             "to_host": "beta",
             "from_host": "alpha",
+            "from_tmux_name": "dev-o-r--feat",
             "from_session_id": source,
             "to_session_id": target,
             "cause_code": "E_SSH",
@@ -677,6 +700,7 @@ mod tests {
             "step": "killing the source dev-o-r--feat on alpha",
             "to_host": "beta",
             "from_host": "alpha",
+            "from_tmux_name": "dev-o-r--feat",
             "from_session_id": source,
             "to_session_id": target,
             "cause_code": "E_SSH",
@@ -1132,12 +1156,18 @@ mod tests {
         // handle they always agree with the live row. A disagreement (a
         // corrupted event, or one orphaned by a deleted-and-reused row id)
         // must refuse, not warn-and-proceed.
-        for bad_field in ["to_host", "to_tmux_name"] {
+        // T9d adds `from_tmux_name`: the SOURCE's identity was `(host,
+        // recyclable id)` and nothing else, while the target's was held to
+        // id AND host AND tmux name — so a reaped source's rowid, handed to
+        // the next session on that host, passed as "the source" and `Finish`
+        // killed it.
+        for bad_field in ["to_host", "to_tmux_name", "from_host", "from_tmux_name"] {
             let (store, source_id, target_id) = partial_fixture(true);
             let mut detail = serde_json::json!({
                 "step": "x",
                 "to_host": "beta",
                 "from_host": "alpha",
+                "from_tmux_name": "dev-o-r--feat",
                 "from_session_id": source_id,
                 "to_session_id": target_id,
                 "to_tmux_name": "dev-o-r--feat",

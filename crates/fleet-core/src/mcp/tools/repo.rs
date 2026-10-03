@@ -196,6 +196,7 @@ impl FleetTools {
         project_id / host_alias: a fleet-wide call answers hundreds of rows.")]
     pub(super) async fn list_worktrees(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<ListWorktreesParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
@@ -211,6 +212,49 @@ impl FleetTools {
         let mut out = worktrees::list_worktrees(args, self.reader()).map_err(to_mcp_err)?;
         if let Some(host) = p.host_alias.as_deref() {
             out.retain(|w| w.worktree.host_alias == host);
+        }
+        // Multi-user M1 (T8d): the OCCUPANTS are fenced by person, the
+        // worktrees are not.
+        //
+        // This tool took no `Caller` at all and answered
+        // `WorktreeOccupant { host_alias, tmux_name }` for every alive session
+        // in the fleet — a private session's machine and its tmux name, which
+        // in this fleet is a branch or a ticket key, i.e. §4.3 content. The
+        // coverage gate could not see it (it is addressed by `worktree_id`
+        // only in `delete_worktree`'s sense; here the arguments are
+        // `project_id` / `host_alias`, both deliberately outside
+        // `SESSION_KEY_NAMES`), and the result gate could not either until
+        // `WorktreeOccupant` started carrying the id.
+        //
+        // The OCCUPANT goes and the worktree stays: a worktree is a checkout,
+        // not a session, and a caller that may start work in it has to be able
+        // to see it. The occupancy COUNT the `summary` view prints is taken
+        // after this, so it counts what the caller may see rather than
+        // answering "two sessions you cannot name are in here".
+        {
+            let s = lock(self.reader()).map_err(to_mcp_err)?;
+            let view = caller.view_scope(&s).map_err(to_mcp_err)?;
+            if !view.is_internal() {
+                for w in out.iter_mut() {
+                    let mut keep = Vec::with_capacity(w.occupants.len());
+                    for o in w.occupants.drain(..) {
+                        let visible = match s
+                            .get_session_by_id(o.session_id)
+                            .map_err(|e| to_mcp_err(crate::ipc_error::IpcError::from(e)))?
+                        {
+                            Some(row) => view.sees_session_row(&row).is_visible(),
+                            // An occupant whose row cannot be resolved is not
+                            // served: the gate is generous in the safe
+                            // direction, exactly as `looks_like_session_row` is.
+                            None => false,
+                        };
+                        if visible {
+                            keep.push(o);
+                        }
+                    }
+                    w.occupants = keep;
+                }
+            }
         }
         // `total` before the cap: a caller that gets 100 of 249 rows must be
         // able to see that it is holding a slice, or it will reason about the
@@ -244,12 +288,26 @@ impl FleetTools {
         E_NOTFOUND, E_GIT_SETUP, E_SSH.")]
     pub(super) async fn list_host_worktrees(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<ListHostWorktreesParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "list_host_worktrees",
             &format!("host={} project_id={}", p.host_alias, p.project_id),
         );
+        // Multi-user M1 (T10): the HOST fence, which this tool had none of.
+        //
+        // It took no `Caller` at all and is `Access::Client`, so a per-host
+        // token could make the hub ssh into ANY host and scan it. That is
+        // the org/host boundary rather than §4.3's person fence — a
+        // `HostWorktrees` carries `WorktreeRow`s (project, host, name, path,
+        // branch) and no session field at all, which is why T10's
+        // "filter the occupants" instruction has nothing to bite on here and
+        // why the worktrees themselves stay whole for everyone (a caller
+        // who may start work in a checkout has to be able to see it, the
+        // same argument `list_worktrees` makes one function up). The master
+        // token and every paired client are unbound and pass.
+        require_host(&caller, &p.host_alias, "the worktrees to scan")?;
         let args = worktrees::ListHostWorktreesArgs {
             host_alias: p.host_alias,
             project_id: p.project_id,
@@ -273,6 +331,86 @@ impl FleetTools {
             "delete_worktree",
             &format!("worktree_id={} force={}", p.worktree_id, p.force),
         );
+        // Multi-user M1 (T7): the session gate, by worktree id.
+        //
+        // This tool is session-addressed without naming a session — it
+        // removes the checkout a session is RUNNING IN, leaving the owner's
+        // pane in a deleted directory and dropping fleet's row, which
+        // `force: true` does even while the session is alive
+        // (`service::worktrees::delete_worktree`). That is destruction of
+        // somebody's work, so it takes the tier §4.3 invariant 5 gives
+        // destruction: `Reach::Own` on every alive occupant, the same level
+        // `safe_kill_session` takes for strictly less. Nobody is granted
+        // `own`, so no share ever reaches it.
+        //
+        // The occupants are resolved HERE rather than inside the service,
+        // because the service is also the desktop's own path, where there is
+        // one person at the keyboard and no `Caller` to ask.
+        //
+        // `occupant_session_ids_for_worktree`, not the ALIVE set: that query
+        // is `status='running' AND lost_at IS NULL`, and a host reboot leaves
+        // the row `ghost` with `lost_at` set while the checkout and its
+        // uncommitted work sit on disk waiting for `restore_host_sessions`.
+        // Over the alive set this loop iterated nothing for exactly those
+        // rows, so the gate below silently did not run — a fix that looks
+        // right and never fires (T8d).
+        let occupants: Vec<i64> = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            s.occupant_session_ids_for_worktree(p.worktree_id)
+                .map_err(|e| to_mcp_err(crate::ipc_error::IpcError::from(e)))?
+        };
+        //
+        // The refusal is the WORKTREE's, never the occupant's.
+        // `require_person_sees` phrases its own as `session {id} not found`,
+        // and that id came from the STORE rather than from the caller: served
+        // verbatim, walking worktree ids would tell anybody which trees hold a
+        // private session and what its id is. The sibling path was hardened
+        // against exactly this — the `E_WORKTREE_BUSY` prose prints a COUNT
+        // now, never host/tmux_name (`service::worktrees::delete_worktree`) —
+        // so neither sentence below names a session. An occupant the caller
+        // cannot see answers `E_WORKTREE_BUSY`, indistinguishable in shape
+        // from a tree that is merely busy; one they CAN see (a grantee) keeps
+        // an `E_FORBIDDEN` that says the tier, since the row is theirs to see
+        // anyway and silence there would only be confusing.
+        for sid in occupants {
+            let refusal = {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                match crate::service::sessions::resolve_session_target(&s, Some(sid), None, None) {
+                    // The row went between the two reads: nothing left to
+                    // protect, and the delete's own checks still run.
+                    Err(_) => None,
+                    Ok(row) => {
+                        if reaches_row(&s, &caller, &row, Reach::Own)? {
+                            None
+                        } else if caller
+                            .view_scope(&s)
+                            .map_err(to_mcp_err)?
+                            .sees_session_row(&row)
+                            .is_visible()
+                        {
+                            // Visible, below the tier: a grantee. Asked
+                            // directly rather than through a second
+                            // `Reach::Read`, which would make this tool's row
+                            // in `SESSION_REACH` read as if a watcher could
+                            // delete a worktree.
+                            Some((
+                                codes::E_FORBIDDEN,
+                                "removing this worktree destroys the work of a session in it: \
+                                 that needs `own`, which no grant reaches",
+                            ))
+                        } else {
+                            Some((
+                                codes::E_WORKTREE_BUSY,
+                                "this worktree is occupied by a session that is not yours",
+                            ))
+                        }
+                    }
+                }
+            };
+            if let Some((code, why)) = refusal {
+                return Err(mcp_err(code, why, None));
+            }
+        }
         self.confirm_gate(
             "delete_worktree",
             p.confirm_nonce.as_deref(),
@@ -299,7 +437,25 @@ impl FleetTools {
         Parameters(args): Parameters<repo::SessionIdArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("repo_changes", &format!("session_id={}", args.session_id));
-        self.require_visible_session(&caller, args.session_id)?;
+        // `watch`, for every `repo_*` read in this file: a session's
+        // worktree is its work, and the four reads the spec calls the
+        // substance of a watch grant include it. The gate was
+        // `require_visible_session` until multi-user M1's T7 — a function
+        // whose first line (`if !caller.is_scoped()`) returned `Ok(())` for
+        // the master AND for every unbound paired client, which is every
+        // person's device. `repo_file` under it returned arbitrary file
+        // contents from anybody's worktree to anybody's phone.
+        //
+        // Person-gated without the host fence in front, which is what the
+        // function it replaces did: a session this caller may not reach —
+        // another person's, another org's, another host's — answers exactly
+        // as an id that does not exist.
+        self.resolve_row_person_gated(
+            &caller,
+            args.session_id,
+            Reach::Read,
+            "the session whose worktree to read",
+        )?;
         let v = repo_read::repo_changes(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -314,7 +470,12 @@ impl FleetTools {
         Parameters(args): Parameters<repo::SessionIdArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("repo_tree", &format!("session_id={}", args.session_id));
-        self.require_visible_session(&caller, args.session_id)?;
+        self.resolve_row_person_gated(
+            &caller,
+            args.session_id,
+            Reach::Read,
+            "the session whose worktree to read",
+        )?;
         let v = repo_read::repo_tree(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -332,7 +493,12 @@ impl FleetTools {
             "repo_file",
             &format!("session_id={} path={}", args.session_id, args.path),
         );
-        self.require_visible_session(&caller, args.session_id)?;
+        self.resolve_row_person_gated(
+            &caller,
+            args.session_id,
+            Reach::Read,
+            "the session whose worktree to read",
+        )?;
         let v = repo_read::repo_file(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -353,7 +519,12 @@ impl FleetTools {
                 p.session_id, p.path, p.fresh_for
             ),
         );
-        self.require_visible_session(&caller, p.session_id)?;
+        self.resolve_row_person_gated(
+            &caller,
+            p.session_id,
+            Reach::Read,
+            "the session whose worktree to read",
+        )?;
 
         // fresh_for absent: today's default, byte-identical, no cursor
         // touched — kept as a literal early return so the two paths can
@@ -414,7 +585,12 @@ impl FleetTools {
         Parameters(p): Parameters<RepoLogParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("repo_log", &format!("session_id={}", p.session_id));
-        self.require_visible_session(&caller, p.session_id)?;
+        self.resolve_row_person_gated(
+            &caller,
+            p.session_id,
+            Reach::Read,
+            "the session whose worktree to read",
+        )?;
         let v = repo_read::repo_log(
             repo_read::RepoLogArgs {
                 session_id: p.session_id,
@@ -438,7 +614,12 @@ impl FleetTools {
         Parameters(args): Parameters<repo::SessionIdArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit("repo_branches", &format!("session_id={}", args.session_id));
-        self.require_visible_session(&caller, args.session_id)?;
+        self.resolve_row_person_gated(
+            &caller,
+            args.session_id,
+            Reach::Read,
+            "the session whose worktree to read",
+        )?;
         let v = repo_read::repo_branches(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -456,7 +637,12 @@ impl FleetTools {
             "repo_commit",
             &format!("session_id={} hash={}", args.session_id, args.hash),
         );
-        self.require_visible_session(&caller, args.session_id)?;
+        self.resolve_row_person_gated(
+            &caller,
+            args.session_id,
+            Reach::Read,
+            "the session whose worktree to read",
+        )?;
         let v = repo_read::repo_commit(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -477,7 +663,12 @@ impl FleetTools {
                 args.session_id, args.hash, args.path
             ),
         );
-        self.require_visible_session(&caller, args.session_id)?;
+        self.resolve_row_person_gated(
+            &caller,
+            args.session_id,
+            Reach::Read,
+            "the session whose worktree to read",
+        )?;
         let v = repo_read::repo_commit_diff(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;

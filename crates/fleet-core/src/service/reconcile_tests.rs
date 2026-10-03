@@ -1360,3 +1360,88 @@ async fn reconcile_one_host_refuses_local_when_hub_local_host_is_off() {
     assert_eq!(err.code, codes::E_NOTFOUND);
     assert!(f.fake.calls_for("local").is_empty());
 }
+
+// ── 5. ownership: whichever pass inserts the row claims it ───────────────────
+
+/// Multi-user M1 (T5). `new_session` reserves the owner of a tmux name BEFORE
+/// the session exists, and from that instant any pass may be the one that
+/// inserts the row — `reconcile_one_host`'s own doc comment says it is ungated
+/// against the background tick. This drives the race the wrong way round on
+/// purpose: the FULL pass (the tick) sees the session first and inserts the
+/// row, and the create path's own single-host pass arrives second. The row has
+/// to come out owned and `private` either way.
+#[tokio::test]
+async fn whichever_reconcile_pass_inserts_the_row_claims_the_reserved_owner() {
+    let f = Fleet::new(&["alpha"]);
+    let ann = {
+        let s = f.store.lock().unwrap();
+        let ann = s.create_person("ann", None).unwrap().id;
+        // What `record_tmux_created(store, host, name, Some(ann))` does, just
+        // before `tmux new-session` returns.
+        s.reserve_session_owner("alpha", "dev-o-r", ann);
+        ann
+    };
+    f.list("alpha", "dev-o-r|1|2|0|/tmp/w|%3\n");
+    f.agents("alpha", "[]\n");
+
+    // The background tick inserts the row.
+    f.pass().await;
+    let row = f.row("dev-o-r", "alpha");
+    assert_eq!(
+        row.owner_person_id,
+        Some(ann),
+        "the pass that inserts the row reads the reservation"
+    );
+    assert_eq!(row.visibility, crate::store::VISIBILITY_PRIVATE);
+
+    // The create path's own pass, second, leaves the ownership alone: the
+    // upsert's `COALESCE(owner_person_id, …)` never re-owns. (That a
+    // second identical pass emits nothing at all is pinned one layer down, in
+    // `store::reconcile`'s `upsert_session_in_tx_identical_row_pushes_no_change`,
+    // where the row is not also subject to a live probe's other columns.)
+    reconcile_one_host_with_for_test(&f.store, &f.deps, "alpha")
+        .await
+        .unwrap();
+    let again = f.row("dev-o-r", "alpha");
+    assert_eq!(again.owner_person_id, Some(ann));
+    assert_eq!(again.visibility, crate::store::VISIBILITY_PRIVATE);
+    assert_eq!(again.id, row.id, "one row, claimed once");
+
+    // A session nobody reserved — the hand-started one on the same host — is
+    // `unclaimed` and belongs to no one. This is the pair that makes the rule
+    // observable: the SAME statement inserts both rows.
+    f.list(
+        "alpha",
+        "dev-o-r|1|2|0|/tmp/w|%3\nby-hand|1|2|0|/tmp/h|%4\n",
+    );
+    f.pass().await;
+    let theirs = f.row("by-hand", "alpha");
+    assert_eq!(theirs.owner_person_id, None);
+    assert_eq!(theirs.visibility, crate::store::VISIBILITY_UNCLAIMED);
+    assert_eq!(f.row("dev-o-r", "alpha").owner_person_id, Some(ann));
+}
+
+/// The reservation is per `(host, tmux name)`: a name reserved on one host does
+/// not claim the same name on another. Two people starting `dev-o-r` on two
+/// machines is the ordinary case, not a conflict.
+#[tokio::test]
+async fn an_owner_reservation_does_not_cross_hosts() {
+    let f = Fleet::new(&["alpha", "beta"]);
+    let ann = {
+        let s = f.store.lock().unwrap();
+        let ann = s.create_person("ann", None).unwrap().id;
+        s.reserve_session_owner("alpha", "dev-o-r", ann);
+        ann
+    };
+    for host in ["alpha", "beta"] {
+        f.list(host, "dev-o-r|1|2|0|/tmp/w|%3\n");
+        f.agents(host, "[]\n");
+    }
+    f.pass().await;
+    assert_eq!(f.row("dev-o-r", "alpha").owner_person_id, Some(ann));
+    assert_eq!(f.row("dev-o-r", "beta").owner_person_id, None);
+    assert_eq!(
+        f.row("dev-o-r", "beta").visibility,
+        crate::store::VISIBILITY_UNCLAIMED
+    );
+}

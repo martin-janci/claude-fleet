@@ -65,6 +65,26 @@ pub fn ensure_master_token(s: &Store) -> Result<String, IpcError> {
     }
 }
 
+/// This hub's personal owner (multi-user M1), minting the `people` row when
+/// the database has none. Returns its id.
+///
+/// It sits beside [`ensure_master_token`] and is called from the same entry
+/// points for the same reason: migration 086 inserts the row, but a store
+/// opened outside `fleet-hub init` must have one too, and no single entry
+/// point is guaranteed to run first. Idempotent — with the flagged row
+/// present it writes nothing, so calling it at every entry point costs one
+/// index seek.
+///
+/// Together with [`Store::personal_owner_id`]'s refusal to fall back, this
+/// is the whole of "a hub always knows whose it is": the id it returns is
+/// the owner of every session the master starts and the person
+/// `Access::Person` is satisfied by. When it cannot be established the hub
+/// fails closed — the scope builder sees no session, the create paths leave
+/// a row unclaimed — rather than treating an unknown owner as everybody.
+pub fn ensure_personal_owner(s: &Store) -> Result<i64, IpcError> {
+    s.mint_personal_owner()
+}
+
 /// The configured port, refusing (`E_PROVISION`) when the control API has
 /// never been enabled — no master token yet means nothing to provision a
 /// host against.
@@ -133,6 +153,35 @@ mod tests {
         let minted = ensure_master_token(&s).unwrap();
         assert_ne!(minted, first);
         assert!(!minted.is_empty());
+    }
+
+    /// Multi-user M1: the hub's personal owner exists from the first open
+    /// (migration 086 inserts it) and this is a no-op; when the flagged row
+    /// is missing it mints exactly one, and a second call finds it. The
+    /// partial unique index would refuse a second one anyway — the point
+    /// here is that this never tries, and never re-homes the flag.
+    #[test]
+    fn ensure_personal_owner_is_idempotent_and_mints_when_the_row_is_gone() {
+        let s = Store::open_in_memory().unwrap();
+        let from_migration = s.personal_owner_id().unwrap().expect("086 mints one");
+        assert_eq!(ensure_personal_owner(&s).unwrap(), from_migration);
+        assert_eq!(ensure_personal_owner(&s).unwrap(), from_migration);
+        assert_eq!(s.list_people().unwrap().len(), 1);
+
+        // A database whose flagged row was removed by hand: one row is
+        // minted, and running it again finds that one rather than a second.
+        s.conn_for_test()
+            .execute("DELETE FROM people WHERE is_personal_owner = 1", [])
+            .unwrap();
+        assert_eq!(s.personal_owner_id().unwrap(), None);
+        let minted = ensure_personal_owner(&s).unwrap();
+        assert_ne!(minted, from_migration);
+        assert_eq!(ensure_personal_owner(&s).unwrap(), minted);
+        assert_eq!(s.list_people().unwrap().len(), 1);
+        assert!(
+            s.get_person(minted).unwrap().unwrap().is_personal_owner,
+            "the row it minted is the flagged one"
+        );
     }
 
     #[test]

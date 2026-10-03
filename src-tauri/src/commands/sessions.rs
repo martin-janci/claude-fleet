@@ -467,14 +467,25 @@ pub(crate) mod routed {
 
     pub async fn new_session(
         backend: &FleetBackend,
-        args: NewSessionArgs,
+        mut args: NewSessionArgs,
         store: &Mutex<Store>,
         ssh: &Arc<SshClient>,
         reg: &Arc<CancellationRegistry>,
     ) -> Result<SessionRow, IpcError> {
         match backend.hub() {
+            // The hub derives the owner from the connection's own person, and
+            // `HubBackend::new_session` deliberately does not send one — see
+            // `NewSessionArgs::owner_person_id`.
             Some(hub) => hub.new_session(&args).await,
-            None => sessions::new_session(args, store, ssh, reg).await,
+            // Standalone: the person behind the window is this fleet's own
+            // personal owner (multi-user M1, T5). The field arrives empty
+            // whatever the frontend sent — it is `skip_deserializing` — so
+            // this is the only place it can be filled, and the session the
+            // user just started is theirs rather than `unclaimed`.
+            None => {
+                args.owner_person_id = fleet_core::service::sessions::hub_personal_owner(store);
+                sessions::new_session(args, store, ssh, reg).await
+            }
         }
     }
 
@@ -671,7 +682,15 @@ pub(crate) mod routed {
     ) -> Result<bg_sessions::NewBgSessionResult, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("new_bg_session", &args).await,
-            None => bg_sessions::new_bg_session_tracked(args, store, ssh).await,
+            // Multi-user M1 (T5): on a standalone desktop the person behind
+            // the window is this fleet's own personal owner (migration 086
+            // gives a standalone hub one), so the agent's row is theirs. Routed
+            // to a hub instead, the hub resolves the owner from the connection
+            // and this arm is not reached.
+            None => {
+                let owner = fleet_core::service::sessions::hub_personal_owner(store);
+                bg_sessions::new_bg_session_tracked(args, store, ssh, owner).await
+            }
         }
     }
 

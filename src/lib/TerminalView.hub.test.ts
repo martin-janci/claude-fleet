@@ -16,6 +16,7 @@ import { hosts, type HostRow } from './hosts';
 import { selectSession, clearSelection } from './selection';
 import { clearToasts, toasts } from './toasts';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
 
 function makeSession(over: Partial<SessionRow>): SessionRow {
   return {
@@ -48,9 +49,23 @@ function makeSession(over: Partial<SessionRow>): SessionRow {
     parent_session_id: null, tags: [],
     model: null, context_tokens: null, context_window: null, context_source: null,
     context_at: null, context_stale: false, tmux_pane_id: null, pending_input: null,
+    // Multi-user M1: every row here belongs to THIS person, and `beforeEach`
+    // seeds the client's identity to match. Without that pairing a paired
+    // desktop derives no access at all and attaches nothing — which is the
+    // correct behaviour and would make every `pty_open` assertion below fail
+    // for a reason that has nothing to do with what it is testing. Seeding the
+    // identity once per suite is both the smaller diff and the honest shape:
+    // the client's identity is ONE value, not a per-row one.
+    owner_person_id: ME,
+    visibility: 'private',
     ...over,
   };
 }
+
+/** This client's person id on the hub. */
+const ME = 7;
+/** Somebody else's. */
+const OTHER = 9;
 
 const remote: HubStatus = {
   remote: true,
@@ -108,11 +123,13 @@ beforeEach(() => {
   clearSelection();
   clearToasts();
   hubStatus.set({ ...STANDALONE });
+  setMyGrants(ME, []);
 });
 
 afterEach(() => {
   clearSelection();
   hubStatus.set({ ...STANDALONE });
+  resetAccessForTests();
 });
 
 describe('the terminal tab against a hub', () => {
@@ -249,5 +266,190 @@ describe('the terminal tab against a hub', () => {
     selectSession(session);
     await settle();
     expect(inv().mock.calls.some((c) => c[0] === 'repair_session')).toBe(true);
+  });
+});
+
+// Multi-user M1: "sharing never confers a terminal" (spec §4.3 invariant 4).
+//
+// The attach is this machine's own `ssh … tmux attach`: the hub is not in the
+// path, cannot refuse it and — the part that decides the design — cannot
+// revoke it once it is up. So a session reached through a GRANT must not
+// attach at all, and the gate has to be on the client. These tests pin the
+// three halves of it that live in this component (App.svelte owns the fourth:
+// it does not mount the component for such a row at all).
+describe('sharing never confers a terminal', () => {
+  const theirs = makeSession({ id: 5, owner_person_id: OTHER });
+
+  beforeEach(() => {
+    hubStatus.set(remote);
+    hosts.set([makeHost({ alias: 'trn', transport: 'ssh' })]);
+    sessions.set([theirs]);
+  });
+
+  it('opens no PTY and runs no workspace probe for a watch-granted session', async () => {
+    setMyGrants(ME, [{ session_id: theirs.id, level: 'watch' }]);
+    render(TerminalView);
+    selectSession(theirs);
+    await settle();
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(false);
+    // `repair_session` respawns tmux and re-adds worktrees. It must not run
+    // for a session you may only watch — hence the early return in `openTerm`
+    // sits BEFORE the probe, not after it.
+    expect(inv().mock.calls.some((c) => c[0] === 'repair_session')).toBe(false);
+    expect(screen.getByTestId('terminal-no-attach')).toBeInTheDocument();
+    expect(screen.queryByTestId('terminal-host')).toBeNull();
+  });
+
+  it('opens no PTY for a DRIVE-granted session either', async () => {
+    // `drive` is "make this machine do work" (through fleet, which the hub can
+    // stop at any moment), not "take an SSH session into the owner's pane".
+    setMyGrants(ME, [{ session_id: theirs.id, level: 'drive' }]);
+    render(TerminalView);
+    selectSession(theirs);
+    await settle();
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(false);
+    expect(screen.getByTestId('terminal-no-attach')).toBeInTheDocument();
+  });
+
+  it('opens no PTY for a stranger’s row with no grant at all', async () => {
+    render(TerminalView);
+    selectSession(theirs);
+    await settle();
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(false);
+  });
+
+  // The fail-closed arm, and the one thing it must NOT say. "The hub has not
+  // told us who we are" and "this session is not yours" are different
+  // problems, and a person acts differently on them.
+  it('blames the hub, not the session, when it does not know who this device is', async () => {
+    resetAccessForTests();
+    render(TerminalView);
+    selectSession(session);
+    await settle();
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(false);
+    const why = screen.getByTestId('terminal-no-attach');
+    expect(why.textContent).toContain('who this device is');
+    expect(why.textContent).not.toContain('Shared with you');
+  });
+
+  // Clause (c) of the gate: a LIVE pty is closed the moment the derived answer
+  // stops being `own`. Without it a share (or a re-identification) would leave
+  // a read/write channel into a pane this client may no longer touch, which
+  // nothing on the hub can reach and which would clear only on the next
+  // 30 s-throttled focus re-list.
+  it('closes a live PTY when the row stops being this person’s', async () => {
+    const mine = makeSession({ id: 6, owner_person_id: ME });
+    sessions.set([mine]);
+    setMyGrants(ME, []);
+    render(TerminalView);
+    selectSession(mine);
+    await settle();
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(true);
+    const closesBefore = inv().mock.calls.filter((c) => c[0] === 'pty_close').length;
+
+    // The row is replaced WHOLESALE, as `createRowStore` does on every merge.
+    sessions.set([{ ...mine, owner_person_id: OTHER }]);
+    setMyGrants(ME, [{ session_id: mine.id, level: 'watch' }]);
+    await settle();
+
+    expect(inv().mock.calls.filter((c) => c[0] === 'pty_close').length).toBeGreaterThan(
+      closesBefore,
+    );
+    expect(screen.getByTestId('terminal-no-attach')).toBeInTheDocument();
+    // And it must not immediately re-attach: the two open-effects re-run when
+    // closeTerm nulls the attach identity, and `openTerm`'s early return is
+    // what stops them turning the close into a reconnect loop.
+    const opensAfter = inv().mock.calls.filter((c) => c[0] === 'pty_open').length;
+    await settle();
+    expect(inv().mock.calls.filter((c) => c[0] === 'pty_open').length).toBe(opensAfter);
+  });
+
+  // THE assertion a per-caller field on the row could not have satisfied. The
+  // gate's effect has THREE inputs — the row, this client's person id and its
+  // grant set — and the two that are not the row move with NO row event behind
+  // them at all: a grant mutates no `sessions` column, and a re-identification
+  // (a resync whose `my_grants` names a different person, a re-paired device)
+  // touches no row either. An effect that read the row alone would never fire.
+  it('closes a live PTY on an identity change alone, with no session event', async () => {
+    const mine = makeSession({ id: 6, owner_person_id: ME });
+    sessions.set([mine]);
+    setMyGrants(ME, []);
+    render(TerminalView);
+    selectSession(mine);
+    await settle();
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(true);
+    const closesBefore = inv().mock.calls.filter((c) => c[0] === 'pty_close').length;
+    const rowBefore = get(sessions)[0];
+
+    // Only the client's own identity moves. The store is not touched.
+    setMyGrants(OTHER, []);
+    await settle();
+
+    expect(get(sessions)[0]).toBe(rowBefore);
+    expect(inv().mock.calls.filter((c) => c[0] === 'pty_close').length).toBeGreaterThan(
+      closesBefore,
+    );
+    expect(screen.getByTestId('terminal-no-attach')).toBeInTheDocument();
+  });
+
+  // The ordinary revoke. Under this gate a granted session never attached in
+  // the first place — which is the stronger guarantee — so what a revoke has
+  // to do is take the pane view away without a re-list, and that is the grant
+  // map (patched by the `grant:changed` frame) and nothing else.
+  it('a revoked grant drops back to nothing on the frame alone, with no re-list', async () => {
+    setMyGrants(ME, [{ session_id: theirs.id, level: 'watch' }]);
+    render(TerminalView);
+    selectSession(theirs);
+    await settle();
+    const listsBefore = inv().mock.calls.filter((c) => c[0] === 'list_sessions').length;
+
+    applyGrantChanges([{ session_id: theirs.id, person_id: ME, level: null }]);
+    await settle();
+
+    const why = screen.getByTestId('terminal-no-attach');
+    // No longer "shared with you to watch": the grant is gone.
+    expect(why.textContent).not.toContain('Shared with you');
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(false);
+    expect(inv().mock.calls.filter((c) => c[0] === 'list_sessions').length).toBe(listsBefore);
+  });
+
+  it('still attaches every OWNED session on a paired desktop', async () => {
+    setMyGrants(ME, []);
+    sessions.set([session]);
+    render(TerminalView);
+    selectSession(session);
+    await settle();
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(true);
+    expect(screen.queryByTestId('terminal-no-attach')).toBeNull();
+  });
+
+  // A standalone desktop IS the fleet: its `list_sessions` serves the personal
+  // owner's rows and the unclaimed ones and nothing else, so every row it
+  // holds is its own — and it keeps its terminal even though `my_grants` has
+  // never answered. This is what makes the gate safe to ship before the
+  // backend half exists.
+  it('a standalone desktop attaches even with no identity and a foreign owner on the row', async () => {
+    hubStatus.set({ ...STANDALONE });
+    resetAccessForTests();
+    sessions.set([theirs]);
+    render(TerminalView);
+    selectSession(theirs);
+    await settle();
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(true);
+    expect(screen.queryByTestId('terminal-no-attach')).toBeNull();
+  });
+
+  // A configured hub this launch could not use: the backend owns nothing and
+  // refuses every command. Fail closed — but, again, say which problem it is.
+  it('a hub this launch cannot use attaches nothing and does not call it a sharing refusal', async () => {
+    hubStatus.set({ ...remote, remote: false, unavailable: 'no stored token' });
+    sessions.set([session]);
+    render(TerminalView);
+    selectSession(session);
+    await settle();
+    expect(inv().mock.calls.some((c) => c[0] === 'pty_open')).toBe(false);
+    const why = screen.getByTestId('terminal-no-attach');
+    expect(why.textContent).toContain('no stored token');
+    expect(why.textContent).not.toContain('Shared with you');
   });
 });

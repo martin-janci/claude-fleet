@@ -137,6 +137,16 @@ pub struct ResumeArgs {
     /// graph M5's integrity rule, as for a link).
     #[serde(default)]
     pub force_cross_org: bool,
+    /// WHOSE resume this is (multi-user M1, T5): the `people` row of the
+    /// caller who asked. Used only as the fallback when the candidate names
+    /// no conversation — the conversation's own owner always wins, since a
+    /// resume continues THAT person's work and the gate above already refused
+    /// a conversation that is not this caller's.
+    ///
+    /// `#[serde(skip)]`: filled from `Caller`, never from JSON, so no caller
+    /// can name an owner.
+    #[serde(skip)]
+    pub owner: Option<i64>,
 }
 
 fn mode(mode: &str, why_not: Option<String>) -> ResumeMode {
@@ -194,6 +204,122 @@ fn reachable_hosts(s: &Store) -> Result<Vec<String>, IpcError> {
     Ok(hosts)
 }
 
+/// What a resume answers for an ended link it may not resume, and the same
+/// thing a `link_id` naming no ended link answers: `E_NOTFOUND` on the LINK.
+///
+/// A function rather than two literals because the owner gate at the MCP
+/// layer (multi-user M1, T7) refuses with it too, and a link whose
+/// conversation belongs to another person must read exactly like a link that
+/// does not exist.
+pub fn no_such_ended_link(key: &str, link_id: i64) -> IpcError {
+    IpcError::new(
+        codes::E_NOTFOUND,
+        format!("{key} has no ended work link {link_id}"),
+    )
+}
+
+/// The candidate a plan would resume: the chosen link's own, by id.
+fn chosen_candidate(plan: &ResumePlan) -> Option<&ResumeCandidate> {
+    plan.candidates
+        .iter()
+        .find(|c| Some(c.link_id) == plan.link_id)
+}
+
+/// The ended link a resume of `key` would start from, and the conversation it
+/// would take over (`None` when that link recorded none).
+///
+/// From the store alone, for the owner gate at the MCP layer (multi-user M1,
+/// T7): `work_link { resume }` is addressed by a work key and a link, so
+/// choke point 2's session gate never sees it, and the person it must be
+/// checked against is the one T3's `conversation_owners` recorded against the
+/// conversation — which is also the person [`resume_session_args`] gives the
+/// NEW session. In EVERY mode: `brief` and `fresh` resume the same work, so a
+/// mode is not a way around whose work it is.
+pub fn resume_source(
+    s: &Store,
+    key: &str,
+    link_id: Option<i64>,
+    scope: &OrgScope,
+) -> Result<(Option<i64>, Option<String>), IpcError> {
+    // `internal()`: this call exists to find the candidate the resume WOULD
+    // take so the caller can be checked AGAINST it. A person-filtered plan
+    // here would hide the candidate instead of refusing it, and the refusal
+    // is the gate's to give (`require_conversation_person`), in the link's
+    // own words.
+    let plan = plan_resume(
+        s,
+        key,
+        link_id,
+        None,
+        scope,
+        &crate::service::view_scope::ViewScope::internal(),
+    )?;
+    let cid = chosen_candidate(&plan).and_then(|c| c.last_claude_session_id.clone());
+    Ok((plan.link_id, cid))
+}
+
+/// `E_EXISTS` for a key that already has a live session, worded for who is
+/// asking (multi-user M1, T9c).
+///
+/// `resume_work`'s two concurrency re-checks deliberately plan with
+/// [`crate::service::view_scope::ViewScope::internal`] — a guard that cannot
+/// see every live session on the key would resume one conversation twice —
+/// and then put the session the GUARD found into the refusal, naming its
+/// friendly name, its tmux name and its host, plus a `details` object with
+/// its id. An error payload never passes T8's result gate and a refusal is a
+/// wire answer, so a person resuming their OWN past work on a shared key was
+/// told the name and machine of another person's private session. Same
+/// defect, same shape and the same fix as
+/// [`crate::service::trackers::tickets`]'s `already_running`: the guard keeps
+/// using `internal()` to DECIDE, and only the words change.
+///
+/// An invisible occupant reads exactly like a merely-busy key, which is the
+/// point.
+fn live_elsewhere(
+    s: &Store,
+    reader: &crate::service::view_scope::ViewScope,
+    key: &str,
+    l: &LiveWork,
+) -> IpcError {
+    let seen = s
+        .get_session_by_id(l.session_id)
+        .ok()
+        .flatten()
+        .is_some_and(|row| reader.sees_session_row(&row).is_visible());
+    if !seen {
+        return IpcError::new(codes::E_EXISTS, format!("{key} already has a live session"));
+    }
+    IpcError::new(
+        codes::E_EXISTS,
+        format!(
+            "{key} is live in {} on {} — jump to it",
+            l.friendly_name.as_deref().unwrap_or(&l.tmux_name),
+            l.host_alias
+        ),
+    )
+    .with_details(serde_json::json!({
+        "session_id": l.session_id,
+        "host_alias": l.host_alias,
+        "tmux_name": l.tmux_name,
+    }))
+}
+
+/// "Some session still holds that conversation", naming it only to a reader
+/// that may see it (multi-user M1, T9c). The holder is found by
+/// [`crate::store::Store::session_with_claude_id`], which judges nothing at
+/// all, and the sentence lands in `ResumePlan.modes[..].why` — served to
+/// every caller who can see the candidate — and in `resume_work`'s own
+/// `E_EXISTS`.
+fn conversation_held(reader: &crate::service::view_scope::ViewScope, row: &SessionRow) -> String {
+    if !reader.sees_session_row(row).is_visible() {
+        return "another session still holds that conversation; restore or jump to it".into();
+    }
+    format!(
+        "session {} still holds that conversation; restore or jump to it",
+        row.tmux_name
+    )
+}
+
 /// PURE of the network: what a resume of `key` would do, from the store.
 /// `link_id` picks a candidate (default: the newest ended link);
 /// `host_alias` overrides the snapshot's host.
@@ -203,6 +329,7 @@ pub fn plan_resume(
     link_id: Option<i64>,
     host_alias: Option<&str>,
     scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<ResumePlan, IpcError> {
     crate::service::orgs::require_key(s, scope, key)?;
     let key = crate::store::normalize_work_ref(key)?;
@@ -215,7 +342,10 @@ pub fn plan_resume(
     }
     let live: Vec<LiveWork> = live_links
         .into_iter()
-        .filter(|(l, _)| scope.sees_link(l))
+        // The person half too (multi-user M1, T7): `LiveWork` is a name, a
+        // host and a tmux name — §4.3 content — for every live session on
+        // this key.
+        .filter(|(l, r)| scope.sees_link(l) && view.sees_session_row(r).is_visible())
         .map(|(_, r)| LiveWork {
             session_id: r.id,
             host_alias: r.host_alias,
@@ -223,20 +353,30 @@ pub fn plan_resume(
             friendly_name: r.friendly_name,
         })
         .collect();
+    // `ResumeCandidate` is `{ name, host_alias, branch, worktree, pr_url,
+    // last_claude_session_id }` per ended link — §4.3 content about a past
+    // session — and `link_id` below is what `work_link { resume }` takes,
+    // which is already person-gated. The two must agree, so a candidate
+    // whose conversation is not this caller's is not offered either
+    // (multi-user M1, T7).
+    //
+    // `scope_links_for`, not `scope_links` plus a local copy of the person
+    // half (T9b): the copy read `claude_session_id` ALONE, so a link whose
+    // only record of its conversations is the snapshot's `snap_claude_ids`
+    // array — which is EVERY link of a reaped session, since the retirement
+    // trigger fills the array — passed on `None => true`. That handed a
+    // second person the `last_claude_session_id`, `pr_url` and host of
+    // another person's past work, and the id is what
+    // `new_session { resume_claude_session_id }` takes.
     let mut ended = s.ended_work_links_for_key(&key)?;
-    crate::service::orgs::scope_links(s, scope, &mut ended)?;
+    crate::service::orgs::scope_links_for(s, view, &mut ended)?;
     let candidates: Vec<ResumeCandidate> = ended.iter().map(candidate).collect();
     let chosen = match link_id {
         Some(id) => Some(
             ended
                 .iter()
                 .find(|l| l.id == id)
-                .ok_or_else(|| {
-                    IpcError::new(
-                        codes::E_NOTFOUND,
-                        format!("{key} has no ended work link {id}"),
-                    )
-                })?
+                .ok_or_else(|| no_such_ended_link(&key, id))?
                 .clone(),
         ),
         None => ended.first().cloned(),
@@ -338,10 +478,7 @@ pub fn plan_resume(
             return Some("no Claude conversation was recorded".into());
         };
         match s.session_with_claude_id(h, id) {
-            Ok(Some(r)) => Some(format!(
-                "session {} still holds that conversation; restore or jump to it",
-                r.tmux_name
-            )),
+            Ok(Some(r)) => Some(conversation_held(view, &r)),
             _ => None,
         }
     });
@@ -591,13 +728,13 @@ pub async fn resume_plan(
     link_id: Option<i64>,
     host_alias: Option<&str>,
     with_brief: bool,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<ResumePlan, IpcError> {
     let reads = PlanReads {
         with_brief,
         transcript: true,
     };
-    resume_plan_with(store, ssh.as_ref(), key, link_id, host_alias, reads, scope).await
+    resume_plan_with(store, ssh.as_ref(), key, link_id, host_alias, reads, view).await
 }
 
 async fn resume_plan_with(
@@ -607,11 +744,12 @@ async fn resume_plan_with(
     link_id: Option<i64>,
     host_alias: Option<&str>,
     reads: PlanReads,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<ResumePlan, IpcError> {
+    let scope = &view.org;
     let (mut plan, gathered, transcript) = {
         let s = lock(store)?;
-        let plan = plan_resume(&s, key, link_id, host_alias, scope)?;
+        let plan = plan_resume(&s, key, link_id, host_alias, scope, view)?;
         let transcript = if reads.transcript {
             transcript_check(&s, &plan)?
         } else {
@@ -630,10 +768,22 @@ async fn resume_plan_with(
                 .iter()
                 .find(|c| Some(c.link_id) == plan.link_id)
                 .and_then(|c| c.host_alias.as_deref()));
+            // This is the org boundary, not a privacy fence: it NARROWS an
+            // unrestricted org half to the landing host's org (work graph
+            // M5), so the brief carries only what that host's company may
+            // read. It cannot widen — `for_host` is a host's own scope —
+            // and the person half travels unchanged, because this is handed
+            // to `ViewScope::with_org`, which can replace the org half and
+            // nothing else.
             let reader = match (scope, landing) {
+                // This is the org boundary, not a privacy fence (see above).
                 (OrgScope::All, Some(h)) => OrgScope::for_host(&s, h)?,
                 _ => scope.clone(),
             };
+            // The org half may narrow to the landing host; the PERSON half
+            // is the caller's own and never swapped (multi-user M1, T7) —
+            // a brief is still built for the caller who asked for it.
+            let reader = view.clone().with_org(reader);
             Some(handover::gather_stored(&s, key, target, &reader)?)
         } else {
             None
@@ -704,6 +854,7 @@ pub fn resume_session_args(
     s: &Store,
     plan: &ResumePlan,
     mode: &str,
+    caller_owner: Option<i64>,
 ) -> Result<NewSessionArgs, IpcError> {
     let m = plan.modes.iter().find(|m| m.mode == mode).ok_or_else(|| {
         IpcError::new(
@@ -731,13 +882,39 @@ pub fn resume_session_args(
         ));
     };
     let (worktree_id, new_worktree) = worktree_choice(s, plan)?;
-    let chosen = plan
-        .candidates
-        .iter()
-        .find(|c| Some(c.link_id) == plan.link_id);
+    let chosen = chosen_candidate(plan);
     let friendly_name = chosen
         .and_then(|c| c.name.clone())
         .filter(|n| crate::validate::friendly_name(n).is_ok());
+    let resume_claude_session_id = if mode == "last" {
+        chosen.and_then(|c| c.last_claude_session_id.clone())
+    } else {
+        None
+    };
+    // Whose the resumed session is (multi-user M1, T5). A resume continues
+    // somebody's work, so the first answer is the person the CONVERSATION
+    // belonged to: `conversation_owners` (migration 087) outlives the row the
+    // resume is replacing, which is exactly the case here — a resume exists
+    // because the old row is gone. The candidate's own conversation names
+    // that person in EVERY mode, not just `last`: `brief` and `fresh` resume
+    // the same work, so falling through to the hub's person there would hand
+    // one person's worktree to another. Only when the candidate names no
+    // conversation is the answer the hub's own person
+    // ([`crate::service::sessions::hub_personal_owner`]'s reasoning): this
+    // path carries no `Caller`, and `unclaimed` would leave the resumed
+    // session unreadable to the person who asked for it.
+    //
+    // A failed read is `None`, not an error: a resume must not fail over an
+    // attribution, and an unclaimed row is recoverable where a wrong owner is
+    // not.
+    let owner_person_id = chosen
+        .and_then(|c| c.last_claude_session_id.as_deref())
+        .and_then(|cid| s.conversation_owner(cid).ok().flatten())
+        // Then the CALLER who asked for the resume: on a hub with two people
+        // the hub's own person is as unreadable to the asker as `unclaimed`
+        // is, AND readable to somebody who did not ask (multi-user M1, T5).
+        .or(caller_owner)
+        .or_else(|| s.personal_owner_id().ok().flatten());
     Ok(NewSessionArgs {
         host_alias: host,
         project_id: pid,
@@ -749,13 +926,10 @@ pub fn resume_session_args(
         kind: None,
         start_command: None,
         friendly_name,
-        resume_claude_session_id: if mode == "last" {
-            chosen.and_then(|c| c.last_claude_session_id.clone())
-        } else {
-            None
-        },
+        resume_claude_session_id,
         model: None,
         effort: None,
+        owner_person_id,
     })
 }
 
@@ -852,6 +1026,7 @@ pub async fn resume_with<F, Fut>(
     ssh: &dyn SshExec,
     args: &ResumeArgs,
     scope: &OrgScope,
+    reader: &crate::service::view_scope::ViewScope,
     spawn: F,
 ) -> Result<(SessionRow, Option<i64>), IpcError>
 where
@@ -881,7 +1056,10 @@ where
         args.link_id,
         args.host_alias.as_deref(),
         reads,
-        scope,
+        // `internal()`: the brief is the LANDING host's reader (work graph
+        // M5), and the person fence has already been applied by the gate
+        // that chose this plan.
+        &crate::service::view_scope::ViewScope::internal(),
     )
     .await?;
     // A per-host token resumes only onto its own host.
@@ -924,17 +1102,14 @@ where
             plan.link_id,
             args.host_alias.as_deref(),
             scope,
+            // `internal()`: a concurrency guard has to see EVERY live
+            // session on the key, including one this caller may not —
+            // otherwise an invisible live session would read as "nothing is
+            // running here" and the same conversation would be resumed twice.
+            &crate::service::view_scope::ViewScope::internal(),
         )?;
         if let Some(l) = fresh.live.first() {
-            return Err(IpcError::new(
-                codes::E_EXISTS,
-                format!(
-                    "{} is live in {} on {} — jump to it",
-                    plan.key,
-                    l.friendly_name.as_deref().unwrap_or(&l.tmux_name),
-                    l.host_alias
-                ),
-            ));
+            return Err(live_elsewhere(&s, reader, &plan.key, l));
         }
         if args.mode == "last" {
             let held = fresh
@@ -949,15 +1124,12 @@ where
             if let Some(r) = held {
                 return Err(IpcError::new(
                     codes::E_EXISTS,
-                    format!(
-                        "session {} still holds that conversation; restore or jump to it",
-                        r.tmux_name
-                    ),
+                    conversation_held(reader, &r),
                 ));
             }
         }
         let claim = InFlight::claim(&s, &plan.key)?;
-        let new_args = resume_session_args(&s, &plan, &args.mode)?;
+        let new_args = resume_session_args(&s, &plan, &args.mode, args.owner)?;
         // The resumed session links the work: the same integrity rule as a
         // link, for every caller (M5).
         if let Some(pid) = plan.project_id {
@@ -999,25 +1171,12 @@ where
             plan.link_id,
             args.host_alias.as_deref(),
             scope,
+            // `internal()`, for the same reason as the guard above.
+            &crate::service::view_scope::ViewScope::internal(),
         )
         .map_err(orphaned)?;
         if let Some(l) = now.live.iter().find(|l| l.session_id != row.id) {
-            return Err(orphaned(
-                IpcError::new(
-                    codes::E_EXISTS,
-                    format!(
-                        "{} is live in {} on {} — jump to it",
-                        plan.key,
-                        l.friendly_name.as_deref().unwrap_or(&l.tmux_name),
-                        l.host_alias
-                    ),
-                )
-                .with_details(serde_json::json!({
-                    "session_id": l.session_id,
-                    "host_alias": l.host_alias,
-                    "tmux_name": l.tmux_name,
-                })),
-            ));
+            return Err(orphaned(live_elsewhere(&s, reader, &plan.key, l)));
         }
         s.link_resumed_work(row.id, &plan.key).map_err(orphaned)?;
         if args.mode == "brief" {
@@ -1052,8 +1211,9 @@ pub async fn resume_work(
     reg: &Arc<CancellationRegistry>,
     args: &ResumeArgs,
     scope: &OrgScope,
+    reader: &crate::service::view_scope::ViewScope,
 ) -> Result<SessionRow, IpcError> {
-    let (row, handover) = resume_with(store, ssh.as_ref(), args, scope, |a| {
+    let (row, handover) = resume_with(store, ssh.as_ref(), args, scope, reader, |a| {
         sessions::new_session(a, store.as_ref(), ssh, reg)
     })
     .await?;
@@ -1278,7 +1438,15 @@ mod tests {
     fn a_reachable_host_with_its_worktree_allows_every_mode() {
         let (st, pid) = fixture();
         let s = st.lock().unwrap();
-        let p = plan_resume(&s, "abc-1", None, None, &OrgScope::All).unwrap();
+        let p = plan_resume(
+            &s,
+            "abc-1",
+            None,
+            None,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         assert_eq!(
             modes(&p),
             vec![("last", true), ("brief", true), ("fresh", true)]
@@ -1290,13 +1458,79 @@ mod tests {
             p.candidates[0].last_claude_session_id.as_deref(),
             Some("c-1")
         );
-        let a = resume_session_args(&s, &p, "last").unwrap();
+        let a = resume_session_args(&s, &p, "last", None).unwrap();
         assert_eq!(a.resume_claude_session_id.as_deref(), Some("c-1"));
         assert!(a.worktree_id.is_some());
         assert_eq!(a.new_worktree, None);
         assert_eq!(a.friendly_name.as_deref(), Some("Fix login"));
-        let a = resume_session_args(&s, &p, "fresh").unwrap();
+        let a = resume_session_args(&s, &p, "fresh", None).unwrap();
         assert_eq!(a.resume_claude_session_id, None);
+    }
+
+    /// Multi-user M1, T5, rule 1: a resume continues somebody's work, so the
+    /// session it makes is THEIRS — in every mode, not only the one that
+    /// replays the transcript. `brief` and `fresh` resume the same work from
+    /// the same worktree, so attributing those to the hub's own person would
+    /// hand one person's tree to another and hide it from the person who
+    /// asked.
+    #[test]
+    fn a_resume_belongs_to_the_person_whose_conversation_it_continues() {
+        let (st, _) = fixture();
+        let s = st.lock().unwrap();
+        let ada = s.create_person("ada", None).unwrap().id;
+        let hub = s.mint_personal_owner().unwrap();
+        assert_ne!(ada, hub);
+        // `c-1` was ada's: migration 087's record, written while her row was
+        // alive, outlives the row the resume is replacing.
+        s.conn_ref()
+            .execute(
+                "INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, \
+                 status, claude_session_id, owner_person_id, visibility) \
+                 VALUES ('adas', 'h', 1, 1, 'running', 'c-1', ?1, 'private')",
+                rusqlite::params![ada],
+            )
+            .unwrap();
+        let gone = s.conn_ref().last_insert_rowid();
+        s.delete_session(gone).unwrap();
+        assert_eq!(s.conversation_owner("c-1").unwrap(), Some(ada));
+
+        let p = plan_resume(
+            &s,
+            "abc-1",
+            None,
+            None,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
+        for mode in RESUME_MODES {
+            let a = resume_session_args(&s, &p, mode, None).unwrap();
+            assert_eq!(a.owner_person_id, Some(ada), "{mode}");
+        }
+    }
+
+    /// …and with nobody recorded for the conversation, the hub's own person,
+    /// never `unclaimed`: this path carries no `Caller`, and an unclaimed row
+    /// would be unreadable to the person who asked for the resume.
+    #[test]
+    fn a_resume_of_an_unowned_conversation_falls_back_to_the_hub_owner() {
+        let (st, _) = fixture();
+        let s = st.lock().unwrap();
+        let hub = s.mint_personal_owner().unwrap();
+        assert_eq!(s.conversation_owner("c-1").unwrap(), None);
+        let p = plan_resume(
+            &s,
+            "abc-1",
+            None,
+            None,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
+        for mode in RESUME_MODES {
+            let a = resume_session_args(&s, &p, mode, None).unwrap();
+            assert_eq!(a.owner_person_id, Some(hub), "{mode}");
+        }
     }
 
     #[test]
@@ -1304,10 +1538,18 @@ mod tests {
         let (st, _) = fixture();
         let s = st.lock().unwrap();
         s.conn_ref().execute("DELETE FROM worktrees", []).unwrap();
-        let p = plan_resume(&s, "ABC-1", None, None, &OrgScope::All).unwrap();
+        let p = plan_resume(
+            &s,
+            "ABC-1",
+            None,
+            None,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         assert!(!p.worktree_present);
         assert!(p.modes.iter().all(|m| m.ok));
-        let a = resume_session_args(&s, &p, "last").unwrap();
+        let a = resume_session_args(&s, &p, "last", None).unwrap();
         assert_eq!(a.worktree_id, None);
         assert_eq!(a.new_worktree.as_deref(), Some("abc-1"));
         assert_eq!(a.base_branch.as_deref(), Some("abc-1"));
@@ -1319,7 +1561,15 @@ mod tests {
         let s = st.lock().unwrap();
         s.update_host_probe("h", false, None, None, 0).unwrap();
         s.upsert_host("g").unwrap();
-        let p = plan_resume(&s, "ABC-1", None, None, &OrgScope::All).unwrap();
+        let p = plan_resume(
+            &s,
+            "ABC-1",
+            None,
+            None,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         assert!(p.modes.iter().all(|m| !m.ok));
         assert!(p.modes[0]
             .reason
@@ -1327,10 +1577,20 @@ mod tests {
             .unwrap()
             .contains("unreachable"));
         assert!(p.hosts.contains(&"g".to_string()));
-        let err = resume_session_args(&s, &p, "fresh").err().expect("refused");
+        let err = resume_session_args(&s, &p, "fresh", None)
+            .err()
+            .expect("refused");
         assert_eq!(err.code, codes::E_INVALID_STATE);
 
-        let p = plan_resume(&s, "ABC-1", None, Some("g"), &OrgScope::All).unwrap();
+        let p = plan_resume(
+            &s,
+            "ABC-1",
+            None,
+            Some("g"),
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         assert_eq!(
             modes(&p),
             vec![("last", false), ("brief", true), ("fresh", true)]
@@ -1340,7 +1600,7 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("transcript is on h"));
-        let a = resume_session_args(&s, &p, "brief").unwrap();
+        let a = resume_session_args(&s, &p, "brief", None).unwrap();
         assert_eq!(a.host_alias, "g");
         assert_eq!(
             a.new_worktree.as_deref(),
@@ -1355,7 +1615,15 @@ mod tests {
         let s = st.lock().unwrap();
         s.mark_purged_work_unresumable(pid, &["h".to_string()])
             .unwrap();
-        let p = plan_resume(&s, "ABC-1", None, None, &OrgScope::All).unwrap();
+        let p = plan_resume(
+            &s,
+            "ABC-1",
+            None,
+            None,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         assert_eq!(
             modes(&p),
             vec![("last", false), ("brief", true), ("fresh", true)]
@@ -1372,7 +1640,15 @@ mod tests {
             .unwrap();
         s.set_claude_session_id(live, "c-1").unwrap();
         // The rebind carried the work onto `live`: it is live now.
-        let p = plan_resume(&s, "ABC-1", None, None, &OrgScope::All).unwrap();
+        let p = plan_resume(
+            &s,
+            "ABC-1",
+            None,
+            None,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         assert_eq!(p.live.len(), 1);
         assert!(p.modes.iter().all(|m| !m.ok));
         assert!(p.modes[0].reason.as_deref().unwrap().contains("jump"));
@@ -1380,7 +1656,15 @@ mod tests {
         // Unlinked, it still holds the conversation: `last` stays off.
         let link = s.session_work_links(live).unwrap()[0].id;
         s.unlink_session_work(live, link).unwrap();
-        let p = plan_resume(&s, "ABC-1", None, None, &OrgScope::All).unwrap();
+        let p = plan_resume(
+            &s,
+            "ABC-1",
+            None,
+            None,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         assert_eq!(
             modes(&p),
             vec![("last", false), ("brief", true), ("fresh", true)]
@@ -1396,17 +1680,40 @@ mod tests {
     fn unknown_keys_links_and_modes_are_refused() {
         let (st, _) = fixture();
         let s = st.lock().unwrap();
-        let p = plan_resume(&s, "NOPE-1", None, None, &OrgScope::All).unwrap();
+        let p = plan_resume(
+            &s,
+            "NOPE-1",
+            None,
+            None,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         assert!(p.modes.iter().all(|m| !m.ok));
         assert_eq!(
-            plan_resume(&s, "ABC-1", Some(999), None, &OrgScope::All)
-                .unwrap_err()
-                .code,
+            plan_resume(
+                &s,
+                "ABC-1",
+                Some(999),
+                None,
+                &OrgScope::All,
+                &crate::service::view_scope::ViewScope::internal()
+            )
+            .unwrap_err()
+            .code,
             codes::E_NOTFOUND
         );
-        let p = plan_resume(&s, "ABC-1", None, None, &OrgScope::All).unwrap();
+        let p = plan_resume(
+            &s,
+            "ABC-1",
+            None,
+            None,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         assert_eq!(
-            resume_session_args(&s, &p, "sideways")
+            resume_session_args(&s, &p, "sideways", None)
                 .err()
                 .expect("refused")
                 .code,
@@ -1427,15 +1734,22 @@ mod tests {
         let spawned = Arc::new(Mutex::new(None));
         let seen = Arc::clone(&spawned);
         let st2 = Arc::clone(&st);
-        let (row, handover) = resume_with(&st, &ssh, &args, &OrgScope::All, |a| async move {
-            *seen.lock().unwrap() =
-                Some((a.host_alias.clone(), a.resume_claude_session_id.clone()));
-            let s = st2.lock().unwrap();
-            let id = s
-                .upsert_session("dev-new", &a.host_alias, None, None, 1, 1, "running", None)
-                .unwrap();
-            Ok(s.get_session_by_id(id).unwrap().unwrap())
-        })
+        let (row, handover) = resume_with(
+            &st,
+            &ssh,
+            &args,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+            |a| async move {
+                *seen.lock().unwrap() =
+                    Some((a.host_alias.clone(), a.resume_claude_session_id.clone()));
+                let s = st2.lock().unwrap();
+                let id = s
+                    .upsert_session("dev-new", &a.host_alias, None, None, 1, 1, "running", None)
+                    .unwrap();
+                Ok(s.get_session_by_id(id).unwrap().unwrap())
+            },
+        )
         .await
         .unwrap();
         assert_eq!(
@@ -1463,9 +1777,17 @@ mod tests {
     };
 
     async fn probed(st: &Arc<Mutex<Store>>, fake: &FakeSsh, host: Option<&str>) -> ResumePlan {
-        resume_plan_with(st, fake, "ABC-1", None, host, PLAN, &OrgScope::All)
-            .await
-            .unwrap()
+        resume_plan_with(
+            st,
+            fake,
+            "ABC-1",
+            None,
+            host,
+            PLAN,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .await
+        .unwrap()
     }
 
     fn probe_calls(fake: &FakeSsh) -> Vec<String> {
@@ -1526,9 +1848,14 @@ mod tests {
             mode: "last".into(),
             ..Default::default()
         };
-        let err = resume_with(&st, &fake, &args, &OrgScope::All, |_| async {
-            panic!("must not spawn")
-        })
+        let err = resume_with(
+            &st,
+            &fake,
+            &args,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+            |_| async { panic!("must not spawn") },
+        )
         .await
         .expect_err("refused");
         assert_eq!(err.code, codes::E_INVALID_STATE);
@@ -1600,13 +1927,20 @@ mod tests {
             ..Default::default()
         };
         let st2 = Arc::clone(&st);
-        resume_with(&st, &fake, &args, &OrgScope::All, |a| async move {
-            let s = st2.lock().unwrap();
-            let id = s
-                .upsert_session("dev-new", &a.host_alias, None, None, 1, 1, "running", None)
-                .unwrap();
-            Ok(s.get_session_by_id(id).unwrap().unwrap())
-        })
+        resume_with(
+            &st,
+            &fake,
+            &args,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+            |a| async move {
+                let s = st2.lock().unwrap();
+                let id = s
+                    .upsert_session("dev-new", &a.host_alias, None, None, 1, 1, "running", None)
+                    .unwrap();
+                Ok(s.get_session_by_id(id).unwrap().unwrap())
+            },
+        )
         .await
         .unwrap();
         assert!(probe_calls(&fake).is_empty(), "{:?}", fake.commands());
@@ -1770,13 +2104,20 @@ mod tests {
             ..Default::default()
         };
         let st2 = Arc::clone(&st);
-        let (row, handover) = resume_with(&st, &ssh, &args, &OrgScope::All, |a| async move {
-            let s = st2.lock().unwrap();
-            let id = s
-                .upsert_session("dev-new", &a.host_alias, None, None, 1, 1, "running", None)
-                .unwrap();
-            Ok(s.get_session_by_id(id).unwrap().unwrap())
-        })
+        let (row, handover) = resume_with(
+            &st,
+            &ssh,
+            &args,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+            |a| async move {
+                let s = st2.lock().unwrap();
+                let id = s
+                    .upsert_session("dev-new", &a.host_alias, None, None, 1, 1, "running", None)
+                    .unwrap();
+                Ok(s.get_session_by_id(id).unwrap().unwrap())
+            },
+        )
         .await
         .expect("the row, not an error after the spawn");
         assert!(handover.is_some(), "the plan's brief was queued");
@@ -1805,7 +2146,8 @@ mod tests {
         };
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let st1 = Arc::clone(&st);
-        let first = resume_with(&st, &ssh, &args, &OrgScope::All, |a| async move {
+        let reader = crate::service::view_scope::ViewScope::internal();
+        let first = resume_with(&st, &ssh, &args, &OrgScope::All, &reader, |a| async move {
             // Parked mid-spawn (tmux is slow) until the second call answered.
             rx.await.unwrap();
             let s = st1.lock().unwrap();
@@ -1817,9 +2159,14 @@ mod tests {
             Ok(s.get_session_by_id(id).unwrap().unwrap())
         });
         let second = async {
-            let err = resume_with(&st, &ssh, &args, &OrgScope::All, |_| async {
-                panic!("the second resume never spawns")
-            })
+            let err = resume_with(
+                &st,
+                &ssh,
+                &args,
+                &OrgScope::All,
+                &crate::service::view_scope::ViewScope::internal(),
+                |_| async { panic!("the second resume never spawns") },
+            )
             .await
             .unwrap_err();
             tx.send(()).unwrap();
@@ -1836,9 +2183,14 @@ mod tests {
         assert_eq!(row.tmux_name, "dev-new");
         // Afterwards the key is live: a resume is blocked by the plan (Jump),
         // and the in-flight claim is released.
-        let err = resume_with(&st, &ssh, &args, &OrgScope::All, |_| async {
-            panic!("a live key never spawns")
-        })
+        let err = resume_with(
+            &st,
+            &ssh,
+            &args,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+            |_| async { panic!("a live key never spawns") },
+        )
         .await
         .unwrap_err();
         assert!(err.message.contains("jump"), "{}", err.message);
@@ -1862,7 +2214,8 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let (at_spawn_tx, at_spawn) = tokio::sync::oneshot::channel::<()>();
         let st1 = Arc::clone(&st);
-        let resume = resume_with(&st, &ssh, &args, &OrgScope::All, |a| async move {
+        let reader = crate::service::view_scope::ViewScope::internal();
+        let resume = resume_with(&st, &ssh, &args, &OrgScope::All, &reader, |a| async move {
             at_spawn_tx.send(()).unwrap();
             rx.await.unwrap();
             let s = st1.lock().unwrap();
@@ -1872,6 +2225,7 @@ mod tests {
             Ok(s.get_session_by_id(id).unwrap().unwrap())
         });
         let plan = crate::service::trackers::tickets::StartPlan {
+            owner: None,
             key: "ABC-1".into(),
             title: String::new(),
             item_id: None,
@@ -1889,7 +2243,7 @@ mod tests {
                 &st,
                 &plan,
                 None,
-                &OrgScope::All,
+                &crate::service::view_scope::ViewScope::internal(),
                 |_| async { panic!("the start never spawns") },
             )
             .await
@@ -1920,43 +2274,50 @@ mod tests {
             ..Default::default()
         };
         let st1 = Arc::clone(&st);
-        let err = resume_with(&st, &ssh, &args, &OrgScope::All, |a| async move {
-            let s = st1.lock().unwrap();
-            // The start wins while this spawn is in flight.
-            let winner = s
-                .upsert_session(
-                    "dev-started",
-                    &a.host_alias,
-                    None,
-                    None,
-                    1,
-                    1,
-                    "running",
-                    None,
-                )
-                .unwrap();
-            s.conn_ref()
-                .execute(
-                    "UPDATE sessions SET project_id = ?1 WHERE id = ?2",
-                    rusqlite::params![pid, winner],
-                )
-                .unwrap();
-            s.link_session_work(winner, WorkTarget::Key("ABC-1"), "started")
-                .unwrap();
-            let id = s
-                .upsert_session(
-                    "dev-resumed",
-                    &a.host_alias,
-                    None,
-                    None,
-                    1,
-                    1,
-                    "running",
-                    None,
-                )
-                .unwrap();
-            Ok(s.get_session_by_id(id).unwrap().unwrap())
-        })
+        let err = resume_with(
+            &st,
+            &ssh,
+            &args,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+            |a| async move {
+                let s = st1.lock().unwrap();
+                // The start wins while this spawn is in flight.
+                let winner = s
+                    .upsert_session(
+                        "dev-started",
+                        &a.host_alias,
+                        None,
+                        None,
+                        1,
+                        1,
+                        "running",
+                        None,
+                    )
+                    .unwrap();
+                s.conn_ref()
+                    .execute(
+                        "UPDATE sessions SET project_id = ?1 WHERE id = ?2",
+                        rusqlite::params![pid, winner],
+                    )
+                    .unwrap();
+                s.link_session_work(winner, WorkTarget::Key("ABC-1"), "started")
+                    .unwrap();
+                let id = s
+                    .upsert_session(
+                        "dev-resumed",
+                        &a.host_alias,
+                        None,
+                        None,
+                        1,
+                        1,
+                        "running",
+                        None,
+                    )
+                    .unwrap();
+                Ok(s.get_session_by_id(id).unwrap().unwrap())
+            },
+        )
         .await
         .unwrap_err();
 
@@ -2001,27 +2362,34 @@ mod tests {
             ..Default::default()
         };
         let st1 = Arc::clone(&st);
-        let err = resume_with(&st, &ssh, &args, &OrgScope::All, |a| async move {
-            let s = st1.lock().unwrap();
-            let id = s
-                .upsert_session(
-                    "dev-resumed",
-                    &a.host_alias,
-                    None,
-                    None,
-                    1,
-                    1,
-                    "running",
-                    None,
-                )
-                .unwrap();
-            let row = s.get_session_by_id(id).unwrap().unwrap();
-            // The row goes away before the link can be written.
-            s.conn_ref()
-                .execute("DELETE FROM sessions WHERE id = ?1", [id])
-                .unwrap();
-            Ok(row)
-        })
+        let err = resume_with(
+            &st,
+            &ssh,
+            &args,
+            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
+            |a| async move {
+                let s = st1.lock().unwrap();
+                let id = s
+                    .upsert_session(
+                        "dev-resumed",
+                        &a.host_alias,
+                        None,
+                        None,
+                        1,
+                        1,
+                        "running",
+                        None,
+                    )
+                    .unwrap();
+                let row = s.get_session_by_id(id).unwrap().unwrap();
+                // The row goes away before the link can be written.
+                s.conn_ref()
+                    .execute("DELETE FROM sessions WHERE id = ?1", [id])
+                    .unwrap();
+                Ok(row)
+            },
+        )
         .await
         .unwrap_err();
         assert!(
@@ -2069,6 +2437,74 @@ mod tests {
         assert_eq!(
             prompt_gate("╭────╮\n│ >  │\n╰────╯\n  ? for shortcuts"),
             PromptGate::Ready
+        );
+    }
+    /// **A resume's refusal names a live session only to a reader that may
+    /// see it** (multi-user M1, T9c).
+    ///
+    /// `resume_work`'s two concurrency re-checks plan with
+    /// `ViewScope::internal()` on purpose — a guard that cannot see every live
+    /// session on the key would resume one conversation twice — and then put
+    /// the session the GUARD found into the `E_EXISTS`, with its friendly
+    /// name, tmux name, host and (for the second) a `details` object holding
+    /// its id. An error payload never passes T8's result gate and a refusal is
+    /// a wire answer, so Bob resuming his own past work on a shared key was
+    /// told the name and machine of Ada's private session. The guard still
+    /// decides with `internal()`; only the words change.
+    #[test]
+    fn a_resume_refusal_names_no_session_the_reader_cannot_see() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+        let bob = s.create_person("bob", None).unwrap().id;
+        assert!(s.sole_enabled_person().unwrap().is_none(), "two people");
+        let sid = s
+            .upsert_session("dev-ada-secret", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        assert!(s.claim_if_unclaimed(sid, Some(ada)).unwrap());
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET friendly_name = 'Ada: payments' WHERE id = ?1",
+                rusqlite::params![sid],
+            )
+            .unwrap();
+        let row = s.get_session_by_id(sid).unwrap().unwrap();
+        let live = LiveWork {
+            session_id: sid,
+            host_alias: row.host_alias.clone(),
+            tmux_name: row.tmux_name.clone(),
+            friendly_name: row.friendly_name.clone(),
+        };
+
+        let adas = crate::mcp::auth::device_view(&s, ada);
+        let bobs = crate::mcp::auth::device_view(&s, bob);
+
+        let hers = live_elsewhere(&s, &adas, "ABC-1", &live);
+        assert_eq!(hers.code, codes::E_EXISTS);
+        assert!(
+            hers.message.contains("Ada: payments") && hers.message.contains(" on h "),
+            "her own session is hers to be told about: {}",
+            hers.message
+        );
+        assert!(hers.details.is_some(), "and its id too");
+
+        let his = live_elsewhere(&s, &bobs, "ABC-1", &live);
+        assert_eq!(his.code, codes::E_EXISTS);
+        assert_eq!(
+            his.message, "ABC-1 already has a live session",
+            "an invisible occupant reads exactly like a merely-busy key"
+        );
+        assert!(
+            his.details.is_none(),
+            "and the details object is netted by nothing: it must not be built"
+        );
+
+        // The same rule for the HOLDER sentence, which lands in
+        // `ResumePlan.modes[..].why` as well as in an `E_EXISTS`.
+        assert!(conversation_held(&adas, &row).contains("dev-ada-secret"));
+        assert_eq!(
+            conversation_held(&bobs, &row),
+            "another session still holds that conversation; restore or jump to it"
         );
     }
 }

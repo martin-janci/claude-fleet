@@ -744,14 +744,47 @@ pub async fn send_system_prompt(
 /// Filter narrowing which work sessions a broadcast targets. Any field left
 /// `None` is not constrained. `status` compares against a session's
 /// `claude_status`.
-#[derive(Debug, Default, Clone)]
+///
+/// **Deliberately not `Default`.** The person half below has no value that
+/// means "everybody", so there is no safe field to default it to: a
+/// `#[derive(Default)]` on this struct would make `..Default::default()` —
+/// the spelling every construction site reaches for — mean *every session in
+/// the fleet*, and a mis-threaded or dropped `view` would then widen the
+/// fan-out silently instead of failing to compile. `BroadcastFilter::internal`
+/// is the named form for the hub's own callers.
+#[derive(Debug, Clone)]
 pub struct BroadcastFilter {
     pub host: Option<String>,
     pub project_id: Option<i64>,
     pub status: Option<String>,
-    /// Work graph M5 (D7): a per-host token's broadcast never reaches a
-    /// session isolated from its host. `None` = every org.
-    pub scope: Option<crate::service::orgs::OrgScope>,
+    /// Multi-user M1 (T7): WHO is broadcasting. A fan-out reaches only the
+    /// sessions that caller could have prompted one at a time — the owner's
+    /// own, and the ones they hold a `drive` grant on.
+    ///
+    /// Not an `Option`: the hub's own readers say so by name
+    /// ([`crate::service::view_scope::ViewScope::internal`]), and every other
+    /// construction site has to produce a real caller's scope or fail to
+    /// compile. It was an `Option<ViewScope>` whose `None` meant "every
+    /// session", with one production site setting it and no test covering the
+    /// wiring — a fence that could not fail.
+    pub view: crate::service::view_scope::ViewScope,
+}
+
+impl BroadcastFilter {
+    /// The hub's OWN fan-out: no filters, and the hub's own reader.
+    ///
+    /// Named rather than derived, so that "whose broadcast is this?" is a
+    /// question every construction site answers out loud. The only callers
+    /// are the ones spec §3.3 keeps unscoped (a tick, a playbook) and the
+    /// tests of the pure selector.
+    pub fn internal() -> Self {
+        BroadcastFilter {
+            host: None,
+            project_id: None,
+            status: None,
+            view: crate::service::view_scope::ViewScope::internal(),
+        }
+    }
 }
 
 /// PURE selector: pick the session ids a broadcast should target.
@@ -764,6 +797,19 @@ pub struct BroadcastFilter {
 ///     broadcast never fans back into the session driving it.
 ///   - the operator session `(host_alias, tmux_name)`, when recorded, is
 ///     excluded so a fan-out never prompts the UX agent that may have sent it.
+///   - multi-user M1 (T7): a session the broadcaster could not have
+///     prompted one at a time is not reached by the fan-out either. The
+///     predicate is `ViewScope::may_drive` — the same one `send_prompt`
+///     answers — because a broadcast IS `send_prompt`, fanned out, and
+///     refusing it to a driver while allowing the single call would be
+///     theatre (spec §4.3, invariant 5's closing paragraph). A row the
+///     scope cannot see at all fails `may_drive` first, so the privacy case
+///     needs no clause of its own. The ORG filter work graph M5 kept beside
+///     it (`BroadcastFilter.scope`, D7) is gone with T10: `may_drive` opens
+///     with `sees_session_row`, which opens with the org boundary and whose
+///     host arm refuses another host's row outright, so the field was a
+///     second copy of an answer this predicate already gives — and an
+///     `Option` one, which is the shape that cannot fail loudly.
 pub fn select_targets(
     sessions: &[SessionRow],
     f: &BroadcastFilter,
@@ -779,7 +825,7 @@ pub fn select_targets(
             f.status.as_deref() == Some("blocked")
                 || (s.claude_status.as_deref() != Some("blocked") && s.stuck_kind.is_none())
         })
-        .filter(|s| f.scope.as_ref().is_none_or(|sc| sc.sees_row(s)))
+        .filter(|s| f.view.may_drive(s))
         .filter(|s| match &f.host {
             Some(h) => &s.host_alias == h,
             None => true,

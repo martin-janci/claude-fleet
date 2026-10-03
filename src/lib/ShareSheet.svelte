@@ -1,0 +1,425 @@
+<script lang="ts">
+  // The one Share sheet for the whole app (multi-user M1).
+  //
+  // Structure copied from `TransferSheet.svelte`, which solves the same
+  // problem: one app-wide instance, `const id = $derived($shareSheetFor)`,
+  // `<Modal>` as the dialog primitive, and a self-closing effect for when the
+  // session it is open on leaves the store.
+  //
+  // What the sheet is FOR, beyond the three buttons: a share is a decision
+  // with two consequences the person taking it cannot see from the controls,
+  // and both are written on screen rather than left to a doc page —
+  //
+  //   1. the recipient also gets the history from BEFORE the share. Granting
+  //      the session grants its transcript, its journal and its timeline; there
+  //      is no "from here on" share and inventing one would be a promise the
+  //      reads cannot keep;
+  //   2. watch and drive are enforced by FLEET, not by SSH. Anyone who
+  //      independently has SSH to the host can still attach, and revoking the
+  //      grant does not change that — it was never Fleet's to grant or revoke.
+  //      Which is also why a share never hands over a terminal at all: the
+  //      terminal is this machine's own `ssh … tmux attach`, with no hub in the
+  //      path to refuse it later (spec §4.3 invariant 4).
+  //
+  // There is **no team / org recipient in M1**. `'org'` visibility was removed
+  // from the milestone by the owner's decision: with no membership table, "the
+  // org can see it" has exactly one referent — `client_tokens.org_id`, written
+  // by an admin binding their own device — which is the privacy hole the
+  // decision closed. Team sharing returns in M2 with memberships and a defined
+  // reader. So this sheet names PEOPLE, and nothing in it offers a team.
+  import Modal from './Modal.svelte';
+  import { accessOf } from './access';
+  import type { Result } from './result';
+  import {
+    fetchSessionAccess,
+    narrowShare,
+    shareSession,
+    sessions,
+    unshareSession,
+    type SessionGrant,
+  } from './sessions';
+  import { shareSheetFor, sessionBlocked } from './share';
+
+  const id = $derived($shareSheetFor);
+  const session = $derived(id === null ? undefined : $sessions.find((s) => s.id === id));
+  /** The sheet is the owner's tool. The buttons that open it are gated too,
+   *  but a row whose grant is revoked while the sheet is open must stop
+   *  offering the controls — so this is read through `$accessOf`, which
+   *  re-derives on a `grant:changed` with no re-list. */
+  const owned = $derived($accessOf(session) === 'own');
+  const shareBlocked = $derived($sessionBlocked(session, 'session_share'));
+  const label = $derived(session?.friendly_name || session?.tmux_name || 'this session');
+
+  /** The live grant list, as `session_access` answers it. `null` while the
+   *  first read is out — told apart from `[]`, which is the real and very
+   *  common "shared with nobody". */
+  let grants = $state<SessionGrant[] | null>(null);
+  let listError = $state<string | null>(null);
+  let person = $state('');
+  let level = $state<'watch' | 'drive'>('watch');
+  /** Which person's grant is one click from being revoked. Revoking is not
+   *  destructive the way a kill is, but it is invisible to the person it
+   *  happens to, so it gets the same two-step the rest of the app uses. */
+  let confirming = $state<string | null>(null);
+  let busy = $state(false);
+  let error = $state<string | null>(null);
+
+  /** `id` is captured by the caller rather than re-read after the await: a
+   *  list that lands after the sheet moved to another session belongs to the
+   *  session that asked for it (the `WatchView.refresh` guard, same reason). */
+  async function load(forId: number) {
+    const r = await fetchSessionAccess(forId);
+    if (forId !== $shareSheetFor) return;
+    if (r.ok) {
+      grants = r.value;
+      listError = null;
+      return;
+    }
+    grants = null;
+    listError = `${r.error.code}: ${r.error.message}`;
+  }
+
+  // A fresh sheet each time it opens on a session: the draft recipient, the
+  // level, the pending revoke and the error are all per-session.
+  $effect(() => {
+    const forId = id;
+    person = '';
+    level = 'watch';
+    confirming = null;
+    error = null;
+    grants = null;
+    listError = null;
+    if (forId !== null) void load(forId);
+  });
+
+  // Nothing to show: the row left the store (killed, reaped, or — on a paired
+  // desktop — revoked out from under us).
+  $effect(() => {
+    if (id !== null && !session) shareSheetFor.set(null);
+  });
+
+  function close() {
+    shareSheetFor.set(null);
+  }
+
+  /** Every mutation has the same shape: run it, keep the sheet open on a
+   *  refusal with the reason in place, re-read the list on success. The list
+   *  is re-read rather than patched locally because the hub is the authority
+   *  on what the grant set now is — a narrow that the store refused as
+   *  already-narrow must not leave a locally-edited row claiming otherwise. */
+  async function run(forId: number, f: () => Promise<Result<unknown>>) {
+    // Re-asked at the call, not only in the markup above (multi-user M1, F2b):
+    // `owned` swaps the sheet's body for the refusal notice, but a revoke that
+    // lands between a click and this line would otherwise still send. Sharing,
+    // narrowing and revoking are all the `own` tier, which is exactly `owned`.
+    if (busy || !owned) return;
+    busy = true;
+    error = null;
+    const r = await f();
+    busy = false;
+    confirming = null;
+    if (!r.ok) {
+      error = `${r.error.code}: ${r.error.message}`;
+      return;
+    }
+    await load(forId);
+  }
+
+  function doShare() {
+    const forId = id;
+    const name = person.trim();
+    if (forId === null || !name) return;
+    void run(forId, async () => {
+      const r = await shareSession(forId, name, level);
+      if (r.ok) person = '';
+      return r;
+    });
+  }
+
+  function doNarrow(name: string) {
+    const forId = id;
+    if (forId === null) return;
+    void run(forId, () => narrowShare(forId, name));
+  }
+
+  function doRevoke(name: string) {
+    const forId = id;
+    if (forId === null) return;
+    void run(forId, () => unshareSession(forId, name));
+  }
+
+  /** What to call a recipient, and what to send back as `person`. The hub's
+   *  own name is what the sharing tools take, so a grant with no name is
+   *  shown by id and its controls are disabled rather than guessing one. */
+  function recipientName(g: SessionGrant): string | null {
+    return g.person_name ?? null;
+  }
+  function recipientLabel(g: SessionGrant): string {
+    return g.person_display_name || g.person_name || (g.person_id === null ? 'unknown' : `person #${g.person_id}`);
+  }
+</script>
+
+{#if id !== null && session}
+  <Modal
+    title="Share {label}"
+    onclose={busy ? undefined : close}
+    width="480px"
+    testid="share-sheet"
+  >
+    {#if !owned}
+      <!-- Belt and braces: the controls that open this sheet are gated on the
+           same answer, so this is what a revoke ARRIVING while it is open
+           looks like, not a path a click can normally reach. -->
+      <p class="err" data-testid="share-not-owner">
+        {shareBlocked ?? 'Only the session’s owner can share it.'}
+      </p>
+      <div class="actions">
+        <button type="button" onclick={close}>Close</button>
+      </div>
+    {:else}
+      <p class="hint">
+        Shares this session through Fleet with one person at a time. Revoke it
+        whenever you like — a share is never permanent and never passes on: the
+        person you share with cannot share it further.
+      </p>
+
+      <section class="block">
+        <h4>Share with a person</h4>
+        <div class="row">
+          <input
+            data-testid="share-person"
+            aria-label="Person"
+            placeholder="their name on this fleet"
+            bind:value={person}
+            disabled={busy}
+          />
+          <select data-testid="share-level" aria-label="Level" bind:value={level} disabled={busy}>
+            <option value="watch">watch — read only</option>
+            <option value="drive">drive — can send prompts</option>
+          </select>
+          <button
+            type="button"
+            class="primary"
+            data-testid="share-confirm"
+            disabled={busy || person.trim() === ''}
+            onclick={doShare}>{busy ? 'Sharing…' : 'Share'}</button
+          >
+        </div>
+        <!-- There is no team / org option here on purpose (see the comment at
+             the top of this file): M1 has no membership table, so there is
+             nothing a team share could honestly mean. -->
+        <p class="note" data-testid="share-no-team">
+          People only for now — sharing with a whole team needs memberships and
+          is not part of this release.
+        </p>
+      </section>
+
+      <section class="block">
+        <h4>Shared with</h4>
+        {#if listError}
+          <p class="err" data-testid="share-list-error">{listError}</p>
+        {:else if grants === null}
+          <p class="note" data-testid="share-list-loading">Reading the grants…</p>
+        {:else if grants.length === 0}
+          <p class="note" data-testid="share-list-empty">
+            Not shared with anyone. Only you can see this session.
+          </p>
+        {:else}
+          <ul class="grants" data-testid="share-list">
+            {#each grants as g (`${g.person_id}:${g.level}`)}
+              {@const name = recipientName(g)}
+              <li class="grant" data-testid="share-grant">
+                <span class="who" data-testid="share-grant-who">{recipientLabel(g)}</span>
+                <span class="level" data-testid="share-grant-level">{g.level}</span>
+                {#if confirming === name && name !== null}
+                  <span class="confirm" data-testid="share-revoke-confirm">
+                    Revoke?
+                    <button type="button" class="danger" data-testid="share-revoke-yes" disabled={busy}
+                      onclick={() => doRevoke(name)}>Revoke</button
+                    >
+                    <button type="button" data-testid="share-revoke-no" disabled={busy}
+                      onclick={() => (confirming = null)}>Keep</button
+                    >
+                  </span>
+                {:else}
+                  {#if g.level === 'drive'}
+                    <!-- Narrow, never widen: there is no control here that
+                         raises a level, because there is no tool that does
+                         (spec §4.3 invariant 3). Widening is a revoke and a
+                         fresh share, which is a decision, not a slider. -->
+                    <button
+                      type="button"
+                      data-testid="share-narrow"
+                      disabled={busy || name === null}
+                      title={name === null
+                        ? 'This hub did not name the recipient, so this app cannot act on the grant — use fleet-hub'
+                        : 'Lower this grant to watch (read-only)'}
+                      onclick={() => name !== null && doNarrow(name)}>Narrow to watch</button
+                    >
+                  {/if}
+                  <button
+                    type="button"
+                    class="danger"
+                    data-testid="share-revoke"
+                    disabled={busy || name === null}
+                    title={name === null
+                      ? 'This hub did not name the recipient, so this app cannot act on the grant — use fleet-hub'
+                      : 'Revoke this grant'}
+                    onclick={() => (confirming = name)}>Revoke</button
+                  >
+                {/if}
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      </section>
+
+      <!-- The two things a sharer is deciding without being told, said out
+           loud. Making them visible rather than silent turns the share into a
+           decision taken knowingly. -->
+      <section class="block consequences">
+        <p data-testid="share-history-note">
+          <strong>They also get the history from before the share.</strong> The
+          transcript, the work journal and the session's timeline all come with
+          the session — there is no "from this moment on" share.
+        </p>
+        <p data-testid="share-enforcement-note">
+          <strong>Watch and drive are enforced by Fleet, not by SSH.</strong> A
+          share never gives a terminal: attaching is a direct SSH session into
+          this host that Fleet is not in the path of and could never revoke, so
+          the person you share with gets a read-only snapshot of the pane
+          instead. Anyone who independently has SSH to
+          <code>{session.host_alias}</code> can still attach, and revoking
+          changes nothing about that.
+        </p>
+      </section>
+
+      {#if error}<p class="err" data-testid="share-error">{error}</p>{/if}
+
+      <div class="actions">
+        <button type="button" onclick={close} disabled={busy} data-testid="share-close">Close</button>
+      </div>
+    {/if}
+  </Modal>
+{/if}
+
+<style>
+  .hint {
+    margin: 0 0 0.7rem;
+    font-size: 0.85em;
+    color: var(--fg-muted, #999);
+  }
+  .block {
+    margin: 0 0 0.8rem;
+  }
+  .block h4 {
+    margin: 0 0 0.35rem;
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--fg-muted, #999);
+  }
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    align-items: center;
+  }
+  .row input {
+    flex: 1 1 10rem;
+    min-width: 0;
+  }
+  .note {
+    margin: 0.3rem 0 0;
+    font-size: 0.8em;
+    color: var(--fg-muted, #999);
+  }
+  .grants {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .grant {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85em;
+  }
+  .who {
+    font-weight: 600;
+  }
+  .level {
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.68rem;
+    padding: 0.1rem 0.35rem;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  .confirm {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-left: auto;
+  }
+  .grant button {
+    margin-left: auto;
+  }
+  .grant button + button,
+  .confirm button {
+    margin-left: 0;
+  }
+  .consequences p {
+    margin: 0 0 0.45rem;
+    font-size: 0.8em;
+    line-height: 1.45;
+    color: var(--fg-muted, #999);
+  }
+  .consequences code {
+    font-size: 0.95em;
+  }
+  .err {
+    color: var(--danger, #e5534b);
+    font-size: 0.85em;
+    margin: 0 0 0.5rem;
+  }
+  .actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 0.6rem;
+  }
+  button {
+    font-size: 0.85rem;
+    padding: 0.25rem 0.7rem;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg);
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  button.primary {
+    border-color: var(--accent);
+  }
+  button.danger {
+    border-color: var(--danger, #e5534b);
+    color: var(--danger, #e5534b);
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  input,
+  select {
+    font-size: 0.85rem;
+    padding: 0.25rem 0.4rem;
+    border: 1px solid var(--border);
+    background: var(--bg-input, transparent);
+    color: var(--fg);
+    border-radius: 4px;
+  }
+</style>

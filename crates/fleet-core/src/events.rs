@@ -30,7 +30,10 @@ use std::sync::Mutex;
 pub enum RowChange {
     SessionCreated(SessionRow),
     SessionUpdated(SessionRow),
-    SessionKilled(i64),
+    /// A session row is GONE (hard-deleted). Carries the row's identity
+    /// facts as well as its id, because the row is already deleted by the
+    /// time a reader could look it up — see [`SessionKilledPayload`].
+    SessionKilled(SessionKilledPayload),
     /// A timeline event was appended (migration 013/037). Carries the row.
     SessionEventAdded(SessionEvent),
     /// A session's conversation list changed (opened / closed / reopened).
@@ -109,6 +112,11 @@ pub enum RowChange {
     /// only — a client re-reads what it shows. Kind `settings`, so never
     /// sent to a host-bound or org-bound stream: the values are master-only.
     SettingsChanged(String),
+    /// One share of one session was created, narrowed or revoked
+    /// (multi-user M1, T9). Ids only — the client patches its own grant set
+    /// (`src/lib/access.ts`). Kind `grant`, so never sent to a host-bound
+    /// or org-bound stream: a per-host token has no person and no grants.
+    GrantChanged(GrantChanged),
     /// The fleet's update picture changed (update-channel design §11): a
     /// target's observed version or phase, a pin, or the verified channel.
     /// Ids only — a client re-reads `update_status`. Kind `update`, so never
@@ -127,6 +135,28 @@ pub struct UpdateChanged {
     pub target: Option<String>,
 }
 
+/// The payload of `grant:changed` (multi-user M1, T9): one change to one
+/// share of one session, ids only.
+///
+/// `level: None` is a revoke — the frontend's `parseGrantChanged` reads a
+/// missing or unknown level as exactly that, since the one direction a
+/// grant may move is downward (spec §4.3 invariant 3).
+///
+/// A grant mutates no `sessions` column, so sharing could never ride a row
+/// event; the two frames `Store::announce_grant_change` emits are a
+/// `session:updated` (how a new recipient learns the row exists at all) and
+/// this one (how each client keeps its own grant set current). It reaches
+/// the person the grant names and the session's owner, and nobody else.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct GrantChanged {
+    pub session_id: i64,
+    pub person_id: i64,
+    /// `watch` | `drive`, or `None` for a revoke. Written as `null` rather
+    /// than omitted — `strip_nulls` takes it off the wire either way, and
+    /// the client reads absent and null the same.
+    pub level: Option<String>,
+}
+
 /// The payload of `work:changed`.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct WorkChanged {
@@ -140,9 +170,82 @@ pub struct WorkChanged {
     pub view_id: Option<i64>,
 }
 
-#[derive(Serialize, Clone)]
+/// The payload of `session:killed`.
+///
+/// **Why it carries more than an id** (multi-user M1, T9). Every other
+/// `session:*` frame is fenced on `/events` by asking what the caller may
+/// see about that row — from the frame itself for a row-bearing frame, or
+/// by resolving `session_id` in the store. This frame can do neither: it
+/// fires *after* the `DELETE`, so there is no row left to resolve, and an
+/// id alone tells a stranger that a session with that id existed and has
+/// now ended. That is an existence oracle on exactly the mapping a former
+/// grantee learned while their grant was live.
+///
+/// So the facts travel with the frame, read while the row was still there
+/// ([`crate::store::Store::killed_payload`]), and
+/// `events_route::fence_frame` judges them through
+/// [`crate::service::view_scope::ViewScope::sees_session_facts`] — the same
+/// body a live row goes through.
+///
+/// Every added field is `Option` and `skip_serializing_if`, so a payload
+/// built from an id alone still serialises to exactly `{"id": N}` — the
+/// shape every existing client reads. A frame with the facts MISSING is
+/// dropped by the fence for every caller but the hub's own readers: that is
+/// the fail-closed direction, and [`SessionKilledPayload::from`] is the one
+/// way to build such a payload (tests, and nothing else).
+#[derive(Serialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct SessionKilledPayload {
     pub id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_alias: Option<String>,
+    /// The session's org, for the org half of the fence (work graph M5/M14).
+    /// Not in the plan's three keys and required all the same: without it a
+    /// client bound to one org would learn that a session of another org
+    /// had died.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_person_id: Option<i64>,
+}
+
+impl SessionKilledPayload {
+    /// The facts of a row that is still there.
+    pub fn of_row(row: &SessionRow) -> Self {
+        Self {
+            id: row.id,
+            host_alias: Some(row.host_alias.clone()),
+            org_id: row.org_id,
+            visibility: Some(row.visibility.clone()),
+            owner_person_id: row.owner_person_id,
+        }
+    }
+
+    /// The facts this payload carries, for the fence — `None` when it
+    /// carries none, which the fence reads as "drop it".
+    pub fn facts(&self) -> Option<crate::service::view_scope::SessionFacts<'_>> {
+        Some(crate::service::view_scope::SessionFacts {
+            id: self.id,
+            host_alias: self.host_alias.as_deref()?,
+            org_id: self.org_id,
+            visibility: self.visibility.as_deref()?,
+            owner_person_id: self.owner_person_id,
+        })
+    }
+}
+
+/// An id and nothing else: a kill nobody can fence, dropped by
+/// `fence_frame` for every caller but the hub's own readers. Deliberately
+/// the only way to spell that, so a production emitter that forgets the
+/// facts reads as what it is.
+impl From<i64> for SessionKilledPayload {
+    fn from(id: i64) -> Self {
+        Self {
+            id,
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -308,6 +411,7 @@ impl RowChange {
             RowChange::TrackerRemoved(_) => "work:tracker_removed",
             RowChange::WorkChanged(_) => "work:changed",
             RowChange::SettingsChanged(_) => "settings:changed",
+            RowChange::GrantChanged(_) => "grant:changed",
             RowChange::UpdateChanged(_) => "update:changed",
         }
     }
@@ -321,7 +425,7 @@ impl RowChange {
         }
         match self {
             RowChange::SessionCreated(r) | RowChange::SessionUpdated(r) => to_value(r),
-            RowChange::SessionKilled(id) => to_value(&SessionKilledPayload { id: *id }),
+            RowChange::SessionKilled(k) => to_value(k),
             RowChange::SessionEventAdded(e) => to_value(e),
             RowChange::ConversationsChanged(id) => serde_json::json!({ "session_id": id }),
             RowChange::HostAdded(r) | RowChange::HostProbed(r) => to_value(r),
@@ -363,6 +467,7 @@ impl RowChange {
             RowChange::TrackerRemoved(id) => serde_json::json!({ "id": id }),
             RowChange::WorkChanged(w) => to_value(w),
             RowChange::SettingsChanged(key) => serde_json::json!({ "key": key }),
+            RowChange::GrantChanged(g) => to_value(g),
             RowChange::UpdateChanged(u) => to_value(u),
         }
     }
@@ -378,8 +483,10 @@ pub trait EventBus: Send + Sync {
     fn session_updated(&self, row: &SessionRow) {
         self.emit(&RowChange::SessionUpdated(row.clone()));
     }
-    fn session_killed(&self, id: i64) {
-        self.emit(&RowChange::SessionKilled(id));
+    /// See [`SessionKilledPayload`] — a production emitter passes the facts
+    /// it read before the row went; `id.into()` is the id-only form.
+    fn session_killed(&self, killed: SessionKilledPayload) {
+        self.emit(&RowChange::SessionKilled(killed));
     }
     /// See [`RowChange::SessionEventAdded`].
     fn session_event_added(&self, e: &SessionEvent) {
@@ -440,6 +547,10 @@ pub trait EventBus: Send + Sync {
     /// See [`RowChange::MoveProgress`].
     fn move_progress(&self, p: &MoveProgress) {
         self.emit(&RowChange::MoveProgress(p.clone()));
+    }
+    /// See [`RowChange::GrantChanged`].
+    fn grant_changed(&self, g: &GrantChanged) {
+        self.emit(&RowChange::GrantChanged(g.clone()));
     }
 
     /// Flush a single deferred `RowChange`. Used by batched (transactional)
@@ -550,7 +661,7 @@ pub struct BroadcastEventBus {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 26] = [
+pub const EVENT_NAMES: [&str; 27] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -577,12 +688,13 @@ pub const EVENT_NAMES: [&str; 26] = [
     "work:changed",
     "settings:changed",
     "update:changed",
+    "grant:changed",
 ];
 
 /// Every event kind — the part of a [`RowChange::name`] before the `:`, which
 /// is what the `/events` route's `?kinds=` filter matches on.
 /// `event_kinds_cover_every_name` keeps it in step with the variants.
-pub const EVENT_KINDS: [&str; 14] = [
+pub const EVENT_KINDS: [&str; 15] = [
     "session",
     "host",
     "account",
@@ -597,6 +709,7 @@ pub const EVENT_KINDS: [&str; 14] = [
     "work",
     "settings",
     "update",
+    "grant",
 ];
 
 /// Seconds since the Unix epoch (0 on a clock set before 1970).
@@ -629,6 +742,10 @@ pub const REPLAY_RING: usize = 512;
 /// filling — so there would be nothing to replay precisely when it is
 /// wanted. For this long after the last subscriber, the hub keeps rendering
 /// into the ring and sending nothing.
+///
+/// Which serves a resume no production caller can be given any more — see
+/// [`REPLAY_RING`] for why that is a retention kept on purpose, and what
+/// would end it.
 pub const RING_GRACE_SECS: i64 = 15 * 60;
 
 impl BroadcastEventBus {
@@ -850,9 +967,8 @@ impl EventBus for RecordingEventBus {
     fn emit(&self, e: &RowChange) {
         let key = match e {
             RowChange::SessionCreated(r) | RowChange::SessionUpdated(r) => r.id.to_string(),
-            RowChange::SessionKilled(id)
-            | RowChange::WorktreeRemoved(id)
-            | RowChange::ConversationsChanged(id) => id.to_string(),
+            RowChange::SessionKilled(k) => k.id.to_string(),
+            RowChange::WorktreeRemoved(id) | RowChange::ConversationsChanged(id) => id.to_string(),
             RowChange::SessionEventAdded(ev) => format!("{}:{}", ev.session_id, ev.kind),
             RowChange::HostAdded(r) | RowChange::HostProbed(r) => r.alias.clone(),
             RowChange::HostPinged { alias, .. } => alias.clone(),
@@ -887,6 +1003,12 @@ impl EventBus for RecordingEventBus {
                 w.view_id
             ),
             RowChange::SettingsChanged(key) => key.clone(),
+            RowChange::GrantChanged(g) => format!(
+                "{}:{}:{}",
+                g.session_id,
+                g.person_id,
+                g.level.as_deref().unwrap_or("revoked")
+            ),
             RowChange::UpdateChanged(u) => {
                 format!("{}:{}", u.what, u.target.as_deref().unwrap_or_default())
             }
@@ -943,7 +1065,7 @@ mod tests {
             detail: None,
         };
         let cases: Vec<(RowChange, &str)> = vec![
-            (RowChange::SessionKilled(1), "session:killed"),
+            (RowChange::SessionKilled(1.into()), "session:killed"),
             (RowChange::ConversationsChanged(1), "session:conversations"),
             (RowChange::HostRemoved("h".into()), "host:removed"),
             (
@@ -1089,13 +1211,14 @@ mod tests {
                 RowChange::TrackerRemoved(_) => pinned_name!("work:tracker_removed"),
                 RowChange::WorkChanged(_) => pinned_name!("work:changed"),
                 RowChange::SettingsChanged(_) => pinned_name!("settings:changed"),
+                RowChange::GrantChanged(_) => pinned_name!("grant:changed"),
                 RowChange::UpdateChanged(_) => pinned_name!("update:changed"),
             }
         }
         // And for every variant a test can build without a full store row,
         // `RowChange::name` really is the name pinned above.
         for c in [
-            RowChange::SessionKilled(1),
+            RowChange::SessionKilled(1.into()),
             RowChange::ConversationsChanged(1),
             RowChange::HostRemoved("h".into()),
             RowChange::AccountUpserted(AccountRow::default()),
@@ -1135,9 +1258,44 @@ mod tests {
 
     #[test]
     fn scalar_payloads_keep_their_wire_shape() {
+        // An id-only kill still serialises to exactly what every client
+        // has always read — the four added keys are `skip_serializing_if`.
         assert_eq!(
-            RowChange::SessionKilled(7).payload(),
+            RowChange::SessionKilled(7.into()).payload(),
             serde_json::json!({ "id": 7 })
+        );
+        assert_eq!(
+            RowChange::SessionKilled(SessionKilledPayload {
+                id: 7,
+                host_alias: Some("box".into()),
+                org_id: None,
+                visibility: Some("private".into()),
+                owner_person_id: Some(2),
+            })
+            .payload(),
+            serde_json::json!({
+                "id": 7, "host_alias": "box",
+                "visibility": "private", "owner_person_id": 2
+            })
+        );
+        assert_eq!(
+            RowChange::GrantChanged(GrantChanged {
+                session_id: 7,
+                person_id: 2,
+                level: Some("watch".into()),
+            })
+            .payload(),
+            serde_json::json!({ "session_id": 7, "person_id": 2, "level": "watch" })
+        );
+        // A revoke is the same frame with a null level.
+        assert_eq!(
+            RowChange::GrantChanged(GrantChanged {
+                session_id: 7,
+                person_id: 2,
+                level: None,
+            })
+            .payload(),
+            serde_json::json!({ "session_id": 7, "person_id": 2, "level": null })
         );
         assert_eq!(
             RowChange::ConversationsChanged(4).payload(),
@@ -1165,7 +1323,7 @@ mod tests {
     async fn a_subscriber_receives_emitted_row_changes() {
         let bus = BroadcastEventBus::new(16);
         let mut rx = bus.subscribe();
-        bus.emit(&RowChange::SessionKilled(42));
+        bus.emit(&RowChange::SessionKilled(42.into()));
         let msg = rx.recv().await.expect("one message");
         assert_eq!(msg.name, "session:killed");
         assert_eq!(msg.payload["id"], 42);
@@ -1180,7 +1338,7 @@ mod tests {
         assert_eq!(bus.receiver_count(), 0, "nobody is listening yet");
         let mut rx = bus.subscribe();
         assert_eq!(bus.receiver_count(), 1);
-        bus.emit(&RowChange::SessionKilled(1));
+        bus.emit(&RowChange::SessionKilled(1.into()));
         bus.emit(&RowChange::HostRemoved("box".into()));
         assert_eq!(rx.recv().await.unwrap().name, "session:killed");
         assert_eq!(rx.recv().await.unwrap().name, "host:removed");
@@ -1188,7 +1346,7 @@ mod tests {
         // still fine.
         drop(rx);
         assert_eq!(bus.receiver_count(), 0);
-        bus.emit(&RowChange::SessionKilled(2));
+        bus.emit(&RowChange::SessionKilled(2.into()));
     }
 
     /// The stream and the tool boundary must agree about what a null field
@@ -1333,7 +1491,7 @@ mod tests {
         let bus = BroadcastEventBus::new(16);
         let _rx = bus.subscribe();
         for i in 1..=4 {
-            bus.emit(&RowChange::SessionKilled(i));
+            bus.emit(&RowChange::SessionKilled(i.into()));
         }
 
         let after_two = bus
@@ -1359,7 +1517,7 @@ mod tests {
     async fn a_different_generation_is_refused_rather_than_replayed() {
         let bus = BroadcastEventBus::new(16);
         let _rx = bus.subscribe();
-        bus.emit(&RowChange::SessionKilled(1));
+        bus.emit(&RowChange::SessionKilled(1.into()));
 
         assert!(bus.replay_after(bus.generation() ^ 0xffff, 0).is_none());
     }
@@ -1371,7 +1529,7 @@ mod tests {
         let bus = BroadcastEventBus::new(4096);
         let _rx = bus.subscribe();
         for i in 0..(REPLAY_RING as i64 + 10) {
-            bus.emit(&RowChange::SessionKilled(i));
+            bus.emit(&RowChange::SessionKilled(i.into()));
         }
 
         assert!(
@@ -1390,11 +1548,11 @@ mod tests {
     async fn the_ring_keeps_recording_just_after_the_last_subscriber_leaves() {
         let bus = BroadcastEventBus::new(16);
         let rx = bus.subscribe();
-        bus.emit(&RowChange::SessionKilled(1));
+        bus.emit(&RowChange::SessionKilled(1.into()));
         drop(rx);
         assert_eq!(bus.receiver_count(), 0);
 
-        bus.emit(&RowChange::SessionKilled(2));
+        bus.emit(&RowChange::SessionKilled(2.into()));
 
         let missed = bus
             .replay_after(bus.generation(), 1)
@@ -1416,12 +1574,12 @@ mod tests {
     async fn an_event_dropped_after_the_grace_window_refuses_a_resume_from_before_it() {
         let bus = BroadcastEventBus::new(16);
         let rx = bus.subscribe();
-        bus.emit(&RowChange::SessionKilled(1));
+        bus.emit(&RowChange::SessionKilled(1.into()));
         drop(rx);
         bus.expire_grace_for_test();
 
         // Nobody listening and the window gone: not recorded.
-        bus.emit(&RowChange::SessionKilled(2));
+        bus.emit(&RowChange::SessionKilled(2.into()));
 
         assert!(
             bus.replay_after(bus.generation(), 1).is_none(),
@@ -1430,7 +1588,7 @@ mod tests {
         // A fresh subscriber is unaffected, and what follows is replayable
         // again from the ids it hands out.
         let _rx = bus.subscribe();
-        bus.emit(&RowChange::SessionKilled(3));
+        bus.emit(&RowChange::SessionKilled(3.into()));
         let after = bus.replay_after(bus.generation(), 3);
         assert_eq!(after.map(|v| v.len()), Some(0), "caught up at 3");
     }
@@ -1438,7 +1596,7 @@ mod tests {
     #[tokio::test]
     async fn emitting_without_subscribers_is_not_an_error() {
         let bus = BroadcastEventBus::new(4);
-        bus.emit(&RowChange::SessionKilled(1)); // must not panic
+        bus.emit(&RowChange::SessionKilled(1.into())); // must not panic
     }
 
     #[tokio::test]
@@ -1446,7 +1604,7 @@ mod tests {
         let bus = BroadcastEventBus::new(2);
         let mut rx = bus.subscribe();
         for i in 0..5 {
-            bus.emit(&RowChange::SessionKilled(i));
+            bus.emit(&RowChange::SessionKilled(i.into()));
         }
         let err = rx.recv().await.unwrap_err();
         assert!(matches!(
@@ -1458,7 +1616,7 @@ mod tests {
     #[test]
     fn typed_methods_route_through_emit() {
         let bus = RecordingEventBus::new();
-        bus.session_killed(5);
+        bus.session_killed(5.into());
         bus.host_removed("box");
         bus.worktree_removed(9);
         bus.asset_inventory_cleared("box", "claude");

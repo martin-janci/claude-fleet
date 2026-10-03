@@ -28,6 +28,8 @@ pub mod proc;
 pub mod projects;
 pub mod repo_url;
 pub mod rt;
+#[cfg(test)]
+mod scope_guard_tests;
 pub mod service;
 pub mod shell;
 pub mod ssh;

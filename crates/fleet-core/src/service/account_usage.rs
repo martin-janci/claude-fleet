@@ -1184,6 +1184,7 @@ mod tests {
             agent_version: None,
             provisioned_at: None,
             provision_stale: false,
+            unclaimed_sessions: None,
         }
     }
 

@@ -48,6 +48,7 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessions } from './sessions';
+  import { sessionIdBlocked } from './share';
   import { effectiveScope, scopeOf } from './orgs';
   import { inScope } from './tidy';
   import { clearSessionFocus, focusSession } from './session_focus';
@@ -68,6 +69,47 @@
   /** Sheet order, flattened: what j/k walk. */
   const ordered = $derived(groups.flatMap((g) => g.items));
   const blocked = $derived(hubActionBlocked('tidy_apply', $hubStatus, $hubConnection));
+  /**
+   * Both halves, multi-user M1 — and the reason this sheet needed a lookup to
+   * get there: a `TidyCandidate` carries a `session_id`, a host and a tmux
+   * name, never the row's `owner_person_id`, so the access half cannot be
+   * asked about the candidate directly; the row has to be resolved first.
+   *
+   * `tidy_apply` is `own` in `share.ts::SESSION_TIER` because it can SAFE
+   * KILL: until F2a the hub half was the whole gate here, so a `watch` or
+   * `drive` grantee could kill a session shared with them from this sheet.
+   *
+   * ── Not knowing is not permission (F2d) ─────────────────────────────────
+   *
+   * F2a resolved the row out of `$sessions` by hand and treated "no row" as
+   * "nothing to judge, therefore allowed" — `mayTidy` ended `|| !rowById.has(…)`
+   * and a candidate this client could not resolve was fully tidyable, SAFE KILL
+   * included. The hole is not rare: the candidate list and `$sessions` are
+   * fetched independently, the sheet refreshes on its own minute timer, and on a
+   * paired desktop the hub fences rows this person may not see off the stream
+   * entirely — so "unresolvable" is precisely *someone else's, or gone*.
+   *
+   * So the resolution is `share.ts::sessionIdBlocked`'s rather than this
+   * sheet's: it fails closed with `UNKNOWN_SESSION_REASON` on a fleet this
+   * client does not own, and answers `null` on a standalone desktop, where the
+   * master owns every row (`access.ts::sessionAccess` rule 1). A paired desktop
+   * therefore loses candidates whose row it cannot see; the undo is the
+   * backend's, not a wider gate (plan T7: an owner on the link).
+   */
+  function accessBlocked(sessionId: number): string | null {
+    return $sessionIdBlocked(sessionId, 'tidy_apply');
+  }
+  /** One row's own gate: the hub's refusal first, then this client's access. */
+  function rowBlocked(c: TidyCandidate): string | null {
+    return blocked ?? accessBlocked(c.session_id);
+  }
+  /** The candidates this client may actually tidy — the narrowing the footer
+   *  counts and `apply` sends, per target rather than once for the sheet: one
+   *  sheet mixes this person's sessions with the ones shared with them. */
+  const allowed = $derived(ordered.filter((c) => accessBlocked(c.session_id) === null));
+  /** How many rows of the sheet belong to somebody else — shown once, so the
+   *  footer's smaller count is not a mystery. */
+  const notMine = $derived(ordered.length - allowed.length);
 
   let open = $state(false);
   let reopenedOpen = $state(false);
@@ -80,7 +122,7 @@
   // sheet clear it (the link-suggestion sheet may own it).
   let focused = false;
 
-  const tickedCount = $derived(ordered.filter((c) => ticked.has(c.session_id)).length);
+  const tickedCount = $derived(allowed.filter((c) => ticked.has(c.session_id)).length);
 
   function rowName(c: TidyCandidate): string {
     return c.label || c.tmux_name;
@@ -88,10 +130,13 @@
 
   async function openSheet(requested: number[] = []) {
     only = requestedOnly(candidates, requested);
-    ticked =
+    // Preselection never ticks a row this client may not tidy: a tick that
+    // the footer then silently drops would read as a tidy that did nothing.
+    const preTicked =
       requested.length > 0
         ? requestedTicks(candidates, { sessionIds: requested, at: 0 })
         : new Set(candidates.filter(preselected).map((c) => c.session_id));
+    ticked = new Set([...preTicked].filter((id) => accessBlocked(id) === null));
     choice = new Map();
     cursor = Math.max(
       0,
@@ -121,6 +166,10 @@
   }
 
   function toggle(id: number) {
+    // Space ticks the cursor row from the keyboard, past the checkbox's own
+    // `disabled`, so the gate is here as well — a tick the footer would then
+    // drop is worse than no tick at all.
+    if (accessBlocked(id) !== null) return;
     const next = new Set(ticked);
     if (next.has(id)) next.delete(id);
     else next.add(id);
@@ -138,7 +187,9 @@
 
   /** One row's own button: Keep, or an armed Safe kill. */
   async function applyRow(c: TidyCandidate, action: 'keep' | 'safe_kill') {
-    if (busy || blocked !== null) return;
+    // Re-asked here, not only on the button: a revoke that arrives while the
+    // sheet is open must stop the call, and Safe kill is two clicks apart.
+    if (busy || rowBlocked(c) !== null) return;
     if (action === 'safe_kill' && armed !== c.session_id) {
       armed = c.session_id;
       return;
@@ -166,7 +217,10 @@
 
   async function apply() {
     if (busy || blocked !== null) return;
-    const items = applyItems(ordered, ticked, choice);
+    // Narrowed per target, never one answer for the whole sheet: ↵ applies
+    // from anywhere in it, and a session shared with this client at `watch`
+    // or `drive` is not this client's to safe-kill.
+    const items = applyItems(allowed, ticked, choice);
     if (items.length === 0) return;
     busy = true;
     const r = await applyTidy(items);
@@ -373,11 +427,23 @@
       </p>
     {/if}
     {#if blocked}<p class="hint" role="note">{blocked}</p>{/if}
+    {#if notMine > 0}
+      <p class="hint" data-testid="tidy-not-mine">
+        {notMine} session{notMine === 1 ? '' : 's'} here {notMine === 1 ? 'is' : 'are'} not yours to
+        tidy — shared with you, or no longer visible to this app, so it cannot tell whose
+        {notMine === 1 ? 'it is' : 'they are'}. Tidying one is the owner's to do.
+      </p>
+    {/if}
     {#each groups as g (g.reason)}
       <div class="group-head" data-testid="tidy-group">{tidyReasonLabel(g.reason)} · {g.items.length}</div>
       {#each g.items as c (c.session_id)}
         {@const i = ordered.indexOf(c)}
         {@const choices = choicesFor(c)}
+        <!-- The ACCESS half alone for the tick (a down hub leaves the rows
+             listed and ticked — only the sending is off, which `blocked`
+             already says once at the top of the sheet); both halves for the
+             buttons, which actually send. -->
+        {@const notYours = accessBlocked(c.session_id)}
         <div
           class="tidy-row"
           class:cursor={i === cursor}
@@ -393,8 +459,9 @@
           <input
             type="checkbox"
             data-testid="tidy-check"
-            checked={ticked.has(c.session_id)}
-            disabled={choices.length === 0}
+            checked={ticked.has(c.session_id) && notYours === null}
+            disabled={choices.length === 0 || notYours !== null}
+            title={notYours ?? ''}
             aria-label="Tidy {rowName(c)}"
             onchange={() => toggle(c.session_id)}
           />
@@ -417,8 +484,8 @@
             <button
               class="pill"
               data-testid="tidy-keep"
-              disabled={busy || blocked !== null}
-              title="Leave it out of Tidy up for {KEEP_DAYS} days"
+              disabled={busy || rowBlocked(c) !== null}
+              title={rowBlocked(c) ?? `Leave it out of Tidy up for ${KEEP_DAYS} days`}
               onkeydown={(e) => e.stopPropagation()}
               onclick={() => void applyRow(c, 'keep')}>Keep {KEEP_DAYS} d</button
             >
@@ -426,7 +493,8 @@
               class="pill"
               class:armed={armed === c.session_id}
               data-testid="tidy-safe-kill"
-              disabled={busy || blocked !== null}
+              disabled={busy || rowBlocked(c) !== null}
+              title={rowBlocked(c) ?? ''}
               onkeydown={(e) => e.stopPropagation()}
               onclick={() => void applyRow(c, 'safe_kill')}
               >{armed === c.session_id ? 'Confirm safe kill' : 'Safe kill'}</button
@@ -436,7 +504,7 @@
               >commits &amp; pushes first</span
             >
           {/if}
-          {#if c.action === 'resume_or_expire' && c.key}<ResumeButton workKey={c.key} />{/if}
+          {#if c.action === 'resume_or_expire' && c.key}<ResumeButton workKey={c.key} sessionId={c.session_id} />{/if}
           {#if choices.length > 0}
             <select
               data-testid="tidy-choice"

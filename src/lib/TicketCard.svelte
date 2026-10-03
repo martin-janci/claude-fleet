@@ -13,6 +13,7 @@
   import { push, pushError } from './toasts';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { sessionBlocked } from './share';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -46,12 +47,22 @@
   // Only an idle REPL is asked: `stopped` or unknown may be a bare shell,
   // where the prompt would run as commands. The hub refuses the rest too.
   let asking = $state(false);
-  const askBlocked = $derived(hubActionBlocked('request_work_handover', $hubStatus, $hubConnection));
+  // Both halves (multi-user M1, F2a): the hub's own refusal, then who this
+  // client is on THIS row. `request_work_handover` is `drive` in
+  // `share.ts::SESSION_TIER` — it types a prompt into the owner's REPL and
+  // waits for the reply — so a `watch` grantee may not ask for one, and until
+  // F2a the hub half was the whole gate here.
+  const askBlocked = $derived(
+    hubActionBlocked('request_work_handover', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'request_work_handover'),
+  );
   const canAsk = $derived(
     askBlocked === null && canInsertInto(session) && session.claude_status === 'idle' && !session.stuck_kind,
   );
   async function askHandover() {
-    if (!key || asking) return;
+    // Re-asked at the call, not only on the button: a revoke can arrive while
+    // the card is on screen.
+    if (!key || asking || askBlocked !== null) return;
     asking = true;
     const r = await requestWorkHandover(session.id);
     asking = false;

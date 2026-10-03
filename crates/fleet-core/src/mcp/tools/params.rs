@@ -923,6 +923,9 @@ pub struct PairClientParams {
     /// Bind to this org: it reads only that org's and unassigned work.
     #[serde(default)]
     pub org_id: Option<i64>,
+    /// Whose device it is. Default: this hub's owner.
+    #[serde(default)]
+    pub person: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

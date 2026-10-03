@@ -147,7 +147,7 @@ The asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each as
 
 ### `list_clients`
 
-Paired client devices and what each token may do. The token digest is never returned: a token exists in plaintext only in the /pair response that minted it. Read-only but master token only (it names every paired device). Rows: { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at }.
+Paired client devices and what each token may do. The token digest is never returned: a token exists in plaintext only in the /pair response that minted it. Read-only but master token only (it names every paired device). Rows: { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, person_id }.
 
 Parameters: `include_revoked`
 
@@ -165,7 +165,7 @@ Parameters: `host_alias`, `project_id`
 
 ### `list_hosts`
 
-Registered hosts: reachability, claude/tmux versions, linked account.
+Registered hosts: reachability, claude/tmux versions, linked account. unclaimed_sessions is how many sessions on that host nobody owns, served only on a one-person fleet: null means you are not told, 0 means there are none.
 
 ### `list_layers`
 
@@ -239,9 +239,9 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 ### `pair_client`
 
-Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange), updater is fleet-updater's (/update only); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.
+Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange), updater is fleet-updater's (/update only); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). person names whose device it is; the default is this hub's owner, and its sessions are private to that person. Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id, person }.
 
-Parameters: `mode`, `name`, `org_id`, `trusted`, `ttl_s`
+Parameters: `mode`, `name`, `org_id`, `person`, `trusted`, `ttl_s`
 
 ### `peer_exchange`
 

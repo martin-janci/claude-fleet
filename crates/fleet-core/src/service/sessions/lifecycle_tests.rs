@@ -198,6 +198,7 @@ async fn an_unknown_project_id_is_not_found_not_a_raw_sqlite_error() {
         resume_claude_session_id: None,
         model: None,
         effort: None,
+        owner_person_id: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
@@ -225,6 +226,7 @@ async fn an_unknown_project_id_is_not_found_for_a_new_worktree_too() {
         resume_claude_session_id: None,
         model: None,
         effort: None,
+        owner_person_id: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
@@ -338,15 +340,32 @@ struct CreateSite {
     what: &'static str,
     source: &'static str,
     signature: &'static str,
-    /// Every tmux call in the body that leaves the name live. All must come
-    /// BEFORE the `record_tmux_created` call, so a create that fails its `?`
-    /// never forgets a real kill.
+    /// Every tmux call in the body that leaves the name live, and where the
+    /// `record_tmux_created` call sits relative to them — see [`Forget`].
     tmux: &'static [&'static str],
     /// The call that registers/restores the row. One of these must follow
     /// the `record_tmux_created` call — a match BEFORE it does not count
     /// (`move_session_inner` reconciles the source host long before it
     /// starts the target).
     registers: &'static str,
+    order: Forget,
+}
+
+/// Where a create site's `record_tmux_created` call sits.
+#[derive(PartialEq, Eq)]
+enum Forget {
+    /// AFTER every tmux call that leaves the name live — the original rule, so
+    /// a create that fails its `?` never forgets a real kill (the forget would
+    /// then let a pass still carrying the old name re-insert the dead row).
+    AfterTheCreate,
+    /// BEFORE them. `new_session_inner` alone, because the same call now also
+    /// RESERVES the new row's owner (multi-user M1, T5) and that reservation
+    /// has to exist before the tmux session does: from the moment the name is
+    /// live, any reconcile pass may be the one that inserts the row, and a row
+    /// inserted without the reservation is `unclaimed` — momentarily claimable
+    /// by somebody else. The trade is stated at the call site: a failed create
+    /// can now leave a phantom row that the next pass ghosts and reaps.
+    BeforeTheCreate,
 }
 
 #[test]
@@ -361,6 +380,8 @@ fn every_path_that_creates_a_tmux_session_forgets_the_kill_first() {
             signature: "pub(super) async fn new_session_inner(",
             tmux: &["tmux.new_session(&args.name, &path, &pane_cmd)"],
             registers: "reconcile_one_host(",
+            // The one inverted site: the call also reserves the row's owner.
+            order: Forget::BeforeTheCreate,
         },
         CreateSite {
             what: "rename_session_with",
@@ -368,6 +389,7 @@ fn every_path_that_creates_a_tmux_session_forgets_the_kill_first() {
             signature: "pub(super) async fn rename_session_with(",
             tmux: &["tmux.rename_session(&args.old_name, &args.new_name)"],
             registers: "reconcile_one_host(",
+            order: Forget::AfterTheCreate,
         },
         CreateSite {
             what: "restart_session",
@@ -381,6 +403,7 @@ fn every_path_that_creates_a_tmux_session_forgets_the_kill_first() {
                 "tmux.restart_session(&args.name, &pane_cmd)",
             ],
             registers: "reconcile_one_host(",
+            order: Forget::AfterTheCreate,
         },
         CreateSite {
             what: "recreate_session",
@@ -390,6 +413,7 @@ fn every_path_that_creates_a_tmux_session_forgets_the_kill_first() {
             // This one restores its own row instead of reconciling; the call
             // is here so the invariant holds for every tmux create.
             registers: "restore_session(",
+            order: Forget::AfterTheCreate,
         },
         CreateSite {
             what: "spawn_review",
@@ -397,6 +421,10 @@ fn every_path_that_creates_a_tmux_session_forgets_the_kill_first() {
             signature: "pub async fn spawn_review(",
             tmux: &["tmux.new_session("],
             registers: "reconcile_one_host(",
+            // A review's owner is its SOURCE row's and is written once the
+            // row exists (`claim_if_unclaimed`), so there is nothing to
+            // reserve here and the original order stands.
+            order: Forget::AfterTheCreate,
         },
         CreateSite {
             what: "move_session_inner (the target host)",
@@ -404,6 +432,9 @@ fn every_path_that_creates_a_tmux_session_forgets_the_kill_first() {
             signature: "async fn move_session_inner(",
             tmux: &[".start_target("],
             registers: ".refresh_host(store, &target)",
+            // Same as `spawn_review`: the move carries the SOURCE row's owner
+            // onto the target row once that row exists, hard-failing.
+            order: Forget::AfterTheCreate,
         },
     ];
 
@@ -431,12 +462,24 @@ fn every_path_that_creates_a_tmux_session_forgets_the_kill_first() {
                     site.what
                 )
             });
-            assert!(
-                created < forget,
-                "{}: record_tmux_created must come AFTER `{marker}`, so a create that \
-                 fails never forgets a real kill",
-                site.what
-            );
+            match site.order {
+                Forget::AfterTheCreate => assert!(
+                    created < forget,
+                    "{}: record_tmux_created must come AFTER `{marker}`, so a create that \
+                     fails never forgets a real kill",
+                    site.what
+                ),
+                // Inverted deliberately — see `Forget::BeforeTheCreate`. The
+                // assertion is kept rather than skipped: moving the call back
+                // after the create would reopen the window in which a person's
+                // brand-new session is nobody's.
+                Forget::BeforeTheCreate => assert!(
+                    forget < created,
+                    "{}: record_tmux_created must come BEFORE `{marker}`, so the row's \
+                     owner is reserved before any reconcile pass can insert it",
+                    site.what
+                ),
+            }
         }
     }
 }
@@ -479,6 +522,7 @@ fn finalize_new_session_returns_the_row_as_of_its_last_write() {
         Some("Nice Name"),
         Some("uuid-9"),
         false,
+        None,
     )
     .unwrap();
     assert!(
@@ -502,7 +546,7 @@ fn finalize_new_session_tags_a_shell_session() {
     let id = s
         .upsert_session("f4shell", "local", None, None, 1, 1, "running", None)
         .unwrap();
-    let row = finalize_new_session(&s, id, "local", "f4shell", None, None, true).unwrap();
+    let row = finalize_new_session(&s, id, "local", "f4shell", None, None, true, None).unwrap();
     assert_eq!(row.kind, "shell");
     assert!(row.started_at.is_some());
 }
@@ -601,6 +645,7 @@ fn args_named(name: &str, resume: Option<&str>) -> NewSessionArgs {
         resume_claude_session_id: resume.map(str::to_string),
         model: None,
         effort: None,
+        owner_person_id: None,
     }
 }
 
@@ -628,11 +673,11 @@ async fn a_lost_session_with_a_conversation_blocks_its_name() {
         .await
         .unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+    // Multi-user M1 (T10): no row id in the message — the lost row may be
+    // another person's, and `dev-x` is the caller's own argument.
     assert_eq!(
         err.message,
-        format!(
-            "dev-x belongs to a lost session (id {id}); restore it with restore_host_sessions or dismiss it first"
-        )
+        "dev-x belongs to a lost session; restore it with restore_host_sessions or dismiss it first"
     );
     let row = store
         .lock()
@@ -753,6 +798,78 @@ async fn a_lost_session_without_a_conversation_does_not_block() {
     let err = new_session(args_named("dev-x", None), &store, &ssh, &reg)
         .await
         .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
+}
+
+/// Multi-user M1 (T5), DoD 7: a lost row with **no** `claude_session_id` is
+/// not refused by the resumable guard above, and reconcile's
+/// `ON CONFLICT DO UPDATE` revives it with its `owner_person_id` intact. So
+/// person B starting a session under a name person A once used would come up
+/// owned by — and readable only to — A. The name is refused instead.
+///
+/// Four cases in one test, because the rule is the whole table and not the
+/// first row of it.
+#[tokio::test]
+async fn a_lost_row_owned_by_another_person_blocks_its_name_even_with_no_conversation() {
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    let (ann, bob) = {
+        let s = store.lock().unwrap();
+        let ann = s.create_person("ann", None).unwrap().id;
+        let bob = s.create_person("bob", None).unwrap().id;
+        // Ann's shell session on `local`, killed: lost, and NO conversation —
+        // so `lost_resumable_session_named` says nothing about it.
+        let id = lost_row(&s, "dev-x", None);
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' WHERE id = ?2",
+                rusqlite::params![ann, id],
+            )
+            .unwrap();
+        (ann, bob)
+    };
+    let ssh = Arc::new(crate::ssh::SshClient::new());
+    let reg = crate::cancel::CancellationRegistry::new();
+
+    // Bob: refused, and the message names neither ann nor the row id.
+    let mut args = args_named("dev-x", None);
+    args.owner_person_id = Some(bob);
+    let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+    assert!(
+        err.message.contains("another person's lost session"),
+        "{}",
+        err.message
+    );
+    assert!(!err.message.contains("ann"), "{}", err.message);
+
+    // A caller that is nobody (a per-host token, a pre-M1 device) is refused
+    // too: `None` must not read as "the owner".
+    let err = new_session(args_named("dev-x", None), &store, &ssh, &reg)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+    assert!(
+        err.message.contains("another person's lost session"),
+        "{}",
+        err.message
+    );
+
+    // Ann herself gets past the guard — it is HER lost row — and fails later,
+    // on the unknown project `args_named` uses.
+    let mut mine = args_named("dev-x", None);
+    mine.owner_person_id = Some(ann);
+    let err = new_session(mine, &store, &ssh, &reg).await.unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
+
+    // And an UNOWNED lost row still blocks nobody (the pre-M1 behaviour): the
+    // row it revives is `unclaimed`, which belongs to no one.
+    {
+        let s = store.lock().unwrap();
+        lost_row(&s, "dev-nobodys", None);
+    }
+    let mut unowned = args_named("dev-nobodys", None);
+    unowned.owner_person_id = Some(bob);
+    let err = new_session(unowned, &store, &ssh, &reg).await.unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
 }
 
@@ -894,12 +1011,23 @@ async fn a_resume_id_held_by_a_lost_session_is_refused() {
         .await
         .unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_EXISTS);
+    // Multi-user M1 (T10): the holder's id and tmux name are not disclosed
+    // — a tmux name in this fleet is a branch or a ticket key.
     assert_eq!(
         err.message,
         format!(
-            "conversation {RESUME_ID} already belongs to session {id} (dev-x); restore it with restore_host_sessions instead"
+            "conversation {RESUME_ID} is already held by a session on local; restore it with restore_host_sessions instead"
         )
     );
+    // The holder's tmux name, spelled out: an `id.to_string()` check would
+    // be meaningless here, since a one-digit rowid is a substring of the
+    // conversation uuid the message legitimately carries.
+    assert!(
+        !err.message.contains("dev-x"),
+        "the holder's name is not disclosed: {}",
+        err.message
+    );
+    let _ = id;
 }
 
 #[tokio::test]
@@ -964,6 +1092,7 @@ fn a_new_session_is_linked_to_the_worktree_it_was_started_in() {
         resume_claude_session_id: None,
         model: None,
         effort: None,
+        owner_person_id: None,
     };
 
     // A new worktree on local: its row is created and linked.
@@ -1034,4 +1163,129 @@ fn a_new_session_is_linked_to_the_worktree_it_was_started_in() {
         None
     );
     assert_eq!(s.get_session_by_id(d).unwrap().unwrap().worktree_id, None);
+}
+
+// ── Multi-user M1 (T5): every create path says whose the row is ─────────────
+//
+// `spawn_review`, `move_session` and `repair_session` resolve their executors
+// through `exec_for` / `HostExec`, which are not injectable, so driving them
+// for real needs a live tmux server (and macOS CI has none) — the same reason
+// `every_path_that_creates_a_tmux_session_forgets_the_kill_first` reads the
+// source instead of the behaviour. These do the same for ownership: the
+// behaviour of the two primitives they lean on is pinned where those live
+// (`store::sessions::claim_if_unclaimed`'s tests, `store::reconcile`'s upsert
+// tests, `bg_sessions::stamp_bg_row_claims_the_row_and_a_resurrected_one_keeps_its_first_owner`),
+// and what is pinned here is that each path calls them, with the right owner,
+// and hard where the plan says hard.
+
+/// `spawn_review` inherits the SOURCE row's owner, never the caller's (spec
+/// §4.3 invariant 6): a review runs Claude in the owner's worktree, on the
+/// owner's host, so a review owned by whoever asked for it would hand a
+/// watcher an owned session inside somebody else's checkout.
+#[test]
+fn spawn_review_claims_the_review_row_for_the_sources_owner() {
+    const REVIEW: &str = include_str!("review.rs");
+    let body = item_source(REVIEW, "pub async fn spawn_review(");
+    assert!(
+        body.contains("s.claim_if_unclaimed(row.id, source.owner_person_id)?"),
+        "spawn_review must claim the review row for the SOURCE row's owner, \
+         and hard (`?`): a review of a private session that lands `unclaimed` \
+         is a row its owner cannot read and somebody else can claim"
+    );
+    // The caller is deliberately not consulted: `SpawnReviewArgs` carries no
+    // person, and a grep for one here is how that stays true.
+    assert!(
+        !body.contains("owner_for(") && !body.contains("personal_owner_id("),
+        "a review's owner is the source row's, never the caller's or the hub's"
+    );
+}
+
+/// `move_session` carries the owner to the target row as a HARD failure, and
+/// drops the source row's grants (spec §4.3, the owner's decision of
+/// 2026-09-30). Both are in the block whose every other write is commented
+/// "Soft-fail like new_session: the session is live either way" — which is
+/// exactly what these two must not be.
+#[test]
+fn move_session_carries_the_owner_hard_and_drops_the_grants() {
+    const MOVE: &str = include_str!("../move_session/mod.rs");
+    let body = item_source(MOVE, "async fn move_session_inner(");
+    let carry = body
+        .find("claim_if_unclaimed(row.id, snap.row.owner_person_id)")
+        .expect(
+            "move_session must carry the source row's owner onto the target row — \
+             a soft-failed carry leaves the target `unclaimed` on the host the \
+             caller named, which makes a move a silent privacy event",
+        );
+    let revoke = body
+        .find("revoke_all_grants_on_session(snap.row.id)")
+        .expect(
+            "a move must revoke the SOURCE row's grants: they are keyed on the \
+             old `sessions.id`, the target is a new row, and narrowing is the \
+             safe direction",
+        );
+    // Both are `?`-propagated through `partial(...)`, which is what makes them
+    // hard: the move aborts (as a partial move — the target is live) instead of
+    // returning a row that is nobody's or a share nobody expects. Read as "the
+    // statement that starts here ends in `?;` and mentions `partial(`" rather
+    // than as an exact spelling, so rustfmt is free to lay it out as it likes.
+    for (what, at) in [("the owner carry", carry), ("the grant revoke", revoke)] {
+        let tail = &body[at..];
+        let end = tail
+            .find("?;")
+            .map(|e| e + 2)
+            .unwrap_or_else(|| panic!("{what} does not end in `?;`, so it is not a hard failure"));
+        assert!(
+            tail[..end].contains("partial("),
+            "{what} must fail the move through `partial(...)`, not be a \
+             soft-failed write: {}",
+            &tail[..end]
+        );
+        assert!(
+            !tail[..end].contains("tracing::warn!"),
+            "{what} must not be logged-and-ignored: {}",
+            &tail[..end]
+        );
+    }
+}
+
+/// A repair cannot produce an ownerless row because it produces no row at all:
+/// `repair_session` is addressed BY an existing session and only ever rebuilds
+/// its workspace and its pane. The row — and so its owner and visibility —
+/// survives untouched.
+///
+/// Asserted as the absence of a session INSERT rather than by driving the
+/// repair, because the claim being made is structural: if repair ever starts
+/// creating rows it becomes a create path, and a create path with no owner
+/// seam is the bug this test exists to catch.
+#[test]
+fn repair_never_creates_a_session_row_and_so_never_an_ownerless_one() {
+    const REPAIR: &str = include_str!("../repair.rs");
+    // Production code only — the file's own test module seeds rows with
+    // `upsert_session`, which is a `#[cfg(test)]` helper and not a create path
+    // (`store/session_grants.rs`'s surface test slices the same way).
+    // (Cut at the test MODULE: `#[cfg(test)]` also marks two test-only pure
+    // helpers earlier in the file, so the first match is far too early.)
+    let production = &REPAIR[..REPAIR
+        .find("#[cfg(test)]\nmod tests {")
+        .expect("repair.rs has a test module")];
+    // Comments out, so prose quoting SQL does not count.
+    let code = production
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for forbidden in [
+        "INSERT INTO sessions",
+        "upsert_session(",
+        "apply_host_reconcile",
+        "reconcile_one_host",
+    ] {
+        assert!(
+            !code.contains(forbidden),
+            "service/repair.rs must not create session rows ({forbidden:?}): a \
+             repair keeps the row it was asked about, which is what makes the \
+             owner survive it. If this changes, repair needs an owner seam of \
+             its own (multi-user M1, T5)"
+        );
+    }
 }

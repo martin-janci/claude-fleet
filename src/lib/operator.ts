@@ -4,6 +4,7 @@
 import { derived, get, writable, type Readable, type Writable } from 'svelte/store';
 import { invokeCmd } from './result';
 import { restartSession, sessions, type SessionRow } from './sessions';
+import { sessionActionBlocked } from './share';
 
 export type OperatorBlocked = 'absent' | 'lost' | 'no_mcp' | 'token_revoked' | 'no_host';
 
@@ -224,6 +225,12 @@ export function toggleAgent(): Promise<void> {
 export async function restartOperator(): Promise<void> {
   const session = get(operatorSession);
   if (!session) return;
+  // The operator's session is an ordinary fleet row with an owner, so a
+  // restart of it is `restart_session`, spec §4.3's `own` tier (multi-user M1,
+  // F2b). The gate lives HERE rather than on AgentPanel's button because this
+  // is the funnel: the panel's `lost` recovery, and anything else that comes
+  // to want it, both arrive through this function.
+  if (sessionActionBlocked(session, 'restart_session') !== null) return;
   const r = await restartSession(session.host_alias, session.tmux_name);
   if (!r.ok) return;
   await refreshOperator();

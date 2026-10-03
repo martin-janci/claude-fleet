@@ -1269,6 +1269,56 @@ fn every_routed_mutation_names_its_tool_and_arguments() {
     check(routed_mutation_cases());
 }
 
+/// Multi-user M1 (T5): a hub client may not name the OWNER of the session it
+/// asks the hub to create.
+///
+/// `NewSessionArgs::owner_person_id` is `#[serde(skip_deserializing)]` and
+/// `HubBackend::new_session` spells its arguments out one by one, so the field
+/// has two independent reasons never to cross the wire — and this is the
+/// assertion that notices if somebody "fixes" the spelled-out list by
+/// serialising the struct instead. Whose a session is follows from the
+/// connection the hub authenticated, never from a field in the request; a
+/// client that could set it could create a session in a colleague's name.
+///
+/// The table row above carries `owner_person_id: Some(42)` and asserts the JSON
+/// whole, which proves the same thing; this test states it on its own so the
+/// failure message names the rule rather than a diff.
+#[test]
+fn new_session_never_sends_an_owner_over_the_wire() {
+    let fake = Fake::answering(SESSION_PAYLOAD);
+    let (_dir, st) = store();
+    block_on(commands::sessions::routed::new_session(
+        &remote_backend(&fake),
+        fleet_core::service::sessions::NewSessionArgs {
+            host_alias: "trn".into(),
+            project_id: 4,
+            worktree_id: None,
+            name: "demo".into(),
+            call_id: None,
+            new_worktree: None,
+            base_branch: None,
+            kind: None,
+            start_command: None,
+            friendly_name: None,
+            resume_claude_session_id: None,
+            model: None,
+            effort: None,
+            owner_person_id: Some(42),
+        },
+        &st,
+        &ssh(),
+        &fleet_core::cancel::CancellationRegistry::new(),
+    ))
+    .expect("the hub answers with a row");
+    let (tool, args) = fake.only_call();
+    assert_eq!(tool, "new_session");
+    assert!(
+        args.get("owner_person_id").is_none(),
+        "the owner must never cross the wire — the hub resolves it from the \
+         connection's own person: {args}"
+    );
+}
+
 /// The table [`every_routed_mutation_names_its_tool_and_arguments`] runs; also run against a configured hub this
 /// launch cannot use, which must refuse every row.
 fn routed_mutation_cases() -> Vec<Case> {
@@ -2256,6 +2306,12 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         ),
                         model: Some("opus".into()),
                         effort: Some("high".into()),
+                        // Set, and absent from the asserted JSON above: whose
+                        // a session is follows from the CONNECTION, never from
+                        // an argument a client could choose (multi-user M1,
+                        // T5). `new_session_never_sends_an_owner_over_the_wire`
+                        // says it in one assertion as well.
+                        owner_person_id: Some(42),
                     },
                     s,
                     h,

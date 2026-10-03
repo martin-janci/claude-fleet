@@ -145,10 +145,16 @@ fn bg_session_result(claude_session_id: Option<String>) -> NewBgSessionResult {
 /// (`last_prompt`, `started_at`, and a prompt-derived friendly name — PROD-4).
 /// Every post-launch step is best-effort: the agent is already running, so a
 /// reconcile hiccup degrades to `session: None` rather than an error.
+/// `owner` is whose the row is (multi-user M1, T5): the person behind the
+/// request, resolved by the caller (`mcp::tools::fleet::owner_for` at the MCP
+/// edge, the hub's own person on the desktop). `None` leaves the row
+/// `unclaimed`, which is what a per-host token's launch gets — a machine owns
+/// nothing.
 pub async fn new_bg_session_tracked(
     args: NewBgSessionArgs,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
+    owner: Option<i64>,
 ) -> Result<NewBgSessionResult, IpcError> {
     let host_alias = args.host_alias.clone();
     let name = args.name.clone();
@@ -177,7 +183,7 @@ pub async fn new_bg_session_tracked(
         );
         return Ok(res);
     }
-    res.session = stamp_bg_row(store, claude_id, &prompt, requester);
+    res.session = stamp_bg_row(store, claude_id, &prompt, requester, owner);
     Ok(res)
 }
 
@@ -251,15 +257,39 @@ async fn find_launched_id(
 /// Find the bg row for `claude_id` and record the launch prompt on it.
 /// Returns the refreshed row, or `None` when reconcile has not surfaced the
 /// agent yet.
+///
+/// `owner` is claimed here, POST HOC, and that is deliberate (multi-user M1,
+/// T5): the tmux create paths reserve an owner for a tmux NAME before the
+/// session exists ([`Store::reserve_session_owner`]), and a background agent
+/// has no tmux name — its row is the synthetic `bg:<claude session id>`, and
+/// the id is minted by `claude --bg` and not known until it answers. So the
+/// claim is the one in [`Store::claim_if_unclaimed`], against the row reconcile
+/// has just surfaced.
+///
+/// Soft, unlike `new_session`'s: every write in this function is, because the
+/// agent is already running and the row is a *tracking* row this function may
+/// legitimately not find at all (it returns `None` when reconcile has not seen
+/// the agent yet). A failed claim leaves the row `unclaimed` — nobody's, never
+/// somebody else's — and it is logged. A re-launch cannot mis-attribute it
+/// either: `claim_if_unclaimed` refuses a row that is already another person's,
+/// so a resurrected `bg:<id>` row keeps its ORIGINAL owner.
 fn stamp_bg_row(
     store: &Mutex<Store>,
     claude_id: &str,
     prompt: &str,
     requester: Option<i64>,
+    owner: Option<i64>,
 ) -> Option<crate::store::SessionRow> {
     let s = store.lock().ok()?;
     let row = s.get_session_by_claude_id(claude_id).ok().flatten()?;
     let now = now_unix();
+    if let Err(e) = s.claim_if_unclaimed(row.id, owner) {
+        tracing::warn!(
+            session_id = row.id,
+            error = %e.message,
+            "[bg] claiming the background agent's row failed; it stays unclaimed"
+        );
+    }
     let _ = s.set_started_at(row.id, now);
     let _ = s.set_last_prompt(row.id, prompt);
     if row.friendly_name.is_none() {
@@ -427,7 +457,8 @@ mod tests {
             s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 5, "bg", 5)
                 .unwrap();
         }
-        let row = stamp_bg_row(&store, "u1", "Review the auth PR, carefully!", None).expect("row");
+        let row =
+            stamp_bg_row(&store, "u1", "Review the auth PR, carefully!", None, None).expect("row");
         assert_eq!(
             row.friendly_name.as_deref(),
             Some("review the auth pr carefully")
@@ -438,7 +469,42 @@ mod tests {
         );
         assert!(row.started_at.is_some());
         // Unknown id ⇒ None, no panic.
-        assert!(stamp_bg_row(&store, "nope", "x", None).is_none());
+        assert!(stamp_bg_row(&store, "nope", "x", None, None).is_none());
+    }
+
+    /// Multi-user M1 (T5): the bg row is claimed post hoc, and a RE-LAUNCH
+    /// under the same claude session id — the row reconcile resurrects — keeps
+    /// its ORIGINAL owner. The reservation the tmux paths use cannot cover
+    /// this: a background agent has no tmux name to reserve, and its id is not
+    /// known until `claude --bg` answers.
+    #[test]
+    fn stamp_bg_row_claims_the_row_and_a_resurrected_one_keeps_its_first_owner() {
+        let store = make_store();
+        let (ann, bob) = {
+            let s = store.lock().unwrap();
+            s.upsert_host("local").unwrap();
+            s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 5, "bg", 5)
+                .unwrap();
+            s.upsert_bg_session("local", "bg:u2", None, "u2", Some("working"), 5, "bg", 5)
+                .unwrap();
+            (
+                s.create_person("ann", None).unwrap().id,
+                s.create_person("bob", None).unwrap().id,
+            )
+        };
+        let row = stamp_bg_row(&store, "u1", "go", None, Some(ann)).expect("the row is reconciled");
+        assert_eq!(row.owner_person_id, Some(ann));
+        assert_eq!(row.visibility, crate::store::VISIBILITY_PRIVATE);
+
+        // The same row stamped again for somebody else: refused inside
+        // `claim_if_unclaimed`, soft-failed here, and ann is still the owner.
+        let again = stamp_bg_row(&store, "u1", "go again", None, Some(bob)).expect("still there");
+        assert_eq!(again.owner_person_id, Some(ann), "never re-owned");
+
+        // And no owner at all leaves the row unclaimed rather than guessing.
+        let nobodys = stamp_bg_row(&store, "u2", "go", None, None).expect("the row is reconciled");
+        assert_eq!(nobodys.owner_person_id, None);
+        assert_eq!(nobodys.visibility, crate::store::VISIBILITY_UNCLAIMED);
     }
 
     #[test]
@@ -453,7 +519,8 @@ mod tests {
                 .unwrap();
             s.get_session_by_claude_id("u0").unwrap().unwrap().id
         };
-        let row = stamp_bg_row(&store, "u1", "go", Some(parent)).expect("the row is reconciled");
+        let row =
+            stamp_bg_row(&store, "u1", "go", Some(parent), None).expect("the row is reconciled");
         assert_eq!(row.parent_session_id, Some(parent));
     }
 
@@ -466,7 +533,7 @@ mod tests {
             s.upsert_bg_session("local", "bg:u1", None, "u1", Some("working"), 5, "bg", 5)
                 .unwrap();
         }
-        let row = stamp_bg_row(&store, "u1", "go", None).expect("the row is reconciled");
+        let row = stamp_bg_row(&store, "u1", "go", None, None).expect("the row is reconciled");
         assert_eq!(row.parent_session_id, None);
     }
 

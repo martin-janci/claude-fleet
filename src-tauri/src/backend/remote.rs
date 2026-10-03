@@ -968,6 +968,15 @@ impl HubBackend {
     /// cancellation-registry key (`cancel_command`) and has no hub
     /// counterpart, so it is never sent — which is why this spells the
     /// arguments out rather than serialising `NewSessionArgs`.
+    ///
+    /// `owner_person_id` is the second field deliberately absent, and for a
+    /// stronger reason (multi-user M1, T5): whose a session is follows from the
+    /// CONNECTION, so the hub resolves it from the token that reached it and a
+    /// client that could name an owner would be a client that could create a
+    /// session in somebody else's name. The field is `skip_deserializing` on
+    /// `NewSessionArgs` for the same reason, and
+    /// `tests_routing::new_session_never_sends_an_owner_over_the_wire` holds
+    /// this list to it.
     pub async fn new_session(
         &self,
         args: &sessions::NewSessionArgs,

@@ -11,6 +11,7 @@
   import SpiralLoader from './SpiralLoader.svelte';
   import { resumeWork, workResumePlan, type ResumeMode, type ResumePlan } from './work';
   import { sessions } from './sessions';
+  import { sessionIdBlocked } from './share';
   import { selectSessionExplicitly } from './selection';
 
   type Mode = 'last' | 'brief' | 'fresh';
@@ -18,12 +19,16 @@
   let {
     workKey,
     linkId = null,
+    sessionId = null,
     initialMode = 'last',
     onclose,
     onresumed,
   }: {
     workKey: string;
     linkId?: number | null;
+    /** The SOURCE session the resume would re-open, where the caller knows it
+     *  (ResumeButton resolves it from the link's snapshot). */
+    sessionId?: number | null;
     initialMode?: Mode;
     onclose: () => void;
     /** Called with the new session once a resume started. */
@@ -49,6 +54,16 @@
   let briefFor = $state<string | null>(null);
   let briefLoading = $state(false);
   let busy = $state(false);
+
+  /**
+   * Multi-user M1 (F2c). `resume_work` is `share.ts`'s `own` tier whatever the
+   * mode: `last` re-opens the source conversation, `brief` carries a handover
+   * written from it, and even `fresh` starts in the source's own worktree and
+   * branch. All three act on somebody's past session, so all three are judged
+   * against that session's row — and the gate fails closed when this client
+   * cannot see it, rather than treating "no row" as "nobody to ask about".
+   */
+  const shareBlocked = $derived($sessionIdBlocked(sessionId ?? null, 'resume_work'));
 
   const modes = $derived((plan?.modes ?? []) as ResumeMode[]);
   const current = $derived(modes.find((m) => m.mode === mode) ?? null);
@@ -107,6 +122,12 @@
 
   async function start() {
     if (!current?.ok || busy) return;
+    // Re-asked at the write: the dialog stays open across a revoke, and the
+    // plan it renders carries no owner of its own.
+    if (shareBlocked !== null) {
+      error = shareBlocked;
+      return;
+    }
     busy = true;
     error = null;
     const r = await resumeWork({
@@ -214,7 +235,8 @@
       type="button"
       class="primary"
       data-testid="resume-start"
-      disabled={!plan || live.length > 0 || !current?.ok || busy || (mode === 'brief' && briefLoading)}
+      disabled={!plan || live.length > 0 || !current?.ok || busy || shareBlocked !== null || (mode === 'brief' && briefLoading)}
+      title={shareBlocked}
       onclick={start}>{#if busy}<SpiralLoader size={12} class="btn-spiral" />Starting…{:else}{LABELS[mode]}{/if}</button
     >
   </div>

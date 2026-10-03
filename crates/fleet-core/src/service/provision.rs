@@ -46,6 +46,32 @@ label this session; it defines when to fire and how to look up your `host_alias`
 /// hook shape. Stored per host by `set_host_provisioned`; a host whose
 /// stored value differs is `provision_stale` (hosts F1: every host ran
 /// skills from 15 hub upgrades ago, and nothing compared).
+///
+/// **What it does NOT cover: the `~/.claude.json` MCP entry**
+/// ([`merge_mcp_entry`]) — so multi-user M1's `X-Fleet-Pane` header arriving
+/// in that entry does not make an older provisioning read `provision_stale`,
+/// contrary to what T2's "Do." block in
+/// `docs/superpowers/plans/2026-09-30-multi-user-m1-private-sessions.md`
+/// assumed. Adding the entry's shape here is one line, and it would be WORSE
+/// than the gap: `provision_stale` is cleared by
+/// [`provision_content_only`] — the unattended sweep
+/// ([`spawn_reprovision_stale`]) and the `--content-only` command the plan
+/// itself tells the operator to run — which deliberately never rewrites
+/// `~/.claude.json` (no token minted, no user file that Claude Code writes
+/// concurrently touched). The mark would therefore be raised and cleared
+/// within one hub start, with the header still missing and the operator told
+/// nothing.
+///
+/// Telling the two apart needs TWO recorded fingerprints — the content a
+/// content-only pass ships, and the full set including the MCP entry — which
+/// is a column and a plumbing change, i.e. a decision for the plan's owner,
+/// not something to invent here. Until then what the operator is told is:
+/// nothing automatic. A host provisioned before the pane header keeps working
+/// and simply proves no pane (`Caller::pane` is `None`), so every rule that
+/// would have needed the proof refuses — fail-closed — and only a FULL
+/// provisioning (`provision_hosts` without `content_only`, `fleet-hub
+/// provision --host <alias>`) adds the header. `provision_content_only`'s
+/// own doc comment says so from the other side.
 pub fn fingerprint() -> &'static str {
     static FP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     FP.get_or_init(|| {
@@ -219,6 +245,12 @@ async fn provision_skills(
 /// binary ships without touching the token or `~/.claude.json`. Reuses
 /// the host's existing token for the hook headers; a host with none is
 /// refused (`E_NO_TOKEN`) — it needs a full provisioning first.
+///
+/// Because it does not rewrite `~/.claude.json`, it cannot add or repair the
+/// MCP entry — including multi-user M1's `X-Fleet-Pane` header
+/// ([`merge_mcp_entry`]) — yet it clears `provision_stale` for the host.
+/// That asymmetry is why [`fingerprint`] does not cover the MCP entry; read
+/// its doc comment before changing either.
 pub async fn provision_content_only(
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
@@ -1110,6 +1142,26 @@ pub(crate) fn parse_claude_json(existing: &str) -> Result<serde_json::Value, Ipc
 /// Merge the claude-fleet HTTP MCP server entry into a host's `~/.claude.json`
 /// content, preserving every existing key. Returns the new JSON (pretty).
 /// Errors if `existing` is non-empty and not valid JSON.
+///
+/// Two headers travel with every tool call the host's Claude makes:
+///
+/// - `Authorization`, the host's own bearer token; and
+/// - `X-Fleet-Pane`, the calling tmux pane — multi-user M1's pane proof
+///   (plan revision 6, R6-i). Because it is on the CONNECTION rather than an
+///   argument on a handful of tools, `mcp::authorize` can stamp
+///   `Caller::pane` and every tool can then ask "is this the one row whose
+///   pane the caller can prove it is in".
+///
+/// The pane header is written in the **braced** `${TMUX_PANE:-}` form, not
+/// the bare `$TMUX_PANE` the hooks entry uses
+/// (`service::hooks_install::hook_entry`). The two are not interchangeable:
+/// the hooks entry works only because it also carries
+/// `"allowedEnvVars": ["TMUX_PANE"]`, which is a HOOKS-only mechanism with no
+/// equivalent for an MCP server entry. Claude Code expands `${VAR}` and
+/// `${VAR:-default}` inside an MCP entry's `headers` with no allow-list key,
+/// and the `:-` default makes a host outside tmux send an empty value rather
+/// than an unexpanded literal — both of which `mcp::hooks::pane_header`
+/// refuses, so either way the caller simply proves no pane.
 pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String, IpcError> {
     let mut root = parse_claude_json(existing)?;
     let servers = root
@@ -1128,7 +1180,10 @@ pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String,
         serde_json::json!({
             "type": "http",
             "url": url,
-            "headers": { "Authorization": format!("Bearer {token}") }
+            "headers": {
+                "Authorization": format!("Bearer {token}"),
+                "X-Fleet-Pane": "${TMUX_PANE:-}"
+            }
         }),
     );
     serde_json::to_string_pretty(&root)
@@ -1198,6 +1253,13 @@ mod tests {
             v["mcpServers"]["claude-fleet"]["headers"]["Authorization"],
             "Bearer tok"
         );
+        // Multi-user M1's pane proof, in the braced form — the bare
+        // `$TMUX_PANE` the hooks entry uses would arrive unexpanded here,
+        // since `allowedEnvVars` is a hooks-only mechanism.
+        assert_eq!(
+            v["mcpServers"]["claude-fleet"]["headers"]["X-Fleet-Pane"],
+            "${TMUX_PANE:-}"
+        );
     }
 
     #[test]
@@ -1216,6 +1278,12 @@ mod tests {
         assert_eq!(
             v2["mcpServers"]["claude-fleet"]["headers"]["Authorization"],
             "Bearer tok2"
+        );
+        // A re-merge over an existing file keeps the pane header — a host
+        // re-provisioned for a rotated token must not lose its pane proof.
+        assert_eq!(
+            v2["mcpServers"]["claude-fleet"]["headers"]["X-Fleet-Pane"],
+            "${TMUX_PANE:-}"
         );
         assert_eq!(v2["mcpServers"]["other"]["url"], "u");
     }
@@ -1826,6 +1894,13 @@ mod tests {
     }
 
     /// hosts F1: the content fingerprint that `provision_stale` compares.
+    ///
+    /// Pins exactly WHICH inputs it hashes, in both directions: the four it
+    /// covers, and — stated as an assertion rather than a sentence — that the
+    /// `~/.claude.json` MCP entry is not among them, so nobody reads
+    /// multi-user M1's pane header into a staleness signal it does not
+    /// produce. [`fingerprint`]'s doc comment says why that gap is where it
+    /// is and what would have to change to close it.
     #[test]
     fn fingerprint_is_stable_and_covers_skills_claude_md_and_the_hook_shape() {
         let fp = fingerprint();
@@ -1842,6 +1917,29 @@ mod tests {
         assert!(shape.contains("Stop||http"));
         assert!(shape.contains("SessionStart||command"));
         assert!(shape.contains("fleet-hook.headers"));
+        // And the gap, pinned: the MCP entry is NOT an input. Changing the
+        // entry — as multi-user M1 did, adding `X-Fleet-Pane` — leaves the
+        // fingerprint of a host provisioned before it identical, so that host
+        // does not read `provision_stale` and the operator is not told.
+        // `merge_mcp_entry`'s own output is the witness: with the url and
+        // token held fixed, it is not reachable from `expected` above.
+        let entry = merge_mcp_entry("", "http://127.0.0.1:4180/mcp", "tok").unwrap();
+        assert!(
+            entry.contains("X-Fleet-Pane"),
+            "the entry carries the pane header"
+        );
+        for covered in [
+            FLEET_SKILL,
+            FRIENDLY_NAME_SKILL,
+            CLAUDE_MD_BODY,
+            &crate::service::hooks_install::hook_shape(),
+        ] {
+            assert!(
+                !covered.contains("\"X-Fleet-Pane\": \"${TMUX_PANE:-}\""),
+                "if an input ever carries the MCP entry's pane header, this \
+                 test is stale and so is `fingerprint`'s doc comment"
+            );
+        }
     }
 
     /// hosts F1: the unattended refresh writes skills and hooks with the

@@ -104,6 +104,13 @@ enum Cmd {
         /// `bound_sees_unassigned` is on (the default).
         #[arg(long)]
         org: Option<i64>,
+        /// Whose device this is, by name. The person is created on first use
+        /// if this hub has never heard of them, and their sessions are
+        /// private to them. Omitted: this hub's own owner — pairing your own
+        /// second phone needs nothing here. Not for --mode peer or updater,
+        /// which are nobody's device.
+        #[arg(long)]
+        person: Option<String>,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -325,6 +332,14 @@ enum ClientCmd {
     Untrust { name: String },
     /// Bind a client to one org (its id): it reads only that org's work and sessions.
     Bind { name: String, org: i64 },
+    /// Hand a paired device to a person by name: from its next request it is
+    /// theirs, and it sees their sessions instead of the previous owner's.
+    /// The person is created if this hub has never heard of them. No running
+    /// hub needed.
+    BindPerson { name: String, person: String },
+    /// Take that back: the device belongs to nobody and sees no private
+    /// session. It is still paired — `client revoke` is what ends that.
+    UnbindPerson { name: String },
     /// Let a paired client do what is otherwise the master's. `assets`: manage
     /// the asset catalog (edit, commit, push, Sync, Secrets, layers) from its
     /// Assets tab. Only a `full` client bound to no org. No running hub
@@ -406,8 +421,21 @@ async fn main() -> ExitCode {
             ttl,
             trusted,
             org,
+            person,
             opts,
-        } => pair::pair(&opts, &env, &name, mode.as_deref(), ttl, trusted, org).await,
+        } => {
+            pair::pair(
+                &opts,
+                &env,
+                &name,
+                mode.as_deref(),
+                ttl,
+                trusted,
+                org,
+                person.as_deref(),
+            )
+            .await
+        }
         Cmd::Client { cmd, opts } => match cmd {
             ClientCmd::List { include_revoked } => {
                 pair::client_list(&opts, &env, include_revoked).await
@@ -417,6 +445,10 @@ async fn main() -> ExitCode {
             ClientCmd::Untrust { name } => pair::client_trust(&opts, &env, &name, false).await,
             ClientCmd::Bind { name, org } => pair::client_bind(&opts, &env, &name, Some(org)).await,
             ClientCmd::Unbind { name } => pair::client_bind(&opts, &env, &name, None).await,
+            ClientCmd::BindPerson { name, person } => {
+                pair::client_bind_person(&opts, &env, &name, Some(&person))
+            }
+            ClientCmd::UnbindPerson { name } => pair::client_bind_person(&opts, &env, &name, None),
             ClientCmd::Grant { name, grant } => pair::client_grant(&opts, &env, &name, grant, true),
             ClientCmd::Ungrant { name, grant } => {
                 pair::client_grant(&opts, &env, &name, grant, false)
@@ -743,6 +775,55 @@ mod tests {
             panic!("pair --org did not parse");
         };
         assert_eq!(org, Some(2));
+        // `--person` says whose device it is (multi-user M1). Left out, it
+        // is `None` and the HUB applies the default (its own owner): the CLI
+        // must not put a name on the wire that the operator did not type.
+        let Cmd::Pair { person, .. } = Cli::try_parse_from([
+            "fleet-hub",
+            "pair",
+            "--name",
+            "ada-laptop",
+            "--person",
+            "ada",
+        ])
+        .unwrap()
+        .cmd
+        else {
+            panic!("pair --person did not parse");
+        };
+        assert_eq!(person.as_deref(), Some("ada"));
+        let Cmd::Pair { person, .. } =
+            Cli::try_parse_from(["fleet-hub", "pair", "--name", "phone"])
+                .unwrap()
+                .cmd
+        else {
+            panic!("pair without --person did not parse");
+        };
+        assert_eq!(person, None);
+        // Handing a device to a person, and taking it back. Both take the
+        // client's name first, like every other `client` subcommand.
+        let Cmd::Client { cmd, .. } =
+            Cli::try_parse_from(["fleet-hub", "client", "bind-person", "laptop", "ada"])
+                .unwrap()
+                .cmd
+        else {
+            panic!("client bind-person did not parse");
+        };
+        assert!(matches!(
+            cmd,
+            ClientCmd::BindPerson { name, person } if name == "laptop" && person == "ada"
+        ));
+        let Cmd::Client { cmd, .. } =
+            Cli::try_parse_from(["fleet-hub", "client", "unbind-person", "laptop"])
+                .unwrap()
+                .cmd
+        else {
+            panic!("client unbind-person did not parse");
+        };
+        assert!(matches!(cmd, ClientCmd::UnbindPerson { name } if name == "laptop"));
+        // A person's name is required: `bind-person` must never fall back to
+        // a guess about who a device belongs to.
+        assert!(Cli::try_parse_from(["fleet-hub", "client", "bind-person", "laptop"]).is_err());
         let Cmd::Client { cmd, .. } =
             Cli::try_parse_from(["fleet-hub", "client", "bind", "phone", "2"])
                 .unwrap()
