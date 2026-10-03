@@ -16,18 +16,60 @@ for hosts the hub cannot reach — depends on `fleet-proto` only, never `fleet-c
 
 ## Build & test
 
+### Validation ladder (use this, in this order)
+
+One canonical way to validate Rust changes. Every command below selects the
+whole workspace and builds test targets, so they share one set of compiled
+dependencies. Mixing in other selections (`-p <crate>`, plain `cargo build`,
+`cargo check` without `--all-targets`, `pnpm tauri …`) makes cargo compile
+another copy of fleet-core and its dependency graph: 1.5–3 min the first time,
+then every edit paid once per copy (RUST-BUILD-PERFORMANCE-AUDIT.md §10.3).
+The aliases live in `.cargo/config.toml`.
+
 ```bash
-pnpm install
-pnpm test                       # frontend (Vitest)
-pnpm check                      # Svelte/TS type-check
-cargo test --workspace          # backend (all crates)
-cargo clippy --workspace --all-targets -- -D warnings
+# 1. after every edit (fleet-core edit ≈ 20 s; = rust-analyzer's own check)
+cargo fleet-check                       # check --workspace --all-targets
+pnpm check                              # frontend edits: svelte-check
+# 2. the tests of what you touched (module path filter; fleet-core module ≈ 40 s)
+cargo fleet-test -- service::health     # test --workspace --lib --bins -- <filter>
+pnpm exec vitest run src/lib/foo.test.ts
+# 3. before committing (also what .githooks/pre-commit runs)
 cargo fmt --all --check
+cargo fleet-lint                        # clippy --workspace --all-targets -- -D warnings
+# 4. before pushing / marking a PR ready (≈ 20 min; offload it on a small box)
+cargo test --workspace                  # full suite, what CI runs
+scripts/ci-local.sh                     # everything in CI order; --rust-only / --frontend-only / --hub-e2e
+```
+
+Rules:
+
+- Do not run `cargo build` to see whether something compiles; `cargo
+  fleet-check` answers that 2–6× faster. Build only when you need a binary.
+- Do not narrow with `-p <crate>` in the inner loop; narrow with a test filter.
+  Keep `-p` for the cases below that need a binary or a different feature set.
+- Edits that rebuild fleet-core's tests although they look unrelated:
+  `crates/fleet-agent/**` (a fleet-core dev-dependency), `src-tauri/src/lib.rs`,
+  `src-tauri/src/commands/sessions.rs`, `docs/control-api.md`, `docs/updates.md`
+  and `src/lib/{events,moveProgress,attention,work_keys,fleet_settings}.ts`
+  (embedded by fleet-core tests). `src/lib/names.json`, `tools/ag/**` and two
+  `skills/*/SKILL.md` are embedded in fleet-core itself.
+- `pnpm tauri dev` / `pnpm tauri build` and `cargo build -p fleet-hub` use other
+  feature sets. Run them when you need them; in a cloud session (no display,
+  ~30 GB disk) do not run the Tauri ones at all.
+
+Other commands:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm test                       # frontend (Vitest), all of it
 cargo deny check                # licenses + advisories (cargo install cargo-deny --locked)
 cargo build -p fleet-hub --locked   # headless hub (no Tauri libs needed)
 scripts/hub-e2e.sh               # real fleet-hub/-agent e2e; needs tmux, opt-in via ci-local.sh --hub-e2e
-scripts/ci-local.sh             # all of the above in CI order; --rust-only / --frontend-only / --hub-e2e
 ```
+
+The Rust toolchain is pinned in `rust-toolchain.toml` (bump it in its own PR,
+with the CI and Dockerfile pins; `scripts/check-version-consistency.sh`
+enforces it).
 
 `devtools` is an off-by-default cargo feature: `cargo tauri build --features
 devtools` enables the Web Inspector in a release bundle; dev builds have it
@@ -59,7 +101,7 @@ editing any `#[tool(...)]` description or the `generate_handler!` list,
 regenerate it or CI fails:
 
 ```bash
-REGEN_DOCS=1 cargo test -p fleet-core reference_is_current
+REGEN_DOCS=1 cargo fleet-test -- reference_is_current
 ```
 
 `src/lib/hub_verdicts.generated.json` and the refusal table in `docs/hub.md`
@@ -67,7 +109,7 @@ are generated from `src-tauri/src/backend/verdicts.rs`. After editing any row,
 regenerate them or CI fails:
 
 ```bash
-REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
+REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
 ```
 
 ## Architecture
@@ -95,7 +137,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   `describe_fleet_settings`; `docs/settings-reference.md` and the settings
   tables in `docs/work-graph.md` / `docs/decisions.md` are generated from
   it — after editing a spec run
-  `REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current`.
+  `REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current`.
   This is P1 of the declarative pages framework
   (`docs/superpowers/specs/2026-09-28-declarative-pages-design.md`).
 - **Declarative pages** (`crates/fleet-core/src/pages/`, P2): pages are JSON
@@ -106,7 +148,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
   `SPECS` row needs a `field` on a page). Authoring guide `docs/pages.md`;
   regenerate `docs/page-spec.schema.json` / `docs/page-catalog.json` and
   the frontend fixture `src/lib/pages/registry.generated.json` with
-  `REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current`.
+  `REGEN_PAGE_DOCS=1 cargo fleet-test -- page_docs_are_current`.
   P3's renderer (`src/lib/pages/`) shows them in Settings beside
   "General" (`list_pages`, `fetch_page_source`); `hub.*` / `mcp.*` are
   read-only specs (`owned_by`, D-P7), and `settings::set` emits
