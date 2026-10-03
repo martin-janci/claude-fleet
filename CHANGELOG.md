@@ -8,6 +8,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.4.6] - 2026-10-03
+
+### Added
+- **footer:** say whose version is on screen -- this app's or the hub's
+- **conversation:** a Workflow call is a block, on the desktop and the phone
+- **catalog:** block a file two harnesses would both manage (F3c)
+- **catalog:** never write through a symlinked skills dir; move pre-F3c Codex skills safely (F3c)
+- **catalog:** Codex scan reports symlinked skill directories (F3c)
+- **catalog:** render Codex skills to ~/.agents/skills (F3c)
+- **hub:** catalog add, list, remove, admit, unadmit; reload and client grant take --catalog
+- **mcp:** catalog_admin takes a catalog, manages catalogs and admissions, and checks a grant per touched catalog
+- **catalog:** add, list, remove and admit catalogs; layers per catalog; private copies; lint borrows
+- **sync:** a catalog that cannot speak for a host never plans a remove; one snapshot per plan
+- **catalog:** admissions in the effective set; speaks_for and held_back
+- **catalog:** load any catalog; ensure_fresh keeps a broken org catalog as a problem entry
+- **catalog:** host admissions and per-catalog client grants (migration 092)
+- **sync:** plan, scan and apply against the effective catalog of each host
+- **catalog:** the effective catalog for a host — acceptance, scope boundary, collisions
+- **catalog:** asset origin, a borrowing registry view and the catalog acceptance rule
+- **catalog:** layers and inventory rows carry their catalog (migration 091)
+
+### Changed
+- **agent:** move the hub+agent end-to-end test into its own crate
+- **core:** read the frontend, desktop and doc files tests check at run time
+- one live run per ref, and a timeout on every job
+- **store:** in-memory test stores copy a database migrated once per process
+- compile the bundled SQLite without allocation statistics
+- optimise the bundled SQLite C code in dev and test builds
+- **desktop:** build the desktop library as an rlib only
+- dev builds keep line tables only; dev-debug profile for debuggers
+- one canonical validation mode for agents (cargo fleet-check/test/lint)
+- pin the Rust toolchain to 1.99.0
+- **mcp:** raise the tool-surface budget to 70,623
+- **docs:** regenerate control API reference (REGEN_DOCS)
+- **sync:** test (b) really scans the remote org-bound host over a fake ssh
+- **sync:** cfg(test)-gate resolve_for_host, the M1 single-catalog API
+
+### Fixed
+- **deps:** bump devalue to 5.9.4 for three high advisories
+- **deps:** bump async-trait to 0.1.92 for clippy 1.99's double_must_use
+- **deps:** bump devalue to 5.9.4 (GHSA-j22f-vq7h-c4qm, GHSA-mcm9-63f2-9j32)
+- **ci:** allow clippy::double_must_use from #[async_trait] output (clippy 1.99)
+- **catalog:** a file differing only in letter case is blocked, not created over (F3c)
+- **fleet-hub:** catalog add hints --org only on the needs-an-org refusal
+- **catalog_admin:** configure on an org catalog points at add_catalog
+- **catalog_admin:** apply_sync from a catalog removed since the plan says re-plan
+- **catalog_admin:** remove_catalog is master-only, like add_catalog
+- **catalog:** a catalog removed between ensure_fresh's list and load is evicted
+- **catalog:** keep load errors and stale admissions out of resolve_preview's held_back
+- **migrations:** renumber catalog_access to 093 after main took 092
+- **catalog:** guard per-entry legacy links and the delete half of the symlink rule (F3c)
+- **fleet-hub:** catalog CLI leaves owner rules to the service, names re-points, says what unadmit changed, shows a personal load error in list
+- **mcp:** catalog_admin fails closed on an unseen plan, keeps list_catalogs from org-bound clients, audits the touched catalog
+- **catalog:** one owner check shared by add and upsert; one host check; R4 names the org; lint reads secrets outside the registry lock
+- **catalog:** only a checkout failure becomes a problem entry; cheaper eviction; shared entry lookup
+- **store:** finish PF11/PF14 dedup, transactional set_catalog_config, PF11 test
+- **test:** from_ref instead of a cloned one-element slice (clippy 1.98)
+- **provision:** keep the warning a degraded provisioning leaves, and say why
+- **settings:** one search hit per setting, so an approved guide cannot break search
+- **guides:** an org-bound device never writes the fleet's guides, and nobody self-approves
+- **ag:** never rm -rf an AG_HOME ag does not own, and pin where fleet installs
+- **work,provision:** a native subtask's org, and a degraded ag step is not "delivered"
+- **test:** run the cross-catalog Blocked test on unix only, like its local-host siblings (windows CI)
+- **test:** gate plugin_ref_asset to unix like its only caller (windows clippy dead_code)
+- **assets:** surface refused and withheld in the preview; scope refusals name their catalog
+- **migrations:** 091 copies only host_layers rows whose host exists
+- **sync:** an org host keeps private assets it already has — withheld, never removed
+- **sync:** keep the unlayered guard, never remove a refused asset, keep excluded; unknown catalog ids are NULL
+- **catalog:** a name or install-name overlap between catalogs refuses every copy
+- **catalog:** union_all is None without a personal catalog; share the composition order
+- **store:** merging a host keeps its layer assignments; HostLayerRow.catalog_id defaults
+- **reconcile:** a turn that ends on a question is idle, not blocked
+
+### Documentation
+- contract-test rule in CLAUDE.md, audit Appendix E (A/B results)
+- **audit:** the SQLite allocation lock and the template database (Appendix D)
+- **audit:** A/B results of the Phase 1 package
+- **claude-md:** the measured time of a filtered fleet-test run
+- **claude-md:** list the known Rust flakes and the sequential fleet-core runtime
+- Rust build performance audit (baseline, no changes applied)
+- the reverse-link gap, stranded legacy skills, Codex source (F3c)
+- Codex skills in ~/.agents/skills, migration and symlink guard (F3c)
+- **hub:** fleet-wide catalog actions also need the personal grant
+- admissions, per-catalog grants and org catalogs (M3)
+- Assets M3 implementation plan (admissions, per-catalog grants and loading)
+- scope the no-org parity constraint; document the org scope upgrade
+- sync across catalogs (M2)
+- **assets:** the M2 plan — sync across catalogs
 ## [0.4.5] - 2026-09-30
 
 ### Added
@@ -2428,6 +2516,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.4.6]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.6
 [0.4.5]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.5
 [0.4.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.4
 [0.4.3]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.3
