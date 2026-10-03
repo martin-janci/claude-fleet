@@ -109,9 +109,20 @@ pub async fn undo(id: i64, store: &Mutex<Store>) -> Result<ChangesetView, IpcErr
                 return Err(IpcError::new(
                     codes::E_INVALID_STATE,
                     format!(
-                        "card {id}'s commit {} is no longer in catalog {}'s history (reset or \
-                         rewritten since?); nothing was changed — undo it by hand",
+                        "the card's commit {} is not in {}'s history; nothing was changed — \
+                         undo it by hand",
                         short(sha),
+                        row.name
+                    ),
+                ));
+            }
+            if let Some(path) = in_the_way(root, sha)? {
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!(
+                        "undoing card {id} would re-create {path} in catalog {}, but {path} \
+                         exists on disk (a file git ignores?); nothing was changed — move it \
+                         away first",
                         row.name
                     ),
                 ));
@@ -229,6 +240,31 @@ struct Reverted<'a> {
     pre: String,
     commit: String,
     dirs: Vec<String>,
+}
+
+/// Fix round 1 (Critical): a path reverting `sha` would write that is
+/// already on disk — `git revert` silently replaces an IGNORED file where it
+/// re-creates one the card's commit deleted, and `is_clean` never reports
+/// ignored files. Every file the commit deleted must be absent, and each of
+/// its parents absent or a real directory; else the first one in the way.
+fn in_the_way(root: &Path, sha: &str) -> Result<Option<String>, IpcError> {
+    let parent = repo::parent_of(root, sha)?;
+    for f in repo::files_deleted_between(root, &parent, sha)? {
+        for (i, _) in f.match_indices('/') {
+            match std::fs::symlink_metadata(root.join(&f[..i])) {
+                Ok(m) if m.is_dir() => {}
+                Ok(_) => return Ok(Some(f[..i].to_string())),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        match std::fs::symlink_metadata(root.join(&f)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => return Ok(Some(f)),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(None)
 }
 
 /// The directories reverting `sha` would create: every missing parent of a
@@ -1175,6 +1211,127 @@ mod tests {
         assert_eq!(contexts(&f), ["core"]);
         let v = super::super::get(id, &f.store).unwrap();
         assert_eq!((v.state.as_str(), v.undoable), ("applied", true));
+    }
+
+    /// Fix round 1 (Critical): the card's commit deleted a tracked file a
+    /// `.gitignore` matches; a person re-created it, now ignored. `git
+    /// revert` would silently replace it, so undo refuses first and the
+    /// file, HEAD, host_layers and the card stay.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn an_ignored_file_where_the_revert_would_write_refuses_the_undo() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        let root = &f.personal_root;
+        std::fs::create_dir_all(root.join("skills/w")).unwrap();
+        for (rel, body) in [
+            (".gitignore", "*.bak\n"),
+            (
+                "skills/w/asset.yaml",
+                "kind: skill\nname: w\ndescription: The catalog's own long description.\n",
+            ),
+            ("skills/w/body.md", "Old steps.\n"),
+            ("skills/w/notes.bak", "tracked notes\n"),
+        ] {
+            std::fs::write(root.join(rel), body).unwrap();
+        }
+        git(root, &["add", "-f", "."]);
+        git(root, &["commit", "-q", "-m", "seed"]);
+        crate::service::catalog::load_catalog(p, false, &f.store).unwrap();
+        let (home, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        host_skill(home.path(), "w", "Edited on the host, long enough.");
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let take = item(
+            "drift",
+            Some(p),
+            "skill",
+            "w",
+            ItemAction::TakeHost,
+            ItemParams {
+                host: Some("oci".into()),
+                hash: Some("e".into()),
+                ..Default::default()
+            },
+        );
+        let id = apply_card(
+            &f,
+            &ssh,
+            "drift",
+            "skill/w differs on oci",
+            &[take],
+            Some(vec![0]),
+        )
+        .await;
+        assert!(
+            !root.join("skills/w/notes.bak").exists(),
+            "the take_host deleted it"
+        );
+        std::fs::write(root.join("skills/w/notes.bak"), "the person's own\n").unwrap();
+        assert!(clean(root), "an ignored file is not a change");
+        let before = head(root);
+
+        let err = undo(id, &f.store).await.unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID_STATE);
+        assert!(
+            err.message.contains("skills/w/notes.bak exists on disk"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("nothing was changed"),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("skills/w/notes.bak")).unwrap(),
+            "the person's own\n"
+        );
+        assert_eq!(head(root), before);
+        assert_eq!(super::super::get(id, &f.store).unwrap().state, "applied");
+    }
+
+    /// Fix round 1: a card commit the catalog no longer has (pruned, or a
+    /// rewritten history) refuses clearly and changes nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_card_commit_missing_from_the_catalog_refuses_the_undo() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        let missing = "d".repeat(40);
+        let id = {
+            let s = f.store.lock().unwrap();
+            let card = s
+                .insert_changeset("new", "Adopt w", &[import("core", p, "w")])
+                .unwrap();
+            s.set_changeset_item_states(card.id, &[0], "applied")
+                .unwrap();
+            s.mark_changeset_applied(
+                card.id,
+                1_000,
+                &format!(r#"{{"{p}":"{missing}"}}"#),
+                "[]",
+                None,
+            )
+            .unwrap();
+            card.id
+        };
+        let before = head(&f.personal_root);
+        let err = undo(id, &f.store).await.unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID_STATE);
+        assert!(
+            err.message.contains(&format!(
+                "the card's commit {} is not in personal's history; nothing was changed — undo it by hand",
+                &missing[..12]
+            )),
+            "{}",
+            err.message
+        );
+        assert_eq!(head(&f.personal_root), before);
+        assert_eq!(super::super::get(id, &f.store).unwrap().state, "applied");
     }
 
     /// Insert and apply a card adopting `w` into personal's `core` and `v`

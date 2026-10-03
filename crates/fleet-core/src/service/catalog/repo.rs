@@ -805,7 +805,9 @@ pub fn revert(root: &Path, sha: &str) -> Result<String, IpcError> {
     head(root)
 }
 
-/// Whether commit `ancestor` is in `of`'s history (both hex shas).
+/// Whether commit `ancestor` is in `of`'s history (both hex shas). A
+/// commit the repository no longer has (pruned, never fetched) is in no
+/// history: `false`, not an error.
 pub fn is_ancestor(root: &Path, ancestor: &str, of: &str) -> Result<bool, IpcError> {
     check_rev(ancestor)?;
     check_rev(of)?;
@@ -813,6 +815,12 @@ pub fn is_ancestor(root: &Path, ancestor: &str, of: &str) -> Result<bool, IpcErr
     match out.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
+        _ if !git_output(root, &["cat-file", "-e", &format!("{ancestor}^{{commit}}")])?
+            .status
+            .success() =>
+        {
+            Ok(false)
+        }
         _ => Err(
             IpcError::new(E_CATALOG_GIT, "git merge-base --is-ancestor failed").with_details(
                 serde_json::json!({ "stderr": String::from_utf8_lossy(&out.stderr).trim() }),
@@ -835,20 +843,32 @@ pub fn files_between(
     from: &str,
     to: &str,
 ) -> Result<std::collections::BTreeSet<String>, IpcError> {
+    diff_tree(root, from, to, None)
+}
+
+/// The files `from` has and `to` does not (relative, `/`-separated): what a
+/// commit on `from` that made `to` deleted — so what reverting it
+/// re-creates.
+pub fn files_deleted_between(
+    root: &Path,
+    from: &str,
+    to: &str,
+) -> Result<std::collections::BTreeSet<String>, IpcError> {
+    diff_tree(root, from, to, Some("--diff-filter=D"))
+}
+
+fn diff_tree(
+    root: &Path,
+    from: &str,
+    to: &str,
+    filter: Option<&str>,
+) -> Result<std::collections::BTreeSet<String>, IpcError> {
     check_rev(from)?;
     check_rev(to)?;
-    let out = git_output(
-        root,
-        &[
-            "diff-tree",
-            "-r",
-            "--name-only",
-            "-z",
-            "--no-renames",
-            from,
-            to,
-        ],
-    )?;
+    let mut args = vec!["diff-tree", "-r", "--name-only", "-z", "--no-renames"];
+    args.extend(filter);
+    args.extend([from, to]);
+    let out = git_output(root, &args)?;
     if !out.status.success() {
         return Err(
             IpcError::new(E_CATALOG_GIT, "git diff-tree failed").with_details(
@@ -2132,6 +2152,20 @@ mod tests {
         );
         assert!(is_ancestor(root, &base, &added).unwrap());
         assert!(!is_ancestor(root, &added, &base).unwrap());
+        assert!(
+            !is_ancestor(root, &"d".repeat(40), &added).unwrap(),
+            "a commit the repo does not have is in no history"
+        );
+        assert!(files_deleted_between(root, &base, &added)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            files_deleted_between(root, &added, &base)
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["skills/w/body.md"]
+        );
         assert!(
             is_ancestor(root, "--help", &added).is_err(),
             "only hex shas"
