@@ -992,3 +992,41 @@ async fn apply_sync_with_an_unknown_plan_is_refused_before_run_for_a_client() {
         r.message
     );
 }
+
+/// Final review M2: `import_host` into an org catalog reads a host's whole
+/// Claude config. A client granted only that catalog may import from a
+/// host bound to its org or admitted to the catalog; any other source host
+/// also needs the personal grant (the master is never refused).
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn importing_an_outside_host_into_an_org_catalog_needs_the_personal_grant_too() {
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let (s, _desk, ops, _plain, acme) = two_catalog_store();
+    let both = s.insert_client_token("both", "dd44", "full").unwrap();
+    s.set_client_assets_admin("both", true).unwrap();
+    s.set_client_catalog_grant("both", acme, true).unwrap();
+    let t = tools(s);
+    let args = json!({ "host_alias": "h", "dry_run": true });
+    let ops = client(ops, TokenMode::Full, None);
+
+    let r = call_on(&t, &ops, "import_host", Some(args.clone()), Some("acme")).await;
+    assert_eq!(code_of(&r), "E_FORBIDDEN", "h is outside acme's org");
+    assert!(message_of(r).contains("catalog personal"));
+    for caller in [client(both.id, TokenMode::Full, None), Caller::master()] {
+        let r = call_on(&t, &caller, "import_host", Some(args.clone()), Some("acme")).await;
+        assert_ne!(code_of(&r), "E_FORBIDDEN", "{:?}", r.err());
+    }
+
+    t.store
+        .lock()
+        .unwrap()
+        .admit_host_catalog("h", acme)
+        .unwrap();
+    let r = call_on(&t, &ops, "import_host", Some(args), Some("acme")).await;
+    assert_ne!(
+        code_of(&r),
+        "E_FORBIDDEN",
+        "an admitted host: {:?}",
+        r.err()
+    );
+}

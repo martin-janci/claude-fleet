@@ -269,6 +269,30 @@ impl FleetTools {
                 }
             }
         }
+        // Final review M2: importing into an org catalog reads the source
+        // host's whole Claude config. A host of that org (bound to it, or
+        // admitted to the catalog) is the org's to read; any other host —
+        // `local` included — also needs the personal grant, as it did
+        // before import became per catalog (R21).
+        if let (AdminCall::ImportHost(a), Some(row)) = (&call, target.as_ref()) {
+            if row.org_id.is_some()
+                && !host_serves_catalog(&self.store, &a.host_alias, row)?
+                && !may_admin_catalog(&caller, &self.store, catalog::catalogs::PERSONAL)?
+            {
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    format!(
+                        "import_host from {}, a host outside catalog {}'s org, needs the master \
+                         token or a paired client granted catalog personal too ({} refused); on \
+                         the hub: fleet-hub client grant <name> assets",
+                        a.host_alias,
+                        row.name,
+                        caller.label()
+                    ),
+                    None,
+                ));
+            }
+        }
         self.prepare_admin_call(&mut call, p.confirm_nonce.as_deref(), &caller)?;
         let value = catalog::admin::run(call, target.as_ref(), &self.store, &self.ssh, &self.reg)
             .await
@@ -697,6 +721,23 @@ impl FleetTools {
         }
         Ok(())
     }
+}
+
+/// Whether `host` takes org catalog `row`: bound to its org, or (a host
+/// with no org) admitted to it.
+fn host_serves_catalog(
+    store: &std::sync::Mutex<Store>,
+    host: &str,
+    row: &crate::store::CatalogRow,
+) -> Result<bool, McpError> {
+    let s = store
+        .lock()
+        .map_err(|_| mcp_err(codes::E_LOCK, "store mutex poisoned", None))?;
+    if row.org_id.is_some() && s.host_org(host).map_err(to_mcp_err)? == row.org_id {
+        return Ok(true);
+    }
+    let admitted = s.host_admissions(host).map_err(|e| to_mcp_err(e.into()))?;
+    Ok(admitted.contains(&row.id))
 }
 
 /// What a person approves for a host-writing card apply (fix round 1): the
