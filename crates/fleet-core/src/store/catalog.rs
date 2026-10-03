@@ -520,6 +520,21 @@ impl Store {
             .optional()
     }
 
+    /// The id of the newest sync run that SB6 did not make — one whose
+    /// summary is not marked `"auto": true` (Assets M4, final review I3).
+    /// A row whose JSON does not parse counts as a person's.
+    pub fn last_person_sync_run_id(&self) -> Result<Option<i64>, rusqlite::Error> {
+        self.conn
+            .prepare_cached(
+                "SELECT id FROM sync_runs \
+                 WHERE NOT (json_valid(summary_json) \
+                            AND json_extract(summary_json, '$.auto') IS 1) \
+                 ORDER BY id DESC LIMIT 1",
+            )?
+            .query_row([], |row| row.get(0))
+            .optional()
+    }
+
     /// Emit `sync:progress` (not a store row).
     pub fn bus_sync_progress(&self, p: &crate::events::SyncProgress) {
         self.bus.sync_progress(p);

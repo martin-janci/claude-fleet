@@ -1416,6 +1416,13 @@ fn missing_secrets(
 /// — a pair not planned (unreachable, scan failed), which is reported, not
 /// a failure; `applied` — a pair applied something; `nothing` — a pair was
 /// planned and nothing the card may do was left on it (never applied).
+/// Who a host sync runs for: a card a person applied, or SB6.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunBy {
+    Card,
+    Sb6,
+}
+
 #[derive(Debug, Default)]
 struct HostOutcome {
     applied: bool,
@@ -1445,17 +1452,18 @@ impl HostOutcome {
 /// token (R27). A pair that was not planned is reported `skipped`, and one
 /// narrowed to nothing is `nothing` — neither is parked or applied, so a
 /// sync with nothing to write never rescans a host, writes a `sync_runs`
-/// row or emits progress (fix round 1, I1). With `gate_secrets`, an asset
-/// of the card blocked on a missing secret refuses the whole sync first
-/// (`E_SECRET_MISSING`, as `apply_sync` without `force_partial`); without it
-/// (SB6) that asset just waits. With `harness`, only that harness's pairs
-/// are kept (a restore is pinned to the harness its drift was seen on, I2).
-/// Answers each host's [`HostOutcome`].
+/// row or emits progress (fix round 1, I1). For a card ([`RunBy::Card`]),
+/// an asset of the card blocked on a missing secret refuses the whole sync
+/// first (`E_SECRET_MISSING`, as `apply_sync` without `force_partial`); for
+/// SB6 that asset just waits, and the run it records is marked `auto`
+/// (final review I3). With `harness`, only that harness's pairs are kept (a
+/// restore is pinned to the harness its drift was seen on, I2). Answers
+/// each host's [`HostOutcome`].
 async fn sync_hosts(
     wants: &BTreeMap<String, BTreeSet<String>>,
     catalogs: &BTreeSet<String>,
     filter: OpFilter,
-    gate_secrets: bool,
+    by: RunBy,
     harness: Option<&str>,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
@@ -1513,7 +1521,7 @@ async fn sync_hosts(
             }
         }
     }
-    if gate_secrets && !missing.is_empty() {
+    if by == RunBy::Card && !missing.is_empty() {
         return Err(IpcError::new(
             codes::E_SECRET_MISSING,
             format!(
@@ -1532,7 +1540,10 @@ async fn sync_hosts(
         force_partial: true,
         call_id: None,
     };
-    let run = sync::apply_sync_with(args, store, ssh, CancellationToken::new()).await?;
+    let run = match by {
+        RunBy::Card => sync::apply_sync_with(args, store, ssh, CancellationToken::new()).await?,
+        RunBy::Sb6 => sync::apply_sync_auto(args, store, ssh, CancellationToken::new()).await?,
+    };
     for r in &run.hosts {
         let o = out.entry(r.host_alias.clone()).or_default();
         let why = || {
@@ -1649,7 +1660,7 @@ async fn apply_rollout(
         &wants,
         &catalogs,
         OpFilter::Additive,
-        true,
+        RunBy::Card,
         None,
         store,
         ssh,
@@ -1686,7 +1697,7 @@ async fn apply_restore(
         &wants,
         &catalogs,
         OpFilter::Restore,
-        true,
+        RunBy::Card,
         Some(&harness),
         store,
         ssh,
@@ -1775,9 +1786,11 @@ fn finish_host_card(
 /// with no applied Rollout (pre-M4) answers 0 without planning anything; a
 /// layer's first rollout is always a card (R16). An asset blocked on a
 /// missing secret waits. A host a person rejected on a layer's Rollout card
-/// is left out for that layer ([`rejected_rollouts`]).
+/// is left out for that layer ([`rejected_rollouts`]). A host SB6 failed on
+/// is left out until its inventory is scanned again ([`Sb6Backoff`], final
+/// review I3).
 pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result<usize, IpcError> {
-    let (rolled, rejected, rows, hosts, configured) = {
+    let (rolled, rejected, rows, hosts, configured, backoff, scans) = {
         let s = lock(store)?;
         let rolled = s.rolled_out_layers()?;
         if rolled.is_empty() {
@@ -1789,16 +1802,19 @@ pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
             s.list_inventory()?,
             s.list_hosts()?,
             s.list_catalogs()?,
+            Sb6Backoff::read(&s),
+            s.inventory_last_scans()?,
         )
     };
     let snapshot = registry::snapshot()?;
     let id_of = super::catalog_ids_by_label(&configured);
     let mut wants: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut catalogs: BTreeSet<String> = BTreeSet::new();
-    for h in hosts
-        .iter()
-        .filter(|h| !h.hidden && (h.reachable || h.alias == "local"))
-    {
+    for h in hosts.iter().filter(|h| {
+        !h.hidden
+            && (h.reachable || h.alias == "local")
+            && !backoff.holds(&h.alias, scans.get(&h.alias).copied())
+    }) {
         let Ok(eff) = effective::effective_for_host_in(store, &h.alias, &snapshot) else {
             continue;
         };
@@ -1848,7 +1864,7 @@ pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
         &wants,
         &catalogs,
         OpFilter::Additive,
-        false,
+        RunBy::Sb6,
         None,
         store,
         ssh,
@@ -1859,10 +1875,78 @@ pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
             tracing::debug!(host = %host, "catalog.auto: {why}");
         }
     }
+    {
+        let s = lock(store)?;
+        let scans = s.inventory_last_scans()?;
+        let mut next = backoff.clone();
+        next.forget_rescanned(&scans);
+        for (host, o) in &outcome {
+            if o.failed.is_empty() {
+                next.hosts.remove(host);
+            } else {
+                next.hosts.insert(host.clone(), scans.get(host).copied());
+            }
+        }
+        if next != backoff {
+            next.write(&s);
+        }
+    }
     Ok(outcome
         .values()
         .filter(|o| o.applied && o.failed.is_empty())
         .count())
+}
+
+/// Final review I3: the hosts SB6 failed on, each with its newest inventory
+/// scan at that moment (`None`: it had none). SB6 leaves such a host out
+/// until a scan moves that time — the tick's daily rescan, a catalog
+/// change, a person's sync — so one broken host costs one attempt per scan,
+/// not one per pass. Kept in the store's internal `settings` rows (never a
+/// user-facing setting); a row that does not parse is read as empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct Sb6Backoff {
+    hosts: BTreeMap<String, Option<i64>>,
+}
+
+impl Sb6Backoff {
+    const KEY: &'static str = "changesets.sb6_backoff";
+
+    fn read(s: &Store) -> Sb6Backoff {
+        s.get_setting(Self::KEY)
+            .ok()
+            .flatten()
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default()
+    }
+
+    /// Best effort: losing it only means one more attempt.
+    fn write(&self, s: &Store) {
+        let saved = if self.hosts.is_empty() {
+            s.delete_setting(Self::KEY)
+        } else {
+            match serde_json::to_string(self) {
+                Ok(json) => s.set_setting(Self::KEY, &json),
+                Err(e) => {
+                    tracing::warn!("catalog.auto: back-off not saved: {e}");
+                    return;
+                }
+            }
+        };
+        if let Err(e) = saved {
+            tracing::warn!("catalog.auto: back-off not saved: {e}");
+        }
+    }
+
+    /// Whether `host`, whose newest scan is `scanned`, is still held.
+    fn holds(&self, host: &str, scanned: Option<i64>) -> bool {
+        self.hosts.get(host).is_some_and(|at| *at == scanned)
+    }
+
+    /// Drop every host scanned since it failed.
+    fn forget_rescanned(&mut self, scans: &BTreeMap<String, i64>) {
+        self.hosts
+            .retain(|host, at| *at == scans.get(host).copied());
+    }
 }
 
 /// Fix round 1 (6): every (catalog, layer, host) whose latest decision on
@@ -3948,6 +4032,67 @@ mod tests {
             .unwrap();
         auto_additive(&f.store, &ssh).await.unwrap();
         assert!(counter.exists(), "without the rejection SB6 plans trn");
+    }
+
+    /// Final review I3: an SB6 run — here one whose host write fails —
+    /// never changes the scan tick's "everything changed" key, so it never
+    /// makes the next tick rescan the whole fleet; and the host it failed
+    /// on is left out of later passes until its inventory is scanned again.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_failing_sb6_host_neither_rescans_the_fleet_nor_retries_every_pass() {
+        use crate::service::catalog::scan_tick::sync_key;
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let id = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+        let v = apply_all(&f, id, &ssh).await.unwrap();
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        let key = sync_key(&f.store.lock().unwrap());
+        assert!(key.is_some(), "a card's run is a person's run");
+
+        std::fs::remove_dir_all(home.path().join(".claude/skills/w")).unwrap();
+        let missing = |f: &Fleet, at: i64| {
+            let mut row = w_row(f, "oci", "missing");
+            row.scanned_at = at;
+            f.store
+                .lock()
+                .unwrap()
+                .replace_host_inventory("oci", "claude", &[row])
+                .unwrap();
+        };
+        missing(&f, 1);
+        let bin2 = tempfile::tempdir().unwrap();
+        let failing = ssh_with_home_running(
+            bin2.path(),
+            home.path(),
+            "case \"$*\" in *fleet-tmp*) exit 7;; esac",
+        );
+        let runs = last_run(&f);
+        assert_eq!(auto_additive(&f.store, &failing).await.unwrap(), 0);
+        assert_ne!(last_run(&f), runs, "SB6 tried, and its run is recorded");
+        assert_eq!(
+            sync_key(&f.store.lock().unwrap()),
+            key,
+            "an SB6 run is not a reason to rescan the fleet"
+        );
+
+        // Its rescan still says `missing`: the next pass leaves oci alone.
+        let bin3 = tempfile::tempdir().unwrap();
+        let counter = bin3.path().join("calls");
+        let counting = counting_ssh(bin3.path(), home.path(), &counter, "*");
+        assert_eq!(auto_additive(&f.store, &counting).await.unwrap(), 0);
+        assert!(!counter.exists(), "a host SB6 failed on is backed off");
+
+        // A later scan of oci lifts it.
+        let later = f.store.lock().unwrap().inventory_last_scans().unwrap()["oci"] + 100;
+        missing(&f, later);
+        assert_eq!(auto_additive(&f.store, &counting).await.unwrap(), 1);
+        assert!(counter.exists());
+        assert!(home.path().join(".claude/skills/w/SKILL.md").is_file());
     }
 
     /// Final review I1 (interim): the catalog moved **and** a person edited
