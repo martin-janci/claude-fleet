@@ -2286,9 +2286,11 @@ except a Drift card's restore, which a person picks for one asset on one
 host and harness and which backs up what it replaces. `catalog.auto`
 (Settings → Automation → Assets, on by default) hides fleet's and Claude's
 internal assets, prepares the cards after each scan, and — once a Rollout
-card for a layer has been applied — installs and updates that layer's
-assets on its hosts by itself, skipping a host whose rollout a person
-rejected; off, cards come only from `propose` and nothing syncs by itself.
+card for a layer has been applied — installs that layer's assets a host
+is missing, and adopts identical copies, by itself, skipping a host whose
+rollout a person rejected. It never changes a copy a host already has,
+even one that is behind the catalog: updating a drifted copy is a Drift or
+Rollout card, or a sync a person runs. Off, cards come only from `propose` and nothing syncs by itself.
 `catalog.auto_push` (off by default) pushes the catalog right after a card
 commits or is undone. `changesets` is for the master token or a person's
 own full device bound to no org (never a per-host token); listing needs no

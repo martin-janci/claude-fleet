@@ -14,9 +14,10 @@
 //!
 //! A host card (rollout, drift restore) plans the card's hosts and applies
 //! only what R15 allows; SB6's automatic additive sync shares that path
-//! (`auto_additive`). Rollout and SB6 only create, adopt or update; a
-//! restore — one asset, one host, picked by a person — may also overwrite,
-//! with a backup; nothing ever removes. A card's host sync runs under its
+//! (`auto_additive`). A Rollout only creates, adopts or updates, and SB6
+//! only creates or adopts (it never picks a drifted copy); a restore — one
+//! asset, one host, picked by a person — may also overwrite, with a backup;
+//! nothing ever removes. A card's host sync runs under its
 //! own cancellation token, never registered, so `cancel_task` cannot stop
 //! it (R27).
 
@@ -1721,11 +1722,13 @@ fn finish_host_card(
 }
 
 /// SB6 (R17): with no card, sync additively what a rolled-out layer
-/// introduced and a host lacks (`missing`), has an older fleet copy of
-/// (`drifted` and managed — an unmanaged drifted copy could only be
-/// overwritten, which SB6 never does) or has unmanaged but identical
-/// (`in_sync`, adopted). Answers how many hosts it applied something on —
-/// 0, with nothing applied or recorded, when nothing is left to do. A fleet
+/// introduced and a host lacks (`missing`) or has unmanaged but identical
+/// (`in_sync`, adopted). A `drifted` copy — managed or not — is never due
+/// (final review I1): the planner plans an Update whenever the catalog
+/// moved, even over a copy a person edited on the host, so replacing a
+/// drifted copy is left to a person. Answers how many hosts it applied
+/// something on — 0, with nothing applied or recorded, when nothing is left
+/// to do. A fleet
 /// with no applied Rollout (pre-M4) answers 0 without planning anything; a
 /// layer's first rollout is always a card (R16). An asset blocked on a
 /// missing secret waits. A host a person rejected on a layer's Rollout card
@@ -1778,8 +1781,12 @@ pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
                 })
                 .is_some_and(|r| match r.state.as_str() {
                     "missing" => true,
-                    "drifted" => r.managed,
                     "in_sync" => !r.managed,
+                    // Final review I1 (interim): a drifted copy is never
+                    // due. The planner cannot yet tell "host edited" from
+                    // "host behind the catalog" and plans an Update for
+                    // both, so only a person (a Drift card's restore, or a
+                    // sync they run) ever replaces a drifted copy.
                     _ => false,
                 });
             if due {
@@ -3578,9 +3585,9 @@ mod tests {
             "the overwrite did not"
         );
 
-        // SB6 finds `edited` drifted and managed: it plans the host, drops
-        // the overwrite just the same, and with nothing left applies
-        // nothing — no sync run recorded (fix round 1, I1).
+        // SB6 finds `edited` drifted and managed: a drifted copy is never
+        // due (final review I1), so it plans nothing, applies nothing and
+        // records no sync run.
         let runs = last_run(&f);
         assert_eq!(auto_additive(&f.store, &ssh).await.unwrap(), 0);
         assert_eq!(last_run(&f), runs, "a no-op pass writes no sync_runs row");
@@ -3858,6 +3865,46 @@ mod tests {
             .unwrap();
         auto_additive(&f.store, &ssh).await.unwrap();
         assert!(counter.exists(), "without the rejection SB6 plans trn");
+    }
+
+    /// Final review I1 (interim): the catalog moved **and** a person edited
+    /// the host copy, so the planner would plan an Update — SB6 never treats
+    /// a `drifted` row as due, so the host copy stays as the person left it
+    /// and nothing is planned, applied or recorded.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn sb6_never_touches_a_managed_drifted_copy_on_a_rolled_out_layer() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let id = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+        let v = apply_all(&f, id, &ssh).await.unwrap();
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        let installed = home.path().join(".claude/skills/w/SKILL.md");
+        assert!(installed.is_file());
+
+        f.commit_files(&f.personal_root, p, &[("skills/w/body.md", "New steps.\n")]);
+        let hand = "edited by hand\n";
+        std::fs::write(&installed, hand).unwrap();
+        let mut row = w_row(&f, "oci", "drifted");
+        row.managed = true;
+        f.store
+            .lock()
+            .unwrap()
+            .replace_host_inventory("oci", "claude", &[row])
+            .unwrap();
+
+        let bin2 = tempfile::tempdir().unwrap();
+        let counter = bin2.path().join("calls");
+        let ssh = counting_ssh(bin2.path(), home.path(), &counter, "*");
+        let runs = last_run(&f);
+        assert_eq!(auto_additive(&f.store, &ssh).await.unwrap(), 0);
+        assert_eq!(std::fs::read_to_string(&installed).unwrap(), hand);
+        assert!(!counter.exists(), "a drifted copy is never planned");
+        assert_eq!(last_run(&f), runs, "no sync_runs row");
     }
 
     /// A drift card on `skill/w` at `host`: take_host (0), restore (1).

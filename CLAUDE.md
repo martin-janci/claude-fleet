@@ -402,7 +402,8 @@ REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
   a rolled-out layer stays rolled out (P27). Dismiss and reject_item write
   `rejected` verdicts. `catalog.auto` (on) hides internals, prepares cards
   and runs SB6's additive sync on layers a Rollout card has applied
-  (skipping a host whose rollout a person rejected); `catalog.auto_push`
+  (missing assets and identical copies only — never a `drifted` one —
+  skipping a host whose rollout a person rejected); `catalog.auto_push`
   (off) pushes after apply and undo. One tokio `APPLY_LOCK` serialises all
   of it and every authoring write. MCP `changesets { list | propose | apply
   | undo | dismiss | reject_item }` is never served to per-host tokens and

@@ -960,7 +960,7 @@ pub const SPECS: &[Spec] = &[
         "true",
         Kind::Bool,
         "Asset cards and safe sync",
-        "After each asset scan, hide fleet's own and Claude's internal assets, propose changeset cards, and install or update assets on hosts for layers already rolled out once. Never overwrites or removes.",
+        "After each asset scan, hide fleet's own and Claude's internal assets, propose changeset cards, and, for layers already rolled out once, install what a host is missing and adopt identical copies. Never changes, overwrites or removes a copy a host already has.",
     ),
     Spec::new(
         CATALOG_AUTO_PUSH,
