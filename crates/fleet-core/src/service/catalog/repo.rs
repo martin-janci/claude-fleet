@@ -95,7 +95,9 @@ impl Catalog {
 /// What a catalog's load problems put in doubt (Assets M4, carry 2,
 /// Rulings R24). `load_dir` records a file that did not parse at
 /// `<kind dir>/<name>/asset.yaml` (skills, agents) or `<kind dir>/<name>.yaml`
-/// (the rest), and a kind directory it could not read at `<kind dir>`. The
+/// (the rest) — as it does a folder entry it could not stat or a symlink
+/// that does not resolve to a folder (final review I6) — and a kind
+/// directory, or an entry in it, it could not read at `<kind dir>`. The
 /// first holds that one asset, the second every asset of the kind. Layer
 /// and catalog-file problems hold nothing. A sync must never read a held
 /// asset's absence as "the catalog dropped it" (`sync::plan::KeepRules`).
@@ -1078,8 +1080,23 @@ pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
         if !dir.is_dir() {
             continue;
         }
+        // Final review I6: an entry that cannot be read is a Problem, never
+        // silently skipped — an asset whose entry vanished from the load
+        // would read as "the catalog dropped it" and plan a Remove.
         let mut entries: Vec<PathBuf> = match std::fs::read_dir(&dir) {
-            Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).collect(),
+            Ok(rd) => rd
+                .filter_map(|e| match e {
+                    Ok(e) => Some(e.path()),
+                    Err(e) => {
+                        // No name to hold: the whole kind is held.
+                        cat.problems.push(Problem {
+                            path: rel(root, &dir),
+                            message: format!("an entry could not be read: {e}"),
+                        });
+                        None
+                    }
+                })
+                .collect(),
             Err(e) => {
                 cat.problems.push(Problem {
                     path: rel(root, &dir),
@@ -1091,11 +1108,28 @@ pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
         entries.sort();
         for p in entries {
             let (yaml_path, stem) = if kind.is_folder() {
-                if !p.is_dir() {
+                let yaml_path = p.join("asset.yaml");
+                // A symlink must resolve to a directory; a plain stray file
+                // (a README, a `.DS_Store`) is not an asset and is skipped.
+                let unreadable = match std::fs::symlink_metadata(&p) {
+                    Err(e) => Some(e.to_string()),
+                    Ok(m) if m.file_type().is_symlink() => match std::fs::metadata(&p) {
+                        Ok(t) if t.is_dir() => None,
+                        Ok(_) => Some("a symlink to something that is not a folder".to_string()),
+                        Err(e) => Some(format!("a symlink that does not resolve: {e}")),
+                    },
+                    Ok(m) if !m.is_dir() => continue,
+                    Ok(_) => None,
+                };
+                if let Some(message) = unreadable {
+                    cat.problems.push(Problem {
+                        path: rel(root, &yaml_path),
+                        message,
+                    });
                     continue;
                 }
                 (
-                    p.join("asset.yaml"),
+                    yaml_path,
                     p.file_name()
                         .unwrap_or_default()
                         .to_string_lossy()
@@ -1129,7 +1163,18 @@ pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
     if layer_dir.is_dir() {
         let mut parsed: Vec<crate::service::catalog::layer::Layer> = Vec::new();
         let mut entries: Vec<PathBuf> = match std::fs::read_dir(&layer_dir) {
-            Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).collect(),
+            Ok(rd) => rd
+                .filter_map(|e| match e {
+                    Ok(e) => Some(e.path()),
+                    Err(e) => {
+                        cat.problems.push(Problem {
+                            path: rel(root, &layer_dir),
+                            message: format!("an entry could not be read: {e}"),
+                        });
+                        None
+                    }
+                })
+                .collect(),
             Err(e) => {
                 cat.problems.push(Problem {
                     path: rel(root, &layer_dir),
@@ -2156,6 +2201,37 @@ mod tests {
             "{:?}",
             cat.problems
         );
+    }
+
+    /// Final review I6: an entry of a folder kind that cannot be read as a
+    /// folder — a dangling symlink, a symlink to a file — is a Problem at
+    /// `<kind dir>/<name>/asset.yaml`, so it holds that one asset instead
+    /// of vanishing; a plain stray file there is still skipped.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_skill_symlink_is_a_problem_that_holds_the_skill() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::create_dir_all(root.join("skills")).unwrap();
+        std::os::unix::fs::symlink(root.join("nowhere"), root.join("skills/dead")).unwrap();
+        std::fs::write(root.join("a-file"), "x").unwrap();
+        std::os::unix::fs::symlink(root.join("a-file"), root.join("skills/to-file")).unwrap();
+        std::fs::write(root.join("skills/README.md"), "notes").unwrap();
+        let cat = load_dir(root).unwrap();
+        let h = ProblemHolds::from_problems(&cat.problems);
+        assert!(
+            h.reason(Kind::Skill, "dead").is_some(),
+            "{:?}",
+            cat.problems
+        );
+        assert!(
+            h.reason(Kind::Skill, "to-file").is_some(),
+            "{:?}",
+            cat.problems
+        );
+        assert!(h.kinds.is_empty(), "{:?}", cat.problems);
+        assert_eq!(cat.problems.len(), 2, "{:?}", cat.problems);
     }
 
     /// Assets M4: the apply engine's git steps — a clean check that counts

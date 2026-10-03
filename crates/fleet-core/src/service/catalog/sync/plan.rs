@@ -2429,6 +2429,48 @@ mod tests {
         );
     }
 
+    /// Final review I6, end to end: a skill folder that became a dangling
+    /// symlink is a load problem, so its manifest entry is kept (`Noop`),
+    /// never removed.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_skill_symlink_in_the_catalog_plans_no_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::create_dir_all(root.join("skills")).unwrap();
+        std::os::unix::fs::symlink(root.join("nowhere"), root.join("skills/dead")).unwrap();
+        let cat = crate::service::catalog::repo::load_dir(root).unwrap();
+        let mut manifest = Manifest::default();
+        manifest.assets.insert(
+            "skill/dead".into(),
+            ManifestEntry {
+                files: vec!["~/.claude/skills/dead/SKILL.md".into()],
+                ..Default::default()
+            },
+        );
+        let keep = KeepRules {
+            speaks_for: Some(BTreeSet::from(["personal".to_string()])),
+            problem_held: BTreeMap::from([(
+                "personal".to_string(),
+                ProblemHolds::from_problems(&cat.problems),
+            )]),
+            ..Default::default()
+        };
+        let hp = compute_host_plan(
+            &cat,
+            &Claude,
+            "local",
+            &HostSnapshot::default(),
+            &manifest,
+            &secrets_map(),
+            &PlanFilter::default(),
+            &keep,
+        );
+        assert_eq!(act(&hp, "dead").op, ActionOp::Noop, "{:?}", cat.problems);
+        assert!(act(&hp, "dead").remove_entry.is_none());
+    }
+
     /// F3c: with `~/.agents/skills` a symlink, every Codex action that would
     /// write or adopt under it is refused with the reason; Codex's MCP merge
     /// (`~/.codex/config.toml`) and Claude's plan are unaffected.
