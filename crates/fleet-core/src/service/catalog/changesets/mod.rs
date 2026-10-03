@@ -353,22 +353,18 @@ pub fn card(
     Ok((row, items))
 }
 
-/// Whether applying `positions` of this card writes to hosts: every rollout,
-/// and a drift card's restore (R15, R25).
-pub fn writes_hosts(
-    card: &ChangesetRow,
-    items: &[ChangesetItemRow],
-    positions: Option<&[i64]>,
-) -> bool {
-    match card.kind.as_str() {
-        "rollout" => true,
-        "drift" => positions.unwrap_or(&[]).iter().any(|p| {
-            items
-                .iter()
-                .any(|i| i.position == *p && i.action == ItemAction::Restore.as_str())
-        }),
-        _ => false,
-    }
+/// Whether applying `selected` — exactly the items [`apply::select_items`]
+/// picked, which is what `apply` runs — writes to hosts: every rollout,
+/// and a drift card's restore (R15, R25). It mirrors `apply`'s dispatch,
+/// which sends exactly these to a host sync. Read from the selection, never
+/// from the raw `positions`: with none named, `apply` runs every pending
+/// item, so a drift card whose take_host was rejected applies its restore
+/// (Task 9 fix round 1).
+pub fn writes_hosts(card: &ChangesetRow, selected: &[&ChangesetItemRow]) -> bool {
+    card.kind == CardKind::Rollout.as_str()
+        || selected
+            .iter()
+            .any(|i| i.action == ItemAction::Restore.as_str())
 }
 
 /// A card that changed a catalog, so can be undone (R20): bootstrap, new,

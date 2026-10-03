@@ -9,12 +9,17 @@ use crate::service::catalog::admin::AdminCall;
 use serde_json::{json, Value};
 
 pub(super) fn tools(s: Store) -> FleetTools {
+    tools_notifying(s, Arc::new(|_: &guard::ConfirmRequest| {}))
+}
+
+/// [`tools`] whose confirm requests go to `notify` (a recording closure).
+pub(super) fn tools_notifying(s: Store, notify: guard::ConfirmNotify) -> FleetTools {
     FleetTools::new(
         Arc::new(Mutex::new(s)),
         Arc::new(SshClient::new()),
         CancellationRegistry::new(),
         Arc::new(crate::service::tunnel::TunnelSupervisor::new()),
-        McpGuards::new(Arc::new(|_: &guard::ConfirmRequest| {})),
+        McpGuards::new(notify),
     )
 }
 

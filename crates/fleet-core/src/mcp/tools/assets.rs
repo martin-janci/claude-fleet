@@ -297,29 +297,19 @@ impl FleetTools {
             ),
         );
         let personal = catalog::catalogs::PERSONAL;
+        // PF15 / fix round 1: every card names catalogs and hosts across
+        // orgs, so the tool is the master's or a person's own unbound full
+        // device, as `list_catalogs` — checked before any card is read or
+        // the lock awaited, so an org-bound client learns nothing, not even
+        // which card ids exist.
+        if !(caller.is_master() || (caller.is_person_device() && caller.mode == TokenMode::Full)) {
+            return Err(changesets_forbidden(&p.action, None, &caller));
+        }
         match p.action.as_str() {
-            // PF15: every card names catalogs and hosts across orgs — the
-            // master's, or a person's own unbound full device, as
-            // `list_catalogs`.
-            "list" => {
-                if !(caller.is_master()
-                    || (caller.is_person_device() && caller.mode == TokenMode::Full))
-                {
-                    return Err(mcp_err(
-                        "E_FORBIDDEN",
-                        format!(
-                            "changesets list needs the master token or a full paired client \
-                             bound to no org ({} refused)",
-                            caller.label()
-                        ),
-                        None,
-                    ));
-                }
-                match p.id {
-                    Some(id) => ok_json(&cs::get(id, &self.store).map_err(to_mcp_err)?),
-                    None => ok_json_compact(&cs::list(&self.store).map_err(to_mcp_err)?),
-                }
-            }
+            "list" => match p.id {
+                Some(id) => ok_json(&cs::get(id, &self.store).map_err(to_mcp_err)?),
+                None => ok_json_compact(&cs::list(&self.store).map_err(to_mcp_err)?),
+            },
             "propose" => {
                 if !may_admin_catalog(&caller, &self.store, personal)? {
                     return Err(changesets_forbidden("propose", Some(personal), &caller));
@@ -335,9 +325,15 @@ impl FleetTools {
                         None,
                     )
                 })?;
-                // The card is read and the grants checked under the lock the
-                // action runs under, so a refresh in between cannot add an
-                // item in a catalog the caller holds no grant for.
+                // Lock-free pre-check (fix round 1): a client holding no
+                // grant at all can act on no card; refused before the lock
+                // and the card, the same way for every id.
+                if !self.holds_any_catalog_grant(&caller)? {
+                    return Err(changesets_forbidden(&p.action, None, &caller));
+                }
+                // The card is read, the items the action runs selected and
+                // the grants checked under the lock the action runs under,
+                // so a refresh in between cannot change what was authorized.
                 let busy = cs::authoring_lock().await;
                 let (card, items) = match cs::card(id, &self.store) {
                     Ok(found) => found,
@@ -347,19 +343,41 @@ impl FleetTools {
                     }
                     Err(e) => return Err(to_mcp_err(e)),
                 };
-                let writes_hosts =
-                    p.action == "apply" && cs::writes_hosts(&card, &items, p.positions.as_deref());
-                self.check_card_grants(&caller, &p.action, &items, writes_hosts)?;
                 let view = match p.action.as_str() {
                     "apply" => {
+                        // Exactly the items `apply` runs — the same
+                        // function, under the same lock — so what the grants
+                        // and the confirm gate see is what runs. Fix round
+                        // 1: with no `positions` apply runs every pending
+                        // item, so `writes_hosts` is never read from the raw
+                        // parameter.
+                        let selected =
+                            match cs::apply::applicable(&card, &items, p.positions.as_deref()) {
+                                Ok(selected) => selected,
+                                Err(e) => {
+                                    // Nothing runs; why (a closed card, a
+                                    // bad position) is told only to a caller
+                                    // that may act on the card as a whole.
+                                    let all: Vec<_> = items.iter().collect();
+                                    let hosts = cs::writes_hosts(&card, &all);
+                                    self.check_card_grants(&caller, "apply", &all, hosts)?;
+                                    return Err(to_mcp_err(e));
+                                }
+                            };
+                        let writes_hosts = cs::writes_hosts(&card, &selected);
+                        self.check_card_grants(&caller, "apply", &selected, writes_hosts)?;
                         if writes_hosts {
                             self.confirm_gate(
                                 "apply_sync",
                                 p.confirm_nonce.as_deref(),
-                                &format!("changeset={id}"),
+                                &confirm_summary(&card, &selected),
                                 &caller,
                             )?;
                         }
+                        // Under APPLY_LOCK: `ensure_fresh` is synchronous
+                        // and never takes it, so this cannot deadlock; a
+                        // slow reload only delays other card actions (the
+                        // tick `try_lock`s and skips).
                         catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
                         let args = cs::apply::ApplyArgs {
                             id,
@@ -367,13 +385,20 @@ impl FleetTools {
                         };
                         cs::apply::apply_held(&busy, args, &self.store, &self.ssh).await
                     }
-                    "undo" => cs::undo::undo_held(&busy, id, &self.store).await,
-                    "dismiss" => cs::undo::dismiss_held(&busy, id, &self.store).await,
-                    _ => {
-                        let positions = p.positions.ok_or_else(|| {
-                            mcp_err(codes::E_INVALID, "reject_item needs positions", None)
-                        })?;
-                        cs::undo::reject_items_held(&busy, id, &positions, &self.store).await
+                    action => {
+                        let all: Vec<&crate::store::ChangesetItemRow> = items.iter().collect();
+                        self.check_card_grants(&caller, action, &all, false)?;
+                        match action {
+                            "undo" => cs::undo::undo_held(&busy, id, &self.store).await,
+                            "dismiss" => cs::undo::dismiss_held(&busy, id, &self.store).await,
+                            _ => {
+                                let positions = p.positions.ok_or_else(|| {
+                                    mcp_err(codes::E_INVALID, "reject_item needs positions", None)
+                                })?;
+                                cs::undo::reject_items_held(&busy, id, &positions, &self.store)
+                                    .await
+                            }
+                        }
                     }
                 };
                 ok_json(&view.map_err(to_mcp_err)?)
@@ -598,17 +623,39 @@ impl FleetTools {
         Ok(())
     }
 
-    /// R25: a grant on every catalog the card's items name (none named, as
-    /// a hide-only card: personal), and personal too for an apply that
-    /// writes hosts. A per-host token is refused at the central gate first
-    /// (`NOT_FOR_HOST_TOKENS`) and would never pass here either
+    /// The `changesets` pre-check that needs no card (fix round 1): the
+    /// master, or a client holding a grant on some catalog (the personal
+    /// one included, however it was made). Read live, without the lock.
+    fn holds_any_catalog_grant(&self, caller: &Caller) -> Result<bool, McpError> {
+        if caller.is_master() {
+            return Ok(true);
+        }
+        let (None, Some(c)) = (&caller.host_alias, &caller.client) else {
+            return Ok(false);
+        };
+        let s = self
+            .store
+            .lock()
+            .map_err(|_| mcp_err(codes::E_LOCK, "store mutex poisoned", None))?;
+        let any = s
+            .client_is_assets_admin(c.id)
+            .and_then(|personal| Ok(personal || s.client_has_any_catalog_grant(c.id)?))
+            .map_err(|e| to_mcp_err(e.into()))?;
+        Ok(any)
+    }
+
+    /// R25: a grant on every catalog `items` name — for an apply, exactly
+    /// the items it runs; for undo / dismiss / reject_item, the whole card
+    /// — and personal too when one of them names no catalog (a hide) or
+    /// the apply writes hosts. A per-host token is refused at the central
+    /// gate first (`NOT_FOR_HOST_TOKENS`) and would never pass here either
     /// (`may_admin_catalog_row`). R22: a catalog that no longer exists is
     /// `E_NOTFOUND` for the master and the ungranted refusal for a client.
     fn check_card_grants(
         &self,
         caller: &Caller,
         action: &str,
-        items: &[crate::store::ChangesetItemRow],
+        items: &[&crate::store::ChangesetItemRow],
         writes_hosts: bool,
     ) -> Result<(), McpError> {
         let ids: std::collections::BTreeSet<i64> =
@@ -624,7 +671,8 @@ impl FleetTools {
                 .map_err(|e| to_mcp_err(e.into()))?
         };
         let personal = catalog::catalogs::PERSONAL;
-        if (writes_hosts || rows.is_empty()) && !may_admin_catalog(caller, &self.store, personal)? {
+        let fleet_wide = writes_hosts || items.iter().any(|i| i.catalog_id.is_none());
+        if fleet_wide && !may_admin_catalog(caller, &self.store, personal)? {
             return Err(changesets_forbidden(action, Some(personal), caller));
         }
         for (id, row) in &rows {
@@ -651,10 +699,47 @@ impl FleetTools {
     }
 }
 
+/// What a person approves for a host-writing card apply (fix round 1): the
+/// card, its kind and each selected item — e.g. `changeset 12 (drift):
+/// restore #1 skill/w on oci` — so an approval covers this content only; a
+/// card refreshed or re-picked since asks again.
+fn confirm_summary(
+    card: &crate::store::ChangesetRow,
+    selected: &[&crate::store::ChangesetItemRow],
+) -> String {
+    let items: Vec<String> = selected
+        .iter()
+        .map(|i| {
+            let params = catalog::changesets::ItemParams::parse(i.params.as_deref());
+            match i.action.as_str() {
+                "sync" => format!(
+                    "sync #{} {} to {} ({})",
+                    i.position,
+                    i.grp,
+                    i.name,
+                    params.assets.join(", ")
+                ),
+                action => {
+                    let on = params.host.map(|h| format!(" on {h}")).unwrap_or_default();
+                    format!("{action} #{} {}/{}{on}", i.position, i.kind, i.name)
+                }
+            }
+        })
+        .collect();
+    format!(
+        "changeset {} ({}): {}",
+        card.id,
+        card.kind,
+        items.join("; ")
+    )
+}
+
 /// The `E_FORBIDDEN` for a `changesets` action without the grant it needs,
-/// naming the catalog and the operator's remedy on the hub. `None`: a card
-/// or catalog that does not exist, said the way an ungranted one is, with
-/// no name (R22).
+/// naming the catalog and the operator's remedy on the hub. `None`: the
+/// unnamed refusal — a caller that is not the master or a person's own
+/// unbound full device, a client holding no grant at all, or a card or
+/// catalog that does not exist (R22). It names no catalog and no card, so
+/// it reads the same whatever id was asked for.
 fn changesets_forbidden(action: &str, catalog: Option<&str>, caller: &Caller) -> McpError {
     let message = match catalog {
         Some(name) => {
@@ -670,8 +755,8 @@ fn changesets_forbidden(action: &str, catalog: Option<&str>, caller: &Caller) ->
             )
         }
         None => format!(
-            "changesets {action} needs the master token or a paired client granted every \
-             catalog the card names ({} refused)",
+            "changesets {action} needs the master token or a full paired client bound to no \
+             org, granted every catalog the card names ({} refused)",
             caller.label()
         ),
     };

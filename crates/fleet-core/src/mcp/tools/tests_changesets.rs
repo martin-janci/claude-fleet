@@ -5,7 +5,9 @@
 //! a host's "can list" is `list_assets` and the inventory). `list` is the
 //! master's or an unbound full client's, as M3's `list_catalogs` (PF15).
 
-use super::tests_catalog_admin::{client, code_of, host, message_of, tools, two_catalog_store};
+use super::tests_catalog_admin::{
+    client, code_of, host, message_of, tools, tools_notifying, two_catalog_store,
+};
 use super::*;
 use crate::store::NewChangesetItem;
 
@@ -133,8 +135,30 @@ async fn list_is_open_to_unbound_clients_but_only_a_grant_on_the_cards_catalog_m
         }
         let r = call(&t, &caller, "reject_item", Some(card), Some(vec![0])).await;
         assert_eq!(code_of(&r), "E_FORBIDDEN");
-        assert!(message_of(r).contains("--catalog acme"), "names the remedy");
     }
+    // desk holds a grant (personal), so it is told which one it lacks;
+    // plain holds none and is refused before any card is read.
+    let r = call(
+        &t,
+        &client(desk, TokenMode::Full, None),
+        "reject_item",
+        Some(card),
+        Some(vec![0]),
+    )
+    .await;
+    assert!(message_of(r).contains("--catalog acme"), "names the remedy");
+    let r = call(
+        &t,
+        &client(plain, TokenMode::Full, None),
+        "reject_item",
+        Some(card),
+        Some(vec![0]),
+    )
+    .await;
+    assert!(
+        !message_of(r).contains("acme"),
+        "a grantless client learns no catalog"
+    );
     assert_eq!(state_of(&t, card), "proposed", "nothing changed");
     let r = call(
         &t,
@@ -302,4 +326,153 @@ async fn unknown_cards_hide_cards_and_missing_arguments() {
         "E_INVALID"
     );
     assert_eq!(state_of(&t, card), "proposed");
+}
+
+/// Fix round 1 (Critical): `writes_hosts` and the catalogs checked come from
+/// exactly the items `apply` runs. A drift card whose take_host (acme's
+/// alone) was rejected applies its restore when no positions are named — a
+/// host write — so it needs personal and the confirm gate, whose summary
+/// names the card and the restore, and an approved retry gets through.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn a_drift_restore_applied_without_positions_needs_personal_and_confirmation() {
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let (s, _desk, ops, _plain, acme, _card) = seeded();
+    s.set_setting(guard::SETTING_CONFIRM_DESTRUCTIVE, "true")
+        .unwrap();
+    let drift = s
+        .insert_changeset(
+            "drift",
+            "skill/w differs on oci",
+            &[
+                item(
+                    "drift",
+                    Some(acme),
+                    "skill",
+                    "take_host",
+                    r#"{"host":"oci","hash":"h2"}"#,
+                ),
+                item(
+                    "drift",
+                    Some(acme),
+                    "skill",
+                    "restore",
+                    r#"{"host":"oci","hash":"h2"}"#,
+                ),
+            ],
+        )
+        .unwrap();
+    let asked_for: Arc<Mutex<Vec<String>>> = Arc::default();
+    let rec = asked_for.clone();
+    let t = tools_notifying(
+        s,
+        Arc::new(move |r: &guard::ConfirmRequest| rec.lock().unwrap().push(r.summary.clone())),
+    );
+    let ops = client(ops, TokenMode::Full, None);
+    let r = call(&t, &ops, "reject_item", Some(drift.id), Some(vec![0])).await;
+    assert_eq!(code_of(&r), "OK", "{:?}", r.err());
+    assert_eq!(
+        state_of(&t, drift.id),
+        "proposed",
+        "the restore is still pending"
+    );
+
+    let r = call(&t, &ops, "apply", Some(drift.id), None).await;
+    assert_eq!(code_of(&r), "E_FORBIDDEN", "the lone restore writes a host");
+    assert!(message_of(r).contains("catalog personal"));
+
+    let m = Caller::master();
+    let asked = call(&t, &m, "apply", Some(drift.id), None)
+        .await
+        .unwrap_err();
+    assert!(
+        asked.message.starts_with(codes::E_CONFIRM_REQUIRED),
+        "{}",
+        asked.message
+    );
+    let nonce = asked.data.as_ref().unwrap()["details"]["confirm_nonce"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        *asked_for.lock().unwrap(),
+        vec![format!(
+            "changeset {} (drift): restore #1 skill/w on oci",
+            drift.id
+        )],
+        "the approval names what runs"
+    );
+    assert!(t.guards.confirms.resolve(&nonce, true));
+    let after = t
+        .changesets(
+            Extension(m.clone()),
+            Parameters(ChangesetsParams {
+                action: "apply".into(),
+                id: Some(drift.id),
+                positions: None,
+                confirm_nonce: Some(nonce),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        !after.message.starts_with(codes::E_CONFIRM_REQUIRED)
+            && !after.message.starts_with("E_FORBIDDEN"),
+        "past the gate, into the apply: {}",
+        after.message
+    );
+}
+
+/// Fix round 1: an org-bound client is refused before any card is read —
+/// the same refusal, word for word, for an id that exists and one that
+/// does not, on every action.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn an_org_bound_client_learns_nothing_about_cards() {
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let (s, _desk, _ops, _plain, acme, card) = seeded();
+    let org_id = s.get_catalog(acme).unwrap().unwrap().org_id;
+    // Granted acme while unbound, then bound: the grant row stays.
+    let bound = s.insert_client_token("bound", "ee55", "full").unwrap();
+    s.set_client_catalog_grant("bound", acme, true).unwrap();
+    s.set_client_org("bound", org_id).unwrap();
+    let t = tools(s);
+    let c = client(bound.id, TokenMode::Full, org_id);
+    for action in ["apply", "dismiss", "undo", "list"] {
+        let known = message_of(call(&t, &c, action, Some(card), None).await);
+        let unknown = message_of(call(&t, &c, action, Some(9_999), None).await);
+        assert!(known.starts_with("E_FORBIDDEN"), "{action}: {known}");
+        assert_eq!(known, unknown, "{action}");
+        assert!(!known.contains("acme"), "{action}: {known}");
+    }
+    assert_eq!(state_of(&t, card), "proposed");
+}
+
+/// Fix round 1, R22: for an unbound client the code is the same for a card
+/// that does not exist and one it holds no grant on. What still differs,
+/// by design: a client holding some grant is told which catalog an
+/// existing card needs (`--catalog acme`), and a client holding none is
+/// told nothing for either.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn an_unbound_clients_refusals_share_a_code_for_unknown_and_ungranted_cards() {
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let (s, desk, _ops, plain, _acme, card) = seeded();
+    let t = tools(s);
+    let desk = client(desk, TokenMode::Full, None);
+    let known = call(&t, &desk, "apply", Some(card), None).await;
+    let unknown = call(&t, &desk, "apply", Some(9_999), None).await;
+    assert_eq!(code_of(&known), "E_FORBIDDEN");
+    assert_eq!(code_of(&unknown), "E_FORBIDDEN");
+    assert!(message_of(known).contains("--catalog acme"));
+    assert!(!message_of(unknown).contains("9999"));
+
+    let plain = client(plain, TokenMode::Full, None);
+    let known = message_of(call(&t, &plain, "apply", Some(card), None).await);
+    let unknown = message_of(call(&t, &plain, "apply", Some(9_999), None).await);
+    assert!(known.starts_with("E_FORBIDDEN"), "{known}");
+    assert_eq!(
+        known, unknown,
+        "a grantless client is refused before the card"
+    );
 }

@@ -369,22 +369,27 @@ Index by area (names only; see the reference for details):
   `apply_sync` and `set_secret`).
 - **Asset changesets (Assets M4)** — `changesets` (`action`: `list` |
   `propose` | `apply` | `undo` | `dismiss` | `reject_item`): cards
-  proposed from the last scan (Bootstrap, New on host, Drift, Rollout).
-  `list` (one card in full with `id`) is open to the master and a full
-  paired client bound to no org; a per-host token is never served the tool
-  (its "can list" is `list_assets` and the inventory). `propose` needs the
-  personal grant; `apply` (`positions` picks items; a drift card applies
-  one), `undo` (the latest applied card per catalog: `git revert` plus the
-  stored layer assignments, never touching hosts), `dismiss` and
-  `reject_item` need a grant on every catalog the card names (`fleet-hub
-  client grant <name> assets [--catalog NAME]`); applying a rollout or a
-  restore also needs the personal grant and passes the `apply_sync`
-  confirm gate. A client naming a card that does not exist gets the same
-  `E_FORBIDDEN` as an ungranted one; the master gets `E_NOTFOUND`. A
-  failed apply commits nothing; a card never removes anything from a host.
-  Dismissing or rejecting records a verdict, so the same content is not
-  proposed again. One card action runs at a time; a card's host sync is
-  not a task, so `cancel_task` cannot stop it.
+  proposed from the last scan (Bootstrap, New on host, Drift, Rollout). It
+  answers only the master and a full paired client bound to no org, which
+  may `list` (one card in full with `id`); an org-bound client is refused
+  every action before any card is read, and a per-host token is never
+  served the tool (its "can list" is `list_assets` and the inventory).
+  `propose` needs the personal grant; `apply` (`positions` picks items; a
+  drift card applies one), `undo` (the latest applied card per catalog:
+  `git revert` plus the stored layer assignments, never touching hosts),
+  `dismiss` and `reject_item` need a grant on every catalog the card names
+  (`fleet-hub client grant <name> assets [--catalog NAME]`); for `apply`
+  the grants and the gate are read from exactly the items it runs (with no
+  `positions`, every pending item but "needs a look"): applying a rollout
+  or a restore also needs the personal grant and passes the `apply_sync`
+  confirm gate, whose request names the card, its kind and each item, so
+  an approval covers only that content. A client naming a card that does
+  not exist gets the same `E_FORBIDDEN` as an ungranted one, and a client
+  holding no grant at all gets one refusal for every card; the master gets
+  `E_NOTFOUND`. A failed apply commits nothing; a card never removes
+  anything from a host. Dismissing or rejecting records a verdict, so the
+  same content is not proposed again. One card action runs at a time; a
+  card's host sync is not a task, so `cancel_task` cannot stop it.
 - **Multi-harness set (F3a)** — `set_host_harnesses` (choose which
   harnesses the catalog syncs on one host: `null` = auto — Claude, plus
   Codex where a scan finds it or fleet already manages it there —

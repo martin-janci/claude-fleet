@@ -74,16 +74,7 @@ pub async fn apply_held(
     ssh: &Arc<SshClient>,
 ) -> Result<ChangesetView, IpcError> {
     let (card, items) = super::card(args.id, store)?;
-    if !is_open(&card.state) {
-        return Err(IpcError::new(
-            codes::E_INVALID_STATE,
-            format!(
-                "card {} is {}; only a proposed or failed card applies",
-                card.id, card.state
-            ),
-        ));
-    }
-    let selected = select_items(&card, &items, args.positions.as_deref())?;
+    let selected = applicable(&card, &items, args.positions.as_deref())?;
     // Dispatch on what was selected (fix round 1): a restore is the one
     // item applied, whatever named it.
     if selected
@@ -103,6 +94,27 @@ pub async fn apply_held(
         apply_catalog(&card, &items, &selected, store, ssh).await?;
     }
     super::get(args.id, store)
+}
+
+/// The items applying `positions` of this card runs, or why it applies
+/// nothing: only an open card applies (R3), then [`select_items`]. The MCP
+/// tool's grant check and confirm gate read this same selection under the
+/// same `APPLY_LOCK`, so what is authorized is what runs.
+pub fn applicable<'a>(
+    card: &ChangesetRow,
+    items: &'a [ChangesetItemRow],
+    positions: Option<&[i64]>,
+) -> Result<Vec<&'a ChangesetItemRow>, IpcError> {
+    if !is_open(&card.state) {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!(
+                "card {} is {}; only a proposed or failed card applies",
+                card.id, card.state
+            ),
+        ));
+    }
+    select_items(card, items, positions)
 }
 
 /// R3, R8: the items this apply runs.
