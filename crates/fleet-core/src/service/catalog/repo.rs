@@ -462,10 +462,194 @@ pub fn read_asset(root: &Path, kind: Kind, name: &str) -> Result<Asset, IpcError
         .map_err(|m| IpcError::new(E_CATALOG_PARSE, format!("{}: {m}", rel(root, &yaml))))
 }
 
-/// Whether the working tree has nothing to commit — untracked files count
-/// (Rulings R11: what `reset_hard` would delete must not be someone's work).
+/// `git status` for the M4 guards: every untracked file listed one by one,
+/// submodules included, whatever `status.showUntrackedFiles` or
+/// `diff.ignoreSubmodules` the repo or the user configured — a config that
+/// hides untracked files must never make someone's work look clean.
+const STATUS_ALL: [&str; 6] = [
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--untracked-files=all",
+    "--ignore-submodules=none",
+    "--no-renames",
+];
+
+/// Every path `git status` reports changed, staged or untracked (each
+/// untracked file on its own), relative to `root` with `/` separators.
+pub fn changed_paths(root: &Path) -> Result<Vec<String>, IpcError> {
+    let out = git_output(root, &STATUS_ALL)?;
+    if !out.status.success() {
+        return Err(
+            IpcError::new(E_CATALOG_GIT, "git status failed").with_details(
+                serde_json::json!({ "stderr": String::from_utf8_lossy(&out.stderr).trim() }),
+            ),
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|e| e.len() > 3)
+        .map(|e| e[3..].to_string())
+        .collect())
+}
+
+/// Whether the working tree has nothing to commit — untracked files count,
+/// whatever the config says (Rulings R11: what a failed apply's reset would
+/// undo must not be someone's work).
 pub fn is_clean(root: &Path) -> Result<bool, IpcError> {
-    Ok(git(root, &["status", "--porcelain"])?.trim().is_empty())
+    Ok(changed_paths(root)?.is_empty())
+}
+
+/// An asset's path relative to the catalog root, as `git` names it: its
+/// folder for skills and agents, its file for the rest.
+pub fn asset_rel_path(kind: Kind, name: &str) -> String {
+    if kind.is_folder() {
+        format!("{}/{name}", kind.dir())
+    } else {
+        format!("{}/{name}.yaml", kind.dir())
+    }
+}
+
+/// Whether `path` (relative, `/`-separated) is one of `ours` or inside one.
+fn is_ours(path: &str, ours: &std::collections::BTreeSet<String>) -> bool {
+    let path = path.trim_end_matches('/');
+    ours.iter()
+        .any(|o| path == o || path.starts_with(&format!("{o}/")))
+}
+
+fn check_rev(rev: &str) -> Result<(), IpcError> {
+    if rev.is_empty() || !rev.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(IpcError::new(E_INVALID, format!("not a commit id: {rev}")));
+    }
+    Ok(())
+}
+
+/// The members of `paths` that have at least one file in `rev`'s tree.
+fn paths_in_tree(
+    root: &Path,
+    rev: &str,
+    paths: &std::collections::BTreeSet<String>,
+) -> Result<std::collections::BTreeSet<String>, IpcError> {
+    if paths.is_empty() {
+        return Ok(Default::default());
+    }
+    let mut args: Vec<&str> = vec!["ls-tree", "-r", "--name-only", rev, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    let files = git(root, &args)?;
+    Ok(paths
+        .iter()
+        .filter(|p| {
+            files
+                .lines()
+                .any(|f| f == p.as_str() || f.starts_with(&format!("{p}/")))
+        })
+        .cloned()
+        .collect())
+}
+
+/// Assets M4 guard (PF7, Task 6 review): what in `root` is NOT this
+/// operation's own work — HEAD anywhere but `heads` (the HEAD it recorded
+/// before writing, and the commit it made itself), and every changed path,
+/// untracked included, outside `ours` (the paths it wrote). Empty means
+/// [`reset_paths`] can undo the operation without touching anyone else's
+/// work; anything else must be left for a person. Apply and undo share it.
+pub fn foreign_changes(
+    root: &Path,
+    heads: &[&str],
+    ours: &std::collections::BTreeSet<String>,
+) -> Result<Vec<String>, IpcError> {
+    let mut foreign = Vec::new();
+    let now = head(root)?;
+    if !heads.contains(&now.as_str()) {
+        foreign.push(format!(
+            "HEAD moved to {} (expected {})",
+            &now[..now.len().min(12)],
+            heads
+                .iter()
+                .map(|h| &h[..h.len().min(12)])
+                .collect::<Vec<_>>()
+                .join(" or ")
+        ));
+    }
+    foreign.extend(
+        changed_paths(root)?
+            .into_iter()
+            .filter(|p| !is_ours(p, ours)),
+    );
+    Ok(foreign)
+}
+
+/// Commit exactly `paths` (relative; deletions included) — never anything
+/// else staged or lying in the tree. `None` when they hold no change.
+pub fn commit_paths(
+    root: &Path,
+    message: &str,
+    paths: &std::collections::BTreeSet<String>,
+) -> Result<Option<String>, IpcError> {
+    let tracked = paths_in_tree(root, "HEAD", paths)?;
+    let known: Vec<String> = paths
+        .iter()
+        .filter(|p| root.join(p.as_str()).exists() || tracked.contains(*p))
+        .cloned()
+        .collect();
+    if known.is_empty() {
+        return Ok(None);
+    }
+    stage_paths(root, &known)?;
+    if !has_staged(root, &known)? {
+        return Ok(None);
+    }
+    let mut args: Vec<&str> = Vec::new();
+    if !has_identity(root) {
+        args.extend([
+            "-c",
+            "user.name=claude-fleet",
+            "-c",
+            "user.email=fleet@localhost",
+        ]);
+    }
+    args.extend(["commit", "-q", "--only", "-m", message, "--"]);
+    args.extend(known.iter().map(String::as_str));
+    git(root, &args)?;
+    head(root).map(Some)
+}
+
+/// Undo an operation's own writes: HEAD back to `pre` (soft — the index
+/// keeps every other path), then each of `ours` removed and restored from
+/// `pre` in the index and the tree (or left absent when `pre` has none).
+/// Touches nothing outside `ours`, and never runs `git clean`. Call it only
+/// once [`foreign_changes`] came back empty.
+pub fn reset_paths(
+    root: &Path,
+    pre: &str,
+    ours: &std::collections::BTreeSet<String>,
+) -> Result<(), IpcError> {
+    check_rev(pre)?;
+    if head(root)? != pre {
+        git(root, &["reset", "-q", "--soft", pre])?;
+    }
+    if ours.is_empty() {
+        return Ok(());
+    }
+    let mut args: Vec<&str> = vec!["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--"];
+    args.extend(ours.iter().map(String::as_str));
+    git(root, &args)?;
+    for p in ours {
+        let path = root.join(p);
+        match std::fs::symlink_metadata(&path) {
+            Ok(m) if m.is_dir() => std::fs::remove_dir_all(&path)?,
+            Ok(_) => std::fs::remove_file(&path)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let existing = paths_in_tree(root, pre, ours)?;
+    if !existing.is_empty() {
+        let mut args: Vec<&str> = vec!["checkout", "-q", pre, "--"];
+        args.extend(existing.iter().map(String::as_str));
+        git(root, &args)?;
+    }
+    Ok(())
 }
 
 /// Put the tree back at `rev`, deleting what is untracked but never what git
@@ -482,9 +666,7 @@ pub fn reset_hard(root: &Path, rev: &str) -> Result<(), IpcError> {
 /// identity `commit` falls back to. A conflict aborts the revert, leaving
 /// the tree as it was, and is the error. Answers the new HEAD.
 pub fn revert(root: &Path, sha: &str) -> Result<String, IpcError> {
-    if sha.is_empty() || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(IpcError::new(E_INVALID, format!("not a commit id: {sha}")));
-    }
+    check_rev(sha)?;
     let mut args: Vec<&str> = Vec::new();
     if !has_identity(root) {
         args.extend([
@@ -1777,5 +1959,83 @@ mod tests {
             "w"
         );
         assert!(read_asset(dir.path(), Kind::Skill, "nope").is_err());
+    }
+
+    /// Task 6 review (Critical): a repo or user config that hides untracked
+    /// files must not make a tree with someone's new file look clean.
+    #[test]
+    fn is_clean_sees_untracked_files_whatever_the_config_says() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        commit(root, "init").unwrap();
+        git(root, &["config", "status.showUntrackedFiles", "no"]).unwrap();
+        std::fs::create_dir_all(root.join("skills/w")).unwrap();
+        std::fs::write(root.join("skills/w/asset.yaml"), "x\n").unwrap();
+        assert!(
+            git(root, &["status", "--porcelain"]).unwrap().is_empty(),
+            "the config hides it from a plain status"
+        );
+        assert!(!is_clean(root).unwrap());
+        assert_eq!(changed_paths(root).unwrap(), ["skills/w/asset.yaml"]);
+    }
+
+    /// Task 6 review (PF7 "never"): an operation commits only the paths it
+    /// wrote, the guard names everything else, and the reset puts back only
+    /// those paths — a foreign file survives both.
+    #[test]
+    fn commit_paths_foreign_changes_and_reset_paths_keep_to_our_paths() {
+        use std::collections::BTreeSet;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::create_dir_all(root.join("skills/w")).unwrap();
+        std::fs::write(root.join("skills/w/asset.yaml"), "old\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let base = commit(root, "init").unwrap();
+
+        let ours: BTreeSet<String> = ["skills/w", "layers/core.yaml"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        std::fs::write(root.join("skills/w/asset.yaml"), "new\n").unwrap();
+        std::fs::write(root.join("skills/w/body.md"), "b\n").unwrap();
+        std::fs::create_dir_all(root.join("layers")).unwrap();
+        std::fs::write(root.join("layers/core.yaml"), "l\n").unwrap();
+        std::fs::write(root.join("foreign.txt"), "theirs\n").unwrap();
+        let mine = commit_paths(root, "fleet: x", &ours).unwrap().unwrap();
+        let files = git(root, &["show", "--name-only", "--format=", "HEAD"]).unwrap();
+        assert!(!files.contains("foreign.txt"), "{files}");
+        assert!(files.contains("layers/core.yaml") && files.contains("skills/w/body.md"));
+
+        let foreign = foreign_changes(root, &[&base, &mine], &ours).unwrap();
+        assert_eq!(foreign, ["foreign.txt"]);
+        let moved = foreign_changes(root, &[&base], &ours).unwrap();
+        assert!(moved[0].starts_with("HEAD moved"), "{moved:?}");
+
+        // The guard is clean once the foreign file is gone; the reset then
+        // restores exactly our paths.
+        std::fs::remove_file(root.join("foreign.txt")).unwrap();
+        std::fs::write(root.join("skills/w/stray.md"), "ours too\n").unwrap();
+        assert!(foreign_changes(root, &[&base, &mine], &ours)
+            .unwrap()
+            .is_empty());
+        std::fs::write(root.join("keep.txt"), "a later file\n").unwrap();
+        let keep: BTreeSet<String> = ours.clone();
+        reset_paths(root, &base, &keep).unwrap();
+        assert_eq!(head(root).unwrap(), base);
+        assert_eq!(
+            std::fs::read_to_string(root.join("skills/w/asset.yaml")).unwrap(),
+            "old\n"
+        );
+        assert!(!root.join("skills/w/body.md").exists());
+        assert!(!root.join("skills/w/stray.md").exists());
+        assert!(!root.join("layers/core.yaml").exists());
+        assert!(root.join("keep.txt").is_file(), "never a blanket clean");
+        assert_eq!(changed_paths(root).unwrap(), ["keep.txt"]);
+        assert!(commit_paths(root, "noop", &ours).unwrap().is_none());
     }
 }
