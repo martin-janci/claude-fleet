@@ -120,8 +120,8 @@ impl Decider {
 /// An item's `params` JSON (Rulings R8). Every field optional; each action
 /// reads the ones it needs: import `from_host`, `layer`, `member`, `hash`,
 /// `reason`; assign_layer `host`, `layer`, `axis`; set_scope `scope`,
-/// `member`; hide `hash`, `reason`; take_host/restore `host`, `hash`; sync
-/// `layer`, `assets`, `hash`.
+/// `member`; hide `hash`, `reason`; take_host/restore `host`, `hash`,
+/// `harness`; sync `layer`, `assets`, `hash`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -144,6 +144,10 @@ pub struct ItemParams {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assets: Vec<String>,
+    /// The harness a drift was seen on; a restore writes that harness's
+    /// copy only. `None` = `claude` (the drift rule reads claude rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
 }
 
 impl ItemParams {

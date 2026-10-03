@@ -72,10 +72,21 @@ pub async fn apply(
         ));
     }
     let selected = select_items(&card, &items, args.positions.as_deref())?;
-    if card.kind == CardKind::Rollout.as_str() {
-        apply_rollout(&card, &items, &selected, store, ssh).await?;
-    } else if super::writes_hosts(&card, &items, args.positions.as_deref()) {
+    // Dispatch on what was selected (fix round 1): a restore is the one
+    // item applied, whatever named it.
+    if selected
+        .iter()
+        .any(|i| i.action == ItemAction::Restore.as_str())
+    {
+        if selected.len() != 1 {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "a restore applies alone: name only its position",
+            ));
+        }
         apply_restore(&card, &items, selected[0], store, ssh).await?;
+    } else if card.kind == CardKind::Rollout.as_str() {
+        apply_rollout(&card, &items, &selected, store, ssh).await?;
     } else {
         apply_catalog(&card, &items, &selected, store, ssh).await?;
     }
@@ -1368,12 +1379,15 @@ impl HostOutcome {
 /// row or emits progress (fix round 1, I1). With `gate_secrets`, an asset
 /// of the card blocked on a missing secret refuses the whole sync first
 /// (`E_SECRET_MISSING`, as `apply_sync` without `force_partial`); without it
-/// (SB6) that asset just waits. Answers each host's [`HostOutcome`].
+/// (SB6) that asset just waits. With `harness`, only that harness's pairs
+/// are kept (a restore is pinned to the harness its drift was seen on, I2).
+/// Answers each host's [`HostOutcome`].
 async fn sync_hosts(
     wants: &BTreeMap<String, BTreeSet<String>>,
     catalogs: &BTreeSet<String>,
     filter: OpFilter,
     gate_secrets: bool,
+    harness: Option<&str>,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<BTreeMap<String, HostOutcome>, IpcError> {
@@ -1415,6 +1429,9 @@ async fn sync_hosts(
         }
         let o = out.entry(host.clone()).or_default();
         for mut hp in parked.hosts {
+            if harness.is_some_and(|h| h != hp.harness) {
+                continue;
+            }
             missing.extend(missing_secrets(&hp, assets, catalogs));
             narrow(&mut hp, filter, assets, catalogs);
             if hp.status != "planned" {
@@ -1559,13 +1576,26 @@ async fn apply_rollout(
             .or_default()
             .extend(ItemParams::parse(item.params.as_deref()).assets);
     }
-    let outcome = sync_hosts(&wants, &catalogs, OpFilter::Additive, true, store, ssh)
-        .await
-        .map_err(|e| fail_host_card(card, e, store))?;
+    let outcome = sync_hosts(
+        &wants,
+        &catalogs,
+        OpFilter::Additive,
+        true,
+        None,
+        store,
+        ssh,
+    )
+    .await
+    .map_err(|e| fail_host_card(card, e, store))?;
     finish_host_card(card, items, selected, &outcome, |i| i.name.clone(), store)
 }
 
-/// Drift restore: the catalog copy back onto one host, with backup (R15).
+/// Drift restore: the catalog copy back onto one host, with backup (R15) —
+/// on the harness the drift was seen on only (`params.harness`, else
+/// `claude`, where the drift rule reads its rows; I2): another harness's
+/// copy of the same asset was never picked. A restore that wrote nothing —
+/// its host skipped, or no update or overwrite planned — fails and leaves
+/// the drift card open.
 async fn apply_restore(
     card: &ChangesetRow,
     items: &[ChangesetItemRow],
@@ -1573,25 +1603,41 @@ async fn apply_restore(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<(), IpcError> {
-    let host = ItemParams::parse(item.params.as_deref())
+    let params = ItemParams::parse(item.params.as_deref());
+    let host = params
         .host
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "restore names no host"))?;
+    let harness = params.harness.unwrap_or_else(|| "claude".to_string());
     let catalogs = card_catalogs(card, &[item], store)?;
     let wants = BTreeMap::from([(
         host.clone(),
         BTreeSet::from([format!("{}/{}", item.kind, item.name)]),
     )]);
-    let mut outcome = sync_hosts(&wants, &catalogs, OpFilter::Restore, true, store, ssh)
-        .await
-        .map_err(|e| fail_host_card(card, e, store))?;
+    let mut outcome = sync_hosts(
+        &wants,
+        &catalogs,
+        OpFilter::Restore,
+        true,
+        Some(&harness),
+        store,
+        ssh,
+    )
+    .await
+    .map_err(|e| fail_host_card(card, e, store))?;
     // A restore that wrote nothing did not restore: the drift card stays
-    // open rather than closing on a no-op.
+    // open rather than closing on a no-op or a skipped host.
     let o = outcome.entry(host.clone()).or_default();
     if o.failed.is_empty() && !o.applied {
-        o.failed.push(format!(
-            "nothing to restore on {host}: {}/{} has no update or overwrite planned there",
-            item.kind, item.name
-        ));
+        let why = if o.skipped.is_empty() {
+            format!(
+                "nothing to restore on {host}: {}/{} has no update or overwrite planned there",
+                item.kind, item.name
+            )
+        } else {
+            format!("not restored: {}", o.skipped.join("; "))
+        };
+        o.skipped.clear();
+        o.failed.push(why);
     }
     finish_host_card(card, items, &[item], &outcome, move |_| host.clone(), store)
 }
@@ -1721,7 +1767,16 @@ pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
     if wants.is_empty() {
         return Ok(0);
     }
-    let outcome = sync_hosts(&wants, &catalogs, OpFilter::Additive, false, store, ssh).await?;
+    let outcome = sync_hosts(
+        &wants,
+        &catalogs,
+        OpFilter::Additive,
+        false,
+        None,
+        store,
+        ssh,
+    )
+    .await?;
     for (host, o) in &outcome {
         for why in o.failed.iter().chain(&o.skipped) {
             tracing::debug!(host = %host, "catalog.auto: {why}");
@@ -3550,6 +3605,92 @@ mod tests {
         assert!(err.starts_with("nothing to restore on oci"), "{err}");
         assert!(!home.path().join(".claude/skills/w").exists());
         assert_eq!(last_run(&f), None, "nothing applied");
+    }
+
+    /// I2: a restore writes the harness its drift was seen on (claude) and
+    /// nothing else — codex's differing copy of the same skill, which the
+    /// underlying plan would overwrite, is untouched.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_restore_leaves_another_harness_copy_alone() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        f.store
+            .lock()
+            .unwrap()
+            .set_host_harnesses(
+                "oci",
+                Some(&["claude".to_string(), "codex".to_string()][..]),
+            )
+            .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        host_skill(home.path(), "w", "Edited on the host, long enough.");
+        let codex = home.path().join(".codex/skills/w/SKILL.md");
+        std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        let theirs = "---\nname: w\ndescription: Codex's own copy, long enough.\n---\nMine.\n";
+        std::fs::write(&codex, theirs).unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+
+        let planned = sync::plan_sync(
+            PlanArgs {
+                host_alias: Some("oci".into()),
+                ..Default::default()
+            },
+            &f.store,
+            &ssh,
+        )
+        .await
+        .unwrap();
+        sync::plan::registry_take_with_expiry(&planned.id);
+        let codex_op = planned
+            .hosts
+            .iter()
+            .filter(|h| h.harness == "codex")
+            .flat_map(|h| h.actions.iter())
+            .find(|a| a.name == "w")
+            .map(|a| a.op);
+        assert_eq!(codex_op, Some(ActionOp::Overwrite), "{planned:?}");
+
+        let id = drift_card(&f, p, "oci");
+        let v = restore(&f, id, &ssh).await;
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        let claude =
+            std::fs::read_to_string(home.path().join(".claude/skills/w/SKILL.md")).unwrap();
+        assert!(claude.contains("Steps."), "{claude}");
+        assert_eq!(
+            std::fs::read_to_string(&codex).unwrap(),
+            theirs,
+            "codex untouched"
+        );
+    }
+
+    /// Fix round 1 (4): a restore whose host is skipped (unreachable) fails
+    /// and keeps the drift card open — it never closes as applied.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_restore_on_a_skipped_host_fails() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        f.store
+            .lock()
+            .unwrap()
+            .update_host_probe("oci", false, None, None, 2)
+            .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let id = drift_card(&f, p, "oci");
+        let v = restore(&f, id, &ssh).await;
+        assert_eq!(v.state, "failed");
+        assert_eq!(item_states(&v), ["pending", "pending"]);
+        let err = v.error.unwrap_or_default();
+        assert!(
+            err.starts_with("not restored: oci (claude)") && err.contains("unreachable"),
+            "{err}"
+        );
     }
 
     /// A drift card on `skill/w` at `host`: take_host (0), restore (1).
