@@ -1020,6 +1020,9 @@ const MIGRATIONS: &[Migration] = &[
     // (personal backfilled from `assets_admin_at`). IF NOT EXISTS + INSERT
     // OR IGNORE: safe to re-run.
     Migration::plain(93, include_str!("../../migrations/093_catalog_access.sql")),
+    // File downloads: `downloads` (a file a session sent from its host,
+    // copied to the data dir). CREATE IF NOT EXISTS: safe to re-run.
+    Migration::plain(94, include_str!("../../migrations/094_downloads.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

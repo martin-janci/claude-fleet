@@ -340,6 +340,33 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // File downloads: a host's Claude sends a file from its OWN host (the
+    // service fences it there); a person sends, lists and removes from a
+    // paired device. `send_file` only stats the file before it answers —
+    // the copy runs in the background — so it is Quick. Listing and
+    // removing are a person's, so a host's token is not served them
+    // (`NOT_FOR_HOST_TOKENS`).
+    ToolPolicy {
+        name: "send_file",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "list_downloads",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "remove_download",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Trusting a client widens what its token can do (unmarked delivery), so
     // it is credential administration like minting and revoking.
     ToolPolicy {
@@ -1067,7 +1094,12 @@ pub fn is_client_tool(name: &str) -> bool {
 /// `import_assets` with a remote `host_alias`, making the hub SSH into
 /// another host and write into — the catalog is what the master gate exists
 /// to prevent.
-pub const NOT_FOR_HOST_TOKENS: &[&str] = &["catalog_admin", "import_assets"];
+pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
+    "catalog_admin",
+    "import_assets",
+    "list_downloads",
+    "remove_download",
+];
 
 // --- legacy name lists -------------------------------------------------------
 //

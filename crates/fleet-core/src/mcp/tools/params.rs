@@ -1099,3 +1099,9 @@ pub struct UpdateAdminParams {
     #[serde(default)]
     pub reason: Option<String>,
 }
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RemoveDownloadParams {
+    /// The download's id (`list_downloads`).
+    pub id: i64,
+}

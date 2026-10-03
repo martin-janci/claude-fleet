@@ -2161,7 +2161,8 @@ fn capture_default_cap_matches_docs() {
 /// `catalog_admin`, and host identity & health's `merge_host` and
 /// `forget_project`: 95; `update_status` / `update_admin`: 97; `session_tool_detail`: 98 (102 with
 /// the tools main added alongside it; declarative pages' `guide`: 103;
-/// multi-harness F3a's `set_host_harnesses`: 104.)
+/// multi-harness F3a's `set_host_harnesses`: 104; file downloads'
+/// `send_file` / `list_downloads` / `remove_download`: 107.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -2174,6 +2175,7 @@ fn router_sum_serves_every_tool() {
         include_str!("assets.rs"),
         include_str!("peer.rs"),
         include_str!("updates.rs"),
+        include_str!("downloads.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -2183,7 +2185,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 104);
+    assert_eq!(served, 107);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3438,8 +3440,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// +352 bytes). Measured at 70,523 on 2026-10-02 after merging `main`
     /// into Assets M3 (70,483, +92 bytes) and the final review's M-c
     /// (`remove_catalog` is master-only, said in `catalog_admin`'s
-    /// description and its `catalog` parameter, +40 bytes).
-    const BUDGET_BYTES: usize = 70_623;
+    /// description and its `catalog` parameter, +40 bytes). Measured at
+    /// 71,793 on 2026-10-03 after file downloads (`send_file`,
+    /// `list_downloads`, `remove_download`, +1,170 bytes).
+    const BUDGET_BYTES: usize = 71_893;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
