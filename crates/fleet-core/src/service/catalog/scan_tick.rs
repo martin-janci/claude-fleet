@@ -197,8 +197,15 @@ pub fn spawn_catalog_scan_tick(
             // Assets M4 (R19): the reconcile pass — cards, automatic hides —
             // after every pass that got this far (a personal catalog is
             // loaded). It never waits: an apply in flight skips it, and it
-            // never touches `owed` or `seen`.
-            super::changesets::reconcile::after_scan_pass(&store);
+            // never touches `owed` or `seen`. A panic in it is logged and
+            // stops only this pass's reconcile, never the tick loop.
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::changesets::reconcile::after_scan_pass(&store)
+            }))
+            .is_err()
+            {
+                tracing::error!("catalog scan tick: the changeset reconcile pass panicked");
+            }
             seen = Some(now_key);
         }
     }))

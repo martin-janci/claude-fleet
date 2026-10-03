@@ -338,8 +338,13 @@ pub fn writes_hosts(
 }
 
 /// A card that changed a catalog, so can be undone (R20): bootstrap, new,
-/// and a drift applied as take_host.
+/// and a drift applied as take_host — and only when an applied item names a
+/// catalog. A hide-only card committed nothing, so there is nothing to undo
+/// (PF12).
 pub(crate) fn changes_catalog(card: &ChangesetRow, items: &[ChangesetItemRow]) -> bool {
+    if applied_catalogs(items).is_empty() {
+        return false;
+    }
     match card.kind.as_str() {
         "bootstrap" | "new" => true,
         "drift" => items
@@ -603,5 +608,36 @@ mod tests {
         assert_eq!(v.items[0].catalog.as_deref(), Some("personal"));
         assert_eq!(v.items[0].params.from_host.as_deref(), Some("oci"));
         assert_eq!(get(9999, &store).unwrap_err().code, codes::E_NOTFOUND);
+    }
+
+    /// PF12: an applied New card whose only item is a hide committed to no
+    /// catalog, so it is not undoable.
+    #[test]
+    fn an_applied_hide_only_card_is_not_undoable() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_catalog_config("/p", None).unwrap();
+        let card = s
+            .insert_changeset(
+                "new",
+                "Hide hook/stop on oci",
+                &[NewChangesetItem {
+                    grp: "hidden".into(),
+                    catalog_id: None,
+                    kind: "hook".into(),
+                    name: "stop".into(),
+                    action: "hide".into(),
+                    params: Some(r#"{"hash":"h-stop"}"#.into()),
+                    decider: "rule".into(),
+                }],
+            )
+            .unwrap();
+        s.set_changeset_item_states(card.id, &[0], "applied")
+            .unwrap();
+        s.mark_changeset_applied(card.id, 1_000, "{}", "[]", None)
+            .unwrap();
+        let store = Mutex::new(s);
+        let v = get(card.id, &store).unwrap();
+        assert_eq!((v.state.as_str(), v.undoable), ("applied", false));
+        assert!(!list(&store).unwrap()[0].undoable);
     }
 }

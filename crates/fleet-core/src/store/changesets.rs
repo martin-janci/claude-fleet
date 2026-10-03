@@ -174,6 +174,22 @@ impl Store {
         summary: &str,
         items: &[NewChangesetItem],
     ) -> Result<bool> {
+        self.replace_changeset_items_keeping(id, summary, items, |_| Vec::new())
+    }
+
+    /// [`Self::replace_changeset_items`], keeping what a person rejected
+    /// (Rulings PF14): inside ONE transaction it reads the card's current
+    /// items, asks `rejected` which positions of the NEW `items` stay
+    /// `rejected` (the service matches them by `ItemKey`), replaces the
+    /// items and re-rejects those positions. Any failure rolls back, so
+    /// the old items — and their states — stay exactly as they were.
+    pub fn replace_changeset_items_keeping(
+        &self,
+        id: i64,
+        summary: &str,
+        items: &[NewChangesetItem],
+        rejected: impl FnOnce(&[ChangesetItemRow]) -> Vec<i64>,
+    ) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let n = tx.execute(
             "UPDATE changesets SET summary = ?2 WHERE id = ?1 AND state IN ('proposed', 'failed')",
@@ -182,10 +198,38 @@ impl Store {
         if n == 0 {
             return Ok(false);
         }
+        let old: Vec<ChangesetItemRow> = tx
+            .prepare(&format!(
+                "SELECT {ITEM_COLS} FROM changeset_items WHERE changeset_id = ?1 ORDER BY position"
+            ))?
+            .query_map([id], item_row)?
+            .collect::<Result<_>>()?;
+        let keep = rejected(&old);
         tx.execute("DELETE FROM changeset_items WHERE changeset_id = ?1", [id])?;
         insert_items(&tx, id, items)?;
+        {
+            let mut stmt = tx.prepare(
+                "UPDATE changeset_items SET state = 'rejected' \
+                 WHERE changeset_id = ?1 AND position = ?2",
+            )?;
+            for p in keep {
+                stmt.execute(rusqlite::params![id, p])?;
+            }
+        }
         tx.commit()?;
         Ok(true)
+    }
+
+    /// Withdraw an OPEN card (R2): `dismissed` with `error`, only while it
+    /// is `proposed` or `failed` — a card that was applied, undone or
+    /// dismissed meanwhile stays as it is. `true` when it was withdrawn.
+    pub fn withdraw_changeset(&self, id: i64, error: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE changesets SET state = 'dismissed', error = ?2 \
+             WHERE id = ?1 AND state IN ('proposed', 'failed')",
+            rusqlite::params![id, error],
+        )?;
+        Ok(n > 0)
     }
 
     pub fn get_changeset(&self, id: i64) -> Result<Option<ChangesetRow>> {
@@ -419,6 +463,78 @@ mod tests {
         );
         s.set_changeset_state(card.id, "undone", None).unwrap();
         assert_eq!(s.get_changeset(card.id).unwrap().unwrap().state, "undone");
+    }
+
+    /// PF14: the replace and the re-reject are one transaction — a failure
+    /// part-way leaves the old items and their states intact.
+    #[test]
+    fn a_refresh_keeps_rejections_atomically() {
+        let (s, p) = store();
+        let card = s
+            .insert_changeset(
+                "bootstrap",
+                "Adopt 2",
+                &[
+                    item("core", "import", Some(p), None),
+                    item("core", "assign_layer", Some(p), None),
+                ],
+            )
+            .unwrap();
+        s.set_changeset_item_states(card.id, &[1], "rejected")
+            .unwrap();
+        let new = [
+            item("core", "set_scope", Some(p), None),
+            item("core", "assign_layer", Some(p), None),
+        ];
+        assert!(s
+            .replace_changeset_items_keeping(card.id, "Adopt 3", &new, |old| {
+                assert_eq!(old[1].state, "rejected", "it sees the current items");
+                vec![1]
+            })
+            .unwrap());
+        let states: Vec<String> = s
+            .changeset_items(card.id)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.state)
+            .collect();
+        assert_eq!(states, ["pending", "rejected"]);
+
+        let before = s.changeset_items(card.id).unwrap();
+        let broken = [item("core", "import", Some(9999), None)];
+        assert!(
+            s.replace_changeset_items_keeping(card.id, "Broken", &broken, |_| vec![0])
+                .is_err(),
+            "an item naming no catalog trips the foreign key"
+        );
+        assert_eq!(s.changeset_items(card.id).unwrap(), before);
+        assert_eq!(
+            s.get_changeset(card.id).unwrap().unwrap().summary,
+            "Adopt 3"
+        );
+    }
+
+    /// R2: withdrawal only ever closes an open card.
+    #[test]
+    fn only_an_open_card_is_withdrawn() {
+        let (s, _) = store();
+        let failed = s.insert_changeset("new", "F", &[]).unwrap();
+        s.set_changeset_state(failed.id, "failed", Some("boom"))
+            .unwrap();
+        assert!(s.withdraw_changeset(failed.id, "gone").unwrap());
+        let row = s.get_changeset(failed.id).unwrap().unwrap();
+        assert_eq!(
+            (row.state.as_str(), row.error.as_deref()),
+            ("dismissed", Some("gone"))
+        );
+        let applied = s.insert_changeset("new", "A", &[]).unwrap();
+        s.mark_changeset_applied(applied.id, 5, "{}", "[]", None)
+            .unwrap();
+        assert!(!s.withdraw_changeset(applied.id, "gone").unwrap());
+        assert_eq!(
+            s.get_changeset(applied.id).unwrap().unwrap().state,
+            "applied"
+        );
     }
 
     /// Spec, Testing (store): a verdict holds by content hash; a person's

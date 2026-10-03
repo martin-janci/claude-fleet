@@ -240,11 +240,23 @@ fn write(
             report.hidden += 1;
         }
     }
-    let by_subject: BTreeMap<String, &OpenCard> = f
-        .open
-        .iter()
-        .map(|o| (subject_of_row(&o.0, &o.1), o))
-        .collect();
+    // One open card per subject (R2). `open` is newest first, so a
+    // duplicate — which the pass itself never creates — leaves the newest
+    // card in charge and is logged; the older one is left as it is.
+    let mut by_subject: BTreeMap<String, &OpenCard> = BTreeMap::new();
+    for o in &f.open {
+        let subject = subject_of_row(&o.0, &o.1);
+        if let Some(kept) = by_subject.get(&subject) {
+            tracing::warn!(
+                subject = %subject,
+                kept = kept.0.id,
+                ignored = o.0.id,
+                "changesets: two open cards share a subject; the pass refreshes only the newest"
+            );
+            continue;
+        }
+        by_subject.insert(subject, o);
+    }
     let mut produced: BTreeSet<String> = BTreeSet::new();
     for card in proposed {
         let subject = card.subject();
@@ -270,17 +282,20 @@ fn write(
         {
             continue;
         }
-        s.set_changeset_state(row.id, "dismissed", Some(WITHDRAWN))?;
-        report.withdrawn += 1;
+        if s.withdraw_changeset(row.id, WITHDRAWN)? {
+            report.withdrawn += 1;
+        }
     }
     Ok(report)
 }
 
 /// Refresh an open card in place when its proposal changed (R2). PF14: the
 /// items a person rejected stay rejected — matched by [`ItemKey`] (catalog,
-/// kind, name, action, host) — and every other item starts pending. Both
-/// writes happen under the caller's one store guard, so no reader sees the
-/// card between them. `true` when the card was rewritten.
+/// kind, name, action, host) against the card's items as they are inside
+/// the store's transaction — and every other item starts pending. The
+/// replace and the re-reject are one transaction
+/// (`replace_changeset_items_keeping`): a failure leaves the old items.
+/// `true` when the card was rewritten.
 fn refresh(
     s: &Store,
     open: &OpenCard,
@@ -296,25 +311,20 @@ fn refresh(
     if same {
         return Ok(false);
     }
-    let rejected: BTreeSet<ItemKey> = existing
-        .iter()
-        .filter(|i| i.state == "rejected")
-        .map(ItemKey::of_row)
-        .collect();
-    if !s.replace_changeset_items(row.id, &card.summary, items)? {
-        return Ok(false);
-    }
-    let keep: Vec<i64> = card
-        .items
-        .iter()
-        .enumerate()
-        .filter(|(_, i)| rejected.contains(&i.key()))
-        .map(|(p, _)| p as i64)
-        .collect();
-    if !keep.is_empty() {
-        s.set_changeset_item_states(row.id, &keep, "rejected")?;
-    }
-    Ok(true)
+    let keep_rejected = |old: &[ChangesetItemRow]| -> Vec<i64> {
+        let rejected: BTreeSet<ItemKey> = old
+            .iter()
+            .filter(|i| i.state == "rejected")
+            .map(ItemKey::of_row)
+            .collect();
+        card.items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| rejected.contains(&i.key()))
+            .map(|(p, _)| p as i64)
+            .collect()
+    };
+    Ok(s.replace_changeset_items_keeping(row.id, &card.summary, items, keep_rejected)?)
 }
 
 fn catalog_facts(
@@ -664,6 +674,130 @@ mod tests {
         assert_eq!(
             s.get_changeset(rollout.id).unwrap().unwrap().state,
             "proposed"
+        );
+    }
+
+    /// R2: a card with an applied item is history in part — the pass never
+    /// withdraws it, even once its subject is gone.
+    #[test]
+    fn withdrawal_skips_a_card_with_an_applied_item() {
+        let _g = lock_registry_for_test();
+        let (store, _) = fleet_store(vec![skill("kept")]);
+        put(&store, "oci", vec![unmanaged("oci", "w")]);
+        reconcile(&store, true).unwrap();
+        let card = store.lock().unwrap().list_changesets().unwrap()[0].clone();
+        {
+            let s = store.lock().unwrap();
+            s.set_changeset_item_states(card.id, &[0], "applied")
+                .unwrap();
+            s.set_changeset_state(card.id, "failed", Some("trn: unreachable"))
+                .unwrap();
+        }
+        put(&store, "oci", vec![]);
+        let r = reconcile(&store, true).unwrap();
+        assert_eq!(r.withdrawn, 0);
+        let row = store
+            .lock()
+            .unwrap()
+            .get_changeset(card.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (row.state.as_str(), row.error.as_deref()),
+            ("failed", Some("trn: unreachable"))
+        );
+    }
+
+    /// R2/R3: a failed card is open, so a stale one is withdrawn like a
+    /// proposed one.
+    #[test]
+    fn withdrawal_withdraws_a_stale_failed_card() {
+        let _g = lock_registry_for_test();
+        let (store, _) = fleet_store(vec![skill("kept")]);
+        put(&store, "oci", vec![unmanaged("oci", "w")]);
+        reconcile(&store, true).unwrap();
+        let card = store.lock().unwrap().list_changesets().unwrap()[0].clone();
+        store
+            .lock()
+            .unwrap()
+            .set_changeset_state(card.id, "failed", Some("oci: import failed"))
+            .unwrap();
+        put(&store, "oci", vec![]);
+        let r = reconcile(&store, true).unwrap();
+        assert_eq!(r.withdrawn, 1);
+        let row = store
+            .lock()
+            .unwrap()
+            .get_changeset(card.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (row.state.as_str(), row.error.as_deref()),
+            ("dismissed", Some(WITHDRAWN))
+        );
+    }
+
+    /// R10: the pass's automatic hide never overturns a person's verdict on
+    /// the same (kind, name, hash).
+    #[test]
+    fn a_persons_verdict_survives_an_automatic_hide_of_the_same_key() {
+        let _g = lock_registry_for_test();
+        let (store, _) = fleet_store(vec![skill("kept")]);
+        let person = TriageVerdictRow {
+            catalog_id: None,
+            kind: "hook".into(),
+            name: "stop".into(),
+            content_hash: "h-stop".into(),
+            verdict: "rejected".into(),
+            decider: "person".into(),
+            decided_at: 1,
+        };
+        store
+            .lock()
+            .unwrap()
+            .upsert_triage_verdict(&person)
+            .unwrap();
+        put(&store, "oci", vec![fleet_hook("oci")]);
+        let r = reconcile(&store, true).unwrap();
+        assert_eq!(r.hidden, 0, "already decided");
+        assert_eq!(store.lock().unwrap().triage_verdicts().unwrap(), [person]);
+    }
+
+    /// R9: a verdict holds a subject by its content hash; a changed copy is
+    /// a new subject and gets a card again.
+    #[test]
+    fn a_verdict_on_an_old_hash_does_not_suppress_a_card_for_a_changed_hash() {
+        let _g = lock_registry_for_test();
+        let (store, _) = fleet_store(vec![skill("kept")]);
+        store
+            .lock()
+            .unwrap()
+            .upsert_triage_verdict(&TriageVerdictRow {
+                catalog_id: None,
+                kind: "skill".into(),
+                name: "w".into(),
+                content_hash: "h-old".into(),
+                verdict: "rejected".into(),
+                decider: "person".into(),
+                decided_at: 1,
+            })
+            .unwrap();
+        let mut old = unmanaged("oci", "w");
+        old.host_hash = Some("h-old".into());
+        put(&store, "oci", vec![old]);
+        assert_eq!(reconcile(&store, true).unwrap().inserted, 0, "held");
+
+        put(&store, "oci", vec![unmanaged("oci", "w")]);
+        assert_eq!(reconcile(&store, true).unwrap().inserted, 1);
+        let s = store.lock().unwrap();
+        let card = &s.list_changesets().unwrap()[0];
+        assert_eq!(card.kind, "new");
+        let items = s.changeset_items(card.id).unwrap();
+        assert_eq!(
+            ItemParams::parse(items[0].params.as_deref())
+                .hash
+                .as_deref(),
+            Some("h-w")
         );
     }
 
