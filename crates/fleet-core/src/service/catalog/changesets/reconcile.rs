@@ -20,6 +20,7 @@ use crate::store::{
     NewChangesetItem, Store, TriageVerdictRow,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// What one pass wrote.
@@ -445,15 +446,31 @@ fn subject_of_row(card: &ChangesetRow, items: &[ChangesetItemRow]) -> String {
     )
 }
 
+/// Whether [`after_scan_pass`] has already logged an unreadable store.
+static STORE_UNREADABLE_LOGGED: AtomicBool = AtomicBool::new(false);
+
 /// The scan tick's hook (R19, carry 4): with `catalog.auto` on, one pass —
 /// unless an apply holds `APPLY_LOCK`, in which case this pass is skipped
 /// (the tick never waits). Errors are logged, never returned: the tick's own
 /// bookkeeping (`owed`, `seen`) is not this pass's business.
 pub fn after_scan_pass(store: &Arc<Mutex<Store>>) {
-    let auto = store
-        .lock()
-        .map(|s| settings::get_bool(&s, settings::CATALOG_AUTO))
-        .unwrap_or(false);
+    let auto = match lock(store) {
+        Ok(s) => settings::get_bool(&s, settings::CATALOG_AUTO),
+        Err(e) => {
+            // A poisoned store would otherwise read as "auto off" on every
+            // later tick, silently: say so — loudly once per process, then
+            // at debug so a long-lived process does not flood the log.
+            if !STORE_UNREADABLE_LOGGED.swap(true, Ordering::Relaxed) {
+                tracing::error!(
+                    "changesets: the store is unreadable ({}); automatic reconcile passes are skipped until fleet restarts",
+                    e.message
+                );
+            } else {
+                tracing::debug!("changesets: store unreadable; reconcile skipped");
+            }
+            return;
+        }
+    };
     if !auto {
         return;
     }
@@ -952,6 +969,27 @@ mod tests {
         let (_, items) = super::super::card(cards[0].id, &store).unwrap();
         assert!(items.iter().any(|i| i.action == "hide" && i.name == "stop"));
         assert!(store.lock().unwrap().triage_verdicts().unwrap().is_empty());
+    }
+
+    /// A poisoned store (a panic while a guard was held) makes the hook log
+    /// and return — never panic, never pretend `catalog.auto` is off
+    /// silently.
+    #[test]
+    fn a_poisoned_store_makes_the_hook_return_without_panicking() {
+        let _g = lock_registry_for_test();
+        let (store, _) = fleet_store(vec![]);
+        put(&store, "oci", vec![unmanaged("oci", "w")]);
+        let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store.lock().unwrap();
+            panic!("poisoning the store mutex for a test");
+        }));
+        assert!(poison.is_err());
+        assert!(store.is_poisoned());
+        after_scan_pass(&store);
+        after_scan_pass(&store);
+        assert!(STORE_UNREADABLE_LOGGED.load(Ordering::Relaxed));
+        let s = store.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(s.list_changesets().unwrap().is_empty(), "nothing written");
     }
 
     /// R19: the tick's pass never waits for an apply; it skips and the next
