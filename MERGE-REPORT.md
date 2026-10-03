@@ -11,6 +11,14 @@ branch:
 |---|---|---|
 | 1 | `6256466d` (203 commits ahead of base `77653006`; 261 files, +47,995/−1,344) | 22 hunks in 17 files |
 | 2 | `facaf194` (7 further commits; 33 files, +708/−88) | **none** |
+| 3 | `65fd5001` (1 further commit; `RUST-BUILD-PERFORMANCE-AUDIT.md` only, +135/−1) | **none** |
+
+Merge 3 is docs alone — Appendix G of the build audit, no code and no build
+configuration — so it needed nothing beyond a `cargo fleet-check` to confirm
+the tree still compiles. It is kept as its own merge so the branch records
+which `main` each pass carried. `main` landed three PRs (#425, #429, #430)
+during this work; if it has moved again by the time you read this, merge 1 is
+the one that carries the judgement and passes 2 and 3 are routine.
 
 Everything below describes merge 1 unless it says otherwise; merge 2 has its
 own section at the end, and it is the one that changed the validation ladder,
