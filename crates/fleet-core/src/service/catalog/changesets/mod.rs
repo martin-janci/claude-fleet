@@ -3,8 +3,11 @@
 //! undone (`undo`). Spec: docs/superpowers/specs/2026-09-30-assets-s1b-s2-design.md,
 //! *Changesets (the cards)*. The rows are `store::changesets`.
 
+pub mod apply;
 pub mod reconcile;
 pub mod rules;
+#[cfg(test)]
+pub(crate) mod testkit;
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::settings;
@@ -19,6 +22,16 @@ use std::sync::Mutex;
 /// every store guard inside stays scoped. The tick only ever `try_lock`s it
 /// (R19).
 pub(crate) static APPLY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// PF7: what every mutating authoring action (asset and resource edits,
+/// layer files, `commit_pending`, `push`, `import_host`, `host_layers`,
+/// configure/load/add/remove a catalog) holds around its repo work. It is
+/// [`APPLY_LOCK`], so an edit waits for an apply or undo in flight instead
+/// of landing mid-apply — where the apply would commit it as the card's, or
+/// its failure reset would delete it. Only one process shares it (R27).
+pub async fn authoring_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    APPLY_LOCK.lock().await
+}
 
 /// Closed cards `list` shows next to every open one.
 pub const RECENT_CLOSED: usize = 20;
