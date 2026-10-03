@@ -742,4 +742,51 @@ mod tests {
         let absent = parse_scan_blocks("##HASHES\n##END\n", &|_, _| None).unwrap();
         assert!(!absent.present);
     }
+
+    /// Each of [`mcp_secret_like`]'s three operands, and a clean entry.
+    ///
+    /// It is an OR of three, and only the `env` one had a test that could
+    /// fail — so deleting either of the other two, on the predicate that
+    /// decides whether a scanned MCP server is withheld from the catalog as
+    /// secret-carrying, passed CI.
+    #[test]
+    fn an_mcp_entry_looks_secret_by_its_env_its_headers_or_its_url() {
+        let v = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+
+        // Clean: a command, args, and empty tables.
+        assert!(!mcp_secret_like(&v(
+            r#"{"command":"npx","args":["-y","srv"]}"#
+        )));
+        assert!(!mcp_secret_like(&v(
+            r#"{"command":"npx","env":{},"headers":{}}"#
+        )));
+        assert!(!mcp_secret_like(&v(
+            r#"{"url":"https://mcp.example.com/sse"}"#
+        )));
+        assert!(!mcp_secret_like(&v("{}")));
+
+        // `env`, the one operand that was covered.
+        assert!(mcp_secret_like(&v(
+            r#"{"command":"npx","env":{"API_KEY":"sk-1"}}"#
+        )));
+        // `headers`, which was not.
+        assert!(mcp_secret_like(&v(
+            r#"{"url":"https://x/sse","headers":{"Authorization":"Bearer t"}}"#
+        )));
+        // And the URL's own query, case-insensitively — `?Key=` as well as
+        // `?token=`, which is why the check lowercases first.
+        for url in [
+            "https://x/sse?token=abc",
+            "https://x/sse?Key=abc",
+            "https://x/sse?SECRET=abc",
+            "https://x/sse?a=1&api_key=abc",
+        ] {
+            assert!(
+                mcp_secret_like(&v(&format!(r#"{{"url":"{url}"}}"#))),
+                "{url}"
+            );
+        }
+        // A url-shaped value that is not a string is not read as one.
+        assert!(!mcp_secret_like(&v(r#"{"url":7}"#)));
+    }
 }

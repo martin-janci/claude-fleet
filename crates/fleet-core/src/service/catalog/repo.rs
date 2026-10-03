@@ -1488,4 +1488,44 @@ mod tests {
             b"keep2"
         );
     }
+    /// An S1a-shaped `Catalog` — one from a hub that predates the catalogs
+    /// table — still parses.
+    ///
+    /// This is the PR's named desktop↔hub compatibility guarantee (its
+    /// acceptance 8), and it was three `#[serde(default)]` attributes with no
+    /// test: a `Catalog` travels the wire nested in `resolve::Resolution`, so a
+    /// desktop newer than its hub has to read an answer with no `id`, `name` or
+    /// `org_id` rather than fail the whole preview with `E_PARSE`.
+    #[test]
+    fn a_catalog_from_a_hub_without_the_catalogs_table_still_parses() {
+        let old = serde_json::json!({
+            "assets": [],
+            "problems": [],
+            "head": "abc123",
+            "loaded_at": 17,
+            "layers": { "layers": {} },
+        });
+
+        let c: Catalog = serde_json::from_value(old).expect("an S1a answer must parse");
+
+        assert_eq!(c.id, 0, "no id on the wire reads as the unregistered 0");
+        assert_eq!(c.name, "");
+        assert_eq!(c.org_id, None);
+        assert_eq!(c.head, "abc123");
+        assert!(c.assets.is_empty());
+
+        // And the other direction: a current answer carries all three.
+        let now = serde_json::json!({
+            "id": 3,
+            "name": "team",
+            "org_id": 9,
+            "assets": [],
+            "problems": [],
+            "head": "def",
+            "loaded_at": 18,
+            "layers": { "layers": {} },
+        });
+        let c: Catalog = serde_json::from_value(now).unwrap();
+        assert_eq!((c.id, c.name.as_str(), c.org_id), (3, "team", Some(9)));
+    }
 }

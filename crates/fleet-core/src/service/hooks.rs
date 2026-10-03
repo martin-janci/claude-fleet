@@ -1136,7 +1136,7 @@ fn apply_stop_hook(
             // the step matcher gets the transcript backstop. Read here, under
             // the lock, so an up-to-date host never pays for a tail read.
             let steps_backstop = match s.get_host_row(&before.host_alias) {
-                Ok(h) => h.is_some_and(|h| h.provision_stale || !h.provisioned),
+                Ok(h) => needs_steps_backstop(h.as_ref()),
                 Err(e) => {
                     tracing::debug!(error = %e, "[steps] host row not read");
                     s.ensure_in_tx()?;
@@ -1175,6 +1175,23 @@ fn apply_stop_hook(
     }
     spawn_refresh_context(store, ssh, row_id);
     Ok(())
+}
+
+/// PURE: does this host need the transcript backstop for agent steps?
+///
+/// A host whose hooks predate the step matcher does not report steps itself, so
+/// its transcript tail is read instead (design 2026-09-29 §2). "Predate" is
+/// either `provision_stale` — the hooks on it are not this build's — or never
+/// provisioned at all.
+///
+/// Apart from the Stop handler so each arm can be stated: inverting this gate
+/// either costs an SSH tail read on every Stop of an up-to-date fleet, or
+/// silently drops every step from a fleet that is behind, and neither shows up
+/// as a failure anywhere. An UNKNOWN host (no row) gets no backstop: there is
+/// no host to read a tail from, and guessing yes would spend an SSH call per
+/// Stop on a session whose host fleet does not know.
+pub(crate) fn needs_steps_backstop(host: Option<&crate::store::HostRow>) -> bool {
+    host.is_some_and(|h| h.provision_stale || !h.provisioned)
 }
 
 /// The UserPromptSubmit hook: a turn is starting. Marks the session
@@ -4646,5 +4663,56 @@ mod tests {
             0,
             "a legitimate Stop with nothing pending must reset the streak"
         );
+    }
+    /// Every arm of the step backstop's gate.
+    ///
+    /// It decides whether each Stop costs an SSH transcript tail read, and it
+    /// had no test — so inverting it either spends a read per Stop across an
+    /// up-to-date fleet or silently drops every agent step from a fleet that is
+    /// behind, with nothing failing either way.
+    #[test]
+    fn the_step_backstop_reads_a_transcript_only_for_a_host_whose_hooks_are_behind() {
+        let host = |provisioned: bool, stale: bool| {
+            let mut h = crate::store::HostRow {
+                alias: "pine".to_string(),
+                ssh_alias: None,
+                reachable: true,
+                claude_version: None,
+                tmux_version: None,
+                hidden: false,
+                last_pinged_at: None,
+                account_uuid: None,
+                provisioned,
+                transport: "ssh".to_string(),
+                org_id: None,
+                claude_version_at: None,
+                disk_home_free_kb: None,
+                disk_home_total_kb: None,
+                disk_tmp_free_kb: None,
+                load_1m: None,
+                mem_avail_kb: None,
+                uptime_secs: None,
+                health_at: None,
+                last_hook_at: None,
+                agent_version: None,
+                provisioned_at: None,
+                provision_stale: stale,
+                provision_warning: None,
+                harnesses: None,
+            };
+            h.provision_stale = stale;
+            h
+        };
+
+        // Up to date: its own hooks report the steps, so no tail is read.
+        assert!(!needs_steps_backstop(Some(&host(true, false))));
+        // Provisioned, but not with this build's hooks.
+        assert!(needs_steps_backstop(Some(&host(true, true))));
+        // Never provisioned at all: it has no step matcher either.
+        assert!(needs_steps_backstop(Some(&host(false, false))));
+        assert!(needs_steps_backstop(Some(&host(false, true))));
+        // A host fleet has no row for: nothing to read a tail FROM, and
+        // guessing yes would spend an SSH call on every Stop.
+        assert!(!needs_steps_backstop(None));
     }
 }

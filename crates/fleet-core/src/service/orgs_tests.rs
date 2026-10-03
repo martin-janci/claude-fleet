@@ -360,6 +360,35 @@ fn org_admin_crud_refusals_and_row_announcements() {
         .code,
         codes::E_NOTFOUND
     );
+    // Nor is an org that owns a CATALOG. Migration 090 gave `catalogs.org_id`
+    // an `ON DELETE RESTRICT`, so without the pre-check the removal reached
+    // SQLite and came back as a raw foreign-key failure rather than a sentence
+    // naming what is in the way.
+    st.lock()
+        .unwrap()
+        .conn_for_test()
+        .execute(
+            "INSERT INTO catalogs (name, repo_path, org_id, created_at) \
+             VALUES ('team-assets', '/srv/assets', ?1, 0)",
+            rusqlite::params![oid],
+        )
+        .unwrap();
+    let e = run(
+        &st,
+        crate::service::trackers::admin::WorkAdminArgs {
+            org_id: Some(oid),
+            ..admin_args("remove_org")
+        },
+    )
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID_STATE);
+    assert!(e.message.contains("team-assets (catalog"), "{}", e.message);
+    st.lock()
+        .unwrap()
+        .conn_for_test()
+        .execute("DELETE FROM catalogs WHERE name = 'team-assets'", [])
+        .unwrap();
+
     run(
         &st,
         crate::service::trackers::admin::WorkAdminArgs {

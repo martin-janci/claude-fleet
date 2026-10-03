@@ -382,8 +382,13 @@ fn the_action_param_names_every_admin_call() {
 }
 
 /// Multi-harness F3a: the tool sets, normalises and clears a host's harness
-/// choice; `catalog_admin` reaches the same function (the way a granted
-/// desktop does); a per-host token is refused.
+/// choice; `catalog_admin`'s action of the same name reaches the same function,
+/// for the master AND for a granted desktop; a per-host token is refused.
+///
+/// The `catalog_admin` half used to name the tool `set_host_harnesses` with the
+/// master's own token, so it exercised the dedicated tool a second time rather
+/// than the admin action, and said nothing about the route a granted desktop
+/// takes — which is the one the Host detail control actually uses.
 #[tokio::test]
 async fn set_host_harnesses_sets_normalises_and_clears() {
     let s = Store::open_in_memory().unwrap();
@@ -427,6 +432,7 @@ async fn set_host_harnesses_sets_normalises_and_clears() {
     .unwrap();
     assert_eq!(harnesses_of(&t), None);
 
+    // `catalog_admin`'s own action, as the master.
     call(
         &t,
         &Caller::master(),
@@ -437,6 +443,48 @@ async fn set_host_harnesses_sets_normalises_and_clears() {
     .await
     .unwrap();
     assert_eq!(harnesses_of(&t), Some(vec!["claude".to_string()]));
+
+    // And the route a GRANTED desktop takes, which is the Host detail
+    // control's: a full, unbound client with the `assets` grant, through the
+    // same `enforce_mode` / `enforce_admin` gates `call_tool` runs.
+    let desk = {
+        let s = t.store.lock().unwrap();
+        let row = s.insert_client_token("desk", "aa11", "full").unwrap();
+        s.set_client_assets_admin("desk", true).unwrap();
+        row
+    };
+    let granted = client(desk.id, TokenMode::Full, None);
+    call(
+        &t,
+        &granted,
+        "set_host_harnesses",
+        Some(json!({ "host_alias": "local", "harnesses": ["claude", "codex"] })),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        harnesses_of(&t),
+        Some(vec!["claude".to_string(), "codex".to_string()]),
+    );
+
+    // An UN-granted client of the same shape is refused the action.
+    let plain = t
+        .store
+        .lock()
+        .unwrap()
+        .insert_client_token("plain", "bb22", "full")
+        .unwrap();
+    let err = call(
+        &t,
+        &client(plain.id, TokenMode::Full, None),
+        "set_host_harnesses",
+        Some(json!({ "host_alias": "local", "harnesses": ["claude"] })),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
 
     let err = enforce_admin(&host("local"), "set_host_harnesses").unwrap_err();
     assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);

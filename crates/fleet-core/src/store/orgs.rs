@@ -469,7 +469,8 @@ impl Store {
     /// so do its past links (the `snap_org_id` snapshot, which has no FK):
     /// a removed org's work must not stay fenced from every host forever,
     /// nor name an org that no longer exists. One transaction. Callers
-    /// refuse first while trackers reference it ([`Store::trackers_of_org`]).
+    /// refuse first while trackers ([`Store::trackers_of_org`]) or catalogs
+    /// ([`Store::catalogs_of_org`]) reference it.
     /// `false` when there was no such org.
     pub fn remove_org(&self, id: i64) -> Result<bool, IpcError> {
         let tx = self.conn.unchecked_transaction()?;
@@ -496,6 +497,21 @@ impl Store {
         let mut stmt = self
             .conn
             .prepare("SELECT id, name FROM trackers WHERE org_id = ?1 ORDER BY id")?;
+        let rows = stmt.query_map(rusqlite::params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// `(id, name)` of the catalogs owned by org `id`.
+    ///
+    /// Migration 090 gave `catalogs.org_id` an `ON DELETE RESTRICT`, and
+    /// [`Store::remove_org`] enumerates every referencing table deliberately —
+    /// so without this the removal reached SQLite and came back as a raw
+    /// foreign-key failure instead of the sentence that names what is in the
+    /// way, which is the one thing an operator can act on.
+    pub fn catalogs_of_org(&self, id: i64) -> Result<Vec<(i64, String)>, IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name FROM catalogs WHERE org_id = ?1 ORDER BY id")?;
         let rows = stmt.query_map(rusqlite::params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }

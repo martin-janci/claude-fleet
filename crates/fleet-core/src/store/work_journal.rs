@@ -97,10 +97,18 @@ fn cap_kind(kind: &str) -> Option<usize> {
     match kind {
         "progress" => Some(PROGRESS_CAP),
         "compact_summary" => Some(COMPACT_SUMMARY_CAP),
-        "step" => Some(crate::service::work::steps::STEP_CAP),
+        // `step` is NOT here: it is capped per STEP, not per row — see
+        // [`Store::prune_steps`].
         _ => None,
     }
 }
+
+/// How many rows of one step's own history are kept.
+///
+/// A step is one row per change of its text or state. Three is enough for the
+/// journal to show that a step moved; the only reader that must never lose a
+/// row is [`Store::current_steps`], which reads the newest.
+const STEP_HISTORY: usize = 3;
 
 fn cap_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -231,6 +239,11 @@ impl Store {
                                       ORDER BY at DESC, id DESC LIMIT ?3)",
                     rusqlite::params![claude_session_id, kind, cap as i64],
                 )?;
+            }
+            if kind == "step" {
+                if let Some(conv) = claude_session_id {
+                    Self::prune_steps_in(&self.conn, conv)?;
+                }
             }
             Ok(Some(id))
         })
@@ -460,6 +473,55 @@ impl Store {
             }
         }
         Ok(wrote)
+    }
+
+    /// Bound a conversation's `step` rows, by STEP rather than by row.
+    ///
+    /// The generic row cap was wrong here, and the way it was wrong fed itself.
+    /// A step is one row per change of its text or state, so a conversation
+    /// with 30 steps that each moved ten times holds 300 rows — and the row cap
+    /// deleted the oldest 100, which can be EVERY row of some steps. Those
+    /// steps then vanish from [`Store::current_steps`], so `record_steps`'
+    /// `known` map no longer has them, so the next TodoWrite snapshot — which
+    /// names the whole list — re-inserts them as new rows, evicting others.
+    /// A write/eviction loop that sustains itself, with a step list that
+    /// rotates on screen for as long as the conversation runs.
+    ///
+    /// So: the newest [`crate::service::work::steps::STEP_CAP`] DISTINCT steps
+    /// are kept, every row of each; a step outside that window loses all of its
+    /// rows, which is honest — it really has left the window, and re-recording
+    /// it is then correct rather than a loop. Within a kept step the newest
+    /// [`STEP_HISTORY`] rows stay, which is what keeps the row count bounded
+    /// without ever dropping the row `current_steps` reads.
+    fn prune_steps_in(conn: &rusqlite::Connection, conv: &str) -> Result<(), IpcError> {
+        // Whole steps outside the newest window.
+        conn.execute(
+            "DELETE FROM work_journal \
+              WHERE claude_session_id = ?1 AND kind = 'step' \
+                AND json_extract(meta, '$.native_id') NOT IN ( \
+                    SELECT nid FROM ( \
+                        SELECT json_extract(meta, '$.native_id') AS nid, MAX(id) AS newest \
+                          FROM work_journal \
+                         WHERE claude_session_id = ?1 AND kind = 'step' \
+                         GROUP BY nid ORDER BY newest DESC LIMIT ?2))",
+            rusqlite::params![conv, crate::service::work::steps::STEP_CAP as i64],
+        )?;
+        // And the older history of a step that is kept.
+        conn.execute(
+            "DELETE FROM work_journal \
+              WHERE claude_session_id = ?1 AND kind = 'step' \
+                AND id NOT IN ( \
+                    SELECT id FROM work_journal AS j \
+                     WHERE j.claude_session_id = ?1 AND j.kind = 'step' \
+                       AND ( \
+                           SELECT COUNT(*) FROM work_journal AS n \
+                            WHERE n.claude_session_id = ?1 AND n.kind = 'step' \
+                              AND json_extract(n.meta, '$.native_id') \
+                                  = json_extract(j.meta, '$.native_id') \
+                              AND n.id > j.id) < ?2)",
+            rusqlite::params![conv, STEP_HISTORY as i64],
+        )?;
+        Ok(())
     }
 
     /// The newest state of every step in these conversations, in order of
@@ -759,6 +821,77 @@ mod tests {
         assert_eq!(
             (cur[0].text.as_str(), cur[0].state.as_str()),
             ("Read OM-110", "completed")
+        );
+    }
+
+    /// A step that has not left the window is never re-recorded.
+    ///
+    /// The cap used to prune step ROWS, so a conversation whose steps each
+    /// changed a few times held more rows than the cap and lost EVERY row of
+    /// some steps — which `current_steps` then did not see, so `record_steps`'
+    /// `known` map lacked them and the next TodoWrite snapshot re-inserted them,
+    /// evicting others. A loop that sustains itself, and a step list that
+    /// rotates on screen for as long as the conversation runs.
+    #[test]
+    fn a_live_step_is_never_pruned_into_being_recorded_again() {
+        use crate::service::work::steps::{StepEvent, StepState};
+        let s = Store::open_in_memory().unwrap();
+        // Ten steps, each moved through three states: 30 rows under the old
+        // row cap of 200 — but make them MOVE enough to exceed it.
+        let steps: Vec<String> = (0..10).map(|i| format!("todo:{i}")).collect();
+        let snapshot = |state: StepState| -> Vec<StepEvent> {
+            steps
+                .iter()
+                .enumerate()
+                .map(|(i, id)| StepEvent {
+                    native_id: id.clone(),
+                    text: Some(format!("s{i}")),
+                    state: Some(state),
+                    agent: "claude_code",
+                })
+                .collect()
+        };
+        // 40 passes × 10 steps alternating state = 400 changed rows, twice the
+        // old cap, so the old rule had pruned whole steps away by the end.
+        for pass in 0..40 {
+            let state = if pass % 2 == 0 {
+                StepState::Pending
+            } else {
+                StepState::InProgress
+            };
+            s.record_steps("c1", None, "hook", &snapshot(state))
+                .unwrap();
+        }
+
+        // Every step is still there, exactly once, with its newest state.
+        let cur = s.current_steps(&["c1".to_string()]).unwrap();
+        assert_eq!(
+            cur.len(),
+            steps.len(),
+            "{:?}",
+            cur.iter().map(|v| &v.native_id).collect::<Vec<_>>()
+        );
+
+        // And re-sending the same snapshot writes NOTHING: nothing was pruned
+        // out from under the dedup.
+        let again = s
+            .record_steps("c1", None, "hook", &snapshot(StepState::InProgress))
+            .unwrap();
+        assert_eq!(again, 0, "a step still in the window is not re-recorded");
+
+        // The rows are bounded all the same: at most STEP_HISTORY per step.
+        let rows: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM work_journal WHERE kind = 'step'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            rows <= (steps.len() * STEP_HISTORY) as i64,
+            "{rows} rows for {} steps",
+            steps.len()
         );
     }
 

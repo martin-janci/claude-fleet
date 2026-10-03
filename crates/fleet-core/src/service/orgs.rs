@@ -788,6 +788,29 @@ pub fn admin(
                     "trackers": trackers.iter().map(|(i, _)| i).collect::<Vec<_>>()
                 })));
             }
+            // And its catalogs. Migration 090's `ON DELETE RESTRICT` would stop
+            // the delete anyway, but as a raw foreign-key failure from SQLite —
+            // not as a sentence naming what is in the way, which is the only
+            // part an operator can act on. Same shape as the trackers refusal
+            // directly above.
+            let catalogs = s.catalogs_of_org(id)?;
+            if !catalogs.is_empty() {
+                let names: Vec<String> = catalogs
+                    .iter()
+                    .map(|(cid, n)| format!("{n} (catalog {cid})"))
+                    .collect();
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!(
+                        "org {:?} still owns {}; remove them first (catalog remove)",
+                        org.name,
+                        names.join(", ")
+                    ),
+                )
+                .with_details(serde_json::json!({
+                    "catalogs": catalogs.iter().map(|(i, _)| i).collect::<Vec<_>>()
+                })));
+            }
             s.remove_org(id)?;
             serde_json::json!({ "removed": id })
         }
