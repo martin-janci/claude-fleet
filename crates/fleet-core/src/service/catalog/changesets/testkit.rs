@@ -77,6 +77,15 @@ pub(crate) fn host_skill(home: &Path, name: &str, description: &str) {
 /// login shell would run it.
 #[cfg(unix)]
 pub(crate) fn ssh_with_home(bin_dir: &Path, home: &Path) -> Arc<SshClient> {
+    ssh_with_home_running(bin_dir, home, "")
+}
+
+/// [`ssh_with_home`] that first runs `before` (a shell snippet) on every
+/// remote call — how a test makes something happen mid-apply, between the
+/// apply's checks and its writes (a foreign file, a foreign commit, a held
+/// `index.lock`).
+#[cfg(unix)]
+pub(crate) fn ssh_with_home_running(bin_dir: &Path, home: &Path, before: &str) -> Arc<SshClient> {
     use crate::tmux::fake_exec::{write_exec, PROBE_GUARD};
     let bin = write_exec(
         bin_dir,
@@ -84,6 +93,7 @@ pub(crate) fn ssh_with_home(bin_dir: &Path, home: &Path) -> Arc<SshClient> {
         &format!(
             "#!/bin/sh\n{PROBE_GUARD}\
              case \"$*\" in *'-O check'*|*'-O exit'*) exit 0;; esac\n\
+             {before}\n\
              while [ \"$#\" -gt 0 ] && [ \"$1\" != \"--\" ]; do shift; done\n\
              shift 2\n\
              HOME='{home}' exec sh -c \"$*\"\n",

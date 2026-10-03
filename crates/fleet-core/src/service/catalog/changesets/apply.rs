@@ -5,9 +5,12 @@
 //! failure, every checkout is reset and nothing is committed (R11, R12).
 //!
 //! Everything runs under [`APPLY_LOCK`], which every mutating authoring
-//! action also takes (PF7), so no edit lands in a checkout mid-apply; and an
-//! apply starts only from clean checkouts, so the failure reset can only
-//! drop what this apply itself wrote. Nothing here writes to a host (R15).
+//! action in this process also takes (PF7), and starts only from clean
+//! checkouts. A writer the lock cannot see (the `fleet-hub` CLI, an author
+//! session editing files) is handled by scope: the apply records every path
+//! it writes, commits only those, and on failure undoes only those — and
+//! only when HEAD and the tree show nothing foreign; otherwise it leaves
+//! that catalog for a person. Nothing here writes to a host (R15).
 
 use super::rules::{gap_hash, LayerGap, NEEDS_A_LOOK, UPDATE};
 use super::{is_open, CardKind, ChangesetView, Decider, ItemAction, ItemParams, APPLY_LOCK};
@@ -20,7 +23,7 @@ use crate::service::catalog::{author, registry, repo, CatalogTarget, ImportArgs,
 use crate::service::settings;
 use crate::ssh::SshClient;
 use crate::store::{
-    now_unix, now_unix_ms, CatalogRow, ChangesetItemRow, ChangesetRow, HostLayerRow,
+    now_unix, now_unix_ms, AppliedRecord, CatalogRow, ChangesetItemRow, ChangesetRow, HostLayerRow,
     NewChangesetItem, Store, TriageVerdictRow,
 };
 use serde::{Deserialize, Serialize};
@@ -76,6 +79,16 @@ fn select_items<'a>(
     positions: Option<&[i64]>,
 ) -> Result<Vec<&'a ChangesetItemRow>, IpcError> {
     let chosen: Vec<&ChangesetItemRow> = match positions {
+        Some([]) => {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "no positions named for card {}: name the items to apply, or leave \
+                     positions out to apply every pending item but \"needs a look\"",
+                    card.id
+                ),
+            ))
+        }
         Some(ps) => {
             let mut out: Vec<&ChangesetItemRow> = Vec::new();
             for p in ps {
@@ -132,8 +145,12 @@ fn select_items<'a>(
     Ok(chosen)
 }
 
-/// A failed step and the card group it failed in (spec: "the error on the
-/// failing group").
+/// A failed step and the card group it failed in. Spec: the card is
+/// `failed` "with the error on the failing group", so its error reads
+/// `<group>: <error>`. The group is the failing item's `grp` (a layer name,
+/// `needs a look`, `drift`, …) or, for a card-wide step that belongs to no
+/// one group, a pseudo-group: `host layers` (step 3's store write), `commit`
+/// (step 4, naming the catalog) or `record` (step 5's bookkeeping).
 struct Failure {
     group: String,
     error: IpcError,
@@ -160,6 +177,26 @@ fn kind_of(item: &ChangesetItemRow) -> Result<Kind, IpcError> {
                 format!("item {} names no asset kind ({})", item.position, item.kind),
             )
         })
+}
+
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
+}
+
+/// What this apply has done to the checkouts so far (PF7 guard): per
+/// catalog, every path it writes — recorded BEFORE the write, so a write
+/// that fails half-way is still its own — and the commit it made. A failed
+/// apply undoes exactly these and nothing else.
+#[derive(Debug, Default)]
+struct Progress {
+    written: BTreeMap<i64, BTreeSet<String>>,
+    commits: BTreeMap<i64, String>,
+}
+
+impl Progress {
+    fn wrote(&mut self, catalog_id: i64, path: String) {
+        self.written.entry(catalog_id).or_default().insert(path);
+    }
 }
 
 async fn apply_catalog(
@@ -220,55 +257,140 @@ async fn apply_catalog(
         .into_iter()
         .filter(|r| touched.contains(&r.catalog_id))
         .collect();
-    let outcome = match run_steps(card, selected, &rows, token.as_deref(), store, ssh).await {
-        Ok(commits) => record(card, items, selected, &commits, &snapshot, store).map(|()| commits),
-        Err(f) => Err(f),
-    };
+    let mut progress = Progress::default();
+    let steps = run_steps(
+        card,
+        selected,
+        &rows,
+        &pre,
+        token.as_deref(),
+        store,
+        ssh,
+        &mut progress,
+    )
+    .await;
+    let outcome =
+        steps.and_then(|()| record(card, items, selected, &progress.commits, &snapshot, store));
     match outcome {
-        Ok(commits) => {
-            after_commits(card, selected, &rows, &commits, store);
+        Ok(()) => {
+            after_commits(card, selected, &rows, &progress.commits, store);
             Ok(())
         }
-        Err(failure) => {
-            // R12: every checkout back at its pre-apply HEAD (each was clean,
-            // so this drops only what this apply wrote), host_layers back,
-            // every item pending again, the failing group named.
-            for row in &rows {
-                if let Err(e) = repo::reset_hard(Path::new(&row.repo_path), &pre[&row.id]) {
-                    tracing::error!(
-                        catalog = %row.name,
-                        "card {}: reset after a failed apply: {}",
-                        card.id,
-                        e.message
-                    );
-                }
-            }
-            let msg = format!("{}: {}", failure.group, failure.error.message);
-            let pending: Vec<i64> = items
-                .iter()
-                .filter(|i| i.state == "pending")
-                .map(|i| i.position)
-                .collect();
-            let s = lock(store)?;
-            for cid in &touched {
-                s.restore_host_layers(*cid, &snapshot)?;
-            }
-            s.set_changeset_item_states(card.id, &pending, "pending")?;
-            s.set_changeset_state(card.id, "failed", Some(&msg))?;
-            Err(IpcError::new(&failure.error.code, msg))
-        }
+        Err(failure) => Err(fail_card(
+            card, items, &rows, &pre, &progress, &snapshot, failure, store,
+        )),
     }
 }
 
-/// Steps 2–4. Every error is a [`Failure`]; the caller resets.
+/// R12, best effort at every step: each touched checkout undone (only this
+/// apply's own paths, and only when nothing foreign is there — else it is
+/// left for a person and said so), host_layers restored, every pending item
+/// back to pending and the card failed — the last two always, together —
+/// with every cleanup problem appended to `<group>: <error>`. Answers the
+/// error `apply` returns, which is the card's.
+#[allow(clippy::too_many_arguments)]
+fn fail_card(
+    card: &ChangesetRow,
+    items: &[ChangesetItemRow],
+    rows: &[CatalogRow],
+    pre: &BTreeMap<i64, String>,
+    progress: &Progress,
+    snapshot: &[HostLayerRow],
+    failure: Failure,
+    store: &Mutex<Store>,
+) -> IpcError {
+    let mut problems: Vec<String> = rows
+        .iter()
+        .filter_map(|row| undo_catalog(row, &pre[&row.id], progress))
+        .collect();
+    let pending: Vec<i64> = items
+        .iter()
+        .filter(|i| i.state == "pending")
+        .map(|i| i.position)
+        .collect();
+    let mut msg = format!("{}: {}", failure.group, failure.error.message);
+    match lock(store) {
+        Ok(s) => {
+            for row in rows {
+                if let Err(e) = s.restore_host_layers(row.id, snapshot) {
+                    problems.push(format!(
+                        "host layers of catalog {} could not be restored: {e} — fix by hand",
+                        row.name
+                    ));
+                }
+            }
+            if !problems.is_empty() {
+                msg = format!("{msg}; {}", problems.join("; "));
+            }
+            if let Err(e) = s.fail_changeset(card.id, &pending, &msg) {
+                tracing::error!("card {}: could not be marked failed: {e}", card.id);
+                msg = format!("{msg}; the card could not be marked failed: {e}");
+            }
+        }
+        Err(e) => {
+            problems.push(format!(
+                "the store is unavailable ({}): host layers not restored, card not marked \
+                 failed",
+                e.message
+            ));
+            msg = format!("{msg}; {}", problems.join("; "));
+        }
+    }
+    for p in &problems {
+        tracing::error!("card {}: {p}", card.id);
+    }
+    IpcError::new(&failure.error.code, msg)
+}
+
+/// Undo this apply in one catalog — `None` when done (or nothing to undo),
+/// else what a person must fix. The PF7 guard first: HEAD must be the
+/// recorded pre-apply HEAD or this apply's own commit, and every change in
+/// the tree one of the paths this apply wrote; anything foreign (a CLI
+/// commit, an author session's file) means this catalog is left exactly as
+/// it is.
+fn undo_catalog(row: &CatalogRow, pre: &str, progress: &Progress) -> Option<String> {
+    let empty = BTreeSet::new();
+    let ours = progress.written.get(&row.id).unwrap_or(&empty);
+    let own = progress.commits.get(&row.id);
+    if ours.is_empty() && own.is_none() {
+        return None;
+    }
+    let root = Path::new(&row.repo_path);
+    let mut heads = vec![pre];
+    heads.extend(own.map(String::as_str));
+    match repo::foreign_changes(root, &heads, ours) {
+        Ok(foreign) if foreign.is_empty() => repo::reset_paths(root, pre, ours).err().map(|e| {
+            format!(
+                "catalog {} could not be reset to {}: {} — fix by hand",
+                row.name,
+                short(pre),
+                e.message
+            )
+        }),
+        Ok(foreign) => Some(format!(
+            "manual cleanup needed in {}: {} (nothing there was reset)",
+            row.name,
+            foreign.join(", ")
+        )),
+        Err(e) => Some(format!(
+            "catalog {} could not be checked before its reset: {} — fix by hand",
+            row.name, e.message
+        )),
+    }
+}
+
+/// Steps 2–4. Every error is a [`Failure`]; the caller undoes `progress`.
+#[allow(clippy::too_many_arguments)]
 async fn run_steps(
     card: &ChangesetRow,
     selected: &[&ChangesetItemRow],
     rows: &[CatalogRow],
+    pre: &BTreeMap<i64, String>,
     token: Option<&str>,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
-) -> Result<BTreeMap<i64, String>, Failure> {
+    progress: &mut Progress,
+) -> Result<(), Failure> {
     let row_of = |item: &ChangesetItemRow| -> Result<&CatalogRow, Failure> {
         item.catalog_id
             .and_then(|id| rows.iter().find(|r| r.id == id))
@@ -315,14 +437,15 @@ async fn run_steps(
     for ((_, host), group) in &imports {
         let row = row_of(group[0])?;
         let root = Path::new(&row.repo_path);
-        for &item in group
-            .iter()
-            .filter(|i| i.action == ItemAction::TakeHost.as_str())
-        {
+        for &item in group {
             let kind = kind_of(item).map_err(|e| fail(item, e))?;
-            let old = repo::read_asset(root, kind, &item.name).map_err(|e| fail(item, e))?;
-            kept_scope.push((row, kind, old.header.scope, item));
-            repo::remove_asset(root, kind, &item.name).map_err(|e| fail(item, e))?;
+            progress.wrote(row.id, repo::asset_rel_path(kind, &slugify(&item.name)));
+            if item.action == ItemAction::TakeHost.as_str() {
+                progress.wrote(row.id, repo::asset_rel_path(kind, &item.name));
+                let old = repo::read_asset(root, kind, &item.name).map_err(|e| fail(item, e))?;
+                kept_scope.push((row, kind, old.header.scope, item));
+                repo::remove_asset(root, kind, &item.name).map_err(|e| fail(item, e))?;
+            }
         }
         let only: Vec<String> = group
             .iter()
@@ -392,6 +515,8 @@ async fn run_steps(
             .iter()
             .find(|r| r.id == *cid)
             .ok_or_else(|| fail_in(layer, IpcError::new(codes::E_INVALID_STATE, "no catalog")))?;
+        check_layer_name(layer).map_err(|e| fail_in(layer, e))?;
+        progress.wrote(row.id, format!("layers/{layer}.yaml"));
         add_layer_members(Path::new(&row.repo_path), layer, add).map_err(|e| fail_in(layer, e))?;
     }
 
@@ -424,18 +549,16 @@ async fn run_steps(
                 ))
             }
         };
+        progress.wrote(row.id, repo::asset_rel_path(kind, &name));
         set_scope(Path::new(&row.repo_path), kind, &name, scope).map_err(|e| fail(item, e))?;
     }
     for &item in &shares {
         let row = row_of(item)?;
         let kind = kind_of(item).map_err(|e| fail(item, e))?;
-        set_scope(
-            Path::new(&row.repo_path),
-            kind,
-            &slugify(&item.name),
-            Scope::Shared,
-        )
-        .map_err(|e| fail(item, e))?;
+        let name = slugify(&item.name);
+        progress.wrote(row.id, repo::asset_rel_path(kind, &name));
+        set_scope(Path::new(&row.repo_path), kind, &name, Scope::Shared)
+            .map_err(|e| fail(item, e))?;
     }
 
     // 3. host_layers: append this card's contexts, keeping each host's role
@@ -500,24 +623,37 @@ async fn run_steps(
         }
     }
 
-    // 4. One commit per touched catalog (`fleet: <card summary>`).
-    let mut commits = BTreeMap::new();
+    // 4. One commit per touched catalog (`fleet: <card summary>`), of the
+    //    paths this apply wrote and nothing else (PF7) — and only on the
+    //    HEAD the apply started from.
     for row in rows {
-        let sha = commit_all(
-            Path::new(&row.repo_path),
-            &format!("fleet: {}", card.summary),
-        )
-        .map_err(|e| {
+        let root = Path::new(&row.repo_path);
+        let commit_fail = |e: IpcError| {
             fail_in(
                 "commit",
                 IpcError::new(&e.code, format!("catalog {}: {}", row.name, e.message)),
             )
-        })?;
-        if let Some(sha) = sha {
-            commits.insert(row.id, sha);
+        };
+        let now = repo::head(root).map_err(commit_fail)?;
+        let started = pre[&row.id].as_str();
+        if now != started {
+            return Err(commit_fail(IpcError::new(
+                codes::E_INVALID_STATE,
+                format!(
+                    "HEAD moved from {} to {} during the apply",
+                    short(started),
+                    short(&now)
+                ),
+            )));
+        }
+        let ours = progress.written.get(&row.id).cloned().unwrap_or_default();
+        if let Some(sha) = repo::commit_paths(root, &format!("fleet: {}", card.summary), &ours)
+            .map_err(commit_fail)?
+        {
+            progress.commits.insert(row.id, sha);
         }
     }
-    Ok(commits)
+    Ok(())
 }
 
 /// Task 4 review M2: the selected "needs a look" imports bound for personal
@@ -574,17 +710,6 @@ fn look_shares<'a>(
         .collect())
 }
 
-/// Stage everything and commit it; `None` when nothing changed. The tree was
-/// clean when the apply began (R11), so "everything" is this apply's work.
-fn commit_all(root: &Path, message: &str) -> Result<Option<String>, IpcError> {
-    repo::stage_paths(root, &[])?;
-    if repo::has_staged(root, &[])? {
-        Ok(Some(repo::commit(root, message)?))
-    } else {
-        Ok(None)
-    }
-}
-
 fn set_scope(root: &Path, kind: Kind, name: &str, scope: Scope) -> Result<(), IpcError> {
     let mut a = repo::read_asset(root, kind, name)?;
     if a.header.scope != scope {
@@ -618,9 +743,12 @@ fn add_layer_members(root: &Path, name: &str, add: &BTreeSet<String>) -> Result<
     Ok(())
 }
 
-/// Step 5's bookkeeping, after every commit landed: verdicts for hide items,
-/// the items' states, the card applied (`applied_at` in ms, PF13). A
-/// failure here is still a card failure — the commits are reset (R12).
+/// Step 5's bookkeeping, after every commit landed, in ONE store
+/// transaction: `ignored` verdicts for hide items (decider `rule`, R10 —
+/// the rule that proposed the hide decided it, whoever pressed apply), the
+/// items' states, the card applied (`applied_at` in ms, PF13). A failure
+/// here is still a card failure — pseudo-group `record` — and the commits
+/// are undone (R12).
 fn record(
     card: &ChangesetRow,
     items: &[ChangesetItemRow],
@@ -630,26 +758,24 @@ fn record(
     store: &Mutex<Store>,
 ) -> Result<(), Failure> {
     let bookkeeping = |e: IpcError| fail_in("record", e);
-    let s = lock(store).map_err(bookkeeping)?;
     let now = now_unix();
-    for &item in selected
+    let verdicts: Vec<TriageVerdictRow> = selected
         .iter()
         .filter(|i| i.action == ItemAction::Hide.as_str())
-    {
-        let p = ItemParams::parse(item.params.as_deref());
-        s.upsert_triage_verdict(&TriageVerdictRow {
+        .map(|item| TriageVerdictRow {
             catalog_id: None,
             kind: item.kind.clone(),
             name: item.name.clone(),
-            content_hash: p.hash.unwrap_or_else(|| "-".into()),
+            content_hash: ItemParams::parse(item.params.as_deref())
+                .hash
+                .unwrap_or_else(|| "-".into()),
             verdict: "ignored".into(),
-            decider: item.decider.clone(),
+            decider: Decider::Rule.as_str().into(),
             decided_at: now,
         })
-        .map_err(|e| bookkeeping(e.into()))?;
-    }
+        .collect();
     let applied: Vec<i64> = selected.iter().map(|i| i.position).collect();
-    let rest: Vec<i64> = items
+    let skipped: Vec<i64> = items
         .iter()
         .filter(|i| i.state == "pending" && !applied.contains(&i.position))
         .map(|i| i.position)
@@ -662,13 +788,20 @@ fn record(
         |e: serde_json::Error| bookkeeping(IpcError::new(codes::E_SERIALIZE, e.to_string()));
     let commits_json = serde_json::to_string(&commits_json).map_err(encode)?;
     let snapshot_json = serde_json::to_string(snapshot).map_err(encode)?;
-    s.set_changeset_item_states(card.id, &applied, "applied")
-        .map_err(|e| bookkeeping(e.into()))?;
-    s.set_changeset_item_states(card.id, &rest, "skipped")
-        .map_err(|e| bookkeeping(e.into()))?;
-    s.mark_changeset_applied(card.id, now_unix_ms(), &commits_json, &snapshot_json, None)
-        .map_err(|e| bookkeeping(e.into()))?;
-    Ok(())
+    lock(store)
+        .map_err(bookkeeping)?
+        .record_changeset_applied(
+            card.id,
+            &AppliedRecord {
+                applied_at: now_unix_ms(),
+                commits: &commits_json,
+                layers_snapshot: &snapshot_json,
+                applied: &applied,
+                skipped: &skipped,
+                verdicts: &verdicts,
+            },
+        )
+        .map_err(|e| bookkeeping(e.into()))
 }
 
 /// Step 5's follow-through on an applied card: reload, push when
@@ -1683,6 +1816,339 @@ mod tests {
             v.error.as_deref().unwrap_or("").contains("push personal"),
             "{:?}",
             v.error
+        );
+    }
+
+    fn new_card(f: &Fleet, items: &[NewChangesetItem]) -> i64 {
+        f.store
+            .lock()
+            .unwrap()
+            .insert_changeset("new", "New", items)
+            .unwrap()
+            .id
+    }
+
+    async fn apply_all(
+        f: &Fleet,
+        id: i64,
+        ssh: &Arc<SshClient>,
+    ) -> Result<ChangesetView, IpcError> {
+        apply(
+            ApplyArgs {
+                id,
+                positions: None,
+            },
+            &f.store,
+            ssh,
+        )
+        .await
+    }
+
+    /// PF7 guard (a): a file another process drops into the checkout while
+    /// the apply runs is neither committed with the card nor removed.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_foreign_file_written_mid_apply_is_neither_committed_nor_removed() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        host_skill(home.path(), "w", DESC);
+        let bin = tempfile::tempdir().unwrap();
+        let foreign = f.personal_root.join("foreign.txt");
+        let ssh = ssh_with_home_running(
+            bin.path(),
+            home.path(),
+            &format!("echo theirs > '{}'", foreign.display()),
+        );
+        let id = new_card(
+            &f,
+            &[import("core", p, "w", "oci"), assign("core", p, "oci")],
+        );
+        let v = apply_all(&f, id, &ssh).await.unwrap();
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        let files = git(
+            &f.personal_root,
+            &["show", "--name-only", "--format=", "HEAD"],
+        );
+        assert!(files.contains("skills/w/asset.yaml") && files.contains("layers/core.yaml"));
+        assert!(!files.contains("foreign.txt"), "{files}");
+        assert!(foreign.is_file(), "still on disk");
+    }
+
+    /// PF7 guard (b): the same, but the apply fails — the catalog is left
+    /// exactly as it is and the card says a person must clean up.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_failed_apply_with_a_foreign_file_is_left_for_a_person() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        host_skill(home.path(), "w", DESC);
+        let bin = tempfile::tempdir().unwrap();
+        let foreign = f.personal_root.join("foreign.txt");
+        let ssh = ssh_with_home_running(
+            bin.path(),
+            home.path(),
+            &format!("echo theirs > '{}'", foreign.display()),
+        );
+        let id = new_card(
+            &f,
+            &[
+                import("core", p, "w", "oci"),
+                import("extra", p, "absent", "oci"),
+            ],
+        );
+        let before = head(&f.personal_root);
+        let err = apply_all(&f, id, &ssh).await.unwrap_err();
+        assert!(err.message.starts_with("extra: "), "{}", err.message);
+        assert!(
+            err.message
+                .contains("manual cleanup needed in personal: foreign.txt"),
+            "{}",
+            err.message
+        );
+        assert!(foreign.is_file(), "the foreign file survives");
+        assert!(
+            f.personal_root.join("skills/w").exists(),
+            "nothing was reset"
+        );
+        assert_eq!(head(&f.personal_root), before, "nothing committed");
+        let v = super::super::get(id, &f.store).unwrap();
+        assert_eq!(v.state, "failed");
+        assert_eq!(v.error.as_deref(), Some(err.message.as_str()));
+        assert!(v.items.iter().all(|i| i.state == "pending"));
+    }
+
+    /// PF7 guard (c): a commit someone else made mid-apply fails the card at
+    /// its commit step, and nothing in that catalog is reset.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_foreign_commit_mid_apply_fails_the_card_and_resets_nothing() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        host_skill(home.path(), "w", DESC);
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home_running(
+            bin.path(),
+            home.path(),
+            &format!(
+                "git -C '{}' -c user.name=x -c user.email=x@x commit -q --allow-empty -m foreign",
+                f.personal_root.display()
+            ),
+        );
+        let id = new_card(&f, &[import("core", p, "w", "oci")]);
+        let err = apply_all(&f, id, &ssh).await.unwrap_err();
+        assert!(
+            err.message
+                .starts_with("commit: catalog personal: HEAD moved"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message
+                .contains("manual cleanup needed in personal: HEAD moved"),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            subjects(&f.personal_root)[0],
+            "foreign",
+            "the foreign commit stays"
+        );
+        assert!(
+            f.personal_root.join("skills/w").exists(),
+            "nothing was reset"
+        );
+        assert_eq!(super::super::get(id, &f.store).unwrap().state, "failed");
+    }
+
+    /// Task 6 review: a reset that itself fails is on the card and in the
+    /// answer, not only in the log.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_reset_that_fails_is_reported_on_the_card() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        host_skill(home.path(), "w", DESC);
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home_running(
+            bin.path(),
+            home.path(),
+            &format!(
+                ": > '{}'",
+                f.personal_root.join(".git/index.lock").display()
+            ),
+        );
+        let id = new_card(&f, &[import("core", p, "w", "oci")]);
+        let err = apply_all(&f, id, &ssh).await.unwrap_err();
+        assert!(
+            err.message.starts_with("commit: catalog personal"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message
+                .contains("catalog personal could not be reset to")
+                && err.message.contains("fix by hand"),
+            "{}",
+            err.message
+        );
+        let v = super::super::get(id, &f.store).unwrap();
+        assert_eq!(
+            (v.state.as_str(), v.error.as_deref()),
+            ("failed", Some(err.message.as_str()))
+        );
+    }
+
+    /// R11: a clean personal and a dirty org catalog — refused before
+    /// anything is written anywhere.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn one_dirty_catalog_refuses_the_whole_card_and_the_clean_one_is_untouched() {
+        let _g = lock_registry_for_test();
+        let mut f = Fleet::new(&["oci"]);
+        let (acme, acme_root) = f.add_org_catalog("acme");
+        std::fs::write(acme_root.join("draft.txt"), "wip\n").unwrap();
+        let home = tempfile::tempdir().unwrap();
+        host_skill(home.path(), "w", DESC);
+        host_skill(home.path(), "v", DESC);
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let id = new_card(
+            &f,
+            &[
+                import("core", f.personal.id, "w", "oci"),
+                import("ops", acme.id, "v", "oci"),
+            ],
+        );
+        let before = head(&f.personal_root);
+        let err = apply_all(&f, id, &ssh).await.unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID_STATE);
+        assert!(
+            err.message.contains("catalog acme has uncommitted"),
+            "{}",
+            err.message
+        );
+        assert_eq!(head(&f.personal_root), before);
+        assert!(git(&f.personal_root, &["status", "--porcelain"]).is_empty());
+        assert!(acme_root.join("draft.txt").is_file());
+        assert_eq!(super::super::get(id, &f.store).unwrap().state, "proposed");
+    }
+
+    /// R12: a take_host whose import fails puts the catalog copy it removed
+    /// back.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_failed_take_host_restores_the_catalog_copy() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        f.commit_files(
+            &f.personal_root,
+            p,
+            &[
+                (
+                    "skills/w/asset.yaml",
+                    "kind: skill\nname: w\ndescription: The catalog's own long description.\nscope: shared\n",
+                ),
+                ("skills/w/body.md", "Old steps.\n"),
+            ],
+        );
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let take = item(
+            "drift",
+            Some(p),
+            "skill",
+            "w",
+            ItemAction::TakeHost,
+            ItemParams {
+                host: Some("oci".into()),
+                ..Default::default()
+            },
+        );
+        let id = f
+            .store
+            .lock()
+            .unwrap()
+            .insert_changeset("drift", "skill/w differs", &[take])
+            .unwrap()
+            .id;
+        let before = head(&f.personal_root);
+        let err = apply(
+            ApplyArgs {
+                id,
+                positions: Some(vec![0]),
+            },
+            &f.store,
+            &ssh,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.message.starts_with("drift: skill/w was not imported"),
+            "{}",
+            err.message
+        );
+        let w = repo::read_asset(&f.personal_root, Kind::Skill, "w").unwrap();
+        assert_eq!(w.header.description, "The catalog's own long description.");
+        assert_eq!(head(&f.personal_root), before);
+        assert!(git(&f.personal_root, &["status", "--porcelain"]).is_empty());
+    }
+
+    /// R10: an applied hide records a `rule` verdict, whoever decided the
+    /// item; `positions: []` is its own refusal.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_hide_records_a_rule_verdict_and_empty_positions_are_refused() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let bin = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let mut hide = item(
+            "hidden",
+            None,
+            "hook",
+            "stop",
+            ItemAction::Hide,
+            ItemParams {
+                hash: Some("h-stop".into()),
+                ..Default::default()
+            },
+        );
+        hide.decider = "person".into();
+        let id = new_card(&f, &[hide]);
+        let err = apply(
+            ApplyArgs {
+                id,
+                positions: Some(vec![]),
+            },
+            &f.store,
+            &ssh,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(
+            err.message.starts_with("no positions named"),
+            "{}",
+            err.message
+        );
+        let v = apply_all(&f, id, &ssh).await.unwrap();
+        assert_eq!(v.state, "applied");
+        let verdicts = f.store.lock().unwrap().triage_verdicts().unwrap();
+        assert_eq!(verdicts.len(), 1);
+        assert_eq!(
+            (verdicts[0].decider.as_str(), verdicts[0].verdict.as_str()),
+            ("rule", "ignored")
         );
     }
 }
