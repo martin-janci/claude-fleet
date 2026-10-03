@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1
-FROM rust:1-bookworm AS build
+FROM rust:1.99.0-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
+# .cargo/config.toml carries LIBSQLITE3_FLAGS: the image builds SQLite the
+# same way every other build does.
+COPY .cargo ./.cargo
 COPY crates ./crates
 COPY src-tauri/Cargo.toml ./src-tauri/Cargo.toml
 # The workspace lists src-tauri; give cargo an empty lib so resolution

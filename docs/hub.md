@@ -258,6 +258,19 @@ detail to retire it on a host instead; see *Harnesses per host* in
 `docs/concepts.md`. A Codex MCP merge re-serializes `~/.codex/config.toml`
 and drops its comments, as before.
 
+**Codex skills move to `~/.agents/skills`.** Codex only reads user skills
+from `~/.agents/skills`, so a release with this change renders Codex skills
+there, and the first sync after upgrading moves every Codex skill fleet put
+in `~/.codex/skills` (backing the old copy up, never touching Codex's
+`.system` or skills you added yourself). A host whose `~/.agents/skills`
+(or `~/.agents`, or `~/.codex/skills`) is a symlink shows those Codex
+actions as `blocked` until the link is replaced with a real directory. A
+link the other way — a Claude skill such as `~/.claude/skills/<name>`
+pointing into `~/.agents/skills` — is not detected yet, and both harnesses
+would then write one file: don't link Claude skills into
+`~/.agents/skills`. See *Codex skills live in `~/.agents/skills`* in
+`docs/concepts.md`.
+
 Refreshing the compose file itself (`curl -O …/deploy/hub/docker-compose.yml`)
 also upgrades you, because the copy on `main` carries the pin from the newest
 stable release. Diff it against yours before overwriting: it is the file your
@@ -2482,8 +2495,13 @@ standalone exactly as before.
   a laptop that slept and woke on another network looks like.
 - **The fleet is the hub's.** No reconcile tick, no account-usage poll and no
   embedded control API in the desktop; two brains for one fleet is the failure
-  this mode exists to prevent. The footer's version, database and schema are
-  the hub's too — the badge beside them says whose.
+  this mode exists to prevent. The footer's database and schema are the hub's
+  too, and the version line names both sides — `app 0.4.5 · hub 0.4.6 · db:
+  ok · schema 90`, where everything after `app …` is the hub's. Settings →
+  Hub repeats the two in words. They are allowed to differ: the hub and its
+  clients are released separately, and what decides whether they can talk is
+  the wire contract (an unacceptable one gets the banner above), not matching
+  version numbers.
 - **Projects are added through the hub.** "＋ Add project…" clones or
   creates the repository on the host you pick, with that host's `git` and
   `gh`; the new row arrives like any other change. Cancel stops the desktop

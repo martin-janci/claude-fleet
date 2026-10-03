@@ -1,8 +1,18 @@
 <script lang="ts">
   // A Task / Agent call in the Conversations tab: a bordered block with the
   // agent type, what it was asked to do and how long it took, and the
-  // subagent's final report (Markdown) folded to a few lines.
-  import { formatDuration, toolDurationMs, isLongPrompt, PROMPT_CLAMP_LINES, type ConvGroup } from './conversation';
+  // subagent's final report (Markdown) folded to a few lines. A `Workflow`
+  // call arrives as the same item and draws the same block, headed by its
+  // own name rather than by an agent type it has none of — see
+  // `blockTypeLabel`.
+  import {
+    blockTypeLabel,
+    formatDuration,
+    toolDurationMs,
+    isLongPrompt,
+    PROMPT_CLAMP_LINES,
+    type ConvGroup,
+  } from './conversation';
   import Markdown from './MarkdownView.svelte';
 
   let {
@@ -50,8 +60,8 @@
 
 <div class="subagent" class:err={item.error} data-testid="conv-subagent" data-error={item.error || undefined}>
   <div class="sub-head" data-testid="conv-subagent-head">
-    {#if item.error}<span class="sub-err" title="Subagent failed">✕</span>{/if}
-    <span class="sub-type">{item.agent_type ?? 'subagent'}</span>
+    {#if item.error}<span class="sub-err" title={`${blockTypeLabel(item)} failed`}>✕</span>{/if}
+    <span class="sub-type">{blockTypeLabel(item)}</span>
     {#if item.description}<span class="sep" aria-hidden="true">·</span><span class="sub-desc">{item.description}</span>{/if}
     {#if duration}<span class="sub-dur" class:muted={noResult}>{duration}</span>{/if}
     {#if statusWord}

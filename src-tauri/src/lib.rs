@@ -1,3 +1,7 @@
+// `#[async_trait]` expands each async trait method into a `#[must_use]` fn that
+// returns a boxed future, which is already `#[must_use]`; clippy 1.99 flags that
+// macro output as `double_must_use`. It is not code we wrote — allow it crate-wide.
+#![allow(clippy::double_must_use)]
 mod app_events;
 pub mod backend;
 mod bootstrap;

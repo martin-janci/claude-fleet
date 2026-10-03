@@ -411,7 +411,7 @@ mod tests {
     /// side without the other would split the two classifiers silently.
     #[test]
     fn the_wire_spellings_match_the_desktop_buckets() {
-        let ts = include_str!("../../../../src/lib/attention.ts");
+        let ts = crate::repo_files::read("src/lib/attention.ts");
         for r in [
             Reason::Waiting,
             Reason::Stuck,

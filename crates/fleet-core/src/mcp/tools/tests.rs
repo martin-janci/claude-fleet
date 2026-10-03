@@ -1183,13 +1183,14 @@ fn kill_session_description_covers_external_and_inactive_agent_rows() {
     );
 }
 
-const CONTROL_API_GUIDE: &str = include_str!("../../../../../docs/control-api.md");
+static CONTROL_API_GUIDE: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| crate::repo_files::read("docs/control-api.md"));
 
 #[test]
 fn docs_track_background_runs_with_session_transcript() {
     for (name, text) in [
         ("SKILL.md", CONTROL_SKILL),
-        ("docs/control-api.md", CONTROL_API_GUIDE),
+        ("docs/control-api.md", CONTROL_API_GUIDE.as_str()),
     ] {
         // `peek_session` was removed once `new_bg_session` started returning
         // the fleet row (the gap it filled): a doc that still names it points

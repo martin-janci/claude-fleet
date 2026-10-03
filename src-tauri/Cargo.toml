@@ -13,7 +13,13 @@ license = "MIT"
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "claude_fleet_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop builds only link the rlib into the `claude-fleet` bin. The Tauri
+# template's `staticlib` and `cdylib` exist for iOS/Android, which this app
+# has no target for (fleet-mobile is a separate app), yet every desktop
+# rebuild wrote them: ~2.5 GB and ~4 s of archiving/linking per edit
+# (RUST-BUILD-PERFORMANCE-AUDIT.md §12). Add them back only together with a
+# `tauri android|ios init`.
+crate-type = ["rlib"]
 
 [features]
 default = []

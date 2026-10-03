@@ -55,7 +55,7 @@ See [`control-api.md`](control-api.md) for the narrative guide.\n\n",
 
 /// Extract command identifiers from the `generate_handler![ … ]` block in lib.rs.
 fn tauri_commands() -> Vec<String> {
-    let src = include_str!("../../../../src-tauri/src/lib.rs");
+    let src = crate::repo_files::read("src-tauri/src/lib.rs");
     let start = src
         .find("generate_handler![")
         .expect("generate_handler! macro present in lib.rs");
@@ -78,10 +78,6 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/control-api-reference.md")
     }
 
-    /// The hand-written narrative guide. Compiled in so the check runs
-    /// wherever `cargo test` runs, with no working-directory assumptions.
-    const NARRATIVE_GUIDE: &str = include_str!("../../../../docs/control-api.md");
-
     #[test]
     fn narrative_guide_names_every_tool() {
         // docs/control-api.md no longer restates each tool (the generated
@@ -89,10 +85,12 @@ mod tests {
         // so a reader can find it — a new tool without a mention fails here.
         let tools = FleetTools::tool_router_for_doc().list_all();
         assert!(tools.len() > 20, "router lists {} tools", tools.len());
+        // The hand-written narrative guide.
+        let guide = crate::repo_files::read("docs/control-api.md");
         let missing: Vec<String> = tools
             .iter()
             .map(|t| t.name.to_string())
-            .filter(|name| !NARRATIVE_GUIDE.contains(&format!("`{name}`")))
+            .filter(|name| !guide.contains(&format!("`{name}`")))
             .collect();
         assert!(
             missing.is_empty(),

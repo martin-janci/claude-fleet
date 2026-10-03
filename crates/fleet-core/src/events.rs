@@ -905,7 +905,7 @@ mod tests {
 
     #[test]
     fn frontend_declares_every_event_name() {
-        let events_ts = include_str!("../../../src/lib/events.ts");
+        let events_ts = crate::repo_files::read("src/lib/events.ts");
         for name in EVENT_NAMES {
             assert!(
                 events_ts.contains(&format!("'{name}'")),
@@ -1539,7 +1539,7 @@ mod tests {
     /// test reads the list and nothing else.
     #[test]
     fn frontend_declares_the_move_steps_in_order() {
-        let ts = include_str!("../../../src/lib/moveProgress.ts");
+        let ts = crate::repo_files::read("src/lib/moveProgress.ts");
         let begin = ts.find("// move-steps:begin").expect("begin marker");
         let end = ts.find("// move-steps:end").expect("end marker");
         let quoted: Vec<&str> = ts[begin..end].split('\'').skip(1).step_by(2).collect();
