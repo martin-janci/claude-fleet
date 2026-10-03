@@ -20,32 +20,44 @@ through fleet-core's `testkit` feature), `src-tauri` (the desktop app).
 ### Validation ladder (use this, in this order)
 
 One canonical way to validate Rust changes. Every command below selects the
-whole workspace and builds test targets, so they share one set of compiled
-dependencies. Mixing in other selections (`-p <crate>`, plain `cargo build`,
-`cargo check` without `--all-targets`, `pnpm tauri …`) makes cargo compile
-another copy of fleet-core and its dependency graph: 1.5–3 min the first time,
-then every edit paid once per copy (RUST-BUILD-PERFORMANCE-AUDIT.md §10.3).
-The aliases live in `.cargo/config.toml`.
+whole workspace. All but the first build test targets, so they share one set
+of compiled dependencies in `target/debug/`; `fleet-fast-check` builds none
+and keeps its own set in `target/fast-check/` (a cargo profile), so the two
+never evict each other. Mixing in other selections (`-p <crate>`, plain
+`cargo build`, `cargo check` without `--all-targets`, `pnpm tauri …`) makes
+cargo compile another copy of fleet-core and its dependency graph: 1.5–3 min
+the first time, then every edit paid once per copy
+(RUST-BUILD-PERFORMANCE-AUDIT.md §10.3). The aliases live in
+`.cargo/config.toml`. Times are for a fleet-core edit on 4 cores.
 
 ```bash
-# 1. after every edit (fleet-core edit ≈ 20 s; = rust-analyzer's own check)
-cargo fleet-check                       # check --workspace --all-targets
+# 1. while you work, after every edit (≈ 13 s; libraries and binaries only)
+cargo fleet-fast-check                  # check --workspace --profile fast-check
 pnpm check                              # frontend edits: svelte-check
-# 2. the tests of what you touched (module path filter; fleet-core module ≈ 40 s)
+# 2. at a checkpoint: before committing, and after any change to an API that
+#    tests use (≈ 19 s; = rust-analyzer's own check)
+cargo fleet-check                       # check --workspace --all-targets
+# 3. the tests of what you touched (module path filter; ≈ 30 s build + the run)
 cargo fleet-test -- service::health     # test --workspace --lib --bins -- <filter>
 pnpm exec vitest run src/lib/foo.test.ts
-# 3. before committing (also what .githooks/pre-commit runs)
+# 4. before committing (also what .githooks/pre-commit runs)
 cargo fmt --all --check
 cargo fleet-lint                        # clippy --workspace --all-targets -- -D warnings
-# 4. before pushing / marking a PR ready (≈ 20 min; offload it on a small box)
+# 5. before pushing / marking a PR ready (≈ 2.5 min warm)
 cargo test --workspace                  # full suite, what CI runs
 scripts/ci-local.sh                     # everything in CI order; --rust-only / --frontend-only / --hub-e2e
 ```
 
+`fleet-fast-check` does not type-check test code: a signature change that
+breaks a test passes it and fails `fleet-check`. rust-analyzer stays on the
+full check. `target/fast-check/` costs ~2 GB once and is never cleaned
+automatically.
+
 Rules:
 
 - Do not run `cargo build` to see whether something compiles; `cargo
-  fleet-check` answers that 2–6× faster. Build only when you need a binary.
+  fleet-fast-check` / `cargo fleet-check` answer that 2–6× faster. Build
+  only when you need a binary.
 - Do not narrow with `-p <crate>` in the inner loop; narrow with a test filter.
   Keep `-p` for the cases below that need a binary or a different feature set.
 - A test that checks a file outside its crate (a `src/lib/*.ts` mirror,
