@@ -54,6 +54,7 @@ concurrency:
 #   frontend             2:06-4:39        30
 #   rust                16:45-17:33       60
 #   rust-windows            18:49         60
+#   windows-bundle     (new: the bundle, split out of rust-windows)   60
 #   hub-headless            16:39         60
 #
 # Raise one when the work in it legitimately grows; do not remove it.
@@ -196,10 +197,29 @@ jobs:
       # --no-fail-fast: every crate's failures in one run, not only the first
       # failing test binary's.
       - run: cargo test --workspace --exclude fleet-agent --exclude fleet-hub --no-fail-fast
-      # The app itself, not only its crates: the frontend bundle, tauri-build's
-      # Windows resources (icon.ico, the manifest), the WebView2 link and the
-      # NSIS installer the release ships come together only here, so a break
-      # in any of them shows on the PR instead of at release time.
+
+  # The app itself, not only its crates: the frontend bundle, tauri-build's
+  # Windows resources (icon.ico, the manifest), the WebView2 link and the
+  # NSIS installer the release ships come together only here, so a break in
+  # any of them shows on the PR instead of at release time.
+  #
+  # Its own job, beside rust-windows rather than after its tests: in one job
+  # the bundle added ~3 min (Node setup + `tauri build`) to what was already
+  # the slowest leg of every run (14:15 on #432, the other legs ~7 min). Here
+  # it compiles the app from its own cache in parallel. That cache is saved
+  # from main only, so PR runs restore it without adding an entry per PR.
+  windows-bundle:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: windows-bundle
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
