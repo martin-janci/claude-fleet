@@ -8,8 +8,17 @@
 //! while it is the latest applied catalog-changing card in every catalog it
 //! touched (R20: "undo #N first"). It never touches hosts; an undone
 //! take_host proposes the Rollout that carries the catalog's restored copy
-//! back (R14), and the card's still-open follow-up Rollout loses the assets
-//! the undo took out of the catalog — withdrawn when nothing is left (PF11).
+//! back (R14), and open Rollout cards lose the assets the undo took out of
+//! the catalogs it reverted — withdrawn when nothing is left pending; a
+//! person's rejected item is never lifted (PF11).
+//!
+//! Known limits:
+//! - Undo does not un-hide. A mixed card's applied hide items keep their
+//!   `ignored` verdicts; only its catalog commits and host_layers go back.
+//! - A layer stays "rolled out" (plan P27). If the card's follow-up Rollout
+//!   was already applied, `rolled_out_layers` still names the layer after
+//!   the undo, so SB6 keeps treating it as rolled out; the copies the
+//!   rollout put on hosts stay there (R14: never removed).
 //!
 //! Data safety (PF7, the apply's lessons): under [`APPLY_LOCK`] every
 //! touched checkout must be clean — every untracked file counts, whatever
