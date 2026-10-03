@@ -510,13 +510,6 @@ pub fn asset_rel_path(kind: Kind, name: &str) -> String {
     }
 }
 
-/// Whether `path` (relative, `/`-separated) is one of `ours` or inside one.
-fn is_ours(path: &str, ours: &std::collections::BTreeSet<String>) -> bool {
-    let path = path.trim_end_matches('/');
-    ours.iter()
-        .any(|o| path == o || path.starts_with(&format!("{o}/")))
-}
-
 fn check_rev(rev: &str) -> Result<(), IpcError> {
     if rev.is_empty() || !rev.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(IpcError::new(E_INVALID, format!("not a commit id: {rev}")));
@@ -524,44 +517,78 @@ fn check_rev(rev: &str) -> Result<(), IpcError> {
     Ok(())
 }
 
-/// The members of `paths` that have at least one file in `rev`'s tree.
-fn paths_in_tree(
+/// The files tracked in `rev`'s tree at or under each of `paths` (relative,
+/// `/`-separated). An empty `paths` answers nothing (never the whole tree).
+pub fn tracked_files(
     root: &Path,
     rev: &str,
-    paths: &std::collections::BTreeSet<String>,
+    paths: &[&str],
 ) -> Result<std::collections::BTreeSet<String>, IpcError> {
     if paths.is_empty() {
         return Ok(Default::default());
     }
-    let mut args: Vec<&str> = vec!["ls-tree", "-r", "--name-only", rev, "--"];
-    args.extend(paths.iter().map(String::as_str));
-    let files = git(root, &args)?;
-    Ok(paths
-        .iter()
-        .filter(|p| {
-            files
-                .lines()
-                .any(|f| f == p.as_str() || f.starts_with(&format!("{p}/")))
-        })
-        .cloned()
+    let mut args: Vec<&str> = vec!["ls-tree", "-r", "--name-only", "-z", rev, "--"];
+    args.extend(paths.iter().copied());
+    let out = git_output(root, &args)?;
+    if !out.status.success() {
+        return Err(
+            IpcError::new(E_CATALOG_GIT, "git ls-tree failed").with_details(
+                serde_json::json!({ "stderr": String::from_utf8_lossy(&out.stderr).trim() }),
+            ),
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|f| !f.is_empty())
+        .map(str::to_string)
         .collect())
 }
 
-/// Assets M4 guard (PF7, Task 6 review): what in `root` is NOT this
-/// operation's own work — HEAD anywhere but `heads` (the HEAD it recorded
-/// before writing, and the commit it made itself), and every changed path,
-/// untracked included, outside `ours` (the paths it wrote). Empty means
-/// [`reset_paths`] can undo the operation without touching anyone else's
-/// work; anything else must be left for a person. Apply and undo share it.
+/// Every file on disk under `rel_dir` (relative to `root`), whatever git
+/// thinks of it — untracked, ignored or tracked. A symlink is listed as a
+/// file and never followed. A missing directory has no files.
+pub fn files_on_disk(root: &Path, rel_dir: &str) -> Result<Vec<String>, IpcError> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.join(rel_dir)];
+    while let Some(d) = stack.pop() {
+        let entries = match std::fs::read_dir(&d) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        for entry in entries {
+            let p = entry?.path();
+            let meta = std::fs::symlink_metadata(&p)?;
+            if meta.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(rel(root, &p));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Assets M4 guard (PF7, Task 6 review rounds 1–2): what in `root` is NOT
+/// this operation's own work. `ours` is the exact set of FILES it wrote or
+/// deleted (relative, `/`-separated); `heads` the HEAD it recorded before
+/// writing and the commit it made. Foreign is: HEAD anywhere else; every
+/// changed path git reports (untracked included) that is not one of `ours`;
+/// and every file on disk in a directory holding one of `ours` that is
+/// neither ours nor tracked-and-unchanged — which is how a file git
+/// ignores, next to ours, is seen. Empty means [`reset_paths`] can undo the
+/// operation without touching anyone else's work. Apply and undo share it.
 pub fn foreign_changes(
     root: &Path,
     heads: &[&str],
     ours: &std::collections::BTreeSet<String>,
 ) -> Result<Vec<String>, IpcError> {
-    let mut foreign = Vec::new();
+    let mut foreign = std::collections::BTreeSet::new();
+    let mut moved = None;
     let now = head(root)?;
     if !heads.contains(&now.as_str()) {
-        foreign.push(format!(
+        moved = Some(format!(
             "HEAD moved to {} (expected {})",
             &now[..now.len().min(12)],
             heads
@@ -571,25 +598,52 @@ pub fn foreign_changes(
                 .join(" or ")
         ));
     }
-    foreign.extend(
-        changed_paths(root)?
-            .into_iter()
-            .filter(|p| !is_ours(p, ours)),
-    );
-    Ok(foreign)
+    let changed: std::collections::BTreeSet<String> = changed_paths(root)?.into_iter().collect();
+    foreign.extend(changed.iter().filter(|p| !ours.contains(*p)).cloned());
+    let dirs: std::collections::BTreeSet<&str> = ours
+        .iter()
+        .filter_map(|f| f.rsplit_once('/').map(|(d, _)| d))
+        .collect();
+    let dir_list: Vec<&str> = dirs.iter().copied().collect();
+    let in_index: std::collections::BTreeSet<String> = {
+        let mut args: Vec<&str> = vec!["ls-files", "-z", "--"];
+        args.extend(dir_list.iter().copied());
+        if dir_list.is_empty() {
+            Default::default()
+        } else {
+            git(root, &args)?
+                .split('\0')
+                .filter(|f| !f.is_empty())
+                .map(str::to_string)
+                .collect()
+        }
+    };
+    for d in &dir_list {
+        for f in files_on_disk(root, d)? {
+            if !ours.contains(&f) && (changed.contains(&f) || !in_index.contains(&f)) {
+                foreign.insert(f);
+            }
+        }
+    }
+    Ok(moved.into_iter().chain(foreign).collect())
 }
 
-/// Commit exactly `paths` (relative; deletions included) — never anything
-/// else staged or lying in the tree. `None` when they hold no change.
+/// Commit exactly the FILES `files` (relative; a deleted tracked file
+/// commits as a deletion) — never a directory pathspec, never anything else
+/// staged or lying in the tree. `None` when they hold no change.
 pub fn commit_paths(
     root: &Path,
     message: &str,
-    paths: &std::collections::BTreeSet<String>,
+    files: &std::collections::BTreeSet<String>,
 ) -> Result<Option<String>, IpcError> {
-    let tracked = paths_in_tree(root, "HEAD", paths)?;
-    let known: Vec<String> = paths
+    let all: Vec<&str> = files.iter().map(String::as_str).collect();
+    let tracked = tracked_files(root, "HEAD", &all)?;
+    let known: Vec<String> = files
         .iter()
-        .filter(|p| root.join(p.as_str()).exists() || tracked.contains(*p))
+        .filter(|f| {
+            let p = root.join(f.as_str());
+            (p.is_file() || p.is_symlink()) || tracked.contains(*f)
+        })
         .cloned()
         .collect();
     if known.is_empty() {
@@ -614,48 +668,60 @@ pub fn commit_paths(
     head(root).map(Some)
 }
 
-/// Undo an operation's own writes: HEAD back to `pre` (soft — the index
-/// keeps every other path), then each of `ours` removed and restored from
-/// `pre` in the index and the tree (or left absent when `pre` has none).
-/// Touches nothing outside `ours`, and never runs `git clean`. Call it only
-/// once [`foreign_changes`] came back empty.
+/// Undo an operation's own writes, file by file: HEAD back to `pre` (soft —
+/// the index keeps every other path); each of `files` that `pre` has is
+/// restored from it (index and tree), each it does not have is unstaged and
+/// deleted; then `created_dirs` (the directories the operation made, in the
+/// order it made them) are removed, deepest first, only when now EMPTY.
+/// Never a directory-wide delete, never `git clean`, so ignored and foreign
+/// files are never touched. Call it only once [`foreign_changes`] came back
+/// empty.
 pub fn reset_paths(
     root: &Path,
     pre: &str,
-    ours: &std::collections::BTreeSet<String>,
+    files: &std::collections::BTreeSet<String>,
+    created_dirs: &[String],
 ) -> Result<(), IpcError> {
     check_rev(pre)?;
     if head(root)? != pre {
         git(root, &["reset", "-q", "--soft", pre])?;
     }
-    if ours.is_empty() {
-        return Ok(());
-    }
-    let mut args: Vec<&str> = vec!["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--"];
-    args.extend(ours.iter().map(String::as_str));
-    git(root, &args)?;
-    for p in ours {
-        let path = root.join(p);
-        match std::fs::symlink_metadata(&path) {
-            Ok(m) if m.is_dir() => std::fs::remove_dir_all(&path)?,
-            Ok(_) => std::fs::remove_file(&path)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+    let all: Vec<&str> = files.iter().map(String::as_str).collect();
+    let in_pre = tracked_files(root, pre, &all)?;
+    let new: Vec<&str> = all
+        .iter()
+        .copied()
+        .filter(|f| !in_pre.contains(*f))
+        .collect();
+    if !new.is_empty() {
+        let mut args: Vec<&str> = vec!["rm", "-q", "--cached", "--ignore-unmatch", "--"];
+        args.extend(new.iter().copied());
+        git(root, &args)?;
+        for f in &new {
+            match std::fs::remove_file(root.join(f)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
         }
     }
-    let existing = paths_in_tree(root, pre, ours)?;
-    if !existing.is_empty() {
+    if !in_pre.is_empty() {
         let mut args: Vec<&str> = vec!["checkout", "-q", pre, "--"];
-        args.extend(existing.iter().map(String::as_str));
+        args.extend(in_pre.iter().map(String::as_str));
         git(root, &args)?;
+    }
+    for d in created_dirs.iter().rev() {
+        // Only an empty directory goes; one still holding anything (an
+        // ignored file, someone's file) stays, silently.
+        let _ = std::fs::remove_dir(root.join(d));
     }
     Ok(())
 }
 
-/// Put the tree back at `rev`, deleting what is untracked but never what git
-/// ignores (`clean -fd`, no `-x`). Rulings R12 / PF7: only after a failed
-/// apply or undo that started from a tree [`is_clean`] passed, so all it
-/// can drop is what that apply itself wrote.
+/// Put the whole tree back at `rev`, deleting what is untracked but never
+/// what git ignores (`clean -fd`, no `-x`). NOT for a changeset apply or
+/// undo: those must keep to their own files ([`foreign_changes`],
+/// [`reset_paths`]) — a blanket reset would take another writer's work.
 pub fn reset_hard(root: &Path, rev: &str) -> Result<(), IpcError> {
     git(root, &["reset", "-q", "--hard", rev])?;
     git(root, &["clean", "-q", "-fd"])?;
@@ -1982,60 +2048,82 @@ mod tests {
         assert_eq!(changed_paths(root).unwrap(), ["skills/w/asset.yaml"]);
     }
 
-    /// Task 6 review (PF7 "never"): an operation commits only the paths it
-    /// wrote, the guard names everything else, and the reset puts back only
-    /// those paths — a foreign file survives both.
+    /// Task 6 review (PF7 "never", rounds 1–2): an operation commits only
+    /// the FILES it wrote; the guard names every other file — a stray next
+    /// to ours and an ignored one included — and the reset puts back only
+    /// our files, removing a directory only once it is empty.
     #[test]
-    fn commit_paths_foreign_changes_and_reset_paths_keep_to_our_paths() {
+    fn commit_paths_foreign_changes_and_reset_paths_keep_to_our_files() {
         use std::collections::BTreeSet;
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         git(root, &["init", "-q", "-b", "main"]).unwrap();
         std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "*.local\n").unwrap();
         std::fs::create_dir_all(root.join("skills/w")).unwrap();
         std::fs::write(root.join("skills/w/asset.yaml"), "old\n").unwrap();
+        std::fs::write(root.join("skills/w/gone.md"), "tracked\n").unwrap();
         stage_paths(root, &[]).unwrap();
         let base = commit(root, "init").unwrap();
 
-        let ours: BTreeSet<String> = ["skills/w", "layers/core.yaml"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let set = |v: &[&str]| -> BTreeSet<String> { v.iter().map(|s| s.to_string()).collect() };
+        let ours = set(&[
+            "skills/w/asset.yaml",
+            "skills/w/gone.md",
+            "skills/w/body.md",
+            "layers/core.yaml",
+        ]);
         std::fs::write(root.join("skills/w/asset.yaml"), "new\n").unwrap();
+        std::fs::remove_file(root.join("skills/w/gone.md")).unwrap();
         std::fs::write(root.join("skills/w/body.md"), "b\n").unwrap();
         std::fs::create_dir_all(root.join("layers")).unwrap();
         std::fs::write(root.join("layers/core.yaml"), "l\n").unwrap();
         std::fs::write(root.join("foreign.txt"), "theirs\n").unwrap();
+        std::fs::write(root.join("skills/w/notes.md"), "theirs too\n").unwrap();
         let mine = commit_paths(root, "fleet: x", &ours).unwrap().unwrap();
-        let files = git(root, &["show", "--name-only", "--format=", "HEAD"]).unwrap();
-        assert!(!files.contains("foreign.txt"), "{files}");
-        assert!(files.contains("layers/core.yaml") && files.contains("skills/w/body.md"));
+        let files = git(root, &["show", "--name-status", "--format=", "HEAD"]).unwrap();
+        assert!(files.contains("D\tskills/w/gone.md"), "{files}");
+        assert!(files.contains("A\tskills/w/body.md") && files.contains("A\tlayers/core.yaml"));
+        assert!(
+            !files.contains("notes.md") && !files.contains("foreign.txt"),
+            "{files}"
+        );
 
+        std::fs::write(root.join("skills/w/cache.local"), "ignored\n").unwrap();
         let foreign = foreign_changes(root, &[&base, &mine], &ours).unwrap();
-        assert_eq!(foreign, ["foreign.txt"]);
+        assert_eq!(
+            foreign,
+            ["foreign.txt", "skills/w/cache.local", "skills/w/notes.md"]
+        );
         let moved = foreign_changes(root, &[&base], &ours).unwrap();
         assert!(moved[0].starts_with("HEAD moved"), "{moved:?}");
 
-        // The guard is clean once the foreign file is gone; the reset then
-        // restores exactly our paths.
-        std::fs::remove_file(root.join("foreign.txt")).unwrap();
-        std::fs::write(root.join("skills/w/stray.md"), "ours too\n").unwrap();
-        assert!(foreign_changes(root, &[&base, &mine], &ours)
-            .unwrap()
-            .is_empty());
-        std::fs::write(root.join("keep.txt"), "a later file\n").unwrap();
-        let keep: BTreeSet<String> = ours.clone();
-        reset_paths(root, &base, &keep).unwrap();
+        // A reset is only for a clean guard; even forced, it keeps to our
+        // files: the stray, the ignored file and the foreign file stay.
+        reset_paths(root, &base, &ours, &["layers".to_string()]).unwrap();
         assert_eq!(head(root).unwrap(), base);
         assert_eq!(
             std::fs::read_to_string(root.join("skills/w/asset.yaml")).unwrap(),
             "old\n"
         );
+        assert!(
+            root.join("skills/w/gone.md").is_file(),
+            "a deleted file is back"
+        );
         assert!(!root.join("skills/w/body.md").exists());
-        assert!(!root.join("skills/w/stray.md").exists());
-        assert!(!root.join("layers/core.yaml").exists());
-        assert!(root.join("keep.txt").is_file(), "never a blanket clean");
-        assert_eq!(changed_paths(root).unwrap(), ["keep.txt"]);
+        assert!(!root.join("layers").exists(), "an emptied created dir goes");
+        assert!(
+            root.join("skills/w/notes.md").is_file(),
+            "the stray is kept"
+        );
+        assert!(
+            root.join("skills/w/cache.local").is_file(),
+            "ignored is kept"
+        );
+        assert_eq!(
+            changed_paths(root).unwrap(),
+            ["foreign.txt", "skills/w/notes.md"]
+        );
         assert!(commit_paths(root, "noop", &ours).unwrap().is_none());
     }
 }

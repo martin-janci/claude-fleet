@@ -18,7 +18,7 @@ use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::catalog::import::slugify;
 use crate::service::catalog::layer::{split_key, Axis, Layer};
 use crate::service::catalog::model::{Kind, Scope};
-use crate::service::catalog::validate::check_layer_name;
+use crate::service::catalog::validate::{check_layer_name, check_name};
 use crate::service::catalog::{author, registry, repo, CatalogTarget, ImportArgs, E_CATALOG_PARSE};
 use crate::service::settings;
 use crate::ssh::SshClient;
@@ -183,19 +183,54 @@ fn short(sha: &str) -> &str {
     &sha[..sha.len().min(12)]
 }
 
-/// What this apply has done to the checkouts so far (PF7 guard): per
-/// catalog, every path it writes — recorded BEFORE the write, so a write
-/// that fails half-way is still its own — and the commit it made. A failed
-/// apply undoes exactly these and nothing else.
+/// What this apply has done to the checkouts so far (PF7 guard, Task 6
+/// review rounds 1–2): per catalog, every FILE it writes or deletes —
+/// recorded BEFORE the write, so a write that fails half-way is still its
+/// own — the directories it created, in order, and the commit it made. A
+/// failed apply undoes exactly these and nothing else; a file it did not
+/// record is never its own, whatever folder it sits in.
 #[derive(Debug, Default)]
 struct Progress {
     written: BTreeMap<i64, BTreeSet<String>>,
+    dirs: BTreeMap<i64, Vec<String>>,
     commits: BTreeMap<i64, String>,
 }
 
 impl Progress {
-    fn wrote(&mut self, catalog_id: i64, path: String) {
-        self.written.entry(catalog_id).or_default().insert(path);
+    fn wrote(&mut self, catalog_id: i64, file: String) {
+        self.written.entry(catalog_id).or_default().insert(file);
+    }
+
+    /// `rel_dir` and its parents under `root`, recording each one made.
+    fn make_dir(&mut self, catalog_id: i64, root: &Path, rel_dir: &str) -> Result<(), IpcError> {
+        let mut cur = String::new();
+        for part in rel_dir.split('/').filter(|p| !p.is_empty()) {
+            if !cur.is_empty() {
+                cur.push('/');
+            }
+            cur.push_str(part);
+            if std::fs::symlink_metadata(root.join(&cur)).is_err() {
+                std::fs::create_dir(root.join(&cur))?;
+                self.dirs.entry(catalog_id).or_default().push(cur.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// Record `rel`, make its directory, write it.
+    fn write_file(
+        &mut self,
+        catalog_id: i64,
+        root: &Path,
+        rel: &str,
+        bytes: &[u8],
+    ) -> Result<(), IpcError> {
+        self.wrote(catalog_id, rel.to_string());
+        if let Some((dir, _)) = rel.rsplit_once('/') {
+            self.make_dir(catalog_id, root, dir)?;
+        }
+        std::fs::write(root.join(rel), bytes)?;
+        Ok(())
     }
 }
 
@@ -345,12 +380,14 @@ fn fail_card(
 /// Undo this apply in one catalog — `None` when done (or nothing to undo),
 /// else what a person must fix. The PF7 guard first: HEAD must be the
 /// recorded pre-apply HEAD or this apply's own commit, and every change in
-/// the tree one of the paths this apply wrote; anything foreign (a CLI
-/// commit, an author session's file) means this catalog is left exactly as
-/// it is.
+/// the tree — and every file beside one of its own, ignored ones included —
+/// one of the files this apply wrote; anything foreign (a CLI commit, an
+/// author session's file or edit) means this catalog is left exactly as it
+/// is.
 fn undo_catalog(row: &CatalogRow, pre: &str, progress: &Progress) -> Option<String> {
     let empty = BTreeSet::new();
     let ours = progress.written.get(&row.id).unwrap_or(&empty);
+    let dirs = progress.dirs.get(&row.id).map(Vec::as_slice).unwrap_or(&[]);
     let own = progress.commits.get(&row.id);
     if ours.is_empty() && own.is_none() {
         return None;
@@ -359,14 +396,16 @@ fn undo_catalog(row: &CatalogRow, pre: &str, progress: &Progress) -> Option<Stri
     let mut heads = vec![pre];
     heads.extend(own.map(String::as_str));
     match repo::foreign_changes(root, &heads, ours) {
-        Ok(foreign) if foreign.is_empty() => repo::reset_paths(root, pre, ours).err().map(|e| {
-            format!(
-                "catalog {} could not be reset to {}: {} — fix by hand",
-                row.name,
-                short(pre),
-                e.message
-            )
-        }),
+        Ok(foreign) if foreign.is_empty() => {
+            repo::reset_paths(root, pre, ours, dirs).err().map(|e| {
+                format!(
+                    "catalog {} could not be reset to {}: {} — fix by hand",
+                    row.name,
+                    short(pre),
+                    e.message
+                )
+            })
+        }
         Ok(foreign) => Some(format!(
             "manual cleanup needed in {}: {} (nothing there was reset)",
             row.name,
@@ -432,21 +471,46 @@ async fn run_steps(
         };
         imports.entry((cid, host)).or_default().push(item);
     }
-    // R13 / R15: take_host replaces the catalog copy and keeps its scope.
+    // R13 / R15: each group is imported into a private staging directory
+    // first, then copied into the checkout file by file, each file recorded
+    // before it is written. take_host replaces the catalog copy's TRACKED
+    // files (never an untracked or ignored one beside them) and keeps its
+    // scope — and refuses when someone else changed that asset meanwhile.
     let mut kept_scope: Vec<(&CatalogRow, Kind, Scope, &ChangesetItemRow)> = Vec::new();
     for ((_, host), group) in &imports {
         let row = row_of(group[0])?;
         let root = Path::new(&row.repo_path);
+        let mut plan: Vec<(&ChangesetItemRow, Kind, String)> = Vec::new();
         for &item in group {
             let kind = kind_of(item).map_err(|e| fail(item, e))?;
-            progress.wrote(row.id, repo::asset_rel_path(kind, &slugify(&item.name)));
             if item.action == ItemAction::TakeHost.as_str() {
-                progress.wrote(row.id, repo::asset_rel_path(kind, &item.name));
-                let old = repo::read_asset(root, kind, &item.name).map_err(|e| fail(item, e))?;
-                kept_scope.push((row, kind, old.header.scope, item));
-                repo::remove_asset(root, kind, &item.name).map_err(|e| fail(item, e))?;
+                check_name(&item.name).map_err(|e| fail(item, e))?;
+            } else if repo::asset_path(root, kind, &slugify(&item.name)).exists() {
+                return Err(fail(
+                    item,
+                    IpcError::new(
+                        codes::E_INVALID_STATE,
+                        format!(
+                            "{}/{} is already in catalog {}",
+                            item.kind,
+                            slugify(&item.name),
+                            row.name
+                        ),
+                    ),
+                ));
             }
+            plan.push((item, kind, slugify(&item.name)));
         }
+        let staging = tempfile::tempdir().map_err(|e| {
+            fail(
+                group[0],
+                IpcError::new(codes::E_IO, format!("staging directory: {e}")),
+            )
+        })?;
+        let staged = CatalogRow {
+            repo_path: staging.path().to_string_lossy().to_string(),
+            ..row.clone()
+        };
         let only: Vec<String> = group
             .iter()
             .map(|i| format!("{}:{}", i.kind, i.name))
@@ -457,7 +521,7 @@ async fn run_steps(
             only,
         };
         let report = crate::service::catalog::import_host_into(
-            CatalogTarget::Row(row),
+            CatalogTarget::Row(&staged),
             args,
             store,
             ssh,
@@ -493,10 +557,63 @@ async fn run_steps(
                 ));
             }
         }
+        let started = pre[&row.id].as_str();
+        for (item, kind, slug) in plan {
+            let rel_asset = repo::asset_rel_path(kind, &slug);
+            let new_files: BTreeSet<String> = if kind.is_folder() {
+                repo::files_on_disk(staging.path(), &rel_asset)
+                    .map_err(|e| fail(item, e))?
+                    .into_iter()
+                    .collect()
+            } else {
+                BTreeSet::from([rel_asset.clone()])
+            };
+            if item.action == ItemAction::TakeHost.as_str() {
+                let inside = |p: &str| p == rel_asset || p.starts_with(&format!("{rel_asset}/"));
+                let theirs: Vec<String> = repo::changed_paths(root)
+                    .map_err(|e| fail(item, e))?
+                    .into_iter()
+                    .filter(|p| inside(p))
+                    .collect();
+                if !theirs.is_empty() {
+                    return Err(fail(
+                        item,
+                        IpcError::new(
+                            codes::E_INVALID_STATE,
+                            format!(
+                                "{}/{} changed in catalog {} during the apply (not by it): {}",
+                                item.kind,
+                                item.name,
+                                row.name,
+                                theirs.join(", ")
+                            ),
+                        ),
+                    ));
+                }
+                let old = repo::read_asset(root, kind, &item.name).map_err(|e| fail(item, e))?;
+                kept_scope.push((row, kind, old.header.scope, item));
+                let tracked = repo::tracked_files(root, started, &[rel_asset.as_str()])
+                    .map_err(|e| fail(item, e))?;
+                for f in tracked.difference(&new_files) {
+                    progress.wrote(row.id, f.clone());
+                    match std::fs::remove_file(root.join(f)) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(fail(item, e.into())),
+                    }
+                }
+            }
+            for f in &new_files {
+                let bytes = std::fs::read(staging.path().join(f))
+                    .map_err(|e| fail(item, IpcError::from(e)))?;
+                progress
+                    .write_file(row.id, root, f, &bytes)
+                    .map_err(|e| fail(item, e))?;
+            }
+        }
     }
     for (row, kind, scope, item) in &kept_scope {
-        set_scope(Path::new(&row.repo_path), *kind, &item.name, *scope)
-            .map_err(|e| fail(item, e))?;
+        set_scope(progress, row, *kind, &item.name, *scope).map_err(|e| fail(item, e))?;
     }
 
     // 2b. Layer files: the members this card adds.
@@ -515,9 +632,13 @@ async fn run_steps(
             .iter()
             .find(|r| r.id == *cid)
             .ok_or_else(|| fail_in(layer, IpcError::new(codes::E_INVALID_STATE, "no catalog")))?;
+        let root = Path::new(&row.repo_path);
         check_layer_name(layer).map_err(|e| fail_in(layer, e))?;
+        progress
+            .make_dir(row.id, root, "layers")
+            .map_err(|e| fail_in(layer, e))?;
         progress.wrote(row.id, format!("layers/{layer}.yaml"));
-        add_layer_members(Path::new(&row.repo_path), layer, add).map_err(|e| fail_in(layer, e))?;
+        add_layer_members(root, layer, add).map_err(|e| fail_in(layer, e))?;
     }
 
     // 2c. Scope: the card's set_scope items, then the named look items an
@@ -539,6 +660,7 @@ async fn run_steps(
                 IpcError::new(codes::E_INVALID, format!("bad member {member}")),
             )
         })?;
+        check_name(&name).map_err(|e| fail(item, e))?;
         let scope = match p.scope.as_deref() {
             Some("shared") => Scope::Shared,
             Some("private") => Scope::Private,
@@ -549,15 +671,12 @@ async fn run_steps(
                 ))
             }
         };
-        progress.wrote(row.id, repo::asset_rel_path(kind, &name));
-        set_scope(Path::new(&row.repo_path), kind, &name, scope).map_err(|e| fail(item, e))?;
+        set_scope(progress, row, kind, &name, scope).map_err(|e| fail(item, e))?;
     }
     for &item in &shares {
         let row = row_of(item)?;
         let kind = kind_of(item).map_err(|e| fail(item, e))?;
-        let name = slugify(&item.name);
-        progress.wrote(row.id, repo::asset_rel_path(kind, &name));
-        set_scope(Path::new(&row.repo_path), kind, &name, Scope::Shared)
+        set_scope(progress, row, kind, &slugify(&item.name), Scope::Shared)
             .map_err(|e| fail(item, e))?;
     }
 
@@ -710,11 +829,25 @@ fn look_shares<'a>(
         .collect())
 }
 
-fn set_scope(root: &Path, kind: Kind, name: &str, scope: Scope) -> Result<(), IpcError> {
+/// Set one asset's `scope`, rewriting its yaml file only (the one file it
+/// records) — never its body or resources.
+fn set_scope(
+    progress: &mut Progress,
+    row: &CatalogRow,
+    kind: Kind,
+    name: &str,
+    scope: Scope,
+) -> Result<(), IpcError> {
+    let root = Path::new(&row.repo_path);
     let mut a = repo::read_asset(root, kind, name)?;
     if a.header.scope != scope {
         a.header.scope = scope;
-        repo::write_asset(root, &a, true)?;
+        let rel = if kind.is_folder() {
+            format!("{}/asset.yaml", repo::asset_rel_path(kind, name))
+        } else {
+            repo::asset_rel_path(kind, name)
+        };
+        progress.write_file(row.id, root, &rel, a.to_yaml().as_bytes())?;
     }
     Ok(())
 }
@@ -1893,16 +2026,15 @@ mod tests {
             home.path(),
             &format!("echo theirs > '{}'", foreign.display()),
         );
+        // The import lands in the checkout; the assignment of a layer the
+        // card never writes fails after it.
         let id = new_card(
             &f,
-            &[
-                import("core", p, "w", "oci"),
-                import("extra", p, "absent", "oci"),
-            ],
+            &[import("core", p, "w", "oci"), assign("ghost", p, "oci")],
         );
         let before = head(&f.personal_root);
         let err = apply_all(&f, id, &ssh).await.unwrap_err();
-        assert!(err.message.starts_with("extra: "), "{}", err.message);
+        assert!(err.message.starts_with("ghost: "), "{}", err.message);
         assert!(
             err.message
                 .contains("manual cleanup needed in personal: foreign.txt"),
@@ -2060,7 +2192,13 @@ mod tests {
                 ("skills/w/body.md", "Old steps.\n"),
             ],
         );
+        crate::tmux::fake_exec::write_exec(
+            &f.personal_root.join(".git/hooks"),
+            "pre-commit",
+            &format!("#!/bin/sh\n{}exit 1\n", crate::tmux::fake_exec::PROBE_GUARD),
+        );
         let home = tempfile::tempdir().unwrap();
+        host_skill(home.path(), "w", "Edited on the host, long enough.");
         let bin = tempfile::tempdir().unwrap();
         let ssh = ssh_with_home(bin.path(), home.path());
         let take = item(
@@ -2093,12 +2231,14 @@ mod tests {
         .await
         .unwrap_err();
         assert!(
-            err.message.starts_with("drift: skill/w was not imported"),
+            err.message.starts_with("commit: catalog personal"),
             "{}",
             err.message
         );
+        assert!(!err.message.contains("manual cleanup"), "{}", err.message);
         let w = repo::read_asset(&f.personal_root, Kind::Skill, "w").unwrap();
         assert_eq!(w.header.description, "The catalog's own long description.");
+        assert_eq!(w.body, "Old steps.\n");
         assert_eq!(head(&f.personal_root), before);
         assert!(git(&f.personal_root, &["status", "--porcelain"]).is_empty());
     }
@@ -2150,5 +2290,182 @@ mod tests {
             (verdicts[0].decider.as_str(), verdicts[0].verdict.as_str()),
             ("rule", "ignored")
         );
+    }
+
+    /// Round 2 (a): a person's file inside a folder this apply creates is
+    /// not the apply's — on success it is not committed and stays on disk.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_foreign_file_inside_a_created_folder_is_not_committed() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        host_skill(home.path(), "w", DESC);
+        let bin = tempfile::tempdir().unwrap();
+        let notes = f.personal_root.join("skills/w/notes.md");
+        let ssh = ssh_with_home_running(
+            bin.path(),
+            home.path(),
+            &format!(
+                "mkdir -p '{0}/skills/w' && echo theirs > '{0}/skills/w/notes.md'",
+                f.personal_root.display()
+            ),
+        );
+        let id = new_card(&f, &[import("core", p, "w", "oci")]);
+        let v = apply_all(&f, id, &ssh).await.unwrap();
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        let files = git(
+            &f.personal_root,
+            &["show", "--name-only", "--format=", "HEAD"],
+        );
+        assert!(files.contains("skills/w/asset.yaml"), "{files}");
+        assert!(!files.contains("notes.md"), "{files}");
+        assert!(notes.is_file());
+    }
+
+    /// Round 2 (a): the same on failure — kept, and the card says manual
+    /// cleanup; nothing in that catalog is reset.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_foreign_file_inside_a_created_folder_survives_a_failure() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        host_skill(home.path(), "w", DESC);
+        let bin = tempfile::tempdir().unwrap();
+        let notes = f.personal_root.join("skills/w/notes.md");
+        let ssh = ssh_with_home_running(
+            bin.path(),
+            home.path(),
+            &format!(
+                "mkdir -p '{0}/skills/w' && echo theirs > '{0}/skills/w/notes.md'",
+                f.personal_root.display()
+            ),
+        );
+        let id = new_card(
+            &f,
+            &[import("core", p, "w", "oci"), assign("ghost", p, "oci")],
+        );
+        let err = apply_all(&f, id, &ssh).await.unwrap_err();
+        assert!(
+            err.message
+                .contains("manual cleanup needed in personal: skills/w/notes.md"),
+            "{}",
+            err.message
+        );
+        assert!(notes.is_file());
+        assert!(
+            f.personal_root.join("skills/w/asset.yaml").is_file(),
+            "not reset"
+        );
+    }
+
+    /// Round 2 (b): a file git ignores, inside a folder the apply created,
+    /// is never deleted by a failed apply's reset (R12).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn an_ignored_file_inside_a_created_folder_is_kept_on_failure() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        f.commit_files(&f.personal_root, p, &[(".gitignore", "*.local\n")]);
+        let home = tempfile::tempdir().unwrap();
+        host_skill(home.path(), "w", DESC);
+        let bin = tempfile::tempdir().unwrap();
+        let cache = f.personal_root.join("skills/w/cache.local");
+        let ssh = ssh_with_home_running(
+            bin.path(),
+            home.path(),
+            &format!(
+                "mkdir -p '{0}/skills/w' && echo mine > '{0}/skills/w/cache.local'",
+                f.personal_root.display()
+            ),
+        );
+        let id = new_card(
+            &f,
+            &[import("core", p, "w", "oci"), assign("ghost", p, "oci")],
+        );
+        let err = apply_all(&f, id, &ssh).await.unwrap_err();
+        assert!(cache.is_file(), "an ignored file is never deleted");
+        assert!(
+            err.message
+                .contains("manual cleanup needed in personal: skills/w/cache.local"),
+            "{}",
+            err.message
+        );
+    }
+
+    /// Round 2 (a): a person's edit to a tracked file of the asset a
+    /// take_host replaces, made mid-apply, is foreign: the apply refuses to
+    /// overwrite it and the edit stays.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn an_edit_inside_a_take_host_asset_mid_apply_is_foreign() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        f.commit_files(
+            &f.personal_root,
+            p,
+            &[
+                (
+                    "skills/w/asset.yaml",
+                    "kind: skill\nname: w\ndescription: The catalog's own long description.\n",
+                ),
+                ("skills/w/body.md", "Old steps.\n"),
+            ],
+        );
+        let home = tempfile::tempdir().unwrap();
+        host_skill(home.path(), "w", "Edited on the host, long enough.");
+        let bin = tempfile::tempdir().unwrap();
+        let body = f.personal_root.join("skills/w/body.md");
+        let ssh = ssh_with_home_running(
+            bin.path(),
+            home.path(),
+            &format!("echo mine > '{}'", body.display()),
+        );
+        let take = item(
+            "drift",
+            Some(p),
+            "skill",
+            "w",
+            ItemAction::TakeHost,
+            ItemParams {
+                host: Some("oci".into()),
+                ..Default::default()
+            },
+        );
+        let id = f
+            .store
+            .lock()
+            .unwrap()
+            .insert_changeset("drift", "skill/w differs", &[take])
+            .unwrap()
+            .id;
+        let before = head(&f.personal_root);
+        let err = apply(
+            ApplyArgs {
+                id,
+                positions: Some(vec![0]),
+            },
+            &f.store,
+            &ssh,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.message
+                .contains("changed in catalog personal during the apply")
+                && err.message.contains("skills/w/body.md"),
+            "{}",
+            err.message
+        );
+        assert_eq!(std::fs::read_to_string(&body).unwrap(), "mine\n");
+        let w = repo::read_asset(&f.personal_root, Kind::Skill, "w").unwrap();
+        assert_eq!(w.header.description, "The catalog's own long description.");
+        assert_eq!(head(&f.personal_root), before);
+        assert_eq!(super::super::get(id, &f.store).unwrap().state, "failed");
     }
 }
