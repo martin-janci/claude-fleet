@@ -1795,7 +1795,7 @@ pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
 /// a Rollout card is a person's rejection of its `sync` item — only a
 /// person rejects an item (`reject_item`); a later applied item for the
 /// same triple lifts it. SB6 never syncs what a person said no to.
-fn rejected_rollouts(s: &Store) -> Result<BTreeSet<(i64, String, String)>, IpcError> {
+pub(super) fn rejected_rollouts(s: &Store) -> Result<BTreeSet<(i64, String, String)>, IpcError> {
     let mut cards = s.list_changesets()?;
     cards.sort_by_key(|c| c.id);
     let mut last: BTreeMap<(i64, String, String), bool> = BTreeMap::new();

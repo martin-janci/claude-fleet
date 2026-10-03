@@ -447,7 +447,8 @@ fn after_undo(
         .filter(|i| i.state == "applied" && i.action == ItemAction::TakeHost.as_str())
         .collect();
     let written = lock(store).and_then(|s| {
-        if let Err(e) = trim_follow_up(card.id, items, &s) {
+        let reverted: BTreeSet<i64> = done.iter().map(|r| r.row.id).collect();
+        if let Err(e) = trim_follow_up(card.id, items, &reverted, &s) {
             warnings.push(format!("withdraw its follow-up rollout: {}", e.message));
         }
         if let Err(e) = propose_follow_up(&taken, &s) {
@@ -470,15 +471,29 @@ fn after_undo(
     }
 }
 
-/// PF11: take the assets this undo removed from its catalogs — the members
-/// its imports added — out of every open Rollout card that has applied
-/// nothing yet; a card left with no item is withdrawn. Gap hashes are
-/// recomputed (PF10); an item a person rejected stays rejected while its
-/// assets are unchanged (PF14). A take_host's follow-up (group `update`) is
-/// not trimmed: it carries the catalog's copy of that asset, which after
-/// the undo is the restored one — exactly the Rollout R14 asks undo to
-/// propose, so `propose_follow_up` refreshes it instead of adding a second.
-fn trim_follow_up(card_id: i64, items: &[ChangesetItemRow], s: &Store) -> Result<(), IpcError> {
+/// PF11: take the assets this undo removed — the members its applied
+/// imports added, in the catalogs it actually reverted (`reverted`: a
+/// catalog where the card committed nothing lost nothing) — out of every
+/// open Rollout card that has applied nothing yet. Gap hashes are
+/// recomputed (PF10).
+///
+/// A person's no is never undone here (fix round 1): an item a person
+/// rejected stays `rejected` with whatever assets remain — none, if every
+/// one was taken out — because SB6 holds `(catalog, layer, host)` only
+/// while a rejected sync item for it exists. A pending item left with no
+/// asset is dropped. A card left with no pending item is withdrawn
+/// (`dismissed`), its rejected items kept.
+///
+/// A take_host's follow-up (group `update`) is not trimmed: it carries the
+/// catalog's copy of that asset, which after the undo is the restored one —
+/// exactly the Rollout R14 asks undo to propose, so `propose_follow_up`
+/// refreshes it instead of adding a second.
+fn trim_follow_up(
+    card_id: i64,
+    items: &[ChangesetItemRow],
+    reverted: &BTreeSet<i64>,
+    s: &Store,
+) -> Result<(), IpcError> {
     let mut gone: BTreeMap<(i64, String), BTreeSet<String>> = BTreeMap::new();
     for i in items
         .iter()
@@ -486,12 +501,15 @@ fn trim_follow_up(card_id: i64, items: &[ChangesetItemRow], s: &Store) -> Result
     {
         let p = ItemParams::parse(i.params.as_deref());
         if let (Some(cid), Some(layer), Some(member)) = (i.catalog_id, p.layer, p.member) {
-            gone.entry((cid, layer)).or_default().insert(member);
+            if reverted.contains(&cid) {
+                gone.entry((cid, layer)).or_default().insert(member);
+            }
         }
     }
     if gone.is_empty() {
         return Ok(());
     }
+    let withdrawn = format!("withdrawn: card #{card_id} was undone");
     for rollout in s.list_changesets()? {
         if rollout.kind != CardKind::Rollout.as_str() || !is_open(&rollout.state) {
             continue;
@@ -504,7 +522,7 @@ fn trim_follow_up(card_id: i64, items: &[ChangesetItemRow], s: &Store) -> Result
         let mut kept: Vec<(NewChangesetItem, bool)> = Vec::new();
         for i in &existing {
             let mut new = NewChangesetItem::from(i);
-            let mut rejected = i.state == "rejected";
+            let rejected = i.state == "rejected";
             let drop = i
                 .catalog_id
                 .filter(|_| i.action == ItemAction::Sync.as_str())
@@ -515,8 +533,7 @@ fn trim_follow_up(card_id: i64, items: &[ChangesetItemRow], s: &Store) -> Result
                 p.assets.retain(|a| !drop.contains(a));
                 if p.assets.len() != before {
                     changed = true;
-                    rejected = false;
-                    if p.assets.is_empty() {
+                    if p.assets.is_empty() && !rejected {
                         continue;
                     }
                     new.params = p.to_json();
@@ -527,22 +544,22 @@ fn trim_follow_up(card_id: i64, items: &[ChangesetItemRow], s: &Store) -> Result
         if !changed {
             continue;
         }
-        if kept.is_empty() {
-            s.withdraw_changeset(
-                rollout.id,
-                &format!("withdrawn: card #{card_id} was undone"),
-            )?;
-            continue;
+        if !kept.is_empty() {
+            let keep: Vec<i64> = kept
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, rejected))| *rejected)
+                .map(|(n, _)| n as i64)
+                .collect();
+            let mut news: Vec<NewChangesetItem> = kept.iter().map(|(n, _)| n.clone()).collect();
+            stamp_gap_hashes(&mut news);
+            s.replace_changeset_items_keeping(rollout.id, &rollout_summary(&news), &news, |_| {
+                keep
+            })?;
         }
-        let keep: Vec<i64> = kept
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, rejected))| *rejected)
-            .map(|(n, _)| n as i64)
-            .collect();
-        let mut news: Vec<NewChangesetItem> = kept.into_iter().map(|(n, _)| n).collect();
-        stamp_gap_hashes(&mut news);
-        s.replace_changeset_items_keeping(rollout.id, &rollout_summary(&news), &news, |_| keep)?;
+        if kept.iter().all(|(_, rejected)| *rejected) {
+            s.withdraw_changeset(rollout.id, &withdrawn)?;
+        }
     }
     Ok(())
 }
@@ -959,6 +976,11 @@ mod tests {
 
     #[cfg(unix)]
     fn assign(layer: &str, cid: i64) -> crate::store::NewChangesetItem {
+        assign_to(layer, cid, "oci")
+    }
+
+    #[cfg(unix)]
+    fn assign_to(layer: &str, cid: i64, host: &str) -> crate::store::NewChangesetItem {
         item(
             layer,
             Some(cid),
@@ -966,7 +988,7 @@ mod tests {
             layer,
             ItemAction::AssignLayer,
             ItemParams {
-                host: Some("oci".into()),
+                host: Some(host.into()),
                 layer: Some(layer.into()),
                 axis: Some("context".into()),
                 ..Default::default()
@@ -1332,6 +1354,168 @@ mod tests {
         );
         assert_eq!(head(&f.personal_root), before);
         assert_eq!(super::super::get(id, &f.store).unwrap().state, "applied");
+    }
+
+    /// Every rollout item: (host, state, assets), by host.
+    #[cfg(unix)]
+    fn rollout_items(f: &Fleet) -> Vec<(String, String, Vec<String>)> {
+        let s = f.store.lock().unwrap();
+        let mut out: Vec<_> = s
+            .list_changesets()
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.kind == "rollout")
+            .flat_map(|c| s.changeset_items(c.id).unwrap())
+            .map(|i| {
+                let assets = ItemParams::parse(i.params.as_deref()).assets;
+                (i.name, i.state, assets)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Fix round 1 (Important): trimming never lifts a person's no. A
+    /// rejected `{v, w}` item stays rejected for `v` when the card that
+    /// imported `w` is undone, and SB6 keeps leaving that host out; once
+    /// its last asset goes it stays rejected (no assets), and the card, left
+    /// with no pending item, is withdrawn.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn trimming_a_rollout_keeps_a_rejected_item_rejected() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci", "trn"]);
+        let p = f.personal.id;
+        let (home, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        host_skill(home.path(), "v", DESC);
+        host_skill(home.path(), "w", DESC);
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let a = apply_card(
+            &f,
+            &ssh,
+            "new",
+            "Adopt v",
+            &[
+                import("core", p, "v"),
+                assign_to("core", p, "oci"),
+                assign_to("core", p, "trn"),
+            ],
+            None,
+        )
+        .await;
+        let b = apply_card(&f, &ssh, "new", "Adopt w", &[import("core", p, "w")], None).await;
+        let (rollout, oci) = {
+            let s = f.store.lock().unwrap();
+            let card = s
+                .list_changesets()
+                .unwrap()
+                .into_iter()
+                .find(|c| c.kind == "rollout")
+                .unwrap();
+            let oci = s
+                .changeset_items(card.id)
+                .unwrap()
+                .into_iter()
+                .find(|i| i.name == "oci")
+                .unwrap()
+                .position;
+            (card.id, oci)
+        };
+        reject_items(rollout, &[oci], &f.store).await.unwrap();
+        let vw = vec!["skill/v".to_string(), "skill/w".to_string()];
+        assert_eq!(
+            rollout_items(&f),
+            [
+                ("oci".to_string(), "rejected".to_string(), vw.clone()),
+                ("trn".to_string(), "pending".to_string(), vw)
+            ]
+        );
+        let held = |f: &Fleet| {
+            super::super::apply::rejected_rollouts(&f.store.lock().unwrap())
+                .unwrap()
+                .contains(&(p, "core".to_string(), "oci".to_string()))
+        };
+        assert!(held(&f));
+
+        undo(b, &f.store).await.unwrap();
+        let v = vec!["skill/v".to_string()];
+        assert_eq!(
+            rollout_items(&f),
+            [
+                ("oci".to_string(), "rejected".to_string(), v.clone()),
+                ("trn".to_string(), "pending".to_string(), v)
+            ]
+        );
+        assert_eq!(
+            super::super::get(rollout, &f.store).unwrap().state,
+            "proposed"
+        );
+        assert!(held(&f), "SB6 still leaves oci out");
+
+        undo(a, &f.store).await.unwrap();
+        assert_eq!(
+            rollout_items(&f),
+            [("oci".to_string(), "rejected".to_string(), vec![])],
+            "the rejected item stays; the emptied pending one goes"
+        );
+        assert_eq!(
+            super::super::get(rollout, &f.store).unwrap().state,
+            "dismissed",
+            "no pending item left: withdrawn"
+        );
+        assert!(held(&f), "SB6 still leaves oci out");
+    }
+
+    /// Fix round 1: only a catalog this undo reverted loses assets from
+    /// open rollouts — a card that committed nothing there trims nothing.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn an_undo_that_reverted_nothing_trims_no_rollout() {
+        let _g = lock_registry_for_test();
+        let f = Fleet::new(&["oci"]);
+        let p = f.personal.id;
+        let (id, rollout) = {
+            let s = f.store.lock().unwrap();
+            let card = s
+                .insert_changeset("new", "Adopt w", &[import("core", p, "w")])
+                .unwrap();
+            s.set_changeset_item_states(card.id, &[0], "applied")
+                .unwrap();
+            s.mark_changeset_applied(card.id, 1_000, "{}", "[]", None)
+                .unwrap();
+            let sync = item(
+                "core",
+                Some(p),
+                "host",
+                "oci",
+                ItemAction::Sync,
+                ItemParams {
+                    layer: Some("core".into()),
+                    assets: vec!["skill/w".into()],
+                    ..Default::default()
+                },
+            );
+            let rollout = s
+                .insert_changeset("rollout", "Roll out core to oci", &[sync])
+                .unwrap();
+            (card.id, rollout.id)
+        };
+        let v = undo(id, &f.store).await.unwrap();
+        assert_eq!(v.state, "undone", "{:?}", v.error);
+        assert_eq!(
+            super::super::get(rollout, &f.store).unwrap().state,
+            "proposed"
+        );
+        assert_eq!(
+            rollout_items(&f),
+            [(
+                "oci".to_string(),
+                "pending".to_string(),
+                vec!["skill/w".to_string()]
+            )]
+        );
     }
 
     /// Insert and apply a card adopting `w` into personal's `core` and `v`
