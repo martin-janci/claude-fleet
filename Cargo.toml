@@ -1,3 +1,34 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "src-tauri"]
+
+# Dev and test builds keep line tables only: panics and backtraces still name
+# file:line, but binaries and rlibs carry no variable/type DWARF. That DWARF
+# is what every edit re-links into the 700 MB desktop binary and the 2 GB of
+# desktop library outputs (RUST-BUILD-PERFORMANCE-AUDIT.md §13.4).
+# To step through code with locals in a debugger, build the `dev-debug`
+# profile instead: `cargo build --profile dev-debug` (target/dev-debug/).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev-debug]
+inherits = "dev"
+debug = "full"
+
+# The inner-loop check, `cargo fleet-fast-check` (.cargo/config.toml): the
+# dev profile under another name, so its artifacts live in their own
+# directory (target/fast-check/) and never trade places with `fleet-check`'s
+# test-target world in target/debug/. A profile rather than `--target-dir`,
+# because the directory then follows the workspace (and CARGO_TARGET_DIR)
+# from any working directory.
+[profile.fast-check]
+inherits = "dev"
+
+# The bundled SQLite C code (rusqlite `bundled`) follows the profile's
+# opt-level, which is 0 in dev and test builds. Tests open a fresh in-memory
+# store about a thousand times per run and replay every migration each time,
+# so an unoptimised SQLite was a large share of the fleet-core test suite
+# (RUST-BUILD-PERFORMANCE-AUDIT.md §7.4). Costs one ~7 s C compile; the Rust
+# code stays at opt-level 0.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3

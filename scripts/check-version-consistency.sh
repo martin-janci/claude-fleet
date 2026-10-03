@@ -44,6 +44,7 @@ cd "$ROOT"
 EXEMPT=(
   "crates/fleet-core/Cargo.toml|fleet-core|0.1.0|internal library crate, consumed only by path inside this workspace; excluded from scripts/release.sh's VERSION_FILES"
   "crates/fleet-update/Cargo.toml|fleet-update|0.1.0|internal library crate (the update engine), consumed only by path inside this workspace; excluded from scripts/release.sh's VERSION_FILES"
+  "crates/fleet-agent-e2e/Cargo.toml|fleet-agent-e2e|0.1.0|test-only crate (the hub and the real fleet-agent end to end), never built into anything; excluded from scripts/release.sh's VERSION_FILES"
 )
 
 usage() {
@@ -283,6 +284,32 @@ if [[ -n "$EXPECT_TAG" ]]; then
   else
     printf '  WRONG %-32s %s\n' "git tag" "$EXPECT_TAG"
     problem "tag '$EXPECT_TAG' does not match the repo version — expected 'v$VERSION'"
+  fi
+fi
+
+# --- 7. the Rust toolchain pin -----------------------------------------------
+# rust-toolchain.toml pins an exact version; every CI toolchain install and the
+# hub image's builder must name the same one, or CI and local builds drift
+# apart again (a floating `stable` cold-started every cache on each release).
+TOOLCHAIN="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+if [[ ! "$TOOLCHAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  printf '  WRONG %-32s %s\n' "rust-toolchain.toml" "${TOOLCHAIN:-<none>}"
+  problem "rust-toolchain.toml must pin an exact version (X.Y.Z), not '${TOOLCHAIN:-<none>}'"
+else
+  printf '  ok    %-32s %s\n' "rust-toolchain.toml" "$TOOLCHAIN"
+  while IFS= read -r hit; do
+    file="${hit%%:*}"; ref="${hit##*@}"
+    if [[ "$ref" != "$TOOLCHAIN" ]]; then
+      printf '  WRONG %-32s %s\n' "$file" "dtolnay/rust-toolchain@$ref"
+      problem "$file installs dtolnay/rust-toolchain@$ref, expected @$TOOLCHAIN (rust-toolchain.toml)"
+    fi
+  done < <(grep -oH 'dtolnay/rust-toolchain@[^[:space:]]*' .github/workflows/*.yml || true)
+  IMAGE="$(sed -n 's/^FROM rust:\([^ ]*\)-bookworm.*/\1/p' crates/fleet-hub/Dockerfile)"
+  if [[ "$IMAGE" == "$TOOLCHAIN" ]]; then
+    printf '  ok    %-32s %s\n' "crates/fleet-hub/Dockerfile" "rust:$IMAGE"
+  else
+    printf '  WRONG %-32s %s\n' "crates/fleet-hub/Dockerfile" "rust:${IMAGE:-<none>}"
+    problem "crates/fleet-hub/Dockerfile builds with rust:${IMAGE:-<none>}, expected rust:$TOOLCHAIN-bookworm (rust-toolchain.toml)"
   fi
 fi
 

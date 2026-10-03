@@ -1789,8 +1789,7 @@ mod tests {
         // (`pages::tests::every_setting_has_one_home`); the frontend still
         // keeps a typed key and a default for every editable setting, for the
         // components that read one before `get_fleet_settings` answers.
-        const TS: &str = include_str!("../../../../src/lib/fleet_settings.ts");
-        let ts = code_only(TS);
+        let ts = code_only(&crate::repo_files::read("src/lib/fleet_settings.ts"));
         for spec in SPECS.iter().filter(|s| s.owned_by.is_none()) {
             // `  camelName: 'the.key',` (SETTING_DEFAULTS lines start with a quote).
             let entry = format!(": '{}',", spec.key);
@@ -2242,8 +2241,8 @@ mod tests {
 
     #[test]
     fn update_settings_are_in_the_user_guide() {
-        const GUIDE: &str = include_str!("../../../../docs/updates.md");
-        let rows: BTreeMap<&str, &str> = GUIDE
+        let guide = crate::repo_files::read("docs/updates.md");
+        let rows: BTreeMap<&str, &str> = guide
             .lines()
             .filter_map(|l| {
                 let rest = l.strip_prefix("| `update.")?;

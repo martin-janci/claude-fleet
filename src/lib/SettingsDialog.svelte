@@ -15,6 +15,8 @@
   import { allPages, guideProposals, loadGuides } from './pages/guides';
   import { hosts } from './hosts';
   import { mcpStatus } from './mcp';
+  import { healthCheck } from './ipc';
+  import { appVersion, loadAppVersion } from './app_version';
   import { onboardingDismissed, onboardingWelcomed } from './onboarding';
   import { hintsEnabled, resetHints } from './hints';
   import {
@@ -150,6 +152,15 @@
   // the click — and, just as importantly, their `onMount` fetches are not made
   // at all, or opening Settings would raise two error toasts every time.
   const isRemote = $derived($hubStatus.remote);
+  // The hub's own version, for the Hub section's one plain sentence about
+  // which is which. Read here rather than handed down: the footer's line
+  // (`App.svelte` + `app_version.ts`) is the always-on-screen answer, and
+  // this is the screen somebody opens when that line raised the question.
+  let hubVersion = $state<string | null>(null);
+  // Told apart from "not read yet", because the two are opposite news and
+  // the read is one round trip away: an unreachable hub says so, an
+  // in-flight one says nothing.
+  let hubVersionFailed = $state(false);
   // Not the same thing: a configured hub this launch cannot use is not a hub
   // client, but it owns no fleet either, and the backend refuses the same
   // panels. See `ownsTheFleet`.
@@ -298,7 +309,17 @@
       // The control API and the stranded-token check do not apply to a hub
       // client, and both are guarded on the backend. The settings do: a
       // connected hub serves them (P6).
-      if ($hubStatus.remote) await loadHubPages();
+      if ($hubStatus.remote) {
+        void loadAppVersion();
+        // Not awaited and never surfaced as an error: a hub that cannot be
+        // reached has the banner and the footer already, and this line just
+        // stays off.
+        void healthCheck().then((r) => {
+          if (r.ok && r.value) hubVersion = r.value.version;
+          else hubVersionFailed = true;
+        });
+        await loadHubPages();
+      }
       return;
     }
     const r = await mcpStatus();
@@ -471,6 +492,20 @@
           <code>{$hubStatus.client_name ?? 'desktop'}</code>. The fleet lives
           there: its database, its reconcile tick, its SSH connections. This app
           runs none of them.
+        </p>
+        <!-- Two programs, two release trains, and until now one `v…` in the
+             footer that could have been either. Both are named here, in the
+             section about the pairing itself. -->
+        <p class="hook-desc" data-testid="hub-versions">
+          Versions: this app is
+          <code>{$appVersion ?? 'unknown'}</code>, the hub is
+          <code>{hubVersion ?? (hubVersionFailed ? 'not answering' : 'reading…')}</code>.
+          {#if $appVersion && hubVersion && $appVersion !== hubVersion}
+            They differ, which is allowed — the two are released separately,
+            and what decides whether they can talk is the wire contract, not
+            matching versions. A contract this app cannot accept shows up as
+            its own banner, not as this line.
+          {/if}
         </p>
         {#if $hubStatus.warning}
           <p class="err" data-testid="hub-status-warning">⚠ {$hubStatus.warning}</p>
