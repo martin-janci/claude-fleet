@@ -208,6 +208,31 @@ impl AdminCall {
         )
     }
 
+    /// PF7: the calls that write a catalog checkout or `host_layers` (or
+    /// re-point, reload or remove a catalog). [`run`] holds
+    /// [`super::changesets::authoring_lock`] around them, so none lands
+    /// while a changeset card is being applied or undone.
+    pub fn writes_catalog(&self) -> bool {
+        matches!(
+            self,
+            AdminCall::Configure(_)
+                | AdminCall::Load(_)
+                | AdminCall::SetHostLayers(_)
+                | AdminCall::WriteLayer(_)
+                | AdminCall::DeleteLayer(_)
+                | AdminCall::ImportHost(_)
+                | AdminCall::CreateAsset(_)
+                | AdminCall::UpdateAsset(_)
+                | AdminCall::DeleteAsset(_)
+                | AdminCall::AddResourceBytes(_)
+                | AdminCall::RemoveResource(_)
+                | AdminCall::CommitPending(_)
+                | AdminCall::Push
+                | AdminCall::AddCatalog(_)
+                | AdminCall::RemoveCatalog(_)
+        )
+    }
+
     /// The calls the tool's `catalog` parameter addresses (M3 R10; the
     /// authoring calls since M4, R21).
     pub fn is_per_catalog(&self) -> bool {
@@ -327,6 +352,12 @@ pub async fn run(
     reg: &Arc<CancellationRegistry>,
 ) -> Result<serde_json::Value, IpcError> {
     call.touches(catalog.map(|r| r.name.as_str()))?;
+    // PF7: a catalog write waits for an apply or undo in flight.
+    let _busy = if call.writes_catalog() {
+        Some(super::changesets::authoring_lock().await)
+    } else {
+        None
+    };
     // A per-catalog call naming a catalog other than personal (R10, R21).
     let named = catalog.filter(|r| r.org_id.is_some() && call.is_per_catalog());
     let target = match named {
@@ -775,5 +806,75 @@ mod tests {
             assert!(!call.is_read(), "{}", call.action());
         }
         assert!(AdminCall::RepoStatus.is_read());
+    }
+
+    /// PF7: every call that writes a checkout or `host_layers` waits for an
+    /// apply in flight (`APPLY_LOCK`), so no edit lands mid-apply; reads,
+    /// secrets and host sync do not.
+    #[test]
+    fn the_calls_that_wait_for_an_apply_are_the_catalog_writes() {
+        let waits: Vec<&str> = every_call()
+            .iter()
+            .filter(|c| c.writes_catalog())
+            .map(AdminCall::action)
+            .collect();
+        assert_eq!(
+            waits,
+            [
+                "configure",
+                "load",
+                "set_host_layers",
+                "write_layer",
+                "delete_layer",
+                "import_host",
+                "create_asset",
+                "update_asset",
+                "delete_asset",
+                "add_resource_bytes",
+                "remove_resource",
+                "commit_pending",
+                "push",
+                "add_catalog",
+                "remove_catalog",
+            ]
+        );
+        for c in every_call().iter().filter(|c| c.writes_catalog()) {
+            assert!(!c.is_read(), "{}", c.action());
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn an_authoring_call_waits_for_an_apply_and_a_read_does_not() {
+        use std::time::Duration;
+        let _g = super::super::lock_registry_for_test();
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let ssh = Arc::new(SshClient::new());
+        let reg = CancellationRegistry::new();
+        let commit = || AdminCall::CommitPending(CommitPendingArgs::default());
+        let busy = super::super::changesets::APPLY_LOCK.lock().await;
+        let waited = tokio::time::timeout(
+            Duration::from_millis(200),
+            run(commit(), None, &store, &ssh, &reg),
+        )
+        .await;
+        assert!(waited.is_err(), "commit_pending waits for the apply");
+        let read = tokio::time::timeout(
+            Duration::from_secs(5),
+            run(AdminCall::Config, None, &store, &ssh, &reg),
+        )
+        .await;
+        assert!(read.is_ok(), "a read never waits");
+        drop(busy);
+        let done = tokio::time::timeout(
+            Duration::from_secs(5),
+            run(commit(), None, &store, &ssh, &reg),
+        )
+        .await
+        .expect("runs once the apply is done");
+        assert_eq!(
+            done.unwrap_err().code,
+            super::super::E_CATALOG_NOT_CONFIGURED
+        );
     }
 }

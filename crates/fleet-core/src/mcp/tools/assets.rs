@@ -82,6 +82,8 @@ impl FleetTools {
             s.get_setting(crate::mcp::SETTING_TOKEN)
                 .map_err(|e| to_mcp_err(e.into()))?
         };
+        // PF7: an import writes the checkout; it waits for an apply in flight.
+        let _busy = catalog::changesets::authoring_lock().await;
         let rep = catalog::import_host(args, &self.store, &self.ssh, token.as_deref())
             .await
             .map_err(to_mcp_err)?;
@@ -397,6 +399,9 @@ impl FleetTools {
                 p.contexts.len()
             ),
         );
+        // PF7: a host's layers wait for an apply in flight (a failed apply
+        // restores its snapshot over them).
+        let _busy = catalog::changesets::authoring_lock().await;
         catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
         let out = catalog::set_host_layers(
             &p.host_alias,
