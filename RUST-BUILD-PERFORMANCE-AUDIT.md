@@ -1912,3 +1912,122 @@ clean. The memstatus flag also applies to release builds, where it removes
 the same lock from the hub's concurrent connections (its effect there was
 not measured). The remaining fleet-core time is mostly the scale and
 ring-pressure tests (`scale_work_view` ~30 s, four others at 8–12 s each).
+
+## Appendix E — Contract tests out of fleet-core's build inputs (2026-10-03)
+
+§11 measured that edits to files outside fleet-core still recompiled
+fleet-core's unit-test target. Two mechanisms caused it:
+
+* **`include_str!` of a file outside the crate, in test code.** Ten tests
+  compared the code against `src/lib/{events,moveProgress,attention,work_keys,fleet_settings}.ts`,
+  `src-tauri/src/lib.rs`, `src-tauri/src/commands/sessions.rs`,
+  `docs/control-api.md` or `docs/updates.md`. Each compiled-in copy made the
+  file an input of the test target. Fix (`bbb7882`): they read the file when
+  the test runs (`repo_files::read`, a path under `CARGO_MANIFEST_DIR`). The
+  assertions are unchanged, and a broken mirror still fails the test (checked
+  by breaking `attention.ts`: the test failed in 0.59 s, with nothing
+  recompiled).
+* **fleet-core's dev-dependency on fleet-agent**, for the one hub+agent
+  end-to-end test, linked the agent into fleet-core's test target. Fix
+  (`bf78707`): the test moved to `crates/fleet-agent-e2e`. All of that crate's
+  dependencies are dev-dependencies, and the three helpers it needs are behind
+  fleet-core's new `testkit` feature. So `cargo build --workspace` never
+  enables `testkit` (`cargo tree -e normal,build` shows `[default,nl-detect]`).
+
+### E.1 A/B (4 vCPU Linux, warm; edit, then revert; two samples each)
+
+`T` = `cargo test --workspace --lib --bins --no-run` (what `cargo fleet-test`
+compiles), `C` = `cargo fleet-check`.
+
+| Edit | main `6256466` T / C | A: runtime reads T / C | B: + agent crate T / C |
+|---|---:|---:|---:|
+| `src-tauri/src/lib.rs` (comment) | 29.3, 28.2 / 18.1, 17.8 s | **4.7, 4.7 / 2.4, 2.3 s** | 4.8, 5.0 / 2.3, 2.4 s |
+| `src/lib/events.ts` (comment) | 27.7, 26.3 / 17.7, 17.3 s | **0.35, 0.36 / 0.37, 0.35 s** | 0.37, 0.36 / 0.38, 0.38 s |
+| `docs/control-api.md` (line) | 27.3, 25.6 / 18.2, 17.4 s | **0.36, 0.35 / 0.36, 0.37 s** | 0.36, 0.39 / 0.37, 0.38 s |
+| `crates/fleet-agent/src/lib.rs` (private fn) | 29.2, 26.6 / 18.8, 18.4 s | 27.0, — / 18.8, — s | **1.6, 1.6 / 0.70, 0.72 s** |
+| `crates/fleet-core/src/service/health.rs` (private fn) | 27.1, 27.7 / 18.8, 18.0 s | — | 28.1, 27.3, 26.4 / 17.8, 18.9, 18.3 s |
+
+The last row is the price of the extra crate: none that can be measured.
+`--timings` shows why. `fleet-agent-e2e`'s unit takes 1.0–1.4 s (test build)
+and 0.1 s (check), and it runs alongside fleet-core's own test unit
+(26–28 s), which stays the critical path.
+
+The remaining files that rebuild fleet-core on edit are the ones its
+production code embeds: `src/lib/names.json`, `tools/ag/**`, and two
+`skills/*/SKILL.md`. Those are real build inputs, not test artifacts.
+
+`cargo test --workspace`: 5,497 tests pass (the e2e test now runs in
+`fleet-agent-e2e`, 1.1 s). `fmt` and `clippy -D warnings` are clean, and so
+are `check-version-consistency.sh` and `cargo check -p fleet-core -p fleet-hub
+--all-targets --locked` (the `hub-headless` feature set, without `testkit`).
+
+## Appendix F — An inner-loop check without test targets (2026-10-03)
+
+The fleet-check after a fleet-core edit is dominated by fleet-core's
+test-target check. `--timings` puts the library check at 10.3 s and the
+check-test unit at 18.8 s, which is the critical path. A check that skips
+test targets saves that second unit. Run in the canonical directory, though,
+it would resolve a different feature set (no dev-dependency features) and
+evict fleet-check's artifacts (§10.3). So it gets its own directory: the
+`fast-check` profile (`inherits = "dev"`), whose output is
+`target/fast-check/`. A profile rather than `--target-dir`, because a
+relative `--target-dir` follows the working directory: run from `crates/…`
+it would start a new, un-ignored cold target.
+
+`cargo fleet-fast-check` = `cargo check --workspace --profile fast-check`.
+
+### F.1 Measured (4 vCPU Linux, warm, a private fn added to `service/health.rs`)
+
+| | `fleet-fast-check` | `fleet-check` |
+|---|---:|---:|
+| edit 1 / 2 / 3 | 12.1 / 12.6 / 12.2 s | 19.1 / 19.3 / 19.3 s |
+| revert | 12.4 s | 19.4 s |
+| no-op right after the other command | 0.4 s | 0.4 s |
+| no-op from `crates/fleet-core/` | 0.4 s | — |
+| cold | 170 s | — |
+| disk | 2.1 GB | (target/debug) |
+
+That is −36 % on the most frequent step. The two directories never rebuild
+each other: each no-op stays at 0.4 s after the other ran. The trade-off is
+that it does not type-check test code, so CLAUDE.md keeps `fleet-check` as
+the checkpoint before a commit and after any change to an API that tests
+use. rust-analyzer stays on the full check.
+
+### F.2 Measured and not done: moving a test module out of fleet-core
+
+The other way to shorten the critical path is to shrink fleet-core's test
+target. The first candidate was picked by asking the compiler what each big
+test file needs from fleet-core once it is outside the crate. Each file was
+compiled in a throwaway crate, and the missing names were sorted into a
+plain import, test-support (`cfg(test)`), and private production items:
+
+| Test file | LOC | private production items it needs |
+|---|---:|---:|
+| `mcp/tools/tests.rs` | 9,228 | 63 |
+| `service/sessions/tests.rs` | 7,238 | 58 |
+| `mcp/tools/tests_isolation.rs` | 4,421 | 11 |
+| `service/update/tests.rs` | 1,048 | 4 |
+| `service/trackers/tests_{tickets,sync}.rs` | 4,403 | 3 + 3 |
+| `service/work/view_tests.rs` | 2,142 | 3 |
+| `service/trackers/tests_{github,jira}.rs` | 2,276 | 2 + 2 |
+| `service/reconcile_tests.rs` | 1,362 | 2 |
+
+(Some private-item counts include a few std names the probe could not
+attribute; the ranking holds.)
+
+The tracker tests (all of `service/trackers/tests_*.rs` and its two test
+subfiles, 11,163 LOC) need the fewest. Before moving them, the most the move
+could save was measured by excluding them from the build:
+
+| fleet-core edit | baseline | tracker tests excluded | ceiling |
+|---|---:|---:|---:|
+| test build (fleet-core lib-test unit) | 29.6 s (29.2) | 27.3 s (26.9) | **−2.3 s** |
+| fleet-check (check-test unit) | 19.2 s (18.8) | 18.6 s (18.1) | **−0.6 s** |
+
+That is a ceiling, not a result: a real move adds the new crate's own
+compile on the same four cores, and would expose three private functions.
+The tracker tests run in 13.4 s (285 tests). The move was not made. Lines of
+code are a poor guide here, since the tracker tests are 6.5 % of the test
+code but about 16 % of its test-build cost. Any later split should be chosen
+by measured seconds per module, and should be made only for ≥ 3–5 s off the
+critical path.

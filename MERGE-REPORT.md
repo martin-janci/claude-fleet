@@ -2,8 +2,19 @@
 
 Branch `m1-merge-main`, branched from `mellow-virgo` at its single WIP commit
 `85905c33` ("wip(m1): multi-user foundations"). `mellow-virgo` itself was not
-touched. Merge base `77653006`; `origin/main` was 203 commits ahead, 261 files
-changed, +47,995/−1,344.
+touched.
+
+**Two merges, because `main` moved while this was being done.** Both are on the
+branch:
+
+| Merge | `main` at | Conflicts |
+|---|---|---|
+| 1 | `6256466d` (203 commits ahead of base `77653006`; 261 files, +47,995/−1,344) | 22 hunks in 17 files |
+| 2 | `facaf194` (7 further commits; 33 files, +708/−88) | **none** |
+
+Everything below describes merge 1 unless it says otherwise; merge 2 has its
+own section at the end, and it is the one that changed the validation ladder,
+so [read that before using the commands](#merge-2-what-changed).
 
 ## Summary
 
@@ -15,15 +26,20 @@ changed, +47,995/−1,344.
   the two sets touch disjoint tables. **One open question for you**: a database
   an earlier M1 build already opened will skip main's 086–093, and I did not
   add a repair arm. See [the collision](#the-migration-number-collision).
-- **The merge introduced no new deterministic test failure.** Proven by running
-  the same `fleet-core` binary on `85905c33` (M1 alone) and diffing the failure
-  sets: M1 4480/11, merged 4875/8, and every non-flake failure appears in both.
+- **Neither merge introduced a new test failure.** Proven, not asserted: the
+  same `fleet-core` binary was run on `85905c33` (M1 alone) and the failure
+  sets diffed. M1 4480 passed / 11 failed; after merge 2, 4876 / 6; and the
+  "new in merged" column is **empty**.
 - **Five pre-existing M1 failures remain**, four of them fences reading more
   permissively than their own tests demand. They fail identically on M1 before
-  the merge. I did not invent answers for them — they are M1's design calls.
-- `cargo fmt --all --check`, `cargo fleet-check`, `cargo fleet-lint`, `pnpm
-  check` (658 files, 0 errors) are all clean. `pnpm test` 3892/3893, the one a
-  5 s timeout that passes alone.
+  either merge. I did not invent answers for them — they are M1's design calls.
+- `cargo fmt --all --check`, `cargo fleet-check`, `cargo fleet-lint` clean;
+  `pnpm check` 658 files / 0 errors; `pnpm test` **3904/3904**; the registries,
+  the reach table, the budget and the generated-doc checks all pass.
+- **The validation ladder changed in merge 2** — there is a new first rung,
+  `cargo fleet-fast-check`, which does *not* type-check test code. Every error
+  this merge had to fix in M1 was in test code or a registry table, so that
+  rung would have called the tree clean. See [merge 2](#merge-2-what-changed).
 - **A bug of my own, found and fixed**: the renumber missed the version each
   migration records *inside its SQL*, so M1's four migrations silently never
   ran. [Recorded at the end](#one-bug-of-my-own-recorded-because-it-was-nearly-invisible).
@@ -275,32 +291,54 @@ are M1's alone.
 ## The validation commands a future agent on this branch should use
 
 Quoted from main's `CLAUDE.md`, "Build & test → Validation ladder (use this,
-in this order)". These replace any hand-rolled loop; the aliases are in
-`.cargo/config.toml`.
+in this order)", **as of merge 2** — merge 2 added a new first rung, so this is
+the current five-step ladder, not the four-step one merge 1 brought. The
+aliases are in `.cargo/config.toml`.
 
 ```bash
-# 1. after every edit (fleet-core edit ≈ 20 s; = rust-analyzer's own check)
-cargo fleet-check                       # check --workspace --all-targets
+# 1. while you work, after every edit (≈ 13 s; libraries and binaries only)
+cargo fleet-fast-check                  # check --workspace --profile fast-check
 pnpm check                              # frontend edits: svelte-check
-# 2. the tests of what you touched (module path filter; fleet-core module ≈ 40 s)
+# 2. at a checkpoint: before committing, and after any change to an API that
+#    tests use (≈ 19 s; = rust-analyzer's own check)
+cargo fleet-check                       # check --workspace --all-targets
+# 3. the tests of what you touched (module path filter; ≈ 30 s build + the run)
 cargo fleet-test -- service::health     # test --workspace --lib --bins -- <filter>
 pnpm exec vitest run src/lib/foo.test.ts
-# 3. before committing (also what .githooks/pre-commit runs)
+# 4. before committing (also what .githooks/pre-commit runs)
 cargo fmt --all --check
 cargo fleet-lint                        # clippy --workspace --all-targets -- -D warnings
-# 4. before pushing / marking a PR ready (≈ 20 min; offload it on a small box)
+# 5. before pushing / marking a PR ready (≈ 2.5 min warm)
 cargo test --workspace                  # full suite, what CI runs
 scripts/ci-local.sh                     # everything in CI order; --rust-only / --frontend-only / --hub-e2e
 ```
+
+The trap in the new first rung, in main's own words:
+
+> `fleet-fast-check` does not type-check test code: a signature change that
+> breaks a test passes it and fails `fleet-check`.
+
+So `fleet-fast-check` is the keystroke-to-keystroke rung and `fleet-check` is
+the one that must pass before you believe anything. Merging this branch is
+exactly the case the warning is about: every error I had to fix in M1's code
+was in **test** code or a registry table, which `fleet-fast-check` would have
+reported as clean.
 
 Main states the rules behind them, and they are the ones that retire the
 branch's older advice:
 
 > - Do not run `cargo build` to see whether something compiles; `cargo
->   fleet-check` answers that 2–6× faster. Build only when you need a binary.
+>   fleet-fast-check` / `cargo fleet-check` answer that 2–6× faster. Build
+>   only when you need a binary.
 > - Do not narrow with `-p <crate>` in the inner loop; narrow with a test
 >   filter. Keep `-p` for the cases below that need a binary or a different
 >   feature set.
+> - A test that checks a file outside its crate (a `src/lib/*.ts` mirror,
+>   `src-tauri/src/lib.rs`, a `docs/*.md` guide) reads it when it runs
+>   (`repo_files::read` in fleet-core), never with `include_str!` […] Likewise
+>   fleet-core takes no dev-dependency on a workspace crate it does not already
+>   depend on; a test that needs one lives in a crate of its own, as
+>   `crates/fleet-agent-e2e` does.
 
 So `cargo test -p fleet-core` and `cargo build` in an inner loop — what M1's
 own notes suggested — are both out: each `-p` selection makes cargo compile
@@ -574,3 +612,137 @@ so on). `store::schema` went from 48 failures to 1. Recorded here because a
 renumber that updates the filename and the table but not the SQL body leaves a
 schema that is silently short of four migrations, and only the version
 assertions catch it.
+
+---
+
+## Merge 2: what changed
+
+`main` moved 7 commits (`6256466d` → `facaf194`) while merge 1 was being
+validated, so this branch carries a second merge. **It conflicted nowhere** —
+33 files, +708/−88, and git resolved all of it. Nothing in M1 had to change.
+
+It matters anyway, for three reasons.
+
+### 1. The validation ladder gained a rung
+
+`build: cargo fleet-fast-check, an inner-loop check in its own directory`
+(2db7c317) adds a first step *before* `fleet-check`: `check --workspace
+--profile fast-check`, libraries and binaries only, with its own
+`target/fast-check/` so the two never evict each other — ~13 s against ~19 s
+on 4 cores. The ladder quoted above is the five-step version.
+
+**It does not type-check test code.** That is the one thing to know about it,
+and this merge is the case in point: every compile error I had to fix in M1's
+side (`view_tests.rs`, `tests_tickets.rs`, the `SESSION_REACH` / `SCOPE_GUARDS`
+/ `ORG_HALF_SITES` tables, the `migrated_template_copy` literal) lived in test
+code or a registry. `fleet-fast-check` would have called the tree clean
+throughout. Use it between keystrokes; believe `fleet-check`.
+
+### 2. `include_str!` → `repo_files::read` touched `events.rs`
+
+`test(core): read the frontend, desktop and doc files tests check at runtime`
+(bbb7882b) introduces `crates/fleet-core/src/repo_files.rs` and converts the
+contract tests that mirror files outside the crate:
+
+```diff
+-        let events_ts = include_str!("../../../src/lib/events.ts");
++        let events_ts = crate::repo_files::read("src/lib/events.ts");
+```
+
+**Merge 1's report said `events.rs` was untouched by main. That is no longer
+true** — but the change is purely mechanical and the event bus's design is
+still M1's alone. The point of it is build time: a compiled-in copy made every
+edit to `src/lib/events.ts` recompile fleet-core's whole test target (~26 s
+against ~0.4 s).
+
+It comes with a rule M1 must now follow, and a test-layout consequence:
+
+- a test checking a file outside its crate reads it at runtime, never
+  `include_str!`;
+- fleet-core takes no dev-dependency on a workspace crate it does not already
+  depend on — hence `crates/fleet-agent-e2e` (bf787070), which is where the
+  hub+agent end-to-end test moved out of `fleet-core/src/agent/e2e.rs`.
+
+I checked M1 against the rule: **no violations.** The `include_str!`s left in
+fleet-core are main's deliberately embedded set — `skills/*/SKILL.md`,
+`tools/ag/**`, `src/lib/names.json`, and the crate's own `migrations/*.sql` —
+all of which CLAUDE.md names as embedded on purpose. No `src/lib/*.ts` and no
+`docs/*.md` is compiled in any more.
+
+### 3. A new frontend surface and CI shape
+
+- `feat(footer): say whose version is on screen` (9f285268) adds
+  `src/lib/app_version.ts` + tests and touches `App.svelte`,
+  `SettingsDialog.svelte`, `App.hub.test.ts`, `vitest.setup.ts`. It merged
+  clean against M1's frontend half.
+- `ci: one live run per ref, and a timeout on every job` (410c1b3e) —
+  concurrency and per-job timeouts in `ci.yml`. Worth knowing before you push:
+  a second push to this ref cancels the first run.
+- `docs`: `RUST-BUILD-PERFORMANCE-AUDIT.md` Appendices E and F, and the
+  contract-test rule written into CLAUDE.md.
+
+### Merge 2's results
+
+```
+$ cargo fmt --all --check          → exit 0, no output
+$ cargo fleet-check                → exit 0, no warnings
+$ cargo fleet-lint                 → exit 0, no warnings (-D warnings)
+
+$ pnpm test
+ Test Files  212 passed (212)
+      Tests  3904 passed (3904)
+   Duration  239.91s
+```
+
+The frontend is now **fully** green — 3904/3904, no timeout at all. That also
+settles merge 1's single `PageView.test.ts` failure as load and nothing else:
+same tree, quieter box, clean run.
+
+And `fleet_core`, the whole binary, on the re-merged tree:
+
+```
+$ fleet_core --test-threads=4
+test result: FAILED. 4876 passed; 6 failed; 3 ignored; 0 measured; 0 filtered out; finished in 197.90s
+
+failures:
+service::view_scope::tests::only_caller_view_scope_constructs_a_view_scope
+service::work::card::tests::the_lift_is_fenced_by_org_scope
+service::work::scale_tests::scale_work_today
+service::work::today::tests::today_reads_the_store_and_a_host_scope_reads_only_its_host
+service::work::view::tests::d31_decides_whether_a_bound_client_sees_unassigned_work
+store::reconcile::tests::renaming_onto_a_lost_sessions_name_is_refused_and_keeps_it
+```
+
+Diffed against the M1 baseline set (`85905c33`, 4480 passed / 11 failed):
+
+```
+--- NEW in merge 2 (i.e. candidate regressions) ---
+(none)
+```
+
+**Six failures, every one of them already in M1 before either merge**: the
+five pre-existing WIP failures tabulated earlier, plus one `scale_tests`
+latency flake. After merge 1 the count was 8 on a loaded box; it is 6 on a
+quiet one, and the difference is entirely which latency budgets tripped. So
+both merges together introduce **no new failure of any kind**.
+
+Worth noting for the ladder's own claim: this run took **197.90 s**, against
+611 s for the same binary earlier in the day on a loaded box. Main's "≈ 2.5 min
+warm" for step 5 is accurate when the machine is free; on this host under
+load it was 10 minutes, and `cargo test --workspace` as a single process could
+not finish at all.
+
+### Registries and generated docs, merge 2
+
+```
+$ cargo fleet-test -- scope_guard_tests:: every_session_addressed_tool_declares_its_reach \
+    the_served_definition_budget_stays_bounded reference_is_current verdict_gen \
+    settings_docs_are_current page_docs_are_current store::schema::
+fleet_core        test result: ok. 101 passed; 0 failed; 0 ignored; 0 measured; 4784 filtered out; finished in 15.88s
+claude_fleet_lib  test result: ok.  23 passed; 0 failed; 0 ignored; 0 measured;  358 filtered out; finished in 0.21s
+```
+
+All four scope-guard registries, the session-reach table, the tool-description
+budget, the three generated-doc checks and all of `store::schema` — including
+the `CHAIN_BUDGET` test that tripped under load after merge 1. No generated
+artifact needed regenerating for merge 2 either.

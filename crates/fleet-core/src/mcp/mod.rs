@@ -531,12 +531,13 @@ fn build_app(
 /// Test-only: the real app — the real [`authorize`] layer over the real
 /// routes — on an in-memory store.
 ///
-/// It exists for `crate::agent::ws`'s tests, which dial `/agent` over a real
-/// socket and must go through the SAME auth as production rather than a
-/// hand-built router that could differ from it. `/mcp` answers a stub, since
-/// nothing here drives a tool call.
-#[cfg(test)]
-pub(crate) fn test_app(
+/// It exists for `crate::agent::ws`'s tests and the `fleet-agent-e2e` crate
+/// (through the `testkit` feature), which dial `/agent` over a real socket
+/// and must go through the SAME auth as production rather than a hand-built
+/// router that could differ from it. `/mcp` answers a stub, since nothing
+/// here drives a tool call.
+#[cfg(any(test, feature = "testkit"))]
+pub fn test_app(
     store: Arc<Mutex<Store>>,
     master: &str,
     agent_state: crate::agent::ws::AgentWsState,

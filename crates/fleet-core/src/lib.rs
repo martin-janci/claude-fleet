@@ -31,6 +31,8 @@ mod no_eprintln_tests;
 pub mod pages;
 pub mod proc;
 pub mod projects;
+#[cfg(test)]
+mod repo_files;
 pub mod repo_url;
 pub mod rt;
 #[cfg(test)]

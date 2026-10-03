@@ -1,14 +1,22 @@
 # The canonical validation commands (CLAUDE.md → "Validation ladder").
 #
-# All three select the whole workspace and build test targets, so cargo
-# resolves ONE feature set for them (dev-dependency features such as
-# tokio/test-util included) and they share one set of compiled dependencies.
+# fleet-check / fleet-test / fleet-lint select the whole workspace and build
+# test targets, so cargo resolves ONE feature set for them (dev-dependency
+# features such as tokio/test-util included) and they share one set of
+# compiled dependencies. fleet-fast-check is the one exception, and it keeps
+# its artifacts in a directory of its own for that reason.
 # Mixing in `-p <crate>`, plain `cargo build` or `cargo check` without
 # --all-targets makes cargo compile another copy of fleet-core and its
 # dependency graph (RUST-BUILD-PERFORMANCE-AUDIT.md §10.3).
 # `fleet-check` is also exactly what rust-analyzer runs by default.
 [alias]
 fleet-check = "check --workspace --all-targets"
+# The inner loop: libraries and binaries only, no test targets, in a
+# directory of its own (the `fast-check` profile, target/fast-check/), so it
+# has its own feature set without evicting the one above. A fleet-core edit
+# checks in ~13 s against fleet-check's ~19 s; it does not see test code
+# (RUST-BUILD-PERFORMANCE-AUDIT.md, Appendix F).
+fleet-fast-check = "check --workspace --profile fast-check"
 fleet-test = "test --workspace --lib --bins"
 fleet-lint = "clippy --workspace --all-targets -- -D warnings"
 

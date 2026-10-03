@@ -632,7 +632,7 @@ mod tests {
     /// The deny list is written twice (Rust and TypeScript); they must agree.
     #[test]
     fn the_deny_list_matches_the_typescript_twin() {
-        let ts = include_str!("../../../../../src/lib/work_keys.ts");
+        let ts = crate::repo_files::read("src/lib/work_keys.ts");
         let start = ts
             .find("const DENY = new Set([")
             .expect("DENY in work_keys.ts");

@@ -1392,6 +1392,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fleet-agent-e2e"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "fleet-agent",
+ "fleet-core",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "fleet-core"
 version = "0.1.0"
 dependencies = [
@@ -1400,7 +1411,6 @@ dependencies = [
  "base64 0.22.1",
  "dashmap",
  "directories",
- "fleet-agent",
  "fleet-proto",
  "fleet-update",
  "futures-util",

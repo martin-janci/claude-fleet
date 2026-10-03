@@ -99,6 +99,14 @@ vi.mock('@tauri-apps/api/event', () => ({
   emit: vi.fn(async () => {}),
 }));
 
+// `getVersion()` is an IPC call into the Tauri runtime, which jsdom has none
+// of. The footer's version line reads it (`src/lib/app_version.ts`); a test
+// that cares about the value mocks this module itself, and everything else
+// gets a stable stand-in rather than a rejected promise on mount.
+vi.mock('@tauri-apps/api/app', () => ({
+  getVersion: vi.fn(async () => '0.0.0-test'),
+}));
+
 // The real getCurrentWebview() reads Tauri window internals that don't exist
 // in jsdom, so it throws on access. TerminalView subscribes to drag-drop
 // events through it on mount; stub it so onDragDropEvent resolves to a no-op

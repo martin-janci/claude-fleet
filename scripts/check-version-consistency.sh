@@ -44,6 +44,7 @@ cd "$ROOT"
 EXEMPT=(
   "crates/fleet-core/Cargo.toml|fleet-core|0.1.0|internal library crate, consumed only by path inside this workspace; excluded from scripts/release.sh's VERSION_FILES"
   "crates/fleet-update/Cargo.toml|fleet-update|0.1.0|internal library crate (the update engine), consumed only by path inside this workspace; excluded from scripts/release.sh's VERSION_FILES"
+  "crates/fleet-agent-e2e/Cargo.toml|fleet-agent-e2e|0.1.0|test-only crate (the hub and the real fleet-agent end to end), never built into anything; excluded from scripts/release.sh's VERSION_FILES"
 )
 
 usage() {
