@@ -3,9 +3,9 @@
   // "Staleness and failure"). Header, the 5-hour and weekly rows, the
   // per-model disclosure, every status message from `statusMessage`, and the
   // `via <host> · checked N min ago` footer with a floor-respecting refresh.
-  import type { AccountUsageSnapshot } from './account_usage_store';
-  import { accountLabel, type AccountRow } from './accounts';
-  import { copyText } from './clipboard';
+  import type { AccountUsageSnapshot } from '../../account_usage_store';
+  import { accountLabel, type AccountRow } from '../../accounts';
+  import { copyText } from '../../clipboard';
   import UsageRow from './UsageRow.svelte';
   import {
     bindingModelBucket,
@@ -15,7 +15,7 @@
     refreshCountdown,
     statusMessage,
     type UsageWindowKind,
-  } from './account_usage';
+  } from '../../account_usage';
 
   let {
     account,

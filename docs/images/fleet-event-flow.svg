@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 440" width="1000" height="440" role="img">
+<style>:root {
+  --bg: #f4f6fb; --surface: #ffffff; --surface-2: #eef1f8; --line: #d9deea;
+  --fg: #151a28; --muted: #58617a;
+  --c-desk: #2563eb; --c-hub: #d97706; --c-host: #0d9488; --c-mob: #db2777; --c-agent: #65a30d; --c-trk: #7c3aed;
+  --desk-soft: color-mix(in srgb, var(--c-desk) 11%, var(--surface));
+  --hub-soft: color-mix(in srgb, var(--c-hub) 12%, var(--surface));
+  --host-soft: color-mix(in srgb, var(--c-host) 11%, var(--surface));
+  --mob-soft: color-mix(in srgb, var(--c-mob) 11%, var(--surface));
+  --agent-soft: color-mix(in srgb, var(--c-agent) 13%, var(--surface));
+  --trk-soft: color-mix(in srgb, var(--c-trk) 11%, var(--surface));
+  --f-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #0c0f16; --surface: #141925; --surface-2: #1b2130; --line: #2a3345;
+  --fg: #e9edf6; --muted: #98a3bb;
+  --c-desk: #6aa8ff; --c-hub: #fbbf24; --c-host: #2dd4bf; --c-mob: #f472b6; --c-agent: #a3e635; --c-trk: #a78bfa;
+  color-scheme: dark } }
+.bg { fill: var(--bg) }
+/* SVG styling — every fill comes from the tokens */
+text { font-family: var(--f-body); fill: var(--fg) }
+.t-title { font: 700 17px var(--f-display) }
+.t-big { font: 800 22px var(--f-display) }
+.t-sm { font-size: 12.5px; fill: var(--muted) }
+.t-mono { font: 500 12px var(--f-mono); fill: var(--muted) }
+.t-eye { font: 600 10.5px var(--f-mono); letter-spacing: .12em; fill: var(--muted) }
+.t-lbl { font: 600 12px var(--f-mono) }
+.fr-desk { fill: var(--desk-soft); stroke: var(--c-desk); stroke-width: 1.6 }
+.fr-hub { fill: var(--hub-soft); stroke: var(--c-hub); stroke-width: 1.8 }
+.fr-host { fill: var(--host-soft); stroke: var(--c-host); stroke-width: 1.4 }
+.fr-mob { fill: var(--mob-soft); stroke: var(--c-mob); stroke-width: 1.6 }
+.fr-agent { fill: var(--agent-soft); stroke: var(--c-agent); stroke-width: 1.4 }
+.fr-trk { fill: var(--trk-soft); stroke: var(--c-trk); stroke-width: 1.4 }
+.box { fill: var(--surface); stroke: var(--line); stroke-width: 1.2 }
+.box2 { fill: var(--surface-2); stroke: var(--line); stroke-width: 1 }
+.pill { fill: var(--surface); stroke: var(--line) }
+.ln-desk { stroke: var(--c-desk); fill: none; stroke-width: 2.2 }
+.ln-hub { stroke: var(--c-hub); fill: none; stroke-width: 2.2 }
+.ln-host { stroke: var(--c-host); fill: none; stroke-width: 2; stroke-dasharray: 6 5 }
+.ln-mob { stroke: var(--c-mob); fill: none; stroke-width: 2.2 }
+.ln-agent { stroke: var(--c-agent); fill: none; stroke-width: 2.4 }
+.ln-trk { stroke: var(--c-trk); fill: none; stroke-width: 2 }
+.ln-dash { stroke-dasharray: 7 6 }
+.life { stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 4 5 }
+.d-work { fill: var(--c-hub) } .d-idle { fill: var(--muted) } .d-block { fill: var(--c-mob) } .d-ok { fill: var(--c-host) }
+.k-desk { fill: var(--c-desk) } .k-hub { fill: var(--c-hub) } .k-host { fill: var(--c-host) } .k-mob { fill: var(--c-mob) } .k-agent { fill: var(--c-agent) } .k-trk { fill: var(--c-trk) }
+.tx-desk { fill: var(--c-desk) } .tx-hub { fill: var(--c-hub) } .tx-host { fill: var(--c-host) } .tx-mob { fill: var(--c-mob) } .tx-agent { fill: var(--c-agent) } .tx-trk { fill: var(--c-trk) }
+
+.flow { animation: dash 1.6s linear infinite }
+@keyframes dash { to { stroke-dashoffset: -22 } }
+@media (prefers-reduced-motion: reduce) { .flow { animation: none } }
+</style>
+<rect class="bg" x="0" y="0" width="1000" height="440" rx="16"/>
+      <title id="d-t">Tok udalosti od hooku po obrazovky</title>
+      <desc id="d-d">Sekvenčný diagram: Claude Code spustí hook, hook pošle POST na hub, hub zapíše do databázy a cez SSE pošle session:updated desktopu aj mobilu, ktoré prekreslia UI.</desc>
+      <defs>
+        <marker id="dHost" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="k-host"/></marker>
+        <marker id="dHub" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="k-hub"/></marker>
+      </defs>
+      <!-- heads -->
+      <rect x="20" y="18" width="160" height="50" rx="12" class="fr-host"/><text x="100" y="40" text-anchor="middle" style="font-weight:600">Claude Code</text><text x="100" y="58" text-anchor="middle" class="t-mono">na hoste, v tmux</text>
+      <rect x="230" y="18" width="160" height="50" rx="12" class="fr-host"/><text x="310" y="40" text-anchor="middle" style="font-weight:600">Hook</text><text x="310" y="58" text-anchor="middle" class="t-mono">skript na hoste</text>
+      <rect x="440" y="18" width="160" height="50" rx="12" class="fr-hub"/><text x="520" y="40" text-anchor="middle" style="font-weight:600">fleet-hub</text><text x="520" y="58" text-anchor="middle" class="t-mono">state.db</text>
+      <rect x="650" y="18" width="150" height="50" rx="12" class="fr-desk"/><text x="725" y="40" text-anchor="middle" style="font-weight:600">Desktop</text><text x="725" y="58" text-anchor="middle" class="t-mono">klient</text>
+      <rect x="830" y="18" width="150" height="50" rx="12" class="fr-mob"/><text x="905" y="40" text-anchor="middle" style="font-weight:600">Mobil</text><text x="905" y="58" text-anchor="middle" class="t-mono">klient</text>
+
+      <line x1="100" y1="68" x2="100" y2="420" class="life"/>
+      <line x1="310" y1="68" x2="310" y2="420" class="life"/>
+      <line x1="520" y1="68" x2="520" y2="420" class="life"/>
+      <line x1="725" y1="68" x2="725" y2="420" class="life"/>
+      <line x1="905" y1="68" x2="905" y2="420" class="life"/>
+
+      <path d="M100 112 H 304" class="ln-host" style="stroke-dasharray:none" marker-end="url(#dHost)"/>
+      <text x="112" y="104" class="t-lbl">Stop · UserPromptSubmit</text>
+
+      <path d="M310 164 H 514" class="ln-host" style="stroke-dasharray:none" marker-end="url(#dHost)"/>
+      <text x="322" y="156" class="t-lbl">HTTPS POST · token hostu</text>
+
+      <rect x="450" y="190" width="140" height="56" rx="10" class="fr-hub"/>
+      <text x="520" y="214" text-anchor="middle" class="t-lbl">zapíše riadok</text>
+      <text x="520" y="232" text-anchor="middle" class="t-mono">idle, turn_seq</text>
+
+      <path d="M520 280 H 719" class="ln-hub" marker-end="url(#dHub)"/>
+      <text x="532" y="272" class="t-lbl tx-hub">SSE · session:updated</text>
+      <path d="M520 324 H 899" class="ln-hub" marker-end="url(#dHub)"/>
+      <text x="532" y="316" class="t-lbl tx-hub">SSE · session:updated</text>
+
+      <rect x="640" y="352" width="170" height="52" rx="10" class="fr-desk"/>
+      <text x="725" y="374" text-anchor="middle" class="t-lbl">mergeOne</text>
+      <text x="725" y="392" text-anchor="middle" class="t-mono">riadok sa prekreslí</text>
+      <rect x="826" y="352" width="158" height="52" rx="10" class="fr-mob"/>
+      <text x="905" y="374" text-anchor="middle" class="t-lbl">zoznam sa zmení</text>
+      <text x="905" y="392" text-anchor="middle" class="t-mono">+ needs_attention</text>
+    </svg>

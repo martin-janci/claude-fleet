@@ -36,7 +36,7 @@
   import { loadAccounts, applyAccountEvents, accounts } from './lib/accounts';
   import { loadTasks, applyTaskEvents } from './lib/tasks';
   import { loadAccountUsage, applyAccountUsageEvents, accountUsage } from './lib/account_usage_store';
-  import { footerUsage } from './lib/usage_glance';
+  import EmbedSlot from './lib/pages/EmbedSlot.svelte';
   import { mergeInventoryRow, clearInventoryFor, loadAssets, syncProgress, repoStatus } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
   import { accessOf, applyGrantChanges, loadMyGrants } from './lib/access';
@@ -647,7 +647,6 @@
     const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 30_000);
     return () => clearInterval(t);
   });
-  const usageFooter = $derived(footerUsage($hosts, $accounts, $accountUsage, nowSec));
 
   // What the agent is told about where the person is standing. `branch` has
   // no plumbing in App.svelte today (no per-session/current-branch state to
@@ -1102,17 +1101,17 @@
       >
     {/if}
   {/if}
-  {#if usageFooter}
-    <button
-      type="button"
-      class="usage-seg tone-{usageFooter.tone}"
-      data-testid="footer-usage"
-      data-state={usageFooter.state}
-      aria-label={usageFooter.ariaLabel}
-      title={usageFooter.ariaLabel}
-      onclick={() => openHosts(usageFooter.host)}>{usageFooter.text}</button
-    >
-  {/if}
+  <!-- The usage segment is the embed page `embed.status_footer`. -->
+  <EmbedSlot
+    slot="status_footer"
+    ctx={{
+      now: nowSec,
+      hosts: $hosts,
+      accounts: $accounts,
+      snapshots: $accountUsage,
+      onopenhost: (host) => openHosts(host),
+    }}
+  />
 </footer>
 
 <style>
@@ -1160,23 +1159,6 @@
     white-space: nowrap;
     max-width: 40vw;
   }
-  .usage-seg {
-    margin-left: auto;
-    background: transparent;
-    border: none;
-    padding: 0 0.3rem;
-    font: inherit;
-    font-variant-numeric: tabular-nums;
-    color: var(--fg);
-    cursor: pointer;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .usage-seg:hover { text-decoration: underline; }
-  .usage-seg.tone-muted { color: var(--fg-muted); }
-  .usage-seg.tone-warn { color: var(--usage-warn); }
-  .usage-seg.tone-alarm { color: var(--usage-crit); }
 
   /* Collapsed-pane strip: a thin always-visible vertical button. Same
      visual language for both sidebar and center collapse so the user

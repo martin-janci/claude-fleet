@@ -1,0 +1,144 @@
+{
+  "_generated": "from crates/fleet-core/pages (layout embed); regenerate with REGEN_PAGE_DOCS=1 cargo test -p fleet-core page_docs_are_current",
+  "pages": [
+    {
+      "id": "embed.host_detail",
+      "intro": "The host's Claude account: its headroom in full, with a refresh.",
+      "layout": "embed",
+      "sections": [
+        {
+          "items": [
+            {
+              "source": {
+                "id": "accounts.usage"
+              },
+              "type": "account_usage",
+              "view": "block"
+            }
+          ],
+          "title": "Usage"
+        }
+      ],
+      "slot": "host_detail",
+      "spec": "fleet.page/1",
+      "title": "Host detail: usage"
+    },
+    {
+      "id": "embed.hosts_group_title",
+      "intro": "The account group's plan tier and how fresh its numbers are.",
+      "layout": "embed",
+      "sections": [
+        {
+          "items": [
+            {
+              "source": {
+                "id": "accounts.usage"
+              },
+              "type": "account_usage",
+              "view": "freshness"
+            }
+          ],
+          "title": "Usage"
+        }
+      ],
+      "slot": "hosts_group_title",
+      "spec": "fleet.page/1",
+      "title": "Hosts list: account title"
+    },
+    {
+      "id": "embed.hosts_group",
+      "intro": "The account group's 5-hour and weekly headroom at a glance.",
+      "layout": "embed",
+      "sections": [
+        {
+          "items": [
+            {
+              "source": {
+                "id": "accounts.usage"
+              },
+              "type": "account_usage",
+              "view": "bars"
+            }
+          ],
+          "title": "Usage"
+        }
+      ],
+      "slot": "hosts_group",
+      "spec": "fleet.page/1",
+      "title": "Hosts list: account bars"
+    },
+    {
+      "id": "embed.new_session_chip",
+      "intro": "Each host chip's account headroom, under the alias.",
+      "layout": "embed",
+      "sections": [
+        {
+          "items": [
+            {
+              "source": {
+                "id": "accounts.usage"
+              },
+              "type": "account_usage",
+              "view": "chip"
+            }
+          ],
+          "title": "Usage"
+        }
+      ],
+      "slot": "new_session_chip",
+      "spec": "fleet.page/1",
+      "title": "New session: host chip"
+    },
+    {
+      "id": "embed.new_session_host",
+      "intro": "The selected host's headroom in a sentence, and a warning when its account is low.",
+      "layout": "embed",
+      "sections": [
+        {
+          "items": [
+            {
+              "source": {
+                "id": "accounts.usage"
+              },
+              "type": "account_usage",
+              "view": "line"
+            },
+            {
+              "source": {
+                "id": "accounts.usage"
+              },
+              "type": "account_usage",
+              "view": "warning"
+            }
+          ],
+          "title": "Usage"
+        }
+      ],
+      "slot": "new_session_host",
+      "spec": "fleet.page/1",
+      "title": "New session: selected host"
+    },
+    {
+      "id": "embed.status_footer",
+      "intro": "The fleet's usage in one footer segment; it opens the Hosts view.",
+      "layout": "embed",
+      "sections": [
+        {
+          "items": [
+            {
+              "source": {
+                "id": "accounts.usage"
+              },
+              "type": "account_usage",
+              "view": "footer"
+            }
+          ],
+          "title": "Usage"
+        }
+      ],
+      "slot": "status_footer",
+      "spec": "fleet.page/1",
+      "title": "Status footer: usage"
+    }
+  ]
+}

@@ -225,7 +225,7 @@ describe('the asset catalog on a hub client', () => {
     expect(row.getAttribute('title')).toContain('mac: drifted');
     expect(screen.getByTestId('assets-head').textContent).toContain('abcdef1');
     // Unmanaged rows are listed, with nothing to import them into.
-    expect(screen.getByTestId('unmanaged-row-nas-claude-skill-extra').textContent).not.toContain('Import');
+    expect(screen.getByTestId('identity-row-skill-extra').textContent).not.toContain('Import');
   });
 
   it('scans the hosts through the hub and re-reads the overview', async () => {
@@ -261,7 +261,7 @@ describe('the asset catalog on a hub client', () => {
   // Granted: the whole panel, onto the hub's catalog.
   const hubConfig = { repo_path: '/var/lib/fleet-hub/agent-assets', remote_url: null, head_commit: 'abcdef1234567890', last_loaded_at: 1 };
 
-  it('granted: the full panel onto the hub’s catalog, but no import or author session', async () => {
+  it('granted: the full panel onto the hub’s catalog, import included (Task 6: any host over SSH)', async () => {
     catalog.set(null);
     hubStatus.set(remote);
     inv().mockImplementation(async (cmd: string) => {
@@ -279,10 +279,14 @@ describe('the asset catalog on a hub client', () => {
     expect(screen.getByTestId('assets-secrets')).toBeTruthy();
     expect(screen.getByTestId('assets-new')).toBeTruthy();
     expect(screen.queryByTestId('assets-remote-note')).toBeNull();
-    // The import reads host `local`, which on a hub is the hub's machine.
+    // Import routes to the hub's catalog_admin now, exactly like Sync and
+    // Secrets: it is not disabled here, only while the live connection to
+    // the hub is down (the offline-gating sweep in hub.test.ts covers that
+    // for every `ROUTED_ACTIONS` entry, `catalog_import_host` included).
     const imp = screen.getByTestId('assets-import') as HTMLButtonElement;
-    expect(imp.disabled).toBe(true);
-    expect(imp.title).toContain('import_assets');
+    expect(imp.disabled).toBe(false);
+    await fireEvent.click(imp);
+    expect(await screen.findByTestId('import-dialog')).toBeTruthy();
   });
 
   it('granted with no catalog yet: the setup form, for a path on the hub’s machine', async () => {

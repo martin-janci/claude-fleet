@@ -805,6 +805,26 @@
       "danger": {
         "level": "none"
       },
+      "default": "true",
+      "help": "Provisioning installs fleet's ag launcher (~/.local/share/ag) and, when the host has no cl command, a cl shim (claude --yolo) in ~/.local/bin; panes use it when the host has no cl of its own. Off: provisioning leaves ag alone.",
+      "key": "provision.install_ag",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Install the ag launcher",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "365",
       "help": "Days a work journal row is kept once its conversation ended and its work is done or unlinked.",
       "key": "work.retention.journal_days",
@@ -903,6 +923,49 @@
       "unit": "seconds",
       "value": "300",
       "zero": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "3600",
+      "help": "How often fleet looks for hosts whose asset scan is stale, and rescans them. Under five minutes is raised to five.",
+      "key": "catalog.scan_check_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Asset scan check",
+      "modified": false,
+      "restart": "app",
+      "tags": [],
+      "unit": "minutes",
+      "value": "3600",
+      "zero": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "86400",
+      "help": "A host's assets are rescanned once its last scan is older than this, and every host after the catalog or a sync changes.",
+      "key": "catalog.scan_max_age_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Asset scan age",
+      "modified": false,
+      "restart": "none",
+      "tags": [
+        "advanced"
+      ],
+      "unit": "hours",
+      "value": "86400"
     },
     {
       "ai": "suggest",
@@ -1939,6 +2002,19 @@
           "title": "Workspace repair"
         },
         {
+          "items": [
+            {
+              "key": "catalog.scan_check_secs",
+              "type": "field"
+            },
+            {
+              "key": "catalog.scan_max_age_secs",
+              "type": "field"
+            }
+          ],
+          "title": "Assets"
+        },
+        {
           "advanced": true,
           "collapsible": true,
           "items": [
@@ -1962,6 +2038,10 @@
           "items": [
             {
               "key": "provision.force_git_tree",
+              "type": "field"
+            },
+            {
+              "key": "provision.install_ag",
               "type": "field"
             }
           ],
@@ -2743,6 +2823,26 @@
       "title": "Proposed changes"
     },
     {
+      "id": "guides",
+      "intro": "Step-by-step walks through a task. An agent can propose one with the fleet-guides skill; it is listed here once a person approves it.",
+      "layout": "review_apply",
+      "review": "guides",
+      "sections": [
+        {
+          "items": [
+            {
+              "text": "A Claude session proposes a guide over the control API. It shows up below for review: open it to preview, then approve or reject. Approved guides appear under this page. On a hub, fleet-hub guides lists and decides them.",
+              "tone": "info",
+              "type": "notice"
+            }
+          ],
+          "title": "How a guide gets here"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Guides"
+    },
+    {
       "filters": [
         {
           "choices": [
@@ -2832,6 +2932,11 @@
         {
           "items": [
             {
+              "label": "Claude accounts",
+              "page": "usage.accounts",
+              "type": "link"
+            },
+            {
               "label": "Work graph usage",
               "page": "usage.work",
               "type": "link"
@@ -2882,6 +2987,28 @@
       ],
       "spec": "fleet.page/1",
       "title": "Work graph usage"
+    },
+    {
+      "id": "usage.accounts",
+      "intro": "Each Claude account's plan headroom: the 5-hour and weekly windows and per-model limits, checked from a host logged in to it.",
+      "layout": "data_page",
+      "parent": "usage",
+      "sections": [
+        {
+          "items": [
+            {
+              "source": {
+                "id": "accounts.usage"
+              },
+              "type": "account_usage",
+              "view": "block"
+            }
+          ],
+          "title": "Accounts"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Claude accounts"
     }
   ],
   "resources": [
@@ -3597,6 +3724,17 @@
     }
   ],
   "sources": [
+    {
+      "help": "Each Claude account's plan headroom: the 5-hour and weekly windows, per-model limits, when it was checked and from which host, and when a refresh is allowed.",
+      "id": "accounts.usage",
+      "label": "Claude account usage",
+      "live": {
+        "command": "list_account_usage",
+        "event": "account_usage"
+      },
+      "params": [],
+      "shape": "account_usage"
+    },
     {
       "fields": [
         {

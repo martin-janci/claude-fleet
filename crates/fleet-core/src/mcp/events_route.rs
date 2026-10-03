@@ -828,7 +828,7 @@ fn fence_session_frame(
 ///   as attached, i.e. would judge a reaped session's ends against whoever
 ///   holds those recycled ids now. See
 ///   [`crate::service::tasks::task_visible_in_scope_pure`] and migration
-///   089 for the hazard;
+///   097 for the hazard;
 /// * `tasks.id` is the one stable identity in this frame (no delete path
 ///   touches the table), so re-reading by it is the "resolve the subject"
 ///   shape the session arms take, without the id-reuse question.
@@ -1913,7 +1913,7 @@ mod tests {
     /// One private session and the four people a share has: its OWNER, a
     /// `watch` grantee, a `drive` grantee and a stranger.
     ///
-    /// The hub's own personal owner (migration 086) is a FIFTH person, so
+    /// The hub's own personal owner (migration 094) is a FIFTH person, so
     /// `Store::sole_enabled_person` answers `None` and nobody gets the
     /// single-person carve-out. That is deliberate: with it in play every
     /// assertion below would be about the carve-out rather than about the
@@ -2579,7 +2579,7 @@ mod tests {
     /// `result` included. `list_tasks` leaked the same row through the same
     /// predicate.
     ///
-    /// Migration 089's trigger NULLs the ids and stamps `detached_at`, and
+    /// Migration 097's trigger NULLs the ids and stamps `detached_at`, and
     /// the predicate refuses a detached task to everyone but the hub's own
     /// reader.
     #[test]

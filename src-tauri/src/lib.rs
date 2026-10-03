@@ -1,3 +1,7 @@
+// `#[async_trait]` expands each async trait method into a `#[must_use]` fn that
+// returns a boxed future, which is already `#[must_use]`; clippy 1.99 flags that
+// macro output as `double_must_use`. It is not code we wrote — allow it crate-wide.
+#![allow(clippy::double_must_use)]
 mod app_events;
 pub mod backend;
 mod bootstrap;
@@ -391,6 +395,9 @@ pub fn run() {
             commands::work::list_local_work_items,
             commands::work::name_session_work,
             commands::work::rename_work_item,
+            commands::work::create_work_task,
+            commands::work::accept_work_proposal,
+            commands::work::reject_work_proposal,
             commands::work_view::work_tree,
             commands::work_view::work_task,
             commands::work_view::work_session_tasks,
@@ -464,6 +471,9 @@ pub fn run() {
             commands::pages::flow_cancel,
             commands::pages::setting_proposals,
             commands::pages::decide_setting_proposals,
+            commands::pages::list_guides,
+            commands::pages::decide_guide,
+            commands::pages::remove_guide,
             commands::pages::setting_history,
             commands::pages::set_fleet_setting,
             commands::tasks::list_tasks,
@@ -531,6 +541,7 @@ pub fn run() {
             commands::assets::catalog_resolve_preview,
             commands::assets::catalog_propose_layers,
             commands::assets::catalog_set_host_layers,
+            commands::assets::catalog_set_host_harnesses,
             commands::assets::catalog_layer_template,
             commands::assets::catalog_write_layer,
             commands::assets::catalog_delete_layer,

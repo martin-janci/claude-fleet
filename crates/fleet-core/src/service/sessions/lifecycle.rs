@@ -517,7 +517,7 @@ pub(crate) fn reject_held_conversation(
 /// that belonged to somebody else.
 ///
 /// **The attack works precisely when the session row is gone**, which is why
-/// a check against live rows cannot close it and why migration 087 records
+/// a check against live rows cannot close it and why migration 095 records
 /// `conversation_owners` durably: A's session is reaped (a kill, a GC
 /// sweep, a `move_session`), B passes its `claude_session_id` to
 /// `new_session`, and the resumed session replays A's whole transcript into

@@ -367,6 +367,17 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Guides (declarative pages, layout guide): any token reads the catalog,
+    // validates and proposes — a host's session is who writes one, with the
+    // fleet-guides skill — and lists. Deciding and removing are a person's:
+    // the master or a trusted device (`settings_writer`, in the tool).
+    ToolPolicy {
+        name: "guide",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Trusting a client widens what its token can do (unmarked delivery), so
     // it is credential administration like minting and revoking.
     ToolPolicy {
@@ -854,8 +865,10 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     // inventory. `scan_assets` is read-only ON THE HOSTS — like
     // `refresh_projects` it re-reads external state and refreshes the cache
     // rows that describe it, changing nothing a session or host depends on.
-    // `import_assets` WRITES the controller's catalog repo working tree and
-    // is therefore mutating.
+    // `import_assets` WRITES the controller's catalog repo working tree — and,
+    // for a remote `host_alias`, makes the hub SSH into another host — so it
+    // is `NOT_FOR_HOST_TOKENS` and its body checks `may_admin_catalog`,
+    // exactly like `catalog_admin`.
     ToolPolicy {
         name: "list_assets",
         access: Access::Client,
@@ -899,11 +912,13 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: true,
         deadline: Deadline::Lifecycle,
     },
-    // Managing the catalog from a paired desktop: every catalog operation
-    // the desktop app has, as one tool. `Client` here only lets the call past
-    // the central gate; the tool itself answers the master and a paired
-    // client the operator granted (`fleet-hub client grant <name> assets`)
-    // and refuses everyone else, per-host tokens included. Not confirm-gated
+    // Managing the catalogs from a paired desktop: every catalog operation
+    // the desktop app has, plus the set of catalogs, as one tool. `Client`
+    // here only lets the call past the central gate (per-host tokens are
+    // refused there, `NOT_FOR_HOST_TOKENS`); the tool itself answers the
+    // master and a paired client granted the catalog each action touches
+    // (`fleet-hub client grant <name> assets [--catalog NAME]`; Assets M3,
+    // R11) and refuses everyone else. Not confirm-gated
     // as a whole — most actions are reads or checkout edits — but its
     // `apply_sync` action passes the same confirm gate as `apply_sync`.
     ToolPolicy {
@@ -954,6 +969,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     // state, so it stays out of readonly.
     ToolPolicy {
         name: "set_host_layers",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Multi-harness F3a: which harnesses a host serves decides what the NEXT
+    // apply_sync writes to (or removes from) its filesystem — the same
+    // reasoning as set_host_layers.
+    ToolPolicy {
+        name: "set_host_harnesses",
         access: Access::Master,
         readonly: false,
         confirm: false,
@@ -1074,11 +1099,13 @@ pub fn is_client_tool(name: &str) -> bool {
 }
 
 /// `Client` tools a per-host token is nonetheless refused, at the central
-/// gate and in the tool list alike. `catalog_admin` answers the master and a
-/// GRANTED paired client only (the tool checks the grant itself); a host's
-/// Claude editing what Sync then writes to every host is what the master
-/// gate exists to prevent.
-pub const NOT_FOR_HOST_TOKENS: &[&str] = &["catalog_admin"];
+/// gate and in the tool list alike. `catalog_admin` and `import_assets`
+/// answer the master and a GRANTED paired client only (each tool checks the
+/// grant itself, via `may_admin_catalog`); a host's Claude editing — or, for
+/// `import_assets` with a remote `host_alias`, making the hub SSH into
+/// another host and write into — the catalog is what the master gate exists
+/// to prevent.
+pub const NOT_FOR_HOST_TOKENS: &[&str] = &["catalog_admin", "import_assets"];
 
 // --- legacy name lists -------------------------------------------------------
 //

@@ -633,12 +633,30 @@ impl Store {
     pub fn item_org(&self, item_id: i64) -> Result<Option<i64>, IpcError> {
         // A tracker item's org is its tracker's; a local item's is its own
         // (work graph M14, `work_items.org_id`, set only on a local item).
+        //
+        // A native SUBTASK carries no `org_id` of its own — `insert_native`
+        // never writes one — so it falls back to its PARENT's org, which is
+        // the org a person actually assigned. Without that fallback every
+        // native subtask reads as unassigned and the org gates on a start
+        // (`check_cross_org`, `brief_visible_on`) pass everything.
+        //
+        // One level is the whole hierarchy: `parent_for_new_child` refuses a
+        // native parent that is itself a subtask, and a tracker parent's org
+        // comes from its tracker, so no further walk is possible.
         Ok(self
             .conn
             .query_row(
-                "SELECT CASE WHEN i.tracker_id IS NOT NULL \
-                             THEN (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id) \
-                             ELSE i.org_id END \
+                "SELECT CASE \
+                   WHEN i.tracker_id IS NOT NULL \
+                     THEN (SELECT t.org_id FROM trackers t WHERE t.id = i.tracker_id) \
+                   WHEN i.org_id IS NOT NULL THEN i.org_id \
+                   WHEN i.parent_id IS NOT NULL \
+                     THEN (SELECT CASE WHEN p.tracker_id IS NOT NULL \
+                                         THEN (SELECT t.org_id FROM trackers t \
+                                                WHERE t.id = p.tracker_id) \
+                                         ELSE p.org_id END \
+                             FROM work_items p WHERE p.id = i.parent_id) \
+                   ELSE NULL END \
                  FROM work_items i WHERE i.id = ?1",
                 rusqlite::params![item_id],
                 |r| r.get::<_, Option<i64>>(0),

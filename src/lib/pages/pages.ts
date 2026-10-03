@@ -18,7 +18,21 @@ export type Layout =
   | 'object_editor'
   | 'cards'
   | 'review_apply'
-  | 'data_page';
+  | 'data_page'
+  | 'embed'
+  | 'guide';
+
+/** Where an `embed` page sits in the desktop's own screens (`model.rs` `Slot`). */
+export type Slot =
+  | 'host_detail'
+  | 'hosts_group_title'
+  | 'hosts_group'
+  | 'new_session_chip'
+  | 'new_session_host'
+  | 'status_footer';
+
+/** How an `account_usage` item draws an account's headroom (`UsageView`). */
+export type UsageView = 'block' | 'freshness' | 'bars' | 'chip' | 'line' | 'warning' | 'footer';
 
 export type Widget =
   | 'switch'
@@ -56,6 +70,7 @@ export type Item =
   | { type: 'record'; source: SourceRef }
   | { type: 'table'; source: SourceRef; columns?: string[]; copy?: boolean }
   | { type: 'chart'; source: SourceRef; chart: 'line' | 'bar' | 'stacked_bar' | 'sparkline'; title?: string }
+  | { type: 'account_usage'; source: SourceRef; view: UsageView }
   | { type: 'notice'; tone: 'info' | 'warn' | 'danger'; text: string }
   | { type: 'custom'; component: CustomComponent }
   | { type: 'action'; action: string }
@@ -96,8 +111,11 @@ export interface Page {
   resource?: string;
   /** A `master_detail` page's items about the whole list. */
   list_items?: Item[];
-  /** A `review_apply` page's proposals (`pages/review.ts`). */
-  review?: 'settings';
+  /** A `review_apply` page's proposals: settings (`pages/review.ts`) or
+   *  guides (`pages/guides.ts`). */
+  review?: 'settings' | 'guides';
+  /** An `embed` page's place in a screen (`pages/embeds.ts`). */
+  slot?: Slot;
   /** A `data_page`'s filter bar: each sets the same-named source param. */
   filters?: Filter[];
   sections?: Section[];
@@ -118,7 +136,8 @@ export type SourceShape =
   | { shape: 'scalar'; ty: ColType }
   | { shape: 'record'; fields: Column[] }
   | { shape: 'rows'; columns: Column[] }
-  | { shape: 'series'; x: Column; y: Column[] };
+  | { shape: 'series'; x: Column; y: Column[] }
+  | { shape: 'account_usage' };
 
 export interface SourceParam {
   name: string;
@@ -127,7 +146,20 @@ export interface SourceParam {
   help: string;
 }
 
-export type SourceSpec = { id: string; label: string; help: string; params?: SourceParam[] } & SourceShape;
+/** A source the app keeps current itself: `command` loads it, the `event`
+ *  row kind keeps it live, and `fetch_page_source` refuses it. */
+export interface LiveSource {
+  command: string;
+  event: string;
+}
+
+export type SourceSpec = {
+  id: string;
+  label: string;
+  help: string;
+  params?: SourceParam[];
+  live?: LiveSource;
+} & SourceShape;
 
 /** A button on a page (`pages/actions.rs`): one existing command, no
  *  arguments; the page's data items are re-read after it. */
@@ -374,7 +406,26 @@ export function searchSettings(
       }
     }
   }
-  return hits;
+  // One hit per setting. `pages` is the compiled pages PLUS every live guide,
+  // and a guide names settings that already have a home elsewhere — so an
+  // approved guide mentioning a matched setting used to yield two hits with
+  // the same key, which the nav renders as `{#each hits as h (h.key)}` and
+  // Svelte refuses as a duplicate key. Prefer the setting's real home: a
+  // guide's fields are never one (`a_guide_walks_through_settings_without_
+  // taking_their_home`), so a guide hit only stands for a setting whose own
+  // page did not match the query.
+  const best = new Map<string, SearchHit>();
+  for (const h of hits) {
+    const kept = best.get(h.key);
+    if (!kept) {
+      best.set(h.key, h);
+      continue;
+    }
+    const keptIsGuide = pages.find((p) => p.id === kept.page)?.layout === 'guide';
+    const thisIsGuide = pages.find((p) => p.id === h.page)?.layout === 'guide';
+    if (keptIsGuide && !thisIsGuide) best.set(h.key, h);
+  }
+  return hits.filter((h) => best.get(h.key) === h);
 }
 
 // ── formatting data ──

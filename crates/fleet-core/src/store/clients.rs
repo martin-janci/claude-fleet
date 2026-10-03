@@ -293,13 +293,20 @@ impl Store {
 }
 
 impl Store {
-    /// Let the live client named `name` manage the asset catalog through the
-    /// hub's `catalog_admin` tool, or take that back: `assets_admin_at`
-    /// becomes now (kept if already set), or NULL. Refused for a peer hub
-    /// link, a `readonly` client (it could not write anyway) and a client
-    /// bound to an org (the catalog is synced to every host, across orgs).
-    /// `E_NOTFOUND` when no live client holds the name.
-    pub fn set_client_assets_admin(
+    /// The live-client eligibility predicate shared by every catalog-grant
+    /// check (Rulings R3): `full`, not revoked, bound to no org. Written
+    /// once and reused by [`Self::client_is_assets_admin`],
+    /// [`Self::client_may_admin_catalog`] and [`Self::catalog_grantees`] so
+    /// the three can never drift apart. Assumes the query aliases
+    /// `client_tokens` as `t`.
+    const LIVE_GRANT_ELIGIBLE: &'static str =
+        "t.revoked_at IS NULL AND t.mode = 'full' AND t.org_id IS NULL";
+
+    /// The live client `name`, checked as eligible to hold a catalog grant
+    /// when `on` (Rulings R3): a peer hub link, a `readonly` client and a
+    /// client bound to an org are refused. `E_NOTFOUND` when no live client
+    /// holds it.
+    fn grantable_client(
         &self,
         name: &str,
         on: bool,
@@ -336,16 +343,45 @@ impl Store {
                 return refuse("is bound to one org, and a catalog sync writes to every host");
             }
         }
-        self.conn.execute(
+        Ok(row)
+    }
+
+    /// Set or clear the personal-grant mirror `client_tokens.assets_admin_at`
+    /// for `client_id` (Rulings R2): the first grant's time is kept, so
+    /// granting twice does not reset it; clearing is a no-op when it is
+    /// already NULL. Shared by the pending path of
+    /// [`Self::set_client_assets_admin`] (no personal catalog yet) and the
+    /// mirror half of [`Self::set_client_catalog_grant`] (a grant on
+    /// `personal` itself).
+    fn mirror_personal_grant(
+        conn: &rusqlite::Connection,
+        client_id: i64,
+        on: bool,
+    ) -> rusqlite::Result<()> {
+        conn.execute(
             if on {
                 "UPDATE client_tokens SET assets_admin_at = COALESCE(assets_admin_at, ?2) \
                  WHERE id = ?1"
             } else {
                 "UPDATE client_tokens SET assets_admin_at = NULL WHERE id = ?1 AND ?2 IS NOT NULL"
             },
-            rusqlite::params![row.id, now_unix()],
+            rusqlite::params![client_id, now_unix()],
         )?;
-        get_client_token_by_id(&self.conn, row.id)?.ok_or_else(|| {
+        Ok(())
+    }
+
+    /// Re-fetch the live client `id` after a write that may have changed it,
+    /// or report that it is gone. `name` is only for the error message (the
+    /// caller already has it; passing it avoids a second lookup just to
+    /// phrase the failure). Shared by [`Self::set_client_assets_admin`]'s
+    /// pending-mirror path and [`Self::set_client_catalog_grant`] — both end
+    /// with exactly this reload.
+    fn reload_live_client(
+        &self,
+        id: i64,
+        name: &str,
+    ) -> Result<ClientTokenRow, crate::ipc_error::IpcError> {
+        get_client_token_by_id(&self.conn, id)?.ok_or_else(|| {
             crate::ipc_error::IpcError::new(
                 codes::E_NOTFOUND,
                 format!("no active client token named '{name}'"),
@@ -353,18 +389,111 @@ impl Store {
         })
     }
 
-    /// True when the live client `id` may manage the asset catalog: granted
-    /// (`set_client_assets_admin`), `full`, not revoked and bound to no org.
-    /// Read on every `catalog_admin` call, so a revoke or an un-grant holds
-    /// from the next call on, whatever any cache says.
+    /// The personal grant (`fleet-hub client grant <name> assets`): a grant
+    /// row on `personal` plus its mirror `assets_admin_at` (Rulings R2).
+    /// With no personal catalog yet, only the mirror is written; configuring
+    /// `personal` turns it into a row (`set_catalog_config`).
+    pub fn set_client_assets_admin(
+        &self,
+        name: &str,
+        on: bool,
+    ) -> Result<ClientTokenRow, crate::ipc_error::IpcError> {
+        if let Some(personal) = self.personal_catalog()? {
+            return self.set_client_catalog_grant(name, personal.id, on);
+        }
+        let row = self.grantable_client(name, on)?;
+        Self::mirror_personal_grant(&self.conn, row.id, on)?;
+        self.reload_live_client(row.id, name.trim())
+    }
+
+    /// Grant (or take back) one catalog to the live client `name` (migration
+    /// 093). On `personal` the mirror `assets_admin_at` follows (R2).
+    pub fn set_client_catalog_grant(
+        &self,
+        name: &str,
+        catalog_id: i64,
+        on: bool,
+    ) -> Result<ClientTokenRow, crate::ipc_error::IpcError> {
+        let row = self.grantable_client(name, on)?;
+        let catalog = self.get_catalog(catalog_id)?.ok_or_else(|| {
+            crate::ipc_error::IpcError::new(
+                codes::E_NOTFOUND,
+                format!("catalog {catalog_id} not found"),
+            )
+        })?;
+        let tx = self.conn.unchecked_transaction()?;
+        if on {
+            tx.execute(
+                "INSERT OR IGNORE INTO client_catalog_grants (client_id, catalog_id, granted_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params![row.id, catalog_id, now_unix()],
+            )?;
+        } else {
+            tx.execute(
+                "DELETE FROM client_catalog_grants WHERE client_id = ?1 AND catalog_id = ?2",
+                rusqlite::params![row.id, catalog_id],
+            )?;
+        }
+        if catalog.org_id.is_none() {
+            Self::mirror_personal_grant(&tx, row.id, on)?;
+        }
+        tx.commit()?;
+        self.reload_live_client(row.id, name.trim())
+    }
+
+    /// True when the live client `id` may manage the personal catalog: a
+    /// grant row on `personal`, or — only while no personal catalog exists —
+    /// the pending mirror `assets_admin_at` (R2). `full`, not revoked, no org.
     pub fn client_is_assets_admin(&self, id: i64) -> Result<bool, rusqlite::Error> {
         self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM client_tokens WHERE id = ?1 AND revoked_at IS NULL \
-                 AND mode = 'full' AND org_id IS NULL AND assets_admin_at IS NOT NULL)",
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM client_tokens t
+                   WHERE t.id = ?1 AND {elig}
+                     AND (EXISTS(SELECT 1 FROM client_catalog_grants g JOIN catalogs c ON c.id = g.catalog_id
+                                 WHERE g.client_id = t.id AND c.org_id IS NULL)
+                          OR (t.assets_admin_at IS NOT NULL
+                              AND NOT EXISTS(SELECT 1 FROM catalogs WHERE org_id IS NULL))))",
+                elig = Self::LIVE_GRANT_ELIGIBLE,
+            ),
             rusqlite::params![id],
             |r| r.get(0),
         )
     }
+
+    /// True when the live client `id` holds a grant on `catalog_id`: `full`,
+    /// not revoked, bound to no org (R3). Read on every `catalog_admin` call.
+    pub fn client_may_admin_catalog(
+        &self,
+        id: i64,
+        catalog_id: i64,
+    ) -> Result<bool, rusqlite::Error> {
+        self.conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM client_tokens t
+                   JOIN client_catalog_grants g ON g.client_id = t.id
+                   WHERE t.id = ?1 AND g.catalog_id = ?2 AND {elig})",
+                elig = Self::LIVE_GRANT_ELIGIBLE,
+            ),
+            rusqlite::params![id, catalog_id],
+            |r| r.get(0),
+        )
+    }
+
+    /// The live clients holding a grant on `catalog_id`, by name. Filters
+    /// with the same eligibility predicate (`LIVE_GRANT_ELIGIBLE`) as
+    /// [`Self::client_may_admin_catalog`]: this must never list a client
+    /// that predicate would refuse.
+    pub fn catalog_grantees(&self, catalog_id: i64) -> Result<Vec<String>, rusqlite::Error> {
+        self.conn
+            .prepare_cached(&format!(
+                "SELECT t.name FROM client_tokens t JOIN client_catalog_grants g ON g.client_id = t.id
+                 WHERE g.catalog_id = ?1 AND {elig}
+                 ORDER BY t.name",
+                elig = Self::LIVE_GRANT_ELIGIBLE,
+            ))?
+            .query_map([catalog_id], |r| r.get(0))?
+            .collect()
+    }
+
     /// Bind the live client named `name` to `org` (work graph M14), or
     /// unbind it (`None`). A bound client reads only that org's and
     /// unassigned work and sessions (`OrgScope::Org`). The auth epoch
@@ -852,6 +981,110 @@ mod tests {
         s.set_client_assets_admin("desk", true).unwrap();
         s.revoke_client_token("desk").unwrap();
         assert!(!s.client_is_assets_admin(desk.id).unwrap());
+    }
+
+    /// Migration 093: a grant names one catalog, is read live, and holds
+    /// only for a live, `full` client bound to no org (Rulings R3). The
+    /// personal grant is mirrored into `assets_admin_at` (R2).
+    #[test]
+    fn grants_are_per_catalog_and_read_live() {
+        use crate::ipc_error::codes::{E_NOTFOUND, E_VALIDATE};
+        let s = store();
+        s.set_catalog_config("/p", None).unwrap();
+        let personal = s.personal_catalog().unwrap().unwrap().id;
+        let org = s.add_org("A", None, false).unwrap();
+        let acme = s
+            .upsert_catalog("acme", "/a", None, Some(org.id))
+            .unwrap()
+            .id;
+        let desk = s.insert_client_token("desk", "aa11", "full").unwrap();
+
+        let e0 = s.auth_epoch().unwrap();
+        let row = s.set_client_catalog_grant("desk", acme, true).unwrap();
+        assert!(s.auth_epoch().unwrap() > e0, "a grant bumps the epoch");
+        assert!(
+            row.assets_admin_at.is_none(),
+            "an org grant leaves the personal mirror alone"
+        );
+        assert!(s.client_may_admin_catalog(desk.id, acme).unwrap());
+        assert!(
+            !s.client_is_assets_admin(desk.id).unwrap(),
+            "acme's grant is not personal's"
+        );
+        assert_eq!(s.catalog_grantees(acme).unwrap(), vec!["desk".to_string()]);
+
+        let p = s.set_client_assets_admin("desk", true).unwrap();
+        assert!(
+            p.assets_admin_at.is_some(),
+            "the personal grant is mirrored"
+        );
+        assert!(s.client_is_assets_admin(desk.id).unwrap());
+        assert!(s.client_may_admin_catalog(desk.id, personal).unwrap());
+
+        s.set_client_org("desk", Some(org.id)).unwrap();
+        assert!(
+            !s.client_may_admin_catalog(desk.id, acme).unwrap(),
+            "bound: no catalog at all"
+        );
+        assert!(!s.client_is_assets_admin(desk.id).unwrap());
+        assert!(
+            s.catalog_grantees(acme).unwrap().is_empty(),
+            "bound: not an eligible grantee even though the grant row still exists (PF11)"
+        );
+        s.set_client_org("desk", None).unwrap();
+
+        s.set_client_catalog_grant("desk", acme, false).unwrap();
+        assert!(!s.client_may_admin_catalog(desk.id, acme).unwrap());
+        assert!(s
+            .set_client_assets_admin("desk", false)
+            .unwrap()
+            .assets_admin_at
+            .is_none());
+        assert!(!s.client_may_admin_catalog(desk.id, personal).unwrap());
+
+        s.set_client_catalog_grant("desk", acme, true).unwrap();
+        s.revoke_client_token("desk").unwrap();
+        assert!(
+            !s.client_may_admin_catalog(desk.id, acme).unwrap(),
+            "revoked"
+        );
+
+        s.insert_client_token("kiosk", "bb22", "readonly").unwrap();
+        let code = |r: Result<_, crate::ipc_error::IpcError>| r.map(|_| ()).unwrap_err().code;
+        assert_eq!(
+            code(s.set_client_catalog_grant("kiosk", acme, true)),
+            E_VALIDATE
+        );
+        assert_eq!(
+            code(s.set_client_catalog_grant("nobody", acme, true)),
+            E_NOTFOUND
+        );
+        s.insert_client_token("eve", "cc33", "full").unwrap();
+        assert_eq!(
+            code(s.set_client_catalog_grant("eve", 9999, true)),
+            E_NOTFOUND
+        );
+    }
+
+    /// Rulings R2: a personal grant made before any catalog exists waits in
+    /// `assets_admin_at` (so a granted client can still configure a fresh
+    /// hub's catalog), and configuring `personal` turns it into a grant row.
+    #[test]
+    fn a_personal_grant_made_before_any_catalog_waits_in_assets_admin_at() {
+        let s = store();
+        let desk = s.insert_client_token("desk", "aa11", "full").unwrap();
+        s.set_client_assets_admin("desk", true).unwrap();
+        assert!(
+            s.client_is_assets_admin(desk.id).unwrap(),
+            "pending, but honoured"
+        );
+        s.set_catalog_config("/p", None).unwrap();
+        let personal = s.personal_catalog().unwrap().unwrap().id;
+        assert!(
+            s.client_may_admin_catalog(desk.id, personal).unwrap(),
+            "moved into a grant row"
+        );
+        assert!(s.client_is_assets_admin(desk.id).unwrap());
     }
 
     #[test]

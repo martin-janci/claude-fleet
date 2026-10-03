@@ -3,10 +3,15 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/martin-janci/claude-fleet/main/tools/ag/install.sh | bash
 #   tools/ag/install.sh --from tools/ag          # from a checkout (fleet provision, tests)
+#   tools/ag/install.sh --alias 'cl=claude --yolo'  # add an alias (repeatable)
 #
 # Copies the ag tree to $AG_HOME (~/.local/share/ag), links $AG_BIN_DIR/ag
 # (~/.local/bin/ag), writes a starter config when there is none, then runs
 # `ag shims` and `ag doctor`. Re-running upgrades in place and keeps the config.
+# --alias NAME=VALUE adds the alias to [alias] unless the config already has
+# that name (a user's existing value is kept) or NAME is already a command of
+# the user's (a foreign $AG_BIN_DIR/NAME, or another NAME on PATH); a
+# symlinked config is never edited (it is managed elsewhere). Repeatable.
 #
 # The whole body lives in main(), called only at the very last line: a
 # `curl | bash` download truncated mid-script then defines an incomplete
@@ -15,12 +20,31 @@ set -euo pipefail
 
 main() {
   local FROM="" DEFAULT=""
+  local ALIASES=()
   while [ $# -gt 0 ]; do
     case $1 in
       --from) FROM=${2:?--from needs a directory}; shift 2 ;;
       --default) DEFAULT=${2:?--default needs a harness}; shift 2 ;;
-      -h | --help) echo "usage: install.sh [--from DIR] [--default HARNESS]"; return 0 ;;
+      --alias) ALIASES+=("${2:?--alias needs NAME=VALUE}"); shift 2 ;;
+      -h | --help) echo "usage: install.sh [--from DIR] [--default HARNESS] [--alias NAME=VALUE]..."; return 0 ;;
       *) echo "install.sh: unknown argument: $1" >&2; return 2 ;;
+    esac
+  done
+
+  # Validate every --alias before touching anything (same rules as `ag shims`).
+  local a name val
+  for a in ${ALIASES[@]+"${ALIASES[@]}"}; do
+    case $a in
+      *=*) ;;
+      *) echo "install.sh: --alias needs NAME=VALUE (got: $a)" >&2; return 2 ;;
+    esac
+    name=${a%%=*}
+    val=${a#*=}
+    case $name in
+      '' | *[!A-Za-z0-9._-]*) echo "install.sh: invalid alias name: $name" >&2; return 2 ;;
+    esac
+    case $val in
+      '' | *[!A-Za-z0-9\ ._=/:@%+-]*) echo "install.sh: alias $name: value must be plain words" >&2; return 2 ;;
     esac
   done
 
@@ -57,10 +81,44 @@ main() {
     return 5
   fi
 
-  # Never delete a directory ag did not create.
-  if [ -e "$AG_HOME" ] && ! { [ -f "$AG_HOME/ag" ] && [ -d "$AG_HOME/drivers" ]; }; then
-    echo "install.sh: $AG_HOME exists and is not an ag install — move it away first" >&2
-    return 5
+  # Never delete a directory ag did not create. `ag` + `drivers/` alone is NOT
+  # enough to prove that: an ag SOURCE CHECKOUT has both, and $AG_HOME is
+  # caller-settable (and fleet runs this through `bash -lc`, so an
+  # `export AG_HOME=...` in the host's login profile reaches it) — so that test
+  # let `rm -rf "$AG_HOME"` below destroy a developer's checkout, .git and
+  # uncommitted work included, while exiting 0.
+  #
+  # Two ways to be ours, and nothing else is:
+  #   - it carries fleet's `.fleet-managed` marker, which `cp -R` copies in
+  #     from the staged source tree; or
+  #   - every entry in it also exists in $FROM, i.e. it holds only the files
+  #     this installer would itself have written. Deriving the set from $FROM
+  #     keeps the rule correct as the ag file set changes, and it preserves the
+  #     manual-install upgrade path for someone who never used fleet.
+  if [ -e "$AG_HOME" ]; then
+    if ! { [ -f "$AG_HOME/ag" ] && [ -d "$AG_HOME/drivers" ]; }; then
+      echo "install.sh: $AG_HOME exists and is not an ag install — move it away first" >&2
+      return 5
+    fi
+    if [ ! -f "$AG_HOME/.fleet-managed" ]; then
+      local stray=
+      local entry base
+      for entry in "$AG_HOME"/* "$AG_HOME"/.[!.]* "$AG_HOME"/..?*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        base=${entry##*/}
+        [ "$base" = ".fleet-managed" ] && continue
+        if [ ! -e "$FROM/$base" ] && [ ! -L "$FROM/$base" ]; then
+          stray=$base
+          break
+        fi
+      done
+      if [ -n "$stray" ]; then
+        echo "install.sh: $AG_HOME holds $stray, which ag did not install — refusing to replace it." >&2
+        echo "install.sh: that looks like your own checkout or directory. Move it aside, or set" >&2
+        echo "install.sh: AG_HOME to a path ag may own." >&2
+        return 5
+      fi
+    fi
   fi
   mkdir -p "$(dirname "$AG_HOME")" "$AG_BIN_DIR"
   rm -rf "$AG_HOME.new"
@@ -108,6 +166,58 @@ yolo = false
 EOF
     echo "install.sh: wrote $CONFIG"
   fi
+
+  # --alias: add each alias unless the config already defines that name,
+  # the user already has a command of that name, or the config is a symlink.
+  local shim found
+  for a in ${ALIASES[@]+"${ALIASES[@]}"}; do
+    name=${a%%=*}
+    val=${a#*=}
+    shim=$AG_BIN_DIR/$name
+    if awk -v n="$name" '
+        /^[[:space:]]*[#;]/ { next }
+        /^[[:space:]]*\[/ { s = $0; gsub(/^[[:space:]]*\[|\][[:space:]]*$/, "", s); sec = s; next }
+        sec == "alias" {
+          i = index($0, "="); if (i == 0) next
+          k = substr($0, 1, i - 1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", k)
+          if (k == n) found = 1
+        }
+        END { exit found ? 0 : 1 }' "$CONFIG"; then
+      echo "install.sh: alias $name is already set in $CONFIG — kept"
+      continue
+    fi
+    # Never shadow a user's own command: a file ag did not generate at
+    # $AG_BIN_DIR/NAME, or NAME resolving on PATH to anything but our shim.
+    if [ -e "$shim" ] && ! grep -q '^# generated by ag-shims' "$shim" 2>/dev/null; then
+      echo "install.sh: $shim exists and was not generated by ag — kept yours; alias $name not added"
+      continue
+    fi
+    found=$(command -v "$name" 2>/dev/null || true)
+    if [ -n "$found" ] && ! [ "$found" -ef "$shim" ]; then
+      echo "install.sh: $name is already a command ($found) — kept yours; alias $name not added"
+      continue
+    fi
+    if [ -L "$CONFIG" ]; then
+      echo "install.sh: $CONFIG is managed elsewhere (symlink): add \`$name = $val\` under [alias] there"
+      continue
+    fi
+    if grep -q '^[[:space:]]*\[alias\][[:space:]]*$' "$CONFIG"; then
+      if ! {
+        awk -v line="$name = $val" '
+          { print }
+          /^[[:space:]]*\[alias\][[:space:]]*$/ && !done { print line; done = 1 }' "$CONFIG" >"$CONFIG.tmp" &&
+          mv "$CONFIG.tmp" "$CONFIG"
+      }; then
+        rm -f "$CONFIG.tmp"
+        echo "install.sh: cannot add alias $name to $CONFIG" >&2
+        return 5
+      fi
+    elif ! printf '\n[alias]\n%s = %s\n' "$name" "$val" >>"$CONFIG"; then
+      echo "install.sh: cannot add alias $name to $CONFIG" >&2
+      return 5
+    fi
+    echo "install.sh: added alias $name = $val"
+  done
 
   # `ag shims` failing (e.g. a foreign file blocking one alias) is not fatal
   # to the install: the core install (tree + symlink + config) already

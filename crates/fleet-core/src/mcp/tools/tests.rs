@@ -341,6 +341,7 @@ fn layer_read_tools_are_readonly_and_the_setter_is_not() {
     assert!(is_readonly_tool("resolve_preview"));
     assert!(is_readonly_tool("propose_layers"));
     assert!(!is_readonly_tool("set_host_layers"));
+    assert!(!is_readonly_tool("set_host_harnesses"));
 }
 
 #[test]
@@ -393,6 +394,7 @@ fn fleet_admin_tools_are_master_only() {
         "apply_sync",
         "set_secret",
         "set_host_layers",
+        "set_host_harnesses",
     ] {
         let err = enforce_admin(&full, t).expect_err(t);
         assert!(
@@ -2251,7 +2253,8 @@ fn capture_default_cap_matches_docs() {
 /// 89; `rewind_conversation`: 90; `add_project` / `list_github_repos`: 92;
 /// `catalog_admin`, and host identity & health's `merge_host` and
 /// `forget_project`: 95; `update_status` / `update_admin`: 97; `session_tool_detail`: 98 (102 with
-/// the tools main added alongside it).)
+/// the tools main added alongside it; declarative pages' `guide`: 103;
+/// multi-harness F3a's `set_host_harnesses`: 104.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -2273,7 +2276,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 102);
+    assert_eq!(served, 104);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -2741,7 +2744,7 @@ async fn pair_client_defaults_the_person_to_this_hubs_owner_and_takes_a_name() {
     let (tools, guards, store) = client_tools();
     let owner_name = {
         let s = store.lock().unwrap();
-        let id = s.personal_owner_id().unwrap().expect("086 mints one");
+        let id = s.personal_owner_id().unwrap().expect("094 mints one");
         s.get_person(id).unwrap().unwrap().name
     };
     let v = result_json(
@@ -3692,15 +3695,34 @@ fn the_served_definition_budget_stays_bounded() {
     /// measured apart never cover the merged surface, so a merge that trips
     /// this re-measures. The why of each raise belongs in its commit
     /// message (`git log -L` on this constant), not here: a log in this
-    /// comment conflicted on every merge.
-    ///
-    /// Measured at 67,937 on 2026-10-01, so the constant is 68_037. It was
-    /// 67_883 (a 67,783 measurement earlier the same day, multi-user M1's
-    /// `pair_client { person }` parameter and the sentences about it in
-    /// `pair_client` / `list_clients`); the 154 bytes are M1 T6's sentence
-    /// on `list_hosts` about `unclaimed_sessions` and the `person` sentence
-    /// added to `pair_client`.
-    const BUDGET_BYTES: usize = 68_037;
+    /// comment conflicted on every merge. Measured at 67,546 on 2026-09-29
+    /// (`session_tool_detail` merged with the native item status work,
+    /// declarative pages P5–P6 and update S4b). Measured at 67,956 on
+    /// 2026-09-29 after shared work context (`work_link` create / propose /
+    /// accept and its `parent` / `notes` / `why` parameters, +410 bytes).
+    /// Measured at 68,195 on 2026-09-30 after asset catalog S1a Task 6
+    /// (`import_assets`/`CatalogAdminParams::action` grew to describe
+    /// importing from any host over SSH and the new `only` parameter,
+    /// +139 bytes). Measured at 68,519 on 2026-09-30 after asset catalog
+    /// S1a Task 7 (`plan_sync`'s description and `PlanSyncParams` grew the
+    /// `allow_unlayered` escape hatch for a remote host with no layers,
+    /// +224 bytes). Measured at 69,180 on 2026-09-30 after multi-harness F3a
+    /// (`set_host_harnesses` and its `catalog_admin` action). Measured at
+    /// 69,306 on 2026-09-30 after declarative pages' `guide` tool (a host's
+    /// session proposes a guide, +787 bytes). Measured at 69,996 on 2026-09-30
+    /// with both merged. Measured at 70,039 on 2026-10-01 after Assets M3
+    /// Task 3 (`resolve_preview` names each held-back catalog, +33 bytes).
+    /// Measured at 70,391 on 2026-10-01 after Assets M3 Task 5
+    /// (`catalog_admin` takes a `catalog` and five catalog-set actions,
+    /// +352 bytes). Measured at 70,523 on 2026-10-02 after merging `main`
+    /// into Assets M3 (70,483, +92 bytes) and the final review's M-c
+    /// (`remove_catalog` is master-only, said in `catalog_admin`'s
+    /// description and its `catalog` parameter, +40 bytes).
+    /// Measured at 70,914 on 2026-10-03 after merging `main` into multi-user
+    /// M1 (+291 bytes over `main`'s 70,623): `pair_client { person }` and the
+    /// sentences about it in `pair_client` / `list_clients`, and M1 T6's
+    /// sentence on `list_hosts` about `unclaimed_sessions`.
+    const BUDGET_BYTES: usize = 71_014;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -9143,10 +9165,13 @@ async fn without_an_approver_only_a_paired_client_creates_a_remote() {
 async fn list_pages_serves_the_compiled_page_bundle() {
     let (tools, _guards, _store) = client_tools();
     let v = result_json(&tools.list_pages().await.unwrap());
-    assert_eq!(
-        v["pages"].as_array().unwrap().len(),
-        crate::pages::all().len()
-    );
+    // Every page a person navigates to; never an embed page, which places
+    // items in the desktop's own screens (declarative pages L8).
+    let pages = v["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), crate::pages::navigable().len());
+    assert!(pages
+        .iter()
+        .all(|p| p["layout"] != "embed" && p.get("slot").is_none()));
     assert!(v["actions"].as_array().is_some());
     assert!(v["resources"].as_array().is_some());
 }
@@ -9428,7 +9453,7 @@ async fn host_counts(t: &FleetTools, caller: Caller) -> Vec<(String, Option<i64>
 async fn list_sessions_drops_another_persons_private_row_and_the_unclaimed_ones() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let mk = |name: &str| {
         s.upsert_session(name, "h", None, None, 1, 1, "running", None)
@@ -9501,7 +9526,7 @@ async fn list_sessions_drops_another_persons_private_row_and_the_unclaimed_ones(
 async fn fresh_for_naming_another_persons_session_writes_no_cursor_and_does_not_blind_them() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let a_row = s
         .upsert_session("a-dev", "h", None, None, 1, 1, "running", None)
@@ -9565,7 +9590,7 @@ async fn fresh_for_naming_another_persons_session_writes_no_cursor_and_does_not_
 async fn a_one_person_fleet_still_sees_its_unclaimed_rows() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let mine = s
         .upsert_session("mine", "h", None, None, 1, 1, "running", None)
         .unwrap();
@@ -9603,7 +9628,7 @@ async fn list_hosts_serves_the_unclaimed_count_only_on_a_one_person_fleet() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("empty").unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     for n in ["one", "two"] {
         s.upsert_session(n, "h", None, None, 1, 1, "running", None)
             .unwrap();
@@ -10280,6 +10305,12 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     ("work_link", "reconsider", &["Drive"]),
     ("work_link", "ack", &["Drive"]),
     // Gated per decision, at the level a single decision takes.
+    // Shared work context: the proposal is STORED in the naming session's
+    // name, so the arm gates that session at `Drive` — a caller who may only
+    // watch a session cannot put words in its mouth. (Merging `main` into
+    // multi-user M1: `main` wrote the arm, M1 had given
+    // `resolve_target_row` its `Reach`, and this is the level chosen for it.)
+    ("work_link", "propose", &["Drive"]),
     ("work_link", "decide_batch", &["Drive"]),
     // Types a prompt into the pane and waits for the reply.
     ("work_link", "handover", &["Drive"]),
@@ -10527,6 +10558,23 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
          the task. Its one session-derived answer is the fresh `OrgImpact` an \
          `E_CONFLICT` carries, which is built through the caller's whole \
          `view_scope` exactly as `work { org_impact }` is",
+    ),
+    (
+        "work_link",
+        "create",
+        "a NEW work item: a standalone task has no links and no sessions, and \
+         a subtask is checked against its PARENT ITEM; the arm refuses every \
+         scoped caller outright (`work::local::create_task`'s two guards)",
+    ),
+    (
+        "work_link",
+        "accept",
+        "a person's decision on a proposal, by `item_id`: no session is \
+         named, and `work::local::decide` refuses every scoped caller — a \
+         per-host token and a bound client alike — because an agent never \
+         accepts a proposal. `reject` in this shape takes the same arm; in \
+         its session-addressed shape it falls through to the tail and is in \
+         `WORK_ACTION_REACH` at `Drive`",
     ),
     ("work_link", "rule_save", "a placement rule"),
     ("work_link", "rule_delete", "a placement rule"),
@@ -10960,7 +11008,7 @@ struct Gate {
 fn gate_fixture() -> Gate {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let mk = |name: &str| {
         s.upsert_session(name, "h", None, None, 1, 1, "running", None)
@@ -11139,7 +11187,7 @@ fn a_host_token_reaches_its_own_pane_and_the_unclaimed_rows_only() {
 fn one_person_keeps_every_verb_on_the_rows_reconcile_found() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let found = s
         .upsert_session("hand-started", "h", None, None, 1, 1, "running", None)
         .unwrap();
@@ -11352,7 +11400,7 @@ fn a_broadcast_reaches_only_what_its_sender_may_drive() {
 fn a_conversation_is_not_resumed_into_another_persons_session() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let a_row = s
         .upsert_session("a-dev", "h", None, None, 1, 1, "running", None)
@@ -11388,7 +11436,7 @@ async fn work_links_conversation_actions_refuse_another_persons_past_work() {
     const CID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let past = s
         .upsert_session("dev-o-r--abc-1", "h", None, None, 1, 1, "running", None)
@@ -11894,7 +11942,7 @@ fn the_result_gate_is_reached_for_every_caller() {
 async fn related_sessions_fences_its_anchor_and_its_list() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let pid = s.upsert_project("o", "r", "/p").unwrap();
     let mk = |name: &str| {
@@ -11993,7 +12041,7 @@ async fn whoami_never_names_another_persons_same_named_session() {
     for h in ["h-a", "h-b", "h-c"] {
         s.upsert_host(h).unwrap();
     }
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     // Distinct `last_activity_at`, because the candidates come in that
     // order (most recent first) and this test asserts on it.
@@ -12280,7 +12328,7 @@ async fn dispatching_a_task_in_another_persons_name_needs_drive() {
 async fn deleting_a_worktree_under_another_persons_session_needs_own() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host(crate::service::projects::LOCAL_HOST).unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let pid = s.upsert_project("o", "r", "/p").unwrap();
     let wt = s
@@ -12594,7 +12642,7 @@ const PAST_CID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 fn past_work_fixture() -> PastWork {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     // The session whose link ENDS: reaped, so only the snapshot is left.
     let past = s
@@ -12688,7 +12736,7 @@ async fn work_links_pages_are_not_a_fleet_wide_catalogue_of_private_sessions() {
 async fn org_impact_names_no_session_another_person_cannot_see() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let org_b = s.add_org("b", None, false).unwrap().id;
     let a_row = s
@@ -12753,7 +12801,7 @@ async fn org_impact_names_no_session_another_person_cannot_see() {
 async fn reopened_and_local_items_count_only_the_callers_own_sessions() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let a_row = s
         .upsert_session("dev-secret-branch", "h", None, None, 1, 1, "running", None)
@@ -12914,7 +12962,7 @@ fn discover_lost_sessions_is_fenced_by_person() {
 async fn deleting_a_worktree_under_another_persons_lost_session_is_still_refused() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host(crate::service::projects::LOCAL_HOST).unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let pid = s.upsert_project("o", "r", "/p").unwrap();
     let wt = s
@@ -12999,7 +13047,7 @@ async fn a_new_session_does_not_land_in_another_persons_worktree() {
     // not a geometry check further in.
     let host = crate::service::projects::LOCAL_HOST;
     s.upsert_host(host).unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let pid = s.upsert_project("o", "r", "/p").unwrap();
     let wt = s
@@ -13108,7 +13156,7 @@ async fn a_new_session_does_not_land_in_another_persons_worktree() {
 async fn list_worktrees_names_no_occupant_another_person_cannot_see() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host(crate::service::projects::LOCAL_HOST).unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let pid = s.upsert_project("o", "r", "/p").unwrap();
     let wt = s
@@ -13456,7 +13504,7 @@ const ADA_SECRETS: &[&str] = &[
 fn view_pages_fixture() -> ViewPages {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     // A second person, so nobody gets the single-person carve-out: with it in
     // play every assertion below would be about the carve-out.
     let bob = s.create_person("bob", None).unwrap().id;
@@ -13810,7 +13858,7 @@ async fn every_view_scope_page_hides_another_persons_ended_link() {
 async fn a_start_refusal_names_no_session_another_person_cannot_see() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let pid = s.upsert_project("o", "r", "/p").unwrap();
     let a_row = s
@@ -13885,7 +13933,7 @@ async fn a_start_does_not_land_in_another_persons_worktree() {
     let s = Store::open_in_memory().unwrap();
     let host = crate::service::projects::LOCAL_HOST;
     s.upsert_host(host).unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let pid = s.upsert_project("o", "r", "/p").unwrap();
     // The branch `work_link { start, key: PAY-123 }` will slug to.
@@ -14127,7 +14175,7 @@ const CARD_KEY: &str = "CRD-1";
 fn ticket_cache_fixture() -> TicketCache {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     assert!(
         s.sole_enabled_person().unwrap().is_none(),
@@ -14379,7 +14427,7 @@ async fn the_ticket_cache_arms_have_no_ended_shape() {
 async fn an_ended_local_items_name_is_not_another_persons_to_change() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     assert!(s.sole_enabled_person().unwrap().is_none(), "two people");
     let pid = s.upsert_project("o", "r", "/p").unwrap();
@@ -14458,7 +14506,7 @@ async fn a_local_items_status_is_not_another_persons_to_set() {
     for ended in [false, true] {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("h").unwrap();
-        let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+        let ada = s.personal_owner_id().unwrap().expect("094 mints one");
         let bob = s.create_person("bob", None).unwrap().id;
         assert!(s.sole_enabled_person().unwrap().is_none(), "two people");
         let pid = s.upsert_project("o", "r", "/p").unwrap();
@@ -14553,7 +14601,7 @@ async fn a_local_items_status_is_not_another_persons_to_set() {
 async fn an_unlinked_local_item_is_nobodys_to_rename_or_set() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     assert!(s.sole_enabled_person().unwrap().is_none(), "two people");
     let pid = s.upsert_project("o", "r", "/p").unwrap();
@@ -14668,4 +14716,281 @@ async fn an_unlinked_local_item_is_nobodys_to_rename_or_set() {
             "{what}: an item with no confirmed link is the hub's alone: {e}"
         );
     }
+}
+
+/// Guides (declarative pages, layout guide): a host's own session reads the
+/// catalog, validates and proposes — that is who writes one — but never
+/// decides; a person does, on the master or a trusted device. Nothing is
+/// live before that.
+#[tokio::test]
+async fn a_host_proposes_a_guide_and_only_a_person_approves_it() {
+    let (tools, _guards, store) = client_tools();
+    let call = |c: Caller, p: serde_json::Value| {
+        tools.guide(
+            Extension(c),
+            Parameters(serde_json::from_value::<GuideParams>(p).unwrap()),
+        )
+    };
+    let host = host_caller("web-1", TokenMode::Full);
+    assert!(present::visible_to(&host, "guide"));
+
+    let cat = result_json(
+        &call(host.clone(), serde_json::json!({ "action": "catalog" }))
+            .await
+            .unwrap(),
+    );
+    let example = cat["example"].clone();
+    assert_eq!(cat["layout"], "guide");
+
+    let mut bad = example.clone();
+    bad["sections"][1]["items"][0]["key"] = serde_json::json!("gc.nope");
+    let v = result_json(
+        &call(
+            host.clone(),
+            serde_json::json!({ "action": "validate", "spec": bad }),
+        )
+        .await
+        .unwrap(),
+    );
+    assert_eq!(v["ok"], false);
+    assert!(
+        v["problems"][0].as_str().unwrap().contains("gc.nope"),
+        "{v}"
+    );
+
+    let p = result_json(
+        &call(
+            host.clone(),
+            serde_json::json!({ "action": "propose", "spec": example, "why": "people ask" }),
+        )
+        .await
+        .expect("a host proposes"),
+    );
+    let id = p["id"].as_i64().unwrap();
+    assert_eq!(p["state"], "pending");
+    {
+        let s = store.lock().unwrap();
+        let row = s.guide_proposal(id).unwrap().unwrap();
+        assert_eq!(row.source, "agent");
+        assert!(crate::service::guides::live(&s).is_empty());
+    }
+
+    let decide = |c: Caller| {
+        call(
+            c,
+            serde_json::json!({ "action": "decide", "id": id, "approve": true }),
+        )
+    };
+    let err = decide(host.clone())
+        .await
+        .expect_err("a host never decides");
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    assert!(
+        err.message.contains("an agent proposes a guide"),
+        "{}",
+        err.message
+    );
+    let laptop = client_caller("laptop", TokenMode::Full);
+    assert!(
+        decide(laptop.clone()).await.is_err(),
+        "untrusted cannot decide"
+    );
+    let listed = result_json(
+        &call(laptop.clone(), serde_json::json!({ "action": "list" }))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        (
+            listed["can_write"].as_bool(),
+            listed["proposals"].as_array().map(Vec::len)
+        ),
+        (Some(false), Some(1))
+    );
+
+    let v = result_json(
+        &decide(trusted(laptop))
+            .await
+            .expect("a trusted device decides"),
+    );
+    assert_eq!(v["guides"][0]["id"], "guide.cleanup");
+    let row = store.lock().unwrap().guide_proposal(id).unwrap().unwrap();
+    assert_eq!(row.decided_by.as_deref(), Some("person (client laptop)"));
+
+    let err = call(
+        host,
+        serde_json::json!({ "action": "remove", "page_id": "guide.cleanup" }),
+    )
+    .await
+    .expect_err("a host never removes");
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    let v = result_json(
+        &call(
+            Caller::master(),
+            serde_json::json!({ "action": "remove", "page_id": "guide.cleanup" }),
+        )
+        .await
+        .expect("the master removes"),
+    );
+    assert!(v["guides"].as_array().unwrap().is_empty());
+}
+
+/// An ORG-BOUND trusted device never decides or removes a guide. The `guide`
+/// tool is `Access::Client` so a host's own token can reach catalog/validate/
+/// propose, which means it does NOT get the `Access::Person` gate that keeps
+/// an org-bound client off `set_setting` — the write actions have to say no
+/// themselves. Guides are the fleet-wide settings surface; a client bound to
+/// one org has no business over it.
+#[tokio::test]
+async fn an_org_bound_device_never_decides_or_removes_a_guide() {
+    let (tools, _guards, store) = client_tools();
+    let call = |c: Caller, p: serde_json::Value| {
+        tools.guide(
+            Extension(c),
+            Parameters(serde_json::from_value::<GuideParams>(p).unwrap()),
+        )
+    };
+    let host = host_caller("web-1", TokenMode::Full);
+    let cat = result_json(
+        &call(host.clone(), serde_json::json!({ "action": "catalog" }))
+            .await
+            .unwrap(),
+    );
+    let p = result_json(
+        &call(
+            host,
+            serde_json::json!({ "action": "propose", "spec": cat["example"].clone() }),
+        )
+        .await
+        .expect("a host proposes"),
+    );
+    let id = p["id"].as_i64().unwrap();
+
+    // trusted AND full, so only the org binding can refuse it
+    let bound = org_bound(trusted(client_caller("phone", TokenMode::Full)));
+    let err = call(
+        bound.clone(),
+        serde_json::json!({ "action": "decide", "id": id, "approve": true }),
+    )
+    .await
+    .expect_err("an org-bound device never decides");
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    assert!(
+        err.message.contains("bound to an organisation"),
+        "{}",
+        err.message
+    );
+    // it may still read, and is told it cannot write
+    let listed = result_json(
+        &call(bound.clone(), serde_json::json!({ "action": "list" }))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(listed["can_write"].as_bool(), Some(false));
+    assert!(
+        store
+            .lock()
+            .unwrap()
+            .guide_proposal(id)
+            .unwrap()
+            .unwrap()
+            .state
+            == "pending"
+    );
+
+    // an UNBOUND trusted device of the same shape does decide — the binding
+    // is the only thing that refused above
+    let free = trusted(client_caller("laptop", TokenMode::Full));
+    assert!(
+        call(
+            free,
+            serde_json::json!({ "action": "decide", "id": id, "approve": true })
+        )
+        .await
+        .is_ok(),
+        "an unbound trusted device decides"
+    );
+    let err = call(
+        bound,
+        serde_json::json!({ "action": "remove", "page_id": "guide.cleanup" }),
+    )
+    .await
+    .expect_err("an org-bound device never removes");
+    assert!(
+        err.message.contains("bound to an organisation"),
+        "{}",
+        err.message
+    );
+}
+
+/// The master token proposes AND writes, so without a no-self-approval rule
+/// one control-API caller could `propose` and then `decide { approve: true }`
+/// with no second party — against the feature's stated guarantee that an
+/// agent proposes and only a person approves. A guide proposed from a HOST
+/// session carries that host's detail, so the master still approves those.
+#[tokio::test]
+async fn the_master_does_not_approve_the_guide_it_proposed_itself() {
+    let (tools, _guards, _store) = client_tools();
+    let call = |c: Caller, p: serde_json::Value| {
+        tools.guide(
+            Extension(c),
+            Parameters(serde_json::from_value::<GuideParams>(p).unwrap()),
+        )
+    };
+    let cat = result_json(
+        &call(Caller::master(), serde_json::json!({ "action": "catalog" }))
+            .await
+            .unwrap(),
+    );
+    let example = cat["example"].clone();
+    let p = result_json(
+        &call(
+            Caller::master(),
+            serde_json::json!({ "action": "propose", "spec": example.clone() }),
+        )
+        .await
+        .expect("the master may propose"),
+    );
+    let own = p["id"].as_i64().unwrap();
+    let err = call(
+        Caller::master(),
+        serde_json::json!({ "action": "decide", "id": own, "approve": true }),
+    )
+    .await
+    .expect_err("not its own");
+    assert!(err.message.starts_with("E_FORBIDDEN"), "{}", err.message);
+    assert!(
+        err.message.contains("does not also approve it"),
+        "{}",
+        err.message
+    );
+    // rejecting its own is fine: that throws the proposal away, it does not
+    // put a guide live
+    assert!(
+        call(
+            Caller::master(),
+            serde_json::json!({ "action": "decide", "id": own, "approve": false })
+        )
+        .await
+        .is_ok(),
+        "an actor may withdraw its own proposal"
+    );
+    // and a HOST's proposal is still the master's to approve
+    let hp = result_json(
+        &call(
+            host_caller("web-1", TokenMode::Full),
+            serde_json::json!({ "action": "propose", "spec": example }),
+        )
+        .await
+        .expect("a host proposes"),
+    );
+    assert!(
+        call(
+            Caller::master(),
+            serde_json::json!({ "action": "decide", "id": hp["id"].as_i64().unwrap(), "approve": true })
+        )
+        .await
+        .is_ok(),
+        "the master approves a host's proposal"
+    );
 }

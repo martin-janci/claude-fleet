@@ -286,6 +286,32 @@ if [[ -n "$EXPECT_TAG" ]]; then
   fi
 fi
 
+# --- 7. the Rust toolchain pin -----------------------------------------------
+# rust-toolchain.toml pins an exact version; every CI toolchain install and the
+# hub image's builder must name the same one, or CI and local builds drift
+# apart again (a floating `stable` cold-started every cache on each release).
+TOOLCHAIN="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+if [[ ! "$TOOLCHAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  printf '  WRONG %-32s %s\n' "rust-toolchain.toml" "${TOOLCHAIN:-<none>}"
+  problem "rust-toolchain.toml must pin an exact version (X.Y.Z), not '${TOOLCHAIN:-<none>}'"
+else
+  printf '  ok    %-32s %s\n' "rust-toolchain.toml" "$TOOLCHAIN"
+  while IFS= read -r hit; do
+    file="${hit%%:*}"; ref="${hit##*@}"
+    if [[ "$ref" != "$TOOLCHAIN" ]]; then
+      printf '  WRONG %-32s %s\n' "$file" "dtolnay/rust-toolchain@$ref"
+      problem "$file installs dtolnay/rust-toolchain@$ref, expected @$TOOLCHAIN (rust-toolchain.toml)"
+    fi
+  done < <(grep -oH 'dtolnay/rust-toolchain@[^[:space:]]*' .github/workflows/*.yml || true)
+  IMAGE="$(sed -n 's/^FROM rust:\([^ ]*\)-bookworm.*/\1/p' crates/fleet-hub/Dockerfile)"
+  if [[ "$IMAGE" == "$TOOLCHAIN" ]]; then
+    printf '  ok    %-32s %s\n' "crates/fleet-hub/Dockerfile" "rust:$IMAGE"
+  else
+    printf '  WRONG %-32s %s\n' "crates/fleet-hub/Dockerfile" "rust:${IMAGE:-<none>}"
+    problem "crates/fleet-hub/Dockerfile builds with rust:${IMAGE:-<none>}, expected rust:$TOOLCHAIN-bookworm (rust-toolchain.toml)"
+  fi
+fi
+
 # --- verdict -----------------------------------------------------------------
 if [[ ${#PROBLEMS[@]} -gt 0 ]]; then
   echo >&2

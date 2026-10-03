@@ -106,6 +106,7 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | Setting | Default | Range | What it does |
 |---|---|---|---|
 | `provision.force_git_tree` | `false` | on / off | Write fleet's skills even when a host's ~/.claude/skills is inside a git work tree, such as a dotfiles checkout. Off: provisioning refuses such a host. Asks to confirm. |
+| `provision.install_ag` | `true` | on / off | Provisioning installs fleet's ag launcher (~/.local/share/ag) and, when the host has no cl command, a cl shim (claude --yolo) in ~/.local/bin; panes use it when the host has no cl of its own. Off: provisioning leaves ag alone. |
 
 ## Work graph
 
@@ -127,6 +128,13 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | `work.tidy_idle_unlinked_days` | `7` | 1–90 days | Days a session with no work linked must sit idle and unprompted before Tidy up suggests it. Only ever suggested, never auto-tidied. |
 | `work.auto_tidy` | `false` | on / off | Let the GC sweep act on the allowed tidy reasons by itself, by safe kill or archive only. Off, Tidy up only suggests. An organisation can override it. Asks to confirm. |
 | `work.auto_tidy_reasons` | `done_idle,pr_merged_idle` | any of `done_idle`, `pr_merged_idle`, `not_planned` | The tidy reasons auto-tidy may act on. |
+
+## catalog
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `catalog.scan_check_secs` | `3600` | seconds, shown in minutes, `0` = off | How often fleet looks for hosts whose asset scan is stale, and rescans them. Under five minutes is raised to five. Applies after a restart. |
+| `catalog.scan_max_age_secs` | `86400` | seconds, shown in hours | A host's assets are rescanned once its last scan is older than this, and every host after the catalog or a sync changes. |
 
 ## update
 

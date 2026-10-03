@@ -467,7 +467,12 @@ fn keep_removal(rm: &ManifestMerge, adds: &[ConfigMerge]) -> bool {
 /// needs in order to uninstall it, and — via `merge_value`'s hash — which
 /// catalog pin fleet last applied, so the next plan can tell a pin change
 /// from a CLI that landed on the wrong version (see `plan::plugin_op`).
-fn plugin_entry(target: &PluginTarget, merge_value: &serde_json::Value, now: i64) -> ManifestEntry {
+fn plugin_entry(
+    target: &PluginTarget,
+    merge_value: &serde_json::Value,
+    now: i64,
+    catalog: &str,
+) -> ManifestEntry {
     ManifestEntry {
         hash: String::new(),
         files: Vec::new(),
@@ -481,6 +486,7 @@ fn plugin_entry(target: &PluginTarget, merge_value: &serde_json::Value, now: i64
             value_hash: value_hash(merge_value),
         }],
         synced_at: now,
+        catalog: catalog.to_string(),
     }
 }
 
@@ -1255,6 +1261,11 @@ fn build_manifest(plan: &HostPlan, work: &[Work], now: i64) -> Option<Manifest> 
             continue;
         }
         let key = manifest_key(action);
+        // Assets M2: an action that names no catalog (a `Remove` for a
+        // manifest orphan never reaches this match arm at all, since that
+        // op is handled separately above) falls back to `"personal"` — the
+        // only catalog a build older than Assets M2 could ever plan from.
+        let catalog = action.catalog.as_deref().unwrap_or("personal");
         match action.op {
             ActionOp::Remove => {
                 changed |= manifest.assets.remove(&key).is_some();
@@ -1276,11 +1287,14 @@ fn build_manifest(plan: &HostPlan, work: &[Work], now: i64) -> Option<Manifest> 
                             .and_then(|p| p.inner().merges.first())
                             .map(|m| m.value.clone())
                             .unwrap_or_else(|| plugin_fallback_value(target));
-                        plugin_entry(target, &merge_value, now)
+                        plugin_entry(target, &merge_value, now, catalog)
                     }
-                    (None, Some(secret_plan)) => {
-                        Manifest::entry_for(&secret_plan.inner().hash(), secret_plan.inner(), now)
-                    }
+                    (None, Some(secret_plan)) => Manifest::entry_for(
+                        &secret_plan.inner().hash(),
+                        secret_plan.inner(),
+                        now,
+                        catalog,
+                    ),
                     (None, None) => continue,
                 };
                 changed |= manifest.assets.get(&key) != Some(&entry);
@@ -1542,6 +1556,7 @@ mod tests {
             &Manifest::default(),
             &BTreeMap::new(),
             &PlanFilter::default(),
+            &plan::KeepRules::default(),
         );
         assert_eq!(hp.actions[0].op, ActionOp::PluginInstall);
         assert!(
@@ -1568,6 +1583,7 @@ mod tests {
             &Manifest::default(),
             &BTreeMap::new(),
             &PlanFilter::default(),
+            &plan::KeepRules::default(),
         );
         assert_eq!(hp.actions[0].op, ActionOp::Adopt);
         let manifest = build_manifest(&hp, &work, 1_000).expect("adopt writes an entry");
@@ -1590,6 +1606,7 @@ mod tests {
             &Manifest::default(),
             &BTreeMap::new(),
             &PlanFilter::default(),
+            &plan::KeepRules::default(),
         );
         assert_eq!(hp.actions[0].op, ActionOp::PluginUpdate);
         let manifest = build_manifest(&hp, &work, 1_000).expect("update writes an entry");
@@ -1709,6 +1726,7 @@ mod tests {
             &manifest,
             secrets,
             &PlanFilter::default(),
+            &plan::KeepRules::default(),
         )
     }
 
@@ -2240,6 +2258,7 @@ mod tests {
             kind: "skill".into(),
             name: "s".into(),
             op: ActionOp::Update,
+            catalog: Some("personal".into()),
             reason: None,
             files: vec!["~/.claude/skills/s/SKILL.md".into()],
             merges: Vec::new(),
@@ -2260,6 +2279,7 @@ mod tests {
                 ],
                 merges: Vec::new(),
                 synced_at: 1,
+                catalog: "personal".into(),
             }),
             plugin: None,
         };
@@ -2301,6 +2321,281 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    async fn codex_plan_for(ssh: &Arc<SshClient>, catalog: &Catalog) -> HostPlan {
+        use crate::service::catalog::harness::codex::Codex;
+        let snap = inventory::scan_host_harness(ssh, "local", &Codex)
+            .await
+            .expect("scan");
+        let manifest = Manifest::from_snapshot(&snap, Codex.manifest_path());
+        plan::compute_host_plan(
+            catalog,
+            &Codex,
+            "local",
+            &snap,
+            &manifest,
+            &BTreeMap::new(),
+            &PlanFilter::default(),
+            &plan::KeepRules::default(),
+        )
+    }
+
+    /// F3b end to end against a real temp `$HOME`, through the real Codex
+    /// scan and planner: a catalog agent is written as
+    /// `~/.codex/agents/pm.toml`, a second plan is a no-op, and dropping it
+    /// from the catalog removes the file and its manifest entry.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_codex_agent_is_written_as_toml_and_removed_locally() {
+        use crate::service::catalog::harness::codex::Codex;
+        let _lock = crate::service::catalog::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        let repo_dir = tempfile::tempdir().unwrap();
+        let catalog = write_catalog(
+            repo_dir.path(),
+            &[
+                (
+                    "agents/pm/asset.yaml",
+                    "kind: agent\nname: pm\ndescription: Plans the work.\ntargets:\n  codex:\n    model: gpt-5.4\n",
+                ),
+                ("agents/pm/prompt.md", "You plan \"carefully\".\n"),
+            ],
+        );
+        let ssh = Arc::new(SshClient::new());
+        let ctx = ApplyCtx {
+            ssh: &ssh,
+            token: CancellationToken::new(),
+            now: 1_000,
+        };
+        let agent_file = home.path().join(".codex/agents/pm.toml");
+        let manifest_file = home.path().join(".codex/.fleet-assets.json");
+
+        // 1. Create.
+        let create = codex_plan_for(&ssh, &catalog).await;
+        assert_eq!(create.actions.len(), 1);
+        assert_eq!(create.actions[0].op, ActionOp::Create);
+        assert_eq!(
+            create.actions[0].files,
+            vec!["~/.codex/agents/pm.toml".to_string()]
+        );
+        let res = apply_host(&ctx, &Codex, &create).await;
+        assert_eq!(res.status, "applied", "{res:?}");
+        assert_eq!(res.actions[0].outcome, DONE);
+        let v: toml::Table =
+            toml::from_str(&std::fs::read_to_string(&agent_file).expect("agent written"))
+                .expect("valid TOML");
+        assert_eq!(v["name"].as_str(), Some("pm"));
+        assert_eq!(v["description"].as_str(), Some("Plans the work."));
+        assert_eq!(
+            v["developer_instructions"].as_str(),
+            Some("You plan \"carefully\".\n")
+        );
+        assert_eq!(v["model"].as_str(), Some("gpt-5.4"));
+        let manifest: Manifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_file).unwrap()).unwrap();
+        assert_eq!(
+            manifest.assets["agent/pm"].files,
+            vec!["~/.codex/agents/pm.toml".to_string()]
+        );
+
+        // 2. Nothing left to do.
+        let again = codex_plan_for(&ssh, &catalog).await;
+        assert_eq!(again.actions[0].op, ActionOp::Noop);
+
+        // 3. The agent leaves the catalog: removed, with its manifest entry.
+        let removal = codex_plan_for(&ssh, &Catalog::default()).await;
+        assert_eq!(removal.actions[0].op, ActionOp::Remove);
+        let res = apply_host(&ctx, &Codex, &removal).await;
+        assert_eq!(res.status, "applied", "{res:?}");
+        assert!(!agent_file.exists(), "the agent file is gone");
+        let manifest: Manifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_file).unwrap()).unwrap();
+        assert!(manifest.assets.is_empty(), "{manifest:?}");
+    }
+
+    /// F3c end to end: with `~/.agents/skills` a symlink to
+    /// `~/.claude/skills`, the real Codex scan reports the link and both
+    /// Codex skill actions are blocked — the one that differs from Claude's
+    /// copy and the one byte-identical to it (adopting would make two
+    /// manifests claim one file) — so Claude's files are untouched and no
+    /// Codex manifest is written.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn codex_never_writes_through_a_symlinked_agents_skills_locally() {
+        use crate::service::catalog::harness::codex::Codex;
+        use crate::service::catalog::model::Kind;
+        let _lock = crate::service::catalog::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        let repo_dir = tempfile::tempdir().unwrap();
+        let catalog = write_catalog(
+            repo_dir.path(),
+            &[
+                (
+                    "skills/s/asset.yaml",
+                    "kind: skill\nname: s\ndescription: d\n",
+                ),
+                ("skills/s/body.md", "codex body\n"),
+                (
+                    "skills/t/asset.yaml",
+                    "kind: skill\nname: t\ndescription: d\n",
+                ),
+                ("skills/t/body.md", "same body\n"),
+            ],
+        );
+        let claude_skills = home.path().join(".claude/skills");
+        std::fs::create_dir_all(claude_skills.join("s")).unwrap();
+        std::fs::write(claude_skills.join("s/SKILL.md"), "claude's copy\n").unwrap();
+        let t_bytes = Codex
+            .render(catalog.find(Kind::Skill, "t").unwrap())
+            .unwrap()
+            .files[0]
+            .bytes
+            .clone();
+        std::fs::create_dir_all(claude_skills.join("t")).unwrap();
+        std::fs::write(claude_skills.join("t/SKILL.md"), &t_bytes).unwrap();
+        std::fs::create_dir_all(home.path().join(".agents")).unwrap();
+        std::os::unix::fs::symlink(&claude_skills, home.path().join(".agents/skills")).unwrap();
+        let ssh = Arc::new(SshClient::new());
+        let ctx = ApplyCtx {
+            ssh: &ssh,
+            token: CancellationToken::new(),
+            now: 1_000,
+        };
+
+        let plan = codex_plan_for(&ssh, &catalog).await;
+        let target = claude_skills.to_string_lossy().to_string();
+        let reason = format!(
+            "~/.agents/skills is a symlink (to {target}); fleet won't write Codex skills through it — replace it with a real directory or turn Codex off for this host"
+        );
+        for name in ["s", "t"] {
+            let a = plan.actions.iter().find(|a| a.name == name).unwrap();
+            assert_eq!(a.op, ActionOp::Blocked, "{name}: {:?}", a.reason);
+            assert_eq!(a.reason.as_deref(), Some(reason.as_str()));
+        }
+        let res = apply_host(&ctx, &Codex, &plan).await;
+        assert!(res.actions.iter().all(|r| r.outcome == BLOCKED), "{res:?}");
+        assert_eq!(
+            std::fs::read_to_string(claude_skills.join("s/SKILL.md")).unwrap(),
+            "claude's copy\n"
+        );
+        assert_eq!(
+            std::fs::read(claude_skills.join("t/SKILL.md")).unwrap(),
+            t_bytes
+        );
+        assert!(
+            !home.path().join(".codex/.fleet-assets.json").exists(),
+            "nothing recorded"
+        );
+    }
+
+    /// F3c end to end against a real temp `$HOME`: a host fleet synced
+    /// before F3c holds a Codex skill at `~/.codex/skills/s/` and a manifest
+    /// pointing there. The next plan creates it in `~/.agents/skills/s/` and
+    /// deletes the old copy (backed up); Codex's own `.system` and a
+    /// hand-made `~/.codex/skills/hand` are never touched; the manifest
+    /// lists only the new path; the plan after that is a no-op.
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_codex_skill_synced_before_f3c_moves_to_agents_skills_locally() {
+        use crate::service::catalog::harness::codex::Codex;
+        use crate::service::catalog::model::Kind;
+        let _lock = crate::service::catalog::CATALOG_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard(std::env::var("HOME").ok());
+        std::env::set_var("HOME", home.path());
+        let repo_dir = tempfile::tempdir().unwrap();
+        let catalog = write_catalog(
+            repo_dir.path(),
+            &[
+                (
+                    "skills/s/asset.yaml",
+                    "kind: skill\nname: s\ndescription: d\n",
+                ),
+                ("skills/s/body.md", "body\n"),
+            ],
+        );
+
+        // The pre-F3c layout: the same bytes, where fleet used to write them,
+        // and a manifest entry naming that path.
+        let rendered = Codex
+            .render(catalog.find(Kind::Skill, "s").unwrap())
+            .unwrap();
+        let bytes = rendered.files[0].bytes.clone();
+        let old_dir = home.path().join(".codex/skills/s");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join("SKILL.md"), &bytes).unwrap();
+        let mut old_plan = rendered.clone();
+        old_plan.files[0].path = "~/.codex/skills/s/SKILL.md".into();
+        let mut old_manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        old_manifest.assets.insert(
+            "skill/s".into(),
+            Manifest::entry_for(&old_plan.hash(), &old_plan, 1, "personal"),
+        );
+        let manifest_file = home.path().join(".codex/.fleet-assets.json");
+        std::fs::write(&manifest_file, old_manifest.to_json()).unwrap();
+        // Codex's built-ins and a hand-made skill: never fleet's to touch.
+        let system = home.path().join(".codex/skills/.system/builtin/SKILL.md");
+        std::fs::create_dir_all(system.parent().unwrap()).unwrap();
+        std::fs::write(&system, "builtin\n").unwrap();
+        let hand = home.path().join(".codex/skills/hand/SKILL.md");
+        std::fs::create_dir_all(hand.parent().unwrap()).unwrap();
+        std::fs::write(&hand, "mine\n").unwrap();
+
+        let ssh = Arc::new(SshClient::new());
+        let ctx = ApplyCtx {
+            ssh: &ssh,
+            token: CancellationToken::new(),
+            now: 2_000,
+        };
+        let plan = codex_plan_for(&ssh, &catalog).await;
+        assert_eq!(plan.actions.len(), 1, "{:?}", plan.actions);
+        let a = &plan.actions[0];
+        assert_eq!(a.op, ActionOp::Create, "{:?}", a.reason);
+        assert_eq!(a.reason.as_deref(), Some(plan::MOVED_CREATE_REASON));
+        assert_eq!(a.files, vec!["~/.agents/skills/s/SKILL.md".to_string()]);
+        assert_eq!(
+            a.remove_entry.as_ref().map(|e| e.files.clone()),
+            Some(vec!["~/.codex/skills/s/SKILL.md".to_string()])
+        );
+
+        let res = apply_host(&ctx, &Codex, &plan).await;
+        assert_eq!(res.status, "applied", "{res:?}");
+        assert_eq!(
+            std::fs::read(home.path().join(".agents/skills/s/SKILL.md")).unwrap(),
+            bytes
+        );
+        assert!(!old_dir.join("SKILL.md").exists(), "the old copy is gone");
+        assert_eq!(backups(&old_dir).len(), 1, "backed up, like any removal");
+        assert_eq!(std::fs::read_to_string(&system).unwrap(), "builtin\n");
+        assert_eq!(std::fs::read_to_string(&hand).unwrap(), "mine\n");
+        let manifest: Manifest =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_file).unwrap()).unwrap();
+        assert_eq!(
+            manifest.assets["skill/s"].files,
+            vec!["~/.agents/skills/s/SKILL.md".to_string()]
+        );
+        assert_eq!(manifest.assets.len(), 1, "{manifest:?}");
+
+        let again = codex_plan_for(&ssh, &catalog).await;
+        assert_eq!(again.actions[0].op, ActionOp::Noop);
+    }
+
     /// A path the applier refuses to interpolate fails its action outright,
     /// and nothing at all is sent to the host.
     #[tokio::test]
@@ -2317,6 +2612,7 @@ mod tests {
             kind: "skill".into(),
             name: "evil".into(),
             op: ActionOp::Create,
+            catalog: Some("personal".into()),
             reason: None,
             files: vec![rendered.files[0].path.clone()],
             merges: Vec::new(),
@@ -2401,6 +2697,7 @@ mod tests {
                 kind: "skill".into(),
                 name: "s".into(),
                 op: ActionOp::Create,
+                catalog: Some("personal".into()),
                 reason: None,
                 files: vec!["~/.claude/skills/s/SKILL.md".into()],
                 merges: Vec::new(),

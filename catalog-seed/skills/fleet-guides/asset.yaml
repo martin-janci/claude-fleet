@@ -1,0 +1,19 @@
+kind: skill
+name: fleet-guides
+version: 1.0.0
+description: >-
+  Use when asked to write a step-by-step guide, walkthrough, setup wizard or
+  how-to for people using claude-fleet — "make a guide for turning on the
+  work graph", "walk people through cleanup" — so it becomes a guide in
+  Settings → Guides that a person approves, rather than prose in a chat.
+tags: [claude-fleet, guides, declarative-pages]
+# Only the one fleet tool the skill uses, pre-approved on Claude hosts
+# (`mcp:claude-fleet` would pre-approve every fleet tool).
+targets:
+  claude:
+    extra:
+      tools:
+        - mcp__claude-fleet__guide
+triggers:
+  - write a fleet guide
+  - návod vo fleete

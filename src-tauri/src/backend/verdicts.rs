@@ -317,6 +317,17 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("list_local_work_items", Verdict::Routed { tool: "work" }),
     ("name_session_work", Verdict::Routed { tool: "work_link" }),
     ("rename_work_item", Verdict::Routed { tool: "work_link" }),
+    // Shared work context (design 2026-09-29): a task or subtask a person
+    // writes, and a person's decision on an agent's proposal.
+    ("create_work_task", Verdict::Routed { tool: "work_link" }),
+    (
+        "accept_work_proposal",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    (
+        "reject_work_proposal",
+        Verdict::Routed { tool: "work_link" },
+    ),
     // Work graph M14: the Work view — eight reads of `work` and ten
     // decisions of `work_link`, every one the same on a paired desktop.
     ("work_tree", Verdict::Routed { tool: "work" }),
@@ -652,6 +663,9 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "setting_history",
         },
     ),
+    ("list_guides", Verdict::Routed { tool: "guide" }),
+    ("decide_guide", Verdict::Routed { tool: "guide" }),
+    ("remove_guide", Verdict::Routed { tool: "guide" }),
     (
         "set_fleet_setting",
         Verdict::Routed {
@@ -1069,6 +1083,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "catalog_set_host_harnesses",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    (
         "catalog_layer_template",
         Verdict::Routed {
             tool: "catalog_admin",
@@ -1088,10 +1108,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "catalog_import_host",
-        Verdict::LocalOnly {
-            instead: "an import reads the Claude config of host `local`, which on a hub is \
-                      the hub's own machine, not this one; call import_assets on the hub, or \
-                      import on the machine whose ~/.claude you mean",
+        Verdict::Routed {
+            tool: "catalog_admin",
         },
     ),
     // Read-only on the hosts, open to a paired client: it refreshes the

@@ -107,6 +107,19 @@ export interface WorkItemRow {
   fetched_at?: number | null;
   unavailable_at?: number | null;
   unavailable_reason?: string | null;
+  /** `manual` | `agent` | `proposed` | `detected` (absent from an older hub). */
+  origin?: string | null;
+  /** The project a native task runs in. */
+  project_id?: number | null;
+  /** A native task's notes (plain text). */
+  notes?: string | null;
+  /** The delegated job a mirror item follows. */
+  task_id?: number | null;
+  /** `proposed` | `accepted` | `rejected`, for `origin = 'proposed'`. */
+  proposal_state?: string | null;
+  proposed_by?: string | null;
+  /** The agent's reason (plain text). */
+  proposal_why?: string | null;
 }
 
 /** One `work:*` frame, as the batched handler receives it. */

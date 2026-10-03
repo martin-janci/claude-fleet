@@ -1,0 +1,4 @@
+# Assets claude-fleet itself ships for a catalog: copy one into your
+# catalog's checkout (or point a test catalog here) and `fleet-hub catalog
+# reload`. See catalog-seed/README.md.
+schema_version: 1

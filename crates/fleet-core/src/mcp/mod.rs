@@ -1180,7 +1180,7 @@ mod tests {
             assert!(kiosk.trusted_at.is_none(), "the plain pairing is not");
             // Multi-user M1: both pairings named the hub's own owner, and
             // both rows came out bound to it.
-            let owner = s.personal_owner_id().unwrap().expect("086 mints one");
+            let owner = s.personal_owner_id().unwrap().expect("094 mints one");
             assert_eq!(desk.person_id, Some(owner));
             assert_eq!(kiosk.person_id, Some(owner));
         }

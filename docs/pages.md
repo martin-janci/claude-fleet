@@ -76,10 +76,12 @@ page tree. `id` is dotted lowercase and is also the page's deep link.
 |---|---|---|
 | `category` | Settings in sections, saved as you change them | `field`, `stat`, `record`, `table`, `action`, `notice`, `link`, `custom` |
 | `cards` | An overview: numbers and links | `stat`, `record`, `notice`, `link` |
-| `data_page` | Stats, charts and tables, with an optional filter bar (see *Data pages and filters*) | `stat`, `record`, `table`, `chart`, `action`, `notice`, `link` |
+| `data_page` | Stats, charts and tables, with an optional filter bar (see *Data pages and filters*) | `stat`, `record`, `table`, `chart`, `account_usage` (`block`), `action`, `notice`, `link` |
+| `embed` | Items placed inside one of the desktop's own screens at a named `slot` (see *Embed pages*); never in the page tree | `account_usage`, in the views its slot takes |
 | `master_detail` | A list of a resource's records beside one record's editor | `field` (naming a field of the resource), `notice`, `custom`; `list_items` above the list: `notice`, `custom` |
 | `flow` | A server-driven wizard (see *Flows*); not a page of its own yet, launched by a resource's `create_flow` | — |
-| `review_apply` | Reviewing proposed changes (see *Proposals*); names its `review` | `notice`, `link`; sections are optional |
+| `review_apply` | Reviewing proposed changes (see *Proposals*); names its `review` (`settings`, or `guides` for Settings → Guides) | `notice`, `link`; sections are optional |
+| `guide` | A task walked through one step at a time (see *Guides*); compiled in, or proposed by an agent at runtime | `field`, `stat`, `record`, `action`, `notice`, `link` |
 | `object_editor` | One object on its own page | Not yet |
 
 ### Items
@@ -93,6 +95,7 @@ Every item is an object tagged by `type`:
 | `record` | `source` | A key → value list of a record source |
 | `table` | `source`, optional `columns`, `copy` | A rows source; `columns` picks and orders columns. `copy: true` adds *Copy as text*: the source's label with the filters, then one line per row (`first: rest, …`) |
 | `chart` | `source`, `chart` (`line` / `bar` / `stacked_bar` / `sparkline`), optional `title` | A series source |
+| `account_usage` | `source` (an `account_usage` source: `accounts.usage`), `view` | Claude accounts' plan headroom, with the hosts-view design's wording, staleness and severity in every view. On a page, `block` for every account; in a slot, the view the slot takes for the slot's host or account |
 | `notice` | `tone` (`info` / `warn` / `danger`), `text` | Plain text, 300 characters at most |
 | `action` | `action` | A button that runs a page action (see *Page actions*), then re-reads the page's data items. Hidden on a read-only page |
 | `link` | `page`, optional `label` | Another page's id |
@@ -122,6 +125,41 @@ over the registered hosts, starting at *All hosts*, which sends no host;
 it takes no `choices` or `default`. A data item may not also set a
 filtered parameter in its own `params`. `usage` and `usage.work` are the
 examples.
+
+### Embed pages
+
+An `embed` page (layout L8) places items inside a screen the desktop draws
+by hand, at a named `slot`, instead of on a page of its own. The screen
+owns the slot and hands it a context; the spec decides what goes there.
+Each slot has at most one page, an embed page has no `parent` and no tabs,
+and nothing links to it. `list_pages` never carries embed pages: the
+desktop reads them from `src/lib/pages/embeds.generated.json`, generated
+from the same specs, so a slot draws on the first frame (and a phone never
+sees them).
+
+| `slot` | Where | Context | Views |
+|---|---|---|---|
+| `host_detail` | Host detail, under the account | the host, its account and snapshot, the other hosts on the account, the refresh | `block` |
+| `hosts_group_title` | A Hosts-list account group's title line | the account and snapshot | `freshness` |
+| `hosts_group` | A Hosts-list account group's header | the account and snapshot | `bars` |
+| `new_session_chip` | Each New-session host chip | the host, its account and snapshot | `chip` |
+| `new_session_host` | Under the New-session chips | the selected host, every host, its account and snapshot | `line`, `warning` |
+| `status_footer` | The status footer's right end | every host, account and snapshot; open the Hosts view | `footer` |
+
+```json
+{ "spec": "fleet.page/1", "id": "embed.new_session_host", "title": "New session: selected host",
+  "layout": "embed", "slot": "new_session_host",
+  "sections": [{ "title": "Usage", "items": [
+    { "type": "account_usage", "source": { "id": "accounts.usage" }, "view": "line" },
+    { "type": "account_usage", "source": { "id": "accounts.usage" }, "view": "warning" }
+  ] }] }
+```
+
+A new slot is a code change: a `Slot` variant and its views in
+`catalog::slot_views`, the context in `src/lib/pages/usage/context.ts`,
+the owner's `<EmbedSlot slot=…>`, and the slot in `RENDERED_SLOTS`
+(`embeds.test.ts` holds the filled slots, the rendered ones and their
+owners equal).
 
 ### Conditions (`when`)
 
@@ -307,12 +345,66 @@ read-only with the hub's reason. A hub that serves no settings to the
 device (an older hub, or a device bound to one org) leaves the page on its
 reason and the hub's answer.
 
+### Guides
+
+A guide (layout L9 `guide`) walks a person through one task, one step at a
+time. Its `sections` are the steps, in order, shown with Back / Next / Done
+and a *Step 2 of 4* line; a step's `when` drops it until it applies, so the
+count follows the answers so far. A step holds settings `field`s (saved as
+they change, like a `category` page), `notice`s, `link`s, page `action`s and
+`stat` / `record` values. A guide passes through settings whose home is
+another page: its fields never count as a setting's one home, and a key
+appears at most once per guide. At most 12 steps, each titled differently,
+none collapsible or advanced.
+
+```json
+{ "spec": "fleet.page/1", "id": "guide.cleanup", "title": "Let fleet tidy up idle sessions",
+  "parent": "guides", "layout": "guide",
+  "sections": [
+    { "title": "What it does", "items": [ { "type": "notice", "tone": "info", "text": "…" } ] },
+    { "title": "Turn it on", "items": [ { "type": "field", "key": "gc.enabled" } ] },
+    { "title": "When it acts", "when": { "key": "gc.enabled", "truthy": true },
+      "items": [ { "type": "field", "key": "gc.bg_idle_secs", "hint": "A day suits most fleets." } ] } ] }
+```
+
+**Guides an agent writes.** A guide can also be stored at runtime
+(`service::guides`, migration 088), so a Claude session on a host — which
+has no checkout of this repository — can write one. It uses the control
+API's `guide` tool (`docs/control-api.md`), usually through the
+`fleet-guides` skill that ships in `catalog-seed/` for your asset catalog:
+
+1. `guide { action: catalog }`: the rules, every setting's key, label,
+   help, kind, unit, default, what `0` means and home page (never a value),
+   the pages, page actions and read-only sources a guide may name, and a
+   working example.
+2. `guide { action: validate, spec }` answers `{ ok, problems }`, each
+   problem with where it is — the same `pages::validate` as every page,
+   against this build's registries — plus: id `guide.<name>` and none of
+   the app's pages, parent `guides`, 16 KiB at most.
+3. `guide { action: propose, spec, why }` stores a proposal. **Nothing is
+   shown until a person approves it**: in Settings → Guides (each proposal
+   with who, why and its steps in words, then Approve / Reject), or with
+   `fleet-hub guides list | show <id> | approve <id> | reject <id> |
+   remove <guide id>` on a hub. Deciding and removing need the master or a
+   trusted device; a host's token only proposes. 20 wait at most, 50 are
+   live; a newer proposal for an id replaces the pending one, and a live
+   guide stays until its revision is approved.
+
+Approved guides join the page tree under Settings → Guides. A live guide
+is checked again whenever the pages are read, so one that names a setting
+a later build removed is left out rather than drawn broken. On a paired
+desktop the guides are the hub's (`list_guides`, `decide_guide`,
+`remove_guide` route to its `guide` tool).
+
 ## Rules the validator enforces
 
 - Every registered setting is on exactly one page (`every_setting_has_one_home`),
-  or it is in `pages::UNLISTED` with a sentence saying why.
+  or it is in `pages::UNLISTED` with a sentence saying why. A guide's
+  fields are not homes.
 - Keys, sources, source fields and columns, widgets, parents and link targets
   must all exist.
+- A `slot` is on an `embed` page only, once per slot, and an `account_usage`
+  item takes only the views its slot (or, on a page, `block`) allows.
 - Filters are on a `data_page` only, each names a parameter some source on
   the page declares (with one type across them), and no item sets a
   filtered parameter itself.
@@ -337,6 +429,9 @@ reason and the hub's answer.
 2. Add its reader to `fetch`.
 
 `every_source_has_a_reader_that_returns_its_shape` holds the reader to the
-declared shape. A source is read-only; changes are made through actions
+declared shape. A **live** source (`live: { command, event }`, today only
+`accounts.usage`) has no reader: the app loads it with `command` and keeps
+it current from the `event` row kind, so `fetch_page_source` refuses it and
+`resource_commands_exist` holds `command` to the handler list. A source is read-only; changes are made through actions
 (design P4). Every source reads the whole fleet, so it is only for whatever
 owns the fleet. An org-scoped view is a new source, not a parameter.

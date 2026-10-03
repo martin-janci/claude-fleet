@@ -44,7 +44,10 @@
     trackers,
     /** The search debounce, ms; injectable for tests. */
     searchDebounceMs = 300,
-  }: { orgs: WorkTreeOrg[]; trackers: WorkTreeTracker[]; searchDebounceMs?: number } = $props();
+    /** The Work tab's List layout: its Done section always reads archived
+     *  tasks, so the Archived switch does nothing there. */
+    listLayout = false,
+  }: { orgs: WorkTreeOrg[]; trackers: WorkTreeTracker[]; searchDebounceMs?: number; listLayout?: boolean } = $props();
 
   const saveBlocked = $derived(hubActionBlocked('save_work_view', $hubStatus, $hubConnection));
   const deleteBlocked = $derived(hubActionBlocked('delete_work_view', $hubStatus, $hubConnection));
@@ -405,7 +408,8 @@
           role="switch"
           aria-checked={!!f.archived}
           data-testid="work-filter-archived"
-          title="Done tasks, and tasks whose sessions are all archived, with nothing running"
+          disabled={listLayout}
+          title={listLayout ? 'In List view, Done shows them' : 'Done tasks, and tasks whose sessions are all archived, with nothing running'}
           onclick={() => set({ archived: !f.archived })}
         >
           <span>Archived tasks</span><span class="switch" aria-hidden="true"></span>
@@ -425,6 +429,11 @@
 </div>
 
 <style>
+  .switch-row:disabled {
+    opacity: 0.5;
+    cursor: default;
+    background: transparent;
+  }
   .work-filters {
     display: flex;
     flex-direction: column;

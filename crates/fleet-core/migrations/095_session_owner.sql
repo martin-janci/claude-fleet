@@ -2,12 +2,12 @@
 -- spec docs/superpowers/specs/2026-09-30-multi-user-gap-analysis.md §4.3): a
 -- SESSION learns whose it is.
 --
--- Migration 086 gave the hub its people; this one gives every session row an
+-- Migration 094 gave the hub its people; this one gives every session row an
 -- owner and a visibility, and records — durably, outliving the row — which
 -- person a Claude conversation belonged to.
 --
 -- What this script does, statement by statement (named rather than counted,
--- 086's convention):
+-- 094's convention):
 --
 --   ALTER TABLE sessions            `owner_person_id`: whose session this is
 --   ALTER TABLE sessions            `visibility`: `private` | `unclaimed`
@@ -29,7 +29,7 @@
 -- that upgrade with `no such column: lost_reason`.
 
 -- Whose session this is. Deliberately NO foreign key to `people`, the
--- migration-066 rationale 086 repeats for `client_tokens.person_id`:
+-- migration-066 rationale 094 repeats for `client_tokens.person_id`:
 -- deleting a person must leave the row owned by an id nothing has (fail
 -- closed — `ViewScope::owns` answers "no" for every caller), never widen it
 -- to everybody and never hand it to somebody else by cascade.
@@ -225,4 +225,4 @@ BEGIN
   UPDATE sessions SET row_version = OLD.row_version + 1 WHERE id = NEW.id;
 END;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (87);
+INSERT OR IGNORE INTO schema_version (version) VALUES (95);

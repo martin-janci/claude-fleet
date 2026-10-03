@@ -8,7 +8,7 @@
 use super::*;
 use crate::service::work::structure::{self, RuleInput};
 use crate::service::work::{work_link, WorkLinkArgs};
-use crate::store::{RuleConditions, TrackerConfig, TrackerItemWrite, WorkTarget};
+use crate::store::{NativeItem, RuleConditions, TrackerConfig, TrackerItemWrite, WorkTarget};
 
 struct W {
     st: Mutex<Store>,
@@ -663,24 +663,73 @@ fn a_bare_key_bound_by_a_sync_still_opens() {
 }
 
 /// The in-memory org rule is the store's (`Store::item_org`).
+///
+/// Covers the native-subtask fallback too: `insert_native` writes no
+/// `org_id`, so a subtask's org is its PARENT's — under a tracker parent the
+/// tracker's org, under a native parent that parent's own. Before that
+/// fallback existed every native subtask read as unassigned and the org gates
+/// on a start passed everything.
 #[test]
 fn the_graph_and_the_store_agree_on_item_orgs() {
     let w = world();
-    let local = {
+    let (local, under_tracker, under_local, orphan) = {
         let s = w.st.lock().unwrap();
         let (it, _) = s.name_session_work(w.s1, None, "Unkeyed").unwrap();
         s.seed_local_item_org(it.id, Some(w.org_b));
-        it.id
+        // a native subtask of the org_a tracker item t1
+        let under_tracker = s
+            .create_native_item(&NativeItem {
+                title: "Subtask of a tracker ticket",
+                parent_id: Some(w.t1),
+                project_id: None,
+                notes: None,
+            })
+            .unwrap();
+        // a native subtask of the org_b local item
+        let under_local = s
+            .create_native_item(&NativeItem {
+                title: "Subtask of a local item",
+                parent_id: Some(it.id),
+                project_id: None,
+                notes: None,
+            })
+            .unwrap();
+        // a top-level native item with no org anywhere: still None
+        let orphan = s
+            .create_native_item(&NativeItem {
+                title: "Top-level, no org",
+                parent_id: None,
+                project_id: None,
+                notes: None,
+            })
+            .unwrap();
+        (it.id, under_tracker.id, under_local.id, orphan.id)
     };
     let s = w.st.lock().unwrap();
     let g = Graph::load(&s, &OrgScope::All).unwrap();
-    for id in [w.t1, w.t2, w.t3, local] {
+    for id in [w.t1, w.t2, w.t3, local, under_tracker, under_local, orphan] {
         assert_eq!(
             g.item_org(&g.items[&id]),
             s.item_org(id).unwrap(),
             "item {id}"
         );
     }
+    // and the fallback resolves to the parent's org, not to None
+    assert_eq!(
+        s.item_org(under_tracker).unwrap(),
+        Some(w.org_a),
+        "a subtask of a tracker ticket is in the tracker's org"
+    );
+    assert_eq!(
+        s.item_org(under_local).unwrap(),
+        Some(w.org_b),
+        "a subtask of a local item is in that item's org"
+    );
+    assert_eq!(
+        s.item_org(orphan).unwrap(),
+        None,
+        "a top-level native item with no org is still unassigned"
+    );
 }
 
 /// Writes the real wire shapes of every Work view read to
@@ -1786,4 +1835,317 @@ fn a_legacy_done_item_a_session_resumes_is_lifted_and_stays_unarchived() {
         !t.archived,
         "a session working it now is not archived, lifted status or not"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Shared work context: tree fields, hidden proposals, the task page's data
+// ---------------------------------------------------------------------------
+
+fn step(
+    text: &str,
+    state: crate::service::work::steps::StepState,
+) -> crate::service::work::steps::StepEvent {
+    crate::service::work::steps::StepEvent {
+        native_id: format!("task:{text}"),
+        text: Some(text.into()),
+        state: Some(state),
+        agent: "claude_code",
+    }
+}
+
+#[test]
+fn proposals_are_not_tasks_and_native_children_name_their_parent() {
+    let w = world();
+    let (parent, sub, prop, rejected) = {
+        let s = w.st.lock().unwrap();
+        let pid = s.upsert_project("acme", "web", "/src/web").unwrap();
+        let parent = s
+            .create_native_item(&crate::store::NativeItem {
+                title: "Ship v1",
+                project_id: Some(pid),
+                notes: Some("n"),
+                ..Default::default()
+            })
+            .unwrap();
+        let sub = s
+            .create_native_item(&crate::store::NativeItem {
+                title: "Changelog",
+                parent_id: Some(parent.id),
+                ..Default::default()
+            })
+            .unwrap();
+        let prop = s
+            .propose_subtask(&crate::store::Proposal {
+                parent_id: parent.id,
+                title: "Idea",
+                notes: None,
+                why: Some("w"),
+                proposed_by: "x",
+            })
+            .unwrap();
+        let rejected = s
+            .propose_subtask(&crate::store::Proposal {
+                parent_id: parent.id,
+                title: "Bad idea",
+                notes: None,
+                why: None,
+                proposed_by: "x",
+            })
+            .unwrap();
+        s.decide_proposal(rejected.id, false).unwrap();
+        (parent, sub, prop, rejected)
+    };
+    let p = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            archived: Some(true),
+            ..Default::default()
+        },
+    );
+    assert!(
+        p.tasks
+            .iter()
+            .all(|t| t.item_id != Some(prop.id) && t.item_id != Some(rejected.id)),
+        "a proposal is not a task"
+    );
+    let pt = p
+        .tasks
+        .iter()
+        .find(|t| t.item_id == Some(parent.id))
+        .unwrap();
+    assert_eq!(
+        (
+            pt.origin.as_str(),
+            pt.project_label.as_deref(),
+            pt.open_proposals
+        ),
+        ("manual", Some("acme/web"), 1)
+    );
+    assert_eq!(pt.parent_task_id, None);
+    let st = p.tasks.iter().find(|t| t.item_id == Some(sub.id)).unwrap();
+    assert_eq!(
+        st.parent_task_id.as_deref(),
+        Some(format!("item:{}", parent.id).as_str())
+    );
+    let tracker = task_of(&p, "TK-1");
+    assert_eq!(
+        (tracker.origin.as_str(), tracker.parent_task_id.as_deref()),
+        ("detected", None)
+    );
+    let d = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", parent.id)).unwrap();
+    assert_eq!(d.notes.as_deref(), Some("n"));
+    assert_eq!(
+        d.subtasks.iter().map(|x| x.item_id).collect::<Vec<_>>(),
+        vec![sub.id]
+    );
+    assert_eq!(
+        d.proposals.iter().map(|x| x.item_id).collect::<Vec<_>>(),
+        vec![prop.id]
+    );
+    assert_eq!(d.proposals[0].why.as_deref(), Some("w"));
+    assert_eq!(
+        d.rejected_proposals
+            .iter()
+            .map(|x| x.item_id)
+            .collect::<Vec<_>>(),
+        vec![rejected.id]
+    );
+
+    // Accepted, the proposal is an ordinary subtask (and a task of the tree).
+    w.st.lock().unwrap().decide_proposal(prop.id, true).unwrap();
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert!(p.tasks.iter().any(|t| t.item_id == Some(prop.id)));
+    let d = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", parent.id)).unwrap();
+    assert_eq!(
+        d.subtasks.iter().map(|x| x.item_id).collect::<Vec<_>>(),
+        vec![sub.id, prop.id]
+    );
+    assert_eq!(d.subtasks[1].origin, "proposed");
+    assert!(d.proposals.is_empty());
+    let pt = page(&w, &OrgScope::All, WorkTreeFilters::default())
+        .tasks
+        .into_iter()
+        .find(|t| t.item_id == Some(parent.id))
+        .unwrap();
+    assert_eq!(pt.open_proposals, 0);
+}
+
+#[test]
+fn a_task_page_shows_the_jobs_result_and_its_sessions_steps() {
+    let w = world();
+    let (parent, job_item) = {
+        let s = w.st.lock().unwrap();
+        let parent = s
+            .create_native_item(&crate::store::NativeItem {
+                title: "Ship v1",
+                ..Default::default()
+            })
+            .unwrap();
+        s.set_claude_session_id(w.s1, "c-s1").unwrap();
+        s.link_session_work(w.s1, WorkTarget::Item(parent.id), "manual")
+            .unwrap();
+        s.record_steps(
+            "c-s1",
+            None,
+            "hook",
+            &[step(
+                "Read it",
+                crate::service::work::steps::StepState::Completed,
+            )],
+        )
+        .unwrap();
+        let job = s.insert_task(None, Some(w.s2), "Changelog", "n").unwrap();
+        let job_item = s
+            .create_agent_task_item(&job, Some(parent.id), None)
+            .unwrap();
+        s.finish_task(job.id, "done", Some("CHANGELOG.md written"), None)
+            .unwrap();
+        (parent, job_item)
+    };
+    let d = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", parent.id)).unwrap();
+    assert_eq!(d.jobs.len(), 1);
+    assert_eq!(d.jobs[0].item_id, job_item.id);
+    assert_eq!(d.jobs[0].state, "done");
+    assert_eq!(d.jobs[0].result.as_deref(), Some("CHANGELOG.md written"));
+    assert_eq!(d.jobs[0].worker.as_deref(), Some("two"));
+    assert_eq!(
+        (
+            d.subtasks[0].origin.as_str(),
+            d.subtasks[0].job_state.as_deref()
+        ),
+        ("agent", Some("done"))
+    );
+    assert_eq!(
+        d.steps
+            .iter()
+            .flat_map(|g| g.steps.iter())
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Read it"]
+    );
+    assert_eq!(d.steps[0].label, "one");
+    assert_eq!(d.steps[0].claude_session_id, "c-s1");
+
+    // The job mirror's own page carries its result; the tree its state.
+    let jd = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", job_item.id)).unwrap();
+    assert_eq!(jd.job_result.as_deref(), Some("CHANGELOG.md written"));
+    assert_eq!(jd.task.job_state.as_deref(), Some("done"));
+    assert_eq!(jd.task.origin, "agent");
+}
+
+#[test]
+fn a_subtasks_steps_roll_up_to_its_parent_and_count_its_live_sessions() {
+    let w = world();
+    let (parent, sub) = {
+        let s = w.st.lock().unwrap();
+        let parent = s
+            .create_native_item(&crate::store::NativeItem {
+                title: "Ship v1",
+                ..Default::default()
+            })
+            .unwrap();
+        let sub = s
+            .create_native_item(&crate::store::NativeItem {
+                title: "Changelog",
+                parent_id: Some(parent.id),
+                ..Default::default()
+            })
+            .unwrap();
+        s.set_claude_session_id(w.s2, "c-s2").unwrap();
+        s.link_session_work(w.s2, WorkTarget::Item(sub.id), "manual")
+            .unwrap();
+        s.record_steps(
+            "c-s2",
+            None,
+            "hook",
+            &[step(
+                "Write it",
+                crate::service::work::steps::StepState::InProgress,
+            )],
+        )
+        .unwrap();
+        (parent, sub)
+    };
+    let d = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", parent.id)).unwrap();
+    assert_eq!(d.subtasks[0].item_id, sub.id);
+    assert_eq!(d.subtasks[0].live_sessions, 1);
+    assert_eq!(d.steps.len(), 1);
+    assert_eq!(
+        (
+            d.steps[0].label.as_str(),
+            d.steps[0].steps[0].state.as_str()
+        ),
+        ("two", "in_progress")
+    );
+}
+
+#[test]
+fn a_per_host_token_reads_agent_text_fenced() {
+    let w = world();
+    let parent = {
+        let s = w.st.lock().unwrap();
+        let parent = s
+            .create_native_item(&crate::store::NativeItem {
+                title: "Ship v1",
+                notes: Some("the notes"),
+                ..Default::default()
+            })
+            .unwrap();
+        s.propose_subtask(&crate::store::Proposal {
+            parent_id: parent.id,
+            title: "Idea",
+            notes: None,
+            why: Some("the why"),
+            proposed_by: "x",
+        })
+        .unwrap();
+        s.set_claude_session_id(w.s1, "c-s1").unwrap();
+        s.link_session_work(w.s1, WorkTarget::Item(parent.id), "manual")
+            .unwrap();
+        s.record_steps(
+            "c-s1",
+            None,
+            "hook",
+            &[step(
+                "the step",
+                crate::service::work::steps::StepState::Pending,
+            )],
+        )
+        .unwrap();
+        parent
+    };
+    let end = crate::mcp::guard::UNTRUSTED_END;
+    let host = OrgScope::for_host(&w.st.lock().unwrap(), "h1").unwrap();
+    let d = task(&w.st, &vs(&host), &format!("item:{}", parent.id)).unwrap();
+    let notes = d.notes.unwrap();
+    assert!(
+        notes.contains("the notes") && notes.contains(end),
+        "{notes}"
+    );
+    let why = d.proposals[0].why.clone().unwrap();
+    assert!(why.contains("the why") && why.contains(end), "{why}");
+    let text = &d.steps[0].steps[0].text;
+    assert!(text.contains("the step") && text.contains(end), "{text}");
+
+    // A person reads it as is.
+    let d = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", parent.id)).unwrap();
+    assert_eq!(d.notes.as_deref(), Some("the notes"));
+    assert_eq!(d.steps[0].steps[0].text, "the step");
+}
+
+#[test]
+fn an_untitled_task_borrows_its_first_sessions_name() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        s.link_session_work(w.s1, WorkTarget::Ref("#333"), "manual")
+            .unwrap();
+    }
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let t = task_of(&p, "#333");
+    assert!(t.title_derived);
+    assert_eq!(t.title, "one");
+    // A titled task never borrows.
+    assert!(!task_of(&p, "TK-1").title_derived);
 }

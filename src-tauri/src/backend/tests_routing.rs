@@ -160,6 +160,9 @@ const PROJECT_TREE_PAYLOAD: &str = r#"{"project":{"id":7,"owner":"o","repo":"r",
 /// A `work_link { summarize }` answer (work graph M13.4c).
 const SUMMARY_PAYLOAD: &str = r#"{"key":"ABC-1","link_id":4,"host_alias":"hetzner","claude_session_id":"0f8fad5b-d9cb-469f-a165-70867728950e","model":"haiku","journal_id":9,"at":1,"summary":"fenced"}"#;
 const TASK_PAYLOAD: &str = r#"{"id":11,"state":"cancelled","created_at":1}"#;
+/// A native item (`TASK-<id>`, shared work context), as `work_link
+/// { create | accept | reject }` answers it.
+const NATIVE_ITEM_PAYLOAD: &str = r#"{"id":9,"source":"local","key":"TASK-9","title":"Write notes","status_category":"todo","created_at":1,"updated_at":1,"origin":"manual"}"#;
 /// A complete `MoveReport` wrapped as a `MoveOutcome::Moved` — all twelve
 /// report fields plus the internal tag `"kind":"moved"`, the last field a
 /// whole `SessionRow` (the same one as [`SESSION_PAYLOAD`]) whose own `kind`
@@ -602,6 +605,20 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "list_guides",
+            "guide",
+            json!({ "action": "list" }),
+            r#"{"guides":[],"proposals":[],"can_write":false}"#,
+            Box::new(|b, s, _| {
+                let v = block_on(commands::pages::routed::list_guides(b, s))?;
+                assert!(
+                    !v.can_write,
+                    "the hub decides whether this device may approve"
+                );
+                Ok(())
+            }),
+        ),
+        (
             "setting_history",
             "setting_history",
             json!({ "key": "work.recent_days", "limit": null }),
@@ -788,6 +805,60 @@ fn routed_read_cases() -> Vec<Case> {
                         item_id: 3,
                         title: "Ops, renamed".into(),
                     },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Shared work context (design 2026-09-29).
+        (
+            "create_work_task",
+            "work_link",
+            json!({ "session_id": null, "action": "create", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "title": "Write notes",
+                    "parent": "item:5", "project_id": 3, "notes": "v1" }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::create_work_task(
+                    b,
+                    commands::work::CreateWorkTaskArgs {
+                        title: "Write notes".into(),
+                        parent: Some("item:5".into()),
+                        project_id: Some(3),
+                        notes: Some("v1".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "accept_work_proposal",
+            "work_link",
+            json!({ "session_id": null, "action": "accept", "key": null, "item_id": 9,
+                    "link_id": null, "source": null }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::decide_work_proposal(
+                    b,
+                    commands::work::WorkProposalArgs { item_id: 9 },
+                    true,
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "reject_work_proposal",
+            "work_link",
+            json!({ "session_id": null, "action": "reject", "key": null, "item_id": 9,
+                    "link_id": null, "source": null }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::decide_work_proposal(
+                    b,
+                    commands::work::WorkProposalArgs { item_id: 9 },
+                    false,
                     s,
                 ))
                 .map(|_| ())
@@ -1357,6 +1428,29 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     s,
                     "work.recent_days".into(),
                     "3".into(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "decide_guide",
+            "guide",
+            json!({ "action": "decide", "id": 7, "approve": true }),
+            r#"{"guides":[],"proposals":[],"can_write":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::pages::routed::decide_guide(b, s, 7, true)).map(|_| ())
+            }),
+        ),
+        (
+            "remove_guide",
+            "guide",
+            json!({ "action": "remove", "page_id": "guide.cleanup" }),
+            r#"{"guides":[],"proposals":[],"can_write":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::pages::routed::remove_guide(
+                    b,
+                    s,
+                    "guide.cleanup".into(),
                 ))
                 .map(|_| ())
             }),
@@ -3630,9 +3724,11 @@ fn a_refusal_never_carries_the_token() {
 ///   routed `kill_session` dismisses an inactive agent exactly as it does.
 ///
 /// The asset catalog used to be the bulk of this list: its commands refused
-/// while the hub had a tool for most of them. They route to `catalog_admin`
-/// now; `catalog_import_host` is the one left refusing, and it still has to
-/// name the hub's `import_assets` rather than deny it.
+/// while the hub had a tool for most of them. They all route to
+/// `catalog_admin` now, including `catalog_import_host` (Task 6: import
+/// works from any host over SSH); `catalog_spawn_author_session` is the one
+/// left refusing, honestly — the hub genuinely has no tool that starts a
+/// Claude session in its checkout.
 ///
 /// The sentences used to be read back out of the source, because a
 /// `#[tauri::command]` cannot be called without a live `tauri::App`. They are
@@ -3646,20 +3742,6 @@ fn a_refusal_that_has_a_hub_tool_names_it_rather_than_denying_it() {
             .unwrap_or_else(|| panic!("{command} no longer refuses"))
     }
     const DENIALS: [&str; 2] = ["exposes no authoring tool", "exposes no tool"];
-
-    for (command, tool) in [("catalog_import_host", "import_assets")] {
-        let said = reason(command);
-        for d in DENIALS {
-            assert!(
-                !said.contains(d),
-                "{command} denies a tool the hub has ({tool}): {said}"
-            );
-        }
-        assert!(
-            said.contains(tool),
-            "{command} must name the hub's {tool}: {said}"
-        );
-    }
 
     let said = reason("dismiss_agent_session");
     for d in DENIALS {
@@ -4321,6 +4403,22 @@ fn resource_commands_exist() {
             "a resource names `{cmd}`, which has no hub verdict"
         );
     }
+    // A live data source is loaded by a desktop command too.
+    for live in fleet_core::pages::sources::SOURCES
+        .iter()
+        .filter_map(|s| s.live)
+    {
+        assert!(
+            registered.iter().any(|c| c == live.command),
+            "a live source names `{}`, which lib.rs does not register",
+            live.command
+        );
+        assert!(
+            super::verdicts::verdict(live.command).is_some(),
+            "a live source names `{}`, which has no hub verdict",
+            live.command
+        );
+    }
 }
 
 /// A payload built from a real value, for the catalog answers too big to
@@ -4341,7 +4439,7 @@ fn catalog_admin_cases() -> Vec<Case> {
     use commands::assets::routed as r;
     use fleet_core::service::catalog::admin::{
         DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs, LoadArgs, ResolvePreviewArgs,
-        SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
+        SetHostHarnessesArgs, SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
     };
     use fleet_core::service::catalog::author::{
         self, AddResourceArgs, AssetRef, CommitPendingArgs, CreateArgs, RemoveResourceArgs,
@@ -4350,7 +4448,7 @@ fn catalog_admin_cases() -> Vec<Case> {
     use fleet_core::service::catalog::layer::Axis;
     use fleet_core::service::catalog::model::Kind;
     use fleet_core::service::catalog::sync::{ApplyArgs, PlanArgs};
-    use fleet_core::service::catalog::ConfigureArgs;
+    use fleet_core::service::catalog::{ConfigureArgs, ImportArgs};
 
     const CONFIG: &str =
         r#"{"repo_path":"/srv/assets","remote_url":null,"head_commit":"abc","last_loaded_at":1}"#;
@@ -4362,6 +4460,7 @@ fn catalog_admin_cases() -> Vec<Case> {
     let detail =
         Box::leak(format!(r#"{{"asset":{asset},"previews":[],"hosts":[]}}"#).into_boxed_str());
     let layer = payload_of(&author::layer_template("core", Axis::Role));
+    let host_row = payload_of(&crate::backend::contract::tests::sample_host());
     let skill = |name: &str| AssetRef {
         kind: Kind::Skill,
         name: name.into(),
@@ -4425,7 +4524,7 @@ fn catalog_admin_cases() -> Vec<Case> {
             "catalog_list_layers",
             "catalog_admin",
             json!({ "action": "list_layers" }),
-            Box::leak(format!(r#"{{"layers":[{layer}],"hosts":[{{"host_alias":"nas","layer_name":"core","axis":"role","position":0,"active":true}}]}}"#).into_boxed_str()),
+            Box::leak(format!(r#"{{"layers":[{layer}],"hosts":[{{"host_alias":"nas","catalog_id":1,"layer_name":"core","axis":"role","position":0,"active":true}}]}}"#).into_boxed_str()),
             Box::new(|b, s, _| block_on(r::catalog_list_layers(b, s)).map(|_| ())),
         ),
         (
@@ -4456,6 +4555,9 @@ fn catalog_admin_cases() -> Vec<Case> {
             "catalog_admin",
             json!({ "action": "set_host_layers",
                     "args": { "host_alias": "nas", "role": "core", "contexts": ["gpu"] } }),
+            // No `catalog_id`: an older hub's answer, predating migration
+            // 091, must still parse — `HostLayerRow.catalog_id` is
+            // `#[serde(default)]` for exactly this.
             r#"[{"host_alias":"nas","layer_name":"core","axis":"role","position":0,"active":true}]"#,
             Box::new(|b, s, _| {
                 block_on(r::catalog_set_host_layers(
@@ -4464,6 +4566,24 @@ fn catalog_admin_cases() -> Vec<Case> {
                         host_alias: "nas".into(),
                         role: Some("core".into()),
                         contexts: vec!["gpu".into()],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_set_host_harnesses",
+            "catalog_admin",
+            json!({ "action": "set_host_harnesses",
+                    "args": { "host_alias": "nas", "harnesses": ["claude", "codex"] } }),
+            host_row,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_set_host_harnesses(
+                    b,
+                    SetHostHarnessesArgs {
+                        host_alias: "nas".into(),
+                        harnesses: Some(vec!["claude".into(), "codex".into()]),
                     },
                     s,
                 ))
@@ -4520,11 +4640,32 @@ fn catalog_admin_cases() -> Vec<Case> {
             r#"[{"host_alias":"nas","harness":"claude","kind":"skill","name":"s","state":"in_sync","scanned_at":1,"managed":true}]"#,
             Box::new(|b, s, _| block_on(r::assets_inventory(b, s)).map(|_| ())),
         ),
+        // Task 6: import works from any host over SSH, not just `local`.
+        (
+            "catalog_import_host",
+            "catalog_admin",
+            json!({ "action": "import_host",
+                    "args": { "host_alias": "oci", "dry_run": true, "only": [] } }),
+            r#"{"created":[],"problems":[],"warnings":[],"flagged_secrets":[],"dry_run":true}"#,
+            Box::new(|b, s, h| {
+                block_on(r::catalog_import_host(
+                    b,
+                    ImportArgs {
+                        host_alias: "oci".into(),
+                        dry_run: true,
+                        only: vec![],
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "catalog_plan_sync",
             "catalog_admin",
             json!({ "action": "plan_sync",
-                    "args": { "host_alias": "nas", "kind": "skill", "name": "s" } }),
+                    "args": { "host_alias": "nas", "kind": "skill", "name": "s", "allow_unlayered": false } }),
             r#"{"id":"p1","computed_at":1,"hosts":[],"counts":{}}"#,
             Box::new(|b, s, h| {
                 block_on(r::catalog_plan_sync(
@@ -4533,6 +4674,7 @@ fn catalog_admin_cases() -> Vec<Case> {
                         host_alias: Some("nas".into()),
                         kind: Some(Kind::Skill),
                         name: Some("s".into()),
+                        allow_unlayered: false,
                     },
                     s,
                     h,

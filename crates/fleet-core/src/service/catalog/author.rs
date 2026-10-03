@@ -6,21 +6,24 @@
 //! Every operation resolves the repo root from the stored catalog config,
 //! performs the write, stages only the paths it touched, auto-commits with a
 //! generated `catalog: …` message, and ends with `catalog::load(false)` so
-//! `CATALOG` and the UI refresh through the existing `catalog:loaded` event.
+//! the registry and the UI refresh through the existing `catalog:loaded`
+//! event.
 
 // This module is the service layer for the twelve `catalog_*` authoring
 // commands in `commands/assets.rs`.
 
+use super::harness::codex::CODEX_SKILLS_DIR;
 use super::harness::HARNESS_IDS;
 use super::layer::{Axis, Layer};
 use super::model::{
-    find_placeholders, Asset, AssetSpec, Header, HookAction, Kind, Marketplace, Problem,
+    find_placeholders, Asset, AssetSpec, Header, HookAction, Kind, Marketplace, Problem, Scope,
 };
+use super::registry;
 use super::repo::{self, Catalog, RepoStatus};
 use super::sync::secrets::{BUILTIN_PORT, BUILTIN_TOKEN};
 use super::validate::{check_layer_name, check_name, check_resource_path};
-use super::{CATALOG, E_ASSET_NOT_FOUND, E_CATALOG_GIT, E_LINT};
-use crate::ipc_error::codes::{E_INVALID, E_LOCK, E_SERIALIZE};
+use super::{E_ASSET_NOT_FOUND, E_CATALOG_GIT, E_LINT};
+use crate::ipc_error::codes::{E_INVALID, E_SERIALIZE};
 use crate::ipc_error::IpcError;
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -44,6 +47,7 @@ pub fn template(kind: Kind, name: &str) -> Asset {
         tags: Vec::new(),
         source: None,
         install_as: None,
+        scope: Scope::Private,
         targets: Default::default(),
     };
     match kind {
@@ -316,6 +320,23 @@ pub fn secrets_example_names(root: &Path) -> Vec<String> {
     }
 }
 
+/// Whether Codex renders `a` into `~/.agents/skills/` (`CODEX_SKILLS_DIR`): a skill, or an agent
+/// with `targets.codex.render_as: skill` — in both cases only while its
+/// Codex target is enabled.
+fn lands_in_codex_skills(a: &Asset) -> bool {
+    let t = a.target("codex");
+    t.enabled
+        && match a.kind() {
+            Kind::Skill => true,
+            Kind::Agent => t.render_as.as_deref() == Some("skill"),
+            _ => false,
+        }
+}
+
+/// Codex's built-in subagent names: a custom agent of one of these names
+/// overrides the built-in rather than adding an agent.
+const CODEX_BUILTIN_AGENTS: &[&str] = &["default", "worker", "explorer"];
+
 /// Static lint for one asset. Errors block a save (`E_LINT`), warnings never
 /// do. The rule list is the spec's, exactly, plus the cross-asset
 /// install-name uniqueness rule below.
@@ -376,6 +397,29 @@ pub fn lint(
             ),
         );
     }
+    // F3b: Codex renders an agent with `targets.codex.render_as: skill` into
+    // `~/.agents/skills/<install name>/` (F3c), where a skill of that install name
+    // also lands — across kinds, so the rule above cannot see it. Both
+    // manifest entries would claim one path, and removing either asset would
+    // delete the other's installed copy.
+    if lands_in_codex_skills(asset) {
+        if let Some(other) = catalog.assets.iter().find(|a| {
+            a.kind() != kind && lands_in_codex_skills(a) && a.install_name() == install_name
+        }) {
+            report.error(
+                if asset.header.install_as.is_some() {
+                    "install_as"
+                } else {
+                    "name"
+                },
+                format!(
+                    "install name '{install_name}' also renders to {CODEX_SKILLS_DIR}/{install_name} for {}/{} (targets.codex.render_as: skill)",
+                    other.kind().as_str(),
+                    other.header.name
+                ),
+            );
+        }
+    }
     let strings = string_fields(asset);
     for (field, value) in &strings {
         if value.contains("TODO") {
@@ -421,6 +465,24 @@ pub fn lint(
                 format!(
                     "{SECRETS_EXAMPLE} is missing; it should list {}",
                     names.join(", ")
+                ),
+            );
+        }
+    }
+
+    // F3b: a Codex subagent's `name` is the catalog name; Codex treats one
+    // named like a built-in agent as overriding that built-in.
+    if kind == Kind::Agent {
+        let t = asset.target("codex");
+        let name = asset.header.name.as_str();
+        if t.enabled
+            && t.render_as.as_deref() != Some("skill")
+            && CODEX_BUILTIN_AGENTS.contains(&name)
+        {
+            report.warn(
+                "name",
+                format!(
+                    "Codex has a built-in '{name}' agent; this one overrides it there (rename it, or set targets.codex.enabled: false)"
                 ),
             );
         }
@@ -475,13 +537,19 @@ pub fn lint(
 pub fn lint_all(catalog: &Catalog, root: &Path) -> LintAll {
     let names = secrets_example_names(root);
     let exists = root.join(SECRETS_EXAMPLE).exists();
+    lint_all_with(catalog, &names, exists)
+}
+
+/// [`lint_all`] with `secrets.example` already read, so a caller borrowing
+/// the registry ([`lint_everything`]) does no file I/O under its read lock.
+fn lint_all_with(catalog: &Catalog, names: &[String], exists: bool) -> LintAll {
     let assets: Vec<AssetLint> = catalog
         .assets
         .iter()
         .map(|a| AssetLint {
             kind: a.kind().as_str().to_string(),
             name: a.header.name.clone(),
-            report: lint(a, catalog, &names, exists),
+            report: lint(a, catalog, names, exists),
         })
         .collect();
     LintAll {
@@ -558,31 +626,35 @@ fn check_has_resources(kind: Kind) -> Result<(), IpcError> {
     }
 }
 
-/// A clone of the named asset out of the loaded `CATALOG`.
+/// A clone of the named asset out of the loaded personal catalog. Borrows
+/// via `with_personal` rather than `registry::personal()?` so only the one
+/// matching `Asset` is ever cloned, not the whole catalog (every other
+/// asset's `resources`, base64'd bytes included). An unloaded catalog and a
+/// present-but-missing asset are the same answer here, same as before this
+/// module read a registry at all: `E_ASSET_NOT_FOUND`, never
+/// `E_CATALOG_NOT_CONFIGURED`.
 fn catalog_asset(kind: Kind, name: &str) -> Result<Asset, IpcError> {
-    let guard = CATALOG
-        .read()
-        .map_err(|_| IpcError::new(E_LOCK, "catalog lock poisoned"))?;
-    guard
-        .as_ref()
-        .and_then(|c| c.find(kind, name).cloned())
-        .ok_or_else(|| {
-            IpcError::new(
-                E_ASSET_NOT_FOUND,
-                format!("{} {name} is not in the catalog", kind.as_str()),
-            )
-        })
+    let not_found = || {
+        IpcError::new(
+            E_ASSET_NOT_FOUND,
+            format!("{} {name} is not in the catalog", kind.as_str()),
+        )
+    };
+    match registry::with_personal(|c| Ok(c.find(kind, name).cloned())) {
+        Ok(found) => found.ok_or_else(not_found),
+        Err(e) if e.code == super::E_CATALOG_NOT_CONFIGURED => Err(not_found()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Lint against the catalog as currently loaded (an unloaded catalog lints
-/// against an empty one — no rule consults it).
+/// against an empty one — no rule consults it). Borrows the registry; never
+/// clones the catalog (M1 carry, R16).
 fn lint_in_repo(asset: &Asset, root: &Path) -> LintReport {
     let names = secrets_example_names(root);
     let exists = root.join(SECRETS_EXAMPLE).exists();
-    let guard = CATALOG.read().ok();
-    let empty = Catalog::default();
-    let catalog = guard.as_ref().and_then(|g| g.as_ref()).unwrap_or(&empty);
-    lint(asset, catalog, &names, exists)
+    registry::with_personal(|c| Ok(lint(asset, c, &names, exists)))
+        .unwrap_or_else(|_| lint(asset, &Catalog::default(), &names, exists))
 }
 
 /// Stage `rel_paths`, commit them under `message`, then reload the catalog
@@ -638,6 +710,7 @@ pub fn create(args: CreateArgs, store: &Mutex<Store>) -> Result<WriteResult, Ipc
             let mut a = catalog_asset(args.kind, from)?;
             a.header.name = args.name.clone();
             a.header.source = None;
+            a.header.scope = Scope::Private; // R15: a copy is private until marked
             a
         }
         None => template(args.kind, &args.name),
@@ -758,15 +831,15 @@ fn resource_message(kind: Kind, name: &str) -> String {
 }
 
 // Both resource operations rewrite the whole asset from the copy in the
-// in-memory `CATALOG` — its `resources` carry the bytes `load_dir` read, so
+// in-memory registry — its `resources` carry the bytes `load_dir` read, so
 // an overwrite reproduces the untouched files and prunes the rest. That
-// assumes `CATALOG` matches the working tree: it holds what the last
-// `catalog::load` saw, every authoring operation ends with one, and the
-// sequence here is synchronous, so the window in which someone could edit
-// the repo underneath is a single operation. A concurrent outside edit to
-// another of *this asset's* files would be reverted by the rewrite (and show
-// up in the commit); anything else in the repo is untouched, because only
-// this asset's path is ever staged.
+// assumes the registry's personal catalog matches the working tree: it
+// holds what the last `catalog::load` saw, every authoring operation ends
+// with one, and the sequence here is synchronous, so the window in which
+// someone could edit the repo underneath is a single operation. A
+// concurrent outside edit to another of *this asset's* files would be
+// reverted by the rewrite (and show up in the commit); anything else in the
+// repo is untouched, because only this asset's path is ever staged.
 
 /// Resources are base64'd whole into the asset's YAML and committed to the
 /// catalog repo, which is synced to every host — a large pick silently
@@ -945,21 +1018,26 @@ pub fn lint_asset(args: AssetRef, store: &Mutex<Store>) -> Result<LintReport, Ip
     Ok(lint_in_repo(&asset, &root))
 }
 
+/// Every asset linted against the loaded catalog, borrowed from the
+/// registry (R16); an unloaded catalog lints against an empty one.
 pub fn lint_everything(store: &Mutex<Store>) -> Result<LintAll, IpcError> {
     let root = repo_root(store)?;
-    let guard = CATALOG
-        .read()
-        .map_err(|_| IpcError::new(E_LOCK, "catalog lock poisoned"))?;
-    let empty = Catalog::default();
-    let catalog = guard.as_ref().unwrap_or(&empty);
-    Ok(lint_all(catalog, &root))
+    let names = secrets_example_names(&root);
+    let exists = root.join(SECRETS_EXAMPLE).exists();
+    match registry::with_personal(|c| Ok(lint_all_with(c, &names, exists))) {
+        Ok(all) => Ok(all),
+        Err(e) if e.code == super::E_CATALOG_NOT_CONFIGURED => {
+            Ok(lint_all_with(&Catalog::default(), &names, exists))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::catalog::lock_registry_for_test;
     use crate::service::catalog::model::{Resource, Source, TargetOverride};
-    use crate::service::catalog::CATALOG_TEST_LOCK;
     use std::path::PathBuf;
 
     // ------------------------------------------------------------ helpers
@@ -1240,6 +1318,48 @@ mod tests {
         assert_eq!(fields(&lint_of(&agent).warnings), vec!["tools"]);
     }
 
+    /// F3b: an agent Codex would install under a built-in agent's name
+    /// (`default`, `worker`, `explorer`) is a warning, not an error — and
+    /// not at all when Codex renders it as a skill or not at all.
+    #[test]
+    fn lint_warns_when_a_codex_subagent_takes_a_built_in_name() {
+        for name in ["default", "worker", "explorer"] {
+            let mut agent = Asset::from_yaml(
+                None,
+                &format!("kind: agent\nname: {name}\ndescription: A reasonably long description here.\ntools: [read]\n"),
+            )
+            .unwrap();
+            agent.body = "You work.\n".into();
+            let report = lint_of(&agent);
+            assert_eq!(fields(&report.warnings), vec!["name"], "{name}");
+            assert!(
+                report.warnings[0].message.contains("built-in"),
+                "{:?}",
+                report.warnings
+            );
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+        }
+        for targets in [
+            "targets:\n  codex:\n    render_as: skill\n",
+            "targets:\n  codex:\n    enabled: false\n",
+        ] {
+            let mut agent = Asset::from_yaml(
+                None,
+                &format!("kind: agent\nname: worker\ndescription: A reasonably long description here.\ntools: [read]\n{targets}"),
+            )
+            .unwrap();
+            agent.body = "You work.\n".into();
+            assert!(lint_of(&agent).warnings.is_empty(), "{targets}");
+        }
+        let mut other = Asset::from_yaml(
+            None,
+            "kind: agent\nname: planner\ndescription: A reasonably long description here.\ntools: [read]\n",
+        )
+        .unwrap();
+        other.body = "You plan.\n".into();
+        assert!(lint_of(&other).warnings.is_empty());
+    }
+
     #[test]
     fn lint_warns_on_an_unknown_target_harness() {
         let mut a = clean_skill();
@@ -1329,6 +1449,54 @@ mod tests {
         assert!(lint(&agent, &catalog, &[], true).errors.is_empty());
     }
 
+    /// F3b: an agent Codex renders as a skill lands in the same
+    /// `~/.agents/skills/<install name>/` as a skill of that install name —
+    /// reported from both sides; a skill with Codex disabled does not collide.
+    #[test]
+    fn lint_errors_when_a_codex_skill_agent_shares_a_skills_install_name() {
+        let mut skill = clean_skill();
+        skill.header.name = "pm".into();
+        let mut agent = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: A reasonably long description here.\ntools: [read]\ntargets:\n  codex:\n    render_as: skill\n",
+        )
+        .unwrap();
+        agent.body = "You plan.\n".into();
+        let catalog = Catalog {
+            assets: vec![skill.clone(), agent.clone()],
+            ..Default::default()
+        };
+        let report = lint(&agent, &catalog, &[], true);
+        assert_eq!(fields(&report.errors), vec!["name"], "{:?}", report.errors);
+        assert!(
+            report.errors[0].message.contains("~/.agents/skills/pm")
+                && report.errors[0].message.contains("skill/pm"),
+            "{:?}",
+            report.errors
+        );
+        let report = lint(&skill, &catalog, &[], true);
+        assert_eq!(fields(&report.errors), vec!["name"], "{:?}", report.errors);
+        assert!(
+            report.errors[0].message.contains("agent/pm"),
+            "{:?}",
+            report.errors
+        );
+
+        let mut off = skill.clone();
+        off.header.targets.insert(
+            "codex".into(),
+            TargetOverride {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        let catalog = Catalog {
+            assets: vec![off, agent.clone()],
+            ..Default::default()
+        };
+        assert!(lint(&agent, &catalog, &[], true).errors.is_empty());
+    }
+
     #[test]
     fn lint_all_surfaces_a_pre_existing_install_name_collision() {
         let root = tmp("lintdup");
@@ -1406,7 +1574,7 @@ mod tests {
 
     #[test]
     fn create_update_delete_round_trip() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("roundtrip");
         let store = configured_store(&root);
 
@@ -1492,7 +1660,7 @@ mod tests {
 
     #[test]
     fn update_refuses_on_lint_errors_and_writes_nothing() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("lintrefuse");
         let store = configured_store(&root);
         create(
@@ -1539,7 +1707,7 @@ mod tests {
     /// of its own (which is what a whole-tree check would have done).
     #[test]
     fn update_with_no_change_is_a_no_op_even_with_the_tree_dirty() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("noop");
         let store = configured_store(&root);
         create(
@@ -1596,7 +1764,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resources_add_and_remove_commit_and_prune() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("resources");
         let store = configured_store(&root);
         create(
@@ -1757,7 +1925,7 @@ mod tests {
 
     #[test]
     fn add_resource_refuses_a_file_over_the_size_cap() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("resources-cap");
         let store = configured_store(&root);
         create(
@@ -1795,7 +1963,7 @@ mod tests {
 
     #[test]
     fn duplicate_from_copies_body_and_resources() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("duplicate");
         let store = configured_store(&root);
         create(
@@ -1867,7 +2035,7 @@ mod tests {
 
     #[test]
     fn commit_pending_commits_a_dirty_tree_and_errors_when_clean() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("pending");
         let store = configured_store(&root);
         assert_eq!(
@@ -1903,7 +2071,7 @@ mod tests {
 
     #[test]
     fn push_to_a_bare_remote_updates_ahead_count() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("push");
         let bare = tmp("push-remote");
         git(&bare, &["init", "-q", "--bare", "-b", "main"]);
@@ -1937,7 +2105,7 @@ mod tests {
 
     #[test]
     fn lint_asset_and_lint_everything_read_the_loaded_catalog() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("lintops");
         let store = configured_store(&root);
         create(
@@ -1983,10 +2151,8 @@ mod tests {
     // ------------------------------------------------------------- layers
 
     fn catalog_layer(name: &str) -> Option<crate::service::catalog::layer::Layer> {
-        CATALOG
-            .read()
+        registry::personal()
             .unwrap()
-            .as_ref()
             .and_then(|c| c.layers.get(name).cloned())
     }
 
@@ -2014,7 +2180,7 @@ mod tests {
 
     #[test]
     fn write_layer_creates_then_updates_commit_and_reload() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("layer-write");
         let store = configured_store(&root);
 
@@ -2050,7 +2216,7 @@ mod tests {
     /// tree or the repo history.
     #[test]
     fn write_layer_refuses_a_key_in_both_members_and_exclude() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("layer-write-clash");
         let store = configured_store(&root);
         let before = subjects(&root);
@@ -2068,7 +2234,7 @@ mod tests {
 
     #[test]
     fn write_layer_refuses_a_malformed_key() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("layer-write-malformed");
         let store = configured_store(&root);
         let before = subjects(&root);
@@ -2085,7 +2251,7 @@ mod tests {
 
     #[test]
     fn delete_layer_removes_commits_and_reloads() {
-        let _g = CATALOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = lock_registry_for_test();
         let root = init_repo("layer-delete");
         let store = configured_store(&root);
         write_layer(&layer_template("workstation", Axis::Role), &store).unwrap();
@@ -2103,6 +2269,46 @@ mod tests {
         assert_eq!(
             delete_layer("Bad Name", &store).unwrap_err().code,
             E_INVALID
+        );
+    }
+
+    /// Rulings R15: a copy is a new asset — private until marked, whatever
+    /// the original's scope.
+    #[test]
+    fn duplicate_from_makes_a_private_copy_of_a_shared_asset() {
+        let _g = lock_registry_for_test();
+        let root = init_repo("dup-scope");
+        let store = configured_store(&root);
+        create(
+            CreateArgs {
+                kind: Kind::Skill,
+                name: "src".into(),
+                duplicate_from: None,
+            },
+            &store,
+        )
+        .unwrap();
+        let mut shared = catalog_asset(Kind::Skill, "src").unwrap();
+        shared.header.scope = Scope::Shared;
+        shared.header.description = "A shared skill that is worth copying once.".into();
+        shared.body = "# src\n\nShared body.\n".into();
+        update(UpdateArgs { asset: shared }, &store).unwrap();
+        create(
+            CreateArgs {
+                kind: Kind::Skill,
+                name: "copy".into(),
+                duplicate_from: Some("src".into()),
+            },
+            &store,
+        )
+        .unwrap();
+        assert_eq!(
+            catalog_asset(Kind::Skill, "copy").unwrap().header.scope,
+            Scope::Private
+        );
+        assert_eq!(
+            catalog_asset(Kind::Skill, "src").unwrap().header.scope,
+            Scope::Shared
         );
     }
 }

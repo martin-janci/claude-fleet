@@ -167,6 +167,7 @@ export type AttentionKind =
   | 'token_missing'
   | 'hooks_missing'
   | 'hooks_stale'
+  | 'provision_warning'
   | 'provision_stale'
   | 'disk_low'
   | 'agent_old'
@@ -223,6 +224,18 @@ export function hostAttention(args: {
       kind: 'hooks_stale',
       glyph: '⚠',
       title: `Fleet hooks are installed on ${host.alias}, but none of its sessions has reported a finished turn. The hooks may be stale — re-provision the host.`,
+    };
+  }
+  // A provisioning that DELIVERED the content but degraded part way. It also
+  // reads provision_stale (its fingerprint was cleared so it is retried), so
+  // this has to outrank that branch — "provisioned with an older fleet" would
+  // be the wrong reason, and the real one was previously only a tracing::warn!
+  // nobody saw.
+  if (host.provision_warning) {
+    return {
+      kind: 'provision_warning',
+      glyph: '⚠',
+      title: `${host.alias}: the last provisioning did not finish cleanly — ${host.provision_warning}. Fleet will retry it; to retry now, fleet-hub provision --host ${host.alias} --content-only.`,
     };
   }
   // hosts F1: every host ran skills from 15 hub upgrades ago and nothing said so.

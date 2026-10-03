@@ -19,6 +19,11 @@
 //! Nothing in this crate does I/O except through the [`channel::Fetch`] and
 //! [`channel::HubTransport`] seams, so it has no runtime of its own.
 
+// `#[async_trait]` expands each async trait method into a `#[must_use]` fn that
+// returns a boxed future, which is already `#[must_use]`; clippy 1.99 flags that
+// macro output as `double_must_use`. It is not code we wrote — allow it crate-wide.
+#![allow(clippy::double_must_use)]
+
 pub mod channel;
 pub mod channel_doc;
 pub mod client_header;

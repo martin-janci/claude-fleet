@@ -8,6 +8,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.4.5] - 2026-09-30
+
+### Added
+- **catalog:** assets carry scope: private | shared (private by default)
+- **catalog:** a catalogs table under the existing config API (migration 089)
+- **catalog:** render agents as Codex subagents in ~/.codex/agents
+- **ui:** Codex auto / on / off in Host detail
+- **mcp:** set_host_harnesses chooses a host's Codex sync (auto / on / off)
+- **catalog:** plan and inventory Codex only where the host has it
+- **catalog:** detect Codex in its scan and gate harnesses per host
+- **store:** hosts.harnesses, a per-host harness choice (migration 088)
+
+### Changed
+- **catalog:** a registry of loaded catalogs replaces the CATALOG global
+
+### Fixed
+- **catalog:** registry test lock, the real lock-order rule, spec milestones
+- **catalog:** no store-then-registry lock nesting; one personal entry; borrow, don't clone
+- **catalog:** lint and render polish for Codex subagents
+- **catalog:** a harness change drops parked plans and owes a rescan
+- **catalog:** detect Codex only from evidence fleet never writes
+- **catalog:** substitute secrets into TOML files as TOML strings
+- **catalog:** codex agent extra cannot override name, description, instructions or model
+
+### Documentation
+- the catalogs table, the registry and scope
+- fix a sentence in the Codex upgrade note
+- Codex upgrade note; spec notes on tier map and catalog sources
+- **plan:** drop a local build path from the F3ab plan
+- **assets:** the M1 plan — catalogs table, registry, scope
+- per-host harness set and Codex subagents (F3a, F3b)
+- **assets:** the S1b + S2 design — catalogs, scopes, changesets and the workspace shell
+## [0.4.4] - 2026-09-30
+
+### Added
+- **pages:** the fleet-guides catalog skill, tested end to end with a fresh agent
+- **pages:** guides — layout L9 and guides an agent proposes at runtime
+- **sync:** an unlayered remote host is skipped instead of getting the whole catalog
+- **catalog:** import from any host over SSH, optionally only the assets asked for
+- **catalog:** a scan tick that rescans stale hosts and every host after a catalog or sync change
+- **assets:** one row per asset with a host strip; fleet internals folded away
+- **catalog:** list_assets groups unmanaged copies into classified identities
+- **catalog:** unmanaged inventory rows keep their content hash and flags (migration 087)
+- **catalog:** a content hash and fleet/secret flags for every installed asset
+- **provision:** install the ag launcher and a cl command on every host
+- **settings:** provision.install_ag — install the ag launcher on provisioned hosts
+- **tmux:** the pane command falls back to a provisioned ag before plain claude
+- **ag:** install.sh --alias adds an alias unless the user already has one
+
+### Changed
+- **catalog:** cover HostStrip states and the identity-differ contract
+- **claude:** install openssh-client in web sessions
+
+### Fixed
+- **catalog:** installed_detail recognizes the legacy token hook too
+- **catalog:** normalize only's host-identifier entries before matching
+- **catalog:** AssetListing.identities is Option so old-hub fallback fires
+- **sync:** "Plan anyway" re-plans the clicked host, not the whole fleet
+- **catalog:** the remote dump script exits 0 whatever the agents dir holds
+- **catalog:** gate import_assets, confine the remote dump, scrub legacy token hooks
+- **catalog:** a host whose rescan failed stays owed until it succeeds
+- **assets:** the orphan filter ignores case like the identity filter
+- **settings:** provision.install_ag help says the cl shim is only added where no cl exists
+- **provision:** surface ag warnings from content-only runs; keep the restart hint
+- **hub:** ship tools/ag in the hub image build context
+- **ag:** --alias never shadows a user's command or a symlinked config
+
+### Documentation
+- CLAUDE.md names host_hash and the identities response field
+- CLAUDE.md notes for the assets S1a foundation
+- upgrade heads-up for the ag rollout
+- provisioning installs ag; panes launch through it
+## [0.4.3] - 2026-09-30
+
+### Added
+- **pages:** embed pages (L8); account usage drawn through the catalog everywhere — declarative pages P4d
+- **work:** the view carries origin, project, parent, proposals, jobs and agent steps
+- **work:** desktop create_work_task and proposal decisions, routed
+- **work:** work_link create / propose / accept / reject
+- **work:** dispatched jobs appear as agent subtasks and follow the job
+- **work:** starting a native item uses its project and the parent ticket's brief
+- **ui:** task page — notes, subtasks, proposals, jobs and agent steps
+- **ui:** Work tab List layout — To do / Doing / Done under the existing header and filters
+- **ui:** remove the global Tasks popover; jobs are in the Work list
+- **work:** agent proposals — capped, decided once, a rejected title stays rejected
+- **work:** native tasks and subtasks (TASK-<id>), job mirrors, depth one
+- **work:** capture Claude Code task steps from PostToolUse, transcript backstop for stale hosts
+- **ag:** one-command installer
+- **ag:** doctor with exact fixes, install hints
+- **ag:** alias shims that work in tmux, ssh and fleet panes
+- **ag:** Codex driver — exec, resume, yolo, model/effort mapping
+- **work:** list data — wire fields, create/decide wrappers, status grouping, layout pref
+- **ag:** normalised flags and Claude Code launch
+- **ag:** launcher skeleton — config reader, harness registry, list/which
+- **work:** agent steps — Claude Code adapter and the journal's step kind
+- **work:** a job's status ('task') is final over the live lift
+- **work:** migration 086 — origin, project, notes, job and proposal columns
+- **conversation:** responsive header bar with one control height and a slim context gauge
+- **pages:** data-page filter bar; Work graph usage as a generated page — declarative pages P4c
+
+### Changed
+- cargo fmt
+- **ag:** run the launcher tests on macOS bash 3.2 + Linux; docs
+- **pages:** read the host filter's options with Array.from for svelte-check
+
+### Fixed
+- **work:** sort step groups with sort_by_key (clippy::unnecessary_sort_by on rust 1.98)
+- **work:** batch-B join — start briefs never carry a parent the caller cannot see; regenerate the control API reference; raise the tool-definition budget to 68,056 (measured 67,956 on 2026-09-29 after work_link create/propose/accept and parent/notes/why, +410 bytes)
+- **work:** local items named after migration 086 are origin 'manual'
+- **ag:** config comments, CDPATH safety, shim/harness hardening; tests
+- **ag:** stricter flag parsing, resume picker, --flag=value
+- **ag:** never replace a foreign ag; doctor detects shadowing
+- **desktop:** put back the nulls the hub strips, so the Hosts view stops crashing
+- **terminal:** the selection follows its text when the screen scrolls
+- **catalog:** name the checkout when its directory cannot be made
+
+### Documentation
+- **assets:** the interactive mockups of the Assets workspace, beside the spec
+- **work:** shared work context — skill, user guide, hook matcher, command count, spec status
+- **assets:** the S1a implementation plan — identities, scan tick, remote import, unlayered guard
+- public-safe spec/plan copies; deferred follow-ups
+- add architecture diagrams (standalone, hub, mobile)
+- **work:** implementation plan for shared work context (roadmap part 1); mark the list-only plan superseded
+- **assets:** hosts accept catalogs explicitly, so a personal host can run an org's assets
+- **assets:** the Assets workspace design — inbox over layers, scopes and org catalogs, authoring and skill tests
+- **work:** shared work context — keep today's Work header, add a List | Grouped toggle; trackers are already connected on the hub
+- **work:** shared work context — map every existing Work feature into the new view; owner's mockup review
+- **work:** design for shared work context (AI task system roadmap part 1)
+- capture AI task system vision, roadmap and countermeasures
+- **work:** implementation plan for the internal task list; spec revisions after reading the code
+- **work:** design for one internal task list (own + dispatched tasks)
 ## [0.4.2] - 2026-09-29
 
 ### Added
@@ -2297,6 +2428,9 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.4.5]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.5
+[0.4.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.4
+[0.4.3]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.3
 [0.4.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.2
 [0.4.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.1
 [0.4.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.0

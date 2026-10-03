@@ -893,7 +893,7 @@ pub fn resume_session_args(
     };
     // Whose the resumed session is (multi-user M1, T5). A resume continues
     // somebody's work, so the first answer is the person the CONVERSATION
-    // belonged to: `conversation_owners` (migration 087) outlives the row the
+    // belonged to: `conversation_owners` (migration 095) outlives the row the
     // resume is replacing, which is exactly the case here — a resume exists
     // because the old row is gone. The candidate's own conversation names
     // that person in EVERY mode, not just `last`: `brief` and `fresh` resume
@@ -1480,7 +1480,7 @@ mod tests {
         let ada = s.create_person("ada", None).unwrap().id;
         let hub = s.mint_personal_owner().unwrap();
         assert_ne!(ada, hub);
-        // `c-1` was ada's: migration 087's record, written while her row was
+        // `c-1` was ada's: migration 095's record, written while her row was
         // alive, outlives the row the resume is replacing.
         s.conn_ref()
             .execute(
@@ -2455,7 +2455,7 @@ mod tests {
     fn a_resume_refusal_names_no_session_the_reader_cannot_see() {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("h").unwrap();
-        let ada = s.personal_owner_id().unwrap().expect("086 mints one");
+        let ada = s.personal_owner_id().unwrap().expect("094 mints one");
         let bob = s.create_person("bob", None).unwrap().id;
         assert!(s.sole_enabled_person().unwrap().is_none(), "two people");
         let sid = s

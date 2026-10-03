@@ -1,0 +1,20 @@
+{
+  "spec": "fleet.page/1",
+  "id": "guides",
+  "title": "Guides",
+  "intro": "Step-by-step walks through a task. An agent can propose one with the fleet-guides skill; it is listed here once a person approves it.",
+  "layout": "review_apply",
+  "review": "guides",
+  "sections": [
+    {
+      "title": "How a guide gets here",
+      "items": [
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "A Claude session proposes a guide over the control API. It shows up below for review: open it to preview, then approve or reject. Approved guides appear under this page. On a hub, fleet-hub guides lists and decides them."
+        }
+      ]
+    }
+  ]
+}

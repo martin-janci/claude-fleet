@@ -1,4 +1,4 @@
-//! People (multi-user M1, migration 086): the humans one hub knows, and
+//! People (multi-user M1, migration 094): the humans one hub knows, and
 //! which person a paired device belongs to.
 //!
 //! Before M1 a hub knew token KINDS, not people — the master, a paired
@@ -15,7 +15,7 @@
 //! a hub with no personal owner refuses session reads rather than serving
 //! them to everybody, which is loud, recoverable and safe.
 //!
-//! **Only two writers move the flag:** migration 086 and
+//! **Only two writers move the flag:** migration 094 and
 //! `Store::mint_personal_owner` (behind
 //! `mcp::settings::ensure_personal_owner`). No public function here moves
 //! it, and nothing re-homes it onto another row.
@@ -30,7 +30,7 @@ use rusqlite::OptionalExtension;
 /// itself.
 pub const MAX_PERSON_NAME_LEN: usize = 64;
 
-/// The placeholder name migration 086 gives this hub's personal owner, and
+/// The placeholder name migration 094 gives this hub's personal owner, and
 /// the one `Store::mint_personal_owner` uses when the row is missing. It
 /// is a placeholder and nothing else: nothing keys on it (see the module
 /// docs), and the operator renames it whenever they like.
@@ -70,7 +70,7 @@ pub struct PersonRow {
     pub created_at: i64,
     /// When this person was disabled ([`Store::disable_person`]), or `None`
     /// while they are live. The row is never deleted: grants and (from
-    /// migration 087) sessions point at it.
+    /// migration 095) sessions point at it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled_at: Option<i64>,
 }
@@ -147,7 +147,7 @@ impl Store {
     /// Create a person. `E_EXISTS` when a LIVE person already holds the name
     /// (a disabled one does not block reuse — see `idx_people_live_name`).
     ///
-    /// Never sets `is_personal_owner`: the flag is written by migration 086
+    /// Never sets `is_personal_owner`: the flag is written by migration 094
     /// and by `Self::mint_personal_owner`, and by nothing else. A colleague
     /// added here is a second person, never a second owner — which the
     /// partial unique index would refuse anyway.
@@ -229,7 +229,7 @@ impl Store {
     /// live person holds the new name.
     ///
     /// The personal owner is renamed through here like anyone else — the
-    /// placeholder `owner` migration 086 writes is meant to be replaced. The
+    /// placeholder `owner` migration 094 writes is meant to be replaced. The
     /// flag does not move with the name, which is the whole reason
     /// [`Self::personal_owner_id`] keys on the flag.
     pub fn rename_person(
@@ -288,7 +288,7 @@ impl Store {
     /// `UPDATE client_tokens SET revoked_at` here would have been a second,
     /// quietly weaker definition of the word.
     ///
-    /// **And every grant TO them** (migration 088), in the same transaction,
+    /// **And every grant TO them** (migration 096), in the same transaction,
     /// through `session_grants::revoke_live_grants_to_person`. A device is the
     /// door; a grant is the reach behind it, and a disabled person who keeps
     /// their shares is one re-enable — or one token minted for them by any
@@ -296,7 +296,7 @@ impl Store {
     /// belong to the session's owner, who is somebody else by definition.
     ///
     /// **Not the personal owner.** `disabled_at` is deliberately outside
-    /// `idx_people_personal_owner` (migration 086) so a disabled owner cannot
+    /// `idx_people_personal_owner` (migration 094) so a disabled owner cannot
     /// free the slot for a second one — which also means
     /// [`Store::personal_owner_id`] would keep answering with a disabled row
     /// and `Caller::is_personal_owner` would keep being true for their
@@ -310,7 +310,7 @@ impl Store {
     /// spec's Q9 answer for a departure. Disabling a person removes their
     /// reach; it never re-attributes their work, and M1 has no operation
     /// that does. The row is kept for the same reason: grants and (from
-    /// migration 087) sessions point at it, and an id nothing has is the
+    /// migration 095) sessions point at it, and an id nothing has is the
     /// fail-closed end of every one of those pointers.
     ///
     /// Idempotent: disabling an already-disabled person keeps the original
@@ -429,7 +429,7 @@ impl Store {
     /// Create this hub's personal owner if it has none, and return its id.
     ///
     /// One of the two writers of `is_personal_owner` (the other is migration
-    /// 086); `pub(crate)` rather than `pub` so it stays that way, and
+    /// 094); `pub(crate)` rather than `pub` so it stays that way, and
     /// reached through `mcp::settings::ensure_personal_owner`, which is
     /// where the entry points call it. Idempotent: with the flagged row
     /// present it writes nothing.
@@ -467,7 +467,7 @@ impl Store {
 
     /// Bind the live client named `name` to `person` (multi-user M1), or
     /// unbind it (`None`). Follows [`Store::set_client_org`]: the name is
-    /// trimmed, the auth-epoch trigger of migration 086 invalidates every
+    /// trimmed, the auth-epoch trigger of migration 094 invalidates every
     /// cached caller so the new binding holds from that client's next
     /// request on, and `E_NOTFOUND` means no live client holds the name (or
     /// the person does not exist).
@@ -475,7 +475,7 @@ impl Store {
     /// A peer hub link and an updater token are refused: neither is a
     /// person's device — one is another fleet, the other is `fleet-updater`
     /// acting for this hub — and giving either a person would make it a
-    /// reader of that person's private sessions. Migration 086's backfill
+    /// reader of that person's private sessions. Migration 094's backfill
     /// skips the same two modes, so the upgrade and this setter say the same
     /// thing.
     ///
@@ -548,7 +548,7 @@ mod tests {
         Store::open_in_memory().expect("store")
     }
 
-    /// Migration 086's insert: every hub has a personal owner from the
+    /// Migration 094's insert: every hub has a personal owner from the
     /// moment its database exists, and it is the ONLY person in it.
     #[test]
     fn a_fresh_database_has_exactly_one_person_and_it_is_the_personal_owner() {
@@ -644,7 +644,7 @@ mod tests {
 
     /// `disable_person` is compound: the stamp AND every device of theirs.
     /// A bare flag would be a no-op that merely freed the name. (The third
-    /// part — every grant TO them, migration 088 — is pinned next to the
+    /// part — every grant TO them, migration 096 — is pinned next to the
     /// grants themselves, in
     /// `store/session_grants.rs::disabling_a_person_revokes_their_tokens_and_every_grant_to_them`.)
     #[test]

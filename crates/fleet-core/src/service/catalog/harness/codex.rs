@@ -1,4 +1,4 @@
-//! Codex CLI renderer (experimental): skills and MCP servers only.
+//! Codex CLI renderer (experimental): skills, subagents (TOML, one file per agent) and MCP servers.
 //!
 //! Codex's config file is TOML (`~/.codex/config.toml`), unlike Claude's JSON
 //! files. `merge_config` bridges the two by parsing TOML into a
@@ -13,20 +13,106 @@
 
 use super::claude::frontmatter;
 use super::{
-    ConfigMerge, FileWrite, Harness, HostSnapshot, ManifestMerge, MergeMode, RenderPlan,
-    Unsupported,
+    canonical_json, dir_hash, mcp_secret_like, ConfigMerge, FileWrite, Harness, HostSnapshot,
+    InstalledAsset, ManifestMerge, MergeMode, RenderPlan, Unsupported,
 };
 use crate::ipc_error::IpcError;
-use crate::service::catalog::model::{Asset, AssetSpec, Kind};
+use crate::service::catalog::model::{sha256_hex, Asset, AssetSpec, Kind};
+use crate::service::catalog::sync::plan::ActionOp;
 use serde_json::{json, Value};
 
-pub const CODEX_SKILLS_DIR: &str = "~/.codex/skills";
+/// Where Codex reads user skills (multi-harness F3c): `~/.agents/skills`, the
+/// cross-harness skills directory — not `~/.codex/skills`, which Codex keeps
+/// for its own built-ins (`.system`).
+pub const CODEX_SKILLS_DIR: &str = "~/.agents/skills";
 pub const CODEX_CONFIG_PATH: &str = "~/.codex/config.toml";
 pub const CODEX_MANIFEST_PATH: &str = "~/.codex/.fleet-assets.json";
+pub const CODEX_AGENTS_DIR: &str = "~/.codex/agents";
+/// Where fleet rendered Codex skills before F3c. Still hashed by the scan
+/// (minus Codex's `.system`) so a manifest entry pointing here can be
+/// deleted under compare-and-swap when its skill moves to
+/// `CODEX_SKILLS_DIR`; never listed as installed, since Codex does not read
+/// it.
+pub const CODEX_LEGACY_SKILLS_DIR: &str = "~/.codex/skills";
+
+/// Render warning for an agent with `tools` (F3b): Codex subagents have no
+/// per-agent tool allowlist. Shown in Asset detail's Codex preview.
+pub const CODEX_AGENT_TOOLS_WARNING: &str = "codex subagents have no tool allowlist; `tools` is not applied (targets.codex.extra.sandbox_mode can restrict the agent)";
+
+/// `targets.codex.extra` keys the agent render already sets itself: an
+/// `extra` entry under one of these is dropped (with a warning) rather than
+/// silently overwriting the asset's identity or its dedicated
+/// `targets.codex.model`.
+const CODEX_AGENT_RESERVED_KEYS: &[&str] =
+    &["name", "description", "developer_instructions", "model"];
 
 const CONFIG_FILES: &[&str] = &[CODEX_CONFIG_PATH, CODEX_MANIFEST_PATH];
 
+/// The scan's Codex presence probe (see `scan_script`). POSIX sh with no
+/// single quote: the whole script is wrapped in `shell::quote`.
+const CODEX_PRESENT_PROBE: &str = "if command -v codex >/dev/null 2>&1 || [ -e .codex/auth.json ] || [ -d .codex/sessions ]; then echo \"##PRESENT\"; fi; ";
+
+/// The scan's symlink probe (multi-harness F3c): `~/.agents`,
+/// `~/.agents/skills` and each entry in it (where Codex skills are written,
+/// including a dot-entry), and `~/.codex/skills` and each entry in IT
+/// (review fix round 1, I1/M3) — where the migration deletes old copies, so
+/// a *per-skill* symlink there (e.g. `~/.codex/skills/s` pointed at
+/// `~/.claude/skills/s`) is just as dangerous as the whole directory: its
+/// compare-and-swap hash would pass through the link and `rm` would delete
+/// Claude's own file. `~/.codex/skills/.system` (Codex's own built-ins,
+/// never fleet's) is excluded even though it starts with a dot. Some setups
+/// point one of these at `~/.claude/skills`; fleet must never write or
+/// remove Codex skills through it (`sync::plan`). POSIX sh, no single
+/// quote; a glob that matches nothing stays literal and fails `-L`.
+///
+/// Each hit is two lines, like a `##CONFIG` block: `##LINK <path>` (via
+/// `printf`, not `echo` — no behavioural difference here, just consistent
+/// no-single-quote style), then the `readlink` target alone on the next
+/// line (`tr -d` strips any newline it printed, and the trailing `echo`
+/// guarantees exactly one line even when `readlink` fails). Never
+/// `##LINK <path> -> <target>` on one line — a directory whose own name
+/// contains `" -> "` would otherwise corrupt the parsed path
+/// (`harness::parse_scan_blocks`).
+const CODEX_LINK_PROBE: &str = "for l in .agents .agents/skills .agents/skills/* .agents/skills/.[!.]* .codex/skills .codex/skills/* .codex/skills/.[!.]*; do case \"$l\" in .codex/skills/.system) continue ;; esac; if [ -L \"$l\" ]; then printf \"%s\\n\" \"##LINK ~/$l\"; readlink \"$l\" 2>/dev/null | tr -d \"\\n\"; echo; fi; done; ";
+
+/// A `targets.codex.extra` value as TOML: nulls stripped (TOML has none);
+/// `None` when nothing representable is left.
+fn json_to_toml(v: &Value) -> Option<toml::Value> {
+    let mut v = v.clone();
+    strip_nulls(&mut v);
+    if v.is_null() {
+        return None;
+    }
+    toml::Value::try_from(&v).ok()
+}
+
 pub struct Codex;
+
+/// A top-level `~/.codex/agents/<name>.toml`, the only agent files
+/// `installed` lists.
+fn is_agent_toml(path: &str) -> bool {
+    path.strip_prefix(&format!("{CODEX_AGENTS_DIR}/"))
+        .and_then(|rest| rest.strip_suffix(".toml"))
+        .is_some_and(|stem| !stem.is_empty() && !stem.contains('/'))
+}
+
+/// `mcp_secret_like` for a Codex MCP server table, which names its HTTP
+/// headers `http_headers` rather than `headers`.
+fn codex_mcp_secret_like(v: &Value) -> bool {
+    mcp_secret_like(v)
+        || v.get("http_headers")
+            .and_then(Value::as_object)
+            .is_some_and(|h| !h.is_empty())
+}
+
+/// Whether a scanned subagent TOML (as JSON) looks like it carries a
+/// credential: any of its own `mcp_servers` does, by the MCP rule.
+fn agent_secret_like(agent: &Value) -> bool {
+    agent
+        .get("mcp_servers")
+        .and_then(Value::as_object)
+        .is_some_and(|servers| servers.values().any(codex_mcp_secret_like))
+}
 
 /// `name` is the catalog name that stays in the `SKILL.md` frontmatter;
 /// `install_name` (`Asset::install_name()`) is the identifier the skill
@@ -221,29 +307,108 @@ impl Harness for Codex {
                     value,
                 });
             }
-            AssetSpec::Agent { .. } | AssetSpec::Hook { .. } | AssetSpec::PluginRef { .. } => {
+            AssetSpec::Agent { tools, .. } => {
+                // A Codex subagent (F3b): one TOML file per agent with the
+                // required `name`, `description` and `developer_instructions`.
+                // Built as a table and serialised by the toml crate, so
+                // whatever the description or prompt holds is escaped.
+                let mut table = toml::Table::new();
+                table.insert(
+                    "name".into(),
+                    toml::Value::String(asset.header.name.clone()),
+                );
+                table.insert(
+                    "description".into(),
+                    toml::Value::String(asset.header.description.clone()),
+                );
+                table.insert(
+                    "developer_instructions".into(),
+                    toml::Value::String(asset.body.clone()),
+                );
+                // No tier → model mapping for Codex: without an explicit
+                // `targets.codex.model` the user's configured model applies.
+                if let Some(model) = &t.model {
+                    table.insert("model".into(), toml::Value::String(model.clone()));
+                }
+                if !tools.is_empty() {
+                    plan.warnings.push(CODEX_AGENT_TOOLS_WARNING.into());
+                }
+                for (k, v) in &t.extra {
+                    if CODEX_AGENT_RESERVED_KEYS.contains(&k.as_str()) {
+                        plan.warnings.push(if k == "model" {
+                            "targets.codex.extra.model ignored: use targets.codex.model".to_string()
+                        } else {
+                            format!("targets.codex.extra.{k} ignored: set by the asset")
+                        });
+                        continue;
+                    }
+                    match json_to_toml(v) {
+                        Some(tv) => {
+                            table.insert(k.clone(), tv);
+                        }
+                        None => plan.warnings.push(format!(
+                            "targets.codex.extra.{k} has no TOML form; not written"
+                        )),
+                    }
+                }
+                let text = match toml::to_string_pretty(&table) {
+                    Ok(text) => text,
+                    Err(e) => {
+                        // Never an empty file in place of the agent: with no
+                        // file the plan is a no-op whose reason is this
+                        // warning (put first, which `plan_sync` reports).
+                        tracing::warn!(
+                            asset = %asset.header.name,
+                            error = %e,
+                            "codex subagent TOML could not be serialized"
+                        );
+                        plan.warnings
+                            .insert(0, format!("codex subagent TOML could not be written: {e}"));
+                        return Ok(plan);
+                    }
+                };
+                plan.note_placeholders(&text);
+                plan.files.push(FileWrite {
+                    path: format!("{CODEX_AGENTS_DIR}/{}.toml", asset.install_name()),
+                    bytes: text.into_bytes(),
+                });
+            }
+            AssetSpec::Hook { .. } | AssetSpec::PluginRef { .. } => {
                 return Err(unsupported());
             }
         }
         Ok(plan)
     }
 
-    /// Same shape as `Claude::scan_script`: hasher detection, `##HASHES` +
-    /// file hashes under `.codex/skills`, a hash for each config file, then
-    /// one `##CONFIG <path>` block per config file (base64, one line), then
-    /// `##END`. No single quotes: the caller wraps the whole script in
-    /// `shell::quote`.
+    /// Same shape as `Claude::scan_script`: hasher detection, the presence
+    /// probe, the symlink probe (`CODEX_LINK_PROBE`, `##LINK` lines),
+    /// `##HASHES` + file hashes under `.agents/skills`,
+    /// `.codex/skills` (legacy, minus `.system`) and `.codex/agents`, a hash
+    /// for each config file, then one `##CONFIG <path>` block per config
+    /// file (base64, one line), then `##END`. No single quotes: the caller
+    /// wraps the whole script in `shell::quote`.
     fn scan_script(&self) -> Option<String> {
         let mut s = String::new();
         s.push_str("cd \"$HOME\" || exit 0; ");
         s.push_str(
             "if command -v sha256sum >/dev/null 2>&1; then H=sha256sum; else H=\"shasum -a 256\"; fi; ",
         );
+        // Multi-harness F3a: is Codex itself here? `harness_set::harness_gate`
+        // serves Codex on an auto host only when this line is printed (or
+        // fleet already manages Codex assets there). Only evidence fleet
+        // never writes counts: the CLI, its login (`auth.json`) or its
+        // session logs — not `~/.codex` itself, which a Codex sync creates.
+        s.push_str(CODEX_PRESENT_PROBE);
+        s.push_str(CODEX_LINK_PROBE);
         s.push_str("echo \"##HASHES\"; ");
         // `-exec $H {} +` (not `-print0 | xargs -0 $H`): see `Claude::scan_script`
         // for why this matters for an existing-but-empty directory.
+        // F3c: `.agents/skills` is where Codex reads skills. `.codex/skills`
+        // is where fleet put them before — hashed only so a manifest entry
+        // pointing there can be deleted under compare-and-swap; Codex's own
+        // `.codex/skills/.system` is pruned, it is never fleet's.
         s.push_str(
-            "for d in .codex/skills; do if [ -d \"$d\" ]; then find -L \"$d\" -type f -exec $H {} + 2>/dev/null; fi; done; ",
+            "for d in .agents/skills .codex/skills .codex/agents; do if [ -d \"$d\" ]; then find -L \"$d\" -path .codex/skills/.system -prune -o -type f -exec $H {} + 2>/dev/null; fi; done; ",
         );
         let config_rel: Vec<&str> = CONFIG_FILES
             .iter()
@@ -259,13 +424,18 @@ impl Harness for Codex {
                 "echo \"##CONFIG {f}\"; if [ -f \"{rel}\" ]; then base64 < \"{rel}\" | tr -d \"\\n\"; fi; echo; "
             ));
         }
+        // Each subagent's TOML too, so `installed_detail` can tell whether an
+        // unmanaged one carries a credential (its `mcp_servers`).
+        s.push_str(
+            "for f in .codex/agents/*.toml; do if [ -f \"$f\" ]; then echo \"##CONFIG ~/$f\"; base64 < \"$f\" | tr -d \"\\n\"; echo; fi; done; ",
+        );
         s.push_str("echo \"##END\"");
         Some(s)
     }
 
     fn parse_scan(&self, stdout: &str) -> Result<HostSnapshot, IpcError> {
         super::parse_scan_blocks(stdout, &|path, bytes| {
-            if path == CODEX_CONFIG_PATH {
+            if path == CODEX_CONFIG_PATH || is_agent_toml(path) {
                 let text = std::str::from_utf8(bytes).ok()?;
                 let toml_value: toml::Value = toml::from_str(text).ok()?;
                 serde_json::to_value(toml_value).ok()
@@ -283,9 +453,19 @@ impl Harness for Codex {
             }
         };
         for path in snap.files.keys() {
+            // F3c: only `CODEX_SKILLS_DIR`. A skill left in
+            // `CODEX_LEGACY_SKILLS_DIR` is invisible to Codex, so it is not
+            // Codex inventory (fleet's own copies there migrate on sync).
             if let Some(rest) = path.strip_prefix(&format!("{CODEX_SKILLS_DIR}/")) {
                 if let Some((name, _)) = rest.split_once('/') {
                     push(Kind::Skill, name.to_string());
+                }
+            }
+            if let Some(rest) = path.strip_prefix(&format!("{CODEX_AGENTS_DIR}/")) {
+                if let Some(stem) = rest.strip_suffix(".toml") {
+                    if !stem.contains('/') {
+                        push(Kind::Agent, stem.to_string());
+                    }
                 }
             }
         }
@@ -302,8 +482,75 @@ impl Harness for Codex {
         out
     }
 
+    fn installed_detail(&self, snap: &HostSnapshot) -> Vec<InstalledAsset> {
+        self.installed(snap)
+            .into_iter()
+            .map(|(kind, name)| {
+                let (hash, secret_like) = match kind {
+                    Kind::Skill => (
+                        dir_hash(snap, &format!("{CODEX_SKILLS_DIR}/{name}/")),
+                        false,
+                    ),
+                    Kind::McpServer => {
+                        let v = snap
+                            .configs
+                            .get(CODEX_CONFIG_PATH)
+                            .and_then(|c| c.get("mcp_servers"))
+                            .and_then(|m| m.get(&name));
+                        (
+                            v.map(|v| sha256_hex(canonical_json(v).as_bytes())),
+                            v.is_some_and(codex_mcp_secret_like),
+                        )
+                    }
+                    Kind::Agent => {
+                        let path = format!("{CODEX_AGENTS_DIR}/{name}.toml");
+                        (
+                            snap.files.get(&path).cloned(),
+                            snap.configs.get(&path).is_some_and(agent_secret_like),
+                        )
+                    }
+                    _ => (None, false),
+                };
+                InstalledAsset {
+                    kind,
+                    name,
+                    hash,
+                    secret_like,
+                    fleet_owned: false,
+                }
+            })
+            .collect()
+    }
+
     fn manifest_path(&self) -> &'static str {
         CODEX_MANIFEST_PATH
+    }
+
+    /// F3c, extended in review fix round 1 (I1/M5). A linked legacy
+    /// `~/.codex/skills` — the whole directory, or any one entry under it
+    /// (`~/.codex/skills/<name>`, the per-skill case the link probe now
+    /// also reports) — only blocks removing old copies, and turning Codex
+    /// off would not avoid that (a retiring host still runs those
+    /// removals), so both get the same "old copies" wording: a per-entry
+    /// link is itself an old copy, same as the whole directory. Elsewhere
+    /// (today, only the *current* `~/.agents/skills`), a `Remove` (an
+    /// orphaned manifest entry) reads differently from every other blocked
+    /// op, since nothing is being written there either.
+    fn symlink_reason(&self, link: &str, target: &str, op: ActionOp) -> String {
+        // Case-insensitive (M3's reasoning applies here too, review fix
+        // round 2): `linked_dir` already matches `link` against a path
+        // case-insensitively, so a host whose `readlink` reports
+        // `~/.Codex/Skills/s` must still read as the legacy directory.
+        let link_lower = link.to_ascii_lowercase();
+        if link_lower == CODEX_LEGACY_SKILLS_DIR
+            || link_lower.starts_with(&format!("{CODEX_LEGACY_SKILLS_DIR}/"))
+        {
+            format!("{link} is a symlink (to {target}); fleet won't remove old Codex skill copies through it — replace it with a real directory")
+        } else if op == ActionOp::Remove {
+            format!("{link} is a symlink (to {target}); fleet won't remove Codex skills through it — replace it with a real directory")
+        } else {
+            format!("{link} is a symlink (to {target}); fleet won't write Codex skills through it — replace it with a real directory or turn Codex off for this host")
+        }
     }
 
     /// Parses `existing` as TOML (an empty string is an empty document; a
@@ -383,7 +630,7 @@ mod tests {
     use crate::service::catalog::model::Asset;
 
     #[test]
-    fn skill_renders_to_codex_skills_dir() {
+    fn skill_renders_to_agents_skills_dir() {
         let mut a = Asset::from_yaml(
             None,
             "kind: skill\nname: worktree\ndescription: Make one.\nallowed_tools: [bash]\n",
@@ -392,7 +639,7 @@ mod tests {
         a.body = "body\n".into();
         let plan = Codex.render(&a).unwrap();
         assert_eq!(plan.files.len(), 1);
-        assert_eq!(plan.files[0].path, "~/.codex/skills/worktree/SKILL.md");
+        assert_eq!(plan.files[0].path, "~/.agents/skills/worktree/SKILL.md");
         assert_eq!(
             String::from_utf8(plan.files[0].bytes.clone()).unwrap(),
             "---\nname: worktree\ndescription: Make one.\n---\nbody\n"
@@ -408,7 +655,7 @@ mod tests {
         .unwrap();
         a.body = "b\n".into();
         let plan = Codex.render(&a).unwrap();
-        assert_eq!(plan.files[0].path, "~/.codex/skills/foo_bar/SKILL.md");
+        assert_eq!(plan.files[0].path, "~/.agents/skills/foo_bar/SKILL.md");
         let text = String::from_utf8(plan.files[0].bytes.clone()).unwrap();
         let yaml = text.split("---\n").nth(1).expect("frontmatter block");
         let map: serde_yaml::Mapping = serde_yaml::from_str(yaml).expect("valid yaml");
@@ -495,13 +742,17 @@ mod tests {
     }
 
     #[test]
-    fn hooks_and_plugins_are_unsupported_agents_unless_render_as_skill() {
+    fn hooks_and_plugins_are_unsupported_and_render_as_skill_still_wins() {
         let hook = Asset::from_yaml(None, "kind: hook\nname: h\ndescription: d\nevent: stop\naction: { type: command, command: x }\n").unwrap();
         assert!(Codex.render(&hook).is_err());
         let plugin = Asset::from_yaml(None, "kind: plugin_ref\nname: p\ndescription: d\nharness: claude\nmarketplace: { name: m, source: github, repo: o/r }\nplugin: p\nversion: latest\n").unwrap();
         assert!(Codex.render(&plugin).is_err());
         let agent = Asset::from_yaml(None, "kind: agent\nname: pm\ndescription: d\n").unwrap();
-        assert!(Codex.render(&agent).is_err());
+        assert_eq!(
+            Codex.render(&agent).unwrap().files[0].path,
+            "~/.codex/agents/pm.toml",
+            "since F3b a plain agent is a Codex subagent"
+        );
         let mut as_skill = Asset::from_yaml(
             None,
             "kind: agent\nname: pm\ndescription: d\ntargets:\n  codex:\n    render_as: skill\n",
@@ -509,10 +760,231 @@ mod tests {
         .unwrap();
         as_skill.body = "prompt\n".into();
         let plan = Codex.render(&as_skill).unwrap();
-        assert_eq!(plan.files[0].path, "~/.codex/skills/pm/SKILL.md");
+        assert_eq!(plan.files[0].path, "~/.agents/skills/pm/SKILL.md");
         assert_eq!(
             plan.warnings,
             vec!["agent rendered as a codex skill (targets.codex.render_as)"]
+        );
+    }
+
+    fn toml_of(plan: &RenderPlan) -> toml::Table {
+        toml::from_str(std::str::from_utf8(&plan.files[0].bytes).unwrap()).expect("valid TOML")
+    }
+
+    #[test]
+    fn agent_renders_a_codex_subagent_toml() {
+        let mut a = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: Plans the work.\n",
+        )
+        .unwrap();
+        a.body = "You plan.\nStep by step.\n".into();
+        let plan = Codex.render(&a).unwrap();
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].path, "~/.codex/agents/pm.toml");
+        let mut want = toml::Table::new();
+        want.insert("name".into(), "pm".into());
+        want.insert("description".into(), "Plans the work.".into());
+        want.insert(
+            "developer_instructions".into(),
+            "You plan.\nStep by step.\n".into(),
+        );
+        assert_eq!(toml_of(&plan), want, "no model unless targets.codex.model");
+        assert!(plan.warnings.is_empty());
+        assert!(plan.merges.is_empty());
+    }
+
+    /// `targets.codex.extra` cannot override the identity fields the render
+    /// itself sets (`name`, `description`, `developer_instructions`) or
+    /// `model` (which has its own dedicated `targets.codex.model`) — each
+    /// attempt is skipped with a warning naming the key, other keys still
+    /// merge.
+    #[test]
+    fn agent_extra_cannot_override_identity_or_model() {
+        let mut a = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: d\ntargets:\n  codex:\n    extra:\n      name: other\n      description: other\n      developer_instructions: other\n      model: x\n      sandbox_mode: read-only\n",
+        )
+        .unwrap();
+        a.body = "b\n".into();
+        let plan = Codex.render(&a).unwrap();
+        let v = toml_of(&plan);
+        assert_eq!(v["name"].as_str(), Some("pm"), "the catalog name wins");
+        assert_eq!(v["description"].as_str(), Some("d"));
+        assert_eq!(v["developer_instructions"].as_str(), Some("b\n"));
+        assert!(
+            v.get("model").is_none(),
+            "no model unless targets.codex.model, {v:?}"
+        );
+        assert_eq!(v["sandbox_mode"].as_str(), Some("read-only"));
+        let mut warnings = plan.warnings.clone();
+        warnings.sort();
+        assert_eq!(
+            warnings,
+            vec![
+                "targets.codex.extra.description ignored: set by the asset".to_string(),
+                "targets.codex.extra.developer_instructions ignored: set by the asset".to_string(),
+                "targets.codex.extra.model ignored: use targets.codex.model".to_string(),
+                "targets.codex.extra.name ignored: set by the asset".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_model_and_extra_come_from_targets_codex_only() {
+        let mut a = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: d\ntools: [read, bash]\nmodel: strong\ntargets:\n  codex:\n    model: gpt-5.4\n    extra:\n      model_reasoning_effort: high\n      sandbox_mode: read-only\n      dropped: null\n",
+        )
+        .unwrap();
+        a.body = "b\n".into();
+        let plan = Codex.render(&a).unwrap();
+        let v = toml_of(&plan);
+        assert_eq!(
+            v["model"].as_str(),
+            Some("gpt-5.4"),
+            "the tier is never mapped for codex"
+        );
+        assert_eq!(v["model_reasoning_effort"].as_str(), Some("high"));
+        assert_eq!(v["sandbox_mode"].as_str(), Some("read-only"));
+        assert!(v.get("dropped").is_none());
+        assert!(v.get("tools").is_none());
+        assert_eq!(
+            plan.warnings,
+            vec![
+                CODEX_AGENT_TOOLS_WARNING.to_string(),
+                "targets.codex.extra.dropped has no TOML form; not written".to_string(),
+            ]
+        );
+    }
+
+    /// The TOML comes from the toml crate, so nothing in a description or
+    /// prompt can close a string and inject a key.
+    #[test]
+    fn agent_toml_escapes_whatever_the_text_holds() {
+        let mut a = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: 'Says \"hi\" = [x]'\n",
+        )
+        .unwrap();
+        a.body = "'''\n\"\"\"\nname = \"evil\"\n".into();
+        let v = toml_of(&Codex.render(&a).unwrap());
+        assert_eq!(v["name"].as_str(), Some("pm"));
+        assert_eq!(v["description"].as_str(), Some("Says \"hi\" = [x]"));
+        assert_eq!(
+            v["developer_instructions"].as_str(),
+            Some("'''\n\"\"\"\nname = \"evil\"\n")
+        );
+    }
+
+    #[test]
+    fn agent_renders_under_install_as_keeping_the_catalog_name() {
+        let mut a = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: d\ninstall_as: pm_agent\n",
+        )
+        .unwrap();
+        a.body = "b\n".into();
+        let plan = Codex.render(&a).unwrap();
+        assert_eq!(plan.files[0].path, "~/.codex/agents/pm_agent.toml");
+        assert_eq!(toml_of(&plan)["name"].as_str(), Some("pm"));
+    }
+
+    #[test]
+    fn a_codex_disabled_agent_renders_nothing() {
+        let a = Asset::from_yaml(
+            None,
+            "kind: agent\nname: pm\ndescription: d\ntargets:\n  codex:\n    enabled: false\n",
+        )
+        .unwrap();
+        let plan = Codex.render(&a).unwrap();
+        assert!(plan.files.is_empty());
+        assert_eq!(
+            plan.warnings,
+            vec!["disabled for codex by targets.codex.enabled"]
+        );
+    }
+
+    #[test]
+    fn installed_lists_agents_and_detail_hashes_their_toml() {
+        let mut s = HostSnapshot::default();
+        s.files
+            .insert(format!("{CODEX_AGENTS_DIR}/pm.toml"), "ab".into());
+        s.files
+            .insert(format!("{CODEX_AGENTS_DIR}/notes.md"), "cd".into());
+        s.files
+            .insert(format!("{CODEX_AGENTS_DIR}/nested/x.toml"), "ef".into());
+        assert_eq!(Codex.installed(&s), vec![(Kind::Agent, "pm".to_string())]);
+        let d = Codex.installed_detail(&s);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].hash.as_deref(), Some("ab"));
+        assert!(!d[0].secret_like && !d[0].fleet_owned);
+    }
+
+    /// An unmanaged subagent whose own `mcp_servers` carry `env` or
+    /// `http_headers` reads as `secret_like`, by the same rule as a Codex MCP
+    /// server in `config.toml`; one without reads clean.
+    #[test]
+    fn installed_detail_flags_a_subagent_with_secret_like_mcp_servers() {
+        let mut s = HostSnapshot::default();
+        for name in ["plain", "env", "headers"] {
+            s.files
+                .insert(format!("{CODEX_AGENTS_DIR}/{name}.toml"), "ab".into());
+        }
+        s.configs.insert(
+            format!("{CODEX_AGENTS_DIR}/plain.toml"),
+            json!({"name": "plain", "mcp_servers": {"fs": {"command": "npx"}}}),
+        );
+        s.configs.insert(
+            format!("{CODEX_AGENTS_DIR}/env.toml"),
+            json!({"name": "env", "mcp_servers": {"jira": {"command": "npx", "env": {"T": "x"}}}}),
+        );
+        s.configs.insert(
+            format!("{CODEX_AGENTS_DIR}/headers.toml"),
+            json!({"name": "headers", "mcp_servers": {"api": {"url": "https://x", "http_headers": {"Authorization": "Bearer x"}}}}),
+        );
+        let d = Codex.installed_detail(&s);
+        let flag = |n: &str| d.iter().find(|a| a.name == n).unwrap().secret_like;
+        assert!(!flag("plain"));
+        assert!(flag("env"));
+        assert!(flag("headers"));
+    }
+
+    /// The real scan hashes `~/.codex/agents`, and `installed` reads the
+    /// agent back from it.
+    #[cfg(unix)]
+    #[test]
+    fn scan_script_hashes_codex_agents_under_bash() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let agents = tmp.path().join(".codex/agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("pm.toml"), b"name = \"pm\"\n").unwrap();
+        let out = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(Codex.scan_script().unwrap())
+            .env("HOME", tmp.path())
+            .output()
+            .expect("run scan script");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let snap = Codex
+            .parse_scan(&String::from_utf8(out.stdout).unwrap())
+            .unwrap();
+        assert!(
+            snap.files.contains_key("~/.codex/agents/pm.toml"),
+            "{:?}",
+            snap.files
+        );
+        assert_eq!(
+            Codex.installed(&snap),
+            vec![(Kind::Agent, "pm".to_string())]
+        );
+        assert_eq!(
+            snap.configs["~/.codex/agents/pm.toml"]["name"], "pm",
+            "the agent's TOML is read back for the secret-like check"
         );
     }
 
@@ -525,7 +997,7 @@ mod tests {
         .unwrap();
         as_skill.body = "prompt\n".into();
         let plan = Codex.render(&as_skill).unwrap();
-        assert_eq!(plan.files[0].path, "~/.codex/skills/foo_bar/SKILL.md");
+        assert_eq!(plan.files[0].path, "~/.agents/skills/foo_bar/SKILL.md");
         let text = String::from_utf8(plan.files[0].bytes.clone()).unwrap();
         let yaml = text.split("---\n").nth(1).expect("frontmatter block");
         let map: serde_yaml::Mapping = serde_yaml::from_str(yaml).expect("valid yaml");
@@ -551,6 +1023,80 @@ mod tests {
         assert_eq!(Codex.manifest_path(), CODEX_MANIFEST_PATH);
     }
 
+    /// F3a: the scan probes for Codex itself — the CLI on PATH, its login
+    /// (`~/.codex/auth.json`) or its session logs (`~/.codex/sessions`),
+    /// evidence a fleet sync never writes — before `##HASHES`, without any
+    /// single quote (the caller wraps the whole script in `shell::quote`).
+    #[test]
+    fn scan_script_probes_for_codex() {
+        let s = Codex.scan_script().unwrap();
+        assert!(
+            s.contains("if command -v codex >/dev/null 2>&1 || [ -e .codex/auth.json ] || [ -d .codex/sessions ]; then echo \"##PRESENT\"; fi; "),
+            "{s}"
+        );
+        assert!(
+            s.find("##PRESENT").unwrap() < s.find("##HASHES").unwrap(),
+            "{s}"
+        );
+        assert!(!s.contains("[ -d .codex ]"), "{s}");
+        assert!(!s.contains('\''));
+    }
+
+    /// Runs the scan under plain `sh` (no login profile) against a temp
+    /// `$HOME`, with `PATH` limited to the system directories so the codex
+    /// CLI of the machine running the test cannot answer for it.
+    #[cfg(unix)]
+    fn present_with(setup: impl FnOnce(&std::path::Path)) -> bool {
+        let tmp = tempfile::TempDir::new().unwrap();
+        setup(tmp.path());
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(Codex.scan_script().unwrap())
+            .env("HOME", tmp.path())
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("run scan script");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Codex
+            .parse_scan(&String::from_utf8(out.stdout).unwrap())
+            .unwrap()
+            .present
+    }
+
+    /// Codex's own login or session logs read as present; a `~/.codex` that
+    /// holds only what a fleet sync writes (skills, agents, `config.toml`,
+    /// the manifest) does not — that is fleet's own trace, not Codex.
+    #[cfg(unix)]
+    #[test]
+    fn only_codex_own_state_reads_as_present() {
+        if ["/usr/bin/codex", "/bin/codex"]
+            .iter()
+            .any(|p| std::path::Path::new(p).exists())
+        {
+            return; // the CLI itself answers on this machine
+        }
+        assert!(present_with(|h| {
+            std::fs::create_dir_all(h.join(".codex/sessions")).unwrap();
+        }));
+        assert!(present_with(|h| {
+            std::fs::create_dir_all(h.join(".codex")).unwrap();
+            std::fs::write(h.join(".codex/auth.json"), b"{}").unwrap();
+        }));
+        assert!(!present_with(|h| {
+            std::fs::create_dir_all(h.join(".codex/skills/s")).unwrap();
+            std::fs::create_dir_all(h.join(".codex/agents")).unwrap();
+            std::fs::write(h.join(".codex/skills/s/SKILL.md"), b"x").unwrap();
+            std::fs::write(h.join(".codex/agents/pm.toml"), b"name = \"pm\"\n").unwrap();
+            std::fs::write(h.join(".codex/config.toml"), b"").unwrap();
+            std::fs::write(h.join(".codex/.fleet-assets.json"), b"{}").unwrap();
+        }));
+        assert!(!present_with(|_| {}));
+    }
+
     /// Builds `##HASHES`/`##CONFIG` scan output with a real base64-encoded
     /// TOML `config.toml` block, the shape a live scan would produce.
     fn scan_fixture() -> String {
@@ -558,7 +1104,7 @@ mod tests {
         let toml_text = "[mcp_servers.fleet]\nurl = \"http://127.0.0.1:4180/mcp\"\n";
         let b64 = base64::engine::general_purpose::STANDARD.encode(toml_text);
         format!(
-            "##HASHES\naaaa  .codex/skills/worktree/SKILL.md\n##CONFIG ~/.codex/config.toml\n{b64}\n##CONFIG ~/.codex/.fleet-assets.json\n##END\n"
+            "##HASHES\naaaa  .agents/skills/worktree/SKILL.md\n##CONFIG ~/.codex/config.toml\n{b64}\n##CONFIG ~/.codex/.fleet-assets.json\n##END\n"
         )
     }
 
@@ -744,6 +1290,208 @@ mod tests {
         assert_eq!(
             snap.configs[CODEX_CONFIG_PATH]["mcp_servers"]["fleet"]["url"],
             "http://127.0.0.1:4180/mcp"
+        );
+    }
+
+    #[test]
+    fn codex_installed_detail_hashes_skills_and_flags_env() {
+        let mut s = HostSnapshot::default();
+        s.files
+            .insert(format!("{CODEX_SKILLS_DIR}/worktree/SKILL.md"), "aa".into());
+        s.configs.insert(
+            CODEX_CONFIG_PATH.into(),
+            serde_json::json!({"mcp_servers": {"jira": {"command": "npx", "env": {"T": "x"}}}}),
+        );
+        let d = Codex.installed_detail(&s);
+        let skill = d.iter().find(|a| a.kind == Kind::Skill).unwrap();
+        assert_eq!(
+            skill.hash.as_deref(),
+            Some(sha256_hex(b"SKILL.md=aa").as_str())
+        );
+        assert!(
+            d.iter()
+                .find(|a| a.kind == Kind::McpServer)
+                .unwrap()
+                .secret_like
+        );
+    }
+
+    /// Runs the real scan under plain `sh` against `home`.
+    #[cfg(unix)]
+    fn scan_home(home: &std::path::Path) -> HostSnapshot {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(Codex.scan_script().unwrap())
+            .env("HOME", home)
+            .output()
+            .expect("run scan script");
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Codex
+            .parse_scan(&String::from_utf8(out.stdout).unwrap())
+            .unwrap()
+    }
+
+    /// F3c: skills are listed only from `~/.agents/skills`, where Codex reads
+    /// them. A copy left in `~/.codex/skills` is invisible to Codex, and
+    /// Codex's own `.system` is never a skill of the user's.
+    #[test]
+    fn codex_skills_are_listed_only_from_agents_skills() {
+        let mut s = HostSnapshot::default();
+        s.files
+            .insert("~/.agents/skills/new/SKILL.md".into(), "aa".into());
+        s.files
+            .insert("~/.codex/skills/old/SKILL.md".into(), "bb".into());
+        s.files.insert(
+            "~/.codex/skills/.system/builtin/SKILL.md".into(),
+            "cc".into(),
+        );
+        assert_eq!(Codex.installed(&s), vec![(Kind::Skill, "new".to_string())]);
+        let d = Codex.installed_detail(&s);
+        assert_eq!(d.len(), 1);
+        assert_eq!(
+            d[0].hash.as_deref(),
+            Some(sha256_hex(b"SKILL.md=aa").as_str())
+        );
+    }
+
+    /// F3c: the real scan hashes `~/.agents/skills` and still the legacy
+    /// `~/.codex/skills` — a pre-F3c manifest entry there needs its hash for
+    /// the compare-and-swap that deletes the old copy — but never Codex's
+    /// `.system` built-ins.
+    #[cfg(unix)]
+    #[test]
+    fn scan_hashes_agents_skills_and_the_legacy_dir_but_never_codex_system() {
+        let home = tempfile::TempDir::new().unwrap();
+        let h = home.path();
+        for (rel, body) in [
+            (".agents/skills/new/SKILL.md", "n"),
+            (".codex/skills/old/SKILL.md", "o"),
+            (".codex/skills/.system/builtin/SKILL.md", "b"),
+        ] {
+            let p = h.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+        }
+        let snap = scan_home(h);
+        assert!(
+            snap.files.contains_key("~/.agents/skills/new/SKILL.md"),
+            "{:?}",
+            snap.files
+        );
+        assert!(
+            snap.files.contains_key("~/.codex/skills/old/SKILL.md"),
+            "the legacy copy keeps a hash for its removal: {:?}",
+            snap.files
+        );
+        assert!(
+            !snap.files.keys().any(|p| p.contains(".system")),
+            "{:?}",
+            snap.files
+        );
+        assert_eq!(
+            Codex.installed(&snap),
+            vec![(Kind::Skill, "new".to_string())]
+        );
+    }
+
+    /// F3c: the scan reports a symlinked `~/.agents/skills` with its target
+    /// (as `readlink` prints it) and still hashes what it points at — that
+    /// is what Codex sees. A real directory reports no link.
+    #[cfg(unix)]
+    #[test]
+    fn scan_reports_a_symlinked_agents_skills_dir() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::TempDir::new().unwrap();
+        let h = home.path();
+        std::fs::create_dir_all(h.join(".claude/skills/s")).unwrap();
+        std::fs::write(h.join(".claude/skills/s/SKILL.md"), b"claude").unwrap();
+        std::fs::create_dir_all(h.join(".agents")).unwrap();
+        symlink(h.join(".claude/skills"), h.join(".agents/skills")).unwrap();
+        let snap = scan_home(h);
+        assert_eq!(
+            snap.links,
+            std::collections::BTreeMap::from([(
+                "~/.agents/skills".to_string(),
+                h.join(".claude/skills").to_string_lossy().to_string()
+            )])
+        );
+        assert!(
+            snap.files.contains_key("~/.agents/skills/s/SKILL.md"),
+            "{:?}",
+            snap.files
+        );
+
+        let plain = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(plain.path().join(".agents/skills/s")).unwrap();
+        assert!(scan_home(plain.path()).links.is_empty());
+    }
+
+    /// A whole linked `~/.agents`, one linked skill inside a real
+    /// `~/.agents/skills`, and a linked legacy `~/.codex/skills` are each
+    /// reported.
+    #[cfg(unix)]
+    #[test]
+    fn scan_reports_a_linked_agents_dir_a_linked_skill_and_a_linked_legacy_dir() {
+        use std::os::unix::fs::symlink;
+        let whole = tempfile::TempDir::new().unwrap();
+        let w = whole.path();
+        std::fs::create_dir_all(w.join("dotfiles/agents/skills")).unwrap();
+        symlink(w.join("dotfiles/agents"), w.join(".agents")).unwrap();
+        let keys: Vec<String> = scan_home(w).links.into_keys().collect();
+        assert_eq!(keys, vec!["~/.agents"]);
+
+        let mixed = tempfile::TempDir::new().unwrap();
+        let m = mixed.path();
+        std::fs::create_dir_all(m.join(".claude/skills/x")).unwrap();
+        std::fs::create_dir_all(m.join(".agents/skills")).unwrap();
+        std::fs::create_dir_all(m.join(".codex")).unwrap();
+        symlink(m.join(".claude/skills/x"), m.join(".agents/skills/x")).unwrap();
+        symlink(m.join(".claude/skills"), m.join(".codex/skills")).unwrap();
+        let keys: Vec<String> = scan_home(m).links.into_keys().collect();
+        assert_eq!(keys, vec!["~/.agents/skills/x", "~/.codex/skills"]);
+    }
+
+    /// I1/M3 (F3c review fix round 1): a *per-entry* symlink under the
+    /// legacy `~/.codex/skills/<name>` is reported, same as the whole
+    /// directory — the migration's removal would otherwise `rm` straight
+    /// through it. A dot-entry under `~/.agents/skills` is reported too,
+    /// but Codex's own `~/.codex/skills/.system` never is, even though it
+    /// also starts with a dot.
+    #[cfg(unix)]
+    #[test]
+    fn scan_reports_a_per_entry_legacy_symlink_and_a_dot_entry_but_never_dot_system() {
+        use std::os::unix::fs::symlink;
+        let home = tempfile::TempDir::new().unwrap();
+        let h = home.path();
+        std::fs::create_dir_all(h.join(".claude/skills/s")).unwrap();
+        std::fs::create_dir_all(h.join(".codex/skills/.system/builtin")).unwrap();
+        std::fs::create_dir_all(h.join(".agents/skills")).unwrap();
+        symlink(h.join(".claude/skills/s"), h.join(".codex/skills/s")).unwrap();
+        symlink(h.join(".claude/skills/s"), h.join(".agents/skills/.hidden")).unwrap();
+        let snap = scan_home(h);
+        assert_eq!(
+            snap.links.into_keys().collect::<Vec<_>>(),
+            vec!["~/.agents/skills/.hidden", "~/.codex/skills/s"],
+            "no entry for .codex/skills/.system"
+        );
+    }
+
+    /// F3c (plan 5/6 review fix): `symlink_reason` compares the legacy-dir
+    /// check case-insensitively too, matching `linked_dir`'s own ASCII
+    /// case-folding (M3) — a host whose `readlink`/scan reports
+    /// `~/.Codex/Skills/s` (a case-insensitive filesystem) still gets the
+    /// legacy "remove old copies" wording, not the generic "write ... or
+    /// turn Codex off" one.
+    #[test]
+    fn symlink_reason_matches_the_legacy_dir_case_insensitively() {
+        let reason = Codex.symlink_reason("~/.Codex/Skills/s", "/x", ActionOp::Create);
+        assert_eq!(
+            reason,
+            "~/.Codex/Skills/s is a symlink (to /x); fleet won't remove old Codex skill copies through it — replace it with a real directory"
         );
     }
 }

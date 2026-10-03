@@ -3,7 +3,7 @@
 use super::harness::claude::{hook_asset_name, unmap_event, unmap_tier, unmap_tool};
 use super::model::{
     is_valid_install_name, is_valid_name, Asset, AssetSpec, Header, HookAction, HookMatch, Kind,
-    Marketplace, Problem, Resource, Source, TargetOverride,
+    Marketplace, Problem, Resource, Scope, Source, TargetOverride,
 };
 use super::repo::{asset_path, write_asset};
 use super::E_ASSET_EXISTS;
@@ -13,7 +13,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ImportReport {
     pub created: Vec<(String, String)>,
     pub problems: Vec<Problem>,
@@ -132,6 +132,48 @@ fn slug_or_problem(
     }
 }
 
+/// Security fix round 1, IMPORTANT 4: whether `name` (a pre-slug identifier,
+/// or an already-valid catalog name — `slugify` is idempotent on one) should
+/// be processed at all under `only`. Called BEFORE a kind importer generates
+/// any problem, warning or flagged secret for it, so `only = ["skill:foo"]`
+/// produces a report about `foo` alone — not one that also lists an
+/// unrelated hook's "only the first of N was imported" note, an unrelated
+/// MCP server's flagged literal secret, or an unrelated plugin's missing
+/// version. `only` empty means "keep everything", same as the final
+/// assembly loop's own check.
+fn only_wants(only: &[String], kind: Kind, name: &str) -> bool {
+    only.is_empty()
+        || only
+            .iter()
+            .any(|o| *o == format!("{}:{}", kind.as_str(), slugify(name)))
+}
+
+/// Security fix round 1, IMPORTANT 4 follow-up (S1a review, finding 3):
+/// `only` arrives over the wire as `<kind>:<host identifier>` — e.g. the
+/// per-row Import button sends the raw name as scanned on the host
+/// (`Foo_Bar`, `plugin_superpowers-chrome_chrome`, any uppercase MCP server
+/// key). `only_wants` (above) and the final assembly loop both compare
+/// against the *slugified* catalog name, so a non-kebab `only` entry never
+/// matches anything and silently imports zero assets. Normalizing every
+/// entry to `kind:slugify(name)` exactly once, here, at the single entry
+/// point (`import_claude_only`), keeps every downstream comparison
+/// (`only_wants` for skills/agents/hooks/MCP servers/plugin refs, and the
+/// final loop matching `a.header.name`) working against the same slug form
+/// regardless of what the caller's list looked like. Hooks are unaffected:
+/// `hook_asset_name` already returns a valid catalog name, and `slugify` is
+/// idempotent on one (see its doc comment), so `kind:hook-name` entries
+/// round-trip unchanged. An entry with no `:` isn't a recognised `<kind>:
+/// <name>` pair — pass it through as-is so it deliberately matches nothing
+/// (silent no-op) rather than panicking or guessing at a split.
+fn normalize_only(only: &[String]) -> Vec<String> {
+    only.iter()
+        .map(|o| match o.split_once(':') {
+            Some((kind, name)) => format!("{kind}:{}", slugify(name)),
+            None => o.clone(),
+        })
+        .collect()
+}
+
 /// Whether `original` should become the asset's `install_as`: `Some(original)`
 /// when the catalog slug diverges from the host identifier and that
 /// identifier is itself a valid install name; `None` when they match
@@ -225,6 +267,7 @@ fn header(
         // it. Hooks and plugin refs never call `apply_install_as`, so it
         // stays `None` for them.
         install_as: None,
+        scope: Scope::Private,
         targets: BTreeMap::new(),
     }
 }
@@ -410,6 +453,7 @@ fn import_hooks(
     taken: &mut Vec<String>,
     flagged: &mut Vec<String>,
     problems: &mut Vec<Problem>,
+    only: &[String],
 ) -> Vec<Asset> {
     let mut out = Vec::new();
     let Some(hooks) = settings.get("hooks").and_then(Value::as_object) else {
@@ -448,6 +492,15 @@ fn import_hooks(
                 n += 1;
             }
             taken.push(name.clone());
+
+            // The name is reserved above regardless — so a later, WANTED
+            // entry that would collide with this skipped one's base name
+            // still gets the same numbered suffix a full import would have
+            // given it — but nothing else about a filtered-out entry is
+            // computed or reported.
+            if !only_wants(only, Kind::Hook, &name) {
+                continue;
+            }
 
             if count > 1 {
                 problems.push(Problem {
@@ -544,12 +597,16 @@ fn import_mcp(
     slugs: &mut SlugMap,
     problems: &mut Vec<Problem>,
     warnings: &mut Vec<Problem>,
+    only: &[String],
 ) -> Vec<Asset> {
     let mut out = Vec::new();
     let Some(servers) = claude_json.get("mcpServers").and_then(Value::as_object) else {
         return out;
     };
     for (name, s) in servers {
+        if !only_wants(only, Kind::McpServer, name) {
+            continue;
+        }
         let Some(slug) = slug_or_problem(slugs, Kind::McpServer, name, path, problems) else {
             continue;
         };
@@ -634,6 +691,7 @@ fn import_mcp(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn import_plugins(
     installed: &Value,
     known: &Value,
@@ -641,6 +699,7 @@ fn import_plugins(
     path: &Path,
     problems: &mut Vec<Problem>,
     slugs: &mut SlugMap,
+    only: &[String],
 ) -> Vec<Asset> {
     let mut out = Vec::new();
     let Some(plugins) = installed.get("plugins").and_then(Value::as_object) else {
@@ -650,6 +709,9 @@ fn import_plugins(
         let Some((plugin, market)) = key.split_once('@') else {
             continue;
         };
+        if !only_wants(only, Kind::PluginRef, plugin) {
+            continue;
+        }
         // Scan every record (not just the first) for an installed version;
         // a plugin with none recorded is reported, not defaulted to latest.
         let version = records
@@ -713,8 +775,208 @@ fn read_json(p: &Path) -> Value {
         .unwrap_or(Value::Null)
 }
 
-/// Convert a Claude config directory into catalog assets. Never overwrites;
-/// collisions become problems. `dry_run` writes nothing.
+/// Printed on the host by `import_host` for a remote alias: every file the
+/// importer reads, framed as `##FILE <home-relative path>` + one base64 line.
+/// No single quotes: the whole script is one `shell::quote`d word.
+///
+/// Security fix round 1, IMPORTANT 3: this used to be `find -L "$d" -type f`
+/// over the whole `skills`/`agents` tree, which follows EVERY symlink it
+/// meets, at any depth — a skill containing `ref -> ~` would dump the
+/// caller's whole home directory (`~/.ssh/*` included) into a repo that gets
+/// pushed, and the total size was unbounded. Now: a top-level entry of
+/// `.claude/skills` is walked with `find -H`, which resolves only that
+/// command-line argument itself, never a symlink found while walking under
+/// it; `.claude/agents` is top-level `*.md` files only, so a link there is
+/// followed once and never recursed into either way. `emit` also tracks a
+/// running total and, at 64 MiB, prints `##TRUNCATED` and exits non-zero —
+/// `run_host_script` already turns a non-zero exit into an error, and
+/// `parse_remote_dump` refuses a `##TRUNCATED` line even if a caller handed
+/// it stdout directly. The `while read` loops read from `<(find …)` rather
+/// than `find … | while …`, on purpose: piping into `while` runs the loop in
+/// a subshell, where `total`'s updates — and `emit`'s `exit` once the cap
+/// trips — would be lost the moment the loop ends instead of stopping the
+/// script.
+///
+/// Security fix round 2: every conditional test uses `if …; then …; fi`
+/// (which is 0 whenever the condition is false and there is no `else`),
+/// never `test && emit` — a `for` loop's own exit status is whatever its
+/// LAST command returned, so `[ -f "$f" ] && emit "$f"` as the loop's last
+/// line made the whole script exit non-zero the moment the final
+/// glob-matched (or literal, unexpanded) entry failed `-f`: an empty
+/// `.claude/agents`, or one whose last sorted entry is a dangling symlink or
+/// a directory. `run_host_script` turns that into `E_SCAN`, failing a
+/// perfectly normal remote import. The trailing `exit 0` is the belt: even a
+/// construct this file didn't think to guard cannot flip the script's own
+/// exit status any more, because it is never the last thing that runs — the
+/// one exception is `emit`'s own `exit 1` on `##TRUNCATED`, which fires
+/// (and returns) before `exit 0` is ever reached.
+// `###"..."###` (three `#`s), not `#"..."#`: the script's own `printf
+// "##FILE ..."`/`"##TRUNCATED"` contain a `"` immediately followed by two
+// `#`s, which would otherwise close a one-`#` raw string early.
+pub const REMOTE_SOURCES_SCRIPT: &str = r###"cd "$HOME" || exit 1
+total=0
+cap=67108864
+emit() {
+  sz=$(wc -c < "$1" 2>/dev/null) || return 0
+  total=$((total + sz))
+  if [ "$total" -gt "$cap" ]; then
+    printf "##TRUNCATED\n"
+    exit 1
+  fi
+  printf "##FILE %s\n" "$1"
+  base64 < "$1" | tr -d "\n"
+  printf "\n"
+}
+for f in .claude/settings.json .claude.json .claude/plugins/installed_plugins.json .claude/plugins/known_marketplaces.json; do
+  if [ -f "$f" ]; then emit "$f"; fi
+done
+if [ -d .claude/skills ]; then
+  for entry in .claude/skills/*; do
+    [ -e "$entry" ] || continue
+    while IFS= read -r f; do emit "$f"; done < <(find -H "$entry" -type f -size -512k 2>/dev/null)
+  done
+fi
+if [ -d .claude/agents ]; then
+  for f in .claude/agents/*.md; do
+    if [ -f "$f" ]; then emit "$f"; fi
+  done
+fi
+exit 0
+"###;
+
+/// True when every component of `path` is a plain name (`Component::Normal`)
+/// — no `..`, no leading `/`, no `.`, and (checked up front, since
+/// `std::path::Path` on this platform is POSIX and would happily accept
+/// either as an ordinary character) no `\` or `:`, which on Windows are a
+/// path separator and a drive-letter marker respectively. Security fix round
+/// 1, CRITICAL 2: `path.split('/')` alone let `.claude/..\..\x` through — a
+/// literal backslash is just an ordinary byte to a `/`-only splitter, but
+/// `..\..\x` is a real traversal the moment this repo (or the temp dir a
+/// remote dump lands in) is on a Windows machine.
+fn is_confined_path(path: &str) -> bool {
+    if path.contains('\\') || path.contains(':') {
+        return false;
+    }
+    Path::new(path)
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+/// Remote dumps are capped at 64 MiB (`REMOTE_SOURCES_SCRIPT`'s own running
+/// total); it prints this line and exits non-zero rather than silently
+/// truncating a file mid-write. `run_host_script` already turns a non-zero
+/// exit into an error before `parse_remote_dump` ever sees the output, but a
+/// caller that hands it stdout directly (as the unit tests do) needs this
+/// checked here too.
+const TRUNCATED_MARKER: &str = "##TRUNCATED";
+
+/// Rebuild the files `REMOTE_SOURCES_SCRIPT` printed under `root`, and point
+/// `ImportSources` at them. Refuses anything outside `.claude/` and
+/// `.claude.json`, and a dump the script cut short at its 64 MiB cap.
+pub fn parse_remote_dump(stdout: &str, root: &Path) -> Result<ImportSources, IpcError> {
+    use base64::Engine;
+    let bad = |p: &str| IpcError::new(E_INVALID, format!("remote import: refusing path {p}"));
+    let mut lines = stdout.lines();
+    while let Some(line) = lines.next() {
+        if line == TRUNCATED_MARKER {
+            return Err(IpcError::new(E_INVALID, "remote dump exceeds 64 MiB"));
+        }
+        let Some(path) = line.strip_prefix("##FILE ") else {
+            continue;
+        };
+        let ok = (path == ".claude.json" || path.starts_with(".claude/")) && is_confined_path(path);
+        if !ok {
+            return Err(bad(path));
+        }
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(lines.next().unwrap_or("").trim())
+            .map_err(|e| IpcError::new(E_INVALID, format!("remote import: {path}: {e}")))?;
+        let dest = root.join(path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, data)?;
+    }
+    Ok(ImportSources {
+        claude_dir: root.join(".claude"),
+        claude_json: root.join(".claude.json"),
+    })
+}
+
+/// Controller ruling (Task 6, security): remove fleet's own entries from a
+/// remote dump before it is imported. Each host carries a DIFFERENT bearer
+/// token than the controller's — `scrub_token` is built to redact the
+/// controller's own token and cannot catch another host's — so without this,
+/// a remote import would write another host's fleet secret straight into the
+/// catalog's git repo, which gets pushed. `import_host` calls this for every
+/// host but `local`: on `local`, fleet's entries carry the controller's own
+/// token, which every value `scrub_token` touches already redacts, and the
+/// existing tests (`import_converts_every_kind_losslessly`, keyed on
+/// `claude-fleet` importing) expect `local` to keep importing it.
+///
+/// Matches by SHAPE (`hooks_install::is_fleet_owned_hook` — every shape
+/// fleet has ever installed a hook as, including the pre-Track-B legacy
+/// `curl … /hook?token=` one, `provision::FLEET_MCP_SERVER`,
+/// `provision::FLEET_SKILL_NAMES`), never by token value, so it works no
+/// matter what the host's own token is. A hook matcher group whose `hooks`
+/// list is emptied by the filter is dropped entirely rather than left as an
+/// empty group.
+pub fn scrub_fleet_entries(src: &ImportSources) -> Result<(), IpcError> {
+    use crate::service::hooks_install::is_fleet_owned_hook;
+    use crate::service::provision::{FLEET_MCP_SERVER, FLEET_SKILL_NAMES};
+
+    for name in FLEET_SKILL_NAMES {
+        let dir = src.claude_dir.join("skills").join(name);
+        if dir.is_dir() {
+            std::fs::remove_dir_all(&dir)?;
+        }
+    }
+
+    let settings_path = src.claude_dir.join("settings.json");
+    if let Ok(bytes) = std::fs::read(&settings_path) {
+        if let Ok(mut settings) = serde_json::from_slice::<Value>(&bytes) {
+            if let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) {
+                for (_event, entries) in hooks.iter_mut() {
+                    let Some(arr) = entries.as_array_mut() else {
+                        continue;
+                    };
+                    for entry in arr.iter_mut() {
+                        if let Some(inner) = entry.get_mut("hooks").and_then(Value::as_array_mut) {
+                            inner.retain(|h| !is_fleet_owned_hook(h));
+                        }
+                    }
+                    arr.retain(|entry| {
+                        entry
+                            .get("hooks")
+                            .and_then(Value::as_array)
+                            .is_none_or(|a| !a.is_empty())
+                    });
+                }
+            }
+            let encoded = serde_json::to_vec(&settings)
+                .expect("a parsed serde_json::Value always re-serialises");
+            std::fs::write(&settings_path, encoded)?;
+        }
+    }
+
+    if let Ok(bytes) = std::fs::read(&src.claude_json) {
+        if let Ok(mut claude_json) = serde_json::from_slice::<Value>(&bytes) {
+            if let Some(servers) = claude_json
+                .get_mut("mcpServers")
+                .and_then(Value::as_object_mut)
+            {
+                servers.remove(FLEET_MCP_SERVER);
+            }
+            let encoded = serde_json::to_vec(&claude_json)
+                .expect("a parsed serde_json::Value always re-serialises");
+            std::fs::write(&src.claude_json, encoded)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// [`import_claude_only`] importing everything (`only` empty).
 pub fn import_claude(
     src: &ImportSources,
     repo_root: &Path,
@@ -722,6 +984,26 @@ pub fn import_claude(
     fleet_token: Option<&str>,
     dry_run: bool,
 ) -> Result<ImportReport, IpcError> {
+    import_claude_only(src, repo_root, host, fleet_token, dry_run, &[])
+}
+
+/// Convert a Claude config directory into catalog assets. Never overwrites;
+/// collisions become problems. `dry_run` writes nothing. `only` — `<kind>:
+/// <name>` keys — limits what is imported to those assets; empty imports
+/// everything.
+pub fn import_claude_only(
+    src: &ImportSources,
+    repo_root: &Path,
+    host: &str,
+    fleet_token: Option<&str>,
+    dry_run: bool,
+    only: &[String],
+) -> Result<ImportReport, IpcError> {
+    // Normalize once, here, so every downstream `only_wants` check and the
+    // final assembly loop compare like-for-like against the slugified
+    // catalog name — see `normalize_only`'s doc comment (S1a review finding 3).
+    let only_normalized = normalize_only(only);
+    let only = &only_normalized[..];
     let mut report = ImportReport {
         created: vec![],
         problems: vec![],
@@ -748,6 +1030,9 @@ pub fn import_claude(
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
+            if !only_wants(only, Kind::Skill, &name) {
+                continue;
+            }
             if !p.is_dir() {
                 if std::fs::symlink_metadata(&p)
                     .map(|m| m.file_type().is_symlink())
@@ -792,6 +1077,9 @@ pub fn import_claude(
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
+            if !only_wants(only, Kind::Agent, &name) {
+                continue;
+            }
             let Some(slug) =
                 slug_or_problem(&mut slugs, Kind::Agent, &name, &p, &mut report.problems)
             else {
@@ -816,6 +1104,7 @@ pub fn import_claude(
         &mut taken,
         &mut report.flagged_secrets,
         &mut report.problems,
+        only,
     ));
     assets.extend(import_mcp(
         &read_json(&src.claude_json),
@@ -826,6 +1115,7 @@ pub fn import_claude(
         &mut slugs,
         &mut report.problems,
         &mut report.warnings,
+        only,
     ));
     let installed_path = src.claude_dir.join("plugins/installed_plugins.json");
     let known_path = src.claude_dir.join("plugins/known_marketplaces.json");
@@ -836,10 +1126,18 @@ pub fn import_claude(
         &installed_path,
         &mut report.problems,
         &mut slugs,
+        only,
     ));
 
     for a in assets {
         let kind = a.kind();
+        if !only.is_empty()
+            && !only
+                .iter()
+                .any(|k| *k == format!("{}:{}", kind.as_str(), a.header.name))
+        {
+            continue;
+        }
         let problems = a.validate();
         if !problems.is_empty() {
             report.problems.push(Problem {
@@ -1182,6 +1480,7 @@ mod tests {
             &mut taken,
             &mut flagged,
             &mut problems,
+            &[],
         );
         assert_eq!(assets.len(), 1);
         assert!(problems.is_empty());
@@ -1213,6 +1512,7 @@ mod tests {
             &mut slugs,
             &mut problems,
             &mut warnings,
+            &[],
         );
         let AssetSpec::McpServer { env, .. } = &assets[0].spec else {
             panic!()
@@ -1235,6 +1535,7 @@ mod tests {
             &mut taken,
             &mut flagged2,
             &mut problems,
+            &[],
         );
         let AssetSpec::Hook { action, .. } = &assets[0].spec else {
             panic!()
@@ -1268,6 +1569,7 @@ mod tests {
             &mut taken,
             &mut flagged,
             &mut problems,
+            &[],
         );
         assert_eq!(assets.len(), 1);
         match &assets[0].spec {
@@ -1305,6 +1607,7 @@ mod tests {
             &mut taken,
             &mut flagged,
             &mut problems,
+            &[],
         );
         assert_eq!(assets.len(), 1);
         // The empty entry did not reserve "stop"; the real one got it.
@@ -1325,6 +1628,7 @@ mod tests {
             Path::new("installed_plugins.json"),
             &mut problems,
             &mut slugs,
+            &[],
         );
         assert!(assets.is_empty());
         assert_eq!(problems.len(), 1);
@@ -1349,6 +1653,7 @@ mod tests {
             Path::new("installed_plugins.json"),
             &mut problems,
             &mut slugs,
+            &[],
         );
         assert!(problems.is_empty(), "{problems:?}");
         match &assets[0].spec {
@@ -1416,6 +1721,7 @@ mod tests {
             &mut slugs,
             &mut problems,
             &mut warnings,
+            &[],
         );
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(assets.len(), 1);
@@ -1585,6 +1891,7 @@ mod tests {
             &mut slugs,
             &mut problems,
             &mut warnings,
+            &[],
         );
         assert!(problems.is_empty(), "{problems:?}");
         assert!(warnings.is_empty(), "{warnings:?}");
@@ -1671,5 +1978,385 @@ mod tests {
             "{:?}",
             rep.problems
         );
+    }
+
+    /// S1a review finding 3: the per-row Import button sends `only` as
+    /// `<kind>:<raw host identifier>` — never slugified — because that is
+    /// what an unmanaged identity's `name` is. Before `normalize_only`, this
+    /// `only` entry (`mcp_server:Foo_Bar`) never matched the asset's slugged
+    /// name (`foo-bar`) that `only_wants` and the final assembly loop
+    /// compare against, so the import silently created nothing.
+    #[test]
+    fn only_matches_a_non_kebab_host_identifier() {
+        let base = std::env::temp_dir().join(format!(
+            "fleet-import-only-non-kebab-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let claude_dir = base.join("home/.claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_json = base.join("home/.claude.json");
+        fs::write(
+            &claude_json,
+            serde_json::json!({
+                "mcpServers": {
+                    "Foo_Bar": { "type": "stdio", "command": "x" },
+                    "other_server": { "type": "stdio", "command": "y" }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        let src = ImportSources {
+            claude_dir,
+            claude_json,
+        };
+
+        let rep = import_claude_only(
+            &src,
+            &repo,
+            "local",
+            None,
+            false,
+            &["mcp_server:Foo_Bar".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            rep.created,
+            vec![("mcp_server".to_string(), "foo-bar".to_string())],
+            "{:?}",
+            rep.created
+        );
+        let cat = load_dir(&repo).unwrap();
+        assert!(cat.find(Kind::McpServer, "foo-bar").is_some());
+        assert!(cat.find(Kind::McpServer, "other-server").is_none());
+    }
+
+    #[test]
+    fn parse_remote_dump_rebuilds_a_home_tree() {
+        use base64::Engine;
+        let b = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+        let out = format!(
+            "##FILE .claude/skills/w/SKILL.md\n{}\n##FILE .claude.json\n{}\n",
+            b("---\nname: w\ndescription: Make a worktree.\n---\nbody\n"),
+            b(r#"{"mcpServers":{}}"#),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let src = parse_remote_dump(&out, dir.path()).unwrap();
+        assert!(src.claude_dir.join("skills/w/SKILL.md").is_file());
+        assert_eq!(
+            std::fs::read_to_string(&src.claude_json).unwrap(),
+            r#"{"mcpServers":{}}"#
+        );
+    }
+
+    #[test]
+    fn parse_remote_dump_refuses_paths_outside_claude() {
+        for bad in [
+            "../etc/passwd",
+            ".claude/../x",
+            ".ssh/id_ed25519",
+            "/abs",
+            // Security fix round 1, CRITICAL 2: a `/`-only splitter never
+            // saw these as traversal, but on a Windows machine `\` is a real
+            // separator and `C:` a real drive prefix.
+            ".claude\\..\\..\\x",
+            ".claude/x:y",
+            "C:\\Windows\\x",
+        ] {
+            let out = format!("##FILE {bad}\nAAAA\n");
+            let dir = tempfile::tempdir().unwrap();
+            assert!(parse_remote_dump(&out, dir.path()).is_err(), "{bad}");
+        }
+    }
+
+    /// Security fix round 1, IMPORTANT 3: the script caps a dump at 64 MiB
+    /// and signals a cut-short one with a bare `##TRUNCATED` line (on top of
+    /// exiting non-zero, which `run_host_script` already turns into an error
+    /// before this function ever runs — this is the belt covering a caller
+    /// that hands stdout straight to `parse_remote_dump`, as this test does).
+    #[test]
+    fn parse_remote_dump_refuses_a_truncated_dump() {
+        let out = "##FILE .claude.json\ne30=\n##TRUNCATED\n";
+        let dir = tempfile::tempdir().unwrap();
+        let err = parse_remote_dump(out, dir.path()).err().unwrap();
+        assert_eq!(err.code, E_INVALID);
+        assert!(err.message.contains("64 MiB"), "{}", err.message);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_imports_the_named_assets() {
+        let (src, repo) = fixture("only");
+        let rep = import_claude_only(
+            &src,
+            &repo,
+            "oci",
+            Some("SECRET123"),
+            true,
+            &["skill:worktree".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            rep.created,
+            vec![("skill".to_string(), "worktree".to_string())]
+        );
+        // Security fix round 1, IMPORTANT 4: the fixture has plenty to say
+        // about assets `only` excludes — a broken symlink under `skills/`
+        // (a `problems` entry), and jira's literal `JIRA_TOKEN` (a
+        // `flagged_secrets` entry, verified present without `only` by
+        // `import_converts_every_kind_losslessly` below). None of it must
+        // reach the report when the caller asked for `skill:worktree` alone.
+        assert!(rep.problems.is_empty(), "{:?}", rep.problems);
+        assert!(rep.warnings.is_empty(), "{:?}", rep.warnings);
+        assert!(rep.flagged_secrets.is_empty(), "{:?}", rep.flagged_secrets);
+    }
+
+    #[test]
+    fn remote_script_quotes_nothing_and_frames_files() {
+        assert!(REMOTE_SOURCES_SCRIPT.contains("##FILE"));
+        assert!(
+            !REMOTE_SOURCES_SCRIPT.contains('\''),
+            "passed through shell::quote whole"
+        );
+        // Security fix round 1, IMPORTANT 3: `-L` follows every symlink at
+        // any depth under the tree it's given; `-H` resolves only the
+        // command-line argument itself (one top-level entry at a time here),
+        // never a link `find` meets while walking under it.
+        assert!(
+            !REMOTE_SOURCES_SCRIPT.contains("-L "),
+            "must not recurse through nested symlinks: {REMOTE_SOURCES_SCRIPT}"
+        );
+        assert!(
+            REMOTE_SOURCES_SCRIPT.contains("-H "),
+            "must resolve only each top-level entry, not what it links to deeper down"
+        );
+        assert!(
+            REMOTE_SOURCES_SCRIPT.contains("##TRUNCATED"),
+            "must signal a dump cut short at the size cap"
+        );
+    }
+
+    /// Runs `REMOTE_SOURCES_SCRIPT` for real, with `HOME` pointed at a fresh
+    /// `tempfile` directory — the same `bash -lc <script>` invocation
+    /// `run_host_script`'s local branch uses, just with `HOME` overridden on
+    /// the CHILD process only (never the test process's own environment, so
+    /// tests running in parallel never see or race each other's `$HOME`).
+    #[cfg(unix)]
+    fn run_remote_script(home: &Path) -> std::process::Output {
+        crate::proc::std_command("bash")
+            .args(["-lc", REMOTE_SOURCES_SCRIPT])
+            .env("HOME", home)
+            .output()
+            .expect("spawn bash")
+    }
+
+    /// Security fix round 2: a `for` loop's exit status is its LAST
+    /// command's, so `[ -f "$f" ] && emit "$f"` as an agents-loop's last line
+    /// made the whole script exit non-zero whenever `.claude/agents` existed
+    /// but held no `.md` file — the unmatched glob stays literal and fails
+    /// `-f`. `run_host_script` turns that non-zero exit into `E_SCAN`,
+    /// failing a completely ordinary remote import. Fixed with `if …; then
+    /// …; fi` (0 when the condition is false, per POSIX) plus a trailing
+    /// `exit 0`; this proves it end to end rather than trusting the shell
+    /// semantics by inspection.
+    #[cfg(unix)]
+    #[test]
+    fn remote_script_exits_zero_with_an_empty_agents_dir() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".claude/agents")).unwrap();
+        let out = run_remote_script(home.path());
+        assert!(
+            out.status.success(),
+            "status={:?} stdout={} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("##FILE"),
+            "nothing to dump: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    /// The same bug, the other repro from the finding: the last SORTED entry
+    /// in `.claude/agents` is a dangling symlink (`-f` follows it, finds
+    /// nothing, fails) rather than the glob just not matching.
+    #[cfg(unix)]
+    #[test]
+    fn remote_script_exits_zero_when_the_last_agent_entry_is_a_dangling_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        let agents = home.path().join(".claude/agents");
+        fs::create_dir_all(&agents).unwrap();
+        // "zz" sorts after every ordinary agent name, so the glob's LAST
+        // match is the dangling one — exactly the shape that tripped the
+        // old script's final-command-decides-the-exit-status bug.
+        std::os::unix::fs::symlink(agents.join("nowhere"), agents.join("zz.md")).unwrap();
+        let out = run_remote_script(home.path());
+        assert!(
+            out.status.success(),
+            "status={:?} stdout={} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A real skill and a real agent survive the round trip: the script's
+    /// stdout, fed straight to `parse_remote_dump`, rebuilds both files.
+    #[cfg(unix)]
+    #[test]
+    fn remote_script_output_round_trips_through_parse_remote_dump() {
+        let home = tempfile::tempdir().unwrap();
+        let claude = home.path().join(".claude");
+        fs::create_dir_all(claude.join("skills/worktree")).unwrap();
+        fs::write(
+            claude.join("skills/worktree/SKILL.md"),
+            "---\nname: worktree\ndescription: Make a worktree.\n---\nbody\n",
+        )
+        .unwrap();
+        fs::create_dir_all(claude.join("agents")).unwrap();
+        fs::write(
+            claude.join("agents/pm.md"),
+            "---\nname: pm\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        fs::write(claude.join("settings.json"), "{}").unwrap();
+        fs::write(home.path().join(".claude.json"), r#"{"mcpServers":{}}"#).unwrap();
+
+        let out = run_remote_script(home.path());
+        assert!(
+            out.status.success(),
+            "status={:?} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).unwrap();
+
+        let rebuilt = tempfile::tempdir().unwrap();
+        let src = parse_remote_dump(&stdout, rebuilt.path()).unwrap();
+        assert!(src.claude_dir.join("skills/worktree/SKILL.md").is_file());
+        assert!(src.claude_dir.join("agents/pm.md").is_file());
+        assert_eq!(
+            std::fs::read_to_string(&src.claude_json).unwrap(),
+            r#"{"mcpServers":{}}"#
+        );
+    }
+
+    /// Controller ruling (Task 6, security): a remote import must never copy
+    /// fleet's own hook, its own MCP server or its own skills — each host
+    /// carries a DIFFERENT bearer token than the controller's, so
+    /// `scrub_token` (built to redact the controller's own token) cannot
+    /// catch it, and the catalog is a git repo that gets pushed. This pins
+    /// that `scrub_fleet_entries` (called by `import_host` for every host but
+    /// `local`) drops fleet's http hook and its MCP server entry — matched by
+    /// shape (`is_fleet_hook_entry`/`FLEET_MCP_SERVER`), not by token value —
+    /// while keeping the user's own hook and MCP server, and that the host's
+    /// token never reaches any file the import wrote under the repo.
+    #[cfg(unix)]
+    #[test]
+    fn remote_import_drops_fleets_own_hook_and_mcp_server_never_leaking_the_host_token() {
+        let base = std::env::temp_dir().join(format!("fleet-import-scrub-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let claude_dir = base.join("home/.claude");
+        let w = |rel: &str, c: &str| {
+            let p = base.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        // Fleet's exact installed shapes: the current http hook
+        // (`hooks_install::hook_entry`), the current SessionStart async
+        // command hook (`hooks_install::session_start_command` — no token in
+        // this one's argv, but it must still be recognised and dropped so no
+        // stray `session-start` asset is created), and the pre-Track-B
+        // legacy `curl … /hook?token=` command hook (IMPORTANT 1: this is
+        // the shape `is_fleet_hook_entry`/`is_fleet_command_entry` alone
+        // missed) — alongside a user's own command hook in a fourth event.
+        w(
+            "home/.claude/settings.json",
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"http","url":"http://127.0.0.1:4180/hook","timeout":5,"headers":{"Authorization":"Bearer HOSTTOKEN","X-Fleet-Pane":"$TMUX_PANE"}}]}],"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo mine"}]}],"SessionStart":[{"hooks":[{"type":"command","command":"curl -sS -m 5 -o /dev/null -X POST -H @\"$HOME/.claude/fleet-hook.headers\" -H \"X-Fleet-Pane: ${TMUX_PANE:-}\" -H 'Content-Type: application/json' --data-binary @- 'http://127.0.0.1:4180/hook' || true","async":true,"timeout":5}]}],"SubagentStop":[{"hooks":[{"type":"command","command":"curl -sS -X POST --data-binary @- 'http://127.0.0.1:4180/hook?token=HOSTTOKEN' 2>/dev/null || true"}]}]}}"#,
+        );
+        w(
+            "home/.claude.json",
+            r#"{"mcpServers":{"claude-fleet":{"type":"http","url":"http://127.0.0.1:4180/mcp","headers":{"Authorization":"Bearer HOSTTOKEN"}},"jira":{"type":"stdio","command":"npx","args":["-y","jira"]}}}"#,
+        );
+        let repo = base.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        let src = ImportSources {
+            claude_dir,
+            claude_json: base.join("home/.claude.json"),
+        };
+
+        // The controller's own token (`None` here — a real caller would pass
+        // its own) never matches "HOSTTOKEN": that is the whole point of the
+        // ruling, and this test would still pass with `scrub_token` alone
+        // doing nothing, which is exactly the gap `scrub_fleet_entries` closes.
+        scrub_fleet_entries(&src).unwrap();
+        let rep = import_claude_only(&src, &repo, "oci", None, false, &[]).unwrap();
+
+        assert!(
+            rep.created
+                .contains(&("hook".to_string(), "before-tool-bash".to_string())),
+            "{:?}",
+            rep.created
+        );
+        assert!(
+            rep.created
+                .contains(&("mcp_server".to_string(), "jira".to_string())),
+            "{:?}",
+            rep.created
+        );
+        let cat = load_dir(&repo).unwrap();
+        assert!(
+            cat.find(Kind::Hook, "stop").is_none(),
+            "fleet's Stop hook must not be imported"
+        );
+        assert!(
+            cat.find(Kind::Hook, "session-start").is_none(),
+            "fleet's SessionStart command hook must not be imported"
+        );
+        assert!(
+            cat.find(Kind::Hook, "subagent-stop").is_none(),
+            "fleet's legacy /hook?token= command hook must not be imported"
+        );
+        assert!(
+            cat.find(Kind::McpServer, "claude-fleet").is_none(),
+            "fleet's own MCP server must not be imported"
+        );
+
+        for entry in walkdir(&repo) {
+            let bytes = fs::read(&entry).unwrap_or_default();
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains("HOSTTOKEN"),
+                "{}: leaked the host's fleet token",
+                entry.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    fn walkdir(root: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&d) else {
+                continue;
+            };
+            for e in entries.filter_map(|e| e.ok()) {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push(p);
+                }
+            }
+        }
+        out
     }
 }

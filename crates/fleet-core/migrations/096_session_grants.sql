@@ -2,7 +2,7 @@
 -- spec docs/superpowers/specs/2026-09-30-multi-user-gap-analysis.md §4.3): the
 -- owner SHARES a session, explicitly, revocably, and downward only.
 --
--- Migration 086 gave the hub its people and 087 gave every session an owner
+-- Migration 094 gave the hub its people and 095 gave every session an owner
 -- and a visibility. A `private` row is readable by exactly one person, which
 -- is the point — and useless the first time two colleagues need to look at
 -- the same agent. `session_grants` is the one way a second person ever
@@ -12,7 +12,7 @@
 -- round the privacy rule if it is the wrong column.
 --
 -- What this script does, statement by statement (named rather than counted,
--- 086's convention):
+-- 096 keeps 094's convention):
 --
 --   CREATE TABLE session_grants      one live grant per (session, recipient)
 --   idx_session_grants_live          ... enforced, NULL-safely
@@ -50,8 +50,8 @@
 --              `Access::Master` — an admin would bind their own device to the
 --              org and read the session with no grant touched and no owner
 --              consent (spec §4.3, *Team sharing is out of M1*). Deliberately
---              no foreign key to `orgs`, the migration-066 rationale 086 and
---              087 both repeat: a deleted org must leave the row pointing at
+--              no foreign key to `orgs`, the migration-066 rationale 094 and
+--              095 both repeat: a deleted org must leave the row pointing at
 --              an id nothing has (fail closed), never widen it.
 -- level        'watch' | 'drive'. There is no 'own': `own` is the tier of
 --              operations only the owner may perform (spec §4.3, invariant
@@ -126,4 +126,4 @@ CREATE INDEX IF NOT EXISTS idx_session_grants_person
 CREATE INDEX IF NOT EXISTS idx_session_grants_session
   ON session_grants(session_id);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (88);
+INSERT OR IGNORE INTO schema_version (version) VALUES (96);

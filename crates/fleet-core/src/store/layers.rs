@@ -1,4 +1,6 @@
-//! Per-host layer assignment: one active role plus ordered contexts.
+//! Per-host layer assignment: one active role plus ordered contexts, per
+//! catalog (Assets M2: `host_layers`'s primary key is now `(host_alias,
+//! catalog_id, layer_name)`, one active role per `(host_alias, catalog_id)`).
 
 use crate::store::Store;
 use serde::{Deserialize, Serialize};
@@ -7,6 +9,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostLayerRow {
     pub host_alias: String,
+    /// Which catalog this assignment belongs to (migration 091). Wire field:
+    /// `#[serde(default)]` so an older hub's `catalog_list_layers` /
+    /// `catalog_set_host_layers` answer (no `catalog_id` yet) still parses.
+    #[serde(default)]
+    pub catalog_id: i64,
     pub layer_name: String,
     /// `"role"` | `"context"`.
     pub axis: String,
@@ -17,61 +24,97 @@ pub struct HostLayerRow {
 fn row_from(r: &rusqlite::Row<'_>) -> Result<HostLayerRow, rusqlite::Error> {
     Ok(HostLayerRow {
         host_alias: r.get(0)?,
-        layer_name: r.get(1)?,
-        axis: r.get(2)?,
-        position: r.get(3)?,
-        active: r.get::<_, i64>(4)? != 0,
+        catalog_id: r.get(1)?,
+        layer_name: r.get(2)?,
+        axis: r.get(3)?,
+        position: r.get(4)?,
+        active: r.get::<_, i64>(5)? != 0,
     })
 }
 
-const COLS: &str = "host_alias, layer_name, axis, position, active";
+const COLS: &str = "host_alias, catalog_id, layer_name, axis, position, active";
 
 impl Store {
+    /// Every catalog's active rows for `host_alias`, ordered by catalog then
+    /// axis/position/name.
     pub fn get_host_layers(&self, host_alias: &str) -> Result<Vec<HostLayerRow>, rusqlite::Error> {
         self.conn
             .prepare(&format!(
                 "SELECT {COLS} FROM host_layers WHERE host_alias=?1 AND active=1 \
-                 ORDER BY axis, position, layer_name"
+                 ORDER BY catalog_id, axis, position, layer_name"
             ))?
             .query_map(rusqlite::params![host_alias], row_from)?
+            .collect()
+    }
+
+    /// `host_alias`'s active rows in one catalog.
+    pub fn get_host_layers_for(
+        &self,
+        host_alias: &str,
+        catalog_id: i64,
+    ) -> Result<Vec<HostLayerRow>, rusqlite::Error> {
+        self.conn
+            .prepare(&format!(
+                "SELECT {COLS} FROM host_layers WHERE host_alias=?1 AND catalog_id=?2 AND active=1 \
+                 ORDER BY axis, position, layer_name"
+            ))?
+            .query_map(rusqlite::params![host_alias, catalog_id], row_from)?
             .collect()
     }
 
     pub fn list_all_host_layers(&self) -> Result<Vec<HostLayerRow>, rusqlite::Error> {
         self.conn
             .prepare(&format!(
-                "SELECT {COLS} FROM host_layers ORDER BY host_alias, axis, position, layer_name"
+                "SELECT {COLS} FROM host_layers ORDER BY host_alias, catalog_id, axis, position, layer_name"
             ))?
             .query_map([], row_from)?
             .collect()
     }
 
-    /// Replace a host's assignment wholesale: one optional role plus the
-    /// contexts in application order. Runs in one transaction so a host is
-    /// never left with a half-written assignment.
+    /// Replace a host's assignment wholesale in the personal catalog: one
+    /// optional role plus the contexts in application order. Errors with
+    /// `QueryReturnedNoRows` if no personal catalog is configured yet.
     pub fn set_host_layers(
         &self,
         host_alias: &str,
         role: Option<&str>,
         contexts: &[&str],
     ) -> Result<(), rusqlite::Error> {
+        let catalog_id = self
+            .personal_catalog()?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?
+            .id;
+        self.set_host_layers_for(host_alias, catalog_id, role, contexts)
+    }
+
+    /// Replace a host's assignment wholesale in one catalog: one optional
+    /// role plus the contexts in application order. Runs in one transaction
+    /// so a host is never left with a half-written assignment. Another
+    /// catalog's rows for the same host are untouched.
+    pub fn set_host_layers_for(
+        &self,
+        host_alias: &str,
+        catalog_id: i64,
+        role: Option<&str>,
+        contexts: &[&str],
+    ) -> Result<(), rusqlite::Error> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
-            "DELETE FROM host_layers WHERE host_alias=?1",
-            rusqlite::params![host_alias],
+            "DELETE FROM host_layers WHERE host_alias=?1 AND catalog_id=?2",
+            rusqlite::params![host_alias, catalog_id],
         )?;
         if let Some(r) = role {
             tx.execute(
-                "INSERT INTO host_layers (host_alias, layer_name, axis, position, active) \
-                 VALUES (?1, ?2, 'role', 0, 1)",
-                rusqlite::params![host_alias, r],
+                "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis, position, active) \
+                 VALUES (?1, ?2, ?3, 'role', 0, 1)",
+                rusqlite::params![host_alias, catalog_id, r],
             )?;
         }
         for (i, c) in contexts.iter().enumerate() {
             tx.execute(
-                "INSERT INTO host_layers (host_alias, layer_name, axis, position, active) \
-                 VALUES (?1, ?2, 'context', ?3, 1)",
-                rusqlite::params![host_alias, c, i as i64],
+                "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis, position, active) \
+                 VALUES (?1, ?2, ?3, 'context', ?4, 1)",
+                rusqlite::params![host_alias, catalog_id, c, i as i64],
             )?;
         }
         tx.commit()
@@ -84,10 +127,12 @@ mod tests {
 
     /// `PRAGMA foreign_keys = ON` is enforced (`schema.rs:247`), and
     /// `host_layers.host_alias` references `hosts(alias)` — so the host row
-    /// must exist or every insert trips the constraint.
+    /// must exist or every insert trips the constraint. `set_host_layers`
+    /// now also needs a personal catalog to target.
     fn store_with_local() -> Store {
         let s = Store::open_in_memory().expect("open");
         s.upsert_host("local").expect("host");
+        s.set_catalog_config("/p", None).expect("personal catalog");
         s
     }
 
@@ -146,19 +191,20 @@ mod tests {
     #[test]
     fn schema_index_rejects_a_second_active_role_for_one_host() {
         let s = store_with_local();
+        let catalog_id = s.personal_catalog().unwrap().unwrap().id;
         s.conn
             .execute(
-                "INSERT INTO host_layers (host_alias, layer_name, axis, position, active) \
-                 VALUES ('local', 'a', 'role', 0, 1)",
-                [],
+                "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis, position, active) \
+                 VALUES ('local', ?1, 'a', 'role', 0, 1)",
+                [catalog_id],
             )
             .unwrap();
         let err = s
             .conn
             .execute(
-                "INSERT INTO host_layers (host_alias, layer_name, axis, position, active) \
-                 VALUES ('local', 'b', 'role', 0, 1)",
-                [],
+                "INSERT INTO host_layers (host_alias, catalog_id, layer_name, axis, position, active) \
+                 VALUES ('local', ?1, 'b', 'role', 0, 1)",
+                [catalog_id],
             )
             .unwrap_err();
         let msg = err.to_string();
@@ -166,5 +212,53 @@ mod tests {
             msg.contains("UNIQUE constraint failed") || msg.contains("idx_host_active_role"),
             "expected a unique-constraint failure, got: {msg}"
         );
+    }
+
+    #[test]
+    fn layers_are_kept_per_catalog() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        s.set_catalog_config("/p", None).unwrap();
+        let personal = s.personal_catalog().unwrap().unwrap().id;
+        s.conn
+            .execute(
+                "INSERT INTO orgs (name, created_at) VALUES ('acme', 0);
+             ",
+                [],
+            )
+            .unwrap();
+        let org: i64 = s
+            .conn
+            .query_row("SELECT id FROM orgs WHERE name='acme'", [], |r| r.get(0))
+            .unwrap();
+        s.conn
+            .execute(
+                "INSERT INTO catalogs (name, repo_path, org_id, created_at) VALUES ('acme', '/a', ?1, 0)",
+                [org],
+            )
+            .unwrap();
+        let acme: i64 = s
+            .conn
+            .query_row("SELECT id FROM catalogs WHERE name='acme'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+
+        s.set_host_layers("h", Some("core"), &[]).unwrap(); // personal
+        s.set_host_layers_for("h", acme, Some("ops"), &["extra"])
+            .unwrap(); // same host, other catalog
+
+        let p = s.get_host_layers_for("h", personal).unwrap();
+        assert_eq!(
+            p.iter().map(|r| r.layer_name.as_str()).collect::<Vec<_>>(),
+            vec!["core"]
+        );
+        let a = s.get_host_layers_for("h", acme).unwrap();
+        assert_eq!(a.len(), 2);
+        assert!(a.iter().all(|r| r.catalog_id == acme));
+        assert_eq!(s.get_host_layers("h").unwrap().len(), 3);
+        // Re-setting one catalog's layers leaves the other's alone.
+        s.set_host_layers_for("h", acme, None, &[]).unwrap();
+        assert_eq!(s.get_host_layers("h").unwrap().len(), 1);
     }
 }

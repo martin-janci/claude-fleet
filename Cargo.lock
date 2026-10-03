@@ -252,13 +252,13 @@ checksum = "8b75356056920673b02621b35afd0f7dda9306d03c79a30f5c56c44cf256e3de"
 
 [[package]]
 name = "async-trait"
-version = "0.1.89"
+version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -683,7 +683,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "claude-fleet"
-version = "0.4.2"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1373,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-agent"
-version = "0.4.2"
+version = "0.4.5"
 dependencies = [
  "clap",
  "fleet-proto",
@@ -1433,7 +1433,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-hub"
-version = "0.4.2"
+version = "0.4.5"
 dependencies = [
  "async-trait",
  "clap",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "fleet-proto"
-version = "0.4.2"
+version = "0.4.5"
 dependencies = [
  "base64 0.22.1",
  "serde",

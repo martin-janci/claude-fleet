@@ -100,6 +100,9 @@ hmac = "0.12"
 hex = "0.4"
 base64 = "0.22"
 toml = "0.8"
+# Asset catalog: `import_host` stages a remote host's dumped `~/.claude`
+# under a throwaway directory before importing it (`service/catalog/mod.rs`).
+tempfile = "3"
 
 # `run_local_script` (service/add_project.rs) signals a script's whole process
 # group (`kill(-pgid, ..)`).
@@ -109,14 +112,15 @@ libc = "0.2"
 [dev-dependencies]
 # Signed test documents for `service::update`'s tests.
 fleet-update = { path = "../fleet-update", features = ["testkit"] }
-tempfile = "3"
 # `trace` only in tests: the work graph's scale tests (M12.2,
 # store/scale_fixture.rs) capture the statements a call runs and check each
 # one's query plan. `functions` only in tests: a scalar function that fails
 # with SQLITE_IOERR injects a real read-level I/O error
 # (`Store::arm_read_ioerr_for_test`). The same crate and version as above; no
 # package added.
-rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
+# `backup` only in tests: every in-memory test store is a page copy of one
+# database migrated once per process (`store::migrated_template_copy`).
+rusqlite = { version = "0.32", features = ["bundled", "trace", "functions", "backup"] }
 # `test-util` only: `#[tokio::test(start_paused = true)]`, so the listener's
 # handshake timeout can be tested without the test waiting it out in real time.
 tokio = { version = "1", features = ["full", "test-util"] }

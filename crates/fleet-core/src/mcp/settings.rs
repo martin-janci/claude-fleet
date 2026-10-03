@@ -156,14 +156,14 @@ mod tests {
     }
 
     /// Multi-user M1: the hub's personal owner exists from the first open
-    /// (migration 086 inserts it) and this is a no-op; when the flagged row
+    /// (migration 094 inserts it) and this is a no-op; when the flagged row
     /// is missing it mints exactly one, and a second call finds it. The
     /// partial unique index would refuse a second one anyway — the point
     /// here is that this never tries, and never re-homes the flag.
     #[test]
     fn ensure_personal_owner_is_idempotent_and_mints_when_the_row_is_gone() {
         let s = Store::open_in_memory().unwrap();
-        let from_migration = s.personal_owner_id().unwrap().expect("086 mints one");
+        let from_migration = s.personal_owner_id().unwrap().expect("094 mints one");
         assert_eq!(ensure_personal_owner(&s).unwrap(), from_migration);
         assert_eq!(ensure_personal_owner(&s).unwrap(), from_migration);
         assert_eq!(s.list_people().unwrap().len(), 1);

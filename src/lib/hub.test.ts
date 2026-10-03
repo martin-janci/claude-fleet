@@ -110,15 +110,6 @@ describe('hubBlock', () => {
     expect(HUB_ACTIONS as readonly string[]).not.toContain('terminal');
   });
 
-  // The audit's finding H, the frontend half: a refusal must not deny a
-  // tool the hub has. The asset catalog routes to `catalog_admin` now; the
-  // one catalog reason left that has a hub tool is the import, which must
-  // name it.
-  it('the asset import reason does not deny the tool the hub has', () => {
-    const said = hubBlock('catalog_import_host', remote)!;
-    expect(said).not.toMatch(/no authoring tool|exposes no tool/);
-    expect(said).toContain('import_assets');
-  });
 });
 
 // F1: a hub is configured but this launch could not use it. The backend owns

@@ -251,6 +251,26 @@ Step 3 is not ceremony: `up -d` recreates the container only if something
 actually changed, so a pin you forgot to edit produces a completely silent
 no-op.
 
+**Codex on upgraded hosts.** The release with per-host harnesses keeps
+Codex on for every host fleet has already synced Codex assets to, and their
+next sync adds Codex subagents (`~/.codex/agents/`). Turn Codex `off` in Host
+detail to retire it on a host instead; see *Harnesses per host* in
+`docs/concepts.md`. A Codex MCP merge re-serializes `~/.codex/config.toml`
+and drops its comments, as before.
+
+**Codex skills move to `~/.agents/skills`.** Codex only reads user skills
+from `~/.agents/skills`, so a release with this change renders Codex skills
+there, and the first sync after upgrading moves every Codex skill fleet put
+in `~/.codex/skills` (backing the old copy up, never touching Codex's
+`.system` or skills you added yourself). A host whose `~/.agents/skills`
+(or `~/.agents`, or `~/.codex/skills`) is a symlink shows those Codex
+actions as `blocked` until the link is replaced with a real directory. A
+link the other way — a Claude skill such as `~/.claude/skills/<name>`
+pointing into `~/.agents/skills` — is not detected yet, and both harnesses
+would then write one file: don't link Claude skills into
+`~/.agents/skills`. See *Codex skills live in `~/.agents/skills`* in
+`docs/concepts.md`.
+
 Refreshing the compose file itself (`curl -O …/deploy/hub/docker-compose.yml`)
 also upgrades you, because the copy on `main` carries the pin from the newest
 stable release. Diff it against yours before overwriting: it is the file your
@@ -519,6 +539,13 @@ reachable stale host *content only* — skills, the CLAUDE.md block and hooks,
 with the host's existing token; no new token, no `~/.claude.json` rewrite, no
 Claude restart. By hand: `fleet-hub provision [--host <alias>]
 [--content-only]` (the `provision_hosts {host, content_only}` tool).
+
+**Upgrade heads-up (the `ag` launcher).** The fingerprint also covers fleet's
+`ag` launcher, so upgrading to the build that ships it makes every provisioned
+host stale: within about a minute of start the unattended content refresh
+installs `ag` (`~/.local/share/ag`, `~/.local/bin/ag`) and, where the host has
+no `cl` command, a `cl` shim (`claude --yolo`) on every reachable host. To opt
+out, set `provision.install_ag=false` right after upgrading.
 
 **Who owns what on a host.**
 
@@ -992,10 +1019,10 @@ What a client may do:
   `E_CONFLICT` instead of overwriting that edit.
 - **Neither mode reaches fleet admin.** `provision_hosts`, `add_host`,
   `remove_host`, `hide_host`, `apply_sync`, `set_secret`, `set_host_layers`,
-  `pair_client`, `revoke_client`, `set_client_trust` and `list_clients` are
-  master-token only, so a paired phone can neither re-provision the fleet nor
-  pair a second device nor revoke (or trust) your own client — nor even
-  enumerate the other devices you have paired.
+  `set_host_harnesses`, `pair_client`, `revoke_client`, `set_client_trust`
+  and `list_clients` are master-token only, so a paired phone can neither
+  re-provision the fleet nor pair a second device nor revoke (or trust) your
+  own client — nor even enumerate the other devices you have paired.
 - **Except what you grant: the asset catalog.** `fleet-hub client grant
   <name> assets` lets that one client manage the asset catalog from its
   Assets tab — configure and load the checkout, create / edit / delete
@@ -1008,7 +1035,21 @@ What a client may do:
   effect from the client's next call, and neither needs a running hub. Grant
   it to the desktop whose keyboard is yours, like `trust` — never to a token
   an agent holds: a Sync writes files and plugins to every host. A per-host
-  token can never use `catalog_admin`, and is not shown it.
+  token can never use `catalog_admin`, and is not shown it. A grant names
+  one catalog: `--catalog <name>` grants an org's catalog instead of the
+  personal one (`client ungrant <name> assets --catalog <name>` takes it
+  back), and the client may then touch only the catalogs it holds — admit
+  hosts to them, load them or list their layers, and apply a Sync plan only
+  when it holds every catalog that plan writes from. The fleet-wide actions
+  (`plan_sync`, `apply_sync`, `inventory`, secrets, `resolve_preview` and
+  the rest) also need the personal grant: an org-only grant covers that
+  catalog's config, load, layers and admissions, nothing more.
+  `list_catalogs` is open to the master or a person's own unbound full
+  device, never an org-bound client; only the master token may
+  `add_catalog` or `remove_catalog` (a removal drops every other client's
+  grant on that catalog, and only the master could add it back). `client
+  list`'s ASSETS column is the personal grant; `catalog list` shows every
+  grant.
 - A prompt typed on a phone reaches an agent **marked** as untrusted input,
   naming the client it came from, unless you have **trusted** that client.
   `raw: true` is the master token's alone.
@@ -2197,6 +2238,22 @@ fleet-hub settings reject 5             # reject by id
 fleet-hub settings history work.recent_days [--limit N] [--json]
 ```
 
+**Guides a session proposes** (declarative pages, layout `guide`). A
+Claude session on a host — with the `fleet-guides` skill from
+`catalog-seed/` in your asset catalog — writes a step-by-step guide for
+Settings → Guides and proposes it with its own token (`guide { propose }`);
+nothing is shown until a person approves it. On the hub machine:
+
+```bash
+fleet-hub guides list [--json]          # live guides, and proposals: who, why
+fleet-hub guides show 3                 # a proposal's steps, and the settings it lets a person change
+fleet-hub guides approve 3              # on the pages (a trusted device may approve too)
+fleet-hub guides reject 4
+fleet-hub guides remove guide.cleanup   # a live guide off the pages
+```
+
+See `docs/pages.md` → *Guides*.
+
 **On a paired device** (declarative pages P6). The desktop paired with this
 hub shows these settings in its own Settings pages, read and written
 through the hub: `get_settings` and `set_setting` answer the master and the
@@ -2307,6 +2364,35 @@ Sync installs on hosts — is a git checkout on the hub's machine. The desktop
 sets it in its Assets tab; on a hub, set it with `fleet-hub catalog`. A
 running hub is not needed, and does not need a restart: it picks the change
 up at its next catalog call (on a paired client, Assets → Refresh).
+`catalog set` configures the personal catalog. An org can have its own:
+`catalog add <name> <path> --org <org> [--remote <url>]` records and loads
+it (on an existing name it re-points it). Which hosts take what: a host
+bound to an org receives that org's catalog plus the `shared` assets of the
+personal catalog; a host with no org receives all of personal plus every org
+catalog it admits (`catalog admit <host> <catalog>`, `catalog unadmit`).
+`catalog list` shows each catalog's owner, load state, HEAD, admissions and
+grants; `catalog reload --catalog <name>` re-reads one. `catalog remove
+<name>` forgets an org catalog — config only, the checkout stays — along
+with its layer assignments, admissions and grants (over MCP,
+`remove_catalog` is the master token's alone, like `add_catalog`).
+
+A catalog whose checkout cannot be loaded is shown as a problem (`catalog
+list`) while the others load; it is retried at its next `reload`. Sync never
+removes what a catalog installed because that catalog went away — not
+loaded, failed, unadmitted, the host changed org, or removed: it reports
+those assets as `Noop` "kept, not removed" and leaves them to you.
+
+`catalog list` and the MCP `list_catalogs` action show every catalog's path
+and remote across orgs, so only the master token or a person's own unbound
+full device may call them — an org-bound client is refused.
+
+**Upgrade note.** An asset's `scope` defaults to `private`: once a host is
+bound to an org, it stops receiving creates and updates for assets that are
+still `private` — only `shared` ones sync to it. To share an asset, add
+`scope: shared` to its `asset.yaml`. Copies already installed on an org-bound
+host from before this change are kept, never removed; Sync reports them
+(`Blocked` on a layered host, `Noop` on an unlayered one) instead of
+uninstalling anything.
 
 ```bash
 # Docker: keep the checkout on the data volume so it survives the container.
@@ -2320,6 +2406,10 @@ docker compose exec fleet-hub fleet-hub catalog reload --pull   # after a push t
   no checkout is cloned from `--remote`, with this machine's git
   credentials: for an SSH remote, allow the key `fleet-hub ssh-key` prints
   to read the repository.
+- `add <name> <path> [--remote <url>] --org <org>` records an org catalog
+  and loads it; `list`, `remove <name>`, `admit <host> <catalog>`,
+  `unadmit <host> <catalog>` manage the set; `reload --catalog <name>`
+  reloads one.
 - `reload [--pull]` re-reads the checkout (optionally `git pull --ff-only`
   first). Nothing pulls on its own.
 - `show` prints the path, remote and last loaded commit.
@@ -2573,10 +2663,11 @@ standalone exactly as before.
   `catalog_admin` once when it opens. For a client granted the catalog
   (`fleet-hub client grant <name> assets`, see *Clients*) it is the full
   panel onto the hub's checkout: set it up, edit assets, lint, commit, push,
-  Sync and Secrets, exactly as standalone — only *Import from host* (it reads
-  host `local`, which on a hub is the hub's machine) and *Open in session*
-  stay disabled. A resource file you add is read on this machine and its
-  bytes sent to the hub. For any other client the hub answers `E_FORBIDDEN`
+  Sync, Secrets and Import from host, exactly as standalone — only *Open in
+  session* stays disabled. Import reads any host over SSH (`import_assets {
+  host_alias }`), so a hub imports from the machines it manages. A resource
+  file you add is read on this machine and its bytes sent to the hub. For
+  any other client the hub answers `E_FORBIDDEN`
   and the tab is a read-only overview: the hub's catalog through
   `list_assets` (each asset's per-host state, unmanaged assets, problems)
   and a Scan hosts button through `scan_assets`, with the grant command to
@@ -2604,7 +2695,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 214 commands, 135 route to a hub tool, 1 routes except for one argument shape, 56 refuse, and 22 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 221 commands, 143 route to a hub tool, 1 routes except for one argument shape, 55 refuse, and 22 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -2614,7 +2705,6 @@ Of the 214 commands, 135 route to a hub tool, 1 routes except for one argument s
 | `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `assign_host_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `assign_tracker_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
-| `catalog_import_host` | an import reads the Claude config of host `local`, which on a hub is the hub's own machine, not this one; call import_assets on the hub, or import on the machine whose ~/.claude you mean |
 | `catalog_spawn_author_session` | an author session is a Claude session started in the catalog's checkout on the machine that owns it, and the hub has no tool that starts one; edit the assets from this panel, or start a session in the checkout on the hub's machine |
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
 | `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |

@@ -4,7 +4,7 @@
     catalog, catalogConfig, loadCatalogConfig, configureCatalog, loadCatalog, loadAssets, loadInventory, scanHosts,
     planSync, lastSync, lastSyncRun,
     commitPending, pushCatalog, repoStatus, repoStatusStore,
-    type HostScanResult, type AssetInventoryRow, type SyncPlan, type SyncRunSummary, type AssetKind,
+    type HostScanResult, type SyncPlan, type SyncRunSummary, type AssetKind, type AssetIdentity,
   } from './assets';
   import { hosts } from './hosts';
   import AssetList from './AssetList.svelte';
@@ -16,7 +16,8 @@
   import LintAllDialog from './LintAllDialog.svelte';
   import PromptDialog from './PromptDialog.svelte';
   import { authorSessionOpened, clearAuthorSessionOpened } from './AuthorSessionDialog.svelte';
-  import { hubStatus, hubBlock, ownsTheFleet } from './hub';
+  import { hubStatus, hubBlock, hubActionBlocked, ownsTheFleet } from './hub';
+  import { hubConnection } from './hub_connection';
 
   let { visible }: { visible: boolean } = $props();
 
@@ -34,9 +35,18 @@
   let scanResults = $state<HostScanResult[] | null>(null);
   let showProblems = $state(false);
   let showImport = $state(false);
+  // Preset from clicking Import next to an unmanaged identity in AssetList:
+  // which host to read and which single asset to limit the import to. Reset
+  // to null (the dialog's own "local" / "everything" defaults) by the
+  // toolbar's own Import button and whenever the dialog closes.
+  let importPreset = $state<{ host: string; only: string[] } | null>(null);
   let filter = $state('');
   let selected = $state<{ kind: string; name: string } | null>(null);
   let syncPlan = $state<SyncPlan | null>(null);
+  // The filter `syncPlan` was computed from, so SyncPlanDialog's "Plan
+  // anyway" (on a skipped-unlayered host) can re-plan with the same scope
+  // plus allowUnlayered.
+  let syncFilter = $state<{ hostAlias?: string; kind?: string; name?: string }>({});
   // The most recent plan computed (kept after the dialog closes) so the
   // SecretsPanel can offer the names its blocked/missing-secret actions
   // named, without recomputing a plan just to open it.
@@ -111,13 +121,18 @@
     if (untrack(() => hubAdmin) !== 'idle') return;
     void probeHubAdmin();
   });
-  // A configured hub this launch cannot use: nothing here can work.
-  const hubUnavailable = $derived($hubStatus.unavailable ? hubBlock('catalog_import_host', $hubStatus) : null);
+  // A configured hub this launch cannot use: nothing here can work. Any
+  // still-refusing catalog key works here — `hubBlock` returns the
+  // "unavailable" sentence regardless of which action it's asked about.
+  const hubUnavailable = $derived($hubStatus.unavailable ? hubBlock('catalog_spawn_author_session', $hubStatus) : null);
   // Not the full panel: the hub's read-only overview until (and unless) the
   // probe says this client may manage the catalog.
   const catalogBlocked = $derived(hubUnavailable !== null || (hubOverview && hubAdmin !== 'granted'));
-  // Import and "Open in session" stay this machine's (see their REASONS).
-  const importBlocked = $derived(hubBlock('catalog_import_host', $hubStatus));
+  // Import now routes to the hub (Task 6: any host, over SSH), so it is
+  // blocked only while the live connection to the hub is down — same check
+  // every other routed mutation gates on. "Open in session" stays this
+  // machine's (see its REASONS entry).
+  const importBlocked = $derived(hubActionBlocked('catalog_import_host', $hubStatus, $hubConnection));
 
   // ...but the list itself, and the scan that refreshes it, route for every
   // paired client: the read-only overview of the hub's catalog — which asset
@@ -198,8 +213,15 @@
     busy = '';
   }
 
-  function onImportUnmanaged(_row: AssetInventoryRow) {
+  // The identity clicked drives which host/asset the dialog opens preset to:
+  // `local` if the identity is on `local` (even alongside other hosts —
+  // reading this machine needs no SSH hop), else its first host; `only`
+  // limits the import to just this one asset rather than everything on
+  // that host.
+  function onImportUnmanaged(identity: AssetIdentity) {
     if (importBlocked) { error = importBlocked; return; }
+    const host = identity.hosts.some((h) => h.host_alias === 'local') ? 'local' : (identity.hosts[0]?.host_alias ?? 'local');
+    importPreset = { host, only: [`${identity.kind}:${identity.name}`] };
     showImport = true;
   }
 
@@ -253,11 +275,17 @@
 
   async function requestSync(filter: { hostAlias?: string; kind?: string; name?: string }) {
     busy = 'plan'; error = null;
+    syncFilter = filter;
     const r = await planSync(filter);
     busy = '';
     if (!r.ok) { error = r.error.message; return; }
     syncPlan = r.value;
     lastPlan = r.value;
+  }
+
+  function onSyncReplanned(p: SyncPlan) {
+    syncPlan = p;
+    lastPlan = p;
   }
 
   function onSyncApplied(summary: SyncRunSummary) {
@@ -361,7 +389,7 @@
       <span class="head" data-testid="assets-head">@ {shortHead || '—'}</span>
       <button onclick={pull} disabled={busy !== ''}>{busy === 'pull' ? 'Pulling…' : 'Pull'}</button>
       <button onclick={scan} disabled={busy !== ''} data-testid="assets-scan">{busy === 'scan' ? 'Scanning…' : 'Scan hosts'}</button>
-      <button onclick={() => (showImport = true)} disabled={busy !== '' || importBlocked !== null} title={importBlocked ?? ''} data-testid="assets-import">Import from host</button>
+      <button onclick={() => { importPreset = null; showImport = true; }} disabled={busy !== '' || importBlocked !== null} title={importBlocked ?? ''} data-testid="assets-import">Import from host</button>
       <button onclick={() => requestSync({})} disabled={busy !== ''} data-testid="assets-sync">{busy === 'plan' ? 'Planning…' : 'Sync'}</button>
       <button onclick={() => (showSecrets = true)} disabled={busy !== ''} data-testid="assets-secrets">Secrets</button>
       <button onclick={() => (showNewAsset = true)} disabled={busy !== ''} data-testid="assets-new">New asset</button>
@@ -433,15 +461,22 @@
     </div>
   {/if}
   {#if showImport}
-    <ImportDialog onclose={() => (showImport = false)} ondone={() => { showImport = false; reload(false); void repoStatus(); }} />
+    <ImportDialog
+      host={importPreset?.host ?? 'local'}
+      only={importPreset?.only ?? []}
+      onclose={() => { showImport = false; importPreset = null; }}
+      ondone={() => { showImport = false; importPreset = null; reload(false); void repoStatus(); }}
+    />
   {/if}
   {#if syncPlan}
     <SyncPlanDialog
       plan={syncPlan}
+      filter={syncFilter}
       onclose={() => (syncPlan = null)}
       onapplied={onSyncApplied}
       onopensecrets={() => (showSecrets = true)}
       onapplying={(a) => (busy = a ? 'apply' : '')}
+      onreplanned={onSyncReplanned}
     />
   {/if}
   {#if showSecrets}
