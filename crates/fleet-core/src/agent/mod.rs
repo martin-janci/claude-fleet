@@ -16,10 +16,6 @@
 //! frames coming back. That is what lets the whole transport be tested
 //! without a socket.
 
-// A real hub and agent over a socket: the agent is Unix-only.
-#[cfg(unix)]
-#[cfg(test)]
-mod e2e;
 #[cfg(test)]
 pub mod fake;
 pub mod registry;

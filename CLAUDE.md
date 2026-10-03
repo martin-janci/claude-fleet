@@ -12,7 +12,8 @@ The Rust side is a workspace: `crates/fleet-core` (Tauri-free service/store/SSH/
 `crates/fleet-hub` (headless daemon, see `docs/hub.md`), `crates/fleet-proto` (the
 hub/agent frame types, shared by both ends), `crates/fleet-agent` (the agent binary
 for hosts the hub cannot reach — depends on `fleet-proto` only, never `fleet-core`),
-`src-tauri` (the desktop app).
+`crates/fleet-agent-e2e` (tests only: the hub against the real agent over a socket,
+through fleet-core's `testkit` feature), `src-tauri` (the desktop app).
 
 ## Build & test
 
@@ -47,12 +48,16 @@ Rules:
   fleet-check` answers that 2–6× faster. Build only when you need a binary.
 - Do not narrow with `-p <crate>` in the inner loop; narrow with a test filter.
   Keep `-p` for the cases below that need a binary or a different feature set.
-- Edits that rebuild fleet-core's tests although they look unrelated:
-  `crates/fleet-agent/**` (a fleet-core dev-dependency), `src-tauri/src/lib.rs`,
-  `src-tauri/src/commands/sessions.rs`, `docs/control-api.md`, `docs/updates.md`
-  and `src/lib/{events,moveProgress,attention,work_keys,fleet_settings}.ts`
-  (embedded by fleet-core tests). `src/lib/names.json`, `tools/ag/**` and two
-  `skills/*/SKILL.md` are embedded in fleet-core itself.
+- A test that checks a file outside its crate (a `src/lib/*.ts` mirror,
+  `src-tauri/src/lib.rs`, a `docs/*.md` guide) reads it when it runs
+  (`repo_files::read` in fleet-core), never with `include_str!`: a compiled-in
+  copy makes every edit to that file recompile the whole test target (~26 s
+  for fleet-core's, against ~0.4 s). Likewise fleet-core takes no
+  dev-dependency on a workspace crate it does not already depend on; a test
+  that needs one lives in a crate of its own, as `crates/fleet-agent-e2e`
+  does. `src/lib/names.json`,
+  `tools/ag/**` and two `skills/*/SKILL.md` are embedded in fleet-core itself,
+  so editing them does recompile it.
 - `pnpm tauri dev` / `pnpm tauri build` and `cargo build -p fleet-hub` use other
   feature sets. Run them when you need them; in a cloud session (no display,
   ~30 GB disk) do not run the Tauri ones at all.

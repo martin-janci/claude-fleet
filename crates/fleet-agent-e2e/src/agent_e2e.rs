@@ -13,11 +13,12 @@
 //! agent's backoff "sleep" is a yield. Every wait is on an observable
 //! condition, bounded by [`PATIENCE`] only to turn a hang into a failure.
 
-use super::registry::{AgentRegistry, ConnId};
-use super::ws::AgentWsState;
-use crate::ipc_error::codes;
-use crate::ssh::{SshClient, SshExec};
-use crate::store::Store;
+use fleet_core::agent::registry::{AgentRegistry, ConnId};
+use fleet_core::agent::ws::AgentWsState;
+use fleet_core::events::NoopEventBus;
+use fleet_core::ipc_error::codes;
+use fleet_core::ssh::{SshClient, SshExec};
+use fleet_core::store::Store;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -43,10 +44,20 @@ struct Hub {
     registry: Arc<AgentRegistry>,
     /// Held so the manual beat source stays open; never fired.
     _beats: Arc<tokio::sync::watch::Sender<u64>>,
+    /// Holds the hub's database file for as long as the hub runs.
+    _db: tempfile::TempDir,
 }
 
 async fn hub() -> Hub {
-    let store = Store::open_in_memory().unwrap();
+    // The hub reports its version in the agent handshake, and outside
+    // fleet-core's own tests nothing declares one for it: this test is the
+    // embedder. Not a plausible release number, like fleet-core's own test
+    // sentinel.
+    fleet_core::app_version::set("0.0.0-fleet-agent-e2e");
+    // A database file, as a hub has: `Store::open_in_memory` is fleet-core's
+    // own test helper, and this crate sees only fleet-core's public API.
+    let db = tempfile::tempdir().unwrap();
+    let store = Store::open_with_bus(&db.path().join("state.db"), Arc::new(NoopEventBus)).unwrap();
     // `laptop` is an agent host with a token; `desk` is an agent host that
     // never gets an agent.
     for alias in ["laptop", "desk"] {
@@ -65,10 +76,10 @@ async fn hub() -> Hub {
     // this fixture.
     let state = AgentWsState::new(Some((Arc::clone(&registry), Arc::clone(&store))))
         .with_manual_beats(Arc::clone(&beats));
-    let app = crate::mcp::test_app(store, MASTER, state);
+    let app = fleet_core::mcp::test_app(store, MASTER, state);
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
-    crate::rt::spawn(async move {
+    fleet_core::rt::spawn(async move {
         let _ = axum::serve(
             listener,
             app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -80,6 +91,7 @@ async fn hub() -> Hub {
         ssh,
         registry,
         _beats: beats,
+        _db: db,
     }
 }
 
@@ -228,7 +240,7 @@ async fn hub_and_agent_talking_over_a_real_socket() {
     assert_eq!(out.stdout, b"hello\n");
     // The service layer's shape, a quoted script (-c, not -lc: a login
     // profile on the machine running the test must not reach the output).
-    let script = crate::shell::quote("echo \"$0 in $(pwd -P)\"; exit 3");
+    let script = fleet_core::shell::quote("echo \"$0 in $(pwd -P)\"; exit 3");
     let out = SshExec::run(&hub.ssh, "laptop", &["bash", "-c", &script], PATIENCE)
         .await
         .unwrap();

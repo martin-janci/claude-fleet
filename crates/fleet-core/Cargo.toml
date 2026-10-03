@@ -26,6 +26,12 @@ e2e = []
 # its neighbours. The models add about 45 MB to a binary, so only
 # `fleet-hub` turns this on; the desktop bundle never carries them.
 nl-detect = ["dep:lingua"]
+# Test-only: the few test helpers another crate's tests need
+# (`mcp::test_app`, `AgentWsState::with_manual_beats`,
+# `AgentRegistry::live_conn`). Only `crates/fleet-agent-e2e` turns it on, as
+# a dev-dependency, so no build of a binary ever has it. Never add it to
+# `default`.
+testkit = []
 
 [dependencies]
 sysinfo = "0.33"
@@ -132,10 +138,3 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 # `ws` feature already pulls in for the server half, so it adds no package to
 # `Cargo.lock` — keep the two in step when axum moves.
 tokio-tungstenite = "0.29"
-
-# The REAL agent, for agent::e2e: the hub and a fleet-agent talking over a
-# loopback socket in one process. A dev-dependency only, and in this
-# direction only — fleet-agent never depends on fleet-core. Unix only, like
-# the agent itself and the e2e module that uses it.
-[target.'cfg(unix)'.dev-dependencies]
-fleet-agent = { path = "../fleet-agent" }
