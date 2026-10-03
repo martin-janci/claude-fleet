@@ -454,6 +454,54 @@ pub fn push(root: &Path) -> Result<(), IpcError> {
     git(root, &["push"]).map(|_| ())
 }
 
+/// One asset straight from the checkout (Assets M4: a card's scope edit and
+/// take_host read the file just written, before any reload).
+pub fn read_asset(root: &Path, kind: Kind, name: &str) -> Result<Asset, IpcError> {
+    let yaml = asset_path(root, kind, name);
+    load_one(root, kind, &yaml, name)
+        .map_err(|m| IpcError::new(E_CATALOG_PARSE, format!("{}: {m}", rel(root, &yaml))))
+}
+
+/// Whether the working tree has nothing to commit — untracked files count
+/// (Rulings R11: what `reset_hard` would delete must not be someone's work).
+pub fn is_clean(root: &Path) -> Result<bool, IpcError> {
+    Ok(git(root, &["status", "--porcelain"])?.trim().is_empty())
+}
+
+/// Put the tree back at `rev`, deleting what is untracked but never what git
+/// ignores (`clean -fd`, no `-x`). Rulings R12 / PF7: only after a failed
+/// apply or undo that started from a tree [`is_clean`] passed, so all it
+/// can drop is what that apply itself wrote.
+pub fn reset_hard(root: &Path, rev: &str) -> Result<(), IpcError> {
+    git(root, &["reset", "-q", "--hard", rev])?;
+    git(root, &["clean", "-q", "-fd"])?;
+    Ok(())
+}
+
+/// `git revert` one commit (Assets M4 undo, SB5), with the synthetic
+/// identity `commit` falls back to. A conflict aborts the revert, leaving
+/// the tree as it was, and is the error. Answers the new HEAD.
+pub fn revert(root: &Path, sha: &str) -> Result<String, IpcError> {
+    if sha.is_empty() || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(IpcError::new(E_INVALID, format!("not a commit id: {sha}")));
+    }
+    let mut args: Vec<&str> = Vec::new();
+    if !has_identity(root) {
+        args.extend([
+            "-c",
+            "user.name=claude-fleet",
+            "-c",
+            "user.email=fleet@localhost",
+        ]);
+    }
+    args.extend(["revert", "--no-edit", sha]);
+    if let Err(e) = git(root, &args) {
+        let _ = git(root, &["revert", "--abort"]);
+        return Err(e);
+    }
+    head(root)
+}
+
 pub fn asset_path(root: &Path, kind: Kind, name: &str) -> PathBuf {
     if kind.is_folder() {
         root.join(kind.dir()).join(name).join("asset.yaml")
@@ -1664,5 +1712,70 @@ mod tests {
             "{:?}",
             cat.problems
         );
+    }
+
+    /// Assets M4: the apply engine's git steps — a clean check that counts
+    /// untracked files, a reset that drops this apply's commit and strays,
+    /// and a revert that keeps history and takes only a hex sha.
+    #[test]
+    fn is_clean_reset_hard_and_revert() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let base = commit(root, "init").unwrap();
+        assert!(is_clean(root).unwrap());
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        assert!(!is_clean(root).unwrap(), "an untracked file is not clean");
+        stage_paths(root, &[]).unwrap();
+        commit(root, "add a").unwrap();
+        std::fs::write(root.join("stray.txt"), "x\n").unwrap();
+        reset_hard(root, &base).unwrap();
+        assert_eq!(head(root).unwrap(), base);
+        assert!(is_clean(root).unwrap());
+        assert!(!root.join("a.txt").exists() && !root.join("stray.txt").exists());
+
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let added = commit(root, "add a").unwrap();
+        let reverted = revert(root, &added).unwrap();
+        assert_ne!(reverted, added);
+        assert!(!root.join("a.txt").exists());
+        assert!(
+            revert(root, "--help").is_err(),
+            "only a hex sha reaches git"
+        );
+    }
+
+    /// The failure reset never deletes what git ignores (controller ruling
+    /// on R12: `clean -fd`, never `-x`).
+    #[test]
+    fn reset_hard_keeps_ignored_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(root.join(".gitignore"), "*.local\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let base = commit(root, "init").unwrap();
+        std::fs::write(root.join("keep.local"), "mine\n").unwrap();
+        assert!(is_clean(root).unwrap(), "an ignored file is not a change");
+        reset_hard(root, &base).unwrap();
+        assert!(root.join("keep.local").is_file());
+    }
+
+    #[test]
+    fn read_asset_reads_one_asset_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = Asset::from_yaml(None, "kind: skill\nname: w\ndescription: d\n").unwrap();
+        write_asset(dir.path(), &a, false).unwrap();
+        assert_eq!(
+            read_asset(dir.path(), Kind::Skill, "w")
+                .unwrap()
+                .header
+                .name,
+            "w"
+        );
+        assert!(read_asset(dir.path(), Kind::Skill, "nope").is_err());
     }
 }
