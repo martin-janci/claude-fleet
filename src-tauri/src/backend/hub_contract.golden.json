@@ -1,5 +1,5 @@
 {
-  "revision": 6,
+  "revision": 7,
   "types": {
     "AccountRow": [
       "display_name",
@@ -346,6 +346,14 @@
       "project_id",
       "worktrees"
     ],
+    "MyGrants": [
+      "grants",
+      "person_id"
+    ],
+    "MyGrants.grants": [
+      "level",
+      "session_id"
+    ],
     "ProjectRow": [
       "adopted",
       "base_path",
@@ -411,6 +419,15 @@
       "detail",
       "id",
       "kind",
+      "session_id"
+    ],
+    "SessionGrantView": [
+      "granted_at",
+      "granted_by",
+      "level",
+      "person_display_name",
+      "person_id",
+      "person_name",
       "session_id"
     ],
     "SessionRow": [

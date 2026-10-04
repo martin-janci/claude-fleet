@@ -529,20 +529,16 @@ impl FleetTools {
         )
         .await
         .map_err(to_mcp_err)?;
-        // A blank pane (fresh/cleared session) yields empty output. Returning it
-        // verbatim would put an empty text block into the caller's conversation;
-        // say so explicitly instead. `text_content` is the backstop for any
-        // residual whitespace-only capture.
-        if text.trim().is_empty() {
-            return Ok(CallToolResult::success(vec![text_content(
-                "(session pane is empty — nothing to capture)",
-            )]));
-        }
+        // A blank pane (fresh/cleared session) yields empty output, and a
+        // capture longer than `max_lines` is cut with a note — both in
+        // `sessions::shape_capture`, which the desktop's routed
+        // `capture_session` command calls too, so one watcher's pane does not
+        // read differently from another's.
+        //
         // Plain text, not `ok_json`: a JSON-encoded string turns every newline
         // into `\n` and doubles the token cost of a pane dump for no benefit.
-        let max = p.max_lines.unwrap_or(CAPTURE_DEFAULT_MAX_LINES);
         Ok(CallToolResult::success(vec![text_content(
-            capture_response(&text, max),
+            sessions::shape_capture(&text, p.max_lines),
         )]))
     }
 

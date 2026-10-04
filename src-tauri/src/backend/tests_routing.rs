@@ -1329,6 +1329,57 @@ fn routed_read_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // ── multi-user M1 (T13): the watcher's pane, and the two reads ──
+        //
+        // `capture_session` is the WATCHER's view of a live pane, which is
+        // the only one sharing gives: `pty_open` would be a direct SSH into
+        // the owner's pane that the hub could neither refuse nor revoke. Its
+        // two optional arguments are passed as `Some` here on purpose — a
+        // mapping that dropped them would still have "worked", with the
+        // watcher silently looking at the visible pane and a different cap.
+        (
+            "capture_session",
+            "capture_session",
+            json!({ "session_id": 42, "scrollback_lines": 400, "max_lines": 120 }),
+            "claude> working on the ticket\n",
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::capture_session(
+                    b,
+                    commands::sessions::CaptureSessionArgs {
+                        session_id: 42,
+                        scrollback_lines: Some(400),
+                        max_lines: Some(120),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "session_access",
+            "session_access",
+            json!({ "session_id": 42 }),
+            r#"[{"session_id":42,"person_id":3,"person_name":"jane","level":"watch","granted_by":1,"granted_at":1700000000}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_access(
+                    b,
+                    commands::sessions::SessionAccessArgs { session_id: 42 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // No arguments, and the empty object is the assertion: "whose grants"
+        // is the CONNECTION's own person on the hub, never a parameter this
+        // side could point at someone else.
+        (
+            "my_grants",
+            "my_grants",
+            json!({}),
+            r#"{"person_id":1,"grants":[{"session_id":42,"level":"drive"}]}"#,
+            Box::new(|b, s, _| block_on(commands::sessions::routed::my_grants(b, s)).map(|_| ())),
+        ),
     ]
 }
 
@@ -2675,6 +2726,64 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // ── multi-user M1 (T13): the three sharing mutations ─────────────
+        //
+        // `level` crosses as the string the user chose and is validated by
+        // the store, so this case proves the field arrives at all; `narrow`
+        // carries no level BECAUSE there is only one direction a grant moves
+        // (spec §4.3 invariant 3), and no tool raises one.
+        (
+            "session_share",
+            "session_share",
+            json!({ "session_id": 42, "person": "jane", "level": "drive" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_share(
+                    b,
+                    commands::sessions::SessionShareArgs {
+                        session_id: 42,
+                        person: "jane".into(),
+                        level: "drive".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "session_unshare",
+            "session_unshare",
+            json!({ "session_id": 42, "person": "jane" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_unshare(
+                    b,
+                    commands::sessions::SessionGrantArgs {
+                        session_id: 42,
+                        person: "jane".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "session_narrow",
+            "session_narrow",
+            json!({ "session_id": 42, "person": "jane" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_narrow(
+                    b,
+                    commands::sessions::SessionGrantArgs {
+                        session_id: 42,
+                        person: "jane".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
     ]
 }
 
@@ -3018,6 +3127,135 @@ fn standalone_reads_still_come_from_the_local_store() {
     ))
     .expect("history");
     assert!(events.is_empty());
+}
+
+/// Multi-user M1 (T13): the standalone arm of the sharing commands.
+///
+/// The thing under test is the one decision this layer makes that the hub
+/// makes differently — **who the caller is**. On a hub the person comes off
+/// the connection; standalone there is no connection, so the `None` arm has
+/// to resolve the fleet's own personal owner (migration 094). Getting that
+/// wrong is not a visible error: `person_id: null` is exactly what
+/// `src/lib/access.ts` reads as "we are nobody", and a client that is nobody
+/// holds no grants, so every session shared with this person would quietly
+/// stop being reachable while nothing failed.
+///
+/// A session row cannot be seeded from this crate (`Store::upsert_session` is
+/// `#[cfg(test)]` inside fleet-core), so the grant list is empty here by
+/// construction; `store/session_grants.rs` owns the filled case. What this
+/// proves is the identity, and that the local path ran at all.
+#[test]
+fn the_standalone_sharing_arm_is_this_fleets_own_person() {
+    let (_dir, st) = store();
+    let local = FleetBackend::local();
+
+    let owner = st
+        .lock()
+        .unwrap()
+        .personal_owner_id()
+        .unwrap()
+        .expect("a fresh store has a personal owner (migration 094)");
+
+    let mine = block_on(commands::sessions::routed::my_grants(&local, &st)).expect("my_grants");
+    assert_eq!(
+        mine.person_id,
+        Some(owner),
+        "the standalone arm must answer the fleet's own person; None here reads as \
+         `we are nobody` on the client and silently drops every grant"
+    );
+    assert!(mine.grants.is_empty(), "a fresh store has no grants");
+
+    // The local path ran, rather than a hub answering: `person_named` is the
+    // local store's own refusal for a name nobody holds.
+    let err = block_on(commands::sessions::routed::session_share(
+        &local,
+        commands::sessions::SessionShareArgs {
+            session_id: 1,
+            person: "nobody-by-that-name".into(),
+            level: "watch".into(),
+        },
+        &st,
+    ))
+    .expect_err("sharing with a person this fleet does not know must refuse");
+    assert_eq!(
+        err.code,
+        fleet_core::ipc_error::codes::E_NOTFOUND,
+        "{err:?}"
+    );
+
+    // And the owner's own grant list for a session that does not exist is
+    // empty, not an error and not someone else's.
+    let grants = block_on(commands::sessions::routed::session_access(
+        &local,
+        commands::sessions::SessionAccessArgs { session_id: 1 },
+        &st,
+    ))
+    .expect("session_access");
+    assert!(grants.is_empty());
+}
+
+/// Multi-user M1 (T13): **every sharing command addresses its session by ROW
+/// ID only.**
+///
+/// The `host_alias` + `tmux_name` pair every other session command accepts is
+/// reusable — the next session started on a host can take a dead one's tmux
+/// name — so a grant resolved by name could land on a different row than the
+/// one the owner was looking at. The tools refuse the pair for exactly this
+/// reason (`mcp/tools/sharing.rs`'s header); this holds the desktop's
+/// argument structs to the same shape, because an added field here would be
+/// serialised straight through `route` to a tool that would then have to
+/// start ignoring it.
+#[test]
+fn the_sharing_commands_address_a_session_by_id_and_nothing_reusable() {
+    use commands::sessions::{
+        CaptureSessionArgs, SessionAccessArgs, SessionGrantArgs, SessionShareArgs,
+    };
+
+    fn keys<T: serde::Serialize>(v: &T) -> BTreeSet<String> {
+        match serde_json::to_value(v).expect("the args must serialise") {
+            Value::Object(m) => m.keys().cloned().collect(),
+            other => panic!("expected an object on the wire, got {other}"),
+        }
+    }
+    fn want(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    assert_eq!(
+        keys(&SessionShareArgs {
+            session_id: 1,
+            person: "jane".into(),
+            level: "watch".into(),
+        }),
+        want(&["session_id", "person", "level"])
+    );
+    assert_eq!(
+        keys(&SessionGrantArgs {
+            session_id: 1,
+            person: "jane".into(),
+        }),
+        want(&["session_id", "person"])
+    );
+    assert_eq!(
+        keys(&SessionAccessArgs { session_id: 1 }),
+        want(&["session_id"])
+    );
+    assert_eq!(
+        keys(&CaptureSessionArgs {
+            session_id: 1,
+            scrollback_lines: None,
+            max_lines: None,
+        }),
+        want(&["session_id", "scrollback_lines", "max_lines"])
+    );
+
+    // A client that sends the reusable pair anyway gets it DROPPED, not
+    // forwarded: the structs have no field for it, so it never reaches a tool.
+    let a: SessionGrantArgs = serde_json::from_value(
+        json!({ "session_id": 1, "person": "jane", "host_alias": "trn", "tmux_name": "demo" }),
+    )
+    .expect("unknown keys are ignored, as every args struct in this file does");
+    assert_eq!(keys(&a), want(&["session_id", "person"]));
 }
 
 /// The work-link commands answer from the local store when standalone.

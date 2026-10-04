@@ -2209,9 +2209,14 @@ fn resolve_row_and_gate_returns_turn_seq_for_the_completion_signal() {
 }
 
 // ---- response caps ----
+//
+// The capture shaping moved to `service::sessions` so the desktop's routed
+// `capture_session` command shares it (multi-user M1, T13); these call it
+// there, by its full path, rather than through a re-export nothing else uses.
 
 #[test]
 fn tail_lines_keeps_last_n_and_reports_total() {
+    use crate::service::sessions::tail_lines;
     let text = "a\nb\nc\nd";
     assert_eq!(tail_lines(text, 2), ("c\nd".to_string(), 4));
     assert_eq!(tail_lines(text, 10), (text.to_string(), 4));
@@ -2220,6 +2225,7 @@ fn tail_lines_keeps_last_n_and_reports_total() {
 
 #[test]
 fn capture_response_notes_truncation_only_when_it_drops_lines() {
+    use crate::service::sessions::capture_response;
     let text = "l1\nl2\nl3";
     assert_eq!(capture_response(text, 3), text);
     let cut = capture_response(text, 2);
@@ -2229,9 +2235,22 @@ fn capture_response_notes_truncation_only_when_it_drops_lines() {
     assert!(!cut.contains("\\n"));
 }
 
+/// The ONE shaper both callers use: the tool above and
+/// `commands::sessions::capture_session`'s standalone arm.
+#[test]
+fn shape_capture_is_what_both_callers_get() {
+    use crate::service::sessions::{shape_capture, CAPTURE_EMPTY_PANE};
+    assert_eq!(shape_capture("   \n\t\n", None), CAPTURE_EMPTY_PANE);
+    assert_eq!(shape_capture("l1\nl2", None), "l1\nl2");
+    let cut = shape_capture("l1\nl2\nl3", Some(2));
+    assert!(cut.starts_with("[capture_session: showing the last 2 of 3 lines"));
+    // `0` is "no cap", not "nothing".
+    assert_eq!(shape_capture("l1\nl2\nl3", Some(0)), "l1\nl2\nl3");
+}
+
 #[test]
 fn capture_default_cap_matches_docs() {
-    assert_eq!(CAPTURE_DEFAULT_MAX_LINES, 200);
+    assert_eq!(crate::service::sessions::CAPTURE_DEFAULT_MAX_LINES, 200);
     assert_eq!(REPO_LOG_DEFAULT_LIMIT, 50);
 }
 

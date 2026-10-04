@@ -88,9 +88,13 @@ pub(super) fn tool_error_result(e: McpError) -> Result<CallToolResult, McpError>
 /// asks for more, but an MCP caller gets a token-capped page by default.
 pub(super) const REPO_LOG_DEFAULT_LIMIT: u32 = 50;
 
-/// Default `max_lines` for `capture_session`: the tail of the pane that is
-/// returned when the caller does not choose a cap.
-pub(super) const CAPTURE_DEFAULT_MAX_LINES: u32 = 200;
+// `capture_session`'s cap, its blank-pane text and its truncation note moved
+// to the service layer, beside `capture_session_output`
+// (`sessions::shape_capture`), because the desktop's routed `capture_session`
+// command (multi-user M1, T13) has a standalone arm that must shape a pane
+// exactly as this server does. Nothing here wraps them any more; the tool
+// calls `sessions::shape_capture` and the tests that pin the shaping call
+// the service functions by their full path.
 
 /// Default `limit` for `list_worktrees`. A fleet accumulates worktrees far
 /// faster than sessions (every branch of every project on every host), and an
@@ -98,35 +102,6 @@ pub(super) const CAPTURE_DEFAULT_MAX_LINES: u32 = 200;
 /// whole tool surface. The result carries `total`, so a caller can see it is
 /// holding a page and narrow with `project_id` / `host_alias`.
 pub(super) const WORKTREES_DEFAULT_LIMIT: usize = 100;
-
-/// Keep only the last `max` lines of `text`. Returns the kept text plus the
-/// total line count so the caller can say how much was dropped. `max == 0`
-/// means no cap.
-pub(super) fn tail_lines(text: &str, max: u32) -> (String, usize) {
-    let lines: Vec<&str> = text.lines().collect();
-    let total = lines.len();
-    if max == 0 || total <= max as usize {
-        return (text.to_string(), total);
-    }
-    (lines[total - max as usize..].join("\n"), total)
-}
-
-/// Render a pane capture for the caller: the last `max` lines, prefixed with
-/// a truncation note when lines were dropped.
-pub(super) fn capture_response(text: &str, max: u32) -> String {
-    let (kept, total) = tail_lines(text, max);
-    if total > kept.lines().count() {
-        format!(
-            "[capture_session: showing the last {} of {} lines — raise max_lines \
-             (0 = no cap) to see more]\n{}",
-            kept.lines().count(),
-            total,
-            kept
-        )
-    } else {
-        kept
-    }
-}
 
 /// Build an MCP tool error carrying an `E_*` code and optional structured data.
 pub(super) fn mcp_err(

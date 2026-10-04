@@ -619,6 +619,42 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     put("WorktreeOccupancy", wire_keys(&sample_occupancy()));
     put("HostWorktrees", wire_keys(&sample_host_worktrees()));
     put("GithubRepo", wire_keys(&sample_github_repo()));
+    // Multi-user M1 (T13): the two answers the sharing commands deserialise.
+    // `SessionGrantView`'s three `Option`s are `skip_serializing_if`, so the
+    // sample fills every one — a key the hub stops sending is the ordinary
+    // "no grant row for that person" case, while a key it RENAMES is what
+    // this file exists to catch.
+    put(
+        "SessionGrantView",
+        wire_keys(&fleet_core::service::sessions::SessionGrantView {
+            session_id: 7,
+            person_id: Some(3),
+            person_name: Some("jane".into()),
+            person_display_name: Some("Jane Q".into()),
+            level: "watch".into(),
+            granted_by: 1,
+            granted_at: 1_700_000_000,
+        }),
+    );
+    // `person_id: None` is a caller that proves no person, which answers an
+    // EMPTY grant list — so the key must be present and null, not absent.
+    put(
+        "MyGrants",
+        wire_keys(&fleet_core::service::sessions::MyGrants {
+            person_id: Some(1),
+            grants: vec![fleet_core::service::sessions::MyGrant {
+                session_id: 7,
+                level: "drive".into(),
+            }],
+        }),
+    );
+    put(
+        "MyGrants.grants",
+        wire_keys(&fleet_core::service::sessions::MyGrant {
+            session_id: 7,
+            level: "drive".into(),
+        }),
+    );
     put(
         "WorktreeOccupant",
         wire_keys(&WorktreeOccupant {

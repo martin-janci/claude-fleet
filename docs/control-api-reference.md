@@ -736,6 +736,12 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::session_conversation`
 - `commands::sessions::session_tool_detail`
 - `commands::sessions::session_activity`
+- `commands::sessions::capture_session`
+- `commands::sessions::session_share`
+- `commands::sessions::session_unshare`
+- `commands::sessions::session_narrow`
+- `commands::sessions::session_access`
+- `commands::sessions::my_grants`
 - `commands::sessions::restart_session`
 - `commands::sessions::rewind_conversation`
 - `commands::sessions::send_prompt`

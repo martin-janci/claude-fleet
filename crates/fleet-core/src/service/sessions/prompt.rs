@@ -1060,6 +1060,64 @@ pub async fn capture_session_output(
     }
 }
 
+/// Default `max_lines` for a pane capture: the tail of the pane returned when
+/// the caller chooses no cap.
+///
+/// In the service layer rather than in `mcp/tools/support.rs`, where it and
+/// [`capture_response`] used to live, because the desktop's routed
+/// `capture_session` command has a standalone arm: with two copies of the
+/// shaping, a watcher's pane on a standalone desktop and the same pane
+/// through a hub would be capped differently and noted differently, and
+/// nothing would have failed. One implementation, both callers.
+pub const CAPTURE_DEFAULT_MAX_LINES: u32 = 200;
+
+/// The text a blank pane answers with. Returning the empty capture verbatim
+/// puts an empty block into an MCP caller's conversation and an empty box
+/// into the watcher's pane view; neither says "there is nothing on screen".
+pub const CAPTURE_EMPTY_PANE: &str = "(session pane is empty — nothing to capture)";
+
+/// Keep only the last `max` lines of `text`. Returns the kept text plus the
+/// total line count so the caller can say how much was dropped. `max == 0`
+/// means no cap.
+pub fn tail_lines(text: &str, max: u32) -> (String, usize) {
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    if max == 0 || total <= max as usize {
+        return (text.to_string(), total);
+    }
+    (lines[total - max as usize..].join("\n"), total)
+}
+
+/// Render a pane capture for the caller: the last `max` lines, prefixed with
+/// a truncation note when lines were dropped.
+pub fn capture_response(text: &str, max: u32) -> String {
+    let (kept, total) = tail_lines(text, max);
+    if total > kept.lines().count() {
+        format!(
+            "[capture_session: showing the last {} of {} lines — raise max_lines \
+             (0 = no cap) to see more]\n{}",
+            kept.lines().count(),
+            total,
+            kept
+        )
+    } else {
+        kept
+    }
+}
+
+/// One capture, shaped for whoever asked: [`CAPTURE_EMPTY_PANE`] for a blank
+/// pane, otherwise the last `max_lines` (default
+/// [`CAPTURE_DEFAULT_MAX_LINES`]) with [`capture_response`]'s note.
+///
+/// The MCP tool and the desktop command both end here, so the bytes a
+/// watcher reads do not depend on which of the two asked.
+pub fn shape_capture(text: &str, max_lines: Option<u32>) -> String {
+    if text.trim().is_empty() {
+        return CAPTURE_EMPTY_PANE.to_string();
+    }
+    capture_response(text, max_lines.unwrap_or(CAPTURE_DEFAULT_MAX_LINES))
+}
+
 #[cfg(test)]
 mod prompt_tests {
     use super::*;

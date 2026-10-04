@@ -434,6 +434,156 @@ pub async fn session_activity(
     routed::session_activity(&backend, args, &store, &ssh).await
 }
 
+// ── sharing a session, and the watcher's pane (multi-user M1, T13) ──────────
+//
+// Six commands, each routed to the hub tool T12 added for it, each argument
+// struct a field-for-field twin of that tool's params — which is what lets
+// them route at all (*parity or refusal*, in `backend::routing`'s header).
+//
+// **What is NOT here, and why.** `session_claim` has no desktop command:
+// parity fails on the CALLER, not the arguments — the tool is
+// `Access::HostToken`, and a desktop's client token can never satisfy it —
+// and spec §4.3 states the prohibition in words ("a UI 'claim' button for an
+// arbitrary org member is exactly what must not exist"). The operator claims
+// with `fleet-hub session claim <id> --person <name>`, or the agent in the
+// session claims through its own per-host token. There is likewise no
+// desktop `session_transcript`: the Conversation tab already reads four
+// routed, richer sources, and a second transcript path would be a second
+// thing to gate.
+//
+// **Sharing never confers a terminal** (spec §4.3 invariant 5), which is why
+// `capture_session` is here: a watcher gets a read-only pane SNAPSHOT, a
+// routed read the hub re-gates on every poll and can revoke between two of
+// them, where `pty_open` would be a direct SSH into the owner's pane that no
+// revoke could reach.
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct CaptureSessionArgs {
+    pub session_id: i64,
+    /// Scrollback rows above the visible pane; `None` = the visible pane.
+    /// Clamped by the service (`clamp_scrollback`), on either arm.
+    #[serde(default)]
+    pub scrollback_lines: Option<u32>,
+    /// Keep the last n lines; `None` = `CAPTURE_DEFAULT_MAX_LINES`, `0` = no
+    /// cap. A cut adds one note line.
+    #[serde(default)]
+    pub max_lines: Option<u32>,
+}
+
+/// A read-only snapshot of a session's tmux pane, as plain text.
+///
+/// Added for the WATCHER (multi-user M1, R5-e): this is what a `watch` grant
+/// gives back after the live terminal is taken away. The hub gates it per
+/// request at `Reach::Read`, so a revoked grant stops the next poll; the
+/// owner does not use it, they attach.
+///
+/// Errors: `E_NOTFOUND`, `E_INVALID_STATE` (no tmux pane), transport codes.
+#[tauri::command]
+pub async fn capture_session(
+    args: CaptureSessionArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<String, IpcError> {
+    routed::capture_session(&backend, args, &store, &ssh).await
+}
+
+/// `session_share`'s arguments — `SessionShareParams` field for field.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SessionShareArgs {
+    pub session_id: i64,
+    /// The recipient, by person name. There is no `org` recipient in M1 and
+    /// the store refuses one, so there is no field for it here.
+    pub person: String,
+    /// `watch` or `drive`. Passed through as the string the user chose: the
+    /// store is the one validator, so a level this build has never heard of
+    /// is refused there rather than silently coerced here.
+    pub level: String,
+}
+
+/// `session_unshare`'s and `session_narrow`'s arguments —
+/// `SessionGrantParams` field for field.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SessionGrantArgs {
+    pub session_id: i64,
+    pub person: String,
+}
+
+/// `session_access`'s arguments — `SessionAccessParams` field for field.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SessionAccessArgs {
+    pub session_id: i64,
+}
+
+/// Share a session you own with one person, at `watch` or `drive`.
+///
+/// Owner only, and the refusal is the store's own `WHERE owner_person_id =
+/// ?granter` on either arm — so the rule holds standalone, where no reach
+/// gate runs. Returns the session row for the optimistic patch.
+/// Errors: `E_NOTFOUND`, `E_FORBIDDEN`, `E_VALIDATE`, `E_EXISTS`.
+#[tauri::command]
+pub async fn session_share(
+    args: SessionShareArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::session_share(&backend, args, &store).await
+}
+
+/// Revoke one person's grant on a session you own. Owner only; the grant row
+/// is kept, revoked, for the audit trail.
+#[tauri::command]
+pub async fn session_unshare(
+    args: SessionGrantArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::session_unshare(&backend, args, &store).await
+}
+
+/// Lower one person's grant from `drive` to `watch`. Owner only.
+///
+/// There is deliberately no twin that raises one, here or on the hub or in
+/// the store: a grant moves downward only (spec §4.3 invariant 3), and
+/// widening is the owner revoking and sharing again.
+#[tauri::command]
+pub async fn session_narrow(
+    args: SessionGrantArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::session_narrow(&backend, args, &store).await
+}
+
+/// Who holds a live grant on a session you own — the Share sheet's list.
+///
+/// Owner only on the hub (`Reach::Own`, not `Read`: the answer names OTHER
+/// people, which is not part of what a `watch` grant promised).
+#[tauri::command]
+pub async fn session_access(
+    args: SessionAccessArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<sessions::SessionGrantView>, IpcError> {
+    routed::session_access(&backend, args, &store).await
+}
+
+/// Who this client is on this fleet, and every live grant TO it.
+///
+/// The one place a client learns its own person id: with each row's
+/// `owner_person_id` and `visibility` (which arrive on every row already) and
+/// T9's `grant:changed` to keep the set current, this is what
+/// `src/lib/access.ts` derives a row's access from. No arguments on purpose —
+/// "whose grants" is the connection's own identity, never an argument a
+/// caller could point at someone else.
+#[tauri::command]
+pub async fn my_grants(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<sessions::MyGrants, IpcError> {
+    routed::my_grants(&backend, &store).await
+}
+
 /// The routing, away from `tauri::State` so the tests can drive it.
 pub(crate) mod routed {
     use super::*;
@@ -805,6 +955,134 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.session_activity(args.session_id).await,
             None => sessions::session_activity(store, ssh, args.session_id).await,
+        }
+    }
+
+    // ── sharing, and the watcher's pane (multi-user M1, T13) ────────────────
+    //
+    // **The `None` arm of all six is the same service call the hub makes, not
+    // `E_UNSUPPORTED`.** Migration 086 gives a standalone fleet a personal
+    // owner, so ownership and grants are meaningful locally: the person
+    // behind a standalone window IS that owner (the rule `new_session`'s own
+    // `None` arm already applies), and the ordinary answer is "this is mine,
+    // shared with nobody".
+    //
+    // **The owner-only rule still holds on the standalone arm**, and not
+    // because this layer checks it: the three mutations go through the
+    // store's own statements, whose `WHERE` carries
+    // `sessions.owner_person_id = ?granter`, so a row that is not this
+    // person's is refused there. `hub_personal_owner` answering `None` (a
+    // fleet with no personal owner at all) is refused too —
+    // `sharing::require_granter` turns it into `E_FORBIDDEN` rather than
+    // letting a caller who proves no person write a grant.
+
+    pub async fn capture_session(
+        backend: &FleetBackend,
+        args: CaptureSessionArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<String, IpcError> {
+        match backend.hub() {
+            // `route_text`, not `route`: the tool answers a pane as prose,
+            // and a JSON-encoded string would turn every newline into `\n`.
+            Some(hub) => hub.route_text("capture_session", &args).await,
+            None => {
+                let text = sessions::capture_session_output(
+                    args.session_id,
+                    store,
+                    ssh,
+                    args.scrollback_lines,
+                )
+                .await?;
+                // The SAME shaper the tool uses, so a watcher's pane does not
+                // read differently on a standalone desktop: the blank-pane
+                // line and the truncation note are one implementation in
+                // `service::sessions`.
+                Ok(sessions::shape_capture(&text, args.max_lines))
+            }
+        }
+    }
+
+    pub async fn session_share(
+        backend: &FleetBackend,
+        args: SessionShareArgs,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("session_share", &args).await,
+            None => {
+                // Read the owner BEFORE taking the lock: `hub_personal_owner`
+                // takes it itself.
+                let granter = sessions::hub_personal_owner(store);
+                let s = lock(store)?;
+                sessions::share_session(&s, args.session_id, &args.person, &args.level, granter)
+            }
+        }
+    }
+
+    pub async fn session_unshare(
+        backend: &FleetBackend,
+        args: SessionGrantArgs,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("session_unshare", &args).await,
+            None => {
+                let granter = sessions::hub_personal_owner(store);
+                let s = lock(store)?;
+                sessions::unshare_session(&s, args.session_id, &args.person, granter)
+            }
+        }
+    }
+
+    pub async fn session_narrow(
+        backend: &FleetBackend,
+        args: SessionGrantArgs,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("session_narrow", &args).await,
+            None => {
+                let granter = sessions::hub_personal_owner(store);
+                let s = lock(store)?;
+                sessions::narrow_session_share(&s, args.session_id, &args.person, granter)
+            }
+        }
+    }
+
+    pub async fn session_access(
+        backend: &FleetBackend,
+        args: SessionAccessArgs,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<Vec<sessions::SessionGrantView>, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("session_access", &args).await,
+            None => {
+                // No reach gate on this arm, which is the standing rule for
+                // every standalone read in this file: a standalone desktop is
+                // `ViewScope::internal()`, the fleet's own reader, holding
+                // the sqlite file itself. The hub arm is where `Reach::Own`
+                // keeps one person's grant list away from another's device.
+                let s = lock(store)?;
+                sessions::session_access(&s, args.session_id)
+            }
+        }
+    }
+
+    pub async fn my_grants(
+        backend: &FleetBackend,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<sessions::MyGrants, IpcError> {
+        match backend.hub() {
+            // No arguments: the hub answers for the CONNECTION's own person.
+            Some(hub) => hub.route("my_grants", &serde_json::json!({})).await,
+            None => {
+                let who = sessions::hub_personal_owner(store);
+                let s = lock(store)?;
+                // `who == None` answers an EMPTY grant set, never every
+                // grant — `sharing::my_grants`' own first line.
+                sessions::my_grants(&s, who)
+            }
         }
     }
 

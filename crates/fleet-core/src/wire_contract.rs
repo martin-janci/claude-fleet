@@ -109,4 +109,29 @@
 //!   local-only, for the master or a paired client granted the catalog. A
 //!   revision-5 hub does not serve it, so even a granted desktop would open
 //!   the full Assets panel and fail every action with an unknown tool.
-pub const CONTRACT_REVISION: u32 = 6;
+//! - **7** — *five brand-new tools the desktop routes to.* Multi-user M1's
+//!   sharing surface: `session_share`, `session_unshare`, `session_narrow`,
+//!   `session_access` and `my_grants` become hub tools, and the desktop
+//!   routes a command to each of them instead of having no command at all.
+//!   A revision-6 hub serves none of the five, so a desktop paired with one
+//!   would draw the Share sheet and fail every button with an unknown tool —
+//!   and, worse than a failed button, `my_grants` is the ONE place a client
+//!   learns its own person id and its own grant set, so a hub that cannot
+//!   answer it leaves every watcher's reach unreadable (`src/lib/access.ts`
+//!   holds the previous answer rather than widening, which means a shared
+//!   session simply never becomes reachable). Refusing such a hub with the
+//!   skew banner says what to do; leaving it `InRange` would ship a Share
+//!   sheet that silently does nothing.
+//!
+//!   `capture_session` becomes a routed desktop command in the same release
+//!   and needs no bump of its own — the tool has existed on every hub since
+//!   long before this mechanism — but it is the reason the bump matters to a
+//!   WATCHER: sharing never confers a terminal, so the read-only pane
+//!   snapshot is the whole of what a `watch` grant gives back.
+//!
+//!   M1's new `SessionRow` fields (`owner_person_id`, `visibility`) are
+//!   deliberately NOT a reason for this bump: they are additive fields, which
+//!   the rule above says explicitly not to bump for, and an older client
+//!   absorbs them through `#[serde(default)]`. One bump covers the milestone.
+//!   There is deliberately no mixed window: hub and desktop upgrade together.
+pub const CONTRACT_REVISION: u32 = 7;

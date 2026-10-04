@@ -103,6 +103,30 @@ in `App.test.ts` and `clipboard_native.test.ts` — that is a dependency gap, no
 code error. (`localStorage` is polyfilled in `vitest.setup.ts`; there are no
 known pre-existing frontend test failures.)
 
+**`src-tauri`'s test target parks on a loaded box, and `TMPDIR` fixes it.**
+`claude_fleet_lib`'s ~700 tests each build a temp SQLite store through
+`tempfile::tempdir()`, so on the root ext4 filesystem they serialise behind one
+journal: threads sit in `jbd2_log_wait_commit` with `/proc/pressure/io` at
+35–83% and `cargo test --workspace` never finishes. Point `TMPDIR` at tmpfs and
+the same binary runs the whole target in ~80–120 s:
+
+```bash
+mkdir -p /dev/shm/fleet-tests
+TMPDIR=/dev/shm/fleet-tests cargo fleet-test -- backend::
+```
+
+Two traps when running a test binary directly rather than through cargo:
+`ls -t target/debug/deps/<crate>-*` can hand you a STALE binary (several hashes
+live there and the newest-written is not always first) — use
+`find target/debug/deps -name '<crate>-*' ! -name '*.d' -printf '%T@ %p\n' | sort -rn | head -1`;
+and a stale `claude_fleet_lib` fails `verdict_gen` for the right reason, because
+it renders the table it was compiled with against the file on disk.
+
+**A `REGEN_*` run is MEANT to fail.** `REGEN_HUB_VERDICTS=1` /
+`REGEN_DOCS=1` / `REGEN_HUB_CONTRACT=1` write the file and then panic on
+purpose, telling you to read the diff and run again without the variable. The
+failure is the receipt, not a problem.
+
 Known Rust flakes — timing-sensitive, so they fail on a loaded box; re-run
 alone before blaming your change: `rewind::tests::the_removal_script_leaves_a_tree_a_live_pane_is_in`,
 `work::scale_tests::*`, the `CHAIN_BUDGET` migration tests in
