@@ -186,8 +186,11 @@ fn the_sweep_drops_expired_rows_and_orphaned_bytes() {
         .unwrap()
         .ready_at
         .unwrap();
-    assert_eq!(sweep(&store, ready_at + 59), 0);
-    assert_eq!(sweep(&store, ready_at + 60), 1);
+    assert_eq!(sweep_with(&store, ready_at + 59, ORPHAN_MIN_AGE_SECS), 0);
+    assert_eq!(sweep_with(&store, ready_at + 60, ORPHAN_MIN_AGE_SECS), 1);
+    // A fresh orphan is left for a later pass (a copy may just have begun).
+    assert!(file_of(orphan.id).unwrap().exists());
+    assert_eq!(sweep_with(&store, ready_at + 60, 0), 0);
     assert!(!file_of(old.id).unwrap().exists());
     assert!(!file_of(orphan.id).unwrap().exists());
 }

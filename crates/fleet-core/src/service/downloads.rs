@@ -608,6 +608,15 @@ pub fn content_disposition(name: &str) -> String {
 /// Drop downloads past `downloads.keep_secs` (ready and failed; a copy in
 /// flight is left alone) and bytes no row owns. The count of rows dropped.
 pub fn sweep(store: &Mutex<Store>, now: i64) -> usize {
+    sweep_with(store, now, ORPHAN_MIN_AGE_SECS)
+}
+
+/// Bytes with no row are removed only once they are this old (seconds):
+/// the rows are read before the directory, so a download inserted in
+/// between has a fresh `.part` and no row in that read — it must survive.
+pub const ORPHAN_MIN_AGE_SECS: i64 = 60 * 60;
+
+fn sweep_with(store: &Mutex<Store>, now: i64, orphan_min_age: i64) -> usize {
     let Ok(dir) = dir() else {
         return 0;
     };
@@ -635,7 +644,16 @@ pub fn sweep(store: &Mutex<Store>, now: i64) -> usize {
             let name = e.file_name();
             let name = name.to_string_lossy();
             let id = name.strip_suffix(".part").unwrap_or(&name).parse::<i64>();
-            if id.is_ok_and(|id| !live.contains(&id)) {
+            if !id.is_ok_and(|id| !live.contains(&id)) {
+                continue;
+            }
+            let modified = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64);
+            if modified.is_some_and(|m| m + orphan_min_age <= now) {
                 let _ = std::fs::remove_file(e.path());
             }
         }
