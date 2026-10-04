@@ -53,6 +53,12 @@ The Assets tab's catalog operations as one tool, plus the set of catalogs and ho
 
 Parameters: `action`, `args`, `catalog`, `confirm_nonce`
 
+### `changesets`
+
+Changeset cards that adopt, sync and fix assets: list (one in full with id), propose (rebuild from the last scan), apply (positions picks items; a drift card takes one), undo (the latest applied card per catalog), dismiss, reject_item. Mutating actions need a grant on every catalog the card names.
+
+Parameters: `action`, `confirm_nonce`, `id`, `positions`
+
 ### `decide_setting_proposals`
 
 Apply or reject settings proposals by id, each on its own; a trusted device only.

@@ -18,7 +18,7 @@ use clap::Subcommand;
 use fleet_core::ipc_error::codes;
 use fleet_core::service::catalog::catalogs::{self, AddCatalogArgs};
 use fleet_core::service::catalog::{self, ConfigureArgs};
-use fleet_core::store::Store;
+use fleet_core::store::{CatalogRemoval, Store};
 use std::collections::HashMap;
 use std::process::ExitCode;
 use std::sync::Mutex;
@@ -62,8 +62,7 @@ pub enum CatalogCmd {
         #[arg(long)]
         org: Option<String>,
     },
-    /// Load or refresh every catalog (as a running hub would), then print
-    /// each: owner, load state, HEAD, path, admissions, grants.
+    /// Print every catalog as its checkout stands — owner, state, HEAD of the last load, path, admissions, grants. Read-only: never clones, pulls or records a load (`reload` does).
     List,
     /// Forget an org catalog (config only: the checkout is never deleted).
     /// Its layer assignments, admissions and grants go; hosts keep what it installed.
@@ -123,11 +122,7 @@ pub fn run(
         CatalogCmd::List => list(&store),
         CatalogCmd::Remove { name } => {
             let r = catalogs::remove_catalog(&name, &store).map_err(|e| e.message)?;
-            out::line(&format!(
-                "removed catalog {} (config only; the checkout is untouched): dropped {} layer \
-                 assignment(s), {} admission(s), {} grant(s); hosts keep what it installed",
-                r.name, r.layer_rows, r.admissions, r.grants
-            ));
+            out::line(&removal_line(&r));
             Ok(ExitCode::SUCCESS)
         }
         CatalogCmd::Admit { host, catalog } => {
@@ -142,6 +137,17 @@ pub fn run(
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// What `catalog remove` prints: what went with the catalog, including the
+/// open changeset cards that named it (withdrawn, Assets M4 R26).
+fn removal_line(r: &CatalogRemoval) -> String {
+    format!(
+        "removed catalog {} (config only; the checkout is untouched): dropped {} layer \
+         assignment(s), {} admission(s), {} grant(s); withdrew {} open card(s); hosts keep \
+         what it installed",
+        r.name, r.layer_rows, r.admissions, r.grants, r.cards
+    )
 }
 
 /// What `catalog unadmit` prints: whether anything was taken back, then
@@ -159,29 +165,11 @@ fn unadmit_line(host: &str, catalog: &str, was_admitted: bool, names: &[String])
     }
 }
 
-/// `catalog list`'s rows after `ensure_fresh`. A checkout failure it
-/// returns can only be the personal catalog's (an org catalog's is kept as a
-/// problem entry), so it lands on the personal row: `problem`, with the
-/// error, whatever this process's registry held before. Any other error is
-/// handed back to be printed on its own line.
-fn list_rows(
-    store: &Mutex<Store>,
-) -> Result<(Vec<catalogs::CatalogStatus>, Option<String>), String> {
-    let refresh_err = catalog::ensure_fresh(store).err();
-    let mut all = catalogs::list_catalogs(store).map_err(|e| e.message)?;
-    let Some(e) = refresh_err else {
-        return Ok((all, None));
-    };
-    let personal = all.iter_mut().find(|c| c.org_id.is_none());
-    match personal {
-        Some(p) if catalog::is_load_failure(&e) => {
-            p.state = "problem".to_string();
-            p.problem = Some(e.message);
-            p.asset_count = 0;
-            Ok((all, None))
-        }
-        _ => Ok((all, Some(e.message))),
-    }
+/// `catalog list`'s rows (Rulings R23): read-only, see
+/// `catalogs::probe_catalogs` — a personal checkout that does not parse
+/// shows on its own row as `problem`, as before.
+fn list_rows(store: &Mutex<Store>) -> Result<Vec<catalogs::CatalogStatus>, String> {
+    catalogs::probe_catalogs(store).map_err(|e| e.message)
 }
 
 fn set_personal(
@@ -290,17 +278,11 @@ fn load(store: &Mutex<Store>, pull: bool) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `catalog list`: loads or refreshes every catalog first (`ensure_fresh`:
-/// this process's registry starts empty, so the state column would say
-/// nothing otherwise), then prints one line per catalog (NAME, OWNER, STATE,
-/// HEAD, PATH) and its admissions and grants (R19) on their own lines. A
-/// broken org catalog shows as `problem`; so does a personal one that failed
-/// to load, with the error `ensure_fresh` returned for it.
+/// `catalog list`: reads each checkout where it is (`list_rows`) and prints
+/// one line per catalog (NAME, OWNER, STATE, HEAD, PATH) with its
+/// admissions, grants and any problem.
 fn list(store: &Mutex<Store>) -> Result<ExitCode, String> {
-    let (all, unplaced) = list_rows(store)?;
-    if let Some(e) = unplaced {
-        out::line(&format!("refreshing the catalogs failed: {e}"));
-    }
+    let all = list_rows(store)?;
     if all.is_empty() {
         out::line(
             "no catalogs; set the personal one with: fleet-hub catalog set <path> [--remote <url>]",
@@ -608,14 +590,100 @@ mod tests {
         );
 
         let store = Mutex::new(serve::open_store(&opts, &env).unwrap());
-        let (rows, unplaced) = list_rows(&store).unwrap();
-        assert_eq!(unplaced, None);
+        let rows = list_rows(&store).unwrap();
         let row = rows
             .iter()
             .find(|c| c.name == "personal")
             .expect("configured");
         assert_eq!(row.state, "problem");
         assert!(row.problem.as_deref().is_some_and(|p| !p.is_empty()));
+    }
+
+    /// R23 (M-e): `catalog list` reads only — an org catalog whose checkout
+    /// is missing is not cloned, and the store's load record is untouched.
+    #[test]
+    fn list_never_clones_or_records_a_load() {
+        let _registry = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let opts = HubOptions {
+            data_dir: Some(dir.path().to_path_buf()),
+            ..HubOptions::default()
+        };
+        let env = HashMap::new();
+        drop(
+            Store::open_with_bus(
+                &dir.path().join("state.db"),
+                Arc::new(fleet_core::events::NoopEventBus),
+            )
+            .unwrap(),
+        );
+        let personal = git_repo(dir.path(), "personal-assets");
+        let set = CatalogCmd::Set {
+            path: personal.to_string_lossy().into(),
+            remote: None,
+        };
+        run(set, &opts, &env).unwrap();
+        let remote = git_repo(dir.path(), "acme-remote");
+        let target = dir.path().join("acme-checkout");
+        {
+            let s = serve::open_store(&opts, &env).unwrap();
+            let org = s.add_org("acme", None, false).unwrap();
+            s.upsert_catalog(
+                "acme",
+                &target.to_string_lossy(),
+                Some(&remote.to_string_lossy()),
+                Some(org.id),
+            )
+            .unwrap();
+        }
+        let store = Mutex::new(serve::open_store(&opts, &env).unwrap());
+        let before = store
+            .lock()
+            .unwrap()
+            .get_catalog_by_name("personal")
+            .unwrap()
+            .unwrap();
+
+        let rows = list_rows(&store).unwrap();
+        let acme = rows.iter().find(|c| c.name == "acme").expect("listed");
+        assert_eq!(acme.state, "not_loaded");
+        assert!(acme
+            .problem
+            .as_deref()
+            .unwrap()
+            .contains("reload --catalog acme"));
+        assert!(!target.exists(), "list never clones");
+        let p = rows.iter().find(|c| c.name == "personal").unwrap();
+        assert_eq!((p.state.as_str(), p.asset_count), ("loaded", 1));
+        let after = store
+            .lock()
+            .unwrap()
+            .get_catalog_by_name("personal")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (after.head_commit, after.last_loaded_at),
+            (before.head_commit, before.last_loaded_at),
+            "nothing recorded"
+        );
+    }
+
+    #[test]
+    fn remove_names_the_withdrawn_cards() {
+        let r = CatalogRemoval {
+            id: 2,
+            name: "acme".into(),
+            layer_rows: 1,
+            admissions: 0,
+            grants: 3,
+            cards: 2,
+        };
+        assert_eq!(
+            removal_line(&r),
+            "removed catalog acme (config only; the checkout is untouched): dropped 1 layer \
+             assignment(s), 0 admission(s), 3 grant(s); withdrew 2 open card(s); hosts keep \
+             what it installed"
+        );
     }
 
     #[test]

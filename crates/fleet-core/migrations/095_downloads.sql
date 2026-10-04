@@ -30,4 +30,4 @@ CREATE TABLE IF NOT EXISTS downloads (
 );
 CREATE INDEX IF NOT EXISTS idx_downloads_at ON downloads(at);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (94);
+INSERT OR IGNORE INTO schema_version (version) VALUES (95);

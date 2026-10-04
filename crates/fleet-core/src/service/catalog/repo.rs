@@ -92,6 +92,64 @@ impl Catalog {
     }
 }
 
+/// What a catalog's load problems put in doubt (Assets M4, carry 2,
+/// Rulings R24). `load_dir` records a file that did not parse at
+/// `<kind dir>/<name>/asset.yaml` (skills, agents) or `<kind dir>/<name>.yaml`
+/// (the rest) — as it does a folder entry it could not stat or a symlink
+/// that does not resolve to a folder (final review I6) — and a kind
+/// directory, or an entry in it, it could not read at `<kind dir>`. The
+/// first holds that one asset, the second every asset of the kind. Layer
+/// and catalog-file problems hold nothing. A sync must never read a held
+/// asset's absence as "the catalog dropped it" (`sync::plan::KeepRules`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProblemHolds {
+    /// Kind → why its whole directory could not be read.
+    pub kinds: BTreeMap<Kind, String>,
+    /// `(kind, name)` → why its file did not load.
+    pub assets: BTreeMap<(Kind, String), String>,
+}
+
+impl ProblemHolds {
+    pub fn from_problems(problems: &[Problem]) -> ProblemHolds {
+        let mut out = ProblemHolds::default();
+        for p in problems {
+            let parts: Vec<&str> = p.path.split(['/', '\\']).collect();
+            let Some(kind) = parts.first().and_then(|d| Kind::from_dir(d)) else {
+                continue;
+            };
+            match parts.as_slice() {
+                [_] => {
+                    out.kinds.insert(kind, p.message.clone());
+                }
+                [_, name, "asset.yaml"] if kind.is_folder() => {
+                    out.assets
+                        .insert((kind, (*name).to_string()), p.message.clone());
+                }
+                [_, file] if !kind.is_folder() => {
+                    if let Some(name) = file.strip_suffix(".yaml") {
+                        out.assets
+                            .insert((kind, name.to_string()), p.message.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Why `kind/name` is held, if it is.
+    pub fn reason(&self, kind: Kind, name: &str) -> Option<&str> {
+        self.assets
+            .get(&(kind, name.to_string()))
+            .or_else(|| self.kinds.get(&kind))
+            .map(String::as_str)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.kinds.is_empty() && self.assets.is_empty()
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct CatalogFile {
     schema_version: u64,
@@ -103,7 +161,12 @@ struct CatalogFile {
 /// status into an `E_CATALOG_GIT`.
 fn git_output(dir: &Path, args: &[&str]) -> Result<std::process::Output, IpcError> {
     let mut cmd = crate::proc::std_command("git");
-    cmd.args(args).current_dir(dir);
+    // Every path this module hands git is a literal file or directory
+    // name, never a pattern: `layers/[a].yaml` must not also match
+    // `layers/a.yaml` (Assets M4, Task 6 review round 3).
+    cmd.args(args)
+        .current_dir(dir)
+        .env("GIT_LITERAL_PATHSPECS", "1");
     // Tests must not depend on (or be broken by) the host's own global git
     // config or identity environment: isolate every git invocation the
     // production code makes from both. This has no effect on release builds
@@ -344,6 +407,69 @@ pub fn stage_paths(root: &Path, rel_paths: &[String]) -> Result<(), IpcError> {
     }
 }
 
+/// Final review I2: which of `rel_paths` (relative FILE paths, present or
+/// not) the checkout's ignore rules match — `.gitignore` files, `.git/info/
+/// exclude` and the user's `core.excludesFile` — so a caller never names an
+/// ignored path to `git add` (which exits 1 on one). A tracked path is never
+/// reported (git does not ignore what it tracks). Paths go over stdin, NUL
+/// separated: `check-ignore` takes no pathspec magic, so this one command
+/// runs without `GIT_LITERAL_PATHSPECS`, and a name is matched as a name.
+pub fn ignored_paths(
+    root: &Path,
+    rel_paths: &std::collections::BTreeSet<String>,
+) -> Result<std::collections::BTreeSet<String>, IpcError> {
+    use std::io::Write;
+    if rel_paths.is_empty() {
+        return Ok(Default::default());
+    }
+    let mut cmd = crate::proc::std_command("git");
+    cmd.args(["check-ignore", "--stdin", "-z"])
+        .current_dir(root)
+        .env_remove("GIT_LITERAL_PATHSPECS")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(test)]
+    test_git_isolation(&mut cmd);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| IpcError::new(E_CATALOG_GIT, format!("spawn git: {e}")))?;
+    let mut input = Vec::new();
+    for p in rel_paths {
+        input.extend_from_slice(p.as_bytes());
+        input.push(0);
+    }
+    let writer = child.stdin.take().map(|mut stdin| {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        })
+    });
+    let out = child
+        .wait_with_output()
+        .map_err(|e| IpcError::new(E_CATALOG_GIT, format!("git check-ignore: {e}")))?;
+    if let Some(w) = writer {
+        let _ = w.join();
+    }
+    // 0: some are ignored; 1: none are; anything else is a real failure.
+    match out.status.code() {
+        Some(0) | Some(1) => {}
+        _ => {
+            return Err(
+                IpcError::new(E_CATALOG_GIT, "git check-ignore: failed").with_details(
+                    serde_json::json!({
+                        "stderr": redact_url_userinfo(String::from_utf8_lossy(&out.stderr).trim())
+                    }),
+                ),
+            )
+        }
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|p| !p.is_empty() && rel_paths.contains(*p))
+        .map(str::to_string)
+        .collect())
+}
+
 /// Whether the index differs from HEAD for `rel_paths` (for the whole index
 /// when empty) — i.e. whether a commit limited to those paths would record
 /// anything. `git diff --cached --quiet` exits 0 when there is nothing
@@ -396,6 +522,430 @@ pub fn commit(root: &Path, message: &str) -> Result<String, IpcError> {
 /// through the shared `git()` helper on failure).
 pub fn push(root: &Path) -> Result<(), IpcError> {
     git(root, &["push"]).map(|_| ())
+}
+
+/// One asset straight from the checkout (Assets M4: a card's scope edit and
+/// take_host read the file just written, before any reload).
+pub fn read_asset(root: &Path, kind: Kind, name: &str) -> Result<Asset, IpcError> {
+    let yaml = asset_path(root, kind, name);
+    load_one(root, kind, &yaml, name)
+        .map_err(|m| IpcError::new(E_CATALOG_PARSE, format!("{}: {m}", rel(root, &yaml))))
+}
+
+/// `git status` for the M4 guards: every untracked file listed one by one,
+/// submodules included, whatever `status.showUntrackedFiles` or
+/// `diff.ignoreSubmodules` the repo or the user configured — a config that
+/// hides untracked files must never make someone's work look clean.
+const STATUS_ALL: [&str; 6] = [
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--untracked-files=all",
+    "--ignore-submodules=none",
+    "--no-renames",
+];
+
+/// Every path `git status` reports changed, staged or untracked (each
+/// untracked file on its own), relative to `root` with `/` separators.
+pub fn changed_paths(root: &Path) -> Result<Vec<String>, IpcError> {
+    let out = git_output(root, &STATUS_ALL)?;
+    if !out.status.success() {
+        return Err(
+            IpcError::new(E_CATALOG_GIT, "git status failed").with_details(
+                serde_json::json!({ "stderr": String::from_utf8_lossy(&out.stderr).trim() }),
+            ),
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|e| e.len() > 3)
+        .map(|e| e[3..].to_string())
+        .collect())
+}
+
+/// Whether the working tree has nothing to commit — untracked files count,
+/// whatever the config says (Rulings R11: what a failed apply's reset would
+/// undo must not be someone's work).
+pub fn is_clean(root: &Path) -> Result<bool, IpcError> {
+    Ok(changed_paths(root)?.is_empty())
+}
+
+/// An asset's path relative to the catalog root, as `git` names it: its
+/// folder for skills and agents, its file for the rest.
+pub fn asset_rel_path(kind: Kind, name: &str) -> String {
+    if kind.is_folder() {
+        format!("{}/{name}", kind.dir())
+    } else {
+        format!("{}/{name}.yaml", kind.dir())
+    }
+}
+
+fn check_rev(rev: &str) -> Result<(), IpcError> {
+    if rev.is_empty() || !rev.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(IpcError::new(E_INVALID, format!("not a commit id: {rev}")));
+    }
+    Ok(())
+}
+
+/// The files tracked in `rev`'s tree at or under each of `paths` (relative,
+/// `/`-separated). An empty `paths` answers nothing (never the whole tree).
+pub fn tracked_files(
+    root: &Path,
+    rev: &str,
+    paths: &[&str],
+) -> Result<std::collections::BTreeSet<String>, IpcError> {
+    if paths.is_empty() {
+        return Ok(Default::default());
+    }
+    let mut args: Vec<&str> = vec!["ls-tree", "-r", "--name-only", "-z", rev, "--"];
+    args.extend(paths.iter().copied());
+    let out = git_output(root, &args)?;
+    if !out.status.success() {
+        return Err(
+            IpcError::new(E_CATALOG_GIT, "git ls-tree failed").with_details(
+                serde_json::json!({ "stderr": String::from_utf8_lossy(&out.stderr).trim() }),
+            ),
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|f| !f.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Whether the file `rel` is tracked at `rev` and the working tree's copy
+/// is still exactly that blob (Assets M4 round 3: the only state in which an
+/// apply may claim and rewrite or delete an existing file). A symlink,
+/// a directory or an untracked or ignored file is never "unchanged".
+pub fn unchanged_since(root: &Path, rev: &str, rel: &str) -> Result<bool, IpcError> {
+    check_rev(rev)?;
+    let entry = git(root, &["ls-tree", rev, "--", rel])?;
+    let Some((meta, _)) = entry.lines().next().and_then(|l| l.split_once('\t')) else {
+        return Ok(false);
+    };
+    let mut parts = meta.split_whitespace();
+    let (Some(mode), Some(kind), Some(blob)) = (parts.next(), parts.next(), parts.next()) else {
+        return Ok(false);
+    };
+    if kind != "blob" || mode == "120000" {
+        return Ok(false);
+    }
+    match std::fs::symlink_metadata(root.join(rel)) {
+        Ok(m) if m.is_file() => {}
+        _ => return Ok(false),
+    }
+    Ok(git(root, &["hash-object", "--", rel])? == blob)
+}
+
+/// The first parent of commit `sha`.
+pub fn parent_of(root: &Path, sha: &str) -> Result<String, IpcError> {
+    check_rev(sha)?;
+    git(root, &["rev-parse", &format!("{sha}^")])
+}
+
+/// Every file on disk under `rel_dir` (relative to `root`), whatever git
+/// thinks of it — untracked, ignored or tracked. A symlink is listed as a
+/// file and never followed. A missing directory has no files.
+pub fn files_on_disk(root: &Path, rel_dir: &str) -> Result<Vec<String>, IpcError> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.join(rel_dir)];
+    while let Some(d) = stack.pop() {
+        let entries = match std::fs::read_dir(&d) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        for entry in entries {
+            let p = entry?.path();
+            let meta = std::fs::symlink_metadata(&p)?;
+            if meta.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(rel(root, &p));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Assets M4 guard (PF7, Task 6 review rounds 1–2): what in `root` is NOT
+/// this operation's own work. `ours` is the exact set of FILES it wrote or
+/// deleted (relative, `/`-separated); `heads` the HEAD it recorded before
+/// writing and the commit it made. Foreign is: HEAD anywhere else; every
+/// changed path git reports (untracked included) that is not one of `ours`;
+/// and every file on disk in a directory holding one of `ours` that is
+/// neither ours nor tracked-and-unchanged — which is how a file git
+/// ignores, next to ours, is seen. Empty means [`reset_paths`] can undo the
+/// operation without touching anyone else's work. Apply and undo share it.
+pub fn foreign_changes(
+    root: &Path,
+    heads: &[&str],
+    ours: &std::collections::BTreeSet<String>,
+) -> Result<Vec<String>, IpcError> {
+    let mut foreign = std::collections::BTreeSet::new();
+    let mut moved = None;
+    let now = head(root)?;
+    if !heads.contains(&now.as_str()) {
+        moved = Some(format!(
+            "HEAD moved to {} (expected {})",
+            &now[..now.len().min(12)],
+            heads
+                .iter()
+                .map(|h| &h[..h.len().min(12)])
+                .collect::<Vec<_>>()
+                .join(" or ")
+        ));
+    }
+    let changed: std::collections::BTreeSet<String> = changed_paths(root)?.into_iter().collect();
+    foreign.extend(changed.iter().filter(|p| !ours.contains(*p)).cloned());
+    let dirs: std::collections::BTreeSet<&str> = ours
+        .iter()
+        .filter_map(|f| f.rsplit_once('/').map(|(d, _)| d))
+        .collect();
+    let dir_list: Vec<&str> = dirs.iter().copied().collect();
+    let in_index: std::collections::BTreeSet<String> = {
+        let mut args: Vec<&str> = vec!["ls-files", "-z", "--"];
+        args.extend(dir_list.iter().copied());
+        if dir_list.is_empty() {
+            Default::default()
+        } else {
+            git(root, &args)?
+                .split('\0')
+                .filter(|f| !f.is_empty())
+                .map(str::to_string)
+                .collect()
+        }
+    };
+    for d in &dir_list {
+        for f in files_on_disk(root, d)? {
+            if !ours.contains(&f) && (changed.contains(&f) || !in_index.contains(&f)) {
+                foreign.insert(f);
+            }
+        }
+    }
+    Ok(moved.into_iter().chain(foreign).collect())
+}
+
+/// Commit exactly the FILES `files` (relative; a deleted tracked file
+/// commits as a deletion) — never a directory pathspec, never anything else
+/// staged or lying in the tree. `None` when they hold no change.
+pub fn commit_paths(
+    root: &Path,
+    message: &str,
+    files: &std::collections::BTreeSet<String>,
+) -> Result<Option<String>, IpcError> {
+    let all: Vec<&str> = files.iter().map(String::as_str).collect();
+    let tracked = tracked_files(root, "HEAD", &all)?;
+    let known: Vec<String> = files
+        .iter()
+        .filter(|f| {
+            let p = root.join(f.as_str());
+            (p.is_file() || p.is_symlink()) || tracked.contains(*f)
+        })
+        .cloned()
+        .collect();
+    if known.is_empty() {
+        return Ok(None);
+    }
+    stage_paths(root, &known)?;
+    if !has_staged(root, &known)? {
+        return Ok(None);
+    }
+    let mut args: Vec<&str> = Vec::new();
+    if !has_identity(root) {
+        args.extend([
+            "-c",
+            "user.name=claude-fleet",
+            "-c",
+            "user.email=fleet@localhost",
+        ]);
+    }
+    args.extend(["commit", "-q", "--only", "-m", message, "--"]);
+    args.extend(known.iter().map(String::as_str));
+    git(root, &args)?;
+    head(root).map(Some)
+}
+
+/// Undo an operation's own writes, file by file: HEAD back to `pre` (soft —
+/// the index keeps every other path); each of `files` that `pre` has is
+/// restored from it (index and tree), each it does not have is unstaged and
+/// deleted; then `created_dirs` (the directories the operation made, in the
+/// order it made them) are removed, deepest first, only when now EMPTY.
+/// Never a directory-wide delete, never `git clean`, so ignored and foreign
+/// files are never touched. Call it only once [`foreign_changes`] came back
+/// empty.
+pub fn reset_paths(
+    root: &Path,
+    pre: &str,
+    files: &std::collections::BTreeSet<String>,
+    created_dirs: &[String],
+) -> Result<(), IpcError> {
+    check_rev(pre)?;
+    if head(root)? != pre {
+        git(root, &["reset", "-q", "--soft", pre])?;
+    }
+    let all: Vec<&str> = files.iter().map(String::as_str).collect();
+    let in_pre = tracked_files(root, pre, &all)?;
+    let new: Vec<&str> = all
+        .iter()
+        .copied()
+        .filter(|f| !in_pre.contains(*f))
+        .collect();
+    if !new.is_empty() {
+        let mut args: Vec<&str> = vec!["rm", "-q", "--cached", "--ignore-unmatch", "--"];
+        args.extend(new.iter().copied());
+        git(root, &args)?;
+        for f in &new {
+            match std::fs::remove_file(root.join(f)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+    if !in_pre.is_empty() {
+        let mut args: Vec<&str> = vec!["checkout", "-q", pre, "--"];
+        args.extend(in_pre.iter().map(String::as_str));
+        git(root, &args)?;
+    }
+    for d in created_dirs.iter().rev() {
+        // Only an empty directory goes; one still holding anything (an
+        // ignored file, someone's file) stays, silently.
+        let _ = std::fs::remove_dir(root.join(d));
+    }
+    Ok(())
+}
+
+/// Put the whole tree back at `rev`, deleting what is untracked but never
+/// what git ignores (`clean -fd`, no `-x`). NOT for a changeset apply or
+/// undo: those must keep to their own files ([`foreign_changes`],
+/// [`reset_paths`]) — a blanket reset would take another writer's work.
+pub fn reset_hard(root: &Path, rev: &str) -> Result<(), IpcError> {
+    git(root, &["reset", "-q", "--hard", rev])?;
+    git(root, &["clean", "-q", "-fd"])?;
+    Ok(())
+}
+
+/// `git revert` one commit (Assets M4 undo, SB5), with the synthetic
+/// identity `commit` falls back to. A revert that fails (a conflict) is
+/// aborted (`git revert --abort`), which puts HEAD, index and tree back,
+/// and is the error; when the abort fails too and a revert is still in
+/// progress the error says so. Callers verify the tree themselves
+/// ([`revert_in_progress`], [`head`], [`is_clean`]) — this never forces
+/// anything. Answers the new HEAD.
+pub fn revert(root: &Path, sha: &str) -> Result<String, IpcError> {
+    check_rev(sha)?;
+    let mut args: Vec<&str> = Vec::new();
+    if !has_identity(root) {
+        args.extend([
+            "-c",
+            "user.name=claude-fleet",
+            "-c",
+            "user.email=fleet@localhost",
+        ]);
+    }
+    args.extend(["revert", "--no-edit", sha]);
+    if let Err(e) = git(root, &args) {
+        if let Err(a) = git(root, &["revert", "--abort"]) {
+            if revert_in_progress(root) {
+                let why = a
+                    .details
+                    .as_ref()
+                    .and_then(|d| d.get("stderr"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let mut both = IpcError::new(
+                    &e.code,
+                    format!("{}; `git revert --abort` failed too: {why}", e.message),
+                );
+                both.details = e.details.clone();
+                return Err(both);
+            }
+        }
+        return Err(e);
+    }
+    head(root)
+}
+
+/// Whether commit `ancestor` is in `of`'s history (both hex shas). A
+/// commit the repository no longer has (pruned, never fetched) is in no
+/// history: `false`, not an error.
+pub fn is_ancestor(root: &Path, ancestor: &str, of: &str) -> Result<bool, IpcError> {
+    check_rev(ancestor)?;
+    check_rev(of)?;
+    let out = git_output(root, &["merge-base", "--is-ancestor", ancestor, of])?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ if !git_output(root, &["cat-file", "-e", &format!("{ancestor}^{{commit}}")])?
+            .status
+            .success() =>
+        {
+            Ok(false)
+        }
+        _ => Err(
+            IpcError::new(E_CATALOG_GIT, "git merge-base --is-ancestor failed").with_details(
+                serde_json::json!({ "stderr": String::from_utf8_lossy(&out.stderr).trim() }),
+            ),
+        ),
+    }
+}
+
+/// Whether a `git revert` is stopped half-way in `root` (`REVERT_HEAD`
+/// exists).
+pub fn revert_in_progress(root: &Path) -> bool {
+    git(root, &["rev-parse", "-q", "--verify", "REVERT_HEAD"]).is_ok()
+}
+
+/// The files that differ between commits `from` and `to` (relative,
+/// `/`-separated, no rename detection): what a commit on `from` that made
+/// `to` wrote or deleted.
+pub fn files_between(
+    root: &Path,
+    from: &str,
+    to: &str,
+) -> Result<std::collections::BTreeSet<String>, IpcError> {
+    diff_tree(root, from, to, None)
+}
+
+/// The files `from` has and `to` does not (relative, `/`-separated): what a
+/// commit on `from` that made `to` deleted — so what reverting it
+/// re-creates.
+pub fn files_deleted_between(
+    root: &Path,
+    from: &str,
+    to: &str,
+) -> Result<std::collections::BTreeSet<String>, IpcError> {
+    diff_tree(root, from, to, Some("--diff-filter=D"))
+}
+
+fn diff_tree(
+    root: &Path,
+    from: &str,
+    to: &str,
+    filter: Option<&str>,
+) -> Result<std::collections::BTreeSet<String>, IpcError> {
+    check_rev(from)?;
+    check_rev(to)?;
+    let mut args = vec!["diff-tree", "-r", "--name-only", "-z", "--no-renames"];
+    args.extend(filter);
+    args.extend([from, to]);
+    let out = git_output(root, &args)?;
+    if !out.status.success() {
+        return Err(
+            IpcError::new(E_CATALOG_GIT, "git diff-tree failed").with_details(
+                serde_json::json!({ "stderr": String::from_utf8_lossy(&out.stderr).trim() }),
+            ),
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|f| !f.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 pub fn asset_path(root: &Path, kind: Kind, name: &str) -> PathBuf {
@@ -530,8 +1080,23 @@ pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
         if !dir.is_dir() {
             continue;
         }
+        // Final review I6: an entry that cannot be read is a Problem, never
+        // silently skipped — an asset whose entry vanished from the load
+        // would read as "the catalog dropped it" and plan a Remove.
         let mut entries: Vec<PathBuf> = match std::fs::read_dir(&dir) {
-            Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).collect(),
+            Ok(rd) => rd
+                .filter_map(|e| match e {
+                    Ok(e) => Some(e.path()),
+                    Err(e) => {
+                        // No name to hold: the whole kind is held.
+                        cat.problems.push(Problem {
+                            path: rel(root, &dir),
+                            message: format!("an entry could not be read: {e}"),
+                        });
+                        None
+                    }
+                })
+                .collect(),
             Err(e) => {
                 cat.problems.push(Problem {
                     path: rel(root, &dir),
@@ -543,11 +1108,28 @@ pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
         entries.sort();
         for p in entries {
             let (yaml_path, stem) = if kind.is_folder() {
-                if !p.is_dir() {
+                let yaml_path = p.join("asset.yaml");
+                // A symlink must resolve to a directory; a plain stray file
+                // (a README, a `.DS_Store`) is not an asset and is skipped.
+                let unreadable = match std::fs::symlink_metadata(&p) {
+                    Err(e) => Some(e.to_string()),
+                    Ok(m) if m.file_type().is_symlink() => match std::fs::metadata(&p) {
+                        Ok(t) if t.is_dir() => None,
+                        Ok(_) => Some("a symlink to something that is not a folder".to_string()),
+                        Err(e) => Some(format!("a symlink that does not resolve: {e}")),
+                    },
+                    Ok(m) if !m.is_dir() => continue,
+                    Ok(_) => None,
+                };
+                if let Some(message) = unreadable {
+                    cat.problems.push(Problem {
+                        path: rel(root, &yaml_path),
+                        message,
+                    });
                     continue;
                 }
                 (
-                    p.join("asset.yaml"),
+                    yaml_path,
                     p.file_name()
                         .unwrap_or_default()
                         .to_string_lossy()
@@ -581,7 +1163,18 @@ pub fn load_dir(root: &Path) -> Result<Catalog, IpcError> {
     if layer_dir.is_dir() {
         let mut parsed: Vec<crate::service::catalog::layer::Layer> = Vec::new();
         let mut entries: Vec<PathBuf> = match std::fs::read_dir(&layer_dir) {
-            Ok(rd) => rd.filter_map(|e| e.ok().map(|e| e.path())).collect(),
+            Ok(rd) => rd
+                .filter_map(|e| match e {
+                    Ok(e) => Some(e.path()),
+                    Err(e) => {
+                        cat.problems.push(Problem {
+                            path: rel(root, &layer_dir),
+                            message: format!("an entry could not be read: {e}"),
+                        });
+                        None
+                    }
+                })
+                .collect(),
             Err(e) => {
                 cat.problems.push(Problem {
                     path: rel(root, &layer_dir),
@@ -1561,5 +2154,330 @@ mod tests {
             fs::read(root.join("skills/s/resources/keep.txt")).unwrap(),
             b"keep2"
         );
+    }
+
+    /// Carry 2 (Rulings R24): a problem holds the asset its path names, or a
+    /// whole kind when the kind's directory could not be read; layer,
+    /// catalog-file and absolute (problem-entry) paths hold nothing.
+    #[test]
+    fn problem_holds_name_the_asset_or_the_kind_a_problem_is_about() {
+        let p = |path: &str| Problem {
+            path: path.into(),
+            message: format!("bad {path}"),
+        };
+        let h = ProblemHolds::from_problems(&[
+            p("skills/broken/asset.yaml"),
+            p("hooks/stop.yaml"),
+            p("agents"),
+            p("layers/core.yaml"),
+            p("layers"),
+            p("/abs/repo"),
+        ]);
+        assert_eq!(
+            h.reason(Kind::Skill, "broken"),
+            Some("bad skills/broken/asset.yaml")
+        );
+        assert_eq!(h.reason(Kind::Hook, "stop"), Some("bad hooks/stop.yaml"));
+        assert_eq!(h.reason(Kind::Agent, "anything"), Some("bad agents"));
+        assert_eq!(h.reason(Kind::Skill, "fine"), None);
+        assert_eq!(h.assets.len() + h.kinds.len(), 3);
+    }
+
+    /// The loader's own paths: a skill whose asset.yaml does not parse.
+    #[test]
+    fn load_dir_problems_become_holds() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::create_dir_all(root.path().join("skills/broken")).unwrap();
+        std::fs::write(
+            root.path().join("skills/broken/asset.yaml"),
+            "kind: skill\nname: [\n",
+        )
+        .unwrap();
+        let cat = load_dir(root.path()).unwrap();
+        let h = ProblemHolds::from_problems(&cat.problems);
+        assert!(
+            h.reason(Kind::Skill, "broken").is_some(),
+            "{:?}",
+            cat.problems
+        );
+    }
+
+    /// Final review I6: an entry of a folder kind that cannot be read as a
+    /// folder — a dangling symlink, a symlink to a file — is a Problem at
+    /// `<kind dir>/<name>/asset.yaml`, so it holds that one asset instead
+    /// of vanishing; a plain stray file there is still skipped.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_skill_symlink_is_a_problem_that_holds_the_skill() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::create_dir_all(root.join("skills")).unwrap();
+        std::os::unix::fs::symlink(root.join("nowhere"), root.join("skills/dead")).unwrap();
+        std::fs::write(root.join("a-file"), "x").unwrap();
+        std::os::unix::fs::symlink(root.join("a-file"), root.join("skills/to-file")).unwrap();
+        std::fs::write(root.join("skills/README.md"), "notes").unwrap();
+        let cat = load_dir(root).unwrap();
+        let h = ProblemHolds::from_problems(&cat.problems);
+        assert!(
+            h.reason(Kind::Skill, "dead").is_some(),
+            "{:?}",
+            cat.problems
+        );
+        assert!(
+            h.reason(Kind::Skill, "to-file").is_some(),
+            "{:?}",
+            cat.problems
+        );
+        assert!(h.kinds.is_empty(), "{:?}", cat.problems);
+        assert_eq!(cat.problems.len(), 2, "{:?}", cat.problems);
+    }
+
+    /// Assets M4: the apply engine's git steps — a clean check that counts
+    /// untracked files, a reset that drops this apply's commit and strays,
+    /// and a revert that keeps history and takes only a hex sha.
+    #[test]
+    fn is_clean_reset_hard_and_revert() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let base = commit(root, "init").unwrap();
+        assert!(is_clean(root).unwrap());
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        assert!(!is_clean(root).unwrap(), "an untracked file is not clean");
+        stage_paths(root, &[]).unwrap();
+        commit(root, "add a").unwrap();
+        std::fs::write(root.join("stray.txt"), "x\n").unwrap();
+        reset_hard(root, &base).unwrap();
+        assert_eq!(head(root).unwrap(), base);
+        assert!(is_clean(root).unwrap());
+        assert!(!root.join("a.txt").exists() && !root.join("stray.txt").exists());
+
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let added = commit(root, "add a").unwrap();
+        let reverted = revert(root, &added).unwrap();
+        assert_ne!(reverted, added);
+        assert!(!root.join("a.txt").exists());
+        assert!(
+            revert(root, "--help").is_err(),
+            "only a hex sha reaches git"
+        );
+    }
+
+    /// Assets M4 undo's git helpers: the files a commit wrote, ancestry,
+    /// and a conflicting revert aborted with no revert left in progress.
+    #[test]
+    fn files_between_ancestry_and_an_aborted_revert() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let base = commit(root, "init").unwrap();
+        std::fs::create_dir_all(root.join("skills/w")).unwrap();
+        std::fs::write(root.join("skills/w/body.md"), "a\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let added = commit(root, "add w").unwrap();
+        assert_eq!(
+            files_between(root, &base, &added)
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["skills/w/body.md"]
+        );
+        assert!(is_ancestor(root, &base, &added).unwrap());
+        assert!(!is_ancestor(root, &added, &base).unwrap());
+        assert!(
+            !is_ancestor(root, &"d".repeat(40), &added).unwrap(),
+            "a commit the repo does not have is in no history"
+        );
+        assert!(files_deleted_between(root, &base, &added)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            files_deleted_between(root, &added, &base)
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
+            ["skills/w/body.md"]
+        );
+        assert!(
+            is_ancestor(root, "--help", &added).is_err(),
+            "only hex shas"
+        );
+
+        std::fs::write(root.join("skills/w/body.md"), "b\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let edited = commit(root, "edit w").unwrap();
+        assert!(revert(root, &added).is_err(), "modify/delete conflicts");
+        assert!(!revert_in_progress(root));
+        assert_eq!(head(root).unwrap(), edited);
+        assert!(is_clean(root).unwrap());
+    }
+
+    /// The failure reset never deletes what git ignores (controller ruling
+    /// on R12: `clean -fd`, never `-x`).
+    #[test]
+    fn reset_hard_keeps_ignored_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(root.join(".gitignore"), "*.local\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let base = commit(root, "init").unwrap();
+        std::fs::write(root.join("keep.local"), "mine\n").unwrap();
+        assert!(is_clean(root).unwrap(), "an ignored file is not a change");
+        reset_hard(root, &base).unwrap();
+        assert!(root.join("keep.local").is_file());
+    }
+
+    #[test]
+    fn read_asset_reads_one_asset_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = Asset::from_yaml(None, "kind: skill\nname: w\ndescription: d\n").unwrap();
+        write_asset(dir.path(), &a, false).unwrap();
+        assert_eq!(
+            read_asset(dir.path(), Kind::Skill, "w")
+                .unwrap()
+                .header
+                .name,
+            "w"
+        );
+        assert!(read_asset(dir.path(), Kind::Skill, "nope").is_err());
+    }
+
+    /// Task 6 review (Critical): a repo or user config that hides untracked
+    /// files must not make a tree with someone's new file look clean.
+    #[test]
+    fn is_clean_sees_untracked_files_whatever_the_config_says() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        commit(root, "init").unwrap();
+        git(root, &["config", "status.showUntrackedFiles", "no"]).unwrap();
+        std::fs::create_dir_all(root.join("skills/w")).unwrap();
+        std::fs::write(root.join("skills/w/asset.yaml"), "x\n").unwrap();
+        assert!(
+            git(root, &["status", "--porcelain"]).unwrap().is_empty(),
+            "the config hides it from a plain status"
+        );
+        assert!(!is_clean(root).unwrap());
+        assert_eq!(changed_paths(root).unwrap(), ["skills/w/asset.yaml"]);
+    }
+
+    /// Task 6 review (PF7 "never", rounds 1–2): an operation commits only
+    /// the FILES it wrote; the guard names every other file — a stray next
+    /// to ours and an ignored one included — and the reset puts back only
+    /// our files, removing a directory only once it is empty.
+    #[test]
+    fn commit_paths_foreign_changes_and_reset_paths_keep_to_our_files() {
+        use std::collections::BTreeSet;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "*.local\n").unwrap();
+        std::fs::create_dir_all(root.join("skills/w")).unwrap();
+        std::fs::write(root.join("skills/w/asset.yaml"), "old\n").unwrap();
+        std::fs::write(root.join("skills/w/gone.md"), "tracked\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let base = commit(root, "init").unwrap();
+
+        let set = |v: &[&str]| -> BTreeSet<String> { v.iter().map(|s| s.to_string()).collect() };
+        let ours = set(&[
+            "skills/w/asset.yaml",
+            "skills/w/gone.md",
+            "skills/w/body.md",
+            "layers/core.yaml",
+        ]);
+        std::fs::write(root.join("skills/w/asset.yaml"), "new\n").unwrap();
+        std::fs::remove_file(root.join("skills/w/gone.md")).unwrap();
+        std::fs::write(root.join("skills/w/body.md"), "b\n").unwrap();
+        std::fs::create_dir_all(root.join("layers")).unwrap();
+        std::fs::write(root.join("layers/core.yaml"), "l\n").unwrap();
+        std::fs::write(root.join("foreign.txt"), "theirs\n").unwrap();
+        std::fs::write(root.join("skills/w/notes.md"), "theirs too\n").unwrap();
+        let mine = commit_paths(root, "fleet: x", &ours).unwrap().unwrap();
+        let files = git(root, &["show", "--name-status", "--format=", "HEAD"]).unwrap();
+        assert!(files.contains("D\tskills/w/gone.md"), "{files}");
+        assert!(files.contains("A\tskills/w/body.md") && files.contains("A\tlayers/core.yaml"));
+        assert!(
+            !files.contains("notes.md") && !files.contains("foreign.txt"),
+            "{files}"
+        );
+
+        std::fs::write(root.join("skills/w/cache.local"), "ignored\n").unwrap();
+        let foreign = foreign_changes(root, &[&base, &mine], &ours).unwrap();
+        assert_eq!(
+            foreign,
+            ["foreign.txt", "skills/w/cache.local", "skills/w/notes.md"]
+        );
+        let moved = foreign_changes(root, &[&base], &ours).unwrap();
+        assert!(moved[0].starts_with("HEAD moved"), "{moved:?}");
+
+        // A reset is only for a clean guard; even forced, it keeps to our
+        // files: the stray, the ignored file and the foreign file stay.
+        reset_paths(root, &base, &ours, &["layers".to_string()]).unwrap();
+        assert_eq!(head(root).unwrap(), base);
+        assert_eq!(
+            std::fs::read_to_string(root.join("skills/w/asset.yaml")).unwrap(),
+            "old\n"
+        );
+        assert!(
+            root.join("skills/w/gone.md").is_file(),
+            "a deleted file is back"
+        );
+        assert!(!root.join("skills/w/body.md").exists());
+        assert!(!root.join("layers").exists(), "an emptied created dir goes");
+        assert!(
+            root.join("skills/w/notes.md").is_file(),
+            "the stray is kept"
+        );
+        assert!(
+            root.join("skills/w/cache.local").is_file(),
+            "ignored is kept"
+        );
+        assert_eq!(
+            changed_paths(root).unwrap(),
+            ["foreign.txt", "skills/w/notes.md"]
+        );
+        assert!(commit_paths(root, "noop", &ours).unwrap().is_none());
+    }
+
+    /// Round 3: an existing file is "unchanged" only while it is the blob
+    /// `rev` tracks; paths are literal, never patterns; a commit's parent.
+    #[test]
+    fn unchanged_since_literal_pathspecs_and_parent_of() {
+        use std::collections::BTreeSet;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "*.local\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let base = commit(root, "init").unwrap();
+        assert!(unchanged_since(root, &base, "catalog.yaml").unwrap());
+        std::fs::write(root.join("catalog.yaml"), "edited\n").unwrap();
+        assert!(!unchanged_since(root, &base, "catalog.yaml").unwrap());
+        std::fs::write(root.join("x.local"), "ignored\n").unwrap();
+        assert!(!unchanged_since(root, &base, "x.local").unwrap());
+        assert!(!unchanged_since(root, &base, "absent.txt").unwrap());
+        std::fs::write(root.join("catalog.yaml"), "schema_version: 1\n").unwrap();
+
+        std::fs::create_dir_all(root.join("layers")).unwrap();
+        std::fs::write(root.join("layers/[a].yaml"), "ours\n").unwrap();
+        std::fs::write(root.join("layers/a.yaml"), "theirs\n").unwrap();
+        let ours: BTreeSet<String> = ["layers/[a].yaml".to_string()].into();
+        let mine = commit_paths(root, "fleet: x", &ours).unwrap().unwrap();
+        let files = git(root, &["show", "--name-only", "--format=", "HEAD"]).unwrap();
+        assert_eq!(files, "layers/[a].yaml", "a bracket is not a glob");
+        assert_eq!(parent_of(root, &mine).unwrap(), base);
+        assert!(parent_of(root, "--help").is_err());
     }
 }

@@ -480,6 +480,15 @@ pub const CATALOG_SCAN_CHECK_SECS: &str = "catalog.scan_check_secs";
 /// A host whose newest inventory row is older than this is rescanned.
 pub const CATALOG_SCAN_MAX_AGE_SECS: &str = "catalog.scan_max_age_secs";
 
+// ── asset changesets (Assets M4; `service::catalog::changesets`) ──
+/// SB6 / spec *Automatic (no card)*: after every scan-tick pass, hide
+/// internals, build changeset cards, and apply additive sync ops on layers
+/// already rolled out once. On by default.
+pub const CATALOG_AUTO: &str = "catalog.auto";
+/// SB4: push each catalog a changeset card commits to, right after it
+/// applies (or is undone). Off by default.
+pub const CATALOG_AUTO_PUSH: &str = "catalog.auto_push";
+
 // ── decisions (Jev evaluation, D35-D37; `service::decide`) ──
 /// The kill switch: with it off no decision-model call is ever made. Off by
 /// default; the Settings dialog's "Decisions (Jev)" toggle.
@@ -980,6 +989,20 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Hours)
     .tags(&[Tag::Advanced]),
+    Spec::new(
+        CATALOG_AUTO,
+        "true",
+        Kind::Bool,
+        "Asset cards and safe sync",
+        "After each asset scan, hide fleet's own and Claude's internal assets, propose changeset cards, and, for layers already rolled out once, install what a host is missing and adopt identical copies. Never changes, overwrites or removes a copy a host already has.",
+    ),
+    Spec::new(
+        CATALOG_AUTO_PUSH,
+        "false",
+        Kind::Bool,
+        "Push applied cards",
+        "Push the catalog repo right after a changeset card commits to it or is undone. Off: push it yourself.",
+    ),
     Spec::new(
         WORK_DESCRIBE_CACHE_SECS,
         "300",

@@ -917,6 +917,21 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Lifecycle,
     },
+    // Assets M4: changeset cards. `NOT_FOR_HOST_TOKENS` like `catalog_admin`
+    // (R25 amended: a host's "can list" is `list_assets` and the inventory);
+    // the body answers `list` to the master and an unbound full client
+    // (PF15, as `list_catalogs`), `propose` to a personal grant, and every
+    // other action to a grant on each catalog the card names
+    // (`may_admin_catalog_row`). Not confirm-gated as a whole; applying a
+    // rollout or a restore also needs the personal grant and passes the
+    // `apply_sync` confirm gate.
+    ToolPolicy {
+        name: "changesets",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
     // Secret values feed every host's rendered config; scoping this to the
     // master token keeps a per-host token from setting values another host's
     // assets would pick up.
@@ -1093,10 +1108,14 @@ pub fn is_client_tool(name: &str) -> bool {
 /// grant itself, via `may_admin_catalog`); a host's Claude editing — or, for
 /// `import_assets` with a remote `host_alias`, making the hub SSH into
 /// another host and write into — the catalog is what the master gate exists
-/// to prevent.
+/// to prevent. `changesets` (Assets M4) applies and undoes those same
+/// catalog edits and rolls layers out to hosts, so it is refused alike, its
+/// `list` included (R25 amended). `list_downloads` / `remove_download` are a
+/// person's: a host's Claude only sends files.
 pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "catalog_admin",
     "import_assets",
+    "changesets",
     "list_downloads",
     "remove_download",
 ];

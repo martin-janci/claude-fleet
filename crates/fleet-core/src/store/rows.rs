@@ -1210,6 +1210,10 @@ pub struct CatalogRemoval {
     pub layer_rows: usize,
     pub admissions: usize,
     pub grants: usize,
+    /// Open changeset cards that named the catalog, withdrawn with it
+    /// (Assets M4, Rulings R26).
+    #[serde(default)]
+    pub cards: usize,
 }
 
 /// Drift state of one catalog asset on one host for one harness
@@ -1421,6 +1425,17 @@ pub fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Unix milliseconds, now: the unit of `changesets.applied_at` (Assets M4,
+/// Rulings PF13), so two cards applied in the same second still order by
+/// when they were applied. Everything else in the store keeps seconds
+/// ([`now_unix`]).
+pub fn now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
 }
 

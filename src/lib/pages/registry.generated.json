@@ -1033,6 +1033,42 @@
       "danger": {
         "level": "none"
       },
+      "default": "true",
+      "help": "After each asset scan, hide fleet's own and Claude's internal assets, propose changeset cards, and, for layers already rolled out once, install what a host is missing and adopt identical copies. Never changes, overwrites or removes a copy a host already has.",
+      "key": "catalog.auto",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Asset cards and safe sync",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Push the catalog repo right after a changeset card commits to it or is undone. Off: push it yourself.",
+      "key": "catalog.auto_push",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Push applied cards",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "300",
       "help": "How long a fetched ticket description is reused before the tracker is asked again; never longer than the done-tickets retention window.",
       "key": "work.describe_cache_secs",
@@ -2070,6 +2106,14 @@
             },
             {
               "key": "catalog.scan_max_age_secs",
+              "type": "field"
+            },
+            {
+              "key": "catalog.auto",
+              "type": "field"
+            },
+            {
+              "key": "catalog.auto_push",
               "type": "field"
             }
           ],

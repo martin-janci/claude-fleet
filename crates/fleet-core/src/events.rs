@@ -115,7 +115,7 @@ pub enum RowChange {
     /// sent to a host-bound or org-bound stream (it names every target).
     UpdateChanged(UpdateChanged),
     /// A file download's row was added, moved state, was fetched or was
-    /// removed (migration 094). The id only — a client re-reads
+    /// removed (migration 095). The id only — a client re-reads
     /// `list_downloads`. Kind `download`, so never sent to a host-bound or
     /// org-bound stream (it names files of every host).
     DownloadChanged(i64),

@@ -1,4 +1,4 @@
-//! File downloads (migration 094): a file a session sent from its host,
+//! File downloads (migration 095): a file a session sent from its host,
 //! copied into this machine's data dir. The rules — who may send, who sees
 //! a row, the byte budget and where the bytes live — are in
 //! `service::downloads`; this is the rows.

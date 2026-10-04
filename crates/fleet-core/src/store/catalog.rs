@@ -192,6 +192,8 @@ impl Store {
     /// Remove an org catalog's row (Rulings R13). Its `host_layers` rows,
     /// admissions and grants go with it (`ON DELETE CASCADE`); inventory rows
     /// keep their place with `catalog_id` NULL (`ON DELETE SET NULL`).
+    /// Open changeset cards naming it are withdrawn and their items let go of
+    /// it (Assets M4).
     pub fn remove_catalog(&self, name: &str) -> Result<CatalogRemoval, crate::ipc_error::IpcError> {
         use crate::ipc_error::{codes, IpcError};
         let row = self
@@ -214,7 +216,28 @@ impl Store {
             layer_rows: count("SELECT COUNT(*) FROM host_layers WHERE catalog_id = ?1")?,
             admissions: count("SELECT COUNT(*) FROM host_catalogs WHERE catalog_id = ?1")?,
             grants: count("SELECT COUNT(*) FROM client_catalog_grants WHERE catalog_id = ?1")?,
+            cards: count(
+                "SELECT COUNT(DISTINCT c.id) FROM changesets c \
+                 JOIN changeset_items i ON i.changeset_id = c.id \
+                 WHERE i.catalog_id = ?1 AND c.state IN ('proposed', 'failed')",
+            )?,
         };
+        // Assets M4 (R26): `changeset_items.catalog_id` has no ON DELETE
+        // (the spec's DDL), so the cards that name this catalog let go of it
+        // first: open ones are withdrawn, applied ones keep their history.
+        tx.execute(
+            "UPDATE changesets SET state = 'dismissed', error = ?2 \
+             WHERE state IN ('proposed', 'failed') \
+               AND id IN (SELECT changeset_id FROM changeset_items WHERE catalog_id = ?1)",
+            rusqlite::params![
+                row.id,
+                format!("withdrawn: catalog {} was removed", row.name)
+            ],
+        )?;
+        tx.execute(
+            "UPDATE changeset_items SET catalog_id = NULL WHERE catalog_id = ?1",
+            [row.id],
+        )?;
         tx.execute("DELETE FROM catalogs WHERE id = ?1", [row.id])?;
         tx.commit()?;
         Ok(removal)
@@ -494,6 +517,21 @@ impl Store {
                     summary_json: row.get(3)?,
                 })
             })
+            .optional()
+    }
+
+    /// The id of the newest sync run that SB6 did not make — one whose
+    /// summary is not marked `"auto": true` (Assets M4, final review I3).
+    /// A row whose JSON does not parse counts as a person's.
+    pub fn last_person_sync_run_id(&self) -> Result<Option<i64>, rusqlite::Error> {
+        self.conn
+            .prepare_cached(
+                "SELECT id FROM sync_runs \
+                 WHERE NOT (json_valid(summary_json) \
+                            AND json_extract(summary_json, '$.auto') IS 1) \
+                 ORDER BY id DESC LIMIT 1",
+            )?
+            .query_row([], |row| row.get(0))
             .optional()
     }
 
