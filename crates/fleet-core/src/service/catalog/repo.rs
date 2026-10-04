@@ -580,6 +580,56 @@ pub fn asset_rel_path(kind: Kind, name: &str) -> String {
     }
 }
 
+/// One commit that touched an asset (Assets M5, the Inspector's History).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitEntry {
+    pub sha: String,
+    /// Committer time, Unix seconds.
+    pub at: i64,
+    pub author: String,
+    pub subject: String,
+}
+
+/// The newest `limit` commits that touched `kind/name` — its folder or its
+/// file ([`asset_rel_path`], a literal pathspec) — newest first. A checkout
+/// with no commit yet has none. `--no-show-signature` keeps a user's
+/// `log.showSignature` from interleaving lines the parser would drop.
+pub fn asset_log(
+    root: &Path,
+    kind: Kind,
+    name: &str,
+    limit: usize,
+) -> Result<Vec<CommitEntry>, IpcError> {
+    if git(root, &["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
+        return Ok(Vec::new());
+    }
+    let rel = asset_rel_path(kind, name);
+    let n = format!("-n{}", limit.max(1));
+    let out = git(
+        root,
+        &[
+            "log",
+            "--no-show-signature",
+            &n,
+            "--format=%H%x1f%ct%x1f%an%x1f%s",
+            "--",
+            &rel,
+        ],
+    )?;
+    Ok(out
+        .lines()
+        .filter_map(|line| {
+            let mut p = line.splitn(4, '\u{1f}');
+            Some(CommitEntry {
+                sha: p.next()?.to_string(),
+                at: p.next()?.parse().ok()?,
+                author: p.next()?.to_string(),
+                subject: p.next().unwrap_or("").to_string(),
+            })
+        })
+        .collect())
+}
+
 fn check_rev(rev: &str) -> Result<(), IpcError> {
     if rev.is_empty() || !rev.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(IpcError::new(E_INVALID, format!("not a commit id: {rev}")));
@@ -1429,6 +1479,44 @@ mod tests {
     use super::*;
     use crate::service::catalog::model::{Asset, Kind, Resource};
     use std::fs;
+
+    /// Assets M5 (R19): the commits that touched one asset, newest first;
+    /// a repo with no commit has none; `limit` caps them; another asset's
+    /// commit and a sibling whose name only starts the same are not its.
+    #[test]
+    fn asset_log_lists_the_commits_that_touched_one_asset_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q", "-b", "main"]).unwrap();
+        assert!(asset_log(root, Kind::Skill, "w", 10).unwrap().is_empty());
+        fs::create_dir_all(root.join("skills/w")).unwrap();
+        fs::write(root.join("skills/w/asset.yaml"), "kind: skill\nname: w\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        let first = commit(root, "add w").unwrap();
+        fs::write(root.join("other.txt"), "x\n").unwrap();
+        fs::create_dir_all(root.join("skills/w2")).unwrap();
+        fs::write(root.join("skills/w2/asset.yaml"), "kind: skill\nname: w2\n").unwrap();
+        stage_paths(root, &[]).unwrap();
+        commit(root, "unrelated").unwrap();
+        fs::write(
+            root.join("skills/w/asset.yaml"),
+            "kind: skill\nname: w\ndescription: d\n",
+        )
+        .unwrap();
+        stage_paths(root, &[]).unwrap();
+        let second = commit(root, "edit w").unwrap();
+
+        let log = asset_log(root, Kind::Skill, "w", 10).unwrap();
+        assert_eq!(
+            log.iter()
+                .map(|c| (c.sha.as_str(), c.subject.as_str()))
+                .collect::<Vec<_>>(),
+            [(second.as_str(), "edit w"), (first.as_str(), "add w")]
+        );
+        assert!(log.iter().all(|c| c.at > 0 && !c.author.is_empty()));
+        assert_eq!(asset_log(root, Kind::Skill, "w", 1).unwrap().len(), 1);
+        assert!(asset_log(root, Kind::Agent, "w", 10).unwrap().is_empty());
+    }
 
     /// Final review I1: a remote's userinfo never survives into a git error.
     #[test]
