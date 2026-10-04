@@ -353,7 +353,7 @@ REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
   layer rows, admissions and grants) and admits hosts; `add_catalog` refuses
   moving an existing catalog to another org (`Store::check_catalog_owner`).
   `catalog_admin` takes an optional `catalog` (config, load, list_layers,
-  set_host_layers; the authoring actions stay personal-only until M4) and
+  set_host_layers, and the authoring actions since M4) and
   five actions (`list_catalogs`, `add_catalog`, `remove_catalog`,
   `admit_catalog`, `unadmit_catalog`); every action checks a grant on the
   catalog it touches (`AdminCall::touches` → `may_admin_catalog`) — the
@@ -368,6 +368,59 @@ REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
   replaces, not only the catalogs its actions come from. Operator side:
   `fleet-hub catalog add|list|remove|admit|unadmit`, `catalog reload
   --catalog`, `client grant|ungrant <name> assets --catalog`.
+- **Assets M4 — changesets** (plan
+  `docs/superpowers/plans/2026-10-02-assets-m4-changesets.md`): migration 094
+  adds `changesets`, `changeset_items` and `asset_triage_verdicts` (the
+  spec's DDL verbatim; `applied_at` is Unix milliseconds, `created_at` and
+  `decided_at` seconds). `service/catalog/changesets/` proposes cards by
+  rule (`rules.rs`, pure): Bootstrap when nothing is bootstrapped yet or
+  ≥ 20 unmanaged normal identities exist — grouped by host-set signature and
+  name prefix into context layers (`everywhere`, `<host>-only`, `core`,
+  `<prefix>`), `set_scope shared` for personal assets an org host has,
+  `hide` for internals; New on host per identity; Drift (take the host copy
+  or restore); Rollout for a never-rolled-out layer with `missing` members.
+  The reconcile pass (`reconcile.rs`) refreshes them after every scan-tick
+  pass while `catalog.auto` is on (`after_scan_pass`, `try_lock` — it never
+  blocks the tick or touches its owed set) and on `changesets { propose }`;
+  a card's subject is derived from its items; a verdict on `(kind, name,
+  content_hash)` holds a subject until its content changes, and a `person`
+  verdict is never replaced by another decider. Apply (`apply.rs`) needs
+  clean checkouts (every untracked file counts), snapshots the touched
+  catalogs' `host_layers`, imports per (catalog, source host), writes layer
+  files and scopes, appends contexts, and commits only the exact files it
+  wrote, once per catalog (`fleet: <summary>`); on any failure it puts back
+  only its own files and the snapshot and commits nothing — and where
+  anything foreign is in its way it resets nothing and the card says
+  "manual cleanup needed"; success proposes a follow-up Rollout. Rollout
+  runs `plan_sync` + `apply_sync` narrowed to create/adopt/update; a Drift
+  restore (one asset, one host, its harness, a person's pick) may also
+  overwrite, with a backup; nothing ever removes from a host. Undo
+  (`undo.rs`) reverts the card's commits and restores the snapshot —
+  replacing every `host_layers` row of each touched catalog — only for the
+  latest applied card per catalog, on clean checkouts, and refuses when a
+  path its revert touches sits on disk untracked; it does not un-hide, and
+  a rolled-out layer stays rolled out (P27). Dismiss and reject_item write
+  `rejected` verdicts. `catalog.auto` (on) hides internals, prepares cards
+  and runs SB6's additive sync on layers a Rollout card has applied
+  (missing assets and identical copies only — never a `drifted` one —
+  skipping a host whose rollout a person rejected); `catalog.auto_push`
+  (off) pushes after apply and undo. One tokio `APPLY_LOCK` serialises all
+  of it and every authoring write. MCP `changesets { list | propose | apply
+  | undo | dismiss | reject_item }` is never served to per-host tokens and
+  is the master's or an unbound full person device's (org-bound, readonly
+  and peer callers are refused before any card is read): `list` needs no
+  more, `propose` the personal grant, `apply` a grant on every catalog its
+  selected items name, undo/dismiss/reject_item one on every catalog the
+  card names — plus personal when an item names no catalog (hide) or the
+  apply writes hosts (rollout, restore), which also passes the `apply_sync`
+  confirm gate. Also in M4: the authoring `catalog_admin` actions take
+  `catalog` (`CatalogTarget`; `configure` stays personal) and a named
+  catalog is resolved once per call; an asset whose own catalog file has a
+  load problem is held (`ProblemHolds` → a `Noop`, never a `Remove`) — in
+  `personal` too, the one deliberate change for a personal-only fleet;
+  `fleet-hub catalog list` reads only (`probe_catalogs`: never clones or
+  records a load) and `catalog remove` reports the open cards it withdrew.
+  No Tauri command or verdict row yet (M6).
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. Only one PTY is attached at a time.

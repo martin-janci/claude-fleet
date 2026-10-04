@@ -400,7 +400,11 @@ pub(crate) mod routed {
                 hub.route("catalog_configure", &AdminCall::Configure(args))
                     .await
             }
-            None => catalog::configure(args, store),
+            None => {
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
+                catalog::configure(args, store)
+            }
         }
     }
 
@@ -411,7 +415,11 @@ pub(crate) mod routed {
     ) -> Result<fleet_core::events::CatalogSummary, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("catalog_load", &AdminCall::Load(args)).await,
-            None => catalog::load_all(args.pull, store),
+            None => {
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
+                catalog::load_all(args.pull, store)
+            }
         }
     }
 
@@ -480,12 +488,16 @@ pub(crate) mod routed {
                 hub.route("catalog_set_host_layers", &AdminCall::SetHostLayers(args))
                     .await
             }
-            None => catalog::set_host_layers(
-                &args.host_alias,
-                args.role.as_deref(),
-                &args.contexts.iter().map(String::as_str).collect::<Vec<_>>(),
-                store,
-            ),
+            None => {
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
+                catalog::set_host_layers(
+                    &args.host_alias,
+                    args.role.as_deref(),
+                    &args.contexts.iter().map(String::as_str).collect::<Vec<_>>(),
+                    store,
+                )
+            }
         }
     }
 
@@ -535,7 +547,11 @@ pub(crate) mod routed {
                 hub.route("catalog_write_layer", &AdminCall::WriteLayer(args))
                     .await
             }
-            None => author::write_layer(&args.layer, store),
+            None => {
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
+                author::write_layer(&args.layer, store)
+            }
         }
     }
 
@@ -550,7 +566,11 @@ pub(crate) mod routed {
                 hub.route("catalog_delete_layer", &AdminCall::DeleteLayer(args))
                     .await
             }
-            None => author::delete_layer(&args.name, store),
+            None => {
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
+                author::delete_layer(&args.name, store)
+            }
         }
     }
 
@@ -665,6 +685,8 @@ pub(crate) mod routed {
             }
             None => {
                 let token = lock(store)?.get_setting(fleet_core::mcp::SETTING_TOKEN)?;
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
                 catalog::import_host(args, store, ssh, token.as_deref()).await
             }
         }
@@ -684,7 +706,11 @@ pub(crate) mod routed {
                 hub.route("catalog_create_asset", &AdminCall::CreateAsset(args))
                     .await
             }
-            None => author::create(args, store),
+            None => {
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
+                author::create(args, store)
+            }
         }
     }
 
@@ -705,7 +731,11 @@ pub(crate) mod routed {
                 )
                 .await
             }
-            None => author::update(args, store),
+            None => {
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
+                author::update(args, store)
+            }
         }
     }
 
@@ -720,7 +750,11 @@ pub(crate) mod routed {
                 hub.route("catalog_delete_asset", &AdminCall::DeleteAsset(args))
                     .await
             }
-            None => author::delete_asset(args, store),
+            None => {
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
+                author::delete_asset(args, store)
+            }
         }
     }
 
@@ -748,7 +782,11 @@ pub(crate) mod routed {
                 });
                 hub.route("catalog_add_resource", &call).await
             }
-            None => author::add_resource(args, store),
+            None => {
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
+                author::add_resource(args, store)
+            }
         }
     }
 
@@ -764,7 +802,11 @@ pub(crate) mod routed {
                 hub.route("catalog_remove_resource", &AdminCall::RemoveResource(args))
                     .await
             }
-            None => author::remove_resource(args, store),
+            None => {
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
+                author::remove_resource(args, store)
+            }
         }
     }
 
@@ -803,7 +845,11 @@ pub(crate) mod routed {
                 hub.route("catalog_commit_pending", &AdminCall::CommitPending(args))
                     .await
             }
-            None => author::commit_pending(args, store),
+            None => {
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
+                author::commit_pending(args, store)
+            }
         }
     }
 
@@ -813,7 +859,11 @@ pub(crate) mod routed {
     ) -> Result<RepoStatus, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("catalog_push", &AdminCall::Push).await,
-            None => author::push(store),
+            None => {
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
+                author::push(store)
+            }
         }
     }
 

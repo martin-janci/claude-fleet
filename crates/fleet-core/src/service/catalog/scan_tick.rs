@@ -1,6 +1,8 @@
 //! Assets S1a: rescan hosts without anyone pressing Scan. Hourly by
 //! default, it rescans every reachable host whose inventory is older than a
-//! day, and all of them after the catalog HEAD or a sync changed.
+//! day, and all of them after the catalog HEAD or a person's sync changed
+//! (SB6's own runs do not count). After each pass it runs the changeset
+//! reconcile pass (Assets M4).
 
 use crate::ssh::SshClient;
 use crate::store::Store;
@@ -83,6 +85,15 @@ pub(crate) fn rescan_requested(alias: &str) -> bool {
     requested().contains(alias)
 }
 
+/// The sync half of the tick's "everything changed" key: the newest sync
+/// run a person made (directly, or by applying a card). SB6's own runs are
+/// left out (final review I3): each one already rescans the hosts it
+/// touched, and counting them would rescan the whole fleet on every pass
+/// while one host keeps failing.
+pub(crate) fn sync_key(s: &Store) -> Option<i64> {
+    s.last_person_sync_run_id().ok().flatten()
+}
+
 fn setting_secs(store: &Mutex<Store>, key: &str) -> i64 {
     store
         .lock()
@@ -146,7 +157,7 @@ pub fn spawn_catalog_scan_tick(
                 let Ok(s) = store.lock() else { continue };
                 let Ok(list) = s.list_hosts() else { continue };
                 let last = s.inventory_last_scans().unwrap_or_default();
-                let sync = s.last_sync_run().ok().flatten().map(|r| r.finished_at);
+                let sync = sync_key(&s);
                 let hosts: Vec<HostDue> = list
                     .into_iter()
                     .map(|h| HostDue {
@@ -192,6 +203,20 @@ pub fn spawn_catalog_scan_tick(
                         tracing::warn!(host = %alias, "catalog scan tick: {}", e.message);
                     }
                 }
+            }
+            // Assets M4 (R19): the reconcile pass — cards, automatic hides —
+            // after every pass that got this far (a personal catalog is
+            // loaded), then SB6's additive sync as a detached task (R17). It
+            // never waits: an apply in flight skips both, and it never
+            // touches `owed` or `seen`. A panic in it is logged and stops
+            // only this pass's reconcile (or that one SB6 run), never the
+            // tick loop.
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::changesets::reconcile::after_scan_pass(&store, &ssh)
+            }))
+            .is_err()
+            {
+                tracing::error!("catalog scan tick: the changeset reconcile pass panicked");
             }
             seen = Some(now_key);
         }

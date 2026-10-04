@@ -1445,6 +1445,30 @@
       ]
     },
     {
+      "default_widget": "switch",
+      "key": "catalog.auto",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Asset cards and safe sync",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
+      "key": "catalog.auto_push",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Push applied cards",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "duration",
       "key": "work.describe_cache_secs",
       "kind": {

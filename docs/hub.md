@@ -2249,16 +2249,63 @@ bound to an org receives that org's catalog plus the `shared` assets of the
 personal catalog; a host with no org receives all of personal plus every org
 catalog it admits (`catalog admit <host> <catalog>`, `catalog unadmit`).
 `catalog list` shows each catalog's owner, load state, HEAD, admissions and
-grants; `catalog reload --catalog <name>` re-reads one. `catalog remove
-<name>` forgets an org catalog — config only, the checkout stays — along
-with its layer assignments, admissions and grants (over MCP,
+grants — read-only: it parses each checkout where it is and never clones,
+pulls or records a load (`reload` does); `catalog reload --catalog <name>`
+re-reads one. `catalog remove <name>` forgets an org catalog — config only,
+the checkout stays — along with its layer assignments, admissions and
+grants, and withdraws the open changeset cards that name it (over MCP,
 `remove_catalog` is the master token's alone, like `add_catalog`).
 
 A catalog whose checkout cannot be loaded is shown as a problem (`catalog
 list`) while the others load; it is retried at its next `reload`. Sync never
 removes what a catalog installed because that catalog went away — not
-loaded, failed, unadmitted, the host changed org, or removed: it reports
-those assets as `Noop` "kept, not removed" and leaves them to you.
+loaded, failed, unadmitted, the host changed org, or removed — nor an asset
+whose own file in a loaded catalog does not parse (or whose kind's directory
+cannot be read): it reports those assets as `Noop` "kept, not removed" and
+leaves them to you. Changeset cards never propose a removal either: a kept
+copy stays until you sync a plan that removes it.
+
+**Changeset cards.** After each asset scan the hub proposes cards from what
+the hosts have: a Bootstrap card that adopts what is already installed into
+the catalogs as layers (grouped by which hosts have each asset; personal
+assets an org-bound host already has are proposed `shared`), New-on-host
+cards, Drift cards (take the host's copy, or restore the catalog's) and
+Rollout cards (sync a layer to its hosts). Nothing is applied until someone
+applies a card through the MCP tool `changesets` (`list`, `propose`,
+`apply`, `undo`, `dismiss`, `reject_item`). Applying commits only the files
+it wrote, once in each catalog it changes, and commits nothing if any step
+fails; if something else changed the checkout meanwhile, it leaves that
+catalog alone and the card says "manual cleanup needed". `undo` reverts the
+latest applied card in each catalog and puts back that catalog's host layer
+assignments as they were before the apply, without touching hosts. Undo
+does not un-hide what the card hid, and a layer the card's Rollout already
+synced stays rolled out. Undo itself leaves every host alone, but the copies
+that Rollout installed or adopted keep fleet's manifest entries while the
+catalog no longer has those assets, so the next ordinary sync would remove
+them (with a backup) — even copies a host had before fleet adopted them.
+The undo's answer warns, naming each such asset and its hosts; to keep a
+copy, put the asset back in the catalog before syncing. Undo replaces the
+catalog's whole set of host layer assignments, so a layer change made there
+after the apply is lost too. A card never overwrites or removes on a host,
+except a Drift card's restore, which a person picks for one asset on one
+host and harness and which backs up what it replaces. `catalog.auto`
+(Settings → Automation → Assets, on by default) hides fleet's and Claude's
+internal assets, prepares the cards after each scan, and — once a Rollout
+card for a layer has been applied — installs that layer's assets a host
+is missing, and adopts identical copies, by itself, skipping a host whose
+rollout a person rejected. It never changes a copy a host already has,
+even one that is behind the catalog: updating a drifted copy is a Drift or
+Rollout card, or a sync a person runs. Off, cards come only from `propose` and nothing syncs by itself.
+`catalog.auto_push` (off by default) pushes the catalog right after a card
+commits or is undone. `changesets` is for the master token or a person's
+own full device bound to no org (never a per-host token); listing needs no
+more. Proposing needs the personal grant; applying, undoing, dismissing or
+rejecting needs a grant on every catalog the card (for an apply, the items
+it runs) names (`fleet-hub client grant <name> assets [--catalog NAME]`),
+plus the personal grant for a Rollout, a restore or a hide; a Rollout or
+restore also asks for the same confirmation as `apply_sync`. A catalog with uncommitted or
+untracked files refuses an apply or undo until they are committed or moved
+away.
 
 `catalog list` and the MCP `list_catalogs` action show every catalog's path
 and remote across orgs, so only the master token or a person's own unbound
