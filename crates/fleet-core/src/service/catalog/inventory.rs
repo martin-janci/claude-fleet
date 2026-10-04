@@ -544,6 +544,7 @@ pub fn compute_states(
                 secret_like: a.secret_like,
                 fleet_owned: a.fleet_owned,
                 catalog_id: None,
+                drift_side: None,
             });
         }
     }

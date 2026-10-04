@@ -335,14 +335,15 @@ impl Store {
             // foreign key, which would otherwise roll back and lose this
             // host's ENTIRE inventory over one row's stale reference.
             tx.execute(
-                "INSERT INTO asset_inventory (host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned, catalog_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, (SELECT id FROM catalogs WHERE id = ?12))",
+                "INSERT INTO asset_inventory (host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned, catalog_id, drift_side)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, (SELECT id FROM catalogs WHERE id = ?12), ?13)",
                 rusqlite::params![
                     host_alias, harness, r.kind, r.name, r.state, r.catalog_hash, r.host_hash, r.scanned_at,
                     if r.managed { 1 } else { 0 },
                     if r.secret_like { 1 } else { 0 },
                     if r.fleet_owned { 1 } else { 0 },
                     r.catalog_id,
+                    r.drift_side,
                 ],
             )?;
         }
@@ -356,7 +357,7 @@ impl Store {
 
     pub fn list_inventory(&self) -> Result<Vec<AssetInventoryRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned, catalog_id
+            "SELECT host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned, catalog_id, drift_side
              FROM asset_inventory ORDER BY host_alias, harness, kind, name",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -373,6 +374,7 @@ impl Store {
                 secret_like: row.get::<_, i64>(9)? != 0,
                 fleet_owned: row.get::<_, i64>(10)? != 0,
                 catalog_id: row.get(11)?,
+                drift_side: row.get(12)?,
             })
         })?;
         rows.collect()
@@ -622,6 +624,7 @@ mod tests {
             secret_like: false,
             fleet_owned: false,
             catalog_id: None,
+            drift_side: None,
         };
         s.replace_host_inventory(
             "local",
@@ -677,6 +680,7 @@ mod tests {
             // No `catalogs` row has this id — not even the personal one,
             // since nothing was configured.
             catalog_id: Some(999_999),
+            drift_side: None,
         };
         s.replace_host_inventory("local", "claude", &[row]).unwrap();
         let rows = s.list_inventory().unwrap();
@@ -726,6 +730,43 @@ mod tests {
         assert!(s.list_inventory().unwrap()[0].managed);
     }
 
+    /// Assets M5 (R4): which side moved survives the store, and a row that
+    /// says nothing reads back as nothing.
+    #[test]
+    fn inventory_round_trips_drift_side() {
+        let s = Store::open_in_memory().unwrap();
+        let row = |name: &str, side: Option<&str>| AssetInventoryRow {
+            host_alias: "local".into(),
+            harness: "claude".into(),
+            kind: "skill".into(),
+            name: name.into(),
+            state: "drifted".into(),
+            managed: true,
+            drift_side: side.map(String::from),
+            ..Default::default()
+        };
+        s.replace_host_inventory(
+            "local",
+            "claude",
+            &[
+                row("a", Some("catalog")),
+                row("b", Some("host")),
+                row("c", None),
+            ],
+        )
+        .unwrap();
+        let got: Vec<Option<String>> = s
+            .list_inventory()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.drift_side)
+            .collect();
+        assert_eq!(
+            got,
+            [Some("catalog".to_string()), Some("host".to_string()), None]
+        );
+    }
+
     #[test]
     fn inventory_round_trips_flags_and_reports_last_scans() {
         let s = Store::open_in_memory().unwrap();
@@ -742,6 +783,7 @@ mod tests {
             secret_like: true,
             fleet_owned: true,
             catalog_id: None,
+            drift_side: None,
         };
         s.replace_host_inventory(
             "local",

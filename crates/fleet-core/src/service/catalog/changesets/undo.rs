@@ -1878,6 +1878,7 @@ mod tests {
                     secret_like: false,
                     fleet_owned: false,
                     catalog_id: Some(p),
+                    drift_side: None,
                 }],
             )
             .unwrap();

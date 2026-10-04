@@ -1241,6 +1241,12 @@ pub struct AssetInventoryRow {
     /// `unmanaged`/`orphan` row, which names nothing the catalog defines.
     #[serde(default)]
     pub catalog_id: Option<i64>,
+    /// Assets M5 (migration 096, Rulings R4): on a `drifted` managed row,
+    /// `host` (edited there) or `catalog` (the host copy is as fleet wrote
+    /// it; the catalog moved on). `None` otherwise, or when the manifest
+    /// entry cannot tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift_side: Option<String>,
 }
 
 /// A secret name known to the sync engine (migration 031). Never carries the
