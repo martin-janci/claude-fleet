@@ -11,10 +11,15 @@ impl FleetTools {
         the last scan, plus unmanaged assets on hosts and catalog parse \
         problems. E_CATALOG_NOT_CONFIGURED until a catalog is set (in the \
         app, or `fleet-hub catalog set` on a hub).")]
-    pub(super) async fn list_assets(&self) -> Result<CallToolResult, McpError> {
-        audit("list_assets", "");
+    pub(super) async fn list_assets(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("list_assets", &format!("caller={}", caller.label()));
         catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
-        ok_json_compact(&catalog::list_assets(&self.store).map_err(to_mcp_err)?)
+        ok_json_compact(
+            &catalog::list_assets_in(&self.store, listing_scope(&caller)).map_err(to_mcp_err)?,
+        )
     }
 
     #[tool(description = "Scan hosts for installed skills/agents/hooks/MCP \
@@ -810,6 +815,19 @@ fn changesets_forbidden(action: &str, catalog: Option<&str>, caller: &Caller) ->
         ),
     };
     mcp_err("E_FORBIDDEN", message, None)
+}
+
+/// Assets M5 (R11): every catalog's assets for the master and a person's own
+/// unbound full device — the `list_catalogs` audience (`Touches::Nothing` in
+/// `catalog_admin`); the personal catalog only, as before M5, for a per-host
+/// token and an org-bound, readonly or single-purpose client, so none of
+/// them learns an org catalog's name or assets from the listing.
+pub(crate) fn listing_scope(caller: &Caller) -> catalog::ListingScope {
+    if caller.is_master() || (caller.is_person_device() && caller.mode == TokenMode::Full) {
+        catalog::ListingScope::Every
+    } else {
+        catalog::ListingScope::Personal
+    }
 }
 
 /// True when `caller` may touch the catalog `name` whose row the caller has

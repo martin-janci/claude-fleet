@@ -32,7 +32,13 @@ export interface AssetSummary {
   install_as?: string;
   /** Optional because an older hub (pre-M1) omits the key. */
   scope?: AssetScope;
+  /** Assets M5 (R11): `personal` or an org catalog's name. A listing spans
+   *  every catalog, so one name can appear twice; an older hub omits the
+   *  key and listed personal only — read it through `catalogOf`. */
+  catalog?: string;
 }
+/** The catalog an asset summary is in (absent = an older hub's personal). */
+export const catalogOf = (a: AssetSummary): string => a.catalog ?? 'personal';
 /** Assets S1a (Task 3/4): `unmanaged` rows grouped per (kind, name) and
  *  classified server-side. Optional because older hubs (pre-migration 087)
  *  omit the key — `identitiesOf` below falls back to grouping client-side. */

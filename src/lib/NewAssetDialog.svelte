@@ -1,6 +1,6 @@
 <script lang="ts">
   import Modal from './Modal.svelte';
-  import { catalog, createAsset, KIND_ORDER, KIND_LABEL, type AssetKind } from './assets';
+  import { catalog, catalogOf, createAsset, KIND_ORDER, KIND_LABEL, type AssetKind } from './assets';
 
   let {
     onclose,
@@ -22,7 +22,10 @@
   const nameError = $derived(name !== '' && !NAME_RE.test(name) ? 'must match [a-z0-9][a-z0-9-]*' : null);
   const canCreate = $derived(name.trim() !== '' && NAME_RE.test(name) && !busy);
 
-  const candidates = $derived(($catalog?.assets ?? []).filter((a) => a.kind === kind));
+  // Assets M5 (PF9): the listing spans every catalog; a new asset is
+  // created in the personal catalog, so it copies from personal's only (one
+  // name per kind there — the option keys stay unique).
+  const candidates = $derived(($catalog?.assets ?? []).filter((a) => a.kind === kind && catalogOf(a) === 'personal'));
 
   // A kind switch invalidates any previously chosen duplicate-from (it named
   // an asset of the old kind).

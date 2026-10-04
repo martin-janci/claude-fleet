@@ -72,3 +72,37 @@ describe('AssetList — identity badge and host-strip differ contract', () => {
     expect(strip?.getAttribute('aria-label')).toBe('local: present');
   });
 });
+
+describe('AssetList — one name in two catalogs (Assets M5, PF9)', () => {
+  const colliding = (): AssetListing => ({
+    ...baseListing(),
+    assets: [
+      { kind: 'skill', name: 's', version: '1', description: 'd', tags: [], hosts: [], catalog: 'personal' },
+      { kind: 'skill', name: 's', version: '2', description: 'd', tags: [], hosts: [], catalog: 'acme' },
+    ],
+  });
+
+  it('renders both rows, keyed by (catalog, name); only the personal one opens the detail', async () => {
+    const onselect = vi.fn();
+    render(AssetList, { listing: colliding(), selected: { kind: 'skill', name: 's' }, filter: '', onselect, onimport: vi.fn() });
+
+    const mine = screen.getByTestId('asset-row-skill-s');
+    const theirs = screen.getByTestId('asset-row-acme-skill-s');
+    expect(mine.classList.contains('selected')).toBe(true);
+    expect(theirs.classList.contains('selected')).toBe(false);
+    expect(theirs.textContent).toContain('acme');
+
+    theirs.click();
+    expect(onselect).not.toHaveBeenCalled();
+    mine.click();
+    expect(onselect).toHaveBeenCalledWith('skill', 's');
+  });
+
+  it('renders both rows read-only too; a row from an older hub (no catalog) is personal', () => {
+    const listing = colliding();
+    delete listing.assets[0].catalog;
+    render(AssetList, { listing, selected: null, filter: '', readonly: true, onselect: () => {}, onimport: vi.fn() });
+    expect(screen.getByTestId('asset-row-skill-s')).toBeTruthy();
+    expect(screen.getByTestId('asset-row-acme-skill-s')).toBeTruthy();
+  });
+});

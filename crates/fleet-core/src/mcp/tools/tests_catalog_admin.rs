@@ -1031,3 +1031,109 @@ async fn importing_an_outside_host_into_an_org_catalog_needs_the_personal_grant_
         r.err()
     );
 }
+
+/// Assets M5 (R11): `list_assets` spans every catalog only for the callers
+/// that may list every catalog — the master and an unbound full device.
+#[test]
+fn list_assets_spans_every_catalog_only_for_the_master_and_unbound_full_devices() {
+    use super::assets::listing_scope;
+    use crate::service::catalog::ListingScope;
+    assert_eq!(listing_scope(&Caller::master()), ListingScope::Every);
+    assert_eq!(
+        listing_scope(&client(1, TokenMode::Full, None)),
+        ListingScope::Every
+    );
+    assert_eq!(
+        listing_scope(&client(1, TokenMode::Readonly, None)),
+        ListingScope::Personal
+    );
+    assert_eq!(
+        listing_scope(&client(1, TokenMode::Updater, None)),
+        ListingScope::Personal
+    );
+    assert_eq!(
+        listing_scope(&client(1, TokenMode::Peer, None)),
+        ListingScope::Personal
+    );
+    assert_eq!(
+        listing_scope(&client(1, TokenMode::Full, Some(7))),
+        ListingScope::Personal
+    );
+    assert_eq!(listing_scope(&host("oci")), ListingScope::Personal);
+}
+
+/// A [`git_catalog`] that also holds skill `s` (uncommitted: a load reads
+/// the working tree).
+fn git_catalog_with_skill(tag: &str) -> std::path::PathBuf {
+    let root = git_catalog(tag);
+    std::fs::create_dir_all(root.join("skills/s")).unwrap();
+    std::fs::write(
+        root.join("skills/s/asset.yaml"),
+        "kind: skill\nname: s\ndescription: d\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("skills/s/body.md"), "b\n").unwrap();
+    root
+}
+
+/// Assets M5 (R11), the security boundary, per caller class through the
+/// tool: the master and an unbound full device (granted or not — the
+/// `list_catalogs` audience) see acme's asset with its catalog; a readonly
+/// or org-bound client and a per-host token see personal's only, exactly as
+/// before — never acme's name.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn the_list_assets_tool_shows_org_catalogs_only_to_who_may_list_every_catalog() {
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let personal = git_catalog_with_skill("m5-list-personal");
+    let acme_root = git_catalog_with_skill("m5-list-acme");
+    let s = Store::open_in_memory().unwrap();
+    s.set_catalog_config(&personal.to_string_lossy(), None)
+        .unwrap();
+    let org = s.add_org("acme", None, false).unwrap();
+    s.upsert_catalog("acme", &acme_root.to_string_lossy(), None, Some(org.id))
+        .unwrap();
+    let plain = s.insert_client_token("plain", "aa11", "full").unwrap();
+    let kiosk = s.insert_client_token("kiosk", "bb22", "readonly").unwrap();
+    let bound = s.insert_client_token("bound", "cc33", "full").unwrap();
+    s.set_client_org("bound", Some(org.id)).unwrap();
+    let t = tools(s);
+
+    let cases: Vec<(&str, Caller, &[&str])> = vec![
+        ("master", Caller::master(), &["personal", "acme"]),
+        (
+            "unbound full client",
+            client(plain.id, TokenMode::Full, None),
+            &["personal", "acme"],
+        ),
+        (
+            "readonly client",
+            client(kiosk.id, TokenMode::Readonly, None),
+            &["personal"],
+        ),
+        (
+            "org-bound client",
+            client(bound.id, TokenMode::Full, Some(org.id)),
+            &["personal"],
+        ),
+        ("per-host token", host("h1"), &["personal"]),
+    ];
+    for (who, caller, want) in cases {
+        let r = t.list_assets(Extension(caller)).await;
+        let text = r
+            .as_ref()
+            .map(|r| r.content[0].as_text().expect("text").text.clone())
+            .unwrap_or_else(|e| panic!("{who}: {}", e.message));
+        let listing: Value = serde_json::from_str(&text).unwrap();
+        let catalogs: Vec<&str> = listing["assets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["catalog"].as_str().unwrap())
+            .collect();
+        assert_eq!(catalogs, want, "{who}");
+        if want.len() == 1 {
+            assert!(!text.contains("acme"), "{who} never sees acme: {text}");
+        }
+    }
+}

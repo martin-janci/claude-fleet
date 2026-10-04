@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { groupByKind, stateCounts, identitiesOf, hostOrder, type AssetListing, type AssetIdentity } from './assets';
+  import { groupByKind, stateCounts, identitiesOf, hostOrder, catalogOf, type AssetListing, type AssetIdentity, type AssetSummary } from './assets';
   import HostStrip from './HostStrip.svelte';
 
   let {
@@ -38,12 +38,20 @@
   const orphans = $derived(listing.unmanaged.filter((r) => r.state === 'orphan' && (filter === '' || r.name.toLowerCase().includes(filter.toLowerCase()))));
   const oddHosts = (i: AssetIdentity) => (i.reason?.startsWith('copies differ on ') ? i.reason.slice(17).split(', ') : []);
   const isSel = (kind: string, name: string) => selected?.kind === kind && selected?.name === name;
+  /** Assets M5 (PF9): the listing spans every catalog, so a row is keyed by
+   *  (catalog, name). The detail and the editor are the personal catalog's
+   *  (`catalog_get_asset`), so only a personal row opens one; an org
+   *  catalog's row is a static row naming its catalog until the Inspector
+   *  reads org assets from the listing (R19). */
+  const isPersonal = (a: AssetSummary) => catalogOf(a) === 'personal';
+  const rowTestid = (a: AssetSummary) =>
+    isPersonal(a) ? `asset-row-${a.kind}-${a.name}` : `asset-row-${catalogOf(a)}-${a.kind}-${a.name}`;
 </script>
 
 <div class="asset-list">
   {#each groups as g (g.kind)}
     <div class="group-header">{g.label} <span class="count">{g.assets.length}</span></div>
-    {#each g.assets as a (a.name)}
+    {#each g.assets as a (`${catalogOf(a)}:${a.name}`)}
       {@const c = stateCounts(a.hosts)}
       {#snippet chips()}
         <span class="chips">
@@ -53,14 +61,15 @@
           {#if c.unsupported}<span class="chip muted">{c.unsupported} unsupported</span>{/if}
         </span>
       {/snippet}
-      {#if readonly}
-        <div class="row static" title={hostsTitle(a.hosts)} data-testid={`asset-row-${a.kind}-${a.name}`}>
+      {#if readonly || !isPersonal(a)}
+        <div class="row static" title={hostsTitle(a.hosts)} data-testid={rowTestid(a)}>
           <span class="name">{a.name}</span>
+          {#if !isPersonal(a)}<span class="meta">{catalogOf(a)}</span>{/if}
           {#if a.version}<span class="meta">{a.version}</span>{/if}
           {@render chips()}
         </div>
       {:else}
-        <button class="row" class:selected={isSel(a.kind, a.name)} onclick={() => onselect(a.kind, a.name)} data-testid={`asset-row-${a.kind}-${a.name}`}>
+        <button class="row" class:selected={isSel(a.kind, a.name)} onclick={() => onselect(a.kind, a.name)} data-testid={rowTestid(a)}>
           <span class="name">{a.name}</span>
           {@render chips()}
         </button>
