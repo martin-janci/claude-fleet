@@ -17,8 +17,9 @@ A/B benchmark says so.
 > E (#428: contract tests out of fleet-core's build inputs, the agent e2e
 > crate), F (#429: `fleet-fast-check`), G (the test-target split
 > experiment), H (cargo-nextest, partitions and build-once/run-many), I
-> (a persistent Linux builder simulated on 4 vCPU, and a Buildkite POC) and
-> J (the macOS runner's memory, and what a test-target split would free).
+> (a persistent Linux builder simulated on 4 vCPU, and a Buildkite POC),
+> J (the macOS runner's memory, and what a test-target split would free)
+> and K (the agent's verification loop end to end, and `scripts/verify.sh`).
 > Where a later measurement overturns a recommendation below,
 > that passage carries an *Update* note. For a fleet-core edit on the same
 > 4 vCPU machine, the numbers today are:
@@ -2629,3 +2630,61 @@ left for macOS are a runner with more memory, or a persistent Mac builder
 (Appendix I.5), which avoids most of this rebuild. After #438 the macOS
 leg is no longer clearly the slowest, and most of what it runs now is
 test execution, so neither is urgent.
+
+## Appendix K — The agent's verification loop, end to end (2026-10-04)
+
+Question: what does an agent pay to verify one change, following CLAUDE.md's
+validation ladder step by step, and how much of it is repeated work? Method:
+4 vCPU Linux, warm `target/`. One private fn was added to
+`service/health.rs`, then every ladder step ran in order. Two rounds; the
+spread between them was under 2 s per step.
+
+### K.1 The ladder as written (before this change)
+
+| Step | Time | Note |
+|---|---:|---|
+| `cargo fleet-fast-check` | 15 s | |
+| `cargo fleet-check` | 22 s | |
+| `cargo fleet-test -- service::health` | 36 s | |
+| `cargo fmt --all --check` | 3.5 s | |
+| `cargo fleet-lint` (the pre-commit hook's clippy) | 25 s | compiles separately from `fleet-check`, so it reuses none of it |
+| `cargo test --workspace` | 118 s | build 1.4 s; fleet-core's unit tests 98 s |
+| `scripts/ci-local.sh --rust-only` | ~145 s more | runs the suite again (118 s), plus `cargo build -p fleet-hub` (21 s, another feature world of fleet-core); summed from its measured steps, since cargo-deny was not installed |
+
+Check and clippy never evict each other (a check after a lint took 0.4 s),
+so the cost is duplicated work, not thrashing. Two steps repeat another:
+`fleet-check` before `fleet-lint` (clippy reports everything check does,
+test code included), and `cargo test --workspace` before `ci-local.sh`,
+which runs it again. In a new worktree the first round paid 3:05
+(`fleet-fast-check`), 1:50 (`fleet-check`), 2:53 (the targeted test), 1:38
+(lint) and 1:50 (the hub build): about 13 minutes and ~22 GB before the
+first verified commit.
+
+On macOS, the pre-commit hook and `ci-local.sh` also fell back to their
+headless `-p` selection, because `pkg-config --exists gtk+-3.0` fails
+there. Only Linux needs those libraries. The fallback linted another
+feature world of fleet-core on every commit.
+
+### K.2 `scripts/verify.sh`
+
+One command that runs each needed check once, in the ladder's package
+selection. `quick` (the default, before a commit) runs fmt, `fleet-lint`
+and the unit tests of the modules the change touches. The filter comes from
+the changed paths: `service/work/view.rs` → `service::work::view`, and a
+crate root, a Cargo file or a file outside `src/` runs every unit test. A
+file that Rust tests read by its repo path (a `src/lib/*.ts` mirror, a
+`docs/*.md` guide) adds the modules that name it. A frontend change runs
+`pnpm run check` and `vitest related`. `full` (before a push) is
+`ci-local.sh`, narrowed to the jobs the change touches. The pre-commit hook
+and `ci-local.sh` fall back to the headless selection on Linux only.
+`scripts/verify-test.sh` holds the path → plan mapping in CI.
+
+| Same fleet-core edit | Before | `verify.sh` |
+|---|---:|---:|
+| before a commit (fmt, check/lint, tests) | 86.5 s | **63–64 s** (fmt 3, lint 27–28, tests 32–34) |
+| the pre-commit hook after it | 25 s | ~1 s (no-op) |
+| before a push | 118 s + ~145 s | ~145 s (`ci-local.sh` once) |
+
+Not addressed here: the cold start of a new worktree (K.1), and the
+full-suite run time (98 s on 4 vCPU). Both are what a persistent builder
+(Appendix I.5) takes off the agent's machine.
