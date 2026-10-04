@@ -51,7 +51,10 @@ let primed = false;
 export async function loadDownloads(): Promise<Result<DownloadList>> {
   const r = await invokeCmd<DownloadList>('list_downloads', { args: {} });
   if (!r.ok) return r;
-  const rows = r.value.downloads;
+  // An answer without the list (a mocked or unexpected reply) reads as empty
+  // rather than throwing inside an event handler.
+  const value = r.value ?? ({} as Partial<DownloadList>);
+  const rows = Array.isArray(value.downloads) ? value.downloads : [];
   if (primed) {
     for (const d of rows) {
       if (d.state === 'ready' && d.downloaded_at == null && !announced.has(d.id)) {
@@ -66,7 +69,7 @@ export async function loadDownloads(): Promise<Result<DownloadList>> {
   for (const d of rows) if (d.state === 'ready') announced.add(d.id);
   primed = true;
   downloads.set(rows);
-  downloadBudget.set({ total: r.value.total_bytes, max: r.value.max_total_bytes });
+  downloadBudget.set({ total: value.total_bytes ?? 0, max: value.max_total_bytes ?? 0 });
   return r;
 }
 

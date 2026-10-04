@@ -73,3 +73,14 @@ describe('downloads', () => {
     expect(fmtSize(5 * 1024 * 1024)).toBe('5.0 MB');
   });
 });
+
+describe('downloads, an unexpected answer', () => {
+  it('reads a null reply as an empty list', async () => {
+    _resetDownloadsForTests();
+    invoke.mockReset();
+    invoke.mockResolvedValueOnce(null);
+    const r = await loadDownloads();
+    expect(r.ok).toBe(true);
+    expect(get(downloads)).toEqual([]);
+  });
+});
