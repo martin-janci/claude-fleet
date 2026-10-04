@@ -1,0 +1,65 @@
+# EXPERIMENT — not for merging. Measures whether the macOS runner (3 cores,
+# 7 GB) swaps while compiling the workspace crates as CI does: dependencies
+# warm, workspace crates cold, CARGO_INCREMENTAL=0. Two legs: cargo's default
+# parallelism and -j 1 (one rustc at a time). Each leg samples free memory,
+# swap and page-outs every 2 s during the measured rebuild.
+name: mac-mem-probe
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/mac-mem-probe.yml
+
+jobs:
+  probe:
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        jobs: ['default', '1']
+    runs-on: macos-latest
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Machine
+        run: |
+          sysctl -n machdep.cpu.brand_string hw.ncpu hw.memsize
+          sysctl vm.swapusage
+          sw_vers
+      - name: Warm-up build (dependencies and everything else; not measured)
+        run: cargo test --workspace --no-run
+      - name: Drop the workspace crates only (CI's state after a cache restore)
+        run: |
+          cargo clean -p fleet-core -p claude-fleet -p fleet-hub -p fleet-agent \
+            -p fleet-proto -p fleet-update -p fleet-agent-e2e
+      - name: Measured rebuild of the workspace crates, with a memory sampler
+        run: |
+          set -u
+          J=""; [ "${{ matrix.jobs }}" != default ] && J="-j ${{ matrix.jobs }}"
+          sample() {
+            while true; do
+              v=$(vm_stat | awk -F: '/Pages free|Pageouts|Swapouts|Swapins|occupied by compressor/ {gsub(/[ .]/,"",$2); printf "%s=%s ", $1, $2}')
+              s=$(sysctl -n vm.swapusage)
+              f=$(memory_pressure -Q 2>/dev/null | awk -F: '/free percentage/ {gsub(/ /,"",$2); print $2}')
+              echo "$(date +%s) free%=$f | $v| $s"
+              sleep 2
+            done
+          }
+          sample > mem.log 2>&1 &
+          SP=$!
+          start=$(date +%s)
+          /usr/bin/time -l cargo test --workspace --no-run $J 2> time.log
+          end=$(date +%s)
+          kill $SP
+          echo "=== wall: $((end - start)) s (jobs: ${{ matrix.jobs }})"
+          echo "=== /usr/bin/time -l (max RSS of the largest child, page faults, swaps)"
+          grep -E 'maximum resident|page faults|swaps|real' time.log || tail -20 time.log
+          echo "=== first and last memory samples"
+          head -1 mem.log; tail -1 mem.log
+          echo "=== lowest free% and highest swap used during the build"
+          awk '{for(i=1;i<=NF;i++){ if($i ~ /^free%=/){split($i,a,"=");v=a[2];gsub(/%/,"",v); if(min==""||v+0<min+0)min=v}; if($i=="used"){u=$(i+2); gsub(/M/,"",u); if(u+0>max+0)max=u} }} END {print "min free% " min ", max swap used " max "M"}' mem.log
+          echo "=== all samples"
+          cat mem.log
