@@ -92,15 +92,20 @@ agent's package creates.
    `minisign` is optional. Without it `ci-local.sh` skips
    `release-update-scripts-test.sh`.
 
-4. **Rust, as `buildkite-agent`, into the persistent directories.** The
-   pinned toolchain in `rust-toolchain.toml` installs itself on the first
-   `cargo` call.
+4. **Rust, as `buildkite-agent`, into the persistent directories.** Run
+   this from the repository root: it installs the toolchain pinned in
+   `rust-toolchain.toml` as the default. Without a default toolchain,
+   `cargo install` outside a checkout fails with *rustup could not choose a
+   version of cargo to run*. Later pin bumps install themselves on the first
+   `cargo` call in the checkout.
 
    ```bash
+   pin=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
    sudo -u buildkite-agent -H bash -c '
      export CARGO_HOME=/srv/ci/cargo-home RUSTUP_HOME=/srv/ci/rustup
-     curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain none
-     /srv/ci/cargo-home/bin/cargo install cargo-deny --locked'
+     curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path \
+       --profile minimal --default-toolchain "$1" -c clippy,rustfmt
+     /srv/ci/cargo-home/bin/cargo install cargo-deny --locked' _ "$pin"
    ```
 
 5. **Node 22 and pnpm 10.** Use any Node 22 install (NodeSource, nvm, or a
