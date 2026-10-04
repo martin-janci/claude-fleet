@@ -788,11 +788,16 @@ async fn apply_sync_run(
     Ok(summary)
 }
 
-/// The most recent completed sync, deserialised from its `sync_runs` row.
+/// The run the Assets footer shows, deserialised from its `sync_runs` row
+/// (Assets M5, R10): the newest a person made, else the newest SB6 made
+/// (marked `auto`), else none.
 pub fn last_sync(store: &Mutex<Store>) -> Result<Option<SyncRunSummary>, IpcError> {
     let row = {
         let s = lock(store)?;
-        s.last_sync_run()?
+        match s.last_person_sync_run()? {
+            Some(row) => Some(row),
+            None => s.last_sync_run()?,
+        }
     };
     match row {
         Some(row) => Ok(Some(serde_json::from_str(&row.summary_json).map_err(
@@ -2540,5 +2545,22 @@ mod tests {
             .hosts
             .iter()
             .all(|h| h.status == "skipped" && h.detail.as_deref() == Some(UNLAYERED_DETAIL)));
+    }
+
+    /// Assets M5 (R10): the Assets footer shows a person's last sync; a fleet
+    /// only SB6 has synced still shows SB6's, marked `auto`.
+    #[test]
+    fn last_sync_prefers_a_person_run_and_falls_back_to_sb6s() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        assert!(last_sync(&store).unwrap().is_none());
+        let auto = r#"{"plan_id":"a","started_at":3,"finished_at":4,"hosts":[],"auto":true}"#;
+        store.lock().unwrap().record_sync_run(3, 4, auto).unwrap();
+        let only = last_sync(&store).unwrap().unwrap();
+        assert!(only.auto);
+        let person = r#"{"plan_id":"p","started_at":1,"finished_at":2,"hosts":[]}"#;
+        store.lock().unwrap().record_sync_run(1, 2, person).unwrap();
+        store.lock().unwrap().record_sync_run(5, 6, auto).unwrap();
+        let got = last_sync(&store).unwrap().unwrap();
+        assert_eq!((got.plan_id.as_str(), got.auto), ("p", false));
     }
 }

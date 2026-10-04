@@ -522,19 +522,31 @@ impl Store {
             .optional()
     }
 
-    /// The id of the newest sync run that SB6 did not make — one whose
-    /// summary is not marked `"auto": true` (Assets M4, final review I3).
-    /// A row whose JSON does not parse counts as a person's.
-    pub fn last_person_sync_run_id(&self) -> Result<Option<i64>, rusqlite::Error> {
+    /// The newest sync run a person made — one whose summary is not marked
+    /// `"auto": true`, i.e. SB6 did not make it (Assets M4 final review I3;
+    /// M5 R10). A row whose JSON does not parse counts as a person's.
+    pub fn last_person_sync_run(&self) -> Result<Option<SyncRunRow>, rusqlite::Error> {
         self.conn
             .prepare_cached(
-                "SELECT id FROM sync_runs \
+                "SELECT id, started_at, finished_at, summary_json FROM sync_runs \
                  WHERE NOT (json_valid(summary_json) \
                             AND json_extract(summary_json, '$.auto') IS 1) \
                  ORDER BY id DESC LIMIT 1",
             )?
-            .query_row([], |row| row.get(0))
+            .query_row([], |row| {
+                Ok(SyncRunRow {
+                    id: row.get(0)?,
+                    started_at: row.get(1)?,
+                    finished_at: row.get(2)?,
+                    summary_json: row.get(3)?,
+                })
+            })
             .optional()
+    }
+
+    /// The id of [`Self::last_person_sync_run`] (PF7: one WHERE clause).
+    pub fn last_person_sync_run_id(&self) -> Result<Option<i64>, rusqlite::Error> {
+        Ok(self.last_person_sync_run()?.map(|r| r.id))
     }
 
     /// Emit `sync:progress` (not a store row).
@@ -956,5 +968,37 @@ mod tests {
             total: 3,
         });
         assert_eq!(bus.take(), vec!["sync:progress:local:claude:1/3"]);
+    }
+
+    /// Assets M5 (R10): the newest run a person made, past SB6's; the id
+    /// reader answers the same run (PF7).
+    #[test]
+    fn last_person_sync_run_skips_runs_sb6_made() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.last_person_sync_run().unwrap().is_none());
+        assert!(s.last_person_sync_run_id().unwrap().is_none());
+        let person = s
+            .record_sync_run(
+                1,
+                2,
+                r#"{"plan_id":"p1","started_at":1,"finished_at":2,"hosts":[]}"#,
+            )
+            .unwrap();
+        s.record_sync_run(
+            3,
+            4,
+            r#"{"plan_id":"p2","started_at":3,"finished_at":4,"hosts":[],"auto":true}"#,
+        )
+        .unwrap();
+        let got = s.last_person_sync_run().unwrap().unwrap();
+        assert!(got.summary_json.contains("p1"));
+        assert_eq!(got.id, person);
+        assert_eq!(s.last_person_sync_run_id().unwrap(), Some(person));
+        assert!(s
+            .last_sync_run()
+            .unwrap()
+            .unwrap()
+            .summary_json
+            .contains("p2"));
     }
 }
