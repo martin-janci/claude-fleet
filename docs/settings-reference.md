@@ -65,6 +65,14 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | `repair.auto_on_tick` | `false` | on / off | Re-add deleted worktree directories without anyone opening them. A stale entry is dropped only when its parent folder is the one seen while it was healthy, so an unmounted volume is never touched. |
 | `repair.tick_interval_secs` | `600` | ≥ 60 seconds | Seconds between automatic workspace checks, each repairing at most five worktrees. |
 
+## downloads
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `downloads.max_file_mb` | `100` | 1–4096 MiB | Largest file a session can send to your devices; a bigger one is refused. |
+| `downloads.max_total_mb` | `2048` | 1–1048576 MiB | How much the kept downloads may take together. A new file pushes out the oldest ones. |
+| `downloads.keep_secs` | `604800` | seconds, shown in days, `0` = until removed | How long a sent file is kept for your devices before it is removed. |
+
 ## Move to host
 
 | Setting | Default | Range | What it does |

@@ -442,6 +442,67 @@
       "danger": {
         "level": "none"
       },
+      "default": "100",
+      "help": "Largest file a session can send to your devices; a bigger one is refused.",
+      "key": "downloads.max_file_mb",
+      "kind": {
+        "max": 4096,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Download: file cap",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "mib",
+      "value": "100"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "2048",
+      "help": "How much the kept downloads may take together. A new file pushes out the oldest ones.",
+      "key": "downloads.max_total_mb",
+      "kind": {
+        "max": 1048576,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Downloads: space",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "mib",
+      "value": "2048"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "604800",
+      "help": "How long a sent file is kept for your devices before it is removed.",
+      "key": "downloads.keep_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Keep downloads",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "days",
+      "value": "604800",
+      "zero": "until removed"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "200",
       "help": "Largest transcript Move to host copies; a bigger one is refused.",
       "key": "move.max_transcript_mb",
@@ -2182,6 +2243,23 @@
             }
           ],
           "title": "Move to host"
+        },
+        {
+          "items": [
+            {
+              "key": "downloads.max_file_mb",
+              "type": "field"
+            },
+            {
+              "key": "downloads.max_total_mb",
+              "type": "field"
+            },
+            {
+              "key": "downloads.keep_secs",
+              "type": "field"
+            }
+          ],
+          "title": "Downloads"
         },
         {
           "items": [

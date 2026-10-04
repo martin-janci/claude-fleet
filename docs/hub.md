@@ -1111,6 +1111,36 @@ free to pair again:
 revoked phone (paired 2026-09-17 09:12Z); its next request is refused and the name is free again
 ```
 
+## File downloads
+
+A session on a host you cannot reach makes a file you want — a PDF, a
+CSV, an image, a build. Have it **sent to your devices**: the hub copies
+the file off the host and keeps it, and the phone's *Files* tab and the
+desktop's *⤓ Downloads* (footer) list it for you to save, share or open.
+
+- **Claude sends it.** Ask the session ("send me the report"): its Claude
+  calls the control API's `send_file { session_id, path }` with its own
+  session id (`whoami`). A host's token may only send from its own host.
+- **You pick it.** In the desktop's Files tab, open the file and press
+  *Send to downloads*.
+
+The copy runs in the background in 8 MiB pieces over the same SSH (or
+agent) link the hub already uses; the row shows *copying…* until it is
+ready, and a toast says so. Folders are refused: zip them first.
+
+| setting | default | |
+|---|---|---|
+| `downloads.max_file_mb` | 100 | largest file one send may copy |
+| `downloads.max_total_mb` | 2048 | everything kept together; a new file pushes out the oldest |
+| `downloads.keep_secs` | 7 days | then the GC sweep removes it (`0` keeps it until removed) |
+
+The copies live in `<data dir>/downloads/` (mode 0700), named by row id.
+A copy that was in flight when the hub stopped is marked failed on the
+next start. The bytes are served at `GET /downloads/<id>` behind the
+same bearer token as `/mcp`; a client bound to an org sees only its org's
+files, and a host's token cannot fetch them. Design:
+`docs/superpowers/specs/2026-10-03-file-downloads-design.md`.
+
 ## Link two hubs
 
 Two fleets can message each other's sessions by address:
@@ -2625,7 +2655,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 221 commands, 143 route to a hub tool, 1 routes except for one argument shape, 55 refuse, and 22 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 225 commands, 147 route to a hub tool, 1 routes except for one argument shape, 55 refuse, and 22 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |

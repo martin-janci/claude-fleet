@@ -109,4 +109,10 @@
 //!   local-only, for the master or a paired client granted the catalog. A
 //!   revision-5 hub does not serve it, so even a granted desktop would open
 //!   the full Assets panel and fail every action with an unknown tool.
-pub const CONTRACT_REVISION: u32 = 6;
+//! - **7** — *brand-new tools the desktop routes to.* File downloads:
+//!   `list_downloads`, `send_file` and `remove_download` (and the
+//!   `GET /downloads/<id>` route `save_download` streams from). A
+//!   revision-6 hub serves none of them, so the Downloads sheet and the file
+//!   viewer's "Send to downloads" would fail every action with an unknown
+//!   tool.
+pub const CONTRACT_REVISION: u32 = 7;

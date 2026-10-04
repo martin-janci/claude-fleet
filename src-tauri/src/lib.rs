@@ -151,6 +151,10 @@ pub fn run() {
             // SEC-11: the DB holds bearer tokens and account metadata in
             // plaintext — keep it owner-only. Best-effort, logged on failure.
             fleet_core::service::provision::set_private_mode(&db_path);
+            // File downloads (standalone: this machine keeps the copies).
+            if let Err(e) = fleet_core::service::downloads::init(&data_dir, &store) {
+                tracing::warn!(error = %e, "downloads unavailable");
+            }
             tracing::info!(
                 version = env!("CARGO_PKG_VERSION"),
                 schema_version = store.schema_version().unwrap_or(0),
@@ -461,6 +465,10 @@ pub fn run() {
             commands::sessions::purge_project,
             commands::quick_replies::quick_replies,
             commands::quick_replies::set_quick_replies,
+            commands::downloads::list_downloads,
+            commands::downloads::send_file,
+            commands::downloads::remove_download,
+            commands::downloads::save_download,
             commands::pages::get_fleet_settings,
             commands::pages::describe_fleet_settings,
             commands::pages::list_pages,

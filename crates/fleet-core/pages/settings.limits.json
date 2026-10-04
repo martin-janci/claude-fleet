@@ -89,6 +89,23 @@
       ]
     },
     {
+      "title": "Downloads",
+      "items": [
+        {
+          "type": "field",
+          "key": "downloads.max_file_mb"
+        },
+        {
+          "type": "field",
+          "key": "downloads.max_total_mb"
+        },
+        {
+          "type": "field",
+          "key": "downloads.keep_secs"
+        }
+      ]
+    },
+    {
       "title": "Usage",
       "items": [
         {

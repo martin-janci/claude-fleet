@@ -82,6 +82,9 @@ export type RowEventHandlers = {
   /** One call per flush with every `update:changed` (update design §11: ids
    *  only), in order: re-read `update_status`. */
   onUpdateChanged?: (changes: UpdateChanged[]) => void;
+  /** One call per flush with the id of every `download:changed` (file
+   *  downloads: ids only), in order: re-read `list_downloads`. */
+  onDownloadsChanged?: (ids: number[]) => void;
 };
 
 /** The payload of `update:changed`: what moved, never the row itself. */
@@ -121,7 +124,8 @@ type Queued =
   | { name: 'work:tracker_removed'; payload: { id: number } }
   | { name: 'work:changed'; payload: unknown }
   | { name: 'settings:changed'; payload: { key: string } }
-  | { name: 'update:changed'; payload: UpdateChanged };
+  | { name: 'update:changed'; payload: UpdateChanged }
+  | { name: 'download:changed'; payload: { id: number } };
 
 /**
  * Subscribe to every row-change event from the backend. Returns a single
@@ -162,6 +166,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     const workChanges: WorkChanged[] = [];
     const settingsKeys: string[] = [];
     const updateChanges: UpdateChanged[] = [];
+    const downloadIds: number[] = [];
     for (const ev of batch) {
       switch (ev.name) {
         case 'session:created':
@@ -265,6 +270,9 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
           }
           break;
         }
+        case 'download:changed':
+          if (typeof ev.payload?.id === 'number') downloadIds.push(ev.payload.id);
+          break;
       }
     }
     if (sessionEvents.length > 0) handlers.onSessionEvents?.(sessionEvents);
@@ -279,6 +287,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     if (workChanges.length > 0) handlers.onWorkChanged?.(workChanges);
     if (settingsKeys.length > 0) handlers.onSettingsChanged?.(settingsKeys);
     if (updateChanges.length > 0) handlers.onUpdateChanged?.(updateChanges);
+    if (downloadIds.length > 0) handlers.onDownloadsChanged?.(downloadIds);
   };
 
   const enqueue = (ev: Queued) => {
@@ -319,6 +328,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     workChanged: !!handlers.onWorkChanged,
     settingsChanged: !!handlers.onSettingsChanged,
     updateChanged: !!handlers.onUpdateChanged,
+    downloadsChanged: !!handlers.onDownloadsChanged,
   };
 
   const sub = <N extends Queued['name']>(
@@ -359,6 +369,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('work:changed', wanted.workChanged),
     sub('settings:changed', wanted.settingsChanged),
     sub('update:changed', wanted.updateChanged),
+    sub('download:changed', wanted.downloadsChanged),
   ]);
   return () => {
     disposed = true;

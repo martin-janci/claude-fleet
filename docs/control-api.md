@@ -700,6 +700,17 @@ Index by area (names only; see the reference for details):
   `update_status`. It never reaches a per-host token or an org-bound
   client. The update wire itself, `POST /update/check` and
   `/update/report`, is not a tool: see `docs/updates.md`.
+- **File downloads** — `send_file` (`{ session_id, path, note? }`) copies a
+  file from a session's host to the machine that owns the fleet (the hub),
+  for the person's phone and desktop: absolute or relative to the session's
+  worktree root, ≤ `downloads.max_file_mb`, folders refused (zip them). It
+  answers the row in state `fetching` at once; the copy runs in the
+  background. A per-host token sends from its OWN host only — that is how a
+  session's Claude hands over what it made. `list_downloads` (a read) and
+  `remove_download` are a person's, never served to a per-host token; the
+  bytes are `GET /downloads/<id>` (bearer, not a tool result). Events:
+  `download:changed { id }`, ids only, never on a host- or org-bound
+  stream. See `docs/hub.md` → *File downloads*.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
   read, but master token only, since the values name hosts and their

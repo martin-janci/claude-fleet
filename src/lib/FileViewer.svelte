@@ -10,6 +10,7 @@
   import { repoCommitDiff } from './history';
   import DiffView from './DiffView.svelte';
   import { highlight, langForPath } from './highlight';
+  import { sendFile } from './downloads';
 
   let {
     session,
@@ -181,6 +182,14 @@
           onclick={() => (view = 'file')}>File</button
         >
       </div>
+      {#if commit === null}
+        <button
+          class="send"
+          data-testid="send-to-downloads"
+          title="Copy this file to Downloads, for your phone and this window"
+          onclick={() => path && void sendFile(session.id, path)}>⤓ Send to downloads</button
+        >
+      {/if}
     </header>
 
     <div class="body">
@@ -259,6 +268,20 @@
     white-space: nowrap;
     direction: rtl;
     text-align: left;
+  }
+  .send {
+    margin-left: 0.5rem;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--fg-muted);
+    cursor: pointer;
+    font-size: 0.72rem;
+    padding: 0.15rem 0.55rem;
+    white-space: nowrap;
+  }
+  .send:hover {
+    color: var(--fg);
   }
   .toggle {
     flex: 0 0 auto;

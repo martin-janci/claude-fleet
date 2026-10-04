@@ -1097,6 +1097,49 @@
     },
     {
       "default_widget": "number",
+      "key": "downloads.max_file_mb",
+      "kind": {
+        "max": 4096,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Download: file cap",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "downloads.max_total_mb",
+      "kind": {
+        "max": 1048576,
+        "min": 1,
+        "type": "int"
+      },
+      "label": "Downloads: space",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "downloads.keep_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Keep downloads",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
       "key": "move.max_transcript_mb",
       "kind": {
         "max": 4096,
