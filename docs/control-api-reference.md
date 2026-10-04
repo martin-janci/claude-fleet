@@ -848,6 +848,10 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::assets::catalog_commit_pending`
 - `commands::assets::catalog_push`
 - `commands::assets::catalog_repo_status`
+- `commands::assets::catalog_repo_status_in`
+- `commands::assets::catalog_list_catalogs`
+- `commands::assets::catalog_list_changesets`
+- `commands::assets::catalog_asset_history`
 - `commands::assets::catalog_template`
 - `commands::assets::catalog_spawn_author_session`
 - `pty::pty_open`
