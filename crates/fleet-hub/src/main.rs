@@ -22,6 +22,7 @@ mod provision;
 mod ready;
 mod reports;
 mod serve;
+mod session;
 mod settings;
 mod tls;
 mod tracker;
@@ -222,6 +223,19 @@ enum Cmd {
     Host {
         #[command(subcommand)]
         cmd: host::HostCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// The sessions nobody owns, and giving one to a person (multi-user M1).
+    ///
+    /// The operator's side of the claim path: `session_claim` over the
+    /// control API is a per-host token's, reachable only from the session's
+    /// own tmux pane, so these two write and read `state.db` directly. No
+    /// running hub needed — a running one honours the change from its next
+    /// pass.
+    Session {
+        #[command(subcommand)]
+        cmd: session::SessionCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -500,6 +514,7 @@ async fn main() -> ExitCode {
         Cmd::Tracker { cmd, opts } => tracker::run(cmd, &opts, &env).await,
         Cmd::Org { cmd, opts } => org::run(cmd, &opts, &env).await,
         Cmd::Host { cmd, opts } => host::run(cmd, &opts, &env).await,
+        Cmd::Session { cmd, opts } => session::run(cmd, &opts, &env),
         Cmd::Provision {
             host,
             content_only,

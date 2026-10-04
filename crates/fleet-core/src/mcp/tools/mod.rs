@@ -48,6 +48,7 @@ mod peer;
 mod present;
 mod repo;
 mod session_ops;
+mod sharing;
 mod support;
 #[cfg(test)]
 mod tests;
@@ -352,6 +353,7 @@ impl FleetTools {
             + Self::assets_router()
             + Self::peer_router()
             + Self::updates_router()
+            + Self::sharing_router()
     }
 }
 

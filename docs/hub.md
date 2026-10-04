@@ -1086,6 +1086,45 @@ What a client may do:
   an updater token are nobody's device and are refused either way. Only the
   hub owner's own device reaches the fleet's settings — see *On a paired
   device* under *Configuration*.
+- **Sharing a session, and the sessions nobody owns** (multi-user M1). A
+  session a person starts is private to them; they share it with one
+  colleague at a time, at `watch` (read it) or `drive` (also prompt it),
+  through `session_share` / `session_unshare` / `session_narrow` and
+  `session_access` on their own device. A grant only ever moves **downward**
+  — revoke it, or narrow `drive` to `watch`; nothing widens one, so widening
+  is an explicit revoke and a fresh share — only the owner makes one, a
+  grantee cannot share on, and **sharing never gives a terminal**: the
+  terminal is the desktop's own SSH into the host, which no revoke of ours
+  could reach. There is no team recipient in M1 (that needs memberships, and
+  arrives in M2) and no `own` level: `own` is the set of operations only the
+  owner may perform — killing, restarting, renaming, moving, forking,
+  re-tagging, re-sharing — and no grant reaches it.
+
+  A session fleet did **not** start — one a reconcile pass found in a tmux
+  server somebody started by hand — belongs to nobody and is `unclaimed`.
+  Such a row leaks nothing: a caller who is not entitled to it is told a
+  per-host COUNT and no more, and on a hub with one person that count is the
+  only thing that changes about the rows they could already see. Claiming one
+  needs proof of HOST access, never org membership: the agent inside the
+  session calls `session_claim` and its request's `X-Fleet-Pane` header has
+  to name that session's active pane, so a per-host token that merely happens
+  to be on the same machine is refused. On the hub machine:
+
+  ```bash
+  fleet-hub session unclaimed                 # per-host counts
+  fleet-hub session unclaimed --host mefistos # that host's rows, with ids
+  fleet-hub session claim 42 --person ada     # give one to a person
+  ```
+
+  Both write and read `state.db` directly, like `client bind-person`: the
+  master token cannot reach `session_claim` over the API at all (it has no
+  pane to prove), and on a hub with more than one person this listing is the
+  only way a human sees those rows. A claim is addressed by **row id**, never
+  by tmux name — a name is reused by the next session on that host — it is
+  refused on a session that already belongs to someone (ownership is never
+  transferred; its owner shares it instead), and it is recorded on that
+  session's own timeline without announcing the row to every connected
+  client.
 - **Bound to an org** (work graph M14.1b). `fleet-hub pair --name <name>
   --org <org id>`, or `fleet-hub client bind <name> <org id>` later
   (`work_admin { action: "assign_client", name, org_id }`; no `org_id` and

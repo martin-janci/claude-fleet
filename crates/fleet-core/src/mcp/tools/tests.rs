@@ -2268,6 +2268,7 @@ fn router_sum_serves_every_tool() {
         include_str!("assets.rs"),
         include_str!("peer.rs"),
         include_str!("updates.rs"),
+        include_str!("sharing.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -2277,7 +2278,8 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 104);
+    // 104 + multi-user M1's six sharing / claim tools (T12).
+    assert_eq!(served, 110);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3300,11 +3302,21 @@ fn a_readonly_token_is_served_no_mutating_tools_and_a_client_no_admin_tools() {
         .iter()
         .filter(|p| p.access == guard::Access::PersonDevice)
         .count();
+    // Multi-user M1 (T12): the third term. `Access::HostToken` is the agent
+    // in a session's own pane and nobody else — the master's path to a claim
+    // is `fleet-hub session claim` on the hub machine — so those rows are not
+    // on the master's surface either.
+    let host_only = guard::TOOL_POLICIES
+        .iter()
+        .filter(|p| p.access == guard::Access::HostToken)
+        .count();
+    assert!(host_only > 0, "Access::HostToken has no rows to subtract");
     assert_eq!(
         master.len(),
-        all.len() - 1 - device_only,
-        "the master token sees everything but peer_exchange and a person's \
-         device's own settings review (it has fleet-hub settings)"
+        all.len() - 1 - device_only - host_only,
+        "the master token sees everything but peer_exchange, a person's \
+         device's own settings review (it has fleet-hub settings) and the \
+         per-host claim path (it has fleet-hub session claim)"
     );
     assert!(!master.iter().any(|n| n == crate::mcp::auth::PEER_TOOL));
 
@@ -3723,7 +3735,14 @@ fn the_served_definition_budget_stays_bounded() {
     /// M1 (+291 bytes over `main`'s 70,623): `pair_client { person }` and the
     /// sentences about it in `pair_client` / `list_clients`, and M1 T6's
     /// sentence on `list_hosts` about `unclaimed_sessions`.
-    const BUDGET_BYTES: usize = 71_014;
+    /// Measured at 73,065 on 2026-10-04 after multi-user M1 T12 (+2,051
+    /// bytes): the five sharing definitions `session_share`,
+    /// `session_unshare`, `session_narrow`, `session_access` and `my_grants`,
+    /// each with its parameters and its refusal codes. The sixth tool,
+    /// `session_claim`, is `Access::HostToken` and is NOT on the master
+    /// surface this constant measures; `NOT_FOR_HOST_TOKENS` keeps the other
+    /// five off a per-host token's (79 tools / 57,468 bytes, unchanged).
+    const BUDGET_BYTES: usize = 73_165;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -9794,6 +9813,28 @@ const SESSION_REACH: &[(&str, &[&str])] = &[
     // never the fence", and this was the one row where the net was the whole
     // of it (T9b).
     ("peer_status", &["Read"]),
+    // sharing.rs — multi-user M1 (T12).
+    //
+    // The three writes and the grant list are `Own`: re-sharing is the tier
+    // spec §4.3 invariant 5 names, and it is where "a grantee cannot grant
+    // on" is enforced — a `drive` grantee reaches `may_drive` and never
+    // `may_own`. `session_access` is `Own` as well although it is a read:
+    // the answer names OTHER PEOPLE who hold a grant, which is no part of
+    // what a `watch` grant promised. (`share.ts::SESSION_TIER` carries the
+    // same four at `own`.)
+    ("session_access", &["Own"]),
+    ("session_narrow", &["Own"]),
+    ("session_share", &["Own"]),
+    ("session_unshare", &["Own"]),
+    // `Read`, and the reason is the whole of `Access::HostToken`: `may_own`
+    // is false for a per-host token whatever pane it proves — the proof says
+    // "I am standing in this session", never "this session is mine" — so an
+    // `Own` row here would refuse the only caller the tool has. What the
+    // reach buys is `require_host`, the org boundary and an `E_NOTFOUND` for
+    // a row this token may not see; what authorises the WRITE is
+    // `claim::claim_session`'s pane check plus the row being unowned, neither
+    // of which is a reach.
+    ("session_claim", &["Read"]),
 ];
 
 /// Session-addressed tools that deliberately gate no single row, with the
@@ -9895,6 +9936,10 @@ const REVIEWED_WITHOUT_A_SESSION: &[(&str, &str)] = &[
     (
         "import_assets",
         "the same catalog, from a host's filesystem into the inventory: it reads files on a host, not sessions",
+    ),
+    (
+        "my_grants",
+        "the CALLER's own person and the live grants to them (multi-user M1, T12). It takes no parameters at all, so there is nothing to address a session with: the one input is who the caller is, resolved through `fleet::owner_for` — a device's `person_id` off the connection, the hub's personal owner for the master, and `None` for a per-host token (which is additionally refused the tool outright by `NOT_FOR_HOST_TOKENS`). `None` answers an EMPTY grant list, never every grant, which is the one way this surface could have leaked",
     ),
 ];
 
@@ -10045,6 +10090,10 @@ fn tool_blocks() -> std::collections::BTreeMap<String, String> {
         "orchestration.rs",
         "repo.rs",
         "session_ops.rs",
+        // Multi-user M1 (T12). Without this line the six sharing tools'
+        // handlers are invisible to `reaches_by_tool`, and clause 5 below
+        // would read every `SESSION_REACH` row they have as stale.
+        "sharing.rs",
     ] {
         let src = std::fs::read_to_string(dir.join(file)).expect("read a tool file");
         let code = src
@@ -16121,4 +16170,730 @@ async fn the_master_does_not_approve_the_guide_it_proposed_itself() {
         .is_ok(),
         "the master approves a host's proposal"
     );
+}
+
+// ---- multi-user M1, T12: the sharing tools, the claim and the grant set ----
+//
+// Two halves, as everywhere else in this milestone. The ACCESS half asserts
+// who the six definitions are served to and who the central gate refuses,
+// which is the part a reader can check against `TOOL_POLICIES` by eye. The
+// BEHAVIOURAL half drives the handlers: a claim against each of its four
+// refusals, a share against a non-owner and a grantee, and `my_grants`
+// against a second person.
+
+/// Two people, one host, and a host token that can prove one pane each way.
+struct Shared {
+    t: FleetTools,
+    /// The hub's personal owner.
+    ada: i64,
+    bob: i64,
+    carol: i64,
+    /// Ada's private row, pane `%9`.
+    a_row: i64,
+    /// Reconcile-discovered, nobody's, pane `%7`.
+    found: i64,
+    /// A second unclaimed row, pane `%8` — the "you proved the wrong row"
+    /// case, which needs a SECOND provable pane or it proves nothing.
+    other: i64,
+    bus: Arc<crate::events::RecordingEventBus>,
+}
+
+fn shared_fixture() -> Shared {
+    let bus = Arc::new(crate::events::RecordingEventBus::new());
+    let s = Store::open_with_bus_in_memory(bus.clone()).expect("store");
+    s.upsert_host("h").unwrap();
+    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let bob = s.create_person("bob", None).unwrap().id;
+    let carol = s.create_person("carol", None).unwrap().id;
+    let mk = |name: &str, pane: &str| {
+        let id = s
+            .upsert_session(name, "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET tmux_pane_id = ?2 WHERE id = ?1",
+                rusqlite::params![id, pane],
+            )
+            .unwrap();
+        id
+    };
+    let a_row = mk("a-dev", "%9");
+    let found = mk("hand-started", "%7");
+    let other = mk("hand-started-2", "%8");
+    s.claim_if_unclaimed(a_row, Some(ada)).unwrap();
+    bus.take();
+    Shared {
+        t: test_tools(s),
+        ada,
+        bob,
+        carol,
+        a_row,
+        found,
+        other,
+        bus,
+    }
+}
+
+impl Shared {
+    fn store(&self) -> std::sync::MutexGuard<'_, Store> {
+        self.t.store.lock().unwrap()
+    }
+    /// Ada's own phone.
+    fn ada_device(&self) -> Caller {
+        device_of(self.ada, self.ada)
+    }
+    /// Bob's phone — a second person on the same hub.
+    fn bob_device(&self) -> Caller {
+        device_of(self.bob, self.ada)
+    }
+}
+
+/// The `E_*` code of a refused handler call.
+fn err_code(e: &McpError) -> String {
+    e.data
+        .as_ref()
+        .and_then(|d| d["code"].as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("no code in {e:?}"))
+}
+
+// ---- the access half -------------------------------------------------------
+
+/// `Access::HostToken` exists because nothing else could express
+/// `session_claim`, and it is worth exactly one assertion per caller shape:
+/// served to a per-host token, refused — in the LIST and at the gate alike —
+/// to the master, to a person's phone and to the operator's own client.
+#[test]
+fn the_claim_is_a_per_host_tokens_and_nobody_elses() {
+    assert_eq!(
+        guard::policy("session_claim").map(|p| p.access),
+        Some(guard::Access::HostToken),
+        "the one row of the variant"
+    );
+    let host = host_caller("h", TokenMode::Full);
+    assert!(present::visible_to(&host, "session_claim"));
+    assert!(enforce_admin(&host, "session_claim").is_ok());
+
+    for caller in [
+        Caller::master(),
+        client_caller("phone", TokenMode::Full),
+        client_caller(
+            crate::service::operator::OPERATOR_CLIENT_NAME,
+            TokenMode::Full,
+        ),
+    ] {
+        assert!(
+            !present::visible_to(&caller, "session_claim"),
+            "session_claim served to {}",
+            caller.label()
+        );
+        let err =
+            enforce_admin(&caller, "session_claim").expect_err("only a per-host token may claim");
+        assert_eq!(err.data.as_ref().unwrap()["code"], "E_FORBIDDEN");
+        // The refusal has to point somewhere: the operator reaching for a
+        // claim has `fleet-hub session claim` and nothing else.
+        assert!(
+            err.message.contains("fleet-hub session claim"),
+            "{}",
+            err.message
+        );
+    }
+    // A readonly host token writes nothing, claims included.
+    assert!(!guard::is_readonly_tool("session_claim"));
+    assert!(!present::visible_to(
+        &host_caller("h", TokenMode::Readonly),
+        "session_claim"
+    ));
+}
+
+/// The mirror image: the five sharing surfaces are a PERSON's, and a per-host
+/// token — which proves no person at all — is refused them centrally rather
+/// than deep inside each handler.
+#[test]
+fn the_sharing_tools_are_never_a_per_host_tokens() {
+    let host = host_caller("h", TokenMode::Full);
+    for tool in [
+        "session_share",
+        "session_unshare",
+        "session_narrow",
+        "session_access",
+        "my_grants",
+    ] {
+        assert!(
+            guard::NOT_FOR_HOST_TOKENS.contains(&tool),
+            "{tool} must be refused to a per-host token"
+        );
+        assert!(
+            !present::visible_to(&host, tool),
+            "{tool} served to a per-host token"
+        );
+        let err = enforce_admin(&host, tool).expect_err(tool);
+        assert_eq!(err.data.as_ref().unwrap()["code"], "E_FORBIDDEN");
+        // And a person's own phone is served every one of them.
+        assert!(
+            present::visible_to(&client_caller("phone", TokenMode::Full), tool),
+            "{tool} must reach a person's device"
+        );
+    }
+    // The two reads are reads; the three writes are not.
+    assert!(guard::is_readonly_tool("session_access"));
+    assert!(guard::is_readonly_tool("my_grants"));
+    for w in ["session_share", "session_unshare", "session_narrow"] {
+        assert!(!guard::is_readonly_tool(w), "{w}");
+    }
+}
+
+/// There is no `org` recipient and no third level to name — M1 ships
+/// person-to-person grants only, and the SCHEMA is where that is enforced:
+/// an argument that does not exist cannot be passed by a client built against
+/// a later hub.
+#[test]
+fn the_share_schema_offers_no_org_recipient() {
+    let tool = FleetTools::tool_router_for_doc()
+        .list_all()
+        .into_iter()
+        .find(|t| t.name == "session_share")
+        .expect("session_share is served");
+    let props = tool.input_schema["properties"]
+        .as_object()
+        .expect("properties");
+    let mut names: Vec<&String> = props.keys().collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["level", "person", "session_id"],
+        "session_share's arguments are exactly these three: no `org`, and no \
+         `host_alias`/`tmux_name` pair (a tmux name is reused by the next \
+         session on that host)"
+    );
+    // The store refuses the arm anyway, so M2 adds a recipient rather than a
+    // column — but nothing in M1 can reach it.
+    let f = shared_fixture();
+    let err = f
+        .store()
+        .grant_session(
+            f.a_row,
+            crate::store::GrantRecipient::Org(1),
+            "watch",
+            f.ada,
+        )
+        .expect_err("no org recipient in M1");
+    assert_eq!(err.code, codes::E_INVALID);
+}
+
+// ---- the behavioural half: the claim --------------------------------------
+
+/// The claim's four refusals, each distinguishable, plus the success.
+///
+/// The order matters as much as the codes: a caller that cannot SEE the row
+/// is answered `E_NOTFOUND` before anything about panes is said, so none of
+/// the three pane answers is an existence oracle over a private session.
+#[tokio::test]
+async fn a_claim_needs_the_proven_pane_of_the_row_it_names() {
+    let f = shared_fixture();
+    let claim = |caller: Caller, id: i64, person: &str| {
+        let person = person.to_string();
+        f.t.session_claim(
+            Extension(caller),
+            Parameters(SessionClaimParams {
+                session_id: id,
+                person,
+            }),
+        )
+    };
+
+    // 1. No pane header at all: the row is visible (it is `unclaimed` on this
+    //    token's own host) and the proof is the one thing missing.
+    let err = claim(pane_caller(None), f.found, "bob")
+        .await
+        .expect_err("no pane, no claim");
+    assert_eq!(err_code(&err), codes::E_INVALID_STATE);
+    assert!(
+        err.message.contains("ACTIVE pane"),
+        "the refusal must name the rule the operator has to act on: {}",
+        err.message
+    );
+    assert_ne!(
+        err_code(&err),
+        codes::E_NOTFOUND,
+        "E_NOTFOUND would send the operator hunting a row they can see in \
+         fleet-hub session unclaimed"
+    );
+
+    // 2. A pane that resolves to a DIFFERENT row. Standing in one session is
+    //    not authority over another.
+    let err = claim(pane_caller(Some("%8")), f.found, "bob")
+        .await
+        .expect_err("that pane is another session");
+    assert_eq!(err_code(&err), codes::E_FORBIDDEN);
+    assert!(
+        err.message.contains(&f.other.to_string()),
+        "{}",
+        err.message
+    );
+
+    // 3. A pane no row carries — the non-active pane of a split window, or a
+    //    pane the last reconcile pass has not seen. Same answer as 1: the
+    //    claim runs from the pane fleet recorded.
+    let err = claim(pane_caller(Some("%404")), f.found, "bob")
+        .await
+        .expect_err("an unrecorded pane proves nothing");
+    assert_eq!(err_code(&err), codes::E_INVALID_STATE);
+
+    // 4. Another person's PRIVATE row, with its pane proven: visible, and
+    //    already owned.
+    let err = claim(pane_caller(Some("%9")), f.a_row, "bob")
+        .await
+        .expect_err("already owned");
+    assert_eq!(err_code(&err), codes::E_EXISTS);
+
+    // 5. The same row with NO proof is not told it is owned, only that no
+    //    pane of it is proven — a private row is never named as somebody's.
+    let err = claim(pane_caller(None), f.a_row, "bob")
+        .await
+        .expect_err("private and unproven");
+    assert_eq!(err_code(&err), codes::E_PANE_UNPROVEN);
+    assert!(
+        !err.message.contains("belongs to"),
+        "a refusal must not say whose the row is: {}",
+        err.message
+    );
+
+    // 6. An unknown person is refused before anything is written.
+    let err = claim(pane_caller(Some("%7")), f.found, "nobody-here")
+        .await
+        .expect_err("no such person");
+    assert_eq!(err_code(&err), codes::E_NOTFOUND);
+    assert_eq!(
+        f.store()
+            .get_session_by_id(f.found)
+            .unwrap()
+            .unwrap()
+            .owner_person_id,
+        None,
+        "a refused claim writes nothing"
+    );
+
+    // 7. And the claim itself.
+    let row = claim(pane_caller(Some("%7")), f.found, "bob")
+        .await
+        .expect("the pane proves this row");
+    let row: crate::store::SessionRow = serde_json::from_value(result_json(&row)).unwrap();
+    assert_eq!(row.owner_person_id, Some(f.bob));
+    assert_eq!(row.visibility, crate::store::VISIBILITY_PRIVATE);
+}
+
+/// The claim is recorded on the session's own timeline and says NOTHING on
+/// the bus (`insert_session_event_quietly`).
+///
+/// A `session:event` frame goes to every connected client, so the loud writer
+/// would announce a row's existence — its id, its host — to people who could
+/// not see it a moment earlier, which is the leak the quiet variant exists
+/// for. The `session:updated` that `claim_if_unclaimed` emits is a different
+/// thing and must still happen: it is how the new OWNER's client learns the
+/// row is theirs, and the stream fence decides who it reaches.
+#[tokio::test]
+async fn a_claim_is_audited_on_the_timeline_and_announced_to_nobody() {
+    let f = shared_fixture();
+    f.t.session_claim(
+        Extension(pane_caller(Some("%7"))),
+        Parameters(SessionClaimParams {
+            session_id: f.found,
+            person: "bob".into(),
+        }),
+    )
+    .await
+    .expect("claimed");
+
+    let events = f.store().list_session_events(f.found, 50).unwrap();
+    let claimed = events
+        .iter()
+        .find(|e| e.kind == crate::service::sessions::EVENT_CLAIMED)
+        .expect("the claim is on the timeline");
+    assert!(
+        claimed
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains(&format!("person={}", f.bob)),
+        "{:?}",
+        claimed.detail
+    );
+    let names = f.bus.take();
+    assert!(
+        names.iter().any(|n| n.starts_with("session:updated")),
+        "the new owner's client has to learn the row is theirs: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("session:event")),
+        "a claim must fan no session:event frame to every client: {names:?}"
+    );
+}
+
+/// The pane proof lapses by itself: nothing is stored, so a reconcile pass
+/// that rewrites `sessions.tmux_pane_id` ends it with no invalidation step.
+///
+/// Driven through `apply_host_reconcile` — a real pass at the store layer —
+/// between two requests of the SAME caller, because "it expires on its own"
+/// is a claim about the absence of a durable record and only a second request
+/// after the rewrite can show it.
+#[tokio::test]
+async fn a_pane_the_reconcile_pass_rewrote_proves_nothing_next_request() {
+    let f = shared_fixture();
+    let caller = pane_caller(Some("%7"));
+    // Before: the proof holds, and the scope resolves it to `found`.
+    assert_eq!(
+        caller.view_scope(&f.store()).unwrap().proven_session,
+        Some(f.found)
+    );
+
+    // A reconcile pass sees the session on a new pane (a tmux server restart,
+    // a window re-layout) and rewrites the column the proof is matched
+    // against.
+    {
+        let mut s = f.store();
+        s.apply_host_reconcile(crate::store::HostReconcile {
+            alias: "h",
+            reachable: true,
+            last_pinged_at: 2,
+            sessions: &[crate::store::ReconcileSession {
+                tmux_name: "hand-started",
+                created_at: 1,
+                last_activity_at: 2,
+                tmux_pane_id: Some("%77".into()),
+                ..Default::default()
+            }],
+            keep: &["hand-started".to_string()],
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    assert_eq!(
+        caller.view_scope(&f.store()).unwrap().proven_session,
+        None,
+        "the stale pane resolves to nothing, with no invalidation step anywhere"
+    );
+    let err =
+        f.t.session_claim(
+            Extension(caller),
+            Parameters(SessionClaimParams {
+                session_id: f.found,
+                person: "bob".into(),
+            }),
+        )
+        .await
+        .expect_err("the proof lapsed");
+    assert_eq!(err_code(&err), codes::E_INVALID_STATE);
+}
+
+// ---- the behavioural half: sharing ----------------------------------------
+
+#[tokio::test]
+async fn sharing_is_the_owners_alone_and_a_grantee_cannot_share_on() {
+    let f = shared_fixture();
+    let share = |caller: Caller, id: i64, person: &str, level: &str| {
+        let (person, level) = (person.to_string(), level.to_string());
+        f.t.session_share(
+            Extension(caller),
+            Parameters(SessionShareParams {
+                session_id: id,
+                person,
+                level,
+            }),
+        )
+    };
+
+    // A stranger cannot see Ada's row, so they are answered exactly as an id
+    // that does not exist — never "forbidden", which would confirm it.
+    let err = share(f.bob_device(), f.a_row, "carol", "watch")
+        .await
+        .expect_err("not bob's session");
+    assert_eq!(err_code(&err), codes::E_NOTFOUND);
+
+    // Carol, who holds nothing at all, is answered the same way.
+    let err = share(device_of(f.carol, f.ada), f.a_row, "bob", "watch")
+        .await
+        .expect_err("not carol's session either");
+    assert_eq!(err_code(&err), codes::E_NOTFOUND);
+
+    // And the owner's own share goes through, which is what makes the two
+    // refusals above a fence rather than a tool nobody can use.
+    share(f.ada_device(), f.a_row, "bob", "watch")
+        .await
+        .expect("ada owns it");
+}
+
+#[tokio::test]
+async fn a_level_outside_watch_and_drive_is_refused() {
+    let f = shared_fixture();
+    for bad in ["own", "admin", "", "WATCH"] {
+        let err =
+            f.t.session_share(
+                Extension(f.ada_device()),
+                Parameters(SessionShareParams {
+                    session_id: f.a_row,
+                    person: "bob".into(),
+                    level: bad.into(),
+                }),
+            )
+            .await
+            .expect_err(bad);
+        assert_eq!(err_code(&err), codes::E_VALIDATE, "level {bad:?}");
+    }
+    // `own` gets its own sentence, because it is the plausible mistake.
+    let err =
+        f.t.session_share(
+            Extension(f.ada_device()),
+            Parameters(SessionShareParams {
+                session_id: f.a_row,
+                person: "bob".into(),
+                level: "own".into(),
+            }),
+        )
+        .await
+        .expect_err("own");
+    assert!(
+        err.message.contains("not a grantable level"),
+        "{}",
+        err.message
+    );
+}
+
+/// Share, read it back, narrow it, revoke it — and the two things that must
+/// NOT work in between: a grantee sharing on, and a grantee reading the
+/// grant list.
+#[tokio::test]
+async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
+    let f = shared_fixture();
+    let ada = f.ada_device();
+    let bob = f.bob_device();
+
+    f.t.session_share(
+        Extension(ada.clone()),
+        Parameters(SessionShareParams {
+            session_id: f.a_row,
+            person: "bob".into(),
+            level: "drive".into(),
+        }),
+    )
+    .await
+    .expect("ada owns it");
+
+    // Bob can now SEE and drive the row — and still cannot share it on, nor
+    // read who else holds a grant: both are the `own` tier.
+    {
+        let s = f.store();
+        let row = s.get_session_by_id(f.a_row).unwrap().unwrap();
+        let scope = bob.view_scope(&s).unwrap();
+        assert!(scope.may_drive(&row));
+        assert!(!scope.may_own(&row));
+    }
+    let err =
+        f.t.session_share(
+            Extension(bob.clone()),
+            Parameters(SessionShareParams {
+                session_id: f.a_row,
+                person: "carol".into(),
+                level: "watch".into(),
+            }),
+        )
+        .await
+        .expect_err("sharing is not transitive");
+    assert_eq!(err_code(&err), codes::E_FORBIDDEN);
+    let err =
+        f.t.session_access(
+            Extension(bob.clone()),
+            Parameters(SessionAccessParams {
+                session_id: f.a_row,
+            }),
+        )
+        .await
+        .expect_err("the grant list names other people");
+    assert_eq!(err_code(&err), codes::E_FORBIDDEN);
+
+    // The owner's own read names the grantee.
+    let list =
+        f.t.session_access(
+            Extension(ada.clone()),
+            Parameters(SessionAccessParams {
+                session_id: f.a_row,
+            }),
+        )
+        .await
+        .expect("ada's own share sheet");
+    let list: Vec<crate::service::sessions::SessionGrantView> =
+        serde_json::from_value(result_json(&list)).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].person_id, Some(f.bob));
+    assert_eq!(list[0].person_name.as_deref(), Some("bob"));
+    assert_eq!(list[0].level, "drive");
+    assert_eq!(list[0].granted_by, f.ada);
+
+    // Narrow: drive -> watch, and idempotent on a second call.
+    for _ in 0..2 {
+        f.t.session_narrow(
+            Extension(ada.clone()),
+            Parameters(SessionGrantParams {
+                session_id: f.a_row,
+                person: "bob".into(),
+            }),
+        )
+        .await
+        .expect("narrowing is the owner's");
+    }
+    {
+        let s = f.store();
+        assert_eq!(
+            s.grants_for_person(f.bob)
+                .unwrap()
+                .get(&f.a_row)
+                .map(String::as_str),
+            Some("watch")
+        );
+    }
+
+    // There is no tool that raises it back: re-sharing a live grant is
+    // `E_EXISTS`, so widening costs the owner an explicit revoke.
+    let err =
+        f.t.session_share(
+            Extension(ada.clone()),
+            Parameters(SessionShareParams {
+                session_id: f.a_row,
+                person: "bob".into(),
+                level: "drive".into(),
+            }),
+        )
+        .await
+        .expect_err("a live grant is never raised");
+    assert_eq!(err_code(&err), codes::E_EXISTS);
+
+    // Revoke, and the watcher loses the row entirely.
+    f.t.session_unshare(
+        Extension(ada.clone()),
+        Parameters(SessionGrantParams {
+            session_id: f.a_row,
+            person: "bob".into(),
+        }),
+    )
+    .await
+    .expect("the owner takes it back");
+    {
+        let s = f.store();
+        let row = s.get_session_by_id(f.a_row).unwrap().unwrap();
+        assert!(!bob
+            .view_scope(&s)
+            .unwrap()
+            .sees_session_row(&row)
+            .is_visible());
+        // The row stays for the audit trail, revoked.
+        assert!(s.grants_for_session(f.a_row).unwrap().is_empty());
+    }
+}
+
+/// `my_grants` is the one per-caller answer in this milestone, so each caller
+/// shape gets its own assertion — and the person-less one answers EMPTY, not
+/// everything.
+#[tokio::test]
+async fn my_grants_answers_the_callers_own_person_and_nobody_elses() {
+    let f = shared_fixture();
+    f.t.session_share(
+        Extension(f.ada_device()),
+        Parameters(SessionShareParams {
+            session_id: f.a_row,
+            person: "bob".into(),
+            level: "watch".into(),
+        }),
+    )
+    .await
+    .expect("shared");
+
+    let answer = |caller: Caller| async {
+        let r =
+            f.t.my_grants(Extension(caller))
+                .await
+                .expect("my_grants never refuses a caller it is served to");
+        serde_json::from_value::<crate::service::sessions::MyGrants>(result_json(&r)).unwrap()
+    };
+
+    let bobs = answer(f.bob_device()).await;
+    assert_eq!(bobs.person_id, Some(f.bob));
+    assert_eq!(bobs.grants.len(), 1);
+    assert_eq!(bobs.grants[0].session_id, f.a_row);
+    assert_eq!(bobs.grants[0].level, "watch");
+
+    // Carol holds nothing: an empty list, with her own id on it.
+    let carols = answer(device_of(f.carol, f.ada)).await;
+    assert_eq!(carols.person_id, Some(f.carol));
+    assert!(carols.grants.is_empty());
+
+    // Ada OWNS the row; owning is not a grant, so her set is empty too.
+    let adas = answer(f.ada_device()).await;
+    assert_eq!(adas.person_id, Some(f.ada));
+    assert!(adas.grants.is_empty());
+
+    // The master resolves to the hub's personal owner — the one place that
+    // mapping is made (`fleet::owner_for`).
+    assert_eq!(answer(Caller::master()).await.person_id, Some(f.ada));
+
+    // A device no pairing bound proves nobody: EMPTY, never every grant.
+    let mut unbound = f.bob_device();
+    if let Some(c) = unbound.client.as_mut() {
+        c.person_id = None;
+    }
+    let nobodys = answer(unbound).await;
+    assert_eq!(nobodys.person_id, None);
+    assert!(nobodys.grants.is_empty());
+}
+
+/// What a `list_sessions` row may carry, and what it deliberately may not
+/// (spec §5.3, R6-j).
+///
+/// The row carries the two CALLER-INDEPENDENT facts — `visibility`, which is
+/// `NOT NULL` and so cannot go missing, and `owner_person_id`, absent rather
+/// than null when nobody owns it. It must NOT carry the caller's own access
+/// level: the bus serialises one `SessionRow` for every recipient with no
+/// caller in scope, `strip_nulls` makes an absent per-caller field
+/// indistinguishable from "unrestricted", and the frontend's row store
+/// replaces a held row wholesale — so the field would be erased by the next
+/// routine `session:updated` and a fail-closed default would then shut the
+/// OWNER's own terminal. `session_access` and `my_grants` are the per-caller
+/// answers instead, where per-caller belongs.
+#[tokio::test]
+async fn a_session_row_carries_the_facts_and_never_the_callers_own_access() {
+    let f = shared_fixture();
+    let page = session_page(&f.t, f.ada_device()).await;
+    let mine = page
+        .iter()
+        .find(|r| r["id"] == f.a_row)
+        .expect("ada sees her own row");
+    assert_eq!(mine["visibility"], "private");
+    assert_eq!(mine["owner_person_id"], f.ada);
+
+    // An `unclaimed` row, read by the one caller this three-person hub serves
+    // it to — the host's own token, §4.4 clause 1. NOT NULL `visibility` is
+    // present, and `owner_person_id` is ABSENT rather than null, which is why
+    // the client's rule 3 requires it to be PRESENT before it reads as
+    // ownership (`strip_nulls` makes absent and unowned the same bytes).
+    let host_page = session_page(&f.t, pane_caller(None)).await;
+    let found = host_page
+        .iter()
+        .find(|r| r["id"] == f.found)
+        .expect("the unclaimed row");
+    assert_eq!(found["visibility"], "unclaimed");
+    assert!(
+        found.get("owner_person_id").is_none(),
+        "strip_nulls removes it, and absent must never read as owned: {found}"
+    );
+
+    // No per-caller field, under any of the names such a field would take.
+    for row in page.iter().chain(host_page.iter()) {
+        for forbidden in ["my_access", "access", "access_level", "my_level", "reach"] {
+            assert!(
+                row.get(forbidden).is_none(),
+                "{forbidden} rides a SessionRow, which the bus and the row \
+                 store cannot carry (spec §5.3): {row}"
+            );
+        }
+    }
 }

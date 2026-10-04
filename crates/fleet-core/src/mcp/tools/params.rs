@@ -1102,3 +1102,46 @@ pub struct UpdateAdminParams {
     #[serde(default)]
     pub reason: Option<String>,
 }
+
+// --- sharing a session (multi-user M1, T12) --------------------------------
+//
+// **Every one of these addresses the session by ROW ID and by nothing else.**
+// No `host_alias` + `tmux_name` fallback, which every other session-addressed
+// tool offers: that pair is REUSABLE — a killed session's tmux name is taken
+// by the next one started on that host — so a share or a claim resolved by
+// name could be written against a different session than the one the caller
+// read. An id names one row for the life of the row.
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionShareParams {
+    /// The session to share, by fleet row id.
+    pub session_id: i64,
+    /// Who to share it with, by person name (`fleet-hub pair --person`).
+    pub person: String,
+    /// watch (read it) or drive (also prompt it). Nothing else — "own" is
+    /// not a grantable level.
+    pub level: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionGrantParams {
+    /// The session, by fleet row id.
+    pub session_id: i64,
+    /// Whose grant, by person name.
+    pub person: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionAccessParams {
+    /// The session, by fleet row id.
+    pub session_id: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionClaimParams {
+    /// The session to claim, by fleet row id (`fleet-hub session unclaimed`
+    /// counts them per host).
+    pub session_id: i64,
+    /// Whose it becomes, by person name. The person must already exist.
+    pub person: String,
+}

@@ -285,6 +285,21 @@ Index by area (names only; see the reference for details):
   `set_friendly_name`, `register_self`, `whoami`, `ensure_operator` (the UX
   agent's own session, idempotent), `operator_status` (why it cannot work,
   if it cannot).
+- **Sharing & ownership** (multi-user M1) — `session_share` (give one
+  person `watch` or `drive` on a session you own), `session_unshare` (take it
+  back), `session_narrow` (`drive` → `watch`; there is deliberately no tool
+  that raises a grant — widen by revoking and sharing again),
+  `session_access` (who holds a live grant on your session), `my_grants`
+  (who *you* are on this fleet and every live grant to you, which is what a
+  client derives access from together with each row's `owner_person_id` and
+  `visibility`), and `session_claim` (give an `unclaimed` session to a
+  person). The first five are a person's device and the master; a per-host
+  token is refused all of them, because it proves no person. `session_claim`
+  is the mirror image: a **per-host token only**, and only for the session
+  whose active pane its `X-Fleet-Pane` header names — the operator's own
+  claim is `fleet-hub session claim <id> --person <name>`, beside
+  `fleet-hub session unclaimed`. Sharing never confers a terminal: a
+  terminal is this machine's own SSH, which no revoke could reach.
 - **Composer** — `quick_replies` (the fleet's shared chip row: the prompt
   presets the desktop and the phone both draw above their text box, in list
   order, each with `auto_send`: a tap sends at once rather than filling the

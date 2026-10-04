@@ -1232,6 +1232,15 @@ pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError>
              ({} refused)",
             caller.label()
         )
+    } else if access == Some(guard::Access::HostToken) {
+        // Multi-user M1 (T12). Says which caller it IS for, because the
+        // refused one is usually the operator reaching for a claim: their
+        // path is `fleet-hub session claim` on the hub machine, and naming it
+        // is the only help a refusal line can give.
+        format!(
+            "{tool} is a per-host token's only: it is reachable from the agent in the              session's own pane, never from the master or a paired device — on the hub              machine use fleet-hub session claim ({} refused)",
+            caller.label()
+        )
     } else if guard::is_admin_tool(tool) {
         format!(
             "{tool} is a fleet-admin tool: master token only ({} refused)",
