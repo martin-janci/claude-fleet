@@ -1023,6 +1023,9 @@ const MIGRATIONS: &[Migration] = &[
     // Assets S1b+S2 M4: changeset cards, their items, triage verdicts (the
     // spec's DDL verbatim). CREATE IF NOT EXISTS: safe to re-run.
     Migration::plain(94, include_str!("../../migrations/094_changesets.sql")),
+    // File downloads: `downloads` (a file a session sent from its host,
+    // copied to the data dir). CREATE IF NOT EXISTS: safe to re-run.
+    Migration::plain(95, include_str!("../../migrations/095_downloads.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

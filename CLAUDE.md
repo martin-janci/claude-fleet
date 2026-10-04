@@ -421,6 +421,19 @@ REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
   `fleet-hub catalog list` reads only (`probe_catalogs`: never clones or
   records a load) and `catalog remove` reports the open cards it withdrew.
   No Tauri command or verdict row yet (M6).
+- **File downloads** (spec
+  `docs/superpowers/specs/2026-10-03-file-downloads-design.md`, migration
+  095, contract revision 7): `send_file { session_id, path }` (a host's
+  Claude from its own host, or a person) stats the file, keeps the
+  `downloads.*` budget and inserts a `fetching` row; `service::downloads`
+  copies it in carry chunks into `<data dir>/downloads/<id>` (set by
+  `downloads::init` in `fleet-hub serve` and the desktop's setup). Clients
+  read `list_downloads` (not served to host tokens), re-read on
+  `download:changed` (ids only, hidden from scoped streams) and fetch the
+  bytes from `GET /downloads/<id>` (`mcp/downloads_route.rs`), never through
+  a tool result. The GC sweep drops rows past `downloads.keep_secs`. Desktop:
+  the footer's ⤓ Downloads sheet and the file viewer's *Send to downloads*;
+  `save_download` picks the destination in its own save dialog.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. Only one PTY is attached at a time.

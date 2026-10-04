@@ -15,6 +15,7 @@ mod changesets;
 mod clients;
 mod conversations;
 mod decisions;
+mod downloads;
 mod guides;
 mod hosts_accounts;
 mod layers;
@@ -70,6 +71,7 @@ pub use decisions::{
     DECISION_FOLLOWUPS, DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_NO_BASELINE,
     DECISION_PERSON_FOLLOWUPS, DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
 };
+pub use downloads::{DownloadRow, NewDownload};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
 pub use layers::HostLayerRow;
 pub use nl_census::{

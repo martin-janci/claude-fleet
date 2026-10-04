@@ -269,13 +269,22 @@ fn check(cases: Vec<Case>) {
 /// enough: asserting a wire value against a second hand-typed literal leaves
 /// the row itself unchecked, which is how the first version of this list was
 /// wrong.
-const ROUTED_WITHOUT_A_CASE: &[(&str, &str)] = &[(
-    "health_check",
-    "health_is_the_hubs_fleet_not_this_apps_empty_database asserts its empty \
+const ROUTED_WITHOUT_A_CASE: &[(&str, &str)] = &[
+    (
+        "save_download",
+        "a_hub_download_is_checked_through_list_downloads_before_a_byte_moves \
+         holds its VERDICTS row against the tool the request carried, the same \
+         way check does; it is not a case because its second half is an HTTP \
+         GET the fake transport does not answer",
+    ),
+    (
+        "health_check",
+        "health_is_the_hubs_fleet_not_this_apps_empty_database asserts its empty \
      arguments and cross-checks its VERDICTS row against the tool the request \
      carried, the same way check does; it is not a case because it also needs \
      a seeded local store to prove the answer is not the local one",
-)];
+    ),
+];
 
 /// The other half of the tool check in [`check`]: a wrong tool must not be
 /// able to hide by having no case at all.
@@ -530,6 +539,53 @@ fn routed_read_cases() -> Vec<Case> {
                     s,
                 ))
                 .map(|_| ())
+            }),
+        ),
+        // File downloads: the hub keeps the copies, so the list, a send and
+        // a removal are its tools.
+        (
+            "list_downloads",
+            "list_downloads",
+            json!({ "session_id": 4 }),
+            r#"{"downloads":[{"id":7,"at":1,"host_alias":"trn","path":"/w/a.pdf","name":"a.pdf","size":3,"state":"ready","source":"agent"}],"total_bytes":3,"max_total_bytes":10,"max_file_bytes":5}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::downloads::routed::list_downloads(
+                    b,
+                    fleet_core::service::downloads::ListDownloadsArgs {
+                        session_id: Some(4),
+                        limit: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "send_file",
+            "send_file",
+            json!({ "session_id": 4, "path": "out/a.pdf", "note": "the report" }),
+            r#"{"id":7,"at":1,"host_alias":"trn","session_id":4,"path":"/w/out/a.pdf","name":"a.pdf","size":3,"state":"fetching","source":"person","note":"the report"}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::downloads::routed::send_file(
+                    b,
+                    fleet_core::service::downloads::SendFileArgs {
+                        session_id: 4,
+                        path: "out/a.pdf".into(),
+                        note: Some("the report".into()),
+                    },
+                    s,
+                    ssh,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_download",
+            "remove_download",
+            json!({ "id": 7 }),
+            r#"{"removed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::downloads::routed::remove_download(b, 7, s)).map(|_| ())
             }),
         ),
         (
@@ -4292,6 +4348,10 @@ const SOURCES: &[(&str, &str)] = &[
         "commands/diagnostics.rs",
         include_str!("../commands/diagnostics.rs"),
     ),
+    (
+        "commands/downloads.rs",
+        include_str!("../commands/downloads.rs"),
+    ),
     ("commands/files.rs", include_str!("../commands/files.rs")),
     ("commands/health.rs", include_str!("../commands/health.rs")),
     (
@@ -4853,4 +4913,33 @@ fn catalog_admin_cases() -> Vec<Case> {
             Box::new(move |b, _, _| block_on(r::catalog_template(b, skill("s"))).map(|_| ())),
         ),
     ]
+}
+
+/// `save_download` on a hub reads the row through its VERDICTS row's tool
+/// first, and refuses one that is not ready without asking where to save.
+#[test]
+fn a_hub_download_is_checked_through_list_downloads_before_a_byte_moves() {
+    let fake = Fake::answering(
+        r#"{"downloads":[{"id":7,"at":1,"host_alias":"trn","path":"/w/a.pdf","name":"a.pdf","size":3,"state":"fetching","source":"agent"}],"total_bytes":3,"max_total_bytes":10,"max_file_bytes":5}"#,
+    );
+    let (_dir, st) = store();
+    let asked = std::sync::atomic::AtomicBool::new(false);
+    let got = block_on(commands::downloads::routed::save_download(
+        &remote_backend(&fake),
+        7,
+        &st,
+        |_| {
+            asked.store(true, std::sync::atomic::Ordering::SeqCst);
+            async { None }
+        },
+    ));
+    let (tool, args) = fake.only_call();
+    assert_eq!(
+        verdicts::verdict("save_download").and_then(Verdict::tool),
+        Some(tool.as_str())
+    );
+    assert_eq!(args, json!({ "limit": 200 }));
+    let e = got.expect_err("a file still copying is not saved");
+    assert_eq!(e.code, codes::E_NOTFOUND);
+    assert!(!asked.load(std::sync::atomic::Ordering::SeqCst));
 }

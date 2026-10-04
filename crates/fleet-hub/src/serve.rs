@@ -822,6 +822,14 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         tracing::warn!("{warning}");
     }
     persist(&store, &r)?;
+    // File downloads live under the data dir; a copy the last run left
+    // half-done fails now, before a client can ask for it.
+    if let Ok(s) = store.lock() {
+        match fleet_core::service::downloads::init(&r.data_dir, &s) {
+            Ok(dir) => tracing::info!(dir = %dir.display(), "downloads ready"),
+            Err(e) => tracing::warn!(error = %e, "downloads unavailable"),
+        }
+    }
     // `/events` stamps `needs_attention` without a store, so it is handed
     // the `context_full` threshold `list_sessions` reads; later writes
     // (`set_setting`, `fleet-hub decide` and the desktop all go through the

@@ -345,6 +345,12 @@ pub const MOVE_MAX_TRANSCRIPT_MB: &str = crate::service::move_session::SETTING_M
 /// Upper bound for [`MOVE_MAX_TRANSCRIPT_MB`]: the copy is held in memory.
 pub const MOVE_MAX_TRANSCRIPT_MB_MAX: u64 = 4096;
 
+/// File downloads: one file's ceiling, everything kept together, and how
+/// long a copy is kept (`service::downloads`).
+pub const DOWNLOADS_MAX_FILE_MB: &str = "downloads.max_file_mb";
+pub const DOWNLOADS_MAX_TOTAL_MB: &str = "downloads.max_total_mb";
+pub const DOWNLOADS_KEEP_SECS: &str = "downloads.keep_secs";
+
 /// Upper bound for [`MOVE_MAX_BUNDLE_MB`]: the bundle is relayed through the
 /// orchestrator in 8 MiB chunks via a private temp file, so this bounds relay
 /// time and temp-disk use on the orchestrator and both hosts, not memory.
@@ -713,6 +719,34 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Seconds)
     .tags(&[Tag::Advanced]),
+    Spec::new(
+        DOWNLOADS_MAX_FILE_MB,
+        "100",
+        Kind::Int { min: 1, max: 4096 },
+        "Download: file cap",
+        "Largest file a session can send to your devices; a bigger one is refused.",
+    )
+    .unit(Unit::Mib),
+    Spec::new(
+        DOWNLOADS_MAX_TOTAL_MB,
+        "2048",
+        Kind::Int {
+            min: 1,
+            max: 1_048_576,
+        },
+        "Downloads: space",
+        "How much the kept downloads may take together. A new file pushes out the oldest ones.",
+    )
+    .unit(Unit::Mib),
+    Spec::new(
+        DOWNLOADS_KEEP_SECS,
+        "604800",
+        Kind::Secs,
+        "Keep downloads",
+        "How long a sent file is kept for your devices before it is removed.",
+    )
+    .unit(Unit::Days)
+    .zero("until removed"),
     Spec::new(
         MOVE_MAX_TRANSCRIPT_MB,
         "200",

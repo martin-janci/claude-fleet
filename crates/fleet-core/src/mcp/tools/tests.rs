@@ -2162,7 +2162,8 @@ fn capture_default_cap_matches_docs() {
 /// `forget_project`: 95; `update_status` / `update_admin`: 97; `session_tool_detail`: 98 (102 with
 /// the tools main added alongside it; declarative pages' `guide`: 103;
 /// multi-harness F3a's `set_host_harnesses`: 104; Assets M4's
-/// `changesets`: 105.)
+/// `changesets`: 105; file downloads' `send_file` / `list_downloads` /
+/// `remove_download`: 108.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -2175,6 +2176,7 @@ fn router_sum_serves_every_tool() {
         include_str!("assets.rs"),
         include_str!("peer.rs"),
         include_str!("updates.rs"),
+        include_str!("downloads.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -2184,7 +2186,7 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    assert_eq!(served, 105);
+    assert_eq!(served, 108);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3445,7 +3447,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// Measured at 71,417 on 2026-10-03 after Assets M4 Task 9 (the
     /// `changesets` tool and its four parameters, +875 bytes; master only —
     /// a per-host token is never served it).
-    const BUDGET_BYTES: usize = 71_517;
+    /// Measured at 72,687 on 2026-10-04 after merging Assets M4 into file
+    /// downloads (`send_file`, `list_downloads`, `remove_download`, +1,170
+    /// bytes).
+    const BUDGET_BYTES: usize = 72_787;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

@@ -32,6 +32,19 @@ pub struct HubResponse {
 pub trait HubTransport: Send + Sync {
     async fn post_json(&self, url: &str, bearer: &str, body: String)
         -> Result<HubResponse, String>;
+
+    /// `GET url` streamed into `dest` ([`download_to`]): a file download's
+    /// bytes, which no tool result carries. A transport that cannot (the
+    /// test fakes, [`NoTransport`]) refuses.
+    async fn get_to_file(
+        &self,
+        _url: &str,
+        _bearer: &str,
+        _dest: &std::path::Path,
+        _max: u64,
+    ) -> Result<u64, String> {
+        Err("this transport does not download files".into())
+    }
 }
 
 /// The transport of a hub this launch cannot use: it sends nothing. See
@@ -205,6 +218,16 @@ impl HubTransport for TcpTransport {
         let raw = exchange(&at, &request).await?;
         split_response(&raw)
     }
+
+    async fn get_to_file(
+        &self,
+        url: &str,
+        bearer: &str,
+        dest: &std::path::Path,
+        max: u64,
+    ) -> Result<u64, String> {
+        download_to(url, bearer, dest, max).await
+    }
 }
 
 /// Connect, write the request, read the whole answer back — as bytes, since
@@ -257,4 +280,133 @@ pub fn split_response(raw: impl AsRef<[u8]>) -> Result<HubResponse, String> {
         String::from_utf8_lossy(body).into_owned()
     };
     Ok(HubResponse { status, body })
+}
+
+/// Largest response head [`download_to`] reads before the body.
+const MAX_HEAD: usize = 64 * 1024;
+
+/// `GET url` and stream the body into `dest` — the bytes of a file download
+/// (`GET /downloads/<id>`), which may be far past [`MAX_RESPONSE`], so they
+/// are never buffered whole. Written to `<dest>.part` and renamed into place
+/// only once complete, so `dest` is either the whole file or untouched. The
+/// byte count on success; on a non-200, `Err("HTTP <status>: <body>")`.
+pub async fn download_to(
+    url: &str,
+    bearer: &str,
+    dest: &std::path::Path,
+    max: u64,
+) -> Result<u64, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let at = Endpoint::parse(url)?;
+    let (host, port) = (at.host().to_string(), at.port());
+    let mut conn = connect(&at).await?;
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {bearer}\r\n\
+         Accept: */*\r\nConnection: close\r\n\r\n",
+        at.target(),
+        at.authority(),
+    );
+    let io = |e: std::io::Error| format!("read from {host}:{port}: {e}");
+    conn.write_all(request.as_bytes()).await.map_err(io)?;
+    conn.flush().await.map_err(io)?;
+
+    let mut raw = Vec::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let split = loop {
+        if let Some(i) = http1::find(&raw, b"\r\n\r\n") {
+            break i;
+        }
+        if raw.len() > MAX_HEAD {
+            return Err(format!("{host}:{port} sent an oversized response head"));
+        }
+        let n = conn.read(&mut buf).await.map_err(io)?;
+        if n == 0 {
+            return Err(format!("{host}:{port} closed before answering"));
+        }
+        raw.extend_from_slice(&buf[..n]);
+    };
+    let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+    let mut rest = raw.split_off(split + 4);
+    let status = http1::parse_status(&head)?;
+    if status != 200 {
+        let _ = conn.take(4096).read_to_end(&mut rest).await;
+        let body = String::from_utf8_lossy(&rest).trim().to_string();
+        return Err(format!("HTTP {status}: {body}"));
+    }
+    let expected: Option<u64> = head.lines().skip(1).find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim()
+            .eq_ignore_ascii_case("content-length")
+            .then(|| v.trim().parse().ok())?
+    });
+    if expected.is_some_and(|n| n > max) {
+        return Err(too_large_download(max));
+    }
+    let mut chunks = http1::Dechunker::new(http1::head_is_chunked(&head));
+    let part = {
+        let mut p = dest.as_os_str().to_owned();
+        p.push(".part");
+        std::path::PathBuf::from(p)
+    };
+    let mut file = tokio::fs::File::create(&part)
+        .await
+        .map_err(|e| format!("create {}: {e}", part.display()))?;
+    let result: Result<u64, String> = async {
+        let mut got: u64 = 0;
+        loop {
+            let data = chunks.take(&mut rest)?;
+            if !data.is_empty() {
+                got += data.len() as u64;
+                if got > max {
+                    return Err(too_large_download(max));
+                }
+                file.write_all(&data)
+                    .await
+                    .map_err(|e| format!("write {}: {e}", part.display()))?;
+            }
+            if chunks.finished() || expected.is_some_and(|n| got >= n) {
+                break;
+            }
+            match conn.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => rest.extend_from_slice(&buf[..n]),
+                // The rustls close without `close_notify` [`speak`] forgives:
+                // the length check below says whether the body is whole.
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(io(e)),
+            }
+        }
+        if let Some(n) = expected {
+            if got != n {
+                return Err(format!(
+                    "{host}:{port} sent {got} of {n} bytes; the download is incomplete"
+                ));
+            }
+        }
+        file.sync_all()
+            .await
+            .map_err(|e| format!("write {}: {e}", part.display()))?;
+        Ok(got)
+    }
+    .await;
+    drop(file);
+    match result {
+        Ok(n) => {
+            tokio::fs::rename(&part, dest)
+                .await
+                .map_err(|e| format!("move into {}: {e}", dest.display()))?;
+            Ok(n)
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&part).await;
+            Err(e)
+        }
+    }
+}
+
+fn too_large_download(max: u64) -> String {
+    format!(
+        "the download is larger than {} MiB; refusing it",
+        max / (1024 * 1024)
+    )
 }

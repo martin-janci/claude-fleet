@@ -791,6 +791,98 @@ impl HubBackend {
         self.route("set_quick_replies", &args).await
     }
 
+    /// `commands::downloads::list_downloads`.
+    pub async fn list_downloads(
+        &self,
+        args: &fleet_core::service::downloads::ListDownloadsArgs,
+    ) -> Result<fleet_core::service::downloads::DownloadList, IpcError> {
+        self.route("list_downloads", &download_list_args(args))
+            .await
+    }
+
+    /// `commands::downloads::send_file`.
+    pub async fn send_file(
+        &self,
+        args: &fleet_core::service::downloads::SendFileArgs,
+    ) -> Result<fleet_core::store::DownloadRow, IpcError> {
+        let mut v = json!({ "session_id": args.session_id, "path": args.path });
+        if let Some(note) = &args.note {
+            v["note"] = json!(note);
+        }
+        self.route("send_file", &v).await
+    }
+
+    /// `commands::downloads::remove_download`.
+    pub async fn remove_download(&self, id: i64) -> Result<bool, IpcError> {
+        let v: Value = self.route("remove_download", &json!({ "id": id })).await?;
+        Ok(v.get("removed").and_then(Value::as_bool).unwrap_or(false))
+    }
+
+    /// `commands::downloads::save_download`'s two halves on a hub: the row,
+    /// read through `list_downloads` (so a file that is not ready, or not
+    /// this client's to see, is refused before a byte moves), and then the
+    /// bytes from `GET /downloads/<id>`, streamed into `dest`.
+    pub async fn ready_download(
+        &self,
+        id: i64,
+    ) -> Result<fleet_core::store::DownloadRow, IpcError> {
+        let list: fleet_core::service::downloads::DownloadList = self
+            .route(
+                "save_download",
+                &json!({ "limit": fleet_core::service::downloads::LIST_LIMIT }),
+            )
+            .await?;
+        let row = list
+            .downloads
+            .into_iter()
+            .find(|d| d.id == id)
+            .ok_or_else(|| {
+                IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("download {id} is gone from the hub"),
+                )
+            })?;
+        if row.state != "ready" {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("{} is not ready yet ({})", row.name, row.state),
+            ));
+        }
+        Ok(row)
+    }
+
+    /// The bytes of a ready download, into `dest`.
+    pub async fn fetch_download(
+        &self,
+        id: i64,
+        dest: &std::path::Path,
+        max: u64,
+    ) -> Result<u64, IpcError> {
+        if let Some(refused) = self.unavailable_error("list_downloads") {
+            return Err(refused);
+        }
+        let url = format!("{}/downloads/{id}", self.cfg.base_url);
+        self.transport
+            .get_to_file(&url, &self.cfg.token, dest, max)
+            .await
+            .map_err(|e| {
+                let e = self.redact(&e);
+                if e.starts_with("HTTP 404") {
+                    IpcError::new(codes::E_NOTFOUND, "the hub no longer has this file")
+                } else if e.starts_with("HTTP 401") {
+                    IpcError::new(
+                        codes::E_UNAUTHORIZED,
+                        "the hub revoked this client — pair again in Settings",
+                    )
+                } else {
+                    IpcError::new(
+                        codes::E_HUB_UNREACHABLE,
+                        format!("downloading from {} failed: {e}", self.cfg.base_url),
+                    )
+                }
+            })
+    }
+
     /// `commands::tasks::list_tasks`.
     pub async fn list_tasks(
         &self,
@@ -1026,3 +1118,15 @@ fn call_timeout(tool: &str) -> std::time::Duration {
 #[cfg(test)]
 #[path = "tests_remote.rs"]
 mod tests;
+
+/// `list_downloads`' arguments as the tool reads them: absent, not null.
+fn download_list_args(args: &fleet_core::service::downloads::ListDownloadsArgs) -> Value {
+    let mut v = json!({});
+    if let Some(id) = args.session_id {
+        v["session_id"] = json!(id);
+    }
+    if let Some(n) = args.limit {
+        v["limit"] = json!(n);
+    }
+    v
+}

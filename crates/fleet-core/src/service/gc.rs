@@ -275,6 +275,11 @@ pub struct GcReport {
     /// same wire reason.
     #[serde(default)]
     pub swept_decision_runs: usize,
+    /// Downloads past `downloads.keep_secs` dropped this sweep, with their
+    /// bytes (`service::downloads::sweep`). Ungated like the retention
+    /// sweeps above; `#[serde(default)]` for the same wire reason.
+    #[serde(default)]
+    pub swept_downloads: usize,
 }
 
 /// Run one sweep against `exec`. Reads rows/hosts/controller under one brief
@@ -421,6 +426,8 @@ pub async fn sweep_with(
     // The decision record (Jev evaluation, D37): `decide.retention_days`
     // (0 = forever), bounded per tick, one batch per lock.
     report.swept_decision_runs = crate::service::decide::sweep_runs(store, now);
+    // File downloads past `downloads.keep_secs`, and bytes no row owns.
+    report.swept_downloads = crate::service::downloads::sweep(store, now);
     report
 }
 
@@ -844,6 +851,7 @@ mod tests {
                 swept_work_events: 0,
                 tidied: 0,
                 swept_decision_runs: 0,
+                swept_downloads: 0,
             }
         );
         assert_eq!(exec.inspects.load(Ordering::SeqCst), 1);
@@ -873,6 +881,7 @@ mod tests {
                 swept_work_events: 0,
                 tidied: 0,
                 swept_decision_runs: 0,
+                swept_downloads: 0,
             }
         );
         assert_eq!(exec.kills.load(Ordering::SeqCst), 0);
@@ -932,6 +941,7 @@ mod tests {
                 swept_work_events: 0,
                 tidied: 0,
                 swept_decision_runs: 0,
+                swept_downloads: 0,
             }
         );
         let s = store.lock().unwrap();
@@ -992,6 +1002,7 @@ mod tests {
                 swept_work_events: 0,
                 tidied: 0,
                 swept_decision_runs: 0,
+                swept_downloads: 0,
             },
             "the retention sweep must run regardless of gc.enabled"
         );
