@@ -1461,6 +1461,36 @@ pub(crate) fn narrow(
         .retain(|a| action_allowed(f, a) && card_owns(a, assets, catalogs));
 }
 
+/// Assets M5 fix round 1: the card's own actions `narrow` drops under `f`
+/// only because the planner could not verify the host copy untouched — an
+/// `Update` over a copy whose manifest entry predates the file hashes, or
+/// an `Overwrite` of a copy the hashes show edited — each as the line the
+/// card reports: such a host is left to a person, never counted done.
+fn held_by_host_copy(
+    host: &str,
+    hp: &HostPlan,
+    f: OpFilter,
+    assets: &BTreeSet<String>,
+    catalogs: &BTreeSet<String>,
+) -> Vec<String> {
+    hp.actions
+        .iter()
+        .filter(|a| card_owns(a, assets, catalogs) && !action_allowed(f, a))
+        .filter(|a| {
+            op_allowed(f, a.op)
+                || (a.op == ActionOp::Overwrite && a.host_copy == Some(HostCopy::Edited))
+        })
+        .map(|a| {
+            let why = if a.host_copy == Some(HostCopy::Edited) {
+                "host copy edited"
+            } else {
+                "host copy predates fleet's file hashes"
+            };
+            format!("{}/{} on {host}: {why} — sync it yourself", a.kind, a.name)
+        })
+        .collect()
+}
+
 /// The `${NAME}`s the card's own assets wait on in `hp` — `apply_sync`'s
 /// secret gate, read before [`narrow`] drops the blocked actions. Names
 /// only, never a value.
@@ -1480,7 +1510,9 @@ fn missing_secrets(
 /// that failed or partly applied (PF5: only these fail a card); `skipped`
 /// — a pair not planned (unreachable, scan failed), which is reported, not
 /// a failure; `applied` — a pair applied something; `nothing` — a pair was
-/// planned and nothing the card may do was left on it (never applied).
+/// planned and nothing the card may do was left on it (never applied);
+/// `held` — the card held back an update the planner could not verify
+/// (Assets M5), which keeps the host's items from counting as done.
 /// Who a host sync runs for: a card a person applied, or SB6.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RunBy {
@@ -1492,15 +1524,20 @@ enum RunBy {
 struct HostOutcome {
     applied: bool,
     nothing: bool,
+    /// Assets M5 fix round 1: the card held back one of its own updates (or
+    /// an overwrite of an edited copy) because the planner could not verify
+    /// the host copy untouched ([`held_by_host_copy`], named in `skipped`).
+    /// The host's items are then not done, like a skipped host's.
+    held: bool,
     failed: Vec<String>,
     skipped: Vec<String>,
 }
 
 impl HostOutcome {
-    /// The host's items count as applied: no pair failed, and one applied
-    /// or had nothing left to do.
+    /// The host's items count as applied: no pair failed, nothing was held
+    /// back, and one applied or had nothing left to do.
     fn ok(&self) -> bool {
-        self.failed.is_empty() && (self.applied || self.nothing)
+        self.failed.is_empty() && !self.held && (self.applied || self.nothing)
     }
 
     fn failed(why: String) -> HostOutcome {
@@ -1514,7 +1551,10 @@ impl HostOutcome {
 /// Plan each host in `wants` (PF4: `allow_unlayered`, since the plan is
 /// narrowed to the card's assets anyway), narrow it to what `filter` lets
 /// the card write, park what is left as one plan and apply it under its own
-/// token (R27). A pair that was not planned is reported `skipped`, and one
+/// token (R27). An action of the card's that `narrow` drops only for its
+/// host copy ([`held_by_host_copy`]) is reported `skipped` and marks the
+/// host `held` (Assets M5 fix round 1). A pair that was not planned is
+/// reported `skipped`, and one
 /// narrowed to nothing is `nothing` — neither is parked or applied, so a
 /// sync with nothing to write never rescans a host, writes a `sync_runs`
 /// row or emits progress (fix round 1, I1). For a card ([`RunBy::Card`]),
@@ -1575,7 +1615,16 @@ async fn sync_hosts(
                 continue;
             }
             missing.extend(missing_secrets(&hp, assets, catalogs));
+            let held = if hp.status == "planned" {
+                held_by_host_copy(host, &hp, filter, assets, catalogs)
+            } else {
+                Vec::new()
+            };
             narrow(&mut hp, filter, assets, catalogs);
+            if !held.is_empty() {
+                o.held = true;
+                o.skipped.extend(held);
+            }
             if hp.status != "planned" {
                 let why = hp.detail.clone().unwrap_or_else(|| hp.status.clone());
                 o.skipped.push(format!("{host} ({}): {why}", hp.harness));
@@ -3904,6 +3953,17 @@ mod tests {
         );
         let v = apply_all(&f, second, &ssh).await.unwrap();
         assert_eq!(v.state, "applied", "{:?}", v.error);
+        // Assets M5 fix round 1: the edited copy is held back and named, so
+        // the host's item is not counted done.
+        assert_eq!(item_states(&v), ["skipped"], "{:?}", v.error);
+        assert!(
+            v.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("skill/edited on oci: host copy edited — sync it yourself"),
+            "{:?}",
+            v.error
+        );
         assert!(skills.join("w/SKILL.md").is_file(), "the create landed");
         assert!(skills.join("gone/SKILL.md").is_file(), "the remove did not");
         assert_eq!(
@@ -3982,6 +4042,121 @@ mod tests {
         assert_eq!(v.state, "applied", "{:?}", v.error);
         assert_eq!(item_states(&v), ["applied"]);
         assert_eq!(last_run(&f), runs, "nothing applied, nothing recorded");
+    }
+
+    /// A person's own sync of everything planned for `oci` — no card, so no
+    /// layer counts as rolled out by it.
+    async fn person_syncs_oci(f: &Fleet, ssh: &Arc<SshClient>) {
+        let planned = sync::plan_sync(
+            PlanArgs {
+                host_alias: Some("oci".into()),
+                allow_unlayered: true,
+                ..Default::default()
+            },
+            &f.store,
+            ssh,
+        )
+        .await
+        .unwrap();
+        sync::apply_sync_with(
+            SyncApplyArgs {
+                plan_id: planned.id,
+                force_partial: false,
+                call_id: None,
+            },
+            &f.store,
+            ssh,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Assets M5 fix round 1 (6): a copy fleet wrote and nobody touched,
+    /// then a catalog change — the Rollout carries the update and the host
+    /// counts as rolled out.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_rollout_updates_a_copy_fleet_verified_untouched() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        person_syncs_oci(&f, &ssh).await;
+        let skill = home.path().join(".claude/skills/w/SKILL.md");
+        assert!(skill.is_file());
+
+        f.commit_files(
+            &f.personal_root,
+            p,
+            &[("skills/w/body.md", "Steps, revised.\n")],
+        );
+        let card = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+        let v = apply_all(&f, card, &ssh).await.unwrap();
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        assert_eq!(item_states(&v), ["applied"], "{:?}", v.error);
+        assert!(std::fs::read_to_string(&skill)
+            .unwrap()
+            .contains("Steps, revised."));
+        assert_eq!(
+            f.store.lock().unwrap().rolled_out_layers().unwrap(),
+            BTreeSet::from([(p, "core".to_string())])
+        );
+    }
+
+    /// Assets M5 fix round 1 (2): a manifest entry from before M5 cannot
+    /// vouch for the host copy, so the Rollout leaves its update to a
+    /// person — and says so: the host's item is skipped with a note, never
+    /// counted applied, and the layer is not rolled out there.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_rollout_over_a_copy_fleet_cannot_vouch_for_skips_its_host() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        person_syncs_oci(&f, &ssh).await;
+        let skill = home.path().join(".claude/skills/w/SKILL.md");
+        let before = std::fs::read_to_string(&skill).unwrap();
+
+        // Make the entry one written before M5: no file hashes.
+        let path = home.path().join(".claude/.fleet-assets.json");
+        let mut m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for e in m["assets"].as_object_mut().unwrap().values_mut() {
+            assert!(e.as_object_mut().unwrap().remove("file_hashes").is_some());
+        }
+        std::fs::write(&path, m.to_string()).unwrap();
+
+        f.commit_files(
+            &f.personal_root,
+            p,
+            &[("skills/w/body.md", "Steps, revised.\n")],
+        );
+        let card = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+        let v = apply_all(&f, card, &ssh).await.unwrap();
+        assert_eq!(item_states(&v), ["skipped"], "{:?}", v.error);
+        let note = v.error.clone().unwrap_or_default();
+        assert!(
+            note.contains(
+                "skill/w on oci: host copy predates fleet's file hashes — sync it yourself"
+            ),
+            "{note}"
+        );
+        assert_eq!(std::fs::read_to_string(&skill).unwrap(), before);
+        assert!(
+            f.store
+                .lock()
+                .unwrap()
+                .rolled_out_layers()
+                .unwrap()
+                .is_empty(),
+            "core is not rolled out on oci"
+        );
     }
 
     /// I1: a restore with no update or overwrite planned for its asset (the
