@@ -446,6 +446,32 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Assets M5 (R9): delete the cards the system withdrew — `dismissed`
+    /// with an error starting `withdrawn:` (the reconcile pass's R2, an
+    /// undo's or a catalog removal's) — that were created before
+    /// `created_before` (Unix seconds) and of which no item ever left
+    /// `pending`: no apply, no skip, no person's rejection, so nothing undo,
+    /// `rejected_rollouts` or `rolled_out_layers` reads. Their items go
+    /// with them, explicitly (the FK cascade needs `foreign_keys = ON`).
+    /// One transaction; answers how many cards went.
+    pub fn prune_withdrawn_changesets(&self, created_before: i64) -> Result<usize> {
+        const PRUNABLE: &str = "SELECT c.id FROM changesets c \
+             WHERE c.state = 'dismissed' AND c.error GLOB 'withdrawn:*' AND c.created_at < ?1 \
+               AND NOT EXISTS (SELECT 1 FROM changeset_items i \
+                               WHERE i.changeset_id = c.id AND i.state <> 'pending')";
+        let tx = self.conn.unchecked_transaction()?;
+        let ids: Vec<i64> = tx
+            .prepare(PRUNABLE)?
+            .query_map([created_before], |r| r.get(0))?
+            .collect::<Result<_>>()?;
+        for id in &ids {
+            tx.execute("DELETE FROM changeset_items WHERE changeset_id = ?1", [id])?;
+            tx.execute("DELETE FROM changesets WHERE id = ?1", [id])?;
+        }
+        tx.commit()?;
+        Ok(ids.len())
+    }
+
     pub fn get_changeset(&self, id: i64) -> Result<Option<ChangesetRow>> {
         self.conn
             .query_row(
@@ -1069,5 +1095,55 @@ mod tests {
                 .all(|i| i.decided_at.is_some()),
             "an apply stamps what it applied and what it skipped"
         );
+    }
+
+    /// Assets M5 (R9): only withdrawn cards that are old and that nobody
+    /// ever decided an item of are pruned, with their items — never an
+    /// open card, a person's dismissal, or a card dismissed for another
+    /// reason.
+    #[test]
+    fn only_old_untouched_withdrawn_cards_are_pruned() {
+        let (s, p) = store();
+        let mk = || {
+            s.insert_changeset(
+                "new",
+                "New on oci",
+                &[item("core", "import", Some(p), None)],
+            )
+            .unwrap()
+            .id
+        };
+        let (old, touched, open, fresh, by_person, other) = (mk(), mk(), mk(), mk(), mk(), mk());
+        for id in [old, touched, fresh] {
+            assert!(s
+                .withdraw_changeset(id, "withdrawn: no longer applies")
+                .unwrap());
+        }
+        assert!(s.withdraw_changeset(other, "gone").unwrap());
+        s.set_changeset_item_states(touched, &[0], "rejected")
+            .unwrap();
+        s.reject_changeset_items(by_person, &[0], &[], true)
+            .unwrap();
+        s.conn
+            .execute(
+                "UPDATE changesets SET created_at = 1 WHERE id <> ?1",
+                [fresh],
+            )
+            .unwrap();
+        assert_eq!(s.prune_withdrawn_changesets(100).unwrap(), 1);
+        assert!(s.get_changeset(old).unwrap().is_none());
+        assert!(
+            s.changeset_items(old).unwrap().is_empty(),
+            "items go with it"
+        );
+        for id in [touched, open, fresh, by_person, other] {
+            assert!(s.get_changeset(id).unwrap().is_some(), "card {id} stays");
+            assert_eq!(
+                s.changeset_items(id).unwrap().len(),
+                1,
+                "card {id}'s items stay"
+            );
+        }
+        assert_eq!(s.prune_withdrawn_changesets(100).unwrap(), 0, "idempotent");
     }
 }

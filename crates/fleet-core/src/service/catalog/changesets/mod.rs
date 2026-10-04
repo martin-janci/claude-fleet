@@ -425,6 +425,36 @@ pub(crate) fn later_card(
     Ok(None)
 }
 
+/// Assets M5 (R9): every card [`is_undoable`] answers true for, in one pass
+/// over the cards: an applied catalog-changing card that is the latest —
+/// by `(applied_at, id)` — in every catalog it touched. Equal to asking
+/// [`later_card`] per card, without re-reading every card's items each time.
+pub(crate) fn undoable_ids(cards: &[(ChangesetRow, Vec<ChangesetItemRow>)]) -> BTreeSet<i64> {
+    let changing = || {
+        cards
+            .iter()
+            .filter(|(c, items)| c.state == "applied" && changes_catalog(c, items))
+    };
+    let mut latest: BTreeMap<i64, (Option<i64>, i64)> = BTreeMap::new();
+    for (card, items) in changing() {
+        let at = (card.applied_at, card.id);
+        for cid in applied_catalogs(items) {
+            let l = latest.entry(cid).or_insert(at);
+            if at > *l {
+                *l = at;
+            }
+        }
+    }
+    changing()
+        .filter(|(c, items)| {
+            applied_catalogs(items)
+                .iter()
+                .all(|cid| latest.get(cid) == Some(&(c.applied_at, c.id)))
+        })
+        .map(|(c, _)| c.id)
+        .collect()
+}
+
 fn is_undoable(
     card: &ChangesetRow,
     items: &[ChangesetItemRow],
@@ -495,23 +525,30 @@ pub fn get(id: i64, store: &Mutex<Store>) -> Result<ChangesetView, IpcError> {
 /// Every open card and the [`RECENT_CLOSED`] most recent others, newest first.
 pub fn list(store: &Mutex<Store>) -> Result<Vec<ChangesetSummary>, IpcError> {
     let s = lock(store)?;
+    let mut cards = Vec::new();
+    for card in s.list_changesets()? {
+        let items = s.changeset_items(card.id)?;
+        cards.push((card, items));
+    }
+    // Assets M5 (R9): undoability once, linear, instead of `later_card`
+    // (which reads every card's items again) per card.
+    let undoable = undoable_ids(&cards);
     let mut closed = 0;
     let mut out = Vec::new();
-    for card in s.list_changesets()? {
+    for (card, items) in cards {
         if !is_open(&card.state) {
             if closed >= RECENT_CLOSED {
                 continue;
             }
             closed += 1;
         }
-        let items = s.changeset_items(card.id)?;
         let mut groups: BTreeMap<String, usize> = BTreeMap::new();
         for i in &items {
             *groups.entry(i.grp.clone()).or_insert(0) += 1;
         }
         let pending = items.iter().filter(|i| i.state == "pending").count();
-        let undoable = is_undoable(&card, &items, &s)?;
         out.push(ChangesetSummary {
+            undoable: undoable.contains(&card.id),
             id: card.id,
             kind: card.kind,
             summary: card.summary,
@@ -521,7 +558,6 @@ pub fn list(store: &Mutex<Store>) -> Result<Vec<ChangesetSummary>, IpcError> {
             error: card.error,
             groups,
             pending,
-            undoable,
         });
     }
     Ok(out)
@@ -670,5 +706,103 @@ mod tests {
         let v = get(card.id, &store).unwrap();
         assert_eq!((v.state.as_str(), v.undoable), ("applied", false));
         assert!(!list(&store).unwrap()[0].undoable);
+    }
+
+    /// Assets M5 (R9): one linear pass answers what `later_card` answers per
+    /// card — the latest applied catalog-changing card of every catalog it
+    /// touched is undoable, and nothing else.
+    #[test]
+    fn undoable_is_the_latest_applied_card_in_each_of_its_catalogs() {
+        let card = |id: i64, kind: &str, applied_at: Option<i64>| ChangesetRow {
+            id,
+            kind: kind.into(),
+            summary: "s".into(),
+            state: if applied_at.is_some() {
+                "applied"
+            } else {
+                "proposed"
+            }
+            .into(),
+            created_at: 1,
+            applied_at,
+            commits: None,
+            layers_snapshot: None,
+            error: None,
+        };
+        let import = |card: i64, catalog: i64| ChangesetItemRow {
+            changeset_id: card,
+            position: catalog,
+            grp: "core".into(),
+            catalog_id: Some(catalog),
+            kind: "skill".into(),
+            name: "w".into(),
+            action: "import".into(),
+            params: None,
+            decider: "rule".into(),
+            state: "applied".into(),
+            decided_at: None,
+        };
+        let cards = vec![
+            (card(1, "bootstrap", Some(10)), vec![import(1, 1)]),
+            (card(2, "new", Some(20)), vec![import(2, 1)]),
+            (card(3, "new", Some(15)), vec![import(3, 2)]),
+            (card(4, "new", Some(30)), vec![import(4, 1), import(4, 2)]),
+            (card(5, "rollout", Some(40)), vec![]),
+            (card(6, "new", None), vec![import(6, 1)]),
+        ];
+        assert_eq!(undoable_ids(&cards), BTreeSet::from([4]));
+        assert_eq!(undoable_ids(&cards[..3]), BTreeSet::from([2, 3]));
+    }
+
+    /// Assets M5 (R9): `list`'s one-pass undoability agrees with
+    /// `is_undoable` (what `get` answers) on every stored card.
+    #[test]
+    fn list_and_get_agree_on_what_is_undoable() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_catalog_config("/p", None).unwrap();
+        let p = s.personal_catalog().unwrap().unwrap().id;
+        let import = NewChangesetItem {
+            grp: "core".into(),
+            catalog_id: Some(p),
+            kind: "skill".into(),
+            name: "w".into(),
+            action: "import".into(),
+            params: None,
+            decider: "rule".into(),
+        };
+        let mut ids = Vec::new();
+        for (n, applied_at) in [(0, Some(30)), (1, Some(10)), (2, None)] {
+            let c = s
+                .insert_changeset("new", &format!("New {n}"), std::slice::from_ref(&import))
+                .unwrap();
+            if let Some(at) = applied_at {
+                s.record_changeset_applied(
+                    c.id,
+                    &crate::store::AppliedRecord {
+                        applied_at: at,
+                        commits: "{}",
+                        layers_snapshot: "[]",
+                        applied: &[0],
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            }
+            ids.push(c.id);
+        }
+        let store = Mutex::new(s);
+        let listed: BTreeMap<i64, bool> = list(&store)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.id, c.undoable))
+            .collect();
+        for id in ids {
+            assert_eq!(listed[&id], get(id, &store).unwrap().undoable, "card {id}");
+        }
+        assert_eq!(
+            listed.values().filter(|u| **u).count(),
+            1,
+            "only the card applied last (the first inserted) undoes"
+        );
     }
 }

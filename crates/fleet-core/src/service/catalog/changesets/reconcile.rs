@@ -42,6 +42,10 @@ pub struct ReconcileReport {
 /// The error a withdrawn card carries (R2).
 pub const WITHDRAWN: &str = "withdrawn: no longer applies";
 
+/// Assets M5 (R9): how long a card the system withdrew, untouched, is kept
+/// before the pass prunes it.
+pub const WITHDRAWN_RETENTION_SECS: i64 = 7 * 24 * 3600;
+
 type OpenCard = (ChangesetRow, Vec<ChangesetItemRow>);
 
 /// Everything one pass reads, owned. [`proposals`] puts it in one stable
@@ -59,11 +63,21 @@ struct PassFacts {
 }
 
 /// One pass. `auto` (`catalog.auto`): write `ignored` verdicts for
-/// internals here instead of proposing `hide` items (R18).
+/// internals here instead of proposing `hide` items (R18). Then prune the
+/// system's old, untouched withdrawn cards (Assets M5, R9) — best effort:
+/// a failed prune is logged and tried again next pass, never failing the
+/// pass whose writes already landed.
 pub fn reconcile(store: &Mutex<Store>, auto: bool) -> Result<ReconcileReport, IpcError> {
     let facts = gather(store)?;
     let (identities, proposed) = proposals(&facts, auto);
-    write(store, &facts, &identities, &proposed, auto)
+    let report = write(store, &facts, &identities, &proposed, auto)?;
+    let pruned = lock(store)?.prune_withdrawn_changesets(now_unix() - WITHDRAWN_RETENTION_SECS);
+    match pruned {
+        Ok(0) => {}
+        Ok(n) => tracing::debug!(pruned = n, "changesets: pruned withdrawn cards"),
+        Err(e) => tracing::warn!(error = %e, "changesets: pruning withdrawn cards failed"),
+    }
+    Ok(report)
 }
 
 /// Store rows under one guard, then the registry (cloned out, no lock held
@@ -1139,5 +1153,46 @@ mod tests {
     async fn a_panic_in_the_detached_sync_only_logs() {
         let h = spawn_logged("test sync", async { panic!("SB6 blew up") }).expect("a runtime");
         assert!(h.await.is_ok(), "the panic did not escape the task");
+    }
+
+    /// Assets M5 (R9, PF4): the pass itself prunes its old, untouched
+    /// withdrawn cards — a fresh one stays until it is past retention.
+    #[test]
+    fn a_pass_prunes_an_old_untouched_withdrawn_card() {
+        let _g = lock_registry_for_test();
+        let (store, _) = fleet_store(vec![skill("kept")]);
+        put(&store, "oci", vec![unmanaged("oci", "w")]);
+        reconcile(&store, true).unwrap();
+        let card = store.lock().unwrap().list_changesets().unwrap()[0].clone();
+        put(&store, "oci", vec![]);
+        assert_eq!(reconcile(&store, true).unwrap().withdrawn, 1);
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_changeset(card.id)
+                .unwrap()
+                .is_some(),
+            "a card withdrawn now is kept"
+        );
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE changesets SET created_at = ?2 WHERE id = ?1",
+                rusqlite::params![card.id, now_unix() - WITHDRAWN_RETENTION_SECS - 1],
+            )
+            .unwrap();
+        reconcile(&store, true).unwrap();
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_changeset(card.id)
+                .unwrap()
+                .is_none(),
+            "pruned by the pass"
+        );
     }
 }
