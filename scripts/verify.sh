@@ -8,6 +8,9 @@
 #   scripts/verify.sh quick      # before a commit
 #   scripts/verify.sh full       # before a push: scripts/ci-local.sh, narrowed
 #                                #   to the jobs the change touches
+#   scripts/verify.sh remote     # the same `full`, on the persistent Buildkite
+#                                #   builder, for the pushed HEAD
+#                                #   (scripts/buildkite-verify.sh, docs/buildkite.md)
 #
 # quick, for a Rust change:
 #   cargo fmt --all --check
@@ -52,6 +55,10 @@ files=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     quick|full) level=$1; shift ;;
+    remote)
+      shift
+      [[ "${1:-}" == --dry-run ]] && { echo "verify remote: scripts/buildkite-verify.sh"; exit 0; }
+      exec "$(git rev-parse --show-toplevel)/scripts/buildkite-verify.sh" "$@" ;;
     --base) base=${2:?--base needs a ref}; shift 2 ;;
     --dry-run) dry=1; shift ;;
     --files) files_given=1; shift; files=("$@"); break ;;
