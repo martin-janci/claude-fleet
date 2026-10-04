@@ -37,10 +37,6 @@ const KILL_MEMORY_SECS: i64 = 2
 
 type KillMap = std::collections::HashMap<(String, String), i64>;
 
-/// `(host_alias, tmux_name)` → `(owner person, reserved at)`, the value shape
-/// [`OwnerIntent`] holds.
-type OwnerMap = std::collections::HashMap<(String, String), (i64, i64)>;
-
 /// The sessions fleet itself killed recently: `(host_alias, tmux_name)` →
 /// the unix second of the kill.
 ///
@@ -70,57 +66,40 @@ impl KillMemory {
     }
 }
 
-/// Whose session the tmux name fleet is about to create is going to be
-/// (multi-user M1, T5): `(host_alias, tmux_name)` → `(person, reserved_at)`.
-///
-/// **Why a reservation exists at all.** There is no create path that inserts a
-/// `sessions` row: `service::sessions::new_session` starts tmux and lets the
-/// reconcile pass's upsert create the row — the SAME statement that creates a
-/// row for a session somebody started by hand (spec §3.1 / §3.2). So "the row
-/// fleet just made" and "the row reconcile discovered" are one INSERT, and the
-/// only way to tell them apart at the moment of writing is for the create path
-/// to say, before the tmux session exists, whose the next row under that name
-/// will be. [`Store::reserve_session_owner`] is that statement and
-/// `upsert_session_in_tx` reads it; everything else reconcile inserts is
-/// `unclaimed`, which is the safe holding state (spec §4.3) and not a guess.
-///
-/// It must be read by the pass that actually inserts the row, and that pass is
-/// not necessarily the create path's own: `reconcile_one_host` is deliberately
-/// ungated against the background tick, so a full pass can insert the row
-/// between `tmux.new_session` and `new_session`'s own reconcile. An
-/// INSERT-only stamp would lose that race, which is why the upsert also claims
-/// an unclaimed row on conflict.
-///
-/// Deliberately in memory and not a table, for [`KillMemory`]'s reasons
-/// verbatim: the reader is always a reconcile pass of THIS process (`Store` is
-/// behind one `std::sync::Mutex`, so a pass and a reservation never
-/// interleave), no in-flight pass survives a restart, and a second writer on
-/// the reconcile hot path is the thing to avoid. Entries are pruned on every
-/// read and write, with no timer of their own.
-///
-/// It expires on [`KILL_MEMORY_SECS`] — the same window, derived from the same
-/// two probe timeouts, because it guards the same race from the other side: a
-/// reservation has to outlive the longest in-flight pass that could be the one
-/// to insert the row, and nothing longer. Over-keeping an entry costs the few
-/// bytes it occupies plus the one way it can be wrong: a `new_session` that
-/// FAILED after reserving leaves the intent standing, so a hand-started tmux
-/// session of that exact name on that host, within the window, would be
-/// claimed for the person who asked for the name. The alternative — a
-/// reservation that expires before the pass that needed it — leaves a person's
-/// own session `unclaimed` and therefore unreadable to them, which is worse.
-#[derive(Default)]
-pub(super) struct OwnerIntent(std::sync::Mutex<OwnerMap>);
-
-impl OwnerIntent {
-    /// Drop what has aged out, then hand the map to the caller —
-    /// [`KillMemory::pruned`]'s contract, for the same reason.
-    fn pruned(&self) -> std::sync::MutexGuard<'_, OwnerMap> {
-        let mut intents = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        let cutoff = now_unix() - KILL_MEMORY_SECS;
-        intents.retain(|_, (_, reserved_at)| *reserved_at > cutoff);
-        intents
-    }
-}
+// **There is deliberately no owner intent here, and there must not be one
+// again** (multi-user M1, T5 and its review).
+//
+// The shape that kept being reached for: a create path says, before
+// `tmux new-session` runs, whose the next `sessions` row under
+// `(host_alias, tmux_name)` will be, and whichever reconcile pass inserts
+// the row stamps that owner on it. It is tempting because no create path
+// inserts a row of its own — `service::sessions::new_session` starts tmux and
+// lets the reconcile upsert create the row, the SAME statement that creates a
+// row for a session somebody started by hand (spec §3.1 / §3.2) — so at the
+// moment of writing, a name is the only thing the create path and the pass
+// share.
+//
+// **A name is not an identity.** Three successive attempts guarded that
+// mechanism and each one moved the hole instead of closing it, because a tmux
+// name is reused and re-usable by anyone with host access:
+//
+// * the upsert applied the intent on its `DO UPDATE` branch as well as on
+//   INSERT, so an intent filed for a name that already had an `unclaimed`
+//   row was stamped onto THAT row by the next pass — somebody else's session
+//   acquired by asking to start one under its name, no race needed;
+// * refusing a name that already has a row leaves the case with no row YET —
+//   a live, hand-started tmux session that reconcile has not reached — still
+//   claimable by naming it;
+// * the map is one slot per `(host, name)`, so two concurrent creates of one
+//   name cross-stamp, last writer wins.
+//
+// So reconcile names no owner at all. Every row this upsert inserts is
+// `owner_person_id = NULL` / `unclaimed` (spec §4.3, the safe holding
+// state), and the ONE mechanism that stamps an owner is
+// [`Store::claim_if_unclaimed`], keyed on the row id and refusing a row that
+// is already somebody else's — `service::sessions::finalize_new_session`
+// calls it once the row exists. What that trades, and why the trade is
+// right, is written on `finalize_new_session`.
 
 /// Whether an observation whose probe started at `probe_started_at` may
 /// INSERT a row for a name fleet killed at `killed_at` (`None` = not killed
@@ -243,39 +222,6 @@ impl Store {
             .iter()
             .filter(|((host, _), _)| host == host_alias)
             .map(|((_, name), killed_at)| (name.clone(), *killed_at))
-            .collect()
-    }
-
-    /// Reserve `owner` as the person whose session the next row under
-    /// `(host_alias, tmux_name)` is (multi-user M1, T5) — see [`OwnerIntent`]
-    /// for why a reservation and not a write.
-    ///
-    /// Called by every path that CREATES a tmux session for a PERSON, before
-    /// the session exists, so there is no moment in which the row can be
-    /// inserted unowned: `service::sessions::record_tmux_created` does it
-    /// beside its `forget_kill`, and the two travel together because they are
-    /// the same statement about the same name — fleet is about to bring it to
-    /// life, and this is whose it will be.
-    ///
-    /// Takes `owner` as an `i64`, never an `Option`: "reserve nobody" is not a
-    /// reservation, and a `None` threaded in here would be a silent way to
-    /// write `unclaimed` over a real intent.
-    pub fn reserve_session_owner(&self, host_alias: &str, tmux_name: &str, owner: i64) {
-        self.owner_intent.pruned().insert(
-            (host_alias.to_string(), tmux_name.to_string()),
-            (owner, now_unix()),
-        );
-    }
-
-    /// The still-standing owner reservations on `host_alias`, as
-    /// `tmux_name → person`. Read once per pass, exactly where
-    /// [`Self::recent_kills`] is.
-    fn owner_intents(&self, host_alias: &str) -> std::collections::HashMap<String, i64> {
-        self.owner_intent
-            .pruned()
-            .iter()
-            .filter(|((host, _), _)| host == host_alias)
-            .map(|((_, name), (owner, _))| (name.clone(), *owner))
             .collect()
     }
 
@@ -403,7 +349,6 @@ impl Store {
         reconciled_at: Option<i64>,
         pane_working: bool,
         pr_evidence: Option<&str>,
-        owner_person_id: Option<i64>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // Read the prior row (not just its id) before the write: it tells us
@@ -532,28 +477,14 @@ impl Store {
         // The INSERT path has the same guard against the remembered kill
         // (`killed_at` above), for the case where the row is already gone.
         const NOT_STALE: &str = "lost_at IS NULL OR (?20 > 0 AND ?20 > lost_at)";
-        // Ownership (multi-user M1, T5). `?28` is the reservation this pass
-        // read for the name ([`OwnerIntent`]) — `NULL` for every row reconcile
-        // merely discovered, which is what makes a hand-started session
-        // `unclaimed` (spec §4.3) rather than somebody's.
-        //
-        // On conflict it CLAIMS an unclaimed row and never re-owns an owned
-        // one: `COALESCE(owner_person_id, ?28)` keeps whatever the row already
-        // carries. Both halves are needed because either pass can be the one
-        // that inserts (see [`OwnerIntent`]) — the INSERT alone would lose the
-        // race against a background pass, and the UPDATE alone would never
-        // stamp the common case.
-        //
-        // `visibility` moves with the owner and only with the owner: a row
-        // that was unowned and now has one becomes `private`; anything else
-        // keeps its value, so no reconcile pass can ever widen a private row.
-        // The two SET expressions read the OLD row (SQLite's upsert never lets
-        // one SET clause see another's result), so the `owner_person_id IS
-        // NULL` below is the STORED owner and not the one this statement is
-        // about to write.
-        const NEW_OWNER: &str = "COALESCE(owner_person_id, ?28)";
-        const NEW_VISIBILITY: &str = "CASE WHEN owner_person_id IS NULL AND ?28 IS NOT NULL \
-                                      THEN 'private' ELSE visibility END";
+        // Ownership (multi-user M1, T5, and its review). Reconcile NAMES NO
+        // OWNER: every row it inserts is `owner_person_id = NULL` /
+        // `unclaimed` (spec §4.3), and the `DO UPDATE` branch below touches
+        // neither column, so no reconcile pass can stamp, re-home, un-own or
+        // widen a session. The one mechanism that writes an owner is
+        // `Store::claim_if_unclaimed`, keyed on a row id; the name-keyed
+        // intent this statement used to read is gone for good, and the long
+        // note above it says why it must not come back.
         // A hook/transcript context value younger than 120 s outranks the
         // pane footer (spec §1.5) — unless it belongs to the conversation
         // this pass moves the row away from.
@@ -580,8 +511,8 @@ impl Store {
                      CASE WHEN ?25 THEN ?19 ELSE NULL END,
                      CASE WHEN ?18 THEN ?26 ELSE NULL END,
                      CASE WHEN ?18 AND ?12 IS NOT NULL THEN ?19 ELSE NULL END,
-                     ?28,
-                     CASE WHEN ?28 IS NULL THEN 'unclaimed' ELSE 'private' END)
+                     NULL,
+                     'unclaimed')
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
                project_id=excluded.project_id,
                last_activity_at=excluded.last_activity_at,
@@ -674,12 +605,10 @@ impl Store {
                -- sweep's evidence of life (migration 081). Bookkeeping like
                -- `last_reconciled_at`: not a `SessionRow` field, not watched
                -- by the row_version trigger, so stamping it never emits.
-               pane_working_at=CASE WHEN ?25 THEN ?19 ELSE pane_working_at END,
-               -- Ownership (T5): claim an unclaimed row for the person who
-               -- reserved this name, never re-own an owned one. Both halves
-               -- are spelled out above {new_owner} / {new_visibility}.
-               owner_person_id={new_owner},
-               visibility={new_visibility}
+               pane_working_at=CASE WHEN ?25 THEN ?19 ELSE pane_working_at END
+               -- `owner_person_id` and `visibility` are deliberately ABSENT
+               -- from this SET list (T5's review): a pass must never be able
+               -- to touch either. See the ownership note above.
              WHERE {not_stale}",
             new_stuck = NEW_STUCK,
             new_pending = NEW_PENDING,
@@ -690,8 +619,6 @@ impl Store {
             new_id = NEW_ID,
             fresh = FRESH_CONTEXT,
             not_stale = NOT_STALE,
-            new_owner = NEW_OWNER,
-            new_visibility = NEW_VISIBILITY,
         );
         tx.execute(
             &sql,
@@ -722,8 +649,7 @@ impl Store {
                 crate::service::playbooks::OOM_RECREATE_MIN_SPACING_SECS,
                 pane_working,
                 pr_evidence,
-                crate::service::outcome::PR_CHECKED_REFRESH_SECS,
-                owner_person_id
+                crate::service::outcome::PR_CHECKED_REFRESH_SECS
             ],
         )?;
         if let Some(row) = fetch_session(tx, tmux_name, host_alias)? {
@@ -960,14 +886,6 @@ impl Store {
         // this map — needs that same lock. No kill can slip in between the
         // read and the inserts.
         let kills = self.recent_kills(spec.alias);
-        // Whose the next row under each of this host's names is to be
-        // (multi-user M1, T5) — read here, under the same lock and for the
-        // same reason as the kills above: a create path and a pass never
-        // interleave, so a reservation cannot land between this read and the
-        // inserts below. A name with no reservation yields `None` and its row
-        // is `unclaimed`, which is the answer for everything reconcile merely
-        // found on the host (spec §4.3).
-        let owners = self.owner_intents(spec.alias);
         // Phase 1: run all SQL inside one savepoint, collecting RowChanges.
         let changes = self.in_savepoint("apply_host_reconcile", |tx| {
             let mut out: Vec<RowChange> = Vec::new();
@@ -1021,7 +939,6 @@ impl Store {
                         spec.reconciled_at,
                         sess.pane_working,
                         pr_evidence_json.as_deref(),
-                        owners.get(sess.tmux_name).copied(),
                         &mut out,
                     )?;
                     if let Some(pid) = sess.project_id {
@@ -1469,16 +1386,9 @@ mod tests {
         // Direct, transaction-level check of the BE-11 diff: the same upsert
         // twice yields one `SessionCreated` and then nothing at all; a single
         // changed field yields exactly one `SessionUpdated`.
-        //
-        // It also pins the ownership half (multi-user M1, T5): the row this
-        // upsert inserts with no reservation is `unclaimed`, a second
-        // identical pass does not re-claim an owned row, and a pass that
-        // arrives with a DIFFERENT reservation does not re-home it either —
-        // `COALESCE(owner_person_id, ?28)` is the whole of the rule and the
-        // only widening a reconcile pass could ever have performed.
         let mut store = Store::open_in_memory().unwrap();
         store.upsert_host("alpha").unwrap();
-        let upsert = |store: &mut Store, activity: i64, owner: Option<i64>| -> Vec<RowChange> {
+        let upsert = |store: &mut Store, activity: i64| -> Vec<RowChange> {
             store
                 .with_transaction(|tx| {
                     let mut out = Vec::new();
@@ -1509,59 +1419,114 @@ mod tests {
                         None,
                         false,
                         None,
-                        owner,
                         &mut out,
                     )?;
                     Ok(out)
                 })
                 .unwrap()
         };
-        let first = upsert(&mut store, 10, None);
+        let first = upsert(&mut store, 10);
         assert_eq!(first.len(), 1);
         assert!(matches!(first[0], RowChange::SessionCreated(_)));
-        // No reservation ⇒ the safe holding state, and nobody's.
-        let discovered = store.get_session("s1", "alpha").unwrap().unwrap();
-        assert_eq!(discovered.owner_person_id, None);
-        assert_eq!(discovered.visibility, crate::store::VISIBILITY_UNCLAIMED);
 
-        let second = upsert(&mut store, 10, None);
+        let second = upsert(&mut store, 10);
         assert!(
             second.is_empty(),
             "identical row must push no change, got {} entries",
             second.len()
         );
-        let third = upsert(&mut store, 11, None);
+        let third = upsert(&mut store, 11);
         assert_eq!(third.len(), 1);
         assert!(matches!(third[0], RowChange::SessionUpdated(_)));
+    }
 
-        // The claim: a pass carrying a reservation takes the unclaimed row.
+    /// Ownership (multi-user M1, T5 and its review): **reconcile names no
+    /// owner.** The upsert takes no owner argument any more — the name-keyed
+    /// reservation it used to read is deleted — so this pins the two
+    /// statements that are left: every row it INSERTS is nobody's, and its
+    /// `DO UPDATE` branch cannot touch either ownership column, in any
+    /// direction, for any row.
+    #[test]
+    fn a_reconcile_pass_never_writes_ownership() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.upsert_host("alpha").unwrap();
+        let upsert = |store: &mut Store, activity: i64, probe: i64| {
+            store
+                .with_transaction(|tx| {
+                    let mut out = Vec::new();
+                    Store::upsert_session_in_tx(
+                        tx,
+                        "s1",
+                        "alpha",
+                        None,
+                        None,
+                        1,
+                        activity,
+                        None,
+                        Some("main"),
+                        None,
+                        Some("idle"),
+                        None,
+                        None,
+                        None,
+                        Some(12.5),
+                        None,
+                        true,
+                        None,
+                        false,
+                        probe,
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                        None,
+                        &mut out,
+                    )?;
+                    Ok(out)
+                })
+                .unwrap()
+        };
+        upsert(&mut store, 10, 0);
+        // The INSERT: nobody's, and `unclaimed` — the safe holding state
+        // (spec §4.3), which is the answer for a session reconcile merely
+        // found on the host AND for one fleet is in the middle of creating.
+        let discovered = store.get_session("s1", "alpha").unwrap().unwrap();
+        assert_eq!(discovered.owner_person_id, None);
+        assert_eq!(discovered.visibility, crate::store::VISIBILITY_UNCLAIMED);
+
+        // The claim is somebody else's job, keyed on the row id.
         let ann = store.create_person("ann", None).unwrap().id;
-        let bob = store.create_person("bob", None).unwrap().id;
-        upsert(&mut store, 11, Some(ann));
+        assert!(store.claim_if_unclaimed(discovered.id, Some(ann)).unwrap());
         let claimed = store.get_session("s1", "alpha").unwrap().unwrap();
         assert_eq!(claimed.owner_person_id, Some(ann));
         assert_eq!(claimed.visibility, crate::store::VISIBILITY_PRIVATE);
 
-        // A second identical pass does NOT re-claim it: the row is already
-        // ann's, nothing about it changed, and so nothing is emitted either.
-        let again = upsert(&mut store, 11, Some(ann));
-        assert!(
-            again.is_empty(),
-            "re-claiming an already-owned row must be a no-op, got {} change(s)",
-            again.len()
-        );
-        // Nor does a pass whose reservation names somebody else re-home it —
-        // the one widening a reconcile pass could have performed.
-        upsert(&mut store, 11, Some(bob));
-        let still = store.get_session("s1", "alpha").unwrap().unwrap();
-        assert_eq!(still.owner_person_id, Some(ann), "never re-owned");
-        assert_eq!(still.visibility, crate::store::VISIBILITY_PRIVATE);
-        // And a pass with no reservation at all leaves the owner standing:
-        // `COALESCE` keeps it, so a background tick cannot unclaim a session.
-        upsert(&mut store, 11, None);
-        let kept = store.get_session("s1", "alpha").unwrap().unwrap();
-        assert_eq!(kept.owner_person_id, Some(ann));
-        assert_eq!(kept.visibility, crate::store::VISIBILITY_PRIVATE);
+        // And no number of later passes moves it — neither un-owning the row
+        // nor widening its visibility, the two things a pass could break.
+        for activity in 11..15 {
+            upsert(&mut store, activity, 0);
+            let kept = store.get_session("s1", "alpha").unwrap().unwrap();
+            assert_eq!(kept.owner_person_id, Some(ann), "pass {activity} re-owned");
+            assert_eq!(kept.visibility, crate::store::VISIBILITY_PRIVATE);
+        }
+
+        // A row explicitly made somebody's PRIVATE stays private across a
+        // resurrect, too: ghost the row, then let a pass revive it.
+        store
+            .conn_ref()
+            .execute(
+                "UPDATE sessions SET status='ghost', lost_at=10 WHERE tmux_name='s1'",
+                [],
+            )
+            .unwrap();
+        // A probe that started AFTER the loss, or `NOT_STALE` refuses the
+        // whole `DO UPDATE` and there is no resurrect to judge.
+        upsert(&mut store, 20, 11);
+        let revived = store.get_session("s1", "alpha").unwrap().unwrap();
+        assert_eq!(revived.status, "running", "the resurrect still happens");
+        assert_eq!(revived.owner_person_id, Some(ann));
+        assert_eq!(revived.visibility, crate::store::VISIBILITY_PRIVATE);
     }
 
     #[test]
@@ -3215,10 +3180,6 @@ mod tests {
                     None,
                     None,
                     false,
-                    None,
-                    // No owner reservation: a probe observing a name is not a
-                    // create path, and the row it revives keeps whatever
-                    // owner it already had.
                     None,
                     &mut out,
                 )?;

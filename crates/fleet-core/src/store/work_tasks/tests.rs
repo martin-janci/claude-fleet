@@ -107,10 +107,10 @@ fn a_mirrored_job_is_an_agent_subtask_that_follows_the_job() {
     );
     s.mark_task_running(job.id).unwrap();
     assert_eq!(
-        s.job_states_by_item()
+        s.job_tasks_by_item()
             .unwrap()
             .get(&it.id)
-            .map(String::as_str),
+            .map(|t| t.state.as_str()),
         Some("running")
     );
 }

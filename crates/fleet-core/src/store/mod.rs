@@ -160,11 +160,6 @@ pub struct Store {
     /// pass that probed before a kill cannot re-insert its row once the kill
     /// has reaped it. Process-local on purpose — see [`reconcile::KillMemory`].
     kills: reconcile::KillMemory,
-    /// In-memory record of whose the next session row under a tmux name is to
-    /// be, written by a create path before the tmux session exists and read by
-    /// whichever reconcile pass inserts the row (multi-user M1, T5). Process-
-    /// local for `kills`' reasons verbatim — see [`reconcile::OwnerIntent`].
-    owner_intent: reconcile::OwnerIntent,
     /// Signalled after a `session_messages` insert commits, so a waiter wakes
     /// on arrival instead of polling.
     ///
@@ -410,7 +405,6 @@ fn migrated_template_copy() -> Result<Connection> {
             conn: Connection::open_in_memory().expect("open the template database"),
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
-            owner_intent: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
             instance: next_instance(),
             peer_generations: Default::default(),
@@ -446,7 +440,6 @@ impl Store {
             conn,
             bus: StoreBus::new(bus),
             kills: Default::default(),
-            owner_intent: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
             instance: next_instance(),
             peer_generations: Default::default(),
@@ -486,7 +479,6 @@ impl Store {
             conn,
             bus: StoreBus::new(Arc::new(crate::events::NoopEventBus)),
             kills: Default::default(),
-            owner_intent: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
             instance: next_instance(),
             peer_generations: Default::default(),
@@ -514,7 +506,6 @@ impl Store {
             conn,
             bus: StoreBus::new(bus),
             kills: Default::default(),
-            owner_intent: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
             instance: next_instance(),
             peer_generations: Default::default(),

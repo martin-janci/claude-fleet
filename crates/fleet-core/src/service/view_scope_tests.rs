@@ -54,6 +54,95 @@ fn host_scope(alias: &str, proven: Option<i64>) -> ViewScope {
     )
 }
 
+/// **`with_org` is not a no-op on the predicate the milestone composes.**
+///
+/// `sees_session_facts` opened with `if self.internal { return RowAndContent }`
+/// ABOVE its org clause, so a scope that was internal AND narrowed —
+/// `work::nudge`'s hook reader, `work::today`'s per-host reader,
+/// `work::resume`'s landing-host reader, and every `org_only_view` test —
+/// answered `RowAndContent` for every row in the fleet. The narrowing was
+/// accepted, stored, and then ignored by the one predicate every session read
+/// goes through.
+///
+/// Three claims: the narrowing BITES (a row on another host is refused), it
+/// bites through the verbs built on the predicate (`may_drive`, `may_own`),
+/// and the hub's own UNnarrowed reader is untouched — `OrgScope::All` passes
+/// the org clause trivially, which is what makes putting it first free.
+#[test]
+fn a_narrowed_hub_reader_is_still_fenced_by_its_org() {
+    let mine = row(1, "alpha", None, crate::store::VISIBILITY_UNCLAIMED);
+    let theirs = row(2, "beta", None, crate::store::VISIBILITY_UNCLAIMED);
+    let narrowed = ViewScope::internal().with_org(OrgScope::Host {
+        alias: "alpha".into(),
+        org: None,
+        isolated: Default::default(),
+    });
+
+    assert_eq!(narrowed.sees_session_row(&mine), Visibility::RowAndContent);
+    assert_eq!(
+        narrowed.sees_session_row(&theirs),
+        Visibility::None,
+        "a hub reader narrowed to alpha must not read beta's rows: `with_org` \
+         asked for exactly this and the internal clause used to swallow it"
+    );
+    assert!(narrowed.may_drive(&mine) && !narrowed.may_drive(&theirs));
+    assert!(narrowed.may_own(&mine) && !narrowed.may_own(&theirs));
+    assert!(
+        narrowed.is_internal() && !narrowed.is_unrestricted(),
+        "it is still the hub's own reader — the PERSON fence is off — and it \
+         is no longer unrestricted, which is the distinction every \
+         fence-skipping early return has to use"
+    );
+
+    // The hub's own reader, not narrowed: unchanged, and the one scope for
+    // which skipping a fence outright is the whole truth.
+    let hub = ViewScope::internal();
+    for r in [&mine, &theirs] {
+        assert_eq!(hub.sees_session_row(r), Visibility::RowAndContent);
+        assert!(hub.may_drive(r) && hub.may_own(r));
+    }
+    assert!(hub.is_unrestricted());
+}
+
+/// The same fence on the PAST-conversation predicate, which had the same
+/// shape: `if self.internal { return Ok(true) }` above everything, including
+/// the surviving-row arm that can be judged.
+///
+/// Now the rows decide first (through `may_own`, hence through the org
+/// boundary) and `internal` answers only where there is no row — and
+/// therefore no host and no org — to judge, which is the case the hub's own
+/// readers genuinely need.
+#[test]
+fn a_narrowed_hub_reader_cannot_read_another_orgs_past_conversation() {
+    const CID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("alpha").unwrap();
+    s.upsert_host("beta").unwrap();
+    let on_beta = s
+        .upsert_session("dev-beta", "beta", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.set_claude_session_id(on_beta, CID).unwrap();
+
+    let narrowed = ViewScope::internal().with_org(OrgScope::Host {
+        alias: "alpha".into(),
+        org: None,
+        isolated: Default::default(),
+    });
+    assert!(
+        !narrowed.sees_past_conversation(&s, CID).unwrap(),
+        "the conversation ran on beta and this reader is alpha's"
+    );
+    assert!(
+        ViewScope::internal()
+            .sees_past_conversation(&s, CID)
+            .unwrap(),
+        "the hub's own unnarrowed reader still reads it"
+    );
+    // No row at all: nothing to judge, and the hub's readers must still
+    // reach it (a reaped session's transcript, a summary, the GC).
+    assert!(narrowed.sees_past_conversation(&s, "never-seen").unwrap());
+}
+
 /// **The NULL-equality trap, pinned by name and placed first.**
 ///
 /// An `unclaimed` row has `owner_person_id = None`; a caller that proves no

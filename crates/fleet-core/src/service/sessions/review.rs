@@ -73,10 +73,10 @@ pub async fn spawn_review(
 
     // The review name is live now; clear any kill of it so step 3 may
     // insert the row (the suffix makes a collision unlikely, not impossible).
-    // No owner reservation here: a review's owner is the SOURCE row's, and
-    // step 4 writes it (multi-user M1, T5) — see there for why the source and
-    // not the caller.
-    record_tmux_created(store, &source.host_alias, &review_name, None);
+    // A review's owner is the SOURCE row's, and step 4 writes it against the
+    // row id (multi-user M1, T5) — see there for why the source and not the
+    // caller. No path states an owner by NAME any more.
+    record_tmux_created(store, &source.host_alias, &review_name);
     // 3. Register via per-host reconcile.
     reconcile_one_host(store, ssh, &source.host_alias).await?;
 

@@ -363,16 +363,20 @@ pub fn today(
 
     // Live rows: a per-host token reads its own host's, redacted to its org.
     //
-    // NOT redundant beside `sees_session_row`, which composes the
-    // org answer for every CALLER-built scope (multi-user M1, T10):
-    // `ViewScope::sees_session_facts` returns at its FIRST clause for
-    // the hub's own reader, BEFORE the org boundary, so a scope that
-    // is internal and narrowed (`ViewScope::internal().with_org(..)`,
-    // the shape a hook reader and every org-level test use) is fenced
-    // by its org through THIS call and nothing else. T10 deleted it as
-    // a duplicate and the suite caught it; the deletion silently
-    // widened every such reader. Its row in
-    // `scope_guard_tests::ORG_HALF_SITES` names the person half.
+    // The org half of this filter, and it runs BEFORE the person
+    // predicate below rather than instead of it (multi-user M1, T10).
+    // When T10 first deleted it as a duplicate the suite caught a real
+    // hole: `ViewScope::sees_session_facts` then returned at its FIRST
+    // clause for the hub's own reader, before the org boundary, so a
+    // scope that was internal AND narrowed
+    // (`ViewScope::internal().with_org(..)` — this function's own
+    // per-host reader, a hook reader, every org-level test) was fenced
+    // by THIS call and nothing else. That ordering is fixed (the T6
+    // review): the org clause is first in `sees_session_facts` now, so
+    // the two halves genuinely compose. The call stays because this is
+    // where the page is CUT — a row dropped here is never derived from
+    // — and its row in `scope_guard_tests::ORG_HALF_SITES` names the
+    // person half.
     let mut rows: Vec<SessionRow> = s
         .list_all_sessions()?
         .into_iter()

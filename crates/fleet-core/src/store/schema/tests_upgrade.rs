@@ -23,7 +23,6 @@ fn store_over(conn: Connection) -> Store {
         conn,
         bus: StoreBus::new(Arc::new(NoopEventBus)),
         kills: Default::default(),
-        owner_intent: Default::default(),
         message_notify: Arc::new(tokio::sync::Notify::new()),
         peer_generations: Default::default(),
         instance: super::super::next_instance(),

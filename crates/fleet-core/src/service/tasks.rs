@@ -589,7 +589,13 @@ pub fn task_visible_in_scope_pure(
     worker: Option<&SessionRow>,
     scope: &crate::service::view_scope::ViewScope,
 ) -> bool {
-    if scope.is_internal() {
+    // `is_unrestricted`, not `is_internal`: a hub reader NARROWED by
+    // `with_org` has an org boundary, and skipping the whole predicate for it
+    // would skip that boundary having examined nothing (multi-user M1, the T6
+    // review — the same shape `ViewScope::sees_session_facts` had). A narrowed
+    // reader falls through instead, and `sees_session_row` on each end applies
+    // its org.
+    if scope.is_unrestricted() {
         return true;
     }
     // **A task whose ends no longer identify anybody is the hub's alone**
@@ -1034,6 +1040,57 @@ mod tests {
         s.upsert_host(host).unwrap();
         s.upsert_session(name, host, None, None, 0, 0, "running", None)
             .unwrap()
+    }
+
+    /// **A hub reader narrowed by `with_org` is fenced here too** (multi-user
+    /// M1, the T6 review). `task_visible_in_scope_pure` opened with
+    /// `if scope.is_internal() { return true }`, which answered for a
+    /// NARROWED reader as well, having examined neither end of the dispatch —
+    /// the same shape `ViewScope::sees_session_facts` had, and the reason the
+    /// predicate now asks `is_unrestricted`.
+    ///
+    /// It is not hypothetical: `Graph::build` fences its `job_states` through
+    /// exactly this call, and `work::today` / `work::nudge` / `work::resume`
+    /// all build narrowed hub readers.
+    #[test]
+    fn a_narrowed_hub_reader_sees_only_its_own_hosts_tasks() {
+        let s = Store::open_in_memory().unwrap();
+        let mine = seed(&s, "alpha", "a-dev");
+        let theirs = seed(&s, "beta", "b-dev");
+        let on = |id: i64| s.get_session_by_id(id).unwrap().unwrap();
+        let task_on = |id: i64| create_task(&s, Some(id), Some(id), "do it").unwrap();
+        let (t_mine, t_theirs) = (task_on(mine), task_on(theirs));
+
+        let narrowed = crate::service::view_scope::ViewScope::internal().with_org(
+            crate::service::orgs::OrgScope::Host {
+                alias: "alpha".into(),
+                org: None,
+                isolated: Default::default(),
+            },
+        );
+        assert!(task_visible_in_scope_pure(
+            &t_mine,
+            Some(&on(mine)),
+            Some(&on(mine)),
+            &narrowed
+        ));
+        assert!(
+            !task_visible_in_scope_pure(&t_theirs, Some(&on(theirs)), Some(&on(theirs)), &narrowed),
+            "beta's dispatch — its prompt and its result — is not alpha's \
+             reader's to read"
+        );
+
+        // The hub's own UNnarrowed reader is untouched: it is the one scope
+        // for which skipping the whole predicate is the whole truth.
+        let hub = crate::service::view_scope::ViewScope::internal();
+        for (t, id) in [(&t_mine, mine), (&t_theirs, theirs)] {
+            assert!(task_visible_in_scope_pure(
+                t,
+                Some(&on(id)),
+                Some(&on(id)),
+                &hub
+            ));
+        }
     }
 
     // ---- shared work context: job mirrors ----

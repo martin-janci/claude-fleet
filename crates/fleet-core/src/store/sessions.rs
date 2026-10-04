@@ -800,18 +800,20 @@ impl Store {
 
     /// Stamp `owner` on session `session_id` — but only while nobody owns it.
     ///
-    /// The second half of T5's create seam (the first is the reservation
-    /// [`Self::reserve_session_owner`] that the reconcile upsert reads): the
-    /// create path calls this once the row exists, so a row the upsert could
-    /// not claim — a pass that inserted it before the reservation was read, a
-    /// row a `move_session` or a `spawn_review` inherits an owner for — is
-    /// still the owner's by the time the create path returns it.
+    /// **The one mechanism that stamps an owner** (T5 and its review): the
+    /// create path calls this once the row exists, so the row a reconcile
+    /// pass inserted `unclaimed` — or one a `move_session` or a
+    /// `spawn_review` inherits an owner for — is the owner's by the time the
+    /// create path returns it. It is keyed on the ROW ID, which is why it
+    /// works where the deleted name-keyed reservation could not: an id names
+    /// one row that already exists, a tmux name names whatever is reused
+    /// under it next.
     ///
     /// `Ok(true)` when this call claimed the row, `Ok(false)` when there was
     /// nothing to do: either `owner` is `None` (no person to attribute it to —
     /// the row stays `unclaimed`, which is the answer and not a failure), or
-    /// the row is already owned by exactly that person (the ordinary case: the
-    /// upsert claimed it from the reservation).
+    /// the row is already owned by exactly that person (a `move_session` whose
+    /// target row already carries the source's owner, a re-entered claim).
     ///
     /// `E_FORBIDDEN` when the row is owned by someone ELSE. That is never a
     /// benign outcome: it means the caller is about to hand back, as the

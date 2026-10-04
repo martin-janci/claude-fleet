@@ -201,6 +201,21 @@ const SCOPE_GUARDS: &[Guard] = &[
         verdict: Verdict::OrgBoundary,
         why: "the same org question for a recipient named by id",
     },
+    // ---- service/view_scope.rs ------------------------------------------
+    Guard {
+        file: "crates/fleet-core/src/service/view_scope.rs",
+        func: "is_unrestricted",
+        nth: 0,
+        code: "self.internal && self.org.is_all()",
+        verdict: Verdict::OrgBoundary,
+        why: "the predicate a site uses when it is about to skip a fence \
+              having examined nothing: \"the hub's own reader, and not \
+              narrowed by `with_org`\". It reads the org half to answer \
+              whether an org narrowing EXISTS, which is an org-authority \
+              question and nobody's access decision — every caller-facing \
+              answer still goes through `sees_session_row`, person half and \
+              all (multi-user M1, the T6 review)",
+    },
     // ---- service/orgs.rs -----------------------------------------------
     Guard {
         file: "crates/fleet-core/src/service/orgs.rs",
@@ -1537,18 +1552,31 @@ fn calls_org_only_session_predicate(line: &str) -> bool {
 /// **One reading this table killed, and it is worth recording because it is
 /// the obvious one.** Eight of these calls sit directly beside a person
 /// predicate that composes the org answer, and T10 first read them as pure
-/// REDUNDANCY and deleted them. They are not redundant, and the suite said
-/// so in four places: [`crate::service::view_scope::ViewScope::sees_session_facts`]
-/// returns at its FIRST clause for the hub's own reader —
+/// REDUNDANCY and deleted them. The suite said no in four places, and the
+/// reason was a real defect rather than a subtlety:
+/// [`crate::service::view_scope::ViewScope::sees_session_facts`] returned at
+/// its FIRST clause for the hub's own reader —
 /// [`crate::service::view_scope::ViewScope::internal`] — **before** the org
-/// boundary. So for a scope that is internal AND narrowed
-/// (`ViewScope::internal().with_org(..)`: `work::nudge`'s hook reader, and
-/// every org-level test in the work graph) the person predicate answers
-/// `true` unconditionally and these calls are the only org fence there is.
-/// Deleting them widened every such reader silently. The lesson for the next
-/// reader of this table: "a person predicate runs beside it" does not imply
-/// "the org call is dead", because one scope shape skips the person
-/// predicate's org clause entirely.
+/// boundary, so for a scope that was internal AND narrowed
+/// (`ViewScope::internal().with_org(..)`: `work::nudge`'s hook reader,
+/// `work::today`'s per-host reader, `work::resume`'s landing-host reader, and
+/// every org-level test in the work graph) the person predicate answered
+/// `true` unconditionally and these calls were the only org fence there was.
+///
+/// **That ordering is fixed** (multi-user M1, the T6 review): the org clause
+/// is now first in `sees_session_facts`, first in `may_own`, and the sites
+/// that skipped a fence on `is_internal` alone ask
+/// [`crate::service::view_scope::ViewScope::is_unrestricted`] instead. So the
+/// composition these rows describe really does hold for every scope shape,
+/// and `with_org` narrows what it says it narrows
+/// (`view_scope_tests::a_narrowed_hub_reader_is_still_fenced_by_its_org`).
+///
+/// The rows stay, and the lesson with them. They are no longer the ONLY org
+/// fence for a narrowed hub reader, but each is still the org half of a path
+/// that applies it somewhere the person predicate is not asked — a filter
+/// that runs before it (`work::today`), a projection over items rather than
+/// rows (`orgs::scopes`) — and "a person predicate runs beside it" is still
+/// not a reason to delete an org call without reading what each one guards.
 const ORG_HALF_SITES: &[OrgHalf] = &[
     OrgHalf {
         file: "crates/fleet-core/src/service/view_scope.rs",
@@ -1727,11 +1755,14 @@ const ORG_HALF_SITES: &[OrgHalf] = &[
         code: "Some(h) => r.host_alias == h && scope.sees_row_org_only(r),",
         person_half: "`view.sees_session_row` on the next filter. BOTH halves \
                       run here on purpose and T10 proved it by deleting this \
-                      one: `ViewScope::sees_session_facts` returns at its FIRST \
-                      clause for the hub's own reader, before the org \
-                      boundary, so an internal-and-narrowed scope \
-                      (`ViewScope::internal().with_org(..)`) is fenced by this \
-                      call and nothing else",
+                      one: at the time `ViewScope::sees_session_facts` \
+                      returned at its FIRST clause for the hub's own reader, \
+                      before the org boundary, so an internal-and-narrowed \
+                      scope (`ViewScope::internal().with_org(..)`) was fenced \
+                      by this call and nothing else. That ordering is fixed \
+                      (the T6 review), so this is now the org half of a \
+                      filter that runs BEFORE the person predicate rather \
+                      than the only fence there is",
     },
     OrgHalf {
         file: "crates/fleet-core/src/service/work/today.rs",

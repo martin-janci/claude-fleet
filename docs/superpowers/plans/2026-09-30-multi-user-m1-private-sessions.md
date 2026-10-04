@@ -1218,6 +1218,28 @@ which walks the module's public functions and fails on a new one that can;
 **Do.** There is no create path to hook (correction (d)). Build the seam in
 three parts.
 
+> **Correction, after the T5 review: parts 1 and 2 were DELETED again.** The
+> `OwnerIntent` map and the upsert's `owner_person_id` / `visibility` writes
+> are gone, and `record_tmux_created` is back to taking no owner and sitting
+> AFTER `tmux.new_session` with every other create site. The reason is
+> structural, not a bug that was fixed: the only key available before the row
+> exists is a tmux NAME, and a name is reused — so an intent filed against one
+> claimed whatever row turned up under it (an existing `unclaimed` row, a live
+> hand-started session fleet had no row for yet), and two concurrent creates of
+> one name cross-stamped its single slot. Three successive guards each moved
+> the hole instead of closing it.
+>
+> What stands is part 3's claim alone: every row the reconcile upsert inserts
+> is `unclaimed`, and `Store::claim_if_unclaimed` — keyed on the ROW ID,
+> refusing another person's row — is the one mechanism that stamps an owner.
+> The window that opens between the insert and the claim is accepted and
+> written down at `finalize_new_session`; `new_session` also refuses a name
+> that already has a row (`reject_adoptable_session_name`), so the create fails
+> rather than adopting a row it did not cause. The long note on
+> `store/reconcile.rs` carries the whole argument, and
+> `no_create_path_reserves_an_owner_for_a_tmux_name` keeps the mechanism from
+> coming back.
+
 1. **An `OwnerIntent(Mutex<HashMap<(String,String),(i64,i64)>>)` on `Store`**,
    copied verbatim from `store/reconcile.rs::KillMemory`: the same
    `KILL_MEMORY_SECS` reasoning, pruned on every access, deliberately in memory

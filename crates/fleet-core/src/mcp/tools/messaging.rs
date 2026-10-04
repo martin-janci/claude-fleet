@@ -180,10 +180,17 @@ impl FleetTools {
             host: p.host,
             project_id: p.project_id,
             status: p.status,
-            // `BroadcastFilter.view` is the WHOLE fence: it composes the
-            // org boundary (`may_drive` -> `sees_session_row`) with the
-            // person half, so the `scope` field M5 kept beside it is gone
-            // (multi-user M1, T10).
+            // `BroadcastFilter.view` is the whole fence THIS layer applies:
+            // it composes the org boundary (`may_drive` ->
+            // `sees_session_row`) with the person half, so the `scope` field
+            // M5 kept beside it is gone (multi-user M1, T10).
+            //
+            // It is not the whole fence the broadcast applies, and this
+            // comment used to claim it was. The scope judges a snapshot
+            // here; `service::sessions::broadcast_prompt` re-reads each
+            // target's row by id and re-asks `may_drive` immediately before
+            // that target's send, because delivery is one SSH round trip per
+            // session and a tmux name is reusable (the T7 review).
             view,
         };
         let submit = p.submit.unwrap_or(true);

@@ -260,8 +260,40 @@ impl ViewScope {
     }
 
     /// True for [`Self::internal`] — the hub's own reader.
+    ///
+    /// **It does not mean "unfenced".** A hub reader can be NARROWED by
+    /// [`Self::with_org`] (`work::nudge`'s hook reader, `work::today`'s
+    /// per-host reader, `work::resume`'s landing-host reader), and for such a
+    /// scope the org boundary still applies — see [`Self::is_unrestricted`],
+    /// which is the predicate a site wants when it is about to skip a fence
+    /// having examined nothing.
     pub fn is_internal(&self) -> bool {
         self.internal
+    }
+
+    /// The hub's own reader, NOT narrowed to an org: the one scope for which
+    /// skipping a fence outright is the whole truth.
+    ///
+    /// The distinction exists because `internal` alone was being read as
+    /// "unfenced" at sites that had not looked at the org half at all, which
+    /// made [`Self::with_org`] a no-op there (multi-user M1, the T6 review;
+    /// the instance that mattered was [`Self::sees_session_facts`], whose
+    /// internal clause sat above its org clause). A site may use
+    /// [`Self::is_internal`] instead when the ORG half has demonstrably
+    /// already been applied — `orgs::scope_links_for` runs `scope_links`
+    /// first, `work::local::person_visible_links` runs `visible_links` first,
+    /// `work::tidy::reopened` filters its rows by org above the early return —
+    /// and then what it is skipping is only the PERSON fence, which is what
+    /// internal honestly means.
+    pub fn is_unrestricted(&self) -> bool {
+        // This is the org boundary, not a privacy fence: it answers whether an
+        // org narrowing EXISTS on this scope, never whether somebody may read
+        // a row. The person half is untouched and still runs at every
+        // caller-facing answer (`sees_session_row` and the verbs built on it);
+        // what this predicate is for is the opposite direction — a site that
+        // is about to skip a fence outright may only do so for the hub's own
+        // reader that has NOT been narrowed.
+        self.internal && self.org.is_all()
     }
 
     /// True when this scope's person is the only live person on the hub.
@@ -308,10 +340,19 @@ impl ViewScope {
     ///
     /// The order of the clauses is the rule:
     ///
-    /// 1. the hub's own reader sees everything;
-    /// 2. the ORG boundary first, for everyone else — a bound client or a
-    ///    per-host token never reaches outside its orgs, whoever owns the
-    ///    row (work graph M5 / M14, composed, never replaced);
+    /// 1. the ORG boundary, for EVERYONE — a bound client, a per-host token
+    ///    and a narrowed hub reader alike never reach outside their orgs,
+    ///    whoever owns the row (work graph M5 / M14, composed, never
+    ///    replaced). It used to sit *below* the internal clause, which made
+    ///    [`ViewScope::with_org`] a no-op on this predicate: an
+    ///    internal-and-narrowed scope — `work::nudge`'s hook reader,
+    ///    `work::today`'s per-host reader, `work::resume`'s landing-host
+    ///    reader, and every `org_only_view` test — answered
+    ///    `RowAndContent` for every row on the fleet. `OrgScope::All` passes
+    ///    this clause trivially, so the hub's own unnarrowed reader is
+    ///    unaffected and nothing else can skip the boundary by also being
+    ///    internal;
+    /// 2. the hub's own reader then sees everything inside that boundary;
     /// 3. a per-host token then gets §4.4's two clauses and nothing else:
     ///    an `unclaimed` row on its OWN host (which is what makes the claim
     ///    path reachable at all), and the one row whose pane this request
@@ -334,11 +375,17 @@ impl ViewScope {
     /// The clause order is documented on [`Self::sees_session_row`], which
     /// is the name every call site should use when it has a row.
     pub fn sees_session_facts(&self, f: &SessionFacts<'_>) -> Visibility {
-        if self.internal {
-            return Visibility::RowAndContent;
-        }
+        // FIRST, and above the internal clause: see the clause order on
+        // `sees_session_row`. `OrgScope::All` — the hub's own unnarrowed
+        // reader, the master, a person's own device — passes it trivially, so
+        // this costs nobody reach they had; what it ends is a scope that was
+        // narrowed by `with_org` and then ignored the narrowing because it was
+        // also internal.
         if !self.org.sees_session_org_only(f.host_alias, f.org_id) {
             return Visibility::None;
+        }
+        if self.internal {
+            return Visibility::RowAndContent;
         }
         let unclaimed = f.visibility == VISIBILITY_UNCLAIMED;
         match &self.host {
@@ -456,16 +503,28 @@ impl ViewScope {
     /// work must never be reachable by a proof the deployment can hand to
     /// any process that can run `tmux list-panes`.
     pub fn may_own(&self, row: &SessionRow) -> bool {
+        // Visibility FIRST, for everybody — the shape `may_drive` already
+        // had, and the reason it is written this way here too (multi-user M1,
+        // the T6 review): `if self.internal { return true }` as the opening
+        // line answered `true` for a NARROWED hub reader as well, having
+        // examined nothing about the org it was narrowed to, which made
+        // `with_org` a no-op on this tier and on `sees_past_conversation`,
+        // whose first arm is this predicate. A plain `ViewScope::internal`
+        // passes the visibility check trivially (`OrgScope::All`), so this
+        // costs the hub's own readers nothing.
+        if !self.sees_session_row(row).is_visible() {
+            return false;
+        }
         if self.internal {
             return true;
         }
         // See `sole_persons_unclaimed`. A per-host token is excluded by
         // `is_sole_person` being false for it, which is what keeps the pane
         // proof from ever reaching this tier (the paragraph above).
-        if self.sole_persons_unclaimed(row) && self.sees_session_row(row).is_visible() {
+        if self.sole_persons_unclaimed(row) {
             return true;
         }
-        self.owns(row) && self.sees_session_row(row).is_visible()
+        self.owns(row)
     }
 
     /// May this scope reach a PAST conversation — its transcript, a précis of
@@ -495,14 +554,28 @@ impl ViewScope {
         s: &crate::store::Store,
         claude_id: &str,
     ) -> Result<bool, crate::ipc_error::IpcError> {
-        if self.internal {
-            return Ok(true);
-        }
         let rows = s.sessions_by_claude_id(claude_id)?;
         if !rows.is_empty() {
             // Two rows sharing one id has been observed live: every one of
             // them has to be this caller's, or the conversation is not.
+            //
+            // The hub's own reader is NOT short-circuited above this: it
+            // passes through `may_own`, which answers `true` for it — and now
+            // also applies the ORG boundary, so a NARROWED hub reader
+            // (`with_org`) is fenced by its org here exactly as it is on a
+            // live row. Short-circuiting on `internal` alone, which is what
+            // this did, made `with_org` a no-op on the one path that reaches
+            // a transcript.
             return Ok(rows.iter().all(|r| self.may_own(r)));
+        }
+        // Below this line there is no row — and therefore no host and no org —
+        // to judge, so `internal` is the whole answer rather than a skipped
+        // fence. The hub's own readers (GC, the playbooks, a summary) must
+        // reach a conversation whose session is long reaped, and they prove no
+        // person, so the `conversation_owners` arm below would refuse them
+        // every time.
+        if self.internal {
+            return Ok(true);
         }
         Ok(match s.conversation_owner(claude_id)? {
             None => true,
@@ -564,7 +637,12 @@ impl ViewScope {
         // early return is "the hub does its work", and it is NOT the old
         // `OrgScope::is_all` one, which was also true for an unbound paired
         // client — the caller this gate exists for.
-        if self.internal {
+        //
+        // `is_unrestricted`, not `is_internal`: a NARROWED hub reader has an
+        // org boundary, and a gate that skipped the walk for it would be the
+        // same shape as the bug `sees_session_facts` had — a fence skipped
+        // having examined nothing. The walk is what applies it.
+        if self.is_unrestricted() {
             return;
         }
         drop_rows(v, sees);

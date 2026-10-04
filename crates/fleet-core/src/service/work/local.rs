@@ -123,6 +123,13 @@ fn visible_links(
 /// The ITEM is not fenced here: a local item's title and key are item data,
 /// and the Work view already shows a task while dropping the links under it.
 /// So this keeps the item and zeroes the count.
+///
+/// **One kind of local item is the exception, and the sentence above used to
+/// be written as though there were none** (multi-user M1, T5's review): a JOB
+/// MIRROR, whose title is the first line of the dispatch prompt
+/// (`Store::create_agent_task_item`). Its title is withheld in
+/// [`local_items`] itself, on the same fence every other surface of a mirror
+/// asks (`view::visible_job_states`).
 fn person_visible_links(
     s: &Store,
     view: &crate::service::view_scope::ViewScope,
@@ -162,6 +169,9 @@ pub fn local_items(
     for l in person_visible_links(&s, view, s.local_item_links(None)?)? {
         by_item.entry(l.item_id).or_default().push(l);
     }
+    // The dispatch fence, for the job mirrors among these items: this list
+    // has no `Graph`, so it asks the same predicate directly.
+    let jobs = crate::service::work::view::visible_job_states(&s, view)?;
     Ok(s.local_work_items()?
         .into_iter()
         .filter_map(|i| {
@@ -172,10 +182,20 @@ pub fn local_items(
             if !scope.is_all() && links.is_none() {
                 return None;
             }
+            // A job mirror's title is the dispatch PROMPT's first line, so it
+            // is content of both ends of the dispatch and not item data. The
+            // row stays — the key still names it, and that is what a caller
+            // links by — under the same withheld label every other surface
+            // uses.
+            let hidden = i.origin.as_deref() == Some("agent") && !jobs.contains_key(&i.id);
             Some(LocalWorkItem {
                 id: i.id,
                 key: i.key,
-                title: i.title,
+                title: if hidden {
+                    crate::service::work::view::JOB_TITLE_WITHHELD.to_string()
+                } else {
+                    i.title
+                },
                 created_at: i.created_at,
                 updated_at: i.updated_at,
                 live_sessions: links.map_or(0, |l| live_count(l)),

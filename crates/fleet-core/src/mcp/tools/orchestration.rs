@@ -1194,8 +1194,10 @@ impl FleetTools {
                         Reach::Drive,
                         "the session",
                     )?;
-                    let name = r.friendly_name.unwrap_or(r.tmux_name);
-                    format!("{name} · {}", r.host_alias)
+                    // ONE spelling, shared with the fence that has to
+                    // recognise it again (multi-user M1):
+                    // `work::view::proposer_label`, whose doc says why.
+                    crate::service::work::view::proposer_label(&r)
                 }
                 None => caller.label(),
             };

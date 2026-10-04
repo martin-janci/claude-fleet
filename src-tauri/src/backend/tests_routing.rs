@@ -3946,6 +3946,93 @@ fn registered_commands() -> Vec<(String, String)> {
     entries
 }
 
+/// **The desktop half of multi-user M1's review of what `main` added** — the
+/// nine commands that reached this table while M1 was being built, with the
+/// person-fence judgement each one was missing, and what it acts on.
+///
+/// Why it is needed at all. `every_command_has_a_verdict` holds this crate to
+/// a ROUTING decision per command; it has nothing to say about privacy. The
+/// routing verdict is nonetheless where the privacy answer lives for a hub
+/// client, because `Routed` means the hub's own tool runs the call — and the
+/// hub is where M1's fences are. So the row for each of these is a pair of
+/// claims a reader can check: the verdict is `Routed` to the named tool, and
+/// the fence is that tool's (recorded in `fleet_core`'s
+/// `SESSION_REACH` / `WORK_ACTION_REACH` / `WORK_ACTION_NO_GATE` /
+/// `REVIEWED_WITHOUT_A_SESSION`).
+///
+/// **A standalone desktop adds no fence of its own, and that is deliberate.**
+/// Its store has one person — the owner `personal_owner_id` mints — so there
+/// is nobody for a fence to keep out; spec §4.3's D1 promises exactly that
+/// nothing changes for a single user. The moment this desktop is a window onto
+/// a hub, every one of these calls is the hub's to judge.
+const M1_REVIEWED_DESKTOP_COMMANDS: &[(&str, &str, &str)] = &[
+    (
+        "create_work_task",
+        "work_link",
+        "a NEW work item (a task or subtask). No session is named; `work::local::create_task` refuses every scoped caller outright",
+    ),
+    (
+        "accept_work_proposal",
+        "work_link",
+        "a person's decision on an agent's proposal, by `item_id` — `work::local::decide`, which refuses every scoped caller because an agent never accepts its own proposal",
+    ),
+    (
+        "reject_work_proposal",
+        "work_link",
+        "the same decision, the other way. In its session-addressed shape `reject` is the LINK decision instead and takes the hub tail's `Reach::Drive`",
+    ),
+    (
+        "list_guides",
+        "guide",
+        "the fleet's page catalog, read: the live guides and the proposals \
+         waiting. A `guide_proposals` row records the proposing caller's \
+         LABEL (`host:<alias>`, `client:<name>`, `master` — \
+         `Caller::label`) and never a session, a pane or a tmux name. There \
+         is no desktop command for the agent's own `propose`: that arm is \
+         reached over the control API by the host session carrying the \
+         fleet-guides skill, and its row is `fleet_core`'s \
+         `REVIEWED_WITHOUT_A_SESSION`",
+    ),
+    (
+        "decide_guide",
+        "guide",
+        "approving or rejecting one guide — a person's, through the hub's `guide_decider`",
+    ),
+    ("remove_guide", "guide", "retiring one live guide"),
+    (
+        "catalog_set_host_harnesses",
+        "catalog_admin",
+        "which harnesses a HOST serves, i.e. what the next `apply_sync` \
+         writes to that host's filesystem. It is one of the dozen \
+         `catalog_*` commands that route to the hub's `catalog_admin`, which \
+         the operator's per-client `assets` grant fences and a person never \
+         does: the catalog is layers, checkouts, secrets and syncs, and the \
+         one place `service/catalog/` touches a session row is \
+         `catalog_spawn_author_session`, which CREATES one and stamps \
+         `hub_personal_owner` on it",
+    ),
+];
+
+/// Every row of [`M1_REVIEWED_DESKTOP_COMMANDS`] still describes the command
+/// it names: the table has a verdict for it, and that verdict routes to the
+/// tool the reason rests on.
+///
+/// A command that changes from `Routed` to `LocalOnly` (or routes somewhere
+/// else) fails here, because then the reason — "the hub's tool applies the
+/// fence" — has stopped being true and the judgement has to be made again.
+#[test]
+fn the_commands_main_added_carry_an_m1_person_fence_judgement() {
+    for (command, tool, why) in M1_REVIEWED_DESKTOP_COMMANDS {
+        let v = verdicts::verdict(command)
+            .unwrap_or_else(|| panic!("{command} is reviewed here but has no verdict row ({why})"));
+        assert_eq!(
+            v.tool(),
+            Some(*tool),
+            "{command} no longer routes to {tool}, so its M1 person-fence judgement ({why}) rests on a tool that does not run it any more"
+        );
+    }
+}
+
 /// **The test that matters six months from now.**
 ///
 /// Reads the `generate_handler!` list out of `lib.rs` and holds it to exactly

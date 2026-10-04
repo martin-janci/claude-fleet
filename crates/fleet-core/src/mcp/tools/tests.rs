@@ -9850,6 +9850,54 @@ const NO_PER_ROW_GATE: &[(&str, &str)] = &[
     ),
 ];
 
+/// **The surfaces `main` landed while M1 was being built, reviewed and found
+/// to act on something that is not a session** — with what each one acts on
+/// INSTEAD, and pinned so the silence stays honest (multi-user M1, the T7/T9
+/// review).
+///
+/// Why a table of its own. [`every_session_addressed_tool_declares_its_reach`]
+/// derives its subjects from the input SCHEMAS, so a tool that carries no
+/// session key is not merely unclassified there — it is invisible, and a
+/// green run says nothing whatever about it. These four were therefore never
+/// cleared by anything; they were never asked. The row is the asking, and the
+/// test below holds each one to the two facts the reason rests on: the router
+/// serves it, and its schema really does carry no session key. Add a
+/// `session_id` to `GuideParams` tomorrow and this fails, which is the only
+/// way an exemption written today can still be true next year.
+///
+/// **That promise is a SCHEMA promise, and one of the four rows is not
+/// addressable by it** (T5's review). `catalog_admin` takes
+/// `args: Option<serde_json::Value>` — an opaque object the derivation cannot
+/// see into — and dispatches 36 actions behind it, the largest and
+/// fastest-growing surface of the four. No action it ever gains can change
+/// its schema, so the clause below would stay green through anything. Its row
+/// therefore carries a pin of its own, and
+/// [`catalog_admins_actions_are_the_reviewed_set`] is it; a row whose claim
+/// this test cannot keep must either name such a pin or say in the row why
+/// none is possible.
+///
+/// It is NOT a general list of session-less tools (most of the API is one).
+/// A row belongs here when somebody asked "does this need a person fence?",
+/// looked, and wrote down the answer.
+const REVIEWED_WITHOUT_A_SESSION: &[(&str, &str)] = &[
+    (
+        "guide",
+        "the fleet's PAGE CATALOG (declarative pages): a guide is a `fleet.page/1` spec, and a `guide_proposals` row carries the spec, the agent's `why` and `Actor`'s label — `host:<alias>`, `client:<name>` or `master` (`Caller::label`), which names a machine or a device and never a session, a pane or a tmux name. Deciding and removing are a person's (`guide_decider` -> `settings_writer`); proposing and listing are any token's, as the fleet-wide settings surface is",
+    ),
+    (
+        "set_host_harnesses",
+        "a HOST's harness list, which decides what the next `apply_sync` writes to that host's filesystem. `Access::Master`, no session named, and nothing it reads or answers is derived from a session row",
+    ),
+    (
+        "catalog_admin",
+        "the ASSET CATALOG — layers, checkouts, secrets, syncs — fenced by the operator's per-client `assets` grant (`service::catalog::admin`, migration 074). `service/catalog/` touches a session row in exactly one place, `author_session::spawn_author_session`, which CREATES one and stamps `hub_personal_owner` on it; that is a desktop-only command (`catalog_spawn_author_session`), not an action of this tool. **The schema clause below cannot speak for this row** (T5's review): `CatalogAdminParams` is `{action, args: Value, confirm_nonce, catalog}`, so its `args` are opaque to the derivation and no future action can ever change the schema. Its own pin is `catalog_admins_actions_are_the_reviewed_set`, which enumerates all 36 actions and reads the dispatcher for a session key — so a 37th action, or an existing one growing a session argument, fails there instead of passing here in silence",
+    ),
+    (
+        "import_assets",
+        "the same catalog, from a host's filesystem into the inventory: it reads files on a host, not sessions",
+    ),
+];
+
 /// The input-schema properties that make a tool **session-addressed by an
 /// id**: each one names a row the call acts on, or dispatches through.
 const SESSION_ARG_NAMES: &[&str] = &[
@@ -10632,6 +10680,126 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
 /// run names every unaccounted surface rather than the alphabetically first
 /// one. The health clause asserts immediately: once the predicate is broken
 /// nothing the others say is worth reading.
+/// [`REVIEWED_WITHOUT_A_SESSION`]'s two load-bearing facts, per row: the
+/// router serves the tool, and its schema carries no session key — so the
+/// coverage gate's silence about it is correct rather than a gap.
+/// Every `catalog_admin` action, reviewed as acting on no session — the pin
+/// [`REVIEWED_WITHOUT_A_SESSION`]'s schema clause cannot be (multi-user M1,
+/// T5's review).
+///
+/// The list is `AdminCall::ACTIONS` written out, and that is the point: a
+/// 37th action fails the test below until whoever added it has looked at it
+/// and put it here. Nothing else in the suite would have noticed, because the
+/// tool's `args` are an opaque `serde_json::Value`.
+const CATALOG_ADMIN_SESSION_LESS_ACTIONS: &[&str] = &[
+    "config",
+    "configure",
+    "load",
+    "get_asset",
+    "list_layers",
+    "resolve_preview",
+    "propose_layers",
+    "set_host_layers",
+    "set_host_harnesses",
+    "layer_template",
+    "write_layer",
+    "delete_layer",
+    "inventory",
+    "import_host",
+    "plan_sync",
+    "apply_sync",
+    "last_sync",
+    "list_secrets",
+    "set_secret",
+    "delete_secret",
+    "create_asset",
+    "update_asset",
+    "delete_asset",
+    "add_resource_bytes",
+    "remove_resource",
+    "lint_asset",
+    "lint_all",
+    "commit_pending",
+    "push",
+    "repo_status",
+    "template",
+    "list_catalogs",
+    "add_catalog",
+    "remove_catalog",
+    "admit_catalog",
+    "unadmit_catalog",
+];
+
+/// `catalog_admin`'s row in [`REVIEWED_WITHOUT_A_SESSION`] made real
+/// (multi-user M1, T5's review). Two clauses, together the analogue of "add a
+/// `session_id` to `GuideParams` tomorrow and this fails":
+///
+/// 1. the action set is exactly the reviewed set, so a NEW action cannot
+///    arrive unlooked-at — the schema derivation can never see one, since
+///    `CatalogAdminParams::args` is an opaque `serde_json::Value`;
+/// 2. the dispatcher and every one of its argument structs — one file,
+///    `service/catalog/admin.rs` — name no session key at all, so an
+///    EXISTING action growing a session argument fails here too.
+///
+/// Clause 2 is the substantive one and clause 1 is what keeps it honest: the
+/// file is the whole surface, so "it mentions no session" is a statement
+/// about all 36 actions and not about the ones a reader happened to check.
+#[test]
+fn catalog_admins_actions_are_the_reviewed_set() {
+    use crate::service::catalog::admin::AdminCall;
+    assert_eq!(
+        AdminCall::ACTIONS,
+        CATALOG_ADMIN_SESSION_LESS_ACTIONS,
+        "catalog_admin's actions have changed. Each new one has to be \
+         reviewed for whether it reaches a session row — nothing else in \
+         this suite can ask, because the tool's `args` are an opaque \
+         serde_json::Value — and then listed in \
+         CATALOG_ADMIN_SESSION_LESS_ACTIONS. If one of them DOES act on a \
+         session, `catalog_admin` stops belonging in \
+         REVIEWED_WITHOUT_A_SESSION and needs a SESSION_REACH row instead"
+    );
+    // The dispatcher's whole source: the `AdminCall` variants, every `*Args`
+    // struct, and the bodies that run them.
+    const ADMIN: &str = include_str!("../../service/catalog/admin.rs");
+    for key in SESSION_ARG_NAMES.iter().chain(SESSION_KEY_NAMES.iter()) {
+        // `task_id` and `link_id` are session keys elsewhere in the API; here
+        // they would be new, and either way the right answer is to look.
+        assert!(
+            !ADMIN.contains(*key),
+            "service/catalog/admin.rs now names `{key}`, so a catalog_admin \
+             action reaches a session row and the REVIEWED_WITHOUT_A_SESSION \
+             row for it is false. Classify the tool in SESSION_REACH"
+        );
+    }
+}
+
+#[test]
+fn the_surfaces_reviewed_as_session_less_still_name_no_session() {
+    let served: std::collections::BTreeSet<String> = FleetTools::tool_router_for_doc()
+        .list_all()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    let addressed = session_addressed_tools();
+    for (name, why) in REVIEWED_WITHOUT_A_SESSION {
+        assert!(
+            served.contains(*name),
+            "{name} is reviewed here but the router serves no such tool ({why})"
+        );
+        assert!(
+            !addressed.contains_key(*name),
+            "{name} NOW reaches a session through {:?}, so this exemption is \
+             stale: classify it in SESSION_REACH or NO_PER_ROW_GATE instead \
+             of leaving it here ({why})",
+            addressed.get(*name)
+        );
+        assert!(
+            crate::mcp::guard::policy(name).is_some(),
+            "{name} has no ToolPolicy, so nothing says who may call it"
+        );
+    }
+}
+
 #[test]
 fn every_session_addressed_tool_declares_its_reach() {
     use crate::service::work::{WORK_ACTIONS, WORK_LINK_ACTIONS};
@@ -11392,6 +11560,177 @@ fn a_broadcast_reaches_only_what_its_sender_may_drive() {
          one on a hub with two people"
     );
     assert_eq!(targets(&device_of(g.bob, g.ada)), vec![g.b_row]);
+}
+
+/// **The level `work_link { propose }` gates at, tested adversarially** — the
+/// justification at the tool is "the proposal is STORED in the session's name,
+/// so a watch-only caller must not put words in its mouth" (multi-user M1,
+/// the review of main's new actions).
+///
+/// Three claims, because the sentence rests on all three:
+///
+/// 1. a WATCH grantee is refused — otherwise a reader of somebody's session
+///    could sign an agent proposal with that session's name;
+/// 2. a DRIVE grantee is allowed, and `Own` would be the wrong level: a
+///    driver can already type anything into that pane, so refusing it the
+///    proposal while allowing it the prompt would be theatre (§4.3 invariant
+///    5's closing paragraph);
+/// 3. what gets stored really is the SESSION's name and host — which is what
+///    makes the level matter at all, and what `Graph::proposer_visible` then
+///    has to fence on the way out.
+#[tokio::test]
+async fn proposing_in_a_sessions_name_needs_drive_on_that_session() {
+    let g = gate_fixture();
+    let (ada, bob, a_row) = (g.ada, g.bob, g.a_row);
+    let parent = g
+        .store
+        .create_native_item(&crate::store::NativeItem {
+            title: "Ship v1",
+            ..Default::default()
+        })
+        .unwrap();
+    let ada_label = {
+        let row = g.store.get_session_by_id(a_row).unwrap().unwrap();
+        crate::service::work::view::proposer_label(&row)
+    };
+    let t = test_tools(g.store);
+    let propose = async |caller: Caller, title: &str| {
+        let args = serde_json::json!({
+            "action": "propose",
+            "session_id": a_row,
+            "parent": format!("item:{}", parent.id),
+            "title": title,
+        });
+        t.work_link(
+            Extension(caller),
+            Parameters(serde_json::from_value(args).unwrap()),
+        )
+        .await
+    };
+
+    // 1. A watcher. The grant is Ada's to give and it is `watch`.
+    {
+        let s = t.store.lock().unwrap();
+        s.grant_session(
+            a_row,
+            crate::store::GrantRecipient::Person(bob),
+            crate::store::GRANT_WATCH,
+            ada,
+        )
+        .unwrap();
+    }
+    let e = propose(device_of(bob, ada), "a watcher's idea")
+        .await
+        .expect_err("a watch grant does not speak in the session's name");
+    assert!(
+        format!("{e:?}").contains("E_FORBIDDEN"),
+        "a watcher is refused, not merely unlucky: {e:?}"
+    );
+
+    // 2. The owner proposes, and 3. the stored attribution is her SESSION.
+    propose(device_of(ada, ada), "the owner's idea")
+        .await
+        .expect("the owner may propose in her own session's name");
+    let stored = {
+        let s = t.store.lock().unwrap();
+        s.native_children(parent.id)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.title == "the owner's idea")
+            .expect("the proposal is stored")
+    };
+    assert_eq!(
+        stored.proposed_by.as_deref(),
+        Some(ada_label.as_str()),
+        "the proposal is signed with the session's name and host, which is \
+         why a watcher must not be able to file one"
+    );
+
+    // 2b. A grant only ever moves DOWNWARD (invariant 4), so widening Bob to
+    // `drive` means revoking the watch first — exactly as a person would have
+    // to — and then a grantee may propose too.
+    {
+        let s = t.store.lock().unwrap();
+        s.revoke_session_grant(a_row, bob, ada).unwrap();
+        s.grant_session(
+            a_row,
+            crate::store::GrantRecipient::Person(bob),
+            crate::store::GRANT_DRIVE,
+            ada,
+        )
+        .unwrap();
+    }
+    propose(device_of(bob, ada), "a driver's idea")
+        .await
+        .expect("a driver may: it can already type into that pane");
+}
+
+/// The window the T7 review found in that same broadcast: the gate judged a
+/// row in a SNAPSHOT, and delivery named a `(host_alias, tmux_name)` pair —
+/// one SSH round trip per target, nothing re-read in between. A tmux name is
+/// reusable and a row id is not, so a session killed and re-created under the
+/// same name mid-fan-out would have been prompted on the authority of a
+/// judgement made about the dead one.
+///
+/// Every assertion is about `sessions::delivery_target`, which is what the
+/// delivery loop resolves its subject through now, and the three cases are the
+/// three ways a snapshot goes stale: the name moved, the row stopped being
+/// drivable, the row went away.
+#[test]
+fn a_broadcast_delivery_resolves_its_target_again_by_id() {
+    let g = gate_fixture();
+    let ada = g.ada;
+    let bob = g.bob;
+    let sid = g.a_row;
+    let store = std::sync::Mutex::new(g.store);
+    let view_of = |c: Caller| {
+        let s = store.lock().unwrap();
+        c.view_scope(&s).unwrap()
+    };
+    let target = |p: i64| sessions::delivery_target(&store, &view_of(device_of(p, ada)), sid);
+
+    // The ordinary case: the row is ada's, and the delivery goes to the host
+    // and name the ROW carries.
+    assert_eq!(target(ada).unwrap(), ("h".to_string(), "a-dev".to_string()));
+
+    // **The name moved.** Delivery follows the id, not the name the gate saw.
+    {
+        let s = store.lock().unwrap();
+        s.rename_session_row("h", "a-dev", "a-dev-2", 2).unwrap();
+    }
+    assert_eq!(
+        target(ada).unwrap(),
+        ("h".to_string(), "a-dev-2".to_string()),
+        "the delivery's subject is the row, not the name the snapshot held"
+    );
+
+    // **No longer drivable.** bob holds a drive grant when the snapshot is
+    // taken and it is narrowed to watch before his target's turn comes.
+    {
+        let s = store.lock().unwrap();
+        s.grant_session(
+            sid,
+            crate::store::GrantRecipient::Person(bob),
+            crate::store::GRANT_DRIVE,
+            ada,
+        )
+        .unwrap();
+    }
+    assert!(target(bob).is_ok(), "a driver delivers");
+    {
+        let s = store.lock().unwrap();
+        s.narrow_session_grant(sid, bob, ada).unwrap();
+    }
+    let e = target(bob).expect_err("a watch grant never confers a pane write");
+    assert_eq!(e.code, codes::E_FORBIDDEN);
+
+    // **Gone.** Reported, never silently dropped out of the summary.
+    {
+        let s = store.lock().unwrap();
+        s.delete_session(sid).unwrap();
+    }
+    let e = target(ada).expect_err("the row is gone");
+    assert_eq!(e.code, codes::E_NOTFOUND);
 }
 
 /// The takeover T3's durable record exists to close: the attack works
@@ -13389,6 +13728,10 @@ struct ViewPages {
     live: i64,
     /// The local work item both of her sessions are linked to.
     item: i64,
+    /// The `agent` mirror of the job Ada dispatched under `item`. Its own
+    /// page carries `TaskDetail.job_result` and its title is the dispatch
+    /// prompt, so it needs a proof of its own (T5's review).
+    job_item: i64,
     org_b: i64,
 }
 
@@ -13419,6 +13762,17 @@ const ITEM_KEY: &str = "LOC-1";
 const PAST_SUMMARY: &str = "ada-summary-secret: she rewrote the retry loop";
 const PAST_PROGRESS: &str = "ada-progress-secret: halfway through the migration";
 const PAST_FIRST_PROMPT: &str = "ada-prompt-secret: please fix the flaky retry";
+/// The RESULT of a job Ada dispatched under her item — the worker session's
+/// own output, carried by `JobView.result` (multi-user M1, the review of
+/// main's new `Graph` fields).
+const ADA_JOB_RESULT: &str = "ada-job-secret: the retry loop is rewritten";
+/// The PROMPT of that job — what Ada told the worker to do. The mirror item's
+/// `title` is its first line and the mirror's `notes` are the whole of it
+/// (`Store::create_agent_task_item`), so a mirror's text is one session's
+/// instruction to another and not shared work structure (multi-user M1, T5's
+/// review; the `open_proposals` note in `Graph::build` records the reasoning
+/// that used to exempt it).
+const ADA_JOB_PROMPT: &str = "ada-dispatch-secret: write the changelog";
 
 /// Sweep calls that answer the owner and a stranger the SAME against
 /// [`view_pages_fixture`], with the reason. Asserted exactly, so a page that
@@ -13500,6 +13854,8 @@ const ADA_SECRETS: &[&str] = &[
     PAST_SUMMARY,
     PAST_PROGRESS,
     PAST_FIRST_PROMPT,
+    ADA_JOB_RESULT,
+    ADA_JOB_PROMPT,
 ];
 
 fn view_pages_fixture() -> ViewPages {
@@ -13584,6 +13940,36 @@ fn view_pages_fixture() -> ViewPages {
     .unwrap();
     s.link_session_work(live, crate::store::WorkTarget::Item(item), "manual")
         .unwrap();
+    // **An agent's proposal, made in Ada's live session's name** (shared work
+    // context, landed on `main` while M1 was being built). `proposed_by` is
+    // the session's `proposer_label` — its name and its machine, stored as
+    // text — so if `work { task }` serves it to Bob the sweep sees
+    // `LIVE_TMUX` in his page.
+    let live_row = s.get_session_by_id(live).unwrap().unwrap();
+    let proposer = crate::service::work::view::proposer_label(&live_row);
+    assert!(
+        proposer.contains(LIVE_TMUX),
+        "the proposer label has to carry the session's name, or this half of \
+         the sweep proves nothing: {proposer}"
+    );
+    s.propose_subtask(&crate::store::Proposal {
+        parent_id: item,
+        title: "Ada's agent had an idea",
+        notes: None,
+        why: Some("because the retry loop is flaky"),
+        proposed_by: &proposer,
+    })
+    .unwrap();
+    // **A job Ada dispatched under the same item**, finished, with its
+    // result. The mirror item is the job's subtask; `JobView.result` is the
+    // worker's output and `job_state` the live bit "somebody is working on
+    // this".
+    let job = s
+        .insert_task(Some(live), Some(live), ADA_JOB_PROMPT, "n1")
+        .unwrap();
+    let job_item = s.create_agent_task_item(&job, Some(item), None).unwrap().id;
+    s.finish_task(job.id, "done", Some(ADA_JOB_RESULT), None)
+        .unwrap();
     // The item is reopened, AFTER the live link was made — `reopened_work`
     // drops an item whose live link is newer than the reopening, so the
     // stamp has to come last for `work { reopened }` to have anything.
@@ -13599,6 +13985,7 @@ fn view_pages_fixture() -> ViewPages {
         bob,
         live,
         item,
+        job_item,
         org_b,
     }
 }
@@ -13747,6 +14134,72 @@ async fn every_view_scope_page_hides_another_persons_live_session() {
          (`SWEEP_SAME_FOR_BOTH`), or a page has stopped being fenced by the \
          PERSON and started refusing everybody — or stopped being exercised",
         view_scope_sweep_calls().len()
+    );
+}
+
+/// **A job mirror's OWN page** (multi-user M1, T5's review). The sweep above
+/// asks `work { task }` for the PARENT item, so two surfaces of the same
+/// dispatch went unexercised and both were open:
+///
+/// 1. `TaskDetail.job_result` — set from `job_of(i.item.task_id)` for the
+///    item being viewed, with no fence at all, while `JobView.result` sixty
+///    lines below it in the same function had been fenced on
+///    `g.job_states`. Viewing the mirror itself handed any reader the worker
+///    session's own output.
+/// 2. `SubtaskView.title` — a mirror's title is the first line of the
+///    dispatch PROMPT (`Store::create_agent_task_item`), and the exemption
+///    that let it through said a proposal's "title and `why` are item data in
+///    the shared graph, as every other item's are". That sentence is true of
+///    a proposal and false of a mirror.
+///
+/// Both are fenced on `g.job_states`, the map `task_visible_in_scope_pure`
+/// has already failed closed on for a dispatch end this reader cannot
+/// resolve. Ada still reads both; Bob reads neither — and Bob's answer is not
+/// a refusal, which is the half that stops the fence from being a blanket.
+#[tokio::test]
+async fn a_job_mirrors_own_page_hides_the_dispatch_from_a_stranger() {
+    let f = view_pages_fixture();
+    let (ada, bob, item, job_item) = (f.ada, f.bob, f.item, f.job_item);
+    let t = test_tools(f.store);
+    let mirror = serde_json::json!({ "action": "task", "task_id": format!("item:{job_item}") });
+    let parent = serde_json::json!({ "action": "task", "task_id": format!("item:{item}") });
+
+    // Ada reads her own dispatch, on both pages — the control, without which
+    // "Bob sees nothing" would also pass for a page that answers nobody.
+    let ada_mirror = sweep_text(&t, device_of(ada, ada), "work", &mirror).await;
+    assert!(
+        ada_mirror.contains(ADA_JOB_RESULT),
+        "the owner must still read her job's result on its own page: {ada_mirror}"
+    );
+    assert!(
+        ada_mirror.contains(ADA_JOB_PROMPT),
+        "and the prompt she dispatched: {ada_mirror}"
+    );
+    let ada_parent = sweep_text(&t, device_of(ada, ada), "work", &parent).await;
+    assert!(
+        ada_parent.contains(ADA_JOB_PROMPT),
+        "the parent page names her own job by its prompt: {ada_parent}"
+    );
+
+    // Bob reads neither, on either page.
+    for (what, args) in [("the mirror", &mirror), ("its parent", &parent)] {
+        let bobs = sweep_text(&t, device_of(bob, ada), "work", args).await;
+        for secret in [ADA_JOB_RESULT, ADA_JOB_PROMPT] {
+            assert!(!bobs.contains(secret), "{what} handed Bob {secret}: {bobs}");
+        }
+        // Not a refusal: the page answers him, it just carries none of the
+        // dispatch. The mirror's row is still THERE on the parent page —
+        // structure, under the withheld label — so the tree and the detail
+        // cannot disagree about how many children the item has.
+        assert!(
+            bobs.contains("task_id"),
+            "{what} must still answer Bob a page, not a refusal: {bobs}"
+        );
+    }
+    let bobs_parent = sweep_text(&t, device_of(bob, ada), "work", &parent).await;
+    assert!(
+        bobs_parent.contains(crate::service::work::view::JOB_TITLE_WITHHELD),
+        "the mirror's row survives for Bob under the withheld label: {bobs_parent}"
     );
 }
 

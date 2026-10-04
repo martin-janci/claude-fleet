@@ -49,6 +49,12 @@ pub const REVIEW_DEFAULT_LIMIT: usize = 50;
 pub const DESCRIPTION_MAX_CHARS: usize = 600;
 /// A last-outcome summary, in characters.
 pub const OUTCOME_MAX_CHARS: usize = 600;
+/// What a job mirror's title reads as when the reader may not read the
+/// dispatch behind it (multi-user M1, T5's review). Deliberately the same
+/// words `Store::job_title` falls back to for a prompt with no first line, so
+/// a withheld title is indistinguishable from an unremarkable one and the
+/// fence leaks nothing by its own shape.
+pub const JOB_TITLE_WITHHELD: &str = "Delegated job";
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -627,7 +633,31 @@ pub(crate) struct Graph {
     pub(crate) job_states: HashMap<i64, String>,
     /// A task's item id → its proposals waiting for a decision.
     pub(crate) open_proposals: HashMap<i64, u32>,
+    /// The [`proposer_label`] of every session row that SURVIVED the person
+    /// fence, or `None` on the ORG-only load — the text half of
+    /// [`Self::hidden_sessions`], for `work_items.proposed_by` (multi-user
+    /// M1). See [`Self::proposer_visible`].
+    pub(crate) visible_proposers: Option<BTreeSet<String>>,
 }
+
+/// How a session is named when an agent proposes a subtask in its name:
+/// `"<friendly name, else tmux name> · <host alias>"`.
+///
+/// **One spelling, two readers** (multi-user M1): `work_link { propose }`
+/// writes it into `work_items.proposed_by`, and [`Graph::build`] computes it
+/// again for the rows the person fence hides, so that
+/// [`Graph::proposer_hidden`] can recognise one. The two were the same
+/// `format!` in two files, which is how the fence would have drifted into
+/// passing everything the first time somebody added a space.
+pub(crate) fn proposer_label(row: &SessionRow) -> String {
+    let name = row.friendly_name.as_deref().unwrap_or(&row.tmux_name);
+    format!("{name}{SEPARATOR}{}", row.host_alias)
+}
+
+/// What a [`proposer_label`] puts between the session and its host, and
+/// therefore the one mark that says a stored `proposed_by` is a SESSION's
+/// label rather than a caller's (`master`, `client:phone`).
+const SEPARATOR: &str = " · ";
 
 impl Graph {
     /// The ORG-only load: for the reads and writes that answer a TASK and
@@ -743,6 +773,28 @@ impl Graph {
                 *open_proposals.entry(parent).or_default() += 1;
             }
         }
+        // A job mirror's state is the state of a DISPATCH, and both ends of a
+        // dispatch are sessions (multi-user M1, the review of main's new
+        // `Graph` fields). `work { task }` served it — and `JobView.result`,
+        // the worker's own output — to anyone who could see the work item,
+        // with no fence of any kind: `job_states_by_item` answered a state
+        // string, so the one predicate that judges a task
+        // (`tasks::task_visible_in_scope_pure`) could not even be asked. The
+        // store now hands over the `tasks` row and the predicate runs here,
+        // against the ALREADY person-filtered `sessions` map — so an end this
+        // reader cannot see resolves to `None` and the predicate fails closed
+        // on it, which is its documented behaviour for an unreadable end.
+        //
+        // `view: None` is the ORG-only load, whose readers answer tasks and
+        // never a session row (`Graph::load`'s doc, and the
+        // `WORK_ACTION_NO_GATE` rows it names); it keeps every state, as it
+        // keeps every session row.
+        // The labels of the rows that SURVIVED the fence, so
+        // `proposer_visible` can recognise one (multi-user M1). `None` is the
+        // ORG-only load, which applies no person fence anywhere.
+        let visible_proposers: Option<BTreeSet<String>> =
+            view.map(|_| sessions.values().map(proposer_label).collect());
+        let job_states = job_states_from(s, &sessions, view)?;
         Ok(Graph {
             now: crate::service::catalog::now_secs(),
             items,
@@ -763,9 +815,57 @@ impl Graph {
             working_session_items,
             hidden_sessions,
             hidden_links,
-            job_states: s.job_states_by_item()?,
+            job_states,
+            // NOT fenced, and that is the judgement rather than an omission:
+            // this is a count of ITEMS (the `proposed` children of one
+            // parent), not of sessions. A proposal's own session metadata is
+            // its `proposed_by`, which `hidden_proposers` withholds; what is
+            // left — its title and `why` — is text a person wrote into the
+            // shared graph for the people who decide it, and the count
+            // carries none of it anyway.
+            //
+            // **The reason stops at proposals, and used to be written as
+            // though it covered every item** (multi-user M1, T5's review).
+            // It does not cover a JOB MIRROR: `create_agent_task_item` fills
+            // an `agent` child's title from the first line of the dispatch
+            // PROMPT and its notes from the prompt itself, so a mirror's text
+            // is one session's instruction to another — §4.3 content of both
+            // ends, not shared work structure. Mirrors are fenced on
+            // `g.job_states` wherever their text is served (`JobView`, and
+            // `SubtaskView.title` in `native_work`); they are not counted
+            // here, since a mirror is never `proposal_state = 'proposed'`.
             open_proposals,
+            visible_proposers,
         })
+    }
+
+    /// Is this item a JOB MIRROR whose dispatch the reader may not read — so
+    /// its title and notes must be withheld (multi-user M1, T5's review)?
+    ///
+    /// A mirror's `title` is the first line of the dispatch PROMPT and its
+    /// `notes` are the prompt itself (`Store::create_agent_task_item`), so a
+    /// mirror's text is one session's instruction to another: §4.3 content of
+    /// both ends of the dispatch, not shared work structure. The reasoning
+    /// that let it through — "its title and `why` are item data in the shared
+    /// graph, as every other item's are" — is true of a PROPOSAL and false of
+    /// a mirror; the `open_proposals` note in [`Graph::build`] records that.
+    ///
+    /// The fence is [`Graph::job_states`], the map already filtered by
+    /// `tasks::task_visible_in_scope_pure` (which fails closed on a dispatch
+    /// end this reader cannot resolve). Asking it here rather than
+    /// re-deriving the predicate is what keeps every surface of one mirror —
+    /// its own page, its row in the tree, its row among a parent's subtasks,
+    /// and `JobView` — from disagreeing about the same job.
+    ///
+    /// `job_states` is unfiltered for the ORG-only load (`Graph::load`, whose
+    /// readers answer tasks and never a session row), so this is `false`
+    /// there, exactly as every other person fence is.
+    /// Takes the ROW, not a [`ViewItem`], so the one predicate serves both
+    /// readers: the graph's own items and the children `native_children`
+    /// reads straight from the store (which are not all in
+    /// [`Graph::items`]).
+    pub(crate) fn mirror_text_hidden(&self, item: &crate::store::WorkItemRow) -> bool {
+        item.origin.as_deref() == Some("agent") && !self.job_states.contains_key(&item.id)
     }
 
     /// Is this link one the reader may not see — its LIVE row fenced, or (for
@@ -781,6 +881,41 @@ impl Graph {
             || self.hidden_links.contains(&l.link.id)
     }
 
+    /// May this reader be told that `proposed_by` proposed a subtask?
+    ///
+    /// `work_items.proposed_by` is the [`proposer_label`] of the session an
+    /// agent proposed in the name of — its name and its machine, stored as
+    /// TEXT when the proposal was written, with no session id beside it. It
+    /// is session metadata by §4.3's definition, exactly as a link's
+    /// `snap_name` / `snap_host` are, and it was served to every reader of
+    /// the parent item.
+    ///
+    /// The rule is **allow-list, not deny-list**, and that is the whole of
+    /// why this is written the way it is:
+    ///
+    /// * a label that matches a row which survived the fence is served — the
+    ///   reader can see that session anyway;
+    /// * a session-shaped label that matches nothing is WITHHELD. A deny-list
+    ///   against the hidden rows would have passed exactly the case that
+    ///   needs it most: a reaped session leaves no row to hide, so its name
+    ///   would have become readable by everybody the moment it died — which
+    ///   is the same hole `Graph::hidden_links` exists to close for an ended
+    ///   link (T9b). The cost is that an attribution fades when its session
+    ///   is reaped, for its owner too;
+    /// * a label that is not session-shaped passes: `master`,
+    ///   `client:phone`, and every caller label `work_link { propose }`
+    ///   records when it names no session, carry no [`SEPARATOR`] and are
+    ///   not sessions at all.
+    ///
+    /// `None` is the ORG-only load ([`Graph::load`]), which applies no person
+    /// fence anywhere and must not start here.
+    pub(crate) fn proposer_visible(&self, proposed_by: &str) -> bool {
+        match &self.visible_proposers {
+            None => true,
+            Some(ok) => !proposed_by.contains(SEPARATOR) || ok.contains(proposed_by),
+        }
+    }
+
     /// An item's own org: its tracker's, or a local item's (M14), or — for a
     /// native subtask, which `insert_native` leaves with no `org_id` — its
     /// parent's. `Store::item_org` in memory (a test holds the two equal).
@@ -788,6 +923,17 @@ impl Graph {
     /// One level only, matching the SQL: `parent_for_new_child` refuses a
     /// native parent that is itself a subtask, so there is no deeper chain to
     /// walk and no cycle to guard against.
+    ///
+    /// **It asks no person fence, and that was checked rather than assumed**
+    /// (multi-user M1, the review of main's new `Graph` fields). Everything
+    /// it reads is item data — `work_items.tracker_id`, a tracker's `org_id`,
+    /// a local item's own org, and the PARENT item's same two fields: no
+    /// link, no session, nothing [`Self::link_hidden`] could be asked about.
+    /// The parent fallback cannot widen the answer either, because a native
+    /// subtask's real org IS its parent's (`insert_native` leaves the column
+    /// NULL and the SQL `Store::item_org` reads it the same way) — so this
+    /// reports the org such an item already belongs to rather than lending it
+    /// one.
     pub(crate) fn item_org(&self, item: &ViewItem) -> Option<i64> {
         self.own_item_org(item).or_else(|| {
             item.item
@@ -1441,12 +1587,73 @@ fn with_sessions(
     task
 }
 
+/// The job mirrors this reader may read, as item id → job state — the ONE
+/// place the dispatch fence is written (multi-user M1, T5's review).
+///
+/// `sessions` must already be the PERSON-filtered map
+/// ([`Graph::hidden_sessions`] has been taken out of it), because that is
+/// what makes `task_visible_in_scope_pure` fail closed: an end this reader
+/// cannot see resolves to `None`, which is its documented refusal.
+///
+/// `view: None` is the ORG-only load ([`Graph::load`], whose readers answer
+/// tasks and never a session row): every job is kept, as every session row
+/// is.
+fn job_states_from(
+    s: &Store,
+    sessions: &HashMap<i64, SessionRow>,
+    view: Option<&crate::service::view_scope::ViewScope>,
+) -> Result<HashMap<i64, String>, IpcError> {
+    Ok(s.job_tasks_by_item()?
+        .into_iter()
+        .filter(|(_, t)| match view {
+            Some(v) => crate::service::tasks::task_visible_in_scope_pure(
+                t,
+                t.requester_session_id.and_then(|id| sessions.get(&id)),
+                t.worker_session_id.and_then(|id| sessions.get(&id)),
+                v,
+            ),
+            None => true,
+        })
+        .map(|(item_id, t)| (item_id, t.state))
+        .collect())
+}
+
+/// [`job_states_from`] for a reader that has no [`Graph`] to hand — it reads
+/// and filters the session map itself (`work::local::local_items`).
+///
+/// Separate from the `Graph` path rather than the other way round so a pass
+/// that already holds the sessions map does not read `sessions` twice.
+pub(crate) fn visible_job_states(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+) -> Result<HashMap<i64, String>, IpcError> {
+    let sessions: HashMap<i64, SessionRow> = s
+        .list_all_sessions()?
+        .into_iter()
+        .filter(|r| view.sees_session_row(r).is_visible())
+        .map(|r| (r.id, r))
+        .collect();
+    job_states_from(s, &sessions, Some(view))
+}
+
 fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'g> {
     let item = b.item;
     let key = item
         .and_then(|i| i.item.key.clone())
         .or_else(|| b.ref_key.clone());
-    let title = item.map(|i| i.item.title.clone()).unwrap_or_default();
+    // A job mirror's title is the dispatch prompt's first line, withheld from
+    // a reader of neither end (`Graph::mirror_text_hidden`). Fenced HERE, the
+    // first time the title is read, so neither the group label nor the
+    // derived-title fallback below can carry it.
+    let title = item
+        .map(|i| {
+            if g.mirror_text_hidden(&i.item) {
+                JOB_TITLE_WITHHELD.to_string()
+            } else {
+                i.item.title.clone()
+            }
+        })
+        .unwrap_or_default();
     let tracker = item
         .and_then(|i| i.item.tracker_id)
         .and_then(|t| g.trackers.get(&t));
@@ -2363,7 +2570,10 @@ pub fn task(
         }
         _ => x,
     };
+    // A job mirror's notes ARE the dispatch prompt, so they go the same way
+    // as its title and its result (`Graph::mirror_text_hidden`).
     let notes = item
+        .filter(|i| !g.mirror_text_hidden(&i.item))
         .and_then(|i| i.item.notes.clone())
         .filter(|n| !n.trim().is_empty())
         .map(|n| fence(n, "a task's notes"));
@@ -2449,7 +2659,22 @@ fn native_work(
             .map(Option::flatten)
     };
     if let Some(i) = item {
-        out.own_result = job_of(i.item.task_id)?.and_then(|t| t.result);
+        // The SAME fence as `JobView.result` sixty lines below, and for the
+        // same reason (multi-user M1, T5's review found this half still
+        // open): `own_result` is the result of the dispatch THIS item mirrors
+        // — the worker session's own output, the most private thing a
+        // dispatch produces — and the reader of the task page is not
+        // necessarily a reader of either end of that dispatch.
+        //
+        // `g.job_states` is the fenced map (`Graph::build`): a job whose
+        // `tasks` row this reader may not see is not in it, and
+        // `task_visible_in_scope_pure` has already failed closed on an end it
+        // cannot resolve. Asking the already-applied fence, rather than
+        // re-deriving one here, is what keeps this answer and the `JobView`
+        // block from disagreeing about the same job.
+        if !g.mirror_text_hidden(&i.item) {
+            out.own_result = job_of(i.item.task_id)?.and_then(|t| t.result);
+        }
     }
     let children: Vec<crate::store::WorkItemRow> = match item {
         Some(i) => s
@@ -2480,7 +2705,11 @@ fn native_work(
             title: c.title.clone(),
             why: c.proposal_why.clone(),
             notes: c.notes.clone(),
-            proposed_by: c.proposed_by.clone(),
+            // The attribution is session metadata — a name and a machine —
+            // so it goes only to a reader who may see that session
+            // (multi-user M1; `Graph::proposer_hidden`). The proposal itself
+            // stays: its title and `why` are item data.
+            proposed_by: c.proposed_by.clone().filter(|by| g.proposer_visible(by)),
             at: c.created_at,
         };
         match c.proposal_state.as_deref() {
@@ -2504,7 +2733,23 @@ fn native_work(
             .get(&c.id)
             .and_then(|v| item_status(g, v))
             .or_else(|| Some(c.status_category.clone()));
-        if c.origin.as_deref() == Some("agent") {
+        // `g.job_states` is the FENCED map (`Graph::build`): a job whose
+        // `tasks` row this reader may not see is not in it, and this is the
+        // gate on the whole `JobView` — its `result` is the worker session's
+        // own output, the single most private thing a dispatch produces.
+        // Asking the already-applied fence rather than re-deriving it is what
+        // keeps the two answers (`SubtaskView.job_state` below and this
+        // block) from disagreeing about the same job.
+        // Is this child a job mirror whose dispatch the reader may not read?
+        // Its TITLE is the first line of the dispatch prompt and its notes
+        // are the prompt (`Store::create_agent_task_item`), so a mirror's
+        // text is one session's instruction to another — not shared work
+        // structure, whatever the shape of the row carrying it (multi-user
+        // M1, T5's review; the `open_proposals` note in `Graph::build` says
+        // where that reasoning went wrong). Same fence as `JobView` below,
+        // asked once here so the title and the view cannot disagree.
+        let mirror_fenced = g.mirror_text_hidden(&c);
+        if c.origin.as_deref() == Some("agent") && g.job_states.contains_key(&c.id) {
             if let Some(job) = job_of(c.task_id)? {
                 out.jobs.push(JobView {
                     item_id: c.id,
@@ -2540,7 +2785,16 @@ fn native_work(
             project_id: c.project_id,
             live_sessions,
             job_state: g.job_states.get(&c.id).cloned(),
-            title: c.title,
+            // The row stays — it is structure, and the tree that shows the
+            // same children would otherwise disagree about how many there
+            // are — but its text does not. `JOB_TITLE_WITHHELD` is the label
+            // `job_title` itself falls back to for a prompt with no first
+            // line, so the answer stays well-formed and says nothing.
+            title: if mirror_fenced {
+                JOB_TITLE_WITHHELD.to_string()
+            } else {
+                c.title
+            },
         });
     }
     // Every conversation of the task and its subtasks, deduplicated.

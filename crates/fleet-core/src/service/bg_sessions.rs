@@ -258,13 +258,12 @@ async fn find_launched_id(
 /// Returns the refreshed row, or `None` when reconcile has not surfaced the
 /// agent yet.
 ///
-/// `owner` is claimed here, POST HOC, and that is deliberate (multi-user M1,
-/// T5): the tmux create paths reserve an owner for a tmux NAME before the
-/// session exists ([`Store::reserve_session_owner`]), and a background agent
-/// has no tmux name — its row is the synthetic `bg:<claude session id>`, and
-/// the id is minted by `claude --bg` and not known until it answers. So the
-/// claim is the one in [`Store::claim_if_unclaimed`], against the row reconcile
-/// has just surfaced.
+/// `owner` is claimed here, POST HOC, which is what every create path does
+/// (multi-user M1, T5 and its review): [`Store::claim_if_unclaimed`] against
+/// the row reconcile has just surfaced is the ONE mechanism that stamps an
+/// owner. A background agent could not have used anything else in any case —
+/// its row is the synthetic `bg:<claude session id>`, and the id is minted by
+/// `claude --bg` and not known until it answers.
 ///
 /// Soft, unlike `new_session`'s: every write in this function is, because the
 /// agent is already running and the row is a *tracking* row this function may

@@ -867,10 +867,56 @@ pub struct BroadcastSummary {
     pub results: Vec<BroadcastResult>,
 }
 
+/// Where ONE broadcast delivery is going, resolved from the session ID at the
+/// moment of delivery and re-gated there (multi-user M1, the T7 review).
+///
+/// **Why this is a function and not two lines in the loop.** The gate and the
+/// action had different subjects: [`select_targets`] judged rows in a snapshot
+/// read once, and delivery named a `(host_alias, tmux_name)` pair — a
+/// REUSABLE identifier — one SSH round trip at a time. A session killed and
+/// re-created under the same tmux name mid-fan-out is a different session,
+/// possibly another person's, and the prompt would have landed in it on the
+/// authority of a judgement made about the dead one. Resolving the id again
+/// here makes the delivery's subject the same row the gate's answer is about,
+/// and returns the host and name THAT row carries now.
+///
+/// What it deliberately does not re-read is the SCOPE (the grant set, read
+/// once per request at the tool layer): that is the same freshness a
+/// single-target `send_prompt` has, and a broadcast is `send_prompt` fanned
+/// out, not a stricter thing.
+pub(crate) fn delivery_target(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+    sid: i64,
+) -> Result<(String, String), IpcError> {
+    let fresh = {
+        let s = lock(store)?;
+        s.get_session_by_id(sid)?
+    };
+    match fresh {
+        Some(row) if view.may_drive(&row) => Ok((row.host_alias, row.tmux_name)),
+        Some(_) => Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!("session {sid} is no longer yours to drive; nothing was sent to it"),
+        )),
+        None => Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("session {sid} is gone; nothing was sent to it"),
+        )),
+    }
+}
+
 /// Fan the same `prompt` out to every work session matching `filter`,
 /// excluding the controller. Resolves targets via [`select_targets`] (reading
 /// the controller from the store), then delivers via the existing
 /// [`send_prompt`] per target, collecting one result each.
+///
+/// **The target list is a list of IDs, and every delivery re-reads its row.**
+/// [`select_targets`] is pure and judges a snapshot; delivery is one SSH round
+/// trip per target, so by the time the fifth one is sent the snapshot can be
+/// minutes old. The loop below therefore re-resolves each id and re-asks
+/// `may_drive` before it sends, and sends to the host and tmux name that came
+/// back — the comment there has the reasoning.
 ///
 /// `submit` mirrors `send_prompt`'s submit semantics (Enter after the literal
 /// text). It is threaded through for API parity; the current delivery path
@@ -904,19 +950,51 @@ pub async fn broadcast_prompt(
 
     let targets = select_targets(&sessions, &filter, controller.as_ref(), operator.as_ref());
 
-    // Map session id -> (host_alias, tmux_name) for delivery.
     let mut results: Vec<BroadcastResult> = Vec::with_capacity(targets.len());
     let mut sent: u32 = 0;
     let mut failed: u32 = 0;
     for sid in targets {
-        let Some(row) = sessions.iter().find(|s| s.id == sid) else {
-            continue;
+        // **Re-resolve the row by ID, under the lock, immediately before this
+        // target's send** (multi-user M1, the T7 review).
+        //
+        // The gate and the action had different subjects. `select_targets`
+        // judged a row in a SNAPSHOT taken once, while delivery named a
+        // `(host_alias, tmux_name)` pair and took one SSH round trip per
+        // target — so the longer the fan-out, the longer the window in which
+        // the snapshot is no longer true. A tmux name is reusable and
+        // `sessions.id` is not: a session killed and re-created under the same
+        // name mid-broadcast is a DIFFERENT session, possibly another
+        // person's, and the prompt would have landed in it on the authority of
+        // a judgement made about the dead one. The same window covers a row
+        // claimed, a grant revoked and a session moved between hosts while the
+        // fan-out walks.
+        //
+        // So the row is read again by id and `may_drive` asked again, and the
+        // host and name used for the send are the ones that came back with it
+        // — never the snapshot's. What remains unrepeated is the SCOPE itself
+        // (the grant set, read once per request at the tool layer): that is
+        // the same freshness every single-target `send_prompt` has, and this
+        // call is "`send_prompt`, fanned out".
+        let (host_alias, tmux_name) = match delivery_target(store, &filter.view, sid) {
+            Ok(t) => t,
+            // Gone, or no longer this caller's to drive. Reported rather than
+            // skipped: the caller asked for this session and must not read a
+            // short result as "it was delivered".
+            Err(e) => {
+                failed += 1;
+                results.push(BroadcastResult {
+                    session_id: sid,
+                    ok: false,
+                    error: Some(format!("{}: {}", e.code, e.message)),
+                });
+                continue;
+            }
         };
         let res = send_prompt_inner(
             store,
             ssh,
-            &row.host_alias,
-            &row.tmux_name,
+            &host_alias,
+            &tmux_name,
             &prompt,
             submit,
             Origin::Unlabeled,

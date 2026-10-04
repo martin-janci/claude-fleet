@@ -3196,9 +3196,10 @@ async fn move_session_inner(
     // `pick_target_name` only avoids names live on the target, so the one it
     // chose may be a name fleet killed there moments ago; the refresh below
     // has to be free to insert its row.
-    // No owner reservation: the target row inherits the SOURCE row's owner
-    // through `claim_if_unclaimed` below, which is the move's one carry.
-    crate::service::sessions::record_tmux_created(store, &target, &tmux_name, None);
+    // The target row inherits the SOURCE row's owner through
+    // `claim_if_unclaimed` below, which is the move's one carry — against the
+    // row id, never the name.
+    crate::service::sessions::record_tmux_created(store, &target, &tmux_name);
     // Built once the target session exists: every `partial(...)` call site
     // from here on shares it. The transcript facts are already known (the
     // copy precedes the start); the target row's counters are filled in as
