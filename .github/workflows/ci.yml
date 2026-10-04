@@ -56,6 +56,7 @@ concurrency:
 #   rust                16:45-17:33       60
 #   rust-windows            18:49         60
 #   windows-bundle     (new: the bundle, split out of rust-windows)   60
+#   clippy             (new: macOS/Windows lint, split out of the test jobs)   30
 #   hub-headless            16:39         60
 #
 # Raise one when the work in it legitimately grows; do not remove it.
@@ -213,7 +214,9 @@ jobs:
         with:
           workspaces: .
       - run: cargo fmt --all --check
+      # macOS lints in the `clippy` job below, in parallel with these tests.
       - run: cargo clippy --workspace --all-targets -- -D warnings
+        if: runner.os == 'Linux'
       - run: cargo test --workspace
       # cargo-deny checks Cargo.lock, which is platform-independent, so it
       # runs on the Linux leg only. Runs from the repo root, where cargo-deny
@@ -242,16 +245,49 @@ jobs:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: windows
+      # Clippy runs in the `clippy` job below, in parallel with these tests.
+      # --no-fail-fast: every crate's failures in one run, not only the first
+      # failing test binary's.
+      - run: cargo test --workspace --exclude fleet-agent --exclude fleet-hub --no-fail-fast
+
+  # CLIPPY ON macOS AND WINDOWS, BESIDE THEIR TESTS RATHER THAN BEFORE THEM.
+  # In one job, clippy's check build ran first and added ~1:45 to the two
+  # slowest legs of every run: `rust (macos)` 9:42 and `rust-windows` 7:54 on
+  # #437, where the Linux legs took ~6-7 min. Here it lints in parallel, so
+  # each OS still gets its own lint pass (cfg(target_os) code) and neither
+  # test job waits for it. Linux keeps clippy inside `rust`, which is not
+  # the slowest leg. The lint arguments are the ones the test jobs used.
+  # Its cache is saved from main only, as windows-bundle's is.
+  clippy:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            args: --workspace --all-targets
+          # fleet-agent and fleet-hub are Unix-only (see rust-windows).
+          - os: windows-latest
+            args: --workspace --exclude fleet-agent --exclude fleet-hub --all-targets
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
-          key: windows
-      - run: cargo clippy --workspace --exclude fleet-agent --exclude fleet-hub --all-targets -- -D warnings
-      # --no-fail-fast: every crate's failures in one run, not only the first
-      # failing test binary's.
-      - run: cargo test --workspace --exclude fleet-agent --exclude fleet-hub --no-fail-fast
+          key: clippy
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy ${{ matrix.args }} -- -D warnings
 
   # The app itself, not only its crates: the frontend bundle, tauri-build's
   # Windows resources (icon.ico, the manifest), the WebView2 link and the
