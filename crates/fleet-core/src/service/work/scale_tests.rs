@@ -25,11 +25,15 @@ use std::time::Instant;
 const SEED: u64 = 0x5CA1E;
 const RUNS: usize = 11;
 
-/// One fixture per test binary: building it is the slow part, and every
-/// test only reads (the resolver's writes are idempotent on a second run).
-fn fixture() -> &'static Mutex<Fixture> {
+/// One fixture per test binary, copied for each test: building it is the
+/// slow part (~1.2 s), a copy is not, and a test that held one shared copy
+/// for its whole run made these tests queue behind each other — 37 s in a
+/// row, the last of them running alone at the end of fleet-core's suite.
+/// Every test only reads, apart from the resolver's idempotent writes, which
+/// now land in its own copy.
+fn fixture() -> Fixture {
     static F: OnceLock<Mutex<Fixture>> = OnceLock::new();
-    F.get_or_init(|| {
+    let template = F.get_or_init(|| {
         let now = crate::service::catalog::now_secs();
         let t = Instant::now();
         let f = scale_fixture::build(SEED, now);
@@ -49,7 +53,18 @@ fn fixture() -> &'static Mutex<Fixture> {
             busiest_session,
             hot_key,
         })
-    })
+    });
+    let t = template.lock().unwrap_or_else(|e| e.into_inner());
+    let store = lock(&t.store)
+        .unwrap()
+        .copy_for_test()
+        .expect("copy the fixture");
+    Fixture {
+        store: Mutex::new(store),
+        now: t.now,
+        busiest_session: t.busiest_session,
+        hot_key: t.hot_key.clone(),
+    }
 }
 
 struct Fixture {
@@ -122,7 +137,7 @@ fn host_scope(s: &Mutex<Store>) -> OrgScope {
 
 #[test]
 fn scale_list_sessions_with_work_fields() {
-    let f = fixture().lock().unwrap_or_else(|e| e.into_inner());
+    let f = fixture();
     let store = &f.store;
     let (rows, sql) = traced(store, || lock(store).unwrap().list_all_sessions().unwrap());
     assert_eq!(rows.len(), scale_fixture::SESSIONS);
@@ -172,7 +187,7 @@ fn scale_list_sessions_with_work_fields() {
 
 #[test]
 fn scale_work_today() {
-    let f = fixture().lock().unwrap_or_else(|e| e.into_inner());
+    let f = fixture();
     let store = &f.store;
     let all = OrgScope::All;
     let (t, sql) = traced(store, || super::today::today(store, None, &all).unwrap());
@@ -210,7 +225,7 @@ fn scale_work_today() {
 #[test]
 fn scale_work_tickets() {
     use crate::service::trackers::tickets::tickets;
-    let f = fixture().lock().unwrap_or_else(|e| e.into_inner());
+    let f = fixture();
     let store = &f.store;
     let all = OrgScope::All;
     let (page, sql) = traced(store, || {
@@ -266,7 +281,7 @@ fn scale_work_tickets() {
 
 #[test]
 fn scale_tidy_planner() {
-    let f = fixture().lock().unwrap_or_else(|e| e.into_inner());
+    let f = fixture();
     let store = &f.store;
     let all = OrgScope::All;
     let (report, sql) = traced(store, || {
@@ -308,7 +323,7 @@ fn scale_tidy_planner() {
 
 #[test]
 fn scale_resolver() {
-    let f = fixture().lock().unwrap_or_else(|e| e.into_inner());
+    let f = fixture();
     let store = &f.store;
     let sid = f.busiest_session;
     // Settle once: the first run may apply changes, later ones are the
@@ -392,7 +407,7 @@ fn scale_resolver() {
 
 #[test]
 fn scale_recent_ended_work_links() {
-    let f = fixture().lock().unwrap_or_else(|e| e.into_inner());
+    let f = fixture();
     let store = &f.store;
     let week = f.now - 7 * 86_400;
     let (links, sql) = traced(store, || {
@@ -424,7 +439,7 @@ fn scale_recent_ended_work_links() {
 /// migration 058's two indexes and the key lookup's rewrite.
 #[test]
 fn scale_plans_pin_the_m12_fixes() {
-    let f = fixture().lock().unwrap_or_else(|e| e.into_inner());
+    let f = fixture();
     let store = &f.store;
     let plan_of = |sql: &[String], needle: &str| -> Vec<String> {
         let stmt = sql
@@ -557,7 +572,6 @@ fn scale_retention_status_and_sweep_batches() {
 fn scale_usage_summary() {
     use crate::service::work::usage;
     let f = fixture();
-    let f = f.lock().unwrap();
     let no_metrics = |ids: &[i64]| crate::service::trackers::sync::metrics_for(ids);
     let (u, sql) = traced(&f.store, || {
         usage::usage(&lock(&f.store).unwrap(), 365, f.now, &no_metrics).unwrap()
@@ -601,75 +615,96 @@ fn scale_usage_summary() {
 /// design, once per request, off the writer (the MCP read pool). What is
 /// held here is the wall clock of a first page, a filtered page, a section,
 /// a task and the review inbox, for every kind of scope.
-#[test]
-fn scale_work_view() {
+///
+/// One test per read, so the six (each ~4 s in a test build) spread over
+/// the test threads instead of running back to back.
+mod scale_work_view {
+    use super::*;
     use crate::service::work::view::{review, task, tree, IdOrWord, TreeArgs, WorkTreeFilters};
-    let f = fixture().lock().unwrap_or_else(|e| e.into_inner());
-    let store = &f.store;
-    let first = tree(store, &OrgScope::All, &TreeArgs::default()).unwrap();
-    assert!(first.total > 4_000, "every item is a task: {}", first.total);
-    assert_eq!(first.tasks.len(), 50);
-    assert!(first.next_cursor.is_some());
-    let (_, p95) = measure("work tree, first page (All)", || {
-        tree(store, &OrgScope::All, &TreeArgs::default()).unwrap()
-    });
-    budget("work tree first page (All)", p95, 3_000.0);
 
-    let filtered = TreeArgs {
-        filters: WorkTreeFilters {
-            status: Some("open".into()),
-            has: Some("active".into()),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let (_, p95) = measure("work tree, open with an active session", || {
-        tree(store, &OrgScope::All, &filtered).unwrap()
-    });
-    budget("work tree filtered", p95, 3_000.0);
+    #[test]
+    fn first_page_and_a_paged_section() {
+        let f = fixture();
+        let store = &f.store;
+        let first = tree(store, &OrgScope::All, &TreeArgs::default()).unwrap();
+        assert!(first.total > 4_000, "every item is a task: {}", first.total);
+        assert_eq!(first.tasks.len(), 50);
+        assert!(first.next_cursor.is_some());
+        let (_, p95) = measure("work tree, first page (All)", || {
+            tree(store, &OrgScope::All, &TreeArgs::default()).unwrap()
+        });
+        budget("work tree first page (All)", p95, 3_000.0);
 
-    // A section, paged: the cursor walks it without repeats.
-    let group = first.groups[0].group.id.clone();
-    let mut seen = std::collections::HashSet::new();
-    let mut cursor = None;
-    for _ in 0..3 {
-        let p = tree(
-            store,
-            &OrgScope::All,
-            &TreeArgs {
-                filters: WorkTreeFilters {
-                    group: Some(group.clone()),
+        // A section, paged: the cursor walks it without repeats.
+        let group = first.groups[0].group.id.clone();
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor = None;
+        for _ in 0..3 {
+            let p = tree(
+                store,
+                &OrgScope::All,
+                &TreeArgs {
+                    filters: WorkTreeFilters {
+                        group: Some(group.clone()),
+                        ..Default::default()
+                    },
+                    cursor: cursor.clone(),
                     ..Default::default()
                 },
-                cursor: cursor.clone(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        for t in &p.tasks {
-            assert!(
-                seen.insert(t.task_id.clone()),
-                "a task twice: {}",
-                t.task_id
-            );
-        }
-        match p.next_cursor {
-            Some(c) => cursor = Some(c),
-            None => break,
+            )
+            .unwrap();
+            for t in &p.tasks {
+                assert!(
+                    seen.insert(t.task_id.clone()),
+                    "a task twice: {}",
+                    t.task_id
+                );
+            }
+            match p.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
         }
     }
 
-    let host = host_scope(store);
-    let (_, p95) = measure("work tree, a per-host token", || {
-        tree(store, &host, &TreeArgs::default()).unwrap()
-    });
-    budget("work tree (host)", p95, 3_000.0);
-    let bound = OrgScope::Org {
-        org: 1,
-        sees_unassigned: true,
-    };
-    let (page, p95) = {
-        let p = tree(
+    #[test]
+    fn filtered() {
+        let f = fixture();
+        let store = &f.store;
+        let filtered = TreeArgs {
+            filters: WorkTreeFilters {
+                status: Some("open".into()),
+                has: Some("active".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (_, p95) = measure("work tree, open with an active session", || {
+            tree(store, &OrgScope::All, &filtered).unwrap()
+        });
+        budget("work tree filtered", p95, 3_000.0);
+    }
+
+    #[test]
+    fn a_per_host_token() {
+        let f = fixture();
+        let store = &f.store;
+        let host = host_scope(store);
+        let (_, p95) = measure("work tree, a per-host token", || {
+            tree(store, &host, &TreeArgs::default()).unwrap()
+        });
+        budget("work tree (host)", p95, 3_000.0);
+    }
+
+    #[test]
+    fn a_client_bound_to_one_org() {
+        let f = fixture();
+        let store = &f.store;
+        let bound = OrgScope::Org {
+            org: 1,
+            sees_unassigned: true,
+        };
+        let page = tree(
             store,
             &bound,
             &TreeArgs {
@@ -681,24 +716,35 @@ fn scale_work_view() {
             },
         )
         .unwrap();
+        assert_eq!(
+            page.total, 0,
+            "org 2's tasks never reach a client bound to org 1"
+        );
         let (_, p95) = measure("work tree, a client bound to org 1", || {
             tree(store, &bound, &TreeArgs::default()).unwrap()
         });
-        (p, p95)
-    };
-    assert_eq!(
-        page.total, 0,
-        "org 2's tasks never reach a client bound to org 1"
-    );
-    budget("work tree (bound client)", p95, 3_000.0);
+        budget("work tree (bound client)", p95, 3_000.0);
+    }
 
-    let hot = first.tasks[0].task_id.clone();
-    let (_, p95) = measure("work task detail", || {
-        task(store, &OrgScope::All, &hot).unwrap()
-    });
-    budget("work task", p95, 3_000.0);
-    let (_, p95) = measure("work review inbox", || {
-        review(store, &OrgScope::All, None, None).unwrap()
-    });
-    budget("work review", p95, 3_000.0);
+    #[test]
+    fn task_detail() {
+        let f = fixture();
+        let store = &f.store;
+        let first = tree(store, &OrgScope::All, &TreeArgs::default()).unwrap();
+        let hot = first.tasks[0].task_id.clone();
+        let (_, p95) = measure("work task detail", || {
+            task(store, &OrgScope::All, &hot).unwrap()
+        });
+        budget("work task", p95, 3_000.0);
+    }
+
+    #[test]
+    fn review_inbox() {
+        let f = fixture();
+        let store = &f.store;
+        let (_, p95) = measure("work review inbox", || {
+            review(store, &OrgScope::All, None, None).unwrap()
+        });
+        budget("work review", p95, 3_000.0);
+    }
 }
