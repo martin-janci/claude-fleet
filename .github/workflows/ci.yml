@@ -163,6 +163,10 @@ jobs:
         run: |
           command -v sqlite3 >/dev/null || { sudo apt-get update -q && sudo apt-get install -yq sqlite3; }
           bash scripts/hub-deploy-scripts-test.sh
+      # scripts/verify.sh's plan: which checks a set of changed files
+      # selects (CLAUDE.md → "Validation ladder"). Dry runs, about a second.
+      - name: verify.sh plan
+        run: bash scripts/verify-test.sh
 
   # tools/ag (the agent launcher) against fake claude/codex binaries. macOS
   # runs it under the stock /bin/bash 3.2 — the whole point of ag's

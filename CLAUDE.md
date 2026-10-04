@@ -31,27 +31,41 @@ the first time, then every edit paid once per copy
 `.cargo/config.toml`. Times are for a fleet-core edit on 4 cores.
 
 ```bash
-# 1. while you work, after every edit (≈ 13 s; libraries and binaries only)
+# 1. while you work, after every edit (≈ 15 s; libraries and binaries only)
 cargo fleet-fast-check                  # check --workspace --profile fast-check
 pnpm check                              # frontend edits: svelte-check
-# 2. at a checkpoint: before committing, and after any change to an API that
-#    tests use (≈ 19 s; = rust-analyzer's own check)
-cargo fleet-check                       # check --workspace --all-targets
-# 3. the tests of what you touched (module path filter; ≈ 30 s build + the run)
-cargo fleet-test -- service::health     # test --workspace --lib --bins -- <filter>
-pnpm exec vitest run src/lib/foo.test.ts
-# 4. before committing (also what .githooks/pre-commit runs)
+# 2. before committing (≈ 65 s: fmt 3 s, lint 27 s, tests 33 s)
+scripts/verify.sh                       # fmt, lint and the tests of the modules
+                                        # the change touches, each once; --dry-run
+                                        # prints the plan
+# 3. before pushing / marking a PR ready (≈ 3 min warm)
+scripts/verify.sh full                  # = scripts/ci-local.sh, narrowed to the jobs
+                                        # the change touches; the suite runs once
+```
+
+What `verify.sh` runs, for running a piece of it by hand:
+
+```bash
 cargo fmt --all --check
 cargo fleet-lint                        # clippy --workspace --all-targets -- -D warnings
-# 5. before pushing / marking a PR ready (≈ 2.5 min warm)
-cargo test --workspace                  # full suite, what CI runs
+cargo fleet-test -- service::health     # test --workspace --lib --bins -- <filter>
+pnpm exec vitest related --run src/lib/foo.ts
+cargo fleet-check                       # check --workspace --all-targets (= rust-analyzer's check)
+cargo test --workspace                  # the full suite, what CI runs
 scripts/ci-local.sh                     # everything in CI order; --rust-only / --frontend-only / --hub-e2e
 ```
 
 `fleet-fast-check` does not type-check test code: a signature change that
-breaks a test passes it and fails `fleet-check`. rust-analyzer stays on the
-full check. `target/fast-check/` costs ~2 GB once and is never cleaned
-automatically.
+breaks a test passes it and fails `fleet-lint` / `fleet-check`. rust-analyzer
+stays on the full check. `target/fast-check/` costs ~2 GB once and is never
+cleaned automatically.
+
+`fleet-lint` reports everything `fleet-check` does (clippy is the compiler
+plus lints, test code included), but the two compile separately: running
+both after an edit costs ~22 s more than lint alone. `verify.sh` lints and
+does not check, and the pre-commit hook's clippy is then a no-op. Likewise
+`scripts/ci-local.sh` runs `cargo test --workspace` itself, so running both
+pays the ~2 min suite twice.
 
 Rules:
 
