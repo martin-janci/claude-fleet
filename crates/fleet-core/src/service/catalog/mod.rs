@@ -357,6 +357,11 @@ pub struct HostState {
     pub host_alias: String,
     pub harness: String,
     pub state: String,
+    /// Assets M5 (R4): `host` | `catalog` on a drifted managed copy, so a
+    /// client that cannot read the inventory (an ungranted hub client) still
+    /// sees which side moved. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift_side: Option<String>,
 }
 
 /// `Deserialize` because a hub-client desktop reads this back from the hub's
@@ -416,6 +421,7 @@ fn host_states(rows: &[AssetInventoryRow], kind: Kind, name: &str) -> Vec<HostSt
             host_alias: r.host_alias.clone(),
             harness: r.harness.clone(),
             state: r.state.clone(),
+            drift_side: r.drift_side.clone(),
         })
         .collect()
 }
@@ -1525,7 +1531,8 @@ mod tests {
             vec![HostState {
                 host_alias: "local".into(),
                 harness: "claude".into(),
-                state: "drifted".into()
+                state: "drifted".into(),
+                drift_side: None,
             }]
         );
         assert_eq!(listing.unmanaged.len(), 1);
@@ -1703,10 +1710,62 @@ mod tests {
             vec![HostState {
                 host_alias: "local".into(),
                 harness: "claude".into(),
-                state: "in_sync".into()
+                state: "in_sync".into(),
+                drift_side: None,
             }],
             "an orphan is not a host state of a catalog asset"
         );
+    }
+
+    /// Assets M5 (R4): a catalog asset's host states carry which side moved,
+    /// so a client that reads only `list_assets` sees it too.
+    #[test]
+    fn host_states_carry_which_side_moved() {
+        let row = |host: &str, side: Option<&str>| AssetInventoryRow {
+            host_alias: host.into(),
+            harness: "claude".into(),
+            kind: "skill".into(),
+            name: "s".into(),
+            state: "drifted".into(),
+            managed: true,
+            drift_side: side.map(String::from),
+            ..Default::default()
+        };
+        let got: Vec<(String, Option<String>)> = host_states(
+            &[
+                row("oci", Some("catalog")),
+                row("trn", Some("host")),
+                row("htz", None),
+            ],
+            Kind::Skill,
+            "s",
+        )
+        .into_iter()
+        .map(|h| (h.host_alias, h.drift_side))
+        .collect();
+        assert_eq!(
+            got,
+            [
+                ("oci".to_string(), Some("catalog".to_string())),
+                ("trn".to_string(), Some("host".to_string())),
+                ("htz".to_string(), None),
+            ]
+        );
+        let wire = serde_json::to_value(HostState {
+            host_alias: "oci".into(),
+            harness: "claude".into(),
+            state: "in_sync".into(),
+            drift_side: None,
+        })
+        .unwrap();
+        assert!(
+            wire.get("drift_side").is_none(),
+            "absent when unknown: {wire}"
+        );
+        let old: HostState =
+            serde_json::from_str(r#"{"host_alias":"oci","harness":"claude","state":"drifted"}"#)
+                .unwrap();
+        assert_eq!(old.drift_side, None, "an older hub's reply still parses");
     }
 
     /// A typo'd `host_alias` must fail clearly, not as a raw SQLite
