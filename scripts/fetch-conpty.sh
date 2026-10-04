@@ -18,7 +18,7 @@
 # Usage: scripts/fetch-conpty.sh [x64|arm64]   (default: this machine's CPU;
 # a DLL for another CPU fails to load and portable-pty silently falls back)
 # Then build with `--config src-tauri/tauri.conpty.conf.json` (release.yml and
-# ci.yml's rust-windows job do). Idempotent; needs curl, sha256sum or shasum,
+# ci.yml's windows-bundle job do). Idempotent; needs curl, sha256sum or shasum,
 # and unzip or Python.
 set -euo pipefail
 
