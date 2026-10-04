@@ -128,9 +128,30 @@ fn remote_backend(fake: &Arc<Fake>) -> FleetBackend {
 /// 3c Task 3: `when: idle` on a busy source spawns a waiter that must
 /// outlive the call) — every other routed helper still takes `&Mutex<Store>`
 /// and gets there by deref coercion from `&Arc<Mutex<Store>>`.
+///
+/// Each one is a copy of a file migrated once per test process. Migrating a
+/// fresh file takes ~70 ms, and the sweeps below open one store per routed
+/// command, ~1,100 in all: that was 32 s of this crate's 33 s test run. A
+/// copy opens in about a millisecond; `open_with_bus` still runs `migrate()`
+/// on it, which finds nothing left to do.
 fn store() -> (tempfile::TempDir, Arc<Mutex<Store>>) {
+    static TEMPLATE: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let template = TEMPLATE.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        // Dropping the only connection checkpoints the WAL into the main
+        // file and removes it, so the main file alone is the whole database.
+        drop(Store::open_with_bus(&path, Arc::new(NoopEventBus)).unwrap());
+        assert!(
+            !dir.path().join("state.db-wal").exists(),
+            "the template's WAL outlived its connection; a copy of the main file would miss it"
+        );
+        std::fs::read(&path).unwrap()
+    });
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open_with_bus(&dir.path().join("state.db"), Arc::new(NoopEventBus)).unwrap();
+    let path = dir.path().join("state.db");
+    std::fs::write(&path, template).unwrap();
+    let store = Store::open_with_bus(&path, Arc::new(NoopEventBus)).unwrap();
     (dir, Arc::new(Mutex::new(store)))
 }
 

@@ -510,6 +510,32 @@ impl Store {
         Ok(store)
     }
 
+    /// Test-only: a store of its own holding a copy of this one's database,
+    /// as [`Store::open_with_bus_in_memory`] copies the migrated template.
+    /// For a fixture that is built once and read by tests that must not
+    /// queue on one connection (`service::work::scale_tests`).
+    #[cfg(test)]
+    pub(crate) fn copy_for_test(&self) -> Result<Self> {
+        let mut conn = Connection::open_in_memory()?;
+        rusqlite::backup::Backup::new(&self.conn, &mut conn)?.run_to_completion(
+            i32::MAX,
+            std::time::Duration::ZERO,
+            None,
+        )?;
+        let store = Self {
+            conn,
+            bus: StoreBus::new(Arc::new(NoopEventBus)),
+            kills: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
+            instance: next_instance(),
+            peer_generations: Default::default(),
+        };
+        // Nothing left to migrate; this sets the connection's own pragmas
+        // (`foreign_keys`), which a backup does not carry.
+        store.migrate()?;
+        Ok(store)
+    }
+
     /// A number no other `Store` of this process has or will have — the key
     /// for a process-wide, per-store registry. An address is not one: a
     /// store dropped and another built where it was would alias.
