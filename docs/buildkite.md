@@ -16,7 +16,8 @@ scripts/verify.sh remote        # = scripts/buildkite-verify.sh
 it, prints each state change, and exits 0 only when the build passed. On a
 failure it prints the end of each failed job's log, so the agent can fix the
 change without opening Buildkite. `--no-wait` starts the build and prints its
-URL; Ctrl-C cancels it.
+URL; Ctrl-C cancels it. On a detached HEAD, name the branch:
+`--branch <name>` (and `--commit <ref>` for a commit other than HEAD).
 
 The builder runs `scripts/verify.sh full` (= `scripts/ci-local.sh`, narrowed
 to the jobs the change touches) against a `target/` that survives between

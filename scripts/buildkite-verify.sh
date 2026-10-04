@@ -7,6 +7,10 @@
 #   scripts/buildkite-verify.sh                # build HEAD, wait, exit 0 iff passed
 #   scripts/buildkite-verify.sh --no-wait      # start the build, print its URL
 #   scripts/buildkite-verify.sh --timeout 3600 # give up waiting after N s (default 3600)
+#   scripts/buildkite-verify.sh --branch B --commit C
+#                                              # build commit C (default HEAD) as branch B
+#                                              # (default: the current branch; needed
+#                                              # on a detached HEAD)
 #
 # The builder checks out the commit from GitHub, so HEAD must be pushed to
 # origin under the current branch; uncommitted changes are not part of the
@@ -22,7 +26,7 @@
 #   BUILDKITE_POLL_SECS   default 10
 #   BUILDKITE_LOG_LINES   lines of a failed job's log to print (default 150)
 #   BUILDKITE_VERIFY_ASSUME_PUSHED=1
-#                         skip the "is HEAD on origin" check
+#                         skip the "is the commit on origin" check
 #                         (scripts/buildkite-verify-test.sh)
 set -euo pipefail
 
@@ -30,10 +34,14 @@ usage() { sed -n '2,/^set -euo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
 wait_build=1
 timeout=3600
+branch=""
+commit=HEAD
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-wait) wait_build=0; shift ;;
     --timeout) timeout=${2:?--timeout needs seconds}; shift 2 ;;
+    --branch) branch=${2:?--branch needs a name}; shift 2 ;;
+    --commit) commit=${2:?--commit needs a ref}; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "buildkite-verify: unknown argument: $1 (see --help)" >&2; exit 2 ;;
   esac
@@ -50,15 +58,17 @@ command -v python3 >/dev/null || { echo "buildkite-verify: needs python3 (JSON)"
 
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
-sha="$(git rev-parse HEAD)"
-branch="$(git rev-parse --abbrev-ref HEAD)"
-[[ "$branch" == HEAD ]] && { echo "buildkite-verify: detached HEAD; check out a branch first" >&2; exit 2; }
-subject="$(git log -1 --format=%s HEAD)"
+sha="$(git rev-parse --verify "$commit^{commit}")"
+if [[ -z "$branch" ]]; then
+  branch="$(git rev-parse --abbrev-ref HEAD)"
+  [[ "$branch" == HEAD ]] && { echo "buildkite-verify: detached HEAD; check out a branch or pass --branch NAME" >&2; exit 2; }
+fi
+subject="$(git log -1 --format=%s "$sha")"
 
 if [[ "${BUILDKITE_VERIFY_ASSUME_PUSHED:-}" != 1 ]]; then
   remote_sha="$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | cut -f1)"
   if [[ "$remote_sha" != "$sha" ]]; then
-    echo "buildkite-verify: origin/$branch is not at HEAD (${remote_sha:-missing}); the builder builds what GitHub has." >&2
+    echo "buildkite-verify: origin/$branch is not at ${sha:0:12} (${remote_sha:-missing}); the builder builds what GitHub has." >&2
     echo "buildkite-verify: push first: git push -u origin $branch" >&2
     exit 2
   fi

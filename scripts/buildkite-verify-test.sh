@@ -74,7 +74,7 @@ stop_fake() { kill "$FAKE" 2>/dev/null; wait "$FAKE" 2>/dev/null; }
 run() {
   ( cd "$REPO" && BUILDKITE_API_URL="http://127.0.0.1:$PORT" BUILDKITE_ORG=acme BUILDKITE_PIPELINE=claude-fleet \
     BUILDKITE_POLL_SECS=0 BUILDKITE_VERIFY_ASSUME_PUSHED=1 BUILDKITE_API_TOKEN="${TOKEN:-good-token}" \
-    "$REPO/scripts/buildkite-verify.sh" "$@" ) > "$ROOT/out" 2>&1
+    "$REPO/scripts/buildkite-verify.sh" --branch bk-test "$@" ) > "$ROOT/out" 2>&1
 }
 
 head_sha="$(git -C "$REPO" rev-parse HEAD)"
@@ -83,6 +83,7 @@ start_fake passed
 run; rc=$?
 check "a passed build exits 0" '[ $rc = 0 ]'
 check "the build is for HEAD" 'grep -q "\"commit\": \"$head_sha\"" "$ROOT/created.json"'
+check "the branch is the one passed" 'grep -q "\"branch\": \"bk-test\"" "$ROOT/created.json"'
 check "branch filters are ignored" 'grep -q "\"ignore_pipeline_branch_filters\": true" "$ROOT/created.json"'
 check "org and pipeline in the URL" 'grep -qx /organizations/acme/pipelines/claude-fleet/builds "$ROOT/path.txt"'
 check "it reports each state and the result" 'grep -q running "$ROOT/out" && grep -q "build #7 passed" "$ROOT/out"'
@@ -107,6 +108,10 @@ stop_fake
 
 ( cd "$REPO" && env -u BUILDKITE_API_TOKEN BUILDKITE_ORG=acme "$REPO/scripts/buildkite-verify.sh" ) > "$ROOT/out" 2>&1; rc=$?
 check "a missing token is named" '[ $rc != 0 ] && grep -q BUILDKITE_API_TOKEN "$ROOT/out"'
+
+( cd "$REPO" && BUILDKITE_API_TOKEN=x BUILDKITE_ORG=acme BUILDKITE_VERIFY_ASSUME_PUSHED=1 \
+  "$REPO/scripts/buildkite-verify.sh" --branch bk-test --commit no-such-ref ) > "$ROOT/out" 2>&1; rc=$?
+check "an unknown --commit is refused before any request" '[ $rc != 0 ] && ! grep -q "build #" "$ROOT/out"'
 
 rm -rf "$ROOT"
 echo "buildkite-verify-test: $PASS passed, $FAIL failed"
