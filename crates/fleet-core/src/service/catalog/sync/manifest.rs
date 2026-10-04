@@ -95,11 +95,14 @@ impl ManifestEntry {
     ///   applying it replaces that value. Over an array it only appends, so
     ///   every element a person put there stays and nothing is foreign.
     ///
-    /// A location the host does not hold yet is new, not foreign.
+    /// A location the host does not hold yet is new, not foreign. An entry
+    /// that records no location at all cannot say which locations are new
+    /// either: it stays `Unverified`, as [`Self::host_copy`] reads it.
     pub fn host_copy_for(&self, snap: &HostSnapshot, plan: &RenderPlan) -> HostCopy {
+        let records_any = !self.files.is_empty() || !self.merges.is_empty();
         match self.host_copy(snap) {
             HostCopy::Edited => HostCopy::Edited,
-            _ if self.holds_foreign_copy(snap, plan) => HostCopy::Edited,
+            _ if records_any && self.holds_foreign_copy(snap, plan) => HostCopy::Edited,
             recorded => recorded,
         }
     }
@@ -792,6 +795,13 @@ mod tests {
         let mut old = entry.clone();
         old.file_hashes.clear();
         assert_eq!(old.host_copy_for(&snap, &v2), HostCopy::Edited);
+
+        // An entry that records nothing cannot tell new locations from its
+        // own: every one is "unlisted", so it vouches for nothing.
+        assert_eq!(
+            ManifestEntry::default().host_copy_for(&snap, &v2),
+            HostCopy::Unverified
+        );
     }
 
     /// Fix round 1 (Critical, merge variant): a `Set` the entry never
