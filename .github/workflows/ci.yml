@@ -49,6 +49,7 @@ concurrency:
 # a morning:
 #
 #   job                  measured   ceiling
+#   changes             (new: the docs-only filter)  5
 #   version-consistency      0:10        15
 #   ag                       0:16        15
 #   frontend             2:06-4:39        30
@@ -60,6 +61,54 @@ concurrency:
 # Raise one when the work in it legitimately grows; do not remove it.
 
 jobs:
+  # SKIP THE BUILD WHEN A PR TOUCHES ONLY PROSE THAT NOTHING READS. A PR that
+  # changed one plan or the build audit still ran every leg below: ten jobs,
+  # 10-14 minutes, the Windows and macOS runners among them (#432 changed one
+  # .md file). This job lists the PR's files; if every one is under a path
+  # below, the build and test jobs are skipped (a skipped job counts as passed
+  # for a required check) and only version-consistency runs.
+  #
+  # The list is deliberately an ALLOWLIST of prose no build or test reads, and
+  # deliberately short. docs/*.md at the top of docs/ is NOT on it: tests read
+  # control-api.md, hub.md, updates.md, work-graph.md, decisions.md,
+  # settings-reference.md and the page schema/catalog there, so an edit to one
+  # can fail CI. Before adding a path, grep crates/, src-tauri/, src/ and
+  # scripts/ for it; a file a test reads must stay off this list.
+  #
+  # Pushes to main and manual runs always run everything, so each merge keeps
+  # its own full verdict. If this job fails, its output is empty and every
+  # gated job runs anyway (`!= 'false'` below): it fails open, never green.
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != pull_request ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          code=false
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            case "$f" in
+              docs/superpowers/*|docs/plans/*|docs/specs/*|docs/adr/*|docs/ux/*|docs/images/*) ;;
+              README.md|CLAUDE.md|RUST-BUILD-PERFORMANCE-AUDIT.md) ;;
+              *) echo "runs the build: $f"; code=true; break ;;
+            esac
+          done < <(git diff --name-only "$BASE...$HEAD")
+          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+
   # The six version carriers scripts/release.sh rewrites, plus the four
   # Cargo.lock member entries it syncs, must all hold the same string — and
   # crates/fleet-core must stay at its allowlisted 0.1.0 with `publish = false`.
@@ -118,6 +167,8 @@ jobs:
   # runs it under the stock /bin/bash 3.2 — the whole point of ag's
   # bash-3.2 rules — because the test pins PATH to $FAKE:/usr/bin:/bin.
   ag:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -133,6 +184,8 @@ jobs:
         run: shellcheck -s bash tools/ag/ag tools/ag/lib/*.sh tools/ag/drivers/*.sh tools/ag/install.sh scripts/ag-test.sh
 
   rust:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -179,6 +232,8 @@ jobs:
   # Linux daemon), so they are left out; fmt and cargo-deny read nothing
   # platform-specific and stay on the Linux leg of `rust` above.
   rust-windows:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -209,6 +264,8 @@ jobs:
   # it compiles the app from its own cache in parallel. That cache is saved
   # from main only, so PR runs restore it without adding an entry per PR.
   windows-bundle:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -256,6 +313,8 @@ jobs:
   # fleet-update (the update engine) is held to the same rule: fleet-updater
   # and, later, fleet-agent depend on it.
   hub-headless:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -341,6 +400,8 @@ jobs:
           retention-days: 7
 
   frontend:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
