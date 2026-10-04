@@ -134,6 +134,30 @@ fn gather(store: &Mutex<Store>) -> Result<PassFacts, IpcError> {
     })
 }
 
+/// Assets M5 (R5): the drifted managed Claude rows a Drift card is for. A
+/// copy that is only behind its catalog (`drift_side = catalog`) is not one:
+/// a Rollout, SB6 or a person's sync brings it up to date with no pick to
+/// make, so a catalog-only change no longer opens a card per host (an open
+/// one is withdrawn by the pass, its subject no longer produced). An edited
+/// copy (`host`) says so in its card; one whose side is unknown (`None`: a
+/// manifest entry from before M5) keeps M4's card.
+fn drift_facts(rows: &[AssetInventoryRow]) -> Vec<DriftFacts> {
+    rows.iter()
+        .filter(|r| r.state == "drifted" && r.managed && r.harness == "claude")
+        .filter(|r| r.drift_side.as_deref() != Some("catalog"))
+        .filter_map(|r| {
+            Some(DriftFacts {
+                catalog_id: r.catalog_id?,
+                kind: r.kind.clone(),
+                name: r.name.clone(),
+                host: r.host_alias.clone(),
+                host_hash: r.host_hash.clone(),
+                edited: r.drift_side.as_deref() == Some("host"),
+            })
+        })
+        .collect()
+}
+
 /// The identities and the cards the facts call for. Pure. Every input the
 /// rules read in sequence is sorted first — rows by (host, harness, kind,
 /// name), drift by (catalog, kind, name, host), gaps by (catalog, layer,
@@ -155,19 +179,7 @@ fn proposals(f: &PassFacts, auto: bool) -> (Vec<AssetIdentity>, Vec<ProposedCard
     hosts.sort_by(|a, b| a.alias.cmp(&b.alias));
     let mut catalogs = f.catalogs.clone();
     catalogs.sort_by_key(|c| c.id);
-    let mut drifted: Vec<DriftFacts> = rows
-        .iter()
-        .filter(|r| r.state == "drifted" && r.managed && r.harness == "claude")
-        .filter_map(|r| {
-            Some(DriftFacts {
-                catalog_id: r.catalog_id?,
-                kind: r.kind.clone(),
-                name: r.name.clone(),
-                host: r.host_alias.clone(),
-                host_hash: r.host_hash.clone(),
-            })
-        })
-        .collect();
+    let mut drifted = drift_facts(&rows);
     drifted.sort_by(|a, b| {
         (a.catalog_id, &a.kind, &a.name, &a.host).cmp(&(b.catalog_id, &b.kind, &b.name, &b.host))
     });
@@ -902,6 +914,76 @@ mod tests {
         r.managed = true;
         r.catalog_id = Some(catalog_id);
         r
+    }
+
+    /// Assets M5 (R5): a copy that is only behind its catalog is not drift a
+    /// person must decide — no card; an edited or unknown one is.
+    #[test]
+    fn only_edited_or_unverified_copies_become_drift_facts() {
+        let row = |host: &str, side: Option<&str>| AssetInventoryRow {
+            host_alias: host.into(),
+            harness: "claude".into(),
+            kind: "skill".into(),
+            name: "w".into(),
+            state: "drifted".into(),
+            managed: true,
+            catalog_id: Some(1),
+            drift_side: side.map(String::from),
+            ..Default::default()
+        };
+        let facts = drift_facts(&[
+            row("oci", Some("catalog")),
+            row("trn", Some("host")),
+            row("htz", None),
+        ]);
+        let got: Vec<(&str, bool)> = facts.iter().map(|d| (d.host.as_str(), d.edited)).collect();
+        assert_eq!(got, [("trn", true), ("htz", false)]);
+    }
+
+    /// Assets M5 (R5, PF4): through the real pass — `proposals` reads the
+    /// side — an edited copy's card says where it was edited, one with an
+    /// unknown side keeps M4's wording, and a copy only behind its catalog
+    /// opens none; an open card whose row turns `catalog` is withdrawn.
+    #[test]
+    fn the_pass_opens_drift_cards_only_for_copies_someone_edited() {
+        let _g = lock_registry_for_test();
+        let (store, p) = fleet_store(vec![skill("w")]);
+        let row = |host: &str, side: Option<&str>| {
+            let mut r = drifted(host, "w", p);
+            r.drift_side = side.map(String::from);
+            r
+        };
+        let open_drift = |store: &Mutex<Store>| -> Vec<String> {
+            let mut v: Vec<String> = store
+                .lock()
+                .unwrap()
+                .list_changesets()
+                .unwrap()
+                .into_iter()
+                .filter(|c| c.kind == "drift" && is_open(&c.state))
+                .map(|c| c.summary)
+                .collect();
+            v.sort();
+            v
+        };
+        put(&store, "oci", vec![row("oci", None)]);
+        put(&store, "trn", vec![row("trn", Some("host"))]);
+        reconcile(&store, true).unwrap();
+        assert_eq!(
+            open_drift(&store),
+            [
+                "skill/w differs on oci from catalog personal",
+                "skill/w was edited on trn (catalog personal)",
+            ]
+        );
+
+        put(&store, "oci", vec![row("oci", Some("catalog"))]);
+        let r = reconcile(&store, true).unwrap();
+        assert_eq!(r.withdrawn, 1, "{r:?}");
+        assert_eq!(
+            open_drift(&store),
+            ["skill/w was edited on trn (catalog personal)"]
+        );
     }
 
     /// Task 4 review (M5): the pass feeds the rules its facts in one stable

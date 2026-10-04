@@ -55,6 +55,9 @@ pub struct DriftFacts {
     pub name: String,
     pub host: String,
     pub host_hash: Option<String>,
+    /// Assets M5 (R5): the host copy is no longer what fleet wrote
+    /// (`drift_side = host`); `false` when the side is unknown.
+    pub edited: bool,
 }
 
 /// Members a never-rolled-out layer should have put on a host, and has not
@@ -664,10 +667,17 @@ fn drift_cards(
             };
             ProposedCard {
                 kind: CardKind::Drift,
-                summary: format!(
-                    "{}/{} differs on {} from catalog {cat}",
-                    d.kind, d.name, d.host
-                ),
+                summary: if d.edited {
+                    format!(
+                        "{}/{} was edited on {} (catalog {cat})",
+                        d.kind, d.name, d.host
+                    )
+                } else {
+                    format!(
+                        "{}/{} differs on {} from catalog {cat}",
+                        d.kind, d.name, d.host
+                    )
+                },
                 items: vec![item(ItemAction::TakeHost), item(ItemAction::Restore)],
             }
         })
@@ -1014,6 +1024,28 @@ mod tests {
         assert_eq!(propose(&f.input()).len(), 1, "a new copy is a new subject");
     }
 
+    /// Assets M5 (R5): a copy a person edited says so in its card.
+    #[test]
+    fn a_drift_card_says_the_copy_was_edited_on_its_host() {
+        let mut f = fleet(false, vec![]);
+        f.bootstrapped = true;
+        f.drifted = vec![DriftFacts {
+            catalog_id: PERSONAL,
+            kind: "skill".into(),
+            name: "w".into(),
+            host: "trn".into(),
+            host_hash: Some("e".into()),
+            edited: true,
+        }];
+        let cards = propose(&f.input());
+        let drift = cards.iter().find(|c| c.kind == CardKind::Drift).unwrap();
+        assert_eq!(
+            drift.summary,
+            "skill/w was edited on trn (catalog personal)"
+        );
+        assert_eq!(drift.subject(), format!("drift:{PERSONAL}:skill/w@trn"));
+    }
+
     /// Drift offers take or restore; a never-rolled-out layer's gaps become
     /// one Rollout card; an open rollout and a verdict hold each.
     #[test]
@@ -1026,6 +1058,7 @@ mod tests {
             name: "w".into(),
             host: "trn".into(),
             host_hash: Some("e".into()),
+            edited: false,
         }];
         f.gaps = ["oci", "htz"]
             .iter()

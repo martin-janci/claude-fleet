@@ -40,8 +40,8 @@ use crate::service::catalog::{
 use crate::service::settings;
 use crate::ssh::SshClient;
 use crate::store::{
-    now_unix, now_unix_ms, AppliedRecord, CatalogRow, ChangesetItemRow, ChangesetRow, HostLayerRow,
-    NewChangesetItem, Store, TriageVerdictRow,
+    now_unix, now_unix_ms, AppliedRecord, AssetInventoryRow, CatalogRow, ChangesetItemRow,
+    ChangesetRow, HostLayerRow, NewChangesetItem, Store, TriageVerdictRow,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1889,13 +1889,30 @@ fn finish_host_card(
     Ok(())
 }
 
+/// Assets M5 (R6): whether SB6 brings `r` up to date — missing; present,
+/// identical and not yet managed (adopt); or managed and only behind its
+/// catalog (`drift_side = catalog`). A copy a person edited, or one its
+/// manifest entry cannot vouch for (`drift_side` unknown), waits for a
+/// person. This only picks what SB6 plans: the planner re-checks the fresh
+/// snapshot (R2) and the Additive filter (R3, `action_allowed`) applies an
+/// Update only over a copy it reads `Unchanged` itself, so a copy edited
+/// after the scan is an Overwrite and dropped — never replaced on the
+/// inventory's say-so.
+pub(crate) fn sb6_due(r: &AssetInventoryRow) -> bool {
+    match r.state.as_str() {
+        "missing" => true,
+        "in_sync" => !r.managed,
+        "drifted" => r.managed && r.drift_side.as_deref() == Some("catalog"),
+        _ => false,
+    }
+}
+
 /// SB6 (R17): with no card, sync additively what a rolled-out layer
 /// introduced and a host lacks (`missing`) or has unmanaged but identical
-/// (`in_sync`, adopted). A `drifted` copy — managed or not — is never due
-/// (final review I1): the planner plans an Update whenever the catalog
-/// moved, even over a copy a person edited on the host, so replacing a
-/// drifted copy is left to a person. Answers how many hosts it applied
-/// something on — 0, with nothing applied or recorded, when nothing is left
+/// (`in_sync`, adopted). A `drifted` copy is due only when it is managed
+/// and only behind its catalog ([`sb6_due`], Assets M5); the planner turns
+/// an edited one into an overwrite, which SB6 never applies. Answers how
+/// many hosts it applied something on — 0, with nothing applied or recorded, when nothing is left
 /// to do. A fleet
 /// with no applied Rollout (pre-M4) answers 0 without planning anything; a
 /// layer's first rollout is always a card (R16). An asset blocked on a
@@ -1952,16 +1969,7 @@ pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
                         && r.kind == kind
                         && r.name == name
                 })
-                .is_some_and(|r| match r.state.as_str() {
-                    "missing" => true,
-                    "in_sync" => !r.managed,
-                    // Final review I1 (interim): a drifted copy is never
-                    // due. The planner cannot yet tell "host edited" from
-                    // "host behind the catalog" and plans an Update for
-                    // both, so only a person (a Drift card's restore, or a
-                    // sync they run) ever replaces a drifted copy.
-                    _ => false,
-                });
+                .is_some_and(sb6_due);
             if due {
                 wants
                     .entry(h.alias.clone())
@@ -2253,6 +2261,27 @@ mod filter_tests {
             }
         }
     }
+
+    /// Assets M5 (R6): SB6 brings a missing copy, adopts an identical one,
+    /// and now updates a managed copy that is only behind its catalog —
+    /// never an edited or unverified one.
+    #[test]
+    fn sb6_brings_a_copy_that_is_only_behind_and_leaves_an_edited_one() {
+        let row = |state: &str, managed: bool, side: Option<&str>| AssetInventoryRow {
+            state: state.into(),
+            managed,
+            drift_side: side.map(String::from),
+            ..Default::default()
+        };
+        assert!(sb6_due(&row("missing", false, None)));
+        assert!(sb6_due(&row("in_sync", false, None)));
+        assert!(!sb6_due(&row("in_sync", true, None)));
+        assert!(sb6_due(&row("drifted", true, Some("catalog"))));
+        assert!(!sb6_due(&row("drifted", true, Some("host"))));
+        assert!(!sb6_due(&row("drifted", true, None)));
+        assert!(!sb6_due(&row("drifted", false, Some("catalog"))));
+        assert!(!sb6_due(&row("orphan", true, None)));
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -2261,7 +2290,6 @@ mod tests {
     use crate::service::catalog::changesets::rules::NEEDS_A_LOOK;
     use crate::service::catalog::changesets::testkit::*;
     use crate::service::catalog::lock_registry_for_test;
-    use crate::store::AssetInventoryRow;
 
     const DESC: &str = "A reasonably long description here.";
 
@@ -4469,6 +4497,94 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&installed).unwrap(), hand);
         assert!(!counter.exists(), "a drifted copy is never planned");
         assert_eq!(last_run(&f), runs, "no sync_runs row");
+    }
+
+    /// Assets M5 (R6, PF4): through the real SB6 pass (`auto_additive` asks
+    /// `sb6_due`), a managed copy on a rolled-out layer that is only behind
+    /// its catalog — exactly as the Rollout wrote it — is brought up to
+    /// date.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn sb6_brings_a_managed_copy_only_behind_its_catalog_up_to_date() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let id = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+        let v = apply_all(&f, id, &ssh).await.unwrap();
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        let installed = home.path().join(".claude/skills/w/SKILL.md");
+        assert!(!std::fs::read_to_string(&installed)
+            .unwrap()
+            .contains("New steps."));
+
+        f.commit_files(&f.personal_root, p, &[("skills/w/body.md", "New steps.\n")]);
+        let mut row = w_row(&f, "oci", "drifted");
+        row.managed = true;
+        row.drift_side = Some("catalog".into());
+        f.store
+            .lock()
+            .unwrap()
+            .replace_host_inventory("oci", "claude", &[row])
+            .unwrap();
+
+        let runs = last_run(&f);
+        assert_eq!(auto_additive(&f.store, &ssh).await.unwrap(), 1);
+        let now = std::fs::read_to_string(&installed).unwrap();
+        assert!(now.contains("New steps."), "{now}");
+        assert_ne!(last_run(&f), runs, "SB6 recorded its run");
+    }
+
+    /// Assets M5 (R6, PF4, safety): SB6 never acts on the inventory's say-so
+    /// alone. A row that says the copy was edited (`host`) is never planned;
+    /// a row that says `catalog` over a copy a person edited after that scan
+    /// is re-checked by the planner, which plans an overwrite the Additive
+    /// filter drops — the person's copy stays either way.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn sb6_leaves_a_copy_edited_on_its_host_whatever_the_scan_said() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let id = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+        let v = apply_all(&f, id, &ssh).await.unwrap();
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        let installed = home.path().join(".claude/skills/w/SKILL.md");
+        f.commit_files(&f.personal_root, p, &[("skills/w/body.md", "New steps.\n")]);
+        let hand = "edited by hand\n";
+        std::fs::write(&installed, hand).unwrap();
+        let put = |side: &str| {
+            let mut row = w_row(&f, "oci", "drifted");
+            row.managed = true;
+            row.drift_side = Some(side.into());
+            f.store
+                .lock()
+                .unwrap()
+                .replace_host_inventory("oci", "claude", &[row])
+                .unwrap();
+        };
+
+        put("host");
+        let bin2 = tempfile::tempdir().unwrap();
+        let counter = bin2.path().join("calls");
+        let counting = counting_ssh(bin2.path(), home.path(), &counter, "*");
+        assert_eq!(auto_additive(&f.store, &counting).await.unwrap(), 0);
+        assert!(!counter.exists(), "an edited copy is never planned");
+        assert_eq!(std::fs::read_to_string(&installed).unwrap(), hand);
+
+        // A stale scan: it saw the copy as fleet wrote it.
+        put("catalog");
+        assert_eq!(auto_additive(&f.store, &ssh).await.unwrap(), 0);
+        assert_eq!(
+            std::fs::read_to_string(&installed).unwrap(),
+            hand,
+            "the planner's re-check keeps the person's edit"
+        );
     }
 
     /// A drift card on `skill/w` at `host`: take_host (0), restore (1).
