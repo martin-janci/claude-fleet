@@ -8,8 +8,10 @@
 //! that was merely found installed) and by `sync::plan`; written by
 //! `sync::apply` at the end of a successful host sync.
 
-use super::super::harness::{value_hash, HostSnapshot, ManifestMerge, RenderPlan};
-use super::super::model::Kind;
+use super::super::harness::{
+    json_get, value_hash, HostSnapshot, ManifestMerge, MergeMode, RenderPlan,
+};
+use super::super::model::{sha256_hex, Kind};
 use super::super::repo::Catalog;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,6 +32,13 @@ pub struct ManifestEntry {
     /// ever have gotten its assets from the personal catalog.
     #[serde(default = "personal")]
     pub catalog: String,
+    /// Assets M5 (Rulings R1): path → sha256 of the bytes this sync wrote
+    /// there — the same hash a scan reports per file — so a later plan can
+    /// tell a copy that is exactly as fleet left it from one a person
+    /// edited. Absent on an entry written before M5, which then cannot
+    /// vouch for its copy ([`HostCopy::Unverified`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub file_hashes: BTreeMap<String, String>,
 }
 
 fn personal() -> String {
@@ -49,6 +58,64 @@ impl Default for ManifestEntry {
             merges: Vec::new(),
             synced_at: 0,
             catalog: personal(),
+            file_hashes: BTreeMap::new(),
+        }
+    }
+}
+
+/// Assets M5 (Rulings R1): whether a managed asset's copy on the host is
+/// still what fleet wrote there — read from the manifest entry's recorded
+/// hashes against a scan, so it needs no bytes from the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostCopy {
+    /// Every location the entry records is exactly what fleet wrote.
+    Unchanged,
+    /// A recorded file or merge differs from what fleet wrote, or is gone:
+    /// someone edited the host copy.
+    Edited,
+    /// The entry cannot say: written before M5 (no file hashes), a `Subset`
+    /// merge (never hashed whole), or nothing recorded at all.
+    Unverified,
+}
+
+impl ManifestEntry {
+    /// [`HostCopy`] of this entry's asset on `snap`. Any differing or
+    /// missing location is `Edited`, even when another one is unverifiable.
+    pub fn host_copy(&self, snap: &HostSnapshot) -> HostCopy {
+        let mut unverified = self.files.is_empty() && self.merges.is_empty();
+        for path in &self.files {
+            let Some(want) = self.file_hashes.get(path) else {
+                unverified = true;
+                continue;
+            };
+            if snap.files.get(path) != Some(want) {
+                return HostCopy::Edited;
+            }
+        }
+        for m in &self.merges {
+            let have = snap
+                .configs
+                .get(&m.file)
+                .and_then(|root| json_get(root, &m.json_path));
+            let same = match m.mode {
+                MergeMode::Set => have.is_some_and(|v| value_hash(v) == m.value_hash),
+                MergeMode::AppendUnique => have
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|arr| arr.iter().any(|e| value_hash(e) == m.value_hash)),
+                MergeMode::Subset => {
+                    unverified = true;
+                    true
+                }
+            };
+            if !same {
+                return HostCopy::Edited;
+            }
+        }
+        if unverified {
+            HostCopy::Unverified
+        } else {
+            HostCopy::Unchanged
         }
     }
 }
@@ -119,6 +186,11 @@ impl Manifest {
                 .collect(),
             synced_at: now,
             catalog: catalog.to_string(),
+            file_hashes: plan
+                .files
+                .iter()
+                .map(|f| (f.path.clone(), sha256_hex(&f.bytes)))
+                .collect(),
         }
     }
 
@@ -231,6 +303,11 @@ mod tests {
                 }],
                 synced_at: 100,
                 catalog: "personal".into(),
+                // Assets M5: the recorded file hashes round-trip too.
+                file_hashes: BTreeMap::from([(
+                    "~/.claude/skills/worktree/SKILL.md".to_string(),
+                    "f00d".to_string(),
+                )]),
             },
         );
         let json = m.to_json();
@@ -433,5 +510,121 @@ mod tests {
             vec!["garbage-key", "skill/mine", "skill/theirs"],
             "None: every catalog speaks (inventory, R8)"
         );
+    }
+
+    use crate::service::catalog::model::sha256_hex;
+
+    /// Assets M5 (R1): an entry records the hash of every file it wrote, so
+    /// a later scan tells "as fleet left it" from "a person edited it".
+    #[test]
+    fn host_copy_tells_an_untouched_copy_from_an_edited_one() {
+        let mut plan = RenderPlan::default();
+        plan.files.push(FileWrite {
+            path: "~/.claude/skills/s/SKILL.md".into(),
+            bytes: b"body".to_vec(),
+        });
+        let hook = json!({"type": "command", "command": "x"});
+        plan.merges.push(ConfigMerge {
+            file: "~/.claude/settings.json".into(),
+            json_path: vec!["hooks".into(), "Stop".into()],
+            mode: MergeMode::AppendUnique,
+            value: hook.clone(),
+        });
+        let entry = Manifest::entry_for("h", &plan, 1, "personal");
+        assert_eq!(
+            entry.file_hashes.get("~/.claude/skills/s/SKILL.md"),
+            Some(&sha256_hex(b"body"))
+        );
+
+        let mut snap = HostSnapshot::default();
+        snap.files
+            .insert("~/.claude/skills/s/SKILL.md".into(), sha256_hex(b"body"));
+        snap.configs.insert(
+            "~/.claude/settings.json".into(),
+            json!({"hooks": {"Stop": [{"type": "command", "command": "other"}, hook]}}),
+        );
+        assert_eq!(entry.host_copy(&snap), HostCopy::Unchanged);
+
+        let mut edited = snap.clone();
+        edited
+            .files
+            .insert("~/.claude/skills/s/SKILL.md".into(), sha256_hex(b"edited"));
+        assert_eq!(entry.host_copy(&edited), HostCopy::Edited);
+
+        let mut gone = snap.clone();
+        gone.files.remove("~/.claude/skills/s/SKILL.md");
+        assert_eq!(
+            entry.host_copy(&gone),
+            HostCopy::Edited,
+            "a deleted file is an edit"
+        );
+
+        let mut hook_changed = snap.clone();
+        hook_changed.configs.insert(
+            "~/.claude/settings.json".into(),
+            json!({"hooks": {"Stop": [{"type": "command", "command": "y"}]}}),
+        );
+        assert_eq!(entry.host_copy(&hook_changed), HostCopy::Edited);
+    }
+
+    /// R1: an entry written before M5 has no file hashes — it cannot vouch
+    /// for the host copy either way, and it still reads and writes as before.
+    #[test]
+    fn an_entry_written_before_m5_is_unverified_not_edited() {
+        let entry: ManifestEntry = serde_json::from_str(
+            r#"{"hash":"h","files":["~/.claude/skills/s/SKILL.md"],"merges":[],"synced_at":1}"#,
+        )
+        .unwrap();
+        assert!(entry.file_hashes.is_empty());
+        let mut snap = HostSnapshot::default();
+        snap.files
+            .insert("~/.claude/skills/s/SKILL.md".into(), "anything".into());
+        assert_eq!(entry.host_copy(&snap), HostCopy::Unverified);
+        assert_eq!(
+            ManifestEntry::default().host_copy(&snap),
+            HostCopy::Unverified,
+            "an entry that records nothing vouches for nothing"
+        );
+        assert!(!serde_json::to_string(&entry)
+            .unwrap()
+            .contains("file_hashes"));
+    }
+
+    /// R1: a `Set` merge is checked by its value hash; a `Subset` merge
+    /// (a plugin's entry) is never hashed whole, so it cannot vouch.
+    #[test]
+    fn host_copy_reads_set_merges_and_cannot_read_subset_ones() {
+        let value = json!({"url": "https://example/mcp"});
+        let entry = ManifestEntry {
+            merges: vec![ManifestMerge {
+                file: "~/.claude.json".into(),
+                json_path: vec!["mcpServers".into(), "fleet".into()],
+                mode: MergeMode::Set,
+                value_hash: value_hash(&value),
+            }],
+            ..Default::default()
+        };
+        let mut snap = HostSnapshot::default();
+        snap.configs.insert(
+            "~/.claude.json".into(),
+            json!({"mcpServers": {"fleet": {"url": "https://example/mcp"}}}),
+        );
+        assert_eq!(entry.host_copy(&snap), HostCopy::Unchanged);
+        snap.configs.insert(
+            "~/.claude.json".into(),
+            json!({"mcpServers": {"fleet": {"url": "https://elsewhere/mcp"}}}),
+        );
+        assert_eq!(entry.host_copy(&snap), HostCopy::Edited);
+
+        let subset = ManifestEntry {
+            merges: vec![ManifestMerge {
+                file: "~/.claude/plugins/installed_plugins.json".into(),
+                json_path: vec!["plugins".into(), "sp@mk".into()],
+                mode: MergeMode::Subset,
+                value_hash: "h".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(subset.host_copy(&snap), HostCopy::Unverified);
     }
 }

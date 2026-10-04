@@ -902,6 +902,7 @@ mod tests {
             secret_files: Default::default(),
             remove_entry: None,
             plugin: None,
+            host_copy: None,
         });
         hp
     }

@@ -778,6 +778,7 @@ fn host_plan_writing(catalog: &str) -> crate::service::catalog::sync::plan::Host
             secret_files: Default::default(),
             remove_entry: None,
             plugin: None,
+            host_copy: None,
         }],
         snapshot: Default::default(),
         manifest: Default::default(),

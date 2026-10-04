@@ -13,7 +13,7 @@ use super::super::harness::{
 use super::super::inventory::merge_satisfied;
 use super::super::model::{sha256_hex, Asset, AssetSpec, Kind};
 use super::super::repo::{Catalog, ProblemHolds};
-use super::manifest::{Manifest, ManifestEntry};
+use super::manifest::{HostCopy, Manifest, ManifestEntry};
 use super::secrets::{self, SecretPlan};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -135,6 +135,12 @@ pub struct Action {
     pub remove_entry: Option<ManifestEntry>,
     #[serde(skip)]
     pub plugin: Option<PluginTarget>,
+    /// Assets M5 (Rulings R2/R3): whether the host copy is still what fleet
+    /// wrote, when the manifest names this asset. The applier's card
+    /// filters read it: an Additive (Rollout, SB6) `Update` needs
+    /// `Unchanged`.
+    #[serde(skip)]
+    pub host_copy: Option<HostCopy>,
 }
 
 /// Every action planned for one host under one harness. `snapshot` and
@@ -293,11 +299,15 @@ fn expected_for<'a>(
 ///    to go), else `Adopt`; present and differing ⇒ `Overwrite` when the
 ///    asset moved (as above) onto a planned file the entry does not list —
 ///    a copy fleet never wrote there, so not a catalog update — else
-///    `Update` when the manifest names it with a *different*
-///    hash (the catalog moved on), `Overwrite("edited on host")` when the
-///    manifest names it with the *same* hash (so the difference came from
-///    the host), and `Overwrite("present but differs; not managed")` when
-///    the manifest does not name it at all. A `Create` whose entry lists
+///    `Overwrite` when the entry's recorded hashes show the host copy was
+///    edited (`HostCopy::Edited`, Assets M5 — whether or not the catalog
+///    moved too); otherwise `Update` when the manifest names it with a
+///    *different* hash (the catalog moved on; reason
+///    `UNVERIFIED_UPDATE_REASON` when the entry predates the file hashes),
+///    `Overwrite("edited on host")` when it names the *same* hash (so the
+///    difference came from the host), and
+///    `Overwrite("present but differs; not managed")` when the manifest
+///    does not name it at all. A `Create` whose entry lists
 ///    locations the render moved away from says so in its reason: rule 8
 ///    deletes those old files with it, and `files` names only the new ones.
 /// 5. `expected` records the scanned hash of every planned file and every
@@ -455,6 +465,7 @@ pub fn compute_host_plan(
             secret_files: BTreeSet::new(),
             remove_entry: Some(entry.clone()),
             plugin: None,
+            host_copy: None,
         });
     }
     // Assets M3 (R6): an entry whose catalog does not speak for this host —
@@ -554,6 +565,7 @@ fn bare_action(
         secret_files: BTreeSet::new(),
         remove_entry: None,
         plugin: None,
+        host_copy: None,
     }
 }
 
@@ -613,6 +625,15 @@ pub(crate) const MOVED_CREATE_REASON: &str =
 pub(crate) const MOVED_UPDATE_REASON: &str =
     "installed at a different location; the old copy is removed";
 pub(crate) const MOVED_ONTO_FOREIGN_REASON: &str = "moved to a location that already holds a different copy fleet did not write; it is replaced (backed up) and the old copy removed";
+/// Rule 4, Assets M5 (Rulings R2): the host copy is not what fleet wrote,
+/// and the catalog moved on as well.
+pub(crate) const EDITED_AND_MOVED_REASON: &str = "edited on host, and the catalog changed too";
+/// Rule 4: the host copy is not what fleet wrote; the catalog is unchanged.
+pub(crate) const EDITED_ON_HOST_REASON: &str = "edited on host; the catalog has not changed";
+/// Rule 4 (R2): the catalog moved on, and the manifest entry predates the
+/// file hashes that would tell whether the host copy was edited too.
+pub(crate) const UNVERIFIED_UPDATE_REASON: &str =
+    "the catalog changed; the host copy predates fleet's file hashes, so a host edit cannot be ruled out";
 
 fn action_for(
     harness: &dyn Harness,
@@ -643,6 +664,7 @@ fn action_for(
         secret_files: BTreeSet::new(),
         remove_entry: None,
         plugin: plugin.clone(),
+        host_copy: None,
     };
 
     // Rule 1.
@@ -693,6 +715,8 @@ fn action_for(
     }
 
     let manifest_entry = manifest.assets.get(&Manifest::key(kind, &name));
+    // Assets M5 (R1/R2): which side moved, read once for rule 4 and the filters.
+    let host_copy = manifest_entry.map(|e| e.host_copy(snap));
 
     // Rule 3.
     if let Some(target) = &plugin {
@@ -789,11 +813,33 @@ fn action_for(
             {
                 (ActionOp::Overwrite, Some(MOVED_ONTO_FOREIGN_REASON.into()))
             }
-            Some(entry) if entry.hash == plan.hash() => (
-                ActionOp::Overwrite,
-                Some("edited on host; the catalog has not changed".into()),
+            // Assets M5 (R2): the host copy is not what fleet wrote. Whatever
+            // the catalog did, writing it loses that edit: an overwrite.
+            //
+            // Parity with M4 (PF17): a person's own Sync now shows an
+            // `overwrite` (red, backed up) over a host-edited copy where M4
+            // showed an `update` whenever the catalog had also moved on.
+            // Nothing else changes for a personal-only plan: an entry from
+            // before M5 cannot tell (`Unverified`) and keeps M4's reading
+            // below, its `update` now carrying `UNVERIFIED_UPDATE_REASON`.
+            Some(entry) if host_copy == Some(HostCopy::Edited) => {
+                let why = if entry.hash == plan.hash() {
+                    EDITED_ON_HOST_REASON
+                } else {
+                    EDITED_AND_MOVED_REASON
+                };
+                (ActionOp::Overwrite, Some(why.into()))
+            }
+            // Unverified (pre-M5 entry): M4's reading — same render means
+            // the difference came from the host.
+            Some(entry) if entry.hash == plan.hash() => {
+                (ActionOp::Overwrite, Some(EDITED_ON_HOST_REASON.into()))
+            }
+            Some(_) => (
+                ActionOp::Update,
+                (host_copy == Some(HostCopy::Unverified))
+                    .then(|| UNVERIFIED_UPDATE_REASON.to_string()),
             ),
-            Some(_) => (ActionOp::Update, None),
             None => (
                 ActionOp::Overwrite,
                 Some("present but differs; not managed".into()),
@@ -832,6 +878,7 @@ fn action_for(
         expected,
         secret_files,
         remove_entry,
+        host_copy,
         ..blank()
     }
 }
@@ -1523,6 +1570,84 @@ mod tests {
         assert_eq!(act(&hp, "foo-bar").op, ActionOp::Noop);
     }
 
+    const SKILL_V2: &str = "kind: skill\nname: s\ndescription: d2\n";
+
+    /// Assets M5 (R2): with the file hashes the entry recorded, a catalog
+    /// change over an untouched copy is an `Update`, and over an edited copy
+    /// an `Overwrite` — never an `Update` that silently drops the edit.
+    #[test]
+    fn a_catalog_change_updates_an_untouched_copy_and_overwrites_an_edited_one() {
+        let old = substituted(&Claude, &asset(SKILL), &secrets_map());
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "skill/s".into(),
+            Manifest::entry_for(&old.hash(), &old, 0, "personal"),
+        );
+        let mut snap = HostSnapshot::default();
+        satisfy(&mut snap, &old);
+        let moved = catalog_of(&[SKILL_V2]);
+
+        let hp = plan_for(&moved, &Claude, &snap, &manifest, &secrets_map());
+        let a = act(&hp, "s");
+        assert_eq!(
+            (a.op, a.reason.as_deref(), a.host_copy),
+            (ActionOp::Update, None, Some(HostCopy::Unchanged))
+        );
+        assert!(a.backup);
+
+        snap.files
+            .insert("~/.claude/skills/s/SKILL.md".into(), "edited".into());
+        let hp = plan_for(&moved, &Claude, &snap, &manifest, &secrets_map());
+        let a = act(&hp, "s");
+        assert_eq!(a.op, ActionOp::Overwrite);
+        assert_eq!(a.reason.as_deref(), Some(EDITED_AND_MOVED_REASON));
+        assert_eq!(a.host_copy, Some(HostCopy::Edited));
+        assert!(a.backup);
+
+        // The catalog did not move: M4's reason, now with the signal.
+        let hp = plan_for(
+            &catalog_of(&[SKILL]),
+            &Claude,
+            &snap,
+            &manifest,
+            &secrets_map(),
+        );
+        let a = act(&hp, "s");
+        assert_eq!(a.op, ActionOp::Overwrite);
+        assert_eq!(a.reason.as_deref(), Some(EDITED_ON_HOST_REASON));
+        assert_eq!(a.host_copy, Some(HostCopy::Edited));
+    }
+
+    /// R2: an entry written before M5 keeps M4's `Update`, but says it could
+    /// not rule out a host edit — and carries `Unverified` for the filters.
+    #[test]
+    fn a_pre_m5_entry_still_updates_but_says_the_copy_is_unverified() {
+        let old = substituted(&Claude, &asset(SKILL), &secrets_map());
+        let mut entry = Manifest::entry_for(&old.hash(), &old, 0, "personal");
+        entry.file_hashes.clear();
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert("skill/s".into(), entry);
+        let mut snap = HostSnapshot::default();
+        satisfy(&mut snap, &old);
+        let hp = plan_for(
+            &catalog_of(&[SKILL_V2]),
+            &Claude,
+            &snap,
+            &manifest,
+            &secrets_map(),
+        );
+        let a = act(&hp, "s");
+        assert_eq!(a.op, ActionOp::Update);
+        assert_eq!(a.host_copy, Some(HostCopy::Unverified));
+        assert_eq!(a.reason.as_deref(), Some(UNVERIFIED_UPDATE_REASON));
+    }
+
     #[test]
     fn managed_and_stale_is_an_update_managed_and_edited_is_an_overwrite() {
         let mut snap = host_with(&[SKILL]);
@@ -1934,6 +2059,7 @@ mod tests {
                 }],
                 synced_at: 1,
                 catalog: "personal".into(),
+                file_hashes: BTreeMap::new(),
             },
         );
         // A key nothing can parse is skipped rather than half-planned.
@@ -2868,6 +2994,7 @@ mod tests {
             secret_files: BTreeSet::new(),
             remove_entry: None,
             plugin: None,
+            host_copy: None,
         }
     }
 

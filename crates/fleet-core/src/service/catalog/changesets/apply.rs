@@ -14,8 +14,9 @@
 //!
 //! A host card (rollout, drift restore) plans the card's hosts and applies
 //! only what R15 allows; SB6's automatic additive sync shares that path
-//! (`auto_additive`). A Rollout only creates, adopts or updates, and SB6
-//! only creates or adopts (it never picks a drifted copy); a restore — one
+//! (`auto_additive`). A Rollout only creates, adopts or updates a copy the
+//! planner verified untouched (Assets M5), and SB6 only creates or adopts
+//! (it never picks a drifted copy); a restore — one
 //! asset, one host, picked by a person — may also overwrite, with a backup;
 //! nothing ever removes. A card's host sync runs under its
 //! own cancellation token, never registered, so `cancel_task` cannot stop
@@ -29,6 +30,7 @@ use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::catalog::import::slugify;
 use crate::service::catalog::layer::{split_key, Axis, Layer};
 use crate::service::catalog::model::{Header, Kind, Scope, TargetOverride};
+use crate::service::catalog::sync::manifest::HostCopy;
 use crate::service::catalog::sync::plan::{Action, ActionOp, HostPlan, SyncPlan};
 use crate::service::catalog::sync::{self, ApplyArgs as SyncApplyArgs, PlanArgs};
 use crate::service::catalog::validate::{check_layer_name, check_name};
@@ -1412,7 +1414,8 @@ pub(crate) fn follow_up_rollout(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpFilter {
     /// Rollout and SB6: create, adopt, update (the applier backs up every
-    /// file it replaces).
+    /// file it replaces) — an update only over a copy the planner verified
+    /// untouched ([`action_allowed`], Assets M5).
     Additive,
     /// Drift restore, one asset a person picked: update or overwrite.
     Restore,
@@ -1427,14 +1430,27 @@ pub(crate) fn op_allowed(f: OpFilter, op: ActionOp) -> bool {
     }
 }
 
+/// Assets M5 (Rulings R3): whether `a` may go to a host under `f`. On top
+/// of [`op_allowed`], an Additive `Update` (Rollout, SB6) needs the planner
+/// to have verified the host copy untouched since fleet wrote it — never an
+/// edited copy, nor one an entry from before M5 cannot vouch for. A
+/// Restore (one asset, one host, a person's pick) may update any copy.
+pub(crate) fn action_allowed(f: OpFilter, a: &Action) -> bool {
+    op_allowed(f, a.op)
+        && (f != OpFilter::Additive
+            || a.op != ActionOp::Update
+            || a.host_copy == Some(HostCopy::Unchanged))
+}
+
 /// Whether `a` is one of `assets` (`<kind>/<name>`) from one of `catalogs`.
 fn card_owns(a: &Action, assets: &BTreeSet<String>, catalogs: &BTreeSet<String>) -> bool {
     assets.contains(&format!("{}/{}", a.kind, a.name))
         && a.catalog.as_ref().is_some_and(|c| catalogs.contains(c))
 }
 
-/// Keep only what the card may apply on this host: an allowed op, for one
-/// of `assets` (`<kind>/<name>`), from one of `catalogs`.
+/// Keep only what the card may apply on this host: an allowed action
+/// ([`action_allowed`]), for one of `assets` (`<kind>/<name>`), from one of
+/// `catalogs`.
 pub(crate) fn narrow(
     hp: &mut HostPlan,
     f: OpFilter,
@@ -1442,7 +1458,7 @@ pub(crate) fn narrow(
     catalogs: &BTreeSet<String>,
 ) {
     hp.actions
-        .retain(|a| op_allowed(f, a.op) && card_owns(a, assets, catalogs));
+        .retain(|a| action_allowed(f, a) && card_owns(a, assets, catalogs));
 }
 
 /// The `${NAME}`s the card's own assets wait on in `hp` — `apply_sync`'s
@@ -2063,6 +2079,7 @@ mod filter_tests {
             secret_files: Default::default(),
             remove_entry: None,
             plugin: None,
+            host_copy: None,
         }
     }
 
@@ -2080,8 +2097,23 @@ mod filter_tests {
                 action("w", ActionOp::Create, Some("personal")),
                 action("w2", ActionOp::Overwrite, Some("personal")),
                 action("w3", ActionOp::Remove, None),
-                action("w4", ActionOp::Update, Some("personal")),
+                Action {
+                    host_copy: Some(HostCopy::Unchanged),
+                    ..action("w4", ActionOp::Update, Some("personal"))
+                },
                 action("w5", ActionOp::Adopt, Some("acme")),
+                // Assets M5 (R3, PF3): an update the planner could not
+                // verify (no entry, a pre-M5 entry) or found edited never
+                // rides an Additive card — `narrow` reads `host_copy`.
+                action("w6", ActionOp::Update, Some("personal")),
+                Action {
+                    host_copy: Some(HostCopy::Edited),
+                    ..action("w7", ActionOp::Update, Some("personal"))
+                },
+                Action {
+                    host_copy: Some(HostCopy::Unverified),
+                    ..action("w8", ActionOp::Update, Some("personal"))
+                },
                 action("other", ActionOp::Create, Some("personal")),
                 action("p", ActionOp::PluginInstall, Some("personal")),
             ],
@@ -2095,6 +2127,9 @@ mod filter_tests {
                 "skill/w3",
                 "skill/w4",
                 "skill/w5",
+                "skill/w6",
+                "skill/w7",
+                "skill/w8",
                 "plugin_ref/p",
             ]
             .map(String::from),
@@ -2117,6 +2152,31 @@ mod filter_tests {
         assert!(!op_allowed(OpFilter::Restore, ActionOp::Remove));
         assert!(!op_allowed(OpFilter::Additive, ActionOp::Overwrite));
         assert!(!op_allowed(OpFilter::Additive, ActionOp::PluginInstall));
+    }
+
+    /// Assets M5 (R3): a Rollout or SB6 updates only a copy the planner
+    /// verified untouched; a person's restore may update any copy.
+    #[test]
+    fn additive_updates_only_a_copy_the_planner_verified_untouched() {
+        let mut a = action("w", ActionOp::Update, Some("personal"));
+        for (copy, want) in [
+            (Some(HostCopy::Unchanged), true),
+            (Some(HostCopy::Edited), false),
+            (Some(HostCopy::Unverified), false),
+            (None, false),
+        ] {
+            a.host_copy = copy;
+            assert_eq!(action_allowed(OpFilter::Additive, &a), want, "{copy:?}");
+            assert!(action_allowed(OpFilter::Restore, &a), "restore: {copy:?}");
+        }
+        assert!(action_allowed(
+            OpFilter::Additive,
+            &action("w", ActionOp::Create, Some("personal"))
+        ));
+        assert!(!action_allowed(
+            OpFilter::Additive,
+            &action("w", ActionOp::Overwrite, Some("personal"))
+        ));
     }
 
     /// R15: no filter lets a remove, a plugin op, a no-op or a blocked
