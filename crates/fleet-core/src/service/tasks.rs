@@ -159,6 +159,51 @@ pub fn session_satisfies(row: &SessionRow, cond: WaitCond) -> bool {
     }
 }
 
+/// Does the caller that STARTED a bounded wait still reach what it is
+/// waiting on? Asked again on every wake, inside the same lock window that
+/// reads the row, and once more immediately before the payload is built
+/// (multi-user M1, T11; rule 8, "A revokes the share, B loses access").
+///
+/// A long poll is the one request that outlives its own authorisation: the
+/// gate ran once, at the top, and then the call sat for up to ten minutes.
+/// Without this a grantee calls a 600-second wait, the owner revokes the
+/// share, and the hub hands over the payload anyway.
+///
+/// `fleet-core`'s service layer must not know what a `Caller` is, so this
+/// is a `&dyn` predicate the MCP layer supplies — exactly as [`PaneProbe`]
+/// is for the pane.
+///
+/// **The contract is "refuse unless proven".** `check` returns the refusal
+/// it would have returned at the top of the call; it does not return a
+/// `bool`, and it does not return an `Option` whose absent arm could be
+/// read as permission. An implementation that cannot answer — the row is
+/// gone, the store read failed — must propagate that as the error, never
+/// swallow it into `Ok(())`.
+pub trait AccessRecheck: Send + Sync {
+    /// `Ok(())` while the access that opened this wait still holds.
+    ///
+    /// Called under the caller's lock on the store, so it must not lock
+    /// again and must not block.
+    fn check(&self, s: &Store) -> Result<(), IpcError>;
+}
+
+/// No re-check, for fleet's own engine. The one production user is the
+/// move waiter (`service::move_session::wait`), which is not a *caller*:
+/// there is no grant behind a move to revoke, and the operator who started
+/// it is the one it runs for. The service layer's own tests are the other.
+///
+/// Deliberately **not** reachable from `mcp/`: every long poll a token can
+/// reach must name a real re-check, and the source-level
+/// `no_long_poll_tool_waives_its_access_recheck` fails the build if a tool
+/// under `mcp/` picks this up.
+pub struct NoRecheck;
+
+impl AccessRecheck for NoRecheck {
+    fn check(&self, _s: &Store) -> Result<(), IpcError> {
+        Ok(())
+    }
+}
+
 /// A live look at a session's pane: its `claude_status` as the pane shows
 /// it now, or `None` when it cannot tell (unreachable host, blank pane, no
 /// pane). What a turn-over check asks before believing a stale-demoted
@@ -212,8 +257,9 @@ pub async fn wait_for_session(
     session_id: i64,
     cond: WaitCond,
     timeout: Duration,
+    recheck: &dyn AccessRecheck,
 ) -> Result<WaitOutcome<SessionRow>, IpcError> {
-    wait_for_session_with(store, session_id, cond, timeout, POLL_INTERVAL).await
+    wait_for_session_with(store, session_id, cond, timeout, POLL_INTERVAL, recheck).await
 }
 
 pub async fn wait_for_session_with(
@@ -222,6 +268,7 @@ pub async fn wait_for_session_with(
     cond: WaitCond,
     timeout: Duration,
     poll: Duration,
+    recheck: &dyn AccessRecheck,
 ) -> Result<WaitOutcome<SessionRow>, IpcError> {
     wait_for_session_probed(
         store,
@@ -231,12 +278,14 @@ pub async fn wait_for_session_with(
         poll,
         &NoPaneProbe,
         STALE_PANE_PROBE_EVERY,
+        recheck,
     )
     .await
 }
 
 /// [`wait_for_session_with`] that asks `probe` about a stale-demoted row
 /// (at most once per `probe_every`) and takes a quiet pane as `Idle`.
+#[allow(clippy::too_many_arguments)]
 pub async fn wait_for_session_probed(
     store: &Mutex<Store>,
     session_id: i64,
@@ -245,14 +294,22 @@ pub async fn wait_for_session_probed(
     poll: Duration,
     probe: &dyn PaneProbe,
     probe_every: Duration,
+    recheck: &dyn AccessRecheck,
 ) -> Result<WaitOutcome<SessionRow>, IpcError> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last_probe: Option<tokio::time::Instant> = None;
     loop {
         // Lock, read one row, unlock — never across the sleep or the probe.
-        let row = lock(store)?.get_session_by_id(session_id)?.ok_or_else(|| {
-            IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
-        })?;
+        // The access re-check (T11) rides the SAME lock window as the row
+        // read, so a grant revoked between two wakes cannot be read as
+        // still held; `?` on it ends the wait with the refusal.
+        let row = {
+            let s = lock(store)?;
+            recheck.check(&s)?;
+            s.get_session_by_id(session_id)?.ok_or_else(|| {
+                IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
+            })?
+        };
         if session_satisfies(&row, cond) {
             return Ok(WaitOutcome {
                 satisfied: true,
@@ -289,8 +346,9 @@ pub async fn wait_for_task(
     store: &Mutex<Store>,
     task_id: i64,
     timeout: Duration,
+    recheck: &dyn AccessRecheck,
 ) -> Result<WaitOutcome<TaskRow>, IpcError> {
-    wait_for_task_with(store, task_id, timeout, POLL_INTERVAL).await
+    wait_for_task_with(store, task_id, timeout, POLL_INTERVAL, recheck).await
 }
 
 pub async fn wait_for_task_with(
@@ -298,11 +356,16 @@ pub async fn wait_for_task_with(
     task_id: i64,
     timeout: Duration,
     poll: Duration,
+    recheck: &dyn AccessRecheck,
 ) -> Result<WaitOutcome<TaskRow>, IpcError> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let row = {
             let s = lock(store)?;
+            // T11: the same lock window that reads the task re-checks the
+            // access that opened the wait. A task's `prompt` and `result`
+            // are the text two sessions exchanged — session content.
+            recheck.check(&s)?;
             let row = s.get_task(task_id)?.ok_or_else(|| {
                 IpcError::new(codes::E_NOTFOUND, format!("task {task_id} not found"))
             })?;
@@ -1291,6 +1354,7 @@ mod tests {
             WaitCond::TurnGt(0),
             Duration::from_millis(30),
             fast,
+            &NoRecheck,
         )
         .await
         .unwrap();
@@ -1308,6 +1372,7 @@ mod tests {
             WaitCond::TurnGt(0),
             Duration::from_secs(5),
             fast,
+            &NoRecheck,
         )
         .await
         .unwrap();
@@ -1316,7 +1381,7 @@ mod tests {
         assert_eq!(out.row.turn_seq, 1);
         assert!(out.row.last_stop_at.is_some());
         assert_eq!(
-            wait_for_session_with(&store, 9999, WaitCond::Idle, fast, fast)
+            wait_for_session_with(&store, 9999, WaitCond::Idle, fast, fast, &NoRecheck)
                 .await
                 .unwrap_err()
                 .code,
@@ -1362,14 +1427,14 @@ mod tests {
         let short = Duration::from_millis(40);
         let every = Duration::from_secs(60);
 
-        let out = wait_for_session_with(&store, id, WaitCond::Idle, short, fast)
+        let out = wait_for_session_with(&store, id, WaitCond::Idle, short, fast, &NoRecheck)
             .await
             .unwrap();
         assert!(!out.satisfied, "no probe: the stored idle is not believed");
         // An attach acknowledges the attention stamp; the demotion (and so
         // the guess) stands.
         assert!(store.lock().unwrap().touch_session(id).unwrap());
-        let out = wait_for_session_with(&store, id, WaitCond::Idle, short, fast)
+        let out = wait_for_session_with(&store, id, WaitCond::Idle, short, fast, &NoRecheck)
             .await
             .unwrap();
         assert_eq!(out.row.stale_working_at, None, "the attach acknowledged it");
@@ -1388,10 +1453,18 @@ mod tests {
                 answer,
                 asks: Default::default(),
             };
-            let out =
-                wait_for_session_probed(&store, id, WaitCond::Idle, short, fast, &pane, every)
-                    .await
-                    .unwrap();
+            let out = wait_for_session_probed(
+                &store,
+                id,
+                WaitCond::Idle,
+                short,
+                fast,
+                &pane,
+                every,
+                &NoRecheck,
+            )
+            .await
+            .unwrap();
             assert_eq!(out.satisfied, satisfied, "{answer:?}");
             assert_eq!(
                 pane.asks.load(std::sync::atomic::Ordering::SeqCst),
@@ -1404,10 +1477,18 @@ mod tests {
             answer: Some("idle"),
             asks: Default::default(),
         };
-        let out =
-            wait_for_session_probed(&store, id, WaitCond::TurnGt(5), short, fast, &pane, every)
-                .await
-                .unwrap();
+        let out = wait_for_session_probed(
+            &store,
+            id,
+            WaitCond::TurnGt(5),
+            short,
+            fast,
+            &pane,
+            every,
+            &NoRecheck,
+        )
+        .await
+        .unwrap();
         assert!(!out.satisfied);
         assert_eq!(pane.asks.load(std::sync::atomic::Ordering::SeqCst), 0);
 
@@ -1417,9 +1498,16 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
             bg.lock().unwrap().record_stop_hook("uuid-w").unwrap();
         });
-        let out = wait_for_session_with(&store, id, WaitCond::Idle, Duration::from_secs(5), fast)
-            .await
-            .unwrap();
+        let out = wait_for_session_with(
+            &store,
+            id,
+            WaitCond::Idle,
+            Duration::from_secs(5),
+            fast,
+            &NoRecheck,
+        )
+        .await
+        .unwrap();
         stopper.await.unwrap();
         assert!(out.satisfied);
         assert_eq!(out.row.stale_working_at, None);
@@ -1572,7 +1660,7 @@ mod tests {
         let t = create_task(&s, None, Some(w), "slow").unwrap();
         let store = Arc::new(Mutex::new(s));
         let fast = Duration::from_millis(5);
-        let out = wait_for_task_with(&store, t.id, Duration::from_millis(30), fast)
+        let out = wait_for_task_with(&store, t.id, Duration::from_millis(30), fast, &NoRecheck)
             .await
             .unwrap();
         assert!(!out.satisfied);
@@ -1585,14 +1673,14 @@ mod tests {
             let task = s.get_task(tid).unwrap().unwrap();
             complete_task(&s, &task, "finished").unwrap();
         });
-        let out = wait_for_task_with(&store, t.id, Duration::from_secs(5), fast)
+        let out = wait_for_task_with(&store, t.id, Duration::from_secs(5), fast, &NoRecheck)
             .await
             .unwrap();
         finisher.await.unwrap();
         assert!(out.satisfied);
         assert_eq!(out.row.state, "done");
         assert_eq!(
-            wait_for_task_with(&store, 9999, fast, fast)
+            wait_for_task_with(&store, 9999, fast, fast, &NoRecheck)
                 .await
                 .unwrap_err()
                 .code,
@@ -1804,6 +1892,7 @@ mod tests {
             t.id,
             Duration::from_secs(5),
             Duration::from_millis(5),
+            &NoRecheck,
         )
         .await
         .unwrap();

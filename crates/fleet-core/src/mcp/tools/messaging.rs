@@ -515,14 +515,27 @@ impl FleetTools {
             "the session",
         )?;
         let _permit = self.long_poll_permit(&caller, "wait_for_reply")?;
+        // T11, and the highest-value of the four re-checks: the payload
+        // here IS content — the text another session sent this one. The
+        // wait asks `recheck` in the same lock window it reads the inbox
+        // in, so a revoke lands before the body is ever loaded; the call
+        // below covers the gap between the last wake and `ok_json`.
+        let recheck = SessionRecheck {
+            caller: &caller,
+            session_id: row.id,
+            reach: Reach::Read,
+            what: "the session",
+        };
         let got = crate::service::messages::wait_for_reply(
             &self.store,
             row.id,
             p.after_message_id,
             tasks::wait_timeout(p.timeout_s),
+            &recheck,
         )
         .await
         .map_err(to_mcp_err)?;
+        self.recheck_now(&recheck)?;
         ok_json(&serde_json::json!({
             "status": if got.is_some() { "satisfied" } else { "timeout" },
             "message": got,

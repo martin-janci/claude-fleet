@@ -362,7 +362,25 @@ pub(super) fn require_person_sees(
     reach: Reach,
     what: &str,
 ) -> Result<(), McpError> {
-    let scope = caller.view_scope(s).map_err(to_mcp_err)?;
+    person_sees(s, caller, row, reach, what).map_err(to_mcp_err)
+}
+
+/// [`require_person_sees`] in the service layer's own error type.
+///
+/// The gate is written ONCE, here, and `require_person_sees` is this plus
+/// [`to_mcp_err`] — which is lossless, so the two refusals are the same
+/// code, the same words and the same details. The reason it exists is the
+/// long-poll re-check (T11): `service::tasks::AccessRecheck` runs inside
+/// `fleet-core`'s service layer, which deals in `IpcError` and must not
+/// know what an `McpError` or a [`Caller`] is.
+fn person_sees(
+    s: &Store,
+    caller: &Caller,
+    row: &crate::store::SessionRow,
+    reach: Reach,
+    what: &str,
+) -> Result<(), IpcError> {
+    let scope = caller.view_scope(s)?;
     if !scope.sees_session_row(row).is_visible() {
         // §4.4 clause 2, as it actually fails in the field. One token
         // authenticates every Claude on a host, so the agent that reaches
@@ -379,7 +397,7 @@ pub(super) fn require_person_sees(
             // only decides whether the refusal may name the pane.
             && scope.org.sees_session_org_only(&row.host_alias, row.org_id)
         {
-            return Err(mcp_err(
+            return Err(IpcError::new(
                 codes::E_PANE_UNPROVEN,
                 format!(
                     "{what}: session {} is on {} but this request proves no pane of it \
@@ -387,13 +405,11 @@ pub(super) fn require_person_sees(
                      session whose pane its X-Fleet-Pane header names)",
                     row.id, row.host_alias
                 ),
-                None,
             ));
         }
-        return Err(mcp_err(
+        return Err(IpcError::new(
             codes::E_NOTFOUND,
             format!("session {} not found", row.id),
-            None,
         ));
     }
     let allowed = match reach {
@@ -406,14 +422,13 @@ pub(super) fn require_person_sees(
     if allowed {
         return Ok(());
     }
-    Err(mcp_err(
+    Err(IpcError::new(
         codes::E_FORBIDDEN,
         format!(
             "{what}: session {} needs {} and this access does not carry it",
             row.id,
             reach.needed()
         ),
-        None,
     ))
 }
 
@@ -445,6 +460,60 @@ pub(super) fn reaches_row(
         Reach::Drive => scope.may_drive(row),
         Reach::Own => scope.may_own(row),
     })
+}
+
+/// The long-poll re-check for a SESSION-bound wait (T11): is the caller
+/// that opened this wait still allowed to see the row it is waiting on?
+///
+/// Handed to `service::tasks::wait_for_session*` and
+/// `service::messages::wait_for_reply` as a `&dyn
+/// tasks::AccessRecheck`, which they call on every wake inside the lock
+/// window that reads the row, and which the tool calls once more before it
+/// builds the payload.
+///
+/// The row is re-read **by id**, from the handle the re-check is given.
+/// Never by `(host_alias, tmux_name)`: that pair is reusable — a killed
+/// session's tmux name is taken by the next one on that host — so a wait
+/// resolved by name could be handed a DIFFERENT session's row than the one
+/// whose access was gated at the top of the call. The id is the row.
+pub(super) struct SessionRecheck<'a> {
+    pub caller: &'a Caller,
+    pub session_id: i64,
+    pub reach: Reach,
+    pub what: &'a str,
+}
+
+impl tasks::AccessRecheck for SessionRecheck<'_> {
+    fn check(&self, s: &Store) -> Result<(), IpcError> {
+        // A row that vanished mid-wait is `E_NOTFOUND`, which is also what
+        // the wait loops themselves answer for it — and the only answer
+        // that is not "permission by absence of evidence".
+        let row = s.get_session_by_id(self.session_id)?.ok_or_else(|| {
+            IpcError::new(
+                codes::E_NOTFOUND,
+                format!("session {} not found", self.session_id),
+            )
+        })?;
+        person_sees(s, self.caller, &row, self.reach, self.what)
+    }
+}
+
+/// The long-poll re-check for `wait_for_task` (T11): the task's own gate,
+/// [`task_visible_at`], asked again on every wake.
+///
+/// A task is visible when the caller sees every session it names, so a
+/// share revoked on the worker (or on the requester) ends the wait before
+/// `task.result` — the worker's paragraph — is returned.
+pub(super) struct TaskRecheck<'a> {
+    pub caller: &'a Caller,
+    pub task_id: i64,
+    pub reach: Reach,
+}
+
+impl tasks::AccessRecheck for TaskRecheck<'_> {
+    fn check(&self, s: &Store) -> Result<(), IpcError> {
+        task_visible_at(s, self.caller, self.task_id, self.reach).map(|_| ())
+    }
 }
 
 /// A paired client bound to an org (work graph M14) starts sessions only
@@ -2255,6 +2324,19 @@ impl FleetTools {
             .map_err(to_mcp_err)
     }
 
+    /// Ask a long poll's [`tasks::AccessRecheck`] once, outside the wait,
+    /// under a fresh lock.
+    ///
+    /// Every long poll calls this immediately before it builds its
+    /// payload. The in-loop re-check cannot be the last word on its own:
+    /// between the final wake and `ok_json` a tool may take another await
+    /// (`wait_for_session`'s pane probe, `run_prompt`'s transcript read),
+    /// and that gap is exactly long enough for a revoke to land.
+    pub(super) fn recheck_now(&self, recheck: &dyn tasks::AccessRecheck) -> Result<(), McpError> {
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        recheck.check(&s).map_err(to_mcp_err)
+    }
+
     /// A long-poll permit for `caller`, or `E_RATE_LIMITED` when it already
     /// holds [`guard::MAX_LONG_POLLS_PER_CALLER`] bounded waits.
     pub(super) fn long_poll_permit(
@@ -2301,60 +2383,70 @@ impl FleetTools {
         reach: Reach,
     ) -> Result<crate::store::TaskRow, McpError> {
         let s = lock(&self.store).map_err(to_mcp_err)?;
-        let task = s
-            .get_task(task_id)
-            .map_err(to_mcp_err)?
-            .ok_or_else(|| mcp_err(codes::E_NOTFOUND, format!("task {task_id} not found"), None))?;
-        let scope = caller.view_scope(&s).map_err(to_mcp_err)?;
-        if !tasks::task_visible_in_scope(&s, &task, &scope).map_err(to_mcp_err)? {
-            return Err(mcp_err(
-                codes::E_NOTFOUND,
-                format!("task {task_id} not found"),
-                None,
+        task_visible_at(&s, caller, task_id, reach).map_err(to_mcp_err)
+    }
+}
+
+/// [`FleetTools::visible_task`] against a store handle the caller already
+/// holds, in the service layer's error type.
+///
+/// Written once, here, for the same reason [`person_sees`] is: the
+/// `wait_for_task` long poll re-checks this on every wake from inside
+/// `service::tasks` (T11), where there is no `McpError` and no [`Caller`].
+pub(super) fn task_visible_at(
+    s: &Store,
+    caller: &Caller,
+    task_id: i64,
+    reach: Reach,
+) -> Result<crate::store::TaskRow, IpcError> {
+    let task = s
+        .get_task(task_id)?
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("task {task_id} not found")))?;
+    let scope = caller.view_scope(s)?;
+    if !tasks::task_visible_in_scope(s, &task, &scope)? {
+        return Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("task {task_id} not found"),
+        ));
+    }
+    // The reach is judged on the WORKER: a task's drive-level act
+    // (`cancel_task`) stops work on the worker's machine, and the
+    // requester is only the session that asked for it. A task with no
+    // worker row to judge is refused rather than allowed — there is
+    // nothing to be the owner of.
+    if reach != Reach::Read {
+        let worker = match task.worker_session_id {
+            Some(id) => s.get_session_by_id(id)?,
+            None => None,
+        };
+        let ok = match (&worker, reach) {
+            (Some(row), Reach::Drive) => {
+                // §4.4: a per-host token drives what it can reach, and
+                // the task's own visibility above is what it could
+                // reach. Without this clause the agent that dispatched
+                // a task could not cancel the worker it spawned — the
+                // worker inherits the REQUESTER's owner (T5), so it is
+                // not the machine's to own even though it is the
+                // machine's to run.
+                scope.may_drive(row) || scope.host.as_deref() == Some(row.host_alias.as_str())
+            }
+            // No equivalent for `own`: a pane proof is never ownership,
+            // and a per-host token is never an owner.
+            (Some(row), Reach::Own) => scope.may_own(row),
+            (Some(_), Reach::Read) | (None, _) => false,
+        };
+        if !ok {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                format!(
+                    "task {task_id} needs {} on its worker session and this access \
+                         does not carry it",
+                    reach.needed()
+                ),
             ));
         }
-        // The reach is judged on the WORKER: a task's drive-level act
-        // (`cancel_task`) stops work on the worker's machine, and the
-        // requester is only the session that asked for it. A task with no
-        // worker row to judge is refused rather than allowed — there is
-        // nothing to be the owner of.
-        if reach != Reach::Read {
-            let worker = match task.worker_session_id {
-                Some(id) => s
-                    .get_session_by_id(id)
-                    .map_err(|e| to_mcp_err(IpcError::from(e)))?,
-                None => None,
-            };
-            let ok = match (&worker, reach) {
-                (Some(row), Reach::Drive) => {
-                    // §4.4: a per-host token drives what it can reach, and
-                    // the task's own visibility above is what it could
-                    // reach. Without this clause the agent that dispatched
-                    // a task could not cancel the worker it spawned — the
-                    // worker inherits the REQUESTER's owner (T5), so it is
-                    // not the machine's to own even though it is the
-                    // machine's to run.
-                    scope.may_drive(row) || scope.host.as_deref() == Some(row.host_alias.as_str())
-                }
-                // No equivalent for `own`: a pane proof is never ownership,
-                // and a per-host token is never an owner.
-                (Some(row), Reach::Own) => scope.may_own(row),
-                (Some(_), Reach::Read) | (None, _) => false,
-            };
-            if !ok {
-                return Err(mcp_err(
-                    codes::E_FORBIDDEN,
-                    format!(
-                        "task {task_id} needs {} on its worker session and this access \
-                         does not carry it",
-                        reach.needed()
-                    ),
-                    None,
-                ));
-            }
-        }
-        Ok(task)
     }
+    Ok(task)
 }
 
 // ---- smart caching (`fresh_for`) --------------------------------------------

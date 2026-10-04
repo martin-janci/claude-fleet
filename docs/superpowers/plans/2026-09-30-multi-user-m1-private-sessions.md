@@ -395,6 +395,28 @@ the sixteen tasks that compile Rust one at a time over several days.
    re-check can withhold the transcript and cannot un-send the prompt. The
    attached terminal is outside this. Both exceptions are written into
    `docs/hub.md`, not only here. (The digest refers to this item as DoD 5.)
+
+   **As built (T11).** The re-check is `service::tasks::AccessRecheck`, a
+   `&dyn` predicate the MCP layer supplies (`SessionRecheck` / `TaskRecheck`
+   in `mcp/tools/support.rs`, over the one copy of the gate —
+   `person_sees` / `task_visible_at`), called by every wait inside the SAME
+   lock window that reads the row and once more by
+   `FleetTools::recheck_now` immediately before the payload is built. Of the
+   five `Deadline::LongPoll` rows in `TOOL_POLICIES`, four are session-bound
+   and carry it: `wait_for_session`, `wait_for_reply`, `wait_for_task` and
+   `run_prompt`. The fifth, `add_project`, waits on a clone and names no
+   session, so there is no grant behind it to re-check. `service::tasks::
+   NoRecheck` is the named waiver, for fleet's own move engine only; a
+   source-level test (`no_long_poll_tool_waives_its_access_recheck`) fails
+   the build if anything under `mcp/` reaches for it.
+
+   **Still open, recorded not fixed:** `mcp/tools/support.rs::
+   long_poll_permit` buckets on `caller.label()` — a *device* name, not a
+   person — so a revoked device keeps holding its
+   `MAX_LONG_POLLS_PER_CALLER` slots for the remaining `LONG_POLL_CAP`
+   (660 s). Those slots serve nothing: every wait behind them now refuses.
+   It is therefore a small self-denial-of-service window, not a leak — and
+   a standing reason never to key a future per-person quota on `label()`.
 7. An existing single-user install upgrades with no registration and no lost
    sessions, and **no session becomes readable by anyone who could not read it
    before** — including after a colleague is added later.
@@ -2162,6 +2184,55 @@ narrowed mid-flight returns nothing; `wait_for_task` takes its permit only after
 `mcp/tools/tests.rs::run_prompt_refuses_a_session_that_is_not_between_turns` and
 `wait_for_task_marks_the_worker_result_as_untrusted` — both construct callers
 and need the person field.
+
+**LANDED.** `service::tasks::AccessRecheck` (+ `NoRecheck`, the named
+waiver for the move engine) is the `&dyn` predicate; the MCP layer's two
+implementations are `SessionRecheck` / `TaskRecheck` in
+`mcp/tools/support.rs`, built on `person_sees` and `task_visible_at` — the
+existing gates, split out into `IpcError` flavours so there is still ONE
+copy of each. `SessionRecheck` re-reads the row **by id**, never by
+`(host_alias, tmux_name)`. The in-loop calls are in
+`wait_for_session_probed`, `wait_for_task_with` and
+`messages::wait_for_reply`, each inside the lock window that already reads
+the row (and, in `wait_for_reply`, BEFORE the inbox read — the body is
+never loaded); the pre-return call is `FleetTools::recheck_now`, in
+`wait_for_session`, `wait_for_task`, `wait_for_reply` and twice in
+`run_prompt` (before `deliver_prompt`, and before the transcript).
+
+Proof: eleven tests in `mcp/tools/tests.rs`, each pin confirmed by
+reverting it and watching the test go red.
+
+* the four tool-level waits — a revoke mid-flight refuses, and a positive
+  control is served: `a_wait_for_{reply,session,task}_*`, plus
+  `the_wait_run_prompt_parks_in_*`, which covers both a revoke
+  (`E_NOTFOUND`) and a narrowing to `watch` (`E_FORBIDDEN` — the case
+  `Reach::Read` could not have caught);
+* `the_pre_return_recheck_closes_the_pane_probes_window` for the one await
+  a wait takes outside its own lock window, which is the gap
+  `recheck_now` exists for;
+* **the in-loop checks of `wait_for_reply` and `wait_for_task`, pinned
+  separately** (`the_wait_behind_wait_for_*`). This is worth recording:
+  reverting either in-loop line left the corresponding TOOL test green,
+  because `recheck_now` caught the same revoke on its own. A tool test
+  therefore pins the pre-return check and says nothing about the in-loop
+  one, so the two are called at the service seam with nothing behind them.
+  Both of those tests drive the revoke from INSIDE the wait's own lock
+  window (`RevokeOnSecondWake`), so "the wait was in flight when the share
+  went" is a fact and not an interleaving of two sleeps, and the wake
+  count is in the failure message. Worth knowing for the next person who
+  reverts a pin: a reversion harness that restores the file afterwards
+  must `touch` it — cargo compares mtimes, and a restored file older than
+  the artifacts is not rebuilt, so three "load flakes" here were in fact
+  the pinned-out binary still on disk;
+* the source-level `no_long_poll_tool_waives_its_access_recheck`.
+
+The `run_prompt` / `wait_for_task` caller-construction breakages predicted
+above did not materialise: `device_of` and `gate_fixture` already carry
+the person field, and neither test needed a change. The rename of
+`require_person_sees`'s body to `person_sees` did move two
+`scope_guard_tests` rows (`ORG_HALF_SITES` and the `sees_session_org_only`
+guard's call-site list), both updated. `add_project`, the fifth
+`Deadline::LongPoll` row, is session-less and carries no re-check (DoD 6).
 
 ---
 

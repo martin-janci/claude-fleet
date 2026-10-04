@@ -258,9 +258,10 @@ const SCOPE_GUARDS: &[Guard] = &[
               wrapper, org-only by its own name), `link_session_visible` \
               (whose person half is `link_person_visible`), `link_visible` \
               (where `link_hidden` has already run) and \
-              `require_person_sees` (where `sees_session_row` has already \
-              refused, and this only decides whether the refusal may say \
-              E_PANE_UNPROVEN)",
+              `person_sees` — the body of `require_person_sees`, and of the \
+              T11 long-poll re-check that shares it — where \
+              `sees_session_row` has already refused, and this only decides \
+              whether the refusal may say E_PANE_UNPROVEN",
     },
     Guard {
         file: "crates/fleet-core/src/service/orgs.rs",
@@ -1732,8 +1733,11 @@ const ORG_HALF_SITES: &[OrgHalf] = &[
                       host binding",
     },
     OrgHalf {
+        // `person_sees` IS the body of `require_person_sees`; T11 split the
+        // two so the long-poll re-check could reuse the one gate in the
+        // service layer's error type, and the call moved with the body.
         file: "crates/fleet-core/src/mcp/tools/support.rs",
-        func: "require_person_sees",
+        func: "person_sees",
         nth: 0,
         code: "&& scope.org.sees_session_org_only(&row.host_alias, row.org_id)",
         person_half: "this function, which has ALREADY refused through \

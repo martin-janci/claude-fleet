@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::ipc_error::lock;
-use crate::service::tasks::PaneProbe as _;
+use crate::service::tasks::{AccessRecheck as _, PaneProbe as _};
 
 #[tool_router(router = orchestration_router, vis = "pub(super)")]
 impl FleetTools {
@@ -38,6 +38,15 @@ impl FleetTools {
         )?;
         let _permit = self.long_poll_permit(&caller, "wait_for_session")?;
         let cond = tasks::WaitCond::parse(&p.until, p.turn).map_err(to_mcp_err)?;
+        // T11: this wait can sit for ten minutes, so the gate above is not
+        // the last word — `recheck` runs it again on every wake and once
+        // more below, before the payload.
+        let recheck = SessionRecheck {
+            caller: &caller,
+            session_id: row.id,
+            reach: Reach::Read,
+            what: "the session",
+        };
         // A stale-demoted row's `idle` is a guess: the wait asks its pane.
         let out = tasks::wait_for_session_probed(
             &self.store,
@@ -50,9 +59,14 @@ impl FleetTools {
                 ssh: &self.ssh,
             },
             tasks::STALE_PANE_PROBE_EVERY,
+            &recheck,
         )
         .await
         .map_err(to_mcp_err)?;
+        // The pane probe above is the one await the wait takes OUTSIDE its
+        // own lock window, so the last wake's re-check is not quite the
+        // last word either. One more, immediately before `ok_json`.
+        self.recheck_now(&recheck)?;
         ok_json(&serde_json::json!({
             "status": if out.satisfied { "satisfied" } else { "timeout" },
             "claude_status": out.row.claude_status,
@@ -363,6 +377,21 @@ impl FleetTools {
         };
         run_prompt_ready(&row, live.as_deref())?;
         let _permit = self.long_poll_permit(&caller, "run_prompt")?;
+        // T11, and the honest limit of it. `run_prompt` is three acts:
+        // deliver, wait, read the transcript. The LAST TWO are recalled by
+        // a revoke; the first is not. The pane probe above took an await
+        // between the gate and here, so this re-check is what stands
+        // between a share revoked during that probe and a prompt typed
+        // into the owner's session — but once the keys are in the pane
+        // there is no un-sending them, and nothing below pretends there
+        // is (`docs/hub.md` → *A revoked share, precisely*, DoD 6).
+        let recheck = SessionRecheck {
+            caller: &caller,
+            session_id: row.id,
+            reach: Reach::Drive,
+            what: "the session to prompt",
+        };
+        self.recheck_now(&recheck)?;
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
         let before = row.turn_seq;
         self.deliver_prompt(&row, prompt, true, false).await?;
@@ -371,9 +400,14 @@ impl FleetTools {
             row.id,
             tasks::WaitCond::TurnGt(before),
             tasks::wait_timeout(p.timeout_s),
+            &recheck,
         )
         .await
         .map_err(to_mcp_err)?;
+        // Before the transcript is even READ, let alone returned: the
+        // reply to a prompt this caller may no longer drive is content it
+        // may no longer have.
+        self.recheck_now(&recheck)?;
         let (transcript, transcript_error) = match self
             .transcript_for(&out.row, Some(before), p.max_chars)
             .await
@@ -592,11 +626,26 @@ impl FleetTools {
         // its result.
         let task = self.visible_task(&caller, p.task_id, Reach::Read)?;
         let _permit = self.long_poll_permit(&caller, "wait_for_task")?;
-        let out = tasks::wait_for_task(&self.store, task.id, tasks::wait_timeout(p.timeout_s))
-            .await
-            .map_err(to_mcp_err)?;
+        // T11: re-checked on every wake and once more below. `task.result`
+        // is the worker's own paragraph, so a share revoked on either of
+        // the task's sessions must end the wait, not complete it.
+        let recheck = TaskRecheck {
+            caller: &caller,
+            task_id: task.id,
+            reach: Reach::Read,
+        };
+        let out = tasks::wait_for_task(
+            &self.store,
+            task.id,
+            tasks::wait_timeout(p.timeout_s),
+            &recheck,
+        )
+        .await
+        .map_err(to_mcp_err)?;
         let row = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
+            // Same lock window as the row that is about to be returned.
+            recheck.check(&s).map_err(to_mcp_err)?;
             tasks::mark_task_result(&s, out.row)
         };
         ok_json(&serde_json::json!({

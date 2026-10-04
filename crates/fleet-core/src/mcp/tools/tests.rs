@@ -11478,6 +11478,680 @@ async fn list_tasks_omits_a_task_whose_ends_another_person_cannot_see() {
     );
 }
 
+// ---- multi-user M1, T11: a long poll re-checks before it answers ----
+
+//
+// A long poll is the one request that outlives its own authorisation. Rule
+// 8 — "A revokes the share; B loses access" — has three bounds in the DoD,
+// and this is the third: a wait that was ALREADY IN FLIGHT when the share
+// went must not hand over its payload. Each test below starts a real wait
+// with a real grant, revokes mid-flight, and asserts the refusal; each has
+// the positive control next to it, because a gate that refuses everything
+// pins nothing.
+//
+// Every timeout here is 60 s, generously. Not padding: a wait that ends on
+// its DEADLINE answers `timeout` having re-checked once, which proves
+// nothing either way. The green path still returns in milliseconds; the
+// 60 s is only the width of the window in which the claim is the thing
+// being measured.
+
+/// `watch` on `row` for `to`, given by `by`.
+fn share_watch(t: &FleetTools, row: i64, to: i64, by: i64) {
+    let s = t.store.lock().unwrap();
+    s.grant_session(
+        row,
+        crate::store::GrantRecipient::Person(to),
+        crate::store::GRANT_WATCH,
+        by,
+    )
+    .unwrap();
+}
+
+/// Run `wait` and take `to`'s grant on `row` away `after` into it, so the
+/// revoke lands while the wait is genuinely parked rather than before it
+/// starts.
+async fn while_waiting<T>(
+    t: &FleetTools,
+    wait: impl std::future::Future<Output = T>,
+    after: Duration,
+    act: impl FnOnce(&FleetTools),
+) -> T {
+    let meanwhile = async {
+        tokio::time::sleep(after).await;
+        act(t);
+    };
+    let (out, ()) = tokio::join!(wait, meanwhile);
+    out
+}
+
+/// The highest-value of the four (the plan's words): `wait_for_reply`'s
+/// payload IS content — the text another session sent this one.
+///
+/// The message is inserted AFTER the revoke, so the wake that would have
+/// returned it is a wake that happens with no grant behind it. The
+/// re-check runs first in that lock window, which is why the body is never
+/// even read.
+#[tokio::test]
+async fn a_wait_for_reply_in_flight_is_refused_when_the_share_is_revoked() {
+    let g = gate_fixture();
+    let (a_row, ada, bob) = (g.a_row, g.ada, g.bob);
+    let t = test_tools(g.store);
+    share_watch(&t, a_row, bob, ada);
+
+    let wait = t.wait_for_reply(
+        Extension(device_of(bob, ada)),
+        Parameters(WaitForReplyParams {
+            session_id: a_row,
+            after_message_id: None,
+            timeout_s: Some(60),
+        }),
+    );
+    let e = while_waiting(&t, wait, Duration::from_millis(50), |t| {
+        let s = t.store.lock().unwrap();
+        s.revoke_session_grant(a_row, bob, ada).unwrap();
+        // And the thing the caller was waiting for, now that it may not
+        // have it.
+        s.insert_message(a_row, a_row, "the secret", "chat", None)
+            .unwrap();
+    })
+    .await
+    .expect_err("a wait that outlived its share answers a refusal");
+    assert!(
+        e.message.starts_with(codes::E_NOTFOUND),
+        "a private row B can no longer see answers as a missing one: {}",
+        e.message
+    );
+    assert!(
+        !format!("{e:?}").contains("the secret"),
+        "and not one byte of the message rides out in the refusal: {e:?}"
+    );
+}
+
+/// The positive control for it: the same wait, the same message, the grant
+/// left alone — the body comes back.
+#[tokio::test]
+async fn a_wait_for_reply_whose_share_stands_still_delivers_the_message() {
+    let g = gate_fixture();
+    let (a_row, ada, bob) = (g.a_row, g.ada, g.bob);
+    let t = test_tools(g.store);
+    share_watch(&t, a_row, bob, ada);
+
+    let wait = t.wait_for_reply(
+        Extension(device_of(bob, ada)),
+        Parameters(WaitForReplyParams {
+            session_id: a_row,
+            after_message_id: None,
+            timeout_s: Some(60),
+        }),
+    );
+    let out = while_waiting(&t, wait, Duration::from_millis(50), |t| {
+        let s = t.store.lock().unwrap();
+        s.insert_message(a_row, a_row, "the secret", "chat", None)
+            .unwrap();
+    })
+    .await
+    .expect("a live grant is served");
+    let body = text_of(&out.content[0]);
+    assert!(
+        body.contains("the secret") && body.contains("satisfied"),
+        "the grantee gets the message the wait was for: {body}"
+    );
+}
+
+/// `wait_for_session`: the row never reaches `idle` on its own
+/// (`claude_status` is unset, which `store::turn_over` does not take as
+/// quiet), so the wait is parked when the revoke lands.
+#[tokio::test]
+async fn a_wait_for_session_in_flight_is_refused_when_the_share_is_revoked() {
+    let g = gate_fixture();
+    let (a_row, ada, bob) = (g.a_row, g.ada, g.bob);
+    let t = test_tools(g.store);
+    share_watch(&t, a_row, bob, ada);
+
+    let wait = t.wait_for_session(
+        Extension(device_of(bob, ada)),
+        Parameters(WaitForSessionParams {
+            session_id: a_row,
+            until: "idle".into(),
+            turn: None,
+            timeout_s: Some(60),
+        }),
+    );
+    let e = while_waiting(&t, wait, Duration::from_millis(50), |t| {
+        let s = t.store.lock().unwrap();
+        s.revoke_session_grant(a_row, bob, ada).unwrap();
+    })
+    .await
+    .expect_err("a wait that outlived its share answers a refusal");
+    assert!(e.message.starts_with(codes::E_NOTFOUND), "{}", e.message);
+}
+
+/// Its positive control: the grant stands, the session goes quiet, and the
+/// wait answers `satisfied` with the row's status.
+#[tokio::test]
+async fn a_wait_for_session_whose_share_stands_still_answers_satisfied() {
+    let g = gate_fixture();
+    let (a_row, ada, bob) = (g.a_row, g.ada, g.bob);
+    let t = test_tools(g.store);
+    share_watch(&t, a_row, bob, ada);
+
+    let wait = t.wait_for_session(
+        Extension(device_of(bob, ada)),
+        Parameters(WaitForSessionParams {
+            session_id: a_row,
+            until: "idle".into(),
+            turn: None,
+            timeout_s: Some(60),
+        }),
+    );
+    let out = while_waiting(&t, wait, Duration::from_millis(50), |t| {
+        let s = t.store.lock().unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET claude_status = 'idle' WHERE id = ?1",
+                rusqlite::params![a_row],
+            )
+            .unwrap();
+    })
+    .await
+    .expect("a live grant is served");
+    let body = text_of(&out.content[0]);
+    assert!(body.contains("satisfied"), "{body}");
+}
+
+/// `wait_for_task`: a task is visible when the caller sees every session it
+/// names, so revoking the share on its sessions ends the wait — before
+/// `task.result`, the worker's own paragraph, is returned.
+#[tokio::test]
+async fn a_wait_for_task_in_flight_is_refused_when_the_share_is_revoked() {
+    let g = gate_fixture();
+    let (a_row, ada, bob) = (g.a_row, g.ada, g.bob);
+    let task =
+        crate::service::tasks::create_task(&g.store, Some(a_row), Some(a_row), "hers").unwrap();
+    let t = test_tools(g.store);
+    share_watch(&t, a_row, bob, ada);
+
+    let wait = t.wait_for_task(
+        Extension(device_of(bob, ada)),
+        Parameters(WaitForTaskParams {
+            task_id: task.id,
+            timeout_s: Some(60),
+        }),
+    );
+    let e = while_waiting(&t, wait, Duration::from_millis(50), |t| {
+        let s = t.store.lock().unwrap();
+        s.revoke_session_grant(a_row, bob, ada).unwrap();
+        // The paragraph the caller was parked on, now that it may not
+        // have it.
+        s.finish_task(task.id, "done", Some("the answer"), None)
+            .unwrap();
+    })
+    .await
+    .expect_err("a wait that outlived its share answers a refusal");
+    assert!(
+        e.message.starts_with(codes::E_NOTFOUND),
+        "an invisible task answers as an unknown one: {}",
+        e.message
+    );
+    assert!(
+        !format!("{e:?}").contains("the answer"),
+        "and the worker's paragraph does not ride out in the refusal: {e:?}"
+    );
+}
+
+/// Its positive control: the grant stands and the paragraph comes back.
+#[tokio::test]
+async fn a_wait_for_task_whose_share_stands_still_returns_the_result() {
+    let g = gate_fixture();
+    let (a_row, ada, bob) = (g.a_row, g.ada, g.bob);
+    let task =
+        crate::service::tasks::create_task(&g.store, Some(a_row), Some(a_row), "hers").unwrap();
+    let t = test_tools(g.store);
+    share_watch(&t, a_row, bob, ada);
+
+    let wait = t.wait_for_task(
+        Extension(device_of(bob, ada)),
+        Parameters(WaitForTaskParams {
+            task_id: task.id,
+            timeout_s: Some(60),
+        }),
+    );
+    let out = while_waiting(&t, wait, Duration::from_millis(50), |t| {
+        let s = t.store.lock().unwrap();
+        s.finish_task(task.id, "done", Some("the answer"), None)
+            .unwrap();
+    })
+    .await
+    .expect("a live grant is served");
+    let body = text_of(&out.content[0]);
+    assert!(
+        body.contains("the answer") && body.contains("satisfied"),
+        "{body}"
+    );
+}
+
+/// A re-check that fires `act` from inside the wait's OWN lock window, on
+/// its second wake.
+///
+/// Why not two sleeps: the first version of the two tests below revoked at
+/// 50 ms and delivered the payload at 150 ms, so its verdict rode on two
+/// wall-clock sleeps interleaving — a coin, not a pin. Here the FIRST wake
+/// proves the wait is parked with the grant live, and the revoke lands in
+/// the same critical section as the wake that would otherwise return the
+/// payload. There is nothing left to race, and the wake COUNT is readable,
+/// so a failure can say whether the wait ever woke twice at all.
+///
+/// The generous timeouts below belong to the same argument: a wait that
+/// ends on its DEADLINE answers `Ok(timeout)` having re-checked once,
+/// which proves nothing either way. The green path still returns in
+/// milliseconds; the 60 s is only the width of the window in which the
+/// claim is the thing being measured.
+struct RevokeOnSecondWake<R: crate::service::tasks::AccessRecheck> {
+    inner: R,
+    wakes: std::sync::atomic::AtomicUsize,
+    act: Box<dyn Fn(&Store) + Send + Sync>,
+}
+
+impl<R: crate::service::tasks::AccessRecheck> RevokeOnSecondWake<R> {
+    fn new(inner: R, act: impl Fn(&Store) + Send + Sync + 'static) -> Self {
+        Self {
+            inner,
+            wakes: std::sync::atomic::AtomicUsize::new(0),
+            act: Box::new(act),
+        }
+    }
+}
+
+impl<R: crate::service::tasks::AccessRecheck> crate::service::tasks::AccessRecheck
+    for RevokeOnSecondWake<R>
+{
+    fn check(&self, s: &Store) -> Result<(), IpcError> {
+        if self.wakes.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            (self.act)(s);
+        }
+        self.inner.check(s)
+    }
+}
+
+/// The IN-LOOP re-check of `wait_for_reply`, pinned where nothing can
+/// stand in for it.
+///
+/// The tool test above proves the tool refuses, but it cannot say WHICH of
+/// the two re-checks did it: `recheck_now` runs after the wait and catches
+/// the same revoke on its own. (Reverting the in-loop line left that test
+/// green — measured, not assumed.) So this one calls the service function
+/// directly, with no pre-return check behind it.
+///
+/// Revert the in-loop line and the message — inserted by the task beside
+/// it — comes back as the answer: a red that is the leak itself, not a
+/// timeout.
+#[tokio::test]
+async fn the_wait_behind_wait_for_reply_ends_on_a_revoke_not_on_the_message() {
+    let g = gate_fixture();
+    let (a_row, ada, bob) = (g.a_row, g.ada, g.bob);
+    let store = std::sync::Mutex::new(g.store);
+    {
+        let s = store.lock().unwrap();
+        s.grant_session(
+            a_row,
+            crate::store::GrantRecipient::Person(bob),
+            crate::store::GRANT_WATCH,
+            ada,
+        )
+        .unwrap();
+    }
+    let caller = device_of(bob, ada);
+    let recheck = RevokeOnSecondWake::new(
+        SessionRecheck {
+            caller: &caller,
+            session_id: a_row,
+            reach: Reach::Read,
+            what: "the session",
+        },
+        move |s| {
+            s.revoke_session_grant(a_row, bob, ada).unwrap();
+        },
+    );
+    let wait = crate::service::messages::wait_for_reply(
+        &store,
+        a_row,
+        None,
+        Duration::from_secs(60),
+        &recheck,
+    );
+    let meanwhile = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let s = store.lock().unwrap();
+        s.insert_message(a_row, a_row, "the secret", "chat", None)
+            .unwrap();
+    };
+    let (out, ()) = tokio::join!(wait, meanwhile);
+    let e = match out {
+        Err(e) => e,
+        Ok(got) => panic!(
+            "the wake must re-check before it reads the inbox, but the wait \
+             answered {got:?} after {} re-check(s) — fewer than two means it \
+             never woke again and this run proved nothing",
+            recheck.wakes.load(std::sync::atomic::Ordering::SeqCst)
+        ),
+    };
+    assert_eq!(e.code, codes::E_NOTFOUND, "{}", e.message);
+    assert!(
+        !format!("{e:?}").contains("the secret"),
+        "the body is never loaded, let alone returned: {e:?}"
+    );
+}
+
+/// The same, for `wait_for_task`'s in-loop re-check: the tool's own
+/// pre-return check sits in the lock window that reads the row back, so
+/// reverting the in-loop line left the tool test green too. This one has
+/// nothing behind it, and reverting the line returns the worker's
+/// paragraph.
+#[tokio::test]
+async fn the_wait_behind_wait_for_task_ends_on_a_revoke_not_on_the_result() {
+    let g = gate_fixture();
+    let (a_row, ada, bob) = (g.a_row, g.ada, g.bob);
+    let task =
+        crate::service::tasks::create_task(&g.store, Some(a_row), Some(a_row), "hers").unwrap();
+    let store = std::sync::Mutex::new(g.store);
+    {
+        let s = store.lock().unwrap();
+        s.grant_session(
+            a_row,
+            crate::store::GrantRecipient::Person(bob),
+            crate::store::GRANT_WATCH,
+            ada,
+        )
+        .unwrap();
+    }
+    let caller = device_of(bob, ada);
+    let recheck = RevokeOnSecondWake::new(
+        TaskRecheck {
+            caller: &caller,
+            task_id: task.id,
+            reach: Reach::Read,
+        },
+        move |s| {
+            s.revoke_session_grant(a_row, bob, ada).unwrap();
+        },
+    );
+    let wait = crate::service::tasks::wait_for_task_with(
+        &store,
+        task.id,
+        Duration::from_secs(60),
+        Duration::from_millis(20),
+        &recheck,
+    );
+    let meanwhile = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let s = store.lock().unwrap();
+        s.finish_task(task.id, "done", Some("the answer"), None)
+            .unwrap();
+    };
+    let (out, ()) = tokio::join!(wait, meanwhile);
+    let e = match out {
+        Err(e) => e,
+        Ok(got) => panic!(
+            "the wake must re-check before it reads the task, but the wait \
+             answered {got:?} after {} re-check(s) — fewer than two means it \
+             never woke again and this run proved nothing",
+            recheck.wakes.load(std::sync::atomic::Ordering::SeqCst)
+        ),
+    };
+    assert_eq!(e.code, codes::E_NOTFOUND, "{}", e.message);
+    assert!(
+        !format!("{e:?}").contains("the answer"),
+        "the worker's paragraph is never loaded: {e:?}"
+    );
+}
+
+/// `run_prompt`'s wait, which is the one long poll whose first act cannot
+/// be recalled.
+///
+/// The tool's own body types into a pane over SSH, so what is pinned here
+/// is the part a revoke DOES reach: the wait between the delivery and the
+/// transcript, with `run_prompt`'s own `Reach::Drive` behind it. Both ways
+/// a drive grant can end are covered — revoked outright, and NARROWED to
+/// `watch`, which is the case `Reach::Read` could never have caught.
+///
+/// What is deliberately not asserted, because it is not true: that the
+/// prompt is un-sent. See `docs/hub.md` → *A revoked share, precisely*.
+#[tokio::test]
+async fn the_wait_run_prompt_parks_in_ends_when_its_drive_grant_does() {
+    for (what, narrow) in [("revoked", false), ("narrowed to watch", true)] {
+        let g = gate_fixture();
+        let (a_row, ada, bob) = (g.a_row, g.ada, g.bob);
+        let store = std::sync::Arc::new(std::sync::Mutex::new(g.store));
+        {
+            let s = store.lock().unwrap();
+            s.grant_session(
+                a_row,
+                crate::store::GrantRecipient::Person(bob),
+                crate::store::GRANT_DRIVE,
+                ada,
+            )
+            .unwrap();
+        }
+        let caller = device_of(bob, ada);
+        let recheck = SessionRecheck {
+            caller: &caller,
+            session_id: a_row,
+            reach: Reach::Drive,
+            what: "the session to prompt",
+        };
+        // Exactly `run_prompt`'s wait: the reply to the prompt it just
+        // delivered, which never arrives here.
+        let wait = crate::service::tasks::wait_for_session(
+            &store,
+            a_row,
+            crate::service::tasks::WaitCond::TurnGt(0),
+            // 60 s, not 10: a wait that ends on its deadline proves
+            // nothing, and a loaded suite starves a test's first wake.
+            Duration::from_secs(60),
+            &recheck,
+        );
+        let meanwhile = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let s = store.lock().unwrap();
+            if narrow {
+                s.narrow_session_grant(a_row, bob, ada).unwrap();
+            } else {
+                s.revoke_session_grant(a_row, bob, ada).unwrap();
+            }
+        };
+        let (out, ()) = tokio::join!(wait, meanwhile);
+        let e = out.expect_err("the wait ends with the grant that opened it");
+        let expected = if narrow {
+            // Still visible, no longer drivable: the refusal says so
+            // rather than pretending the row is gone.
+            codes::E_FORBIDDEN
+        } else {
+            codes::E_NOTFOUND
+        };
+        assert_eq!(e.code, expected, "{what}: {}", e.message);
+    }
+}
+
+/// The control for it: a drive grant left alone is served the turn it was
+/// waiting for.
+#[tokio::test]
+async fn the_wait_run_prompt_parks_in_is_served_while_the_grant_stands() {
+    let g = gate_fixture();
+    let (a_row, ada, bob) = (g.a_row, g.ada, g.bob);
+    let store = std::sync::Arc::new(std::sync::Mutex::new(g.store));
+    {
+        let s = store.lock().unwrap();
+        s.grant_session(
+            a_row,
+            crate::store::GrantRecipient::Person(bob),
+            crate::store::GRANT_DRIVE,
+            ada,
+        )
+        .unwrap();
+    }
+    let caller = device_of(bob, ada);
+    let recheck = SessionRecheck {
+        caller: &caller,
+        session_id: a_row,
+        reach: Reach::Drive,
+        what: "the session to prompt",
+    };
+    let wait = crate::service::tasks::wait_for_session(
+        &store,
+        a_row,
+        crate::service::tasks::WaitCond::TurnGt(0),
+        Duration::from_secs(60),
+        &recheck,
+    );
+    let meanwhile = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let s = store.lock().unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET turn_seq = 7 WHERE id = ?1",
+                rusqlite::params![a_row],
+            )
+            .unwrap();
+    };
+    let (out, ()) = tokio::join!(wait, meanwhile);
+    let out = out.expect("a live drive grant is served");
+    assert!(out.satisfied);
+    assert_eq!(out.row.turn_seq, 7);
+}
+
+/// The PRE-RETURN re-check, and the gap it is actually for.
+///
+/// Every wait re-checks inside its own lock window, so for most wakes the
+/// gate and the row are read together and there is nothing in between. The
+/// exception is the one await a wait takes OUTSIDE that window: the stale
+/// row's pane probe (an SSH capture, tens of milliseconds at best). A
+/// revoke that lands during it is past the last in-loop re-check, and
+/// `FleetTools::recheck_now` — which every long poll calls immediately
+/// before its `ok_json` — is the only thing between it and the payload.
+///
+/// So the assertion is in two halves: the wait itself SUCCEEDS (the pane
+/// said quiet, which is the honest answer to what it was asked), and the
+/// pre-return check refuses anyway.
+#[tokio::test]
+async fn the_pre_return_recheck_closes_the_pane_probes_window() {
+    struct RevokingProbe<'a> {
+        store: &'a std::sync::Mutex<Store>,
+        row: i64,
+        bob: i64,
+        ada: i64,
+    }
+    #[async_trait::async_trait]
+    impl crate::service::tasks::PaneProbe for RevokingProbe<'_> {
+        async fn pane_status(&self, _session_id: i64) -> Option<String> {
+            // Mid-probe, outside the wait's lock window.
+            let s = self.store.lock().unwrap();
+            s.revoke_session_grant(self.row, self.bob, self.ada)
+                .unwrap();
+            Some("idle".into())
+        }
+    }
+
+    let g = gate_fixture();
+    let (a_row, ada, bob) = (g.a_row, g.ada, g.bob);
+    // Stale-demoted with a stored `idle`: the one row shape whose wait
+    // spends a pane probe (`store::needs_pane_confirmation`).
+    g.store
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET claude_status = 'idle', stale_demoted_at = 1 WHERE id = ?1",
+            rusqlite::params![a_row],
+        )
+        .unwrap();
+    let t = test_tools(g.store);
+    share_watch(&t, a_row, bob, ada);
+
+    let caller = device_of(bob, ada);
+    let recheck = SessionRecheck {
+        caller: &caller,
+        session_id: a_row,
+        reach: Reach::Read,
+        what: "the session",
+    };
+    let probe = RevokingProbe {
+        store: &t.store,
+        row: a_row,
+        bob,
+        ada,
+    };
+    let out = crate::service::tasks::wait_for_session_probed(
+        &t.store,
+        a_row,
+        crate::service::tasks::WaitCond::Idle,
+        Duration::from_secs(60),
+        Duration::from_millis(20),
+        &probe,
+        Duration::from_millis(0),
+        &recheck,
+    )
+    .await
+    .expect("the pane answered: the wait's own question is settled");
+    assert!(out.satisfied, "the probe said quiet");
+
+    let e = t
+        .recheck_now(&recheck)
+        .expect_err("but the share went while the probe was in flight");
+    assert!(
+        e.message.starts_with(codes::E_NOTFOUND),
+        "the payload is withheld, as a row B can no longer see: {}",
+        e.message
+    );
+}
+
+/// The completeness check behind the four above: no long poll a token can
+/// reach may waive its re-check.
+///
+/// `tasks::NoRecheck` is the deliberate, named "no grant behind this" —
+/// right for the move engine, never right for a tool. A new long poll that
+/// reaches for it, or a new `wait_for_*` call under `mcp/` that passes it
+/// to get the arity right, fails here rather than shipping a wait that
+/// cannot be revoked.
+///
+/// Test modules are skipped, and only them: this is a rule about the
+/// SERVED path, and a test is entitled to construct whatever it is
+/// asserting about. The scan is over `mcp/`'s production files, which is
+/// where a tool body lives — `no_eprintln_tests` draws the same line.
+#[test]
+fn no_long_poll_tool_waives_its_access_recheck() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/mcp");
+    let mut offenders = Vec::new();
+    let mut stack = vec![dir];
+    while let Some(p) = stack.pop() {
+        for entry in std::fs::read_dir(&p).expect("mcp/ is readable") {
+            let path = entry.expect("a dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if name.starts_with("tests") {
+                continue;
+            }
+            if path.extension().is_some_and(|e| e == "rs") {
+                let src = std::fs::read_to_string(&path).expect("readable");
+                for (n, line) in src.lines().enumerate() {
+                    if line.contains("NoRecheck") {
+                        offenders.push(format!("{}:{}", path.display(), n + 1));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a long poll under mcp/ waived its T11 re-check with NoRecheck \
+         (pass a real `SessionRecheck` / `TaskRecheck` instead): {offenders:?}"
+    );
+}
+
 /// `send_message { deliver: true, submit: true }` types arbitrary text into
 /// the recipient's pane and presses Enter. That is a pane write, so it
 /// takes the same level `send_prompt` does — and a watcher is refused it.

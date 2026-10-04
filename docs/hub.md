@@ -1987,6 +1987,42 @@ beat, through a different check), while revoking a share leaves the device
 paired and only narrows what it may see. Neither is expressed in terms of the
 other.
 
+### A revoked share, precisely
+
+"B loses access" has three bounds, and a long poll is the awkward one: it is
+the only request that outlives its own authorisation — the gate ran once, at
+the top, and the call then sat for up to ten minutes.
+
+1. **The next request is refused.** Nothing is cached between calls.
+2. **An open `/events` stream drops within 15 s**, the keep-alive beat above.
+3. **A long poll already in flight is re-checked** on every wake — twice a
+   second — and once more immediately before it answers. So the wait a
+   grantee started before the revoke ends with `E_NOTFOUND` (the row is no
+   longer theirs to see) or `E_FORBIDDEN` (still visible, no longer theirs
+   to drive), and not with the payload. This covers `wait_for_session`,
+   `wait_for_reply`, `wait_for_task` and `run_prompt`'s wait.
+   `add_project`, the fifth long poll, waits on a clone and names no
+   session, so no share governs it.
+
+**What is NOT recalled, and will not be:**
+
+- **A prompt `run_prompt` has already delivered.** Its order is deliver,
+  wait, read the transcript. A revoke that lands during the wait withholds
+  the transcript — the reply is content the caller may no longer have — but
+  the keystrokes are already in the owner's pane, and there is no un-typing
+  them. Treat `run_prompt` from a shared session as something that has
+  happened the moment it returns anything at all, including a refusal.
+- **An attached terminal.** The PTY is the desktop's own, outside the
+  hub's request path entirely; detaching is the operator's act.
+- **A payload already on the wire.** A refusal cannot overtake bytes that
+  have left.
+
+One more thing worth knowing if you are watching rate limits: a revoked
+device keeps its long-poll SLOTS (`MAX_LONG_POLLS_PER_CALLER`) until its
+parked waits age out, up to 660 s, because the permit bucket is keyed on the
+device name. Every wait behind those slots now refuses, so nothing is served
+through them — the device is only rate-limiting itself.
+
 ## Error reports
 
 The hub is also the one place its participants' errors are collected. The
