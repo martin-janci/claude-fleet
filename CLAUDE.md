@@ -767,8 +767,9 @@ The desktop builds for Windows as a **client** (plan
 there), the home/cache dirs through `fleet_core::home` only, and the hub
 token in Credential Manager. Unix-only code and tests stay `#[cfg(unix)]`
 (for a test module: a `#[cfg(unix)]` line above a bare `#[cfg(test)]`, the
-form `no_eprintln_tests` recognises); `rust-windows` in CI keeps clippy and
-the tests green there. `fleet-agent` and `fleet-hub` stay Unix-only.
+form `no_eprintln_tests` recognises); in CI, `rust-windows` keeps the tests
+and the Windows leg of `clippy` keeps the lints green there. `fleet-agent`
+and `fleet-hub` stay Unix-only.
 On Windows a WSL distribution is a host (`fleet_core::wsl`, alias
 `wsl-<name>`): `SshClient::remote_command` and the PTY attach run it through
 `wsl.exe … sh -c` instead of `ssh`, and it gets no reverse tunnel. The `ssh`
