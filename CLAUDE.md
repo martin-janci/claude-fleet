@@ -41,6 +41,10 @@ scripts/verify.sh                       # fmt, lint and the tests of the modules
 # 3. before pushing / marking a PR ready (≈ 3 min warm)
 scripts/verify.sh full                  # = scripts/ci-local.sh, narrowed to the jobs
                                         # the change touches; the suite runs once
+#    or, with BUILDKITE_API_TOKEN / BUILDKITE_ORG set, after pushing the branch:
+scripts/verify.sh remote                # the same `full` on the persistent Buildkite
+                                        # builder; waits, exit 0 iff it passed
+                                        # (docs/buildkite.md)
 ```
 
 What `verify.sh` runs, for running a piece of it by hand:
