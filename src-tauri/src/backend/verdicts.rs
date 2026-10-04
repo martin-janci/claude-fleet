@@ -1259,6 +1259,38 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "catalog_admin",
         },
     ),
+    // Assets M5 (R13): the workspace's reads. The footer's catalog chips:
+    // `catalog_admin { list_catalogs }`, the master's or an unbound full
+    // client's — no grant (M3 PF15).
+    (
+        "catalog_list_catalogs",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    // The Inbox's cards, read only until M6: `changesets { list }`, the
+    // master's or an unbound full client's.
+    (
+        "catalog_list_changesets",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    // One catalog's repo status by name: `catalog_admin { repo_status }`
+    // with the tool's `catalog` parameter; needs a grant on that catalog.
+    (
+        "catalog_repo_status_in",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    // The Inspector's History: `catalog_admin { asset_history }`, per
+    // catalog, with a grant on it. A hub before M5 refuses the action with
+    // E_INVALID (unknown variant) — no contract bump (R13).
+    (
+        "catalog_asset_history",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
     (
         "catalog_spawn_author_session",
         Verdict::LocalOnly {

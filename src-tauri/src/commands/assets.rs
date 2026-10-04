@@ -16,18 +16,21 @@ use fleet_core::ipc_error::IpcError;
 use fleet_core::service::catalog::{
     self,
     admin::{
-        AdminCall, DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs, LoadArgs,
-        ResolvePreviewArgs, SetHostHarnessesArgs, SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
+        AdminCall, CatalogNameArgs, DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs,
+        LoadArgs, ResolvePreviewArgs, SetHostHarnessesArgs, SetHostLayersArgs, SetSecretArgs,
+        WriteLayerArgs,
     },
     author::{
         self, AddResourceArgs, AddResourceBytesArgs, AssetRef, CommitPendingArgs, CreateArgs,
         LintAll, LintReport, RemoveResourceArgs, UpdateArgs, WriteResult,
     },
     author_session::{self, SpawnAuthorArgs},
+    catalogs::CatalogStatus,
+    changesets::ChangesetSummary,
     import::ImportReport,
     inventory,
-    model::Asset,
-    repo::RepoStatus,
+    model::{Asset, Kind},
+    repo::{CommitEntry, RepoStatus},
     sync::{self, plan::SyncPlan, ApplyArgs, PlanArgs, SyncRunSummary},
     validate::{check_layer_name, check_name, check_resource_path, check_secret_name},
     AssetDetail, AssetListing, ConfigureArgs, ImportArgs,
@@ -321,6 +324,57 @@ pub async fn catalog_repo_status(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<RepoStatus, IpcError> {
     routed::catalog_repo_status(&backend, &store).await
+}
+
+/// Assets M5 (R13, R24): every catalog and its load state — the footer's
+/// chips.
+#[tauri::command]
+pub async fn catalog_list_catalogs(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<CatalogStatus>, IpcError> {
+    routed::catalog_list_catalogs(&backend, &store).await
+}
+
+/// Assets M5 (R13, R14): the changeset cards, read only — the Inbox's
+/// proposed cards. Apply / undo / dismiss are M6.
+#[tauri::command]
+pub async fn catalog_list_changesets(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<ChangesetSummary>, IpcError> {
+    routed::catalog_list_changesets(&backend, &store).await
+}
+
+/// Assets M5 (R13, R24): one catalog's dirty / ahead / behind, by name.
+#[tauri::command]
+pub async fn catalog_repo_status_in(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: CatalogNameArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<RepoStatus, IpcError> {
+    routed::catalog_repo_status_in(&backend, args, &store).await
+}
+
+/// `catalog_asset_history`'s arguments: an asset, and its catalog (`None`
+/// or `personal` = the personal catalog).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AssetHistoryArgs {
+    pub kind: Kind,
+    pub name: String,
+    #[serde(default)]
+    pub catalog: Option<String>,
+}
+
+/// Assets M5 (R13, R19): the commits that touched one asset — the
+/// Inspector's History.
+#[tauri::command]
+pub async fn catalog_asset_history(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: AssetHistoryArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<CommitEntry>, IpcError> {
+    routed::catalog_asset_history(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -877,6 +931,105 @@ pub(crate) mod routed {
                     .await
             }
             None => author::repo_status(store),
+        }
+    }
+
+    /// `call` addressed to `catalog` through the tool's own top-level
+    /// `catalog` parameter (Assets M5, R13) — never inside `args`, where a
+    /// hub would ignore it and answer for personal.
+    fn in_catalog(call: &AdminCall, catalog: &str) -> Result<serde_json::Value, IpcError> {
+        let mut v = serde_json::to_value(call).map_err(|e| {
+            IpcError::new(
+                fleet_core::ipc_error::codes::E_INTERNAL,
+                format!("{} could not be encoded for the hub: {e}", call.action()),
+            )
+        })?;
+        v["catalog"] = serde_json::Value::String(catalog.to_string());
+        Ok(v)
+    }
+
+    pub async fn catalog_list_catalogs(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<CatalogStatus>, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("catalog_list_catalogs", &AdminCall::ListCatalogs)
+                    .await
+            }
+            None => catalog::catalogs::list_catalogs(store),
+        }
+    }
+
+    pub async fn catalog_list_changesets(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<ChangesetSummary>, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route(
+                    "catalog_list_changesets",
+                    &serde_json::json!({ "action": "list" }),
+                )
+                .await
+            }
+            None => catalog::changesets::list(store),
+        }
+    }
+
+    pub async fn catalog_repo_status_in(
+        backend: &FleetBackend,
+        args: CatalogNameArgs,
+        store: &Mutex<Store>,
+    ) -> Result<RepoStatus, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route(
+                    "catalog_repo_status_in",
+                    &in_catalog(&AdminCall::RepoStatus, &args.name)?,
+                )
+                .await
+            }
+            None if args.name == catalog::catalogs::PERSONAL => author::repo_status(store),
+            None => {
+                let row = catalog::catalogs::catalog_named(&args.name, store)?;
+                author::repo_status_in(catalog::CatalogTarget::Row(&row), store)
+            }
+        }
+    }
+
+    pub async fn catalog_asset_history(
+        backend: &FleetBackend,
+        args: AssetHistoryArgs,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<CommitEntry>, IpcError> {
+        check_name(&args.name)?;
+        let asset = AssetRef {
+            kind: args.kind,
+            name: args.name,
+        };
+        let named = args
+            .catalog
+            .filter(|c| c.as_str() != catalog::catalogs::PERSONAL);
+        match (backend.hub(), named) {
+            (Some(hub), Some(c)) => {
+                hub.route(
+                    "catalog_asset_history",
+                    &in_catalog(&AdminCall::AssetHistory(asset), &c)?,
+                )
+                .await
+            }
+            (Some(hub), None) => {
+                hub.route("catalog_asset_history", &AdminCall::AssetHistory(asset))
+                    .await
+            }
+            (None, Some(c)) => {
+                let row = catalog::catalogs::catalog_named(&c, store)?;
+                author::asset_history_in(catalog::CatalogTarget::Row(&row), asset, store)
+            }
+            (None, None) => {
+                author::asset_history_in(catalog::CatalogTarget::Personal, asset, store)
+            }
         }
     }
 
