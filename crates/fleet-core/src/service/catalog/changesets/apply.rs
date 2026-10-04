@@ -2071,42 +2071,78 @@ impl Sb6Backoff {
     }
 }
 
-/// Fix round 1 (6): every (catalog, layer, host) whose latest decision on
-/// a Rollout card is a person's rejection of its `sync` item — only a
-/// person rejects an item (`reject_item`); a later applied item for the
-/// same triple lifts it. SB6 never syncs what a person said no to.
-pub(super) fn rejected_rollouts(s: &Store) -> Result<BTreeSet<(i64, String, String)>, IpcError> {
-    let mut cards = s.list_changesets()?;
-    cards.sort_by_key(|c| c.id);
-    let mut last: BTreeMap<(i64, String, String), bool> = BTreeMap::new();
-    for card in cards
+/// One rollout `sync` decision, for [`rejected_from`].
+struct Decision {
+    at: i64,
+    card: i64,
+    position: i64,
+    key: (i64, String, String),
+    rejected: bool,
+}
+
+/// Fix round 1 (6) / Assets M5 (R8): the `(catalog, layer, host)` whose
+/// latest decision on a Rollout card's `sync` item is a person's rejection
+/// — only a person rejects an item (`reject_item`); a later applied item
+/// for the same triple lifts it. "Latest" is by when it was decided: the
+/// item's `decided_at`, else (decided before 097) its card's `applied_at`,
+/// else the card's creation (seconds → ms); then card id and position.
+/// Pure.
+pub(super) fn rejected_from(
+    cards: &[(ChangesetRow, Vec<ChangesetItemRow>)],
+) -> BTreeSet<(i64, String, String)> {
+    let mut decisions = Vec::new();
+    for (card, items) in cards
         .iter()
-        .filter(|c| c.kind == CardKind::Rollout.as_str())
+        .filter(|(c, _)| c.kind == CardKind::Rollout.as_str())
     {
-        for i in s.changeset_items(card.id)? {
-            if i.action != ItemAction::Sync.as_str() {
-                continue;
-            }
+        for i in items
+            .iter()
+            .filter(|i| i.action == ItemAction::Sync.as_str())
+        {
+            let rejected = match i.state.as_str() {
+                "rejected" => true,
+                "applied" => false,
+                _ => continue,
+            };
             let (Some(cid), Some(layer)) =
                 (i.catalog_id, ItemParams::parse(i.params.as_deref()).layer)
             else {
                 continue;
             };
-            match i.state.as_str() {
-                "rejected" => {
-                    last.insert((cid, layer, i.name.clone()), true);
-                }
-                "applied" => {
-                    last.insert((cid, layer, i.name.clone()), false);
-                }
-                _ => {}
-            }
+            decisions.push(Decision {
+                at: i
+                    .decided_at
+                    .or(card.applied_at)
+                    .unwrap_or(card.created_at.saturating_mul(1000)),
+                card: card.id,
+                position: i.position,
+                key: (cid, layer, i.name.clone()),
+                rejected,
+            });
         }
     }
-    Ok(last
-        .into_iter()
+    decisions.sort_by_key(|d| (d.at, d.card, d.position));
+    let mut last: BTreeMap<(i64, String, String), bool> = BTreeMap::new();
+    for d in decisions {
+        last.insert(d.key, d.rejected);
+    }
+    last.into_iter()
         .filter_map(|(k, rejected)| rejected.then_some(k))
-        .collect())
+        .collect()
+}
+
+/// [`rejected_from`] over the stored Rollout cards.
+pub(super) fn rejected_rollouts(s: &Store) -> Result<BTreeSet<(i64, String, String)>, IpcError> {
+    let mut cards = Vec::new();
+    for c in s
+        .list_changesets()?
+        .into_iter()
+        .filter(|c| c.kind == CardKind::Rollout.as_str())
+    {
+        let items = s.changeset_items(c.id)?;
+        cards.push((c, items));
+    }
+    Ok(rejected_from(&cards))
 }
 
 #[cfg(test)]
@@ -2281,6 +2317,102 @@ mod filter_tests {
         assert!(!sb6_due(&row("drifted", true, None)));
         assert!(!sb6_due(&row("drifted", false, Some("catalog"))));
         assert!(!sb6_due(&row("orphan", true, None)));
+    }
+
+    /// Assets M5 (R8): the later DECISION wins per (catalog, layer, host),
+    /// not the larger card id; an item decided before 097 falls back to its
+    /// card's apply time.
+    #[test]
+    fn a_later_decision_wins_by_when_it_was_made_not_by_card_id() {
+        let card = |id: i64, applied_at: Option<i64>| ChangesetRow {
+            id,
+            kind: "rollout".into(),
+            summary: "Roll out core".into(),
+            state: "applied".into(),
+            created_at: 1,
+            applied_at,
+            commits: None,
+            layers_snapshot: None,
+            error: None,
+        };
+        let sync = |card: i64, state: &str, decided_at: Option<i64>| ChangesetItemRow {
+            changeset_id: card,
+            position: 0,
+            grp: "core".into(),
+            catalog_id: Some(1),
+            kind: "host".into(),
+            name: "oci".into(),
+            action: "sync".into(),
+            params: Some(r#"{"layer":"core","assets":["skill/w"]}"#.into()),
+            decider: "person".into(),
+            state: state.into(),
+            decided_at,
+        };
+        let key = (1, "core".to_string(), "oci".to_string());
+        // Card 9 rejected oci at t=100; card 5 (an OLDER id) applied it at t=200.
+        let applied_later = vec![
+            (card(5, Some(200)), vec![sync(5, "applied", Some(200))]),
+            (card(9, None), vec![sync(9, "rejected", Some(100))]),
+        ];
+        assert!(!rejected_from(&applied_later).contains(&key));
+        let rejected_later = vec![
+            (card(5, Some(200)), vec![sync(5, "applied", Some(200))]),
+            (card(9, None), vec![sync(9, "rejected", Some(300))]),
+        ];
+        assert!(rejected_from(&rejected_later).contains(&key));
+        let pre_097 = vec![
+            (card(5, Some(200)), vec![sync(5, "applied", None)]),
+            (card(9, None), vec![sync(9, "rejected", Some(150))]),
+        ];
+        assert!(
+            !rejected_from(&pre_097).contains(&key),
+            "falls back to applied_at"
+        );
+    }
+
+    /// Assets M5 (R8): the store path — an apply on an OLDER card made after
+    /// a newer card's rejection lifts it: decision time, not card id.
+    #[test]
+    fn rejected_rollouts_reads_decision_times_from_the_store() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_catalog_config("/p", None).unwrap();
+        let p = s.personal_catalog().unwrap().unwrap().id;
+        let sync = NewChangesetItem {
+            grp: "core".into(),
+            catalog_id: Some(p),
+            kind: "host".into(),
+            name: "oci".into(),
+            action: "sync".into(),
+            params: Some(r#"{"layer":"core","assets":["skill/w"]}"#.into()),
+            decider: "rule".into(),
+        };
+        let older = s
+            .insert_changeset("rollout", "Roll out core", std::slice::from_ref(&sync))
+            .unwrap();
+        let newer = s
+            .insert_changeset("rollout", "Roll out core", &[sync])
+            .unwrap();
+        let key = (p, "core".to_string(), "oci".to_string());
+        s.set_changeset_item_states(newer.id, &[0], "rejected")
+            .unwrap();
+        assert!(rejected_rollouts(&s).unwrap().contains(&key));
+        // Decision times are milliseconds: let the clock move on.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        s.record_changeset_applied(
+            older.id,
+            &AppliedRecord {
+                applied_at: now_unix_ms(),
+                commits: "{}",
+                layers_snapshot: "[]",
+                applied: &[0],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !rejected_rollouts(&s).unwrap().contains(&key),
+            "the older card's later apply lifts the rejection"
+        );
     }
 }
 

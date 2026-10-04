@@ -4,7 +4,7 @@
 
 use super::{now_unix, Store};
 use rusqlite::{OptionalExtension, Result};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One card (`changesets` row).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -44,6 +44,11 @@ pub struct ChangesetItemRow {
     pub decider: String,
     /// pending | applied | skipped | rejected
     pub state: String,
+    /// Assets M5 (migration 097, R8): when it left `pending`, Unix ms;
+    /// `None` while pending and on items decided before 097 (absent on the
+    /// wire then, as before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<i64>,
 }
 
 /// An item to insert; its position is its index. `state` is always
@@ -88,10 +93,37 @@ pub struct TriageVerdictRow {
     pub decided_at: i64,
 }
 
+/// What an item is across a refresh — `(grp, kind, name, action,
+/// catalog_id)` — for carrying a person's decision time (Assets M5, R8).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ItemIdentity(String, String, String, String, Option<i64>);
+
+impl ItemIdentity {
+    fn of(r: &ChangesetItemRow) -> Self {
+        ItemIdentity(
+            r.grp.clone(),
+            r.kind.clone(),
+            r.name.clone(),
+            r.action.clone(),
+            r.catalog_id,
+        )
+    }
+
+    fn of_new(n: &NewChangesetItem) -> Self {
+        ItemIdentity(
+            n.grp.clone(),
+            n.kind.clone(),
+            n.name.clone(),
+            n.action.clone(),
+            n.catalog_id,
+        )
+    }
+}
+
 const CARD_COLS: &str =
     "id, kind, summary, state, created_at, applied_at, commits, layers_snapshot, error";
 const ITEM_COLS: &str =
-    "changeset_id, position, grp, catalog_id, kind, name, action, params, decider, state";
+    "changeset_id, position, grp, catalog_id, kind, name, action, params, decider, state, decided_at";
 
 fn card_row(r: &rusqlite::Row<'_>) -> Result<ChangesetRow> {
     Ok(ChangesetRow {
@@ -119,6 +151,7 @@ fn item_row(r: &rusqlite::Row<'_>) -> Result<ChangesetItemRow> {
         params: r.get(7)?,
         decider: r.get(8)?,
         state: r.get(9)?,
+        decided_at: r.get(10)?,
     })
 }
 
@@ -144,6 +177,9 @@ fn insert_items(conn: &rusqlite::Connection, id: i64, items: &[NewChangesetItem]
     Ok(())
 }
 
+/// The one item-state writer (with the re-reject in
+/// [`Store::replace_changeset_items_keeping`]). Assets M5 (R8): leaving
+/// `pending` is a decision, stamped in Unix ms; going back clears it.
 fn set_item_states(
     conn: &rusqlite::Connection,
     id: i64,
@@ -151,10 +187,13 @@ fn set_item_states(
     state: &str,
 ) -> Result<()> {
     let mut stmt = conn.prepare(
-        "UPDATE changeset_items SET state = ?3 WHERE changeset_id = ?1 AND position = ?2",
+        "UPDATE changeset_items SET state = ?3, \
+           decided_at = CASE WHEN ?3 = 'pending' THEN NULL ELSE ?4 END \
+         WHERE changeset_id = ?1 AND position = ?2",
     )?;
+    let at = super::now_unix_ms();
     for p in positions {
-        stmt.execute(rusqlite::params![id, p, state])?;
+        stmt.execute(rusqlite::params![id, p, state, at])?;
     }
     Ok(())
 }
@@ -301,15 +340,29 @@ impl Store {
             .query_map([id], item_row)?
             .collect::<Result<_>>()?;
         let keep = rejected(&old);
+        // Assets M5 (R8): a re-rejected item keeps when the person decided
+        // it — matched on what the item is, since positions change across a
+        // refresh. One it cannot match (or decided before 097) is stamped now.
+        let decided: BTreeMap<ItemIdentity, i64> = old
+            .iter()
+            .filter(|i| i.state == "rejected")
+            .filter_map(|i| Some((ItemIdentity::of(i), i.decided_at?)))
+            .collect();
+        let now = super::now_unix_ms();
         tx.execute("DELETE FROM changeset_items WHERE changeset_id = ?1", [id])?;
         insert_items(&tx, id, items)?;
         {
             let mut stmt = tx.prepare(
-                "UPDATE changeset_items SET state = 'rejected' \
+                "UPDATE changeset_items SET state = 'rejected', decided_at = ?3 \
                  WHERE changeset_id = ?1 AND position = ?2",
             )?;
             for p in keep {
-                stmt.execute(rusqlite::params![id, p])?;
+                let at = usize::try_from(p)
+                    .ok()
+                    .and_then(|p| items.get(p))
+                    .and_then(|it| decided.get(&ItemIdentity::of_new(it)).copied())
+                    .unwrap_or(now);
+                stmt.execute(rusqlite::params![id, p, at])?;
             }
         }
         tx.commit()?;
@@ -949,5 +1002,72 @@ mod tests {
             ("failed", Some("core: boom"))
         );
         assert_eq!(s.changeset_items(other.id).unwrap()[0].state, "pending");
+    }
+
+    /// Assets M5 (R8): an item's decision time is stamped when it leaves
+    /// pending, kept when a refresh re-rejects it, cleared when it goes back.
+    #[test]
+    fn item_decision_times_are_stamped_kept_and_cleared() {
+        let (s, p) = store();
+        let items = [
+            item("core", "set_scope", Some(p), None),
+            item("core", "assign_layer", Some(p), None),
+        ];
+        let card = s.insert_changeset("bootstrap", "Adopt 2", &items).unwrap();
+        assert!(s
+            .changeset_items(card.id)
+            .unwrap()
+            .iter()
+            .all(|i| i.decided_at.is_none()));
+
+        s.set_changeset_item_states(card.id, &[1], "rejected")
+            .unwrap();
+        let at = s.changeset_items(card.id).unwrap()[1]
+            .decided_at
+            .expect("stamped when rejected");
+        s.conn
+            .execute(
+                "UPDATE changeset_items SET decided_at = ?2 WHERE changeset_id = ?1 AND position = 1",
+                rusqlite::params![card.id, at - 60_000],
+            )
+            .unwrap();
+        // The refresh moves the rejected item to position 0 (PF14): its
+        // time follows what it is, not where it sat.
+        let moved = [items[1].clone(), items[0].clone()];
+        assert!(s
+            .replace_changeset_items_keeping(card.id, "Adopt 2", &moved, |_| vec![0])
+            .unwrap());
+        let now = s.changeset_items(card.id).unwrap();
+        assert_eq!(now[0].state, "rejected");
+        assert_eq!(
+            now[0].decided_at,
+            Some(at - 60_000),
+            "a refresh keeps when the person decided"
+        );
+        assert_eq!(now[1].decided_at, None, "a pending item has no time");
+
+        s.set_changeset_item_states(card.id, &[0], "pending")
+            .unwrap();
+        assert_eq!(s.changeset_items(card.id).unwrap()[0].decided_at, None);
+
+        s.record_changeset_applied(
+            card.id,
+            &AppliedRecord {
+                applied_at: 5,
+                commits: "{}",
+                layers_snapshot: "[]",
+                applied: &[0],
+                skipped: &[1],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            s.changeset_items(card.id)
+                .unwrap()
+                .iter()
+                .all(|i| i.decided_at.is_some()),
+            "an apply stamps what it applied and what it skipped"
+        );
     }
 }

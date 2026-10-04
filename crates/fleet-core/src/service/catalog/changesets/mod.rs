@@ -573,6 +573,7 @@ mod tests {
             params: n.params,
             decider: n.decider,
             state: "rejected".into(),
+            decided_at: None,
         }
     }
 

@@ -416,6 +416,17 @@ fn asset_inventory_has_drift_side(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 097 (`decided_at` on
+/// `changeset_items`, Assets M5).
+fn changeset_items_has_decided_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('changeset_items') WHERE name = 'decided_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 087 (`secret_like` / `fleet_owned`
 /// on `asset_inventory`).
 fn asset_inventory_has_fleet_owned(conn: &Connection) -> rusqlite::Result<bool> {
@@ -1043,6 +1054,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 96,
         sql: include_str!("../../migrations/096_inventory_drift_side.sql"),
         already_applied: Some(asset_inventory_has_drift_side),
+    },
+    // Assets M5: when a changeset item was decided. ADD COLUMN is not
+    // idempotent: guarded.
+    Migration {
+        version: 97,
+        sql: include_str!("../../migrations/097_changeset_item_decided_at.sql"),
+        already_applied: Some(changeset_items_has_decided_at),
     },
 ];
 
@@ -2694,7 +2712,9 @@ mod tests {
                 "action",
                 "params",
                 "decider",
-                "state"
+                "state",
+                // 097 (Assets M5): `migrate` runs on to the latest.
+                "decided_at"
             ]
         );
         assert_eq!(
@@ -4500,6 +4520,35 @@ mod tests {
         assert_eq!(side, None);
         s.conn
             .execute_batch("DELETE FROM schema_version WHERE version >= 96;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// Assets M5 (R8): `changeset_items.decided_at`, NULL on existing items,
+    /// guarded on re-run.
+    #[test]
+    fn migration_097_adds_decided_at_as_null_and_is_safe_to_rerun() {
+        let s = store_at_version(96);
+        s.conn
+            .execute_batch(
+                "INSERT INTO changesets (id, kind, summary, state, created_at) \
+                   VALUES (1, 'new', 'New on oci', 'dismissed', 1); \
+                 INSERT INTO changeset_items \
+                   (changeset_id, position, grp, kind, name, action, decider, state) \
+                   VALUES (1, 0, 'core', 'skill', 's', 'import', 'person', 'rejected');",
+            )
+            .unwrap();
+        assert!(!changeset_items_has_decided_at(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert!(changeset_items_has_decided_at(&s.conn).unwrap());
+        let at: Option<i64> = s
+            .conn
+            .query_row("SELECT decided_at FROM changeset_items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(at, None, "an item decided before 097 has no time");
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 97;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);

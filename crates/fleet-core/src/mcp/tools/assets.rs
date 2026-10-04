@@ -963,6 +963,7 @@ mod confirm_summary_tests {
             )),
             decider: "rule".into(),
             state: "pending".into(),
+            decided_at: None,
         }
     }
 
