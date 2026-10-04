@@ -296,16 +296,20 @@ fn expected_for<'a>(
 ///    the render has moved away from (a re-pointed `install_as`, or a Codex
 ///    skill moving from `~/.codex/skills` to `~/.agents/skills` in F3c,
 ///    whose new location already held an identical copy — the old one has
-///    to go), else `Adopt`; present and differing ⇒ `Overwrite` when the
+///    to go; an `Overwrite` with the edited reason instead when the
+///    recorded old copy was edited, Assets M5), else `Adopt`; present and
+///    differing ⇒ `Overwrite` when the
 ///    asset moved (as above) onto a planned file the entry does not list —
 ///    a copy fleet never wrote there, so not a catalog update — else
 ///    `Overwrite` when the entry's recorded hashes show the host copy was
-///    edited (`HostCopy::Edited`, Assets M5 — whether or not the catalog
-///    moved too); otherwise `Update` when the manifest names it with a
-///    *different* hash (the catalog moved on; reason
-///    `UNVERIFIED_UPDATE_REASON` when the entry predates the file hashes),
-///    `Overwrite("edited on host")` when it names the *same* hash (so the
-///    difference came from the host), and
+///    edited, or the render adds a location the host already holds with
+///    other content (`HostCopy::Edited` from `host_copy_for`, Assets M5 —
+///    whether or not the catalog moved too); otherwise `Update` when the
+///    manifest names it with a *different* hash (the catalog moved on;
+///    reason `UNVERIFIED_UPDATE_REASON` when the entry predates the file
+///    hashes), `Overwrite(UNVERIFIED_EDIT_REASON)` when an entry from
+///    before the file hashes names the *same* hash (so the difference most
+///    likely came from the host), and
 ///    `Overwrite("present but differs; not managed")` when the manifest
 ///    does not name it at all. A `Create` whose entry lists
 ///    locations the render moved away from says so in its reason: rule 8
@@ -632,6 +636,12 @@ pub(crate) const EDITED_AND_MOVED_REASON: &str = "edited on host, and the catalo
 pub(crate) const EDITED_ON_HOST_REASON: &str = "edited on host; the catalog has not changed";
 /// Rule 4 (R2): the catalog moved on, and the manifest entry predates the
 /// file hashes that would tell whether the host copy was edited too.
+/// Rule 4 (R2, fix round 1): the catalog has not changed and the host copy
+/// differs, but the entry predates fleet's file hashes, so the edit is
+/// M4's inference, not proven — [`EDITED_ON_HOST_REASON`] is kept for a
+/// copy the hashes show edited.
+pub(crate) const UNVERIFIED_EDIT_REASON: &str =
+    "likely edited on host; the catalog has not changed, and the host copy predates fleet's file hashes";
 pub(crate) const UNVERIFIED_UPDATE_REASON: &str =
     "the catalog changed; the host copy predates fleet's file hashes, so a host edit cannot be ruled out";
 
@@ -715,8 +725,10 @@ fn action_for(
     }
 
     let manifest_entry = manifest.assets.get(&Manifest::key(kind, &name));
-    // Assets M5 (R1/R2): which side moved, read once for rule 4 and the filters.
-    let host_copy = manifest_entry.map(|e| e.host_copy(snap));
+    // Assets M5 (R1/R2): which side moved, read once for rule 4 and the
+    // filters — against this render too, so a location it adds that the
+    // host already holds with other content reads as an edit (fix round 1).
+    let host_copy = manifest_entry.map(|e| e.host_copy_for(snap, plan));
 
     // Rule 3.
     if let Some(target) = &plugin {
@@ -796,8 +808,15 @@ fn action_for(
             // entry still claims them. `Update` (whose `remove_entry`,
             // rule 8, carries the previous entry) deletes them and
             // refreshes the entry; a `Noop` would leak them forever.
+            //
+            // Fix round 1: when a location the entry records was edited,
+            // deleting it is an overwrite a person sees, not an update.
             Some(entry) if has_stale_locations(entry, plan) => {
-                (ActionOp::Update, Some(MOVED_UPDATE_REASON.into()))
+                if host_copy == Some(HostCopy::Edited) {
+                    (ActionOp::Overwrite, Some(edited_reason(entry, plan)))
+                } else {
+                    (ActionOp::Update, Some(MOVED_UPDATE_REASON.into()))
+                }
             }
             Some(_) => (ActionOp::Noop, None),
             None => (ActionOp::Adopt, None),
@@ -823,18 +842,16 @@ fn action_for(
             // before M5 cannot tell (`Unverified`) and keeps M4's reading
             // below, its `update` now carrying `UNVERIFIED_UPDATE_REASON`.
             Some(entry) if host_copy == Some(HostCopy::Edited) => {
-                let why = if entry.hash == plan.hash() {
-                    EDITED_ON_HOST_REASON
-                } else {
-                    EDITED_AND_MOVED_REASON
-                };
-                (ActionOp::Overwrite, Some(why.into()))
+                (ActionOp::Overwrite, Some(edited_reason(entry, plan)))
             }
             // Unverified (pre-M5 entry): M4's reading — same render means
-            // the difference came from the host.
-            Some(entry) if entry.hash == plan.hash() => {
-                (ActionOp::Overwrite, Some(EDITED_ON_HOST_REASON.into()))
+            // the difference most likely came from the host.
+            Some(entry) if entry.hash == plan.hash() && host_copy == Some(HostCopy::Unverified) => {
+                (ActionOp::Overwrite, Some(UNVERIFIED_EDIT_REASON.into()))
             }
+            // The catalog moved on (or, `Unchanged`, every location fleet
+            // recorded is exactly as it wrote it and nothing foreign is in
+            // the way): writing the render loses nothing a person made.
             Some(_) => (
                 ActionOp::Update,
                 (host_copy == Some(HostCopy::Unverified))
@@ -881,6 +898,17 @@ fn action_for(
         host_copy,
         ..blank()
     }
+}
+
+/// Rule 4's reason for a copy the hashes show edited (`HostCopy::Edited`):
+/// whether the catalog moved on as well.
+fn edited_reason(entry: &ManifestEntry, plan: &RenderPlan) -> String {
+    if entry.hash == plan.hash() {
+        EDITED_ON_HOST_REASON
+    } else {
+        EDITED_AND_MOVED_REASON
+    }
+    .to_string()
 }
 
 /// Does `entry` record a file path or a merge (`file`, `json_path`) that
@@ -1646,6 +1674,185 @@ mod tests {
         assert_eq!(a.op, ActionOp::Update);
         assert_eq!(a.host_copy, Some(HostCopy::Unverified));
         assert_eq!(a.reason.as_deref(), Some(UNVERIFIED_UPDATE_REASON));
+    }
+
+    /// Whether a Rollout or SB6 would carry `name` to the host:
+    /// `changesets::apply::narrow` under the Additive filter, for a card
+    /// owning that asset and its catalog.
+    fn additive_keeps(hp: &HostPlan, name: &str) -> bool {
+        use crate::service::catalog::changesets::apply::{narrow, OpFilter};
+        let a = act(hp, name);
+        let mut hp = hp.clone();
+        narrow(
+            &mut hp,
+            OpFilter::Additive,
+            &BTreeSet::from([format!("{}/{}", a.kind, a.name)]),
+            &BTreeSet::from([a
+                .catalog
+                .clone()
+                .expect("a catalog asset names its catalog")]),
+        );
+        hp.actions.iter().any(|a| a.name == name)
+    }
+
+    /// Fix round 1 (Critical): the entry recorded `SKILL.md`; the new render
+    /// adds `scripts/go.sh`, which the host already holds with a person's
+    /// bytes. Every recorded file is untouched, yet writing the render would
+    /// replace content fleet never wrote: the copy is edited, an overwrite,
+    /// and no Rollout or SB6 carries it.
+    #[test]
+    fn a_file_the_new_render_adds_over_a_persons_copy_is_an_overwrite() {
+        let old = substituted(&Claude, &asset(SKILL), &secrets_map());
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "skill/s".into(),
+            Manifest::entry_for(&old.hash(), &old, 0, "personal"),
+        );
+        let mut snap = HostSnapshot::default();
+        satisfy(&mut snap, &old);
+        let mut v2 = asset(SKILL_V2);
+        v2.resources.push(crate::service::catalog::model::Resource {
+            rel_path: "resources/scripts/go.sh".into(),
+            bytes: b"fleet's\n".to_vec(),
+        });
+        let moved = Catalog {
+            assets: vec![v2],
+            ..Default::default()
+        };
+
+        // The new file is not there yet: a plain update, carried.
+        let hp = plan_for(&moved, &Claude, &snap, &manifest, &secrets_map());
+        let a = act(&hp, "s");
+        assert_eq!(
+            (a.op, a.host_copy),
+            (ActionOp::Update, Some(HostCopy::Unchanged))
+        );
+        assert!(additive_keeps(&hp, "s"));
+
+        snap.files.insert(
+            "~/.claude/skills/s/scripts/go.sh".into(),
+            sha256_hex(b"the person's\n"),
+        );
+        let hp = plan_for(&moved, &Claude, &snap, &manifest, &secrets_map());
+        let a = act(&hp, "s");
+        assert_eq!(a.op, ActionOp::Overwrite);
+        assert_eq!(a.host_copy, Some(HostCopy::Edited));
+        assert_eq!(a.reason.as_deref(), Some(EDITED_AND_MOVED_REASON));
+        assert!(a.backup);
+        assert!(!additive_keeps(&hp, "s"), "never on a Rollout or SB6");
+    }
+
+    /// Fix round 1 (Critical, merge variant): the MCP server is re-pointed
+    /// (`install_as`) at `mcpServers.fleet2`, which the host already holds
+    /// with a person's value; the recorded `mcpServers.fleet` is untouched.
+    #[test]
+    fn a_merge_the_new_render_adds_over_a_persons_value_is_an_overwrite() {
+        let old = substituted(&Claude, &asset(MCP), &secrets_map());
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "mcp_server/fleet".into(),
+            Manifest::entry_for(&old.hash(), &old, 0, "personal"),
+        );
+        let mut snap = HostSnapshot::default();
+        satisfy(&mut snap, &old);
+        let root = snap.configs.get_mut("~/.claude.json").unwrap();
+        root["mcpServers"]["fleet2"] = json!({"type": "http", "url": "https://person/mcp"});
+        let repointed = format!("{MCP}install_as: fleet2\n");
+
+        let hp = plan_for(
+            &catalog_of(&[repointed.as_str()]),
+            &Claude,
+            &snap,
+            &manifest,
+            &secrets_map(),
+        );
+        let a = act(&hp, "fleet");
+        assert_eq!(a.op, ActionOp::Overwrite, "{:?}", a.reason);
+        assert_eq!(a.host_copy, Some(HostCopy::Edited));
+        assert_eq!(a.reason.as_deref(), Some(EDITED_AND_MOVED_REASON));
+        assert!(!additive_keeps(&hp, "fleet"));
+    }
+
+    /// Fix round 1: present and matching at its new location, but the old
+    /// location fleet recorded was edited — deleting it is an overwrite a
+    /// person sees, not an "update".
+    #[test]
+    fn a_moved_asset_whose_old_copy_was_edited_is_an_overwrite() {
+        const RENAMED: &str = "kind: skill\nname: foo-bar\ndescription: d\ninstall_as: foo_bar\n";
+        const PLAIN: &str = "kind: skill\nname: foo-bar\ndescription: d\n";
+        let old_plan = substituted(&Claude, &asset(RENAMED), &secrets_map());
+        let new_plan = substituted(&Claude, &asset(PLAIN), &secrets_map());
+        let mut snap = HostSnapshot::default();
+        satisfy(&mut snap, &old_plan);
+        satisfy(&mut snap, &new_plan);
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert(
+            "skill/foo-bar".into(),
+            Manifest::entry_for(&old_plan.hash(), &old_plan, 0, "personal"),
+        );
+        let catalog = catalog_of(&[PLAIN]);
+
+        let hp = plan_for(&catalog, &Claude, &snap, &manifest, &secrets_map());
+        let a = act(&hp, "foo-bar");
+        assert_eq!(
+            (a.op, a.reason.as_deref(), a.host_copy),
+            (
+                ActionOp::Update,
+                Some(MOVED_UPDATE_REASON),
+                Some(HostCopy::Unchanged)
+            )
+        );
+
+        snap.files
+            .insert(old_plan.files[0].path.clone(), "edited".into());
+        let hp = plan_for(&catalog, &Claude, &snap, &manifest, &secrets_map());
+        let a = act(&hp, "foo-bar");
+        assert_eq!(a.op, ActionOp::Overwrite);
+        assert_eq!(a.reason.as_deref(), Some(EDITED_AND_MOVED_REASON));
+        assert_eq!(a.host_copy, Some(HostCopy::Edited));
+        assert!(
+            a.remove_entry.is_some(),
+            "the old copy still goes, backed up"
+        );
+    }
+
+    /// Fix round 1: `EDITED_ON_HOST_REASON` only for a copy proven edited.
+    /// A pre-M5 entry naming this very render over a differing copy keeps
+    /// M4's overwrite, said as what it is — likely, not proven.
+    #[test]
+    fn an_unverified_copy_over_the_same_render_says_it_is_likely_edited() {
+        let render = substituted(&Claude, &asset(SKILL), &secrets_map());
+        let mut entry = Manifest::entry_for(&render.hash(), &render, 0, "personal");
+        entry.file_hashes.clear();
+        let mut manifest = Manifest {
+            version: 1,
+            ..Default::default()
+        };
+        manifest.assets.insert("skill/s".into(), entry);
+        let mut snap = HostSnapshot::default();
+        satisfy(&mut snap, &render);
+        snap.files
+            .insert("~/.claude/skills/s/SKILL.md".into(), "edited".into());
+        let hp = plan_for(
+            &catalog_of(&[SKILL]),
+            &Claude,
+            &snap,
+            &manifest,
+            &secrets_map(),
+        );
+        let a = act(&hp, "s");
+        assert_eq!(a.op, ActionOp::Overwrite);
+        assert_eq!(a.host_copy, Some(HostCopy::Unverified));
+        assert_eq!(a.reason.as_deref(), Some(UNVERIFIED_EDIT_REASON));
     }
 
     #[test]

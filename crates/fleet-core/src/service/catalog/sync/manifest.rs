@@ -80,6 +80,60 @@ pub enum HostCopy {
 }
 
 impl ManifestEntry {
+    /// [`HostCopy`] of this entry's asset on `snap`, read against `plan`,
+    /// the render about to be written (Assets M5, fix round 1). On top of
+    /// [`Self::host_copy`], a location the render writes that the entry
+    /// never recorded, and that the host already holds with something else,
+    /// is content fleet never wrote — the copy is `Edited`, however
+    /// untouched the recorded locations are:
+    ///
+    /// - a planned file at a path the entry does not list, whose host hash
+    ///   is not the render's;
+    /// - a planned `Set` at a `(file, json_path)` the entry does not list,
+    ///   whose host value is not the planned one;
+    /// - a planned `AppendUnique` there whose host value is not an array:
+    ///   applying it replaces that value. Over an array it only appends, so
+    ///   every element a person put there stays and nothing is foreign.
+    ///
+    /// A location the host does not hold yet is new, not foreign.
+    pub fn host_copy_for(&self, snap: &HostSnapshot, plan: &RenderPlan) -> HostCopy {
+        match self.host_copy(snap) {
+            HostCopy::Edited => HostCopy::Edited,
+            _ if self.holds_foreign_copy(snap, plan) => HostCopy::Edited,
+            recorded => recorded,
+        }
+    }
+
+    /// Whether `snap` holds, at a location `plan` writes and this entry
+    /// never recorded, something other than what `plan` would write there
+    /// (see [`Self::host_copy_for`]).
+    fn holds_foreign_copy(&self, snap: &HostSnapshot, plan: &RenderPlan) -> bool {
+        let file = plan.files.iter().any(|f| {
+            !self.files.contains(&f.path)
+                && snap
+                    .files
+                    .get(&f.path)
+                    .is_some_and(|h| *h != sha256_hex(&f.bytes))
+        });
+        file || plan.merges.iter().any(|m| {
+            let recorded = self
+                .merges
+                .iter()
+                .any(|e| e.file == m.file && e.json_path == m.json_path);
+            let have = snap
+                .configs
+                .get(&m.file)
+                .and_then(|root| json_get(root, &m.json_path));
+            !recorded
+                && have.is_some_and(|v| match m.mode {
+                    MergeMode::Set => *v != m.value,
+                    MergeMode::AppendUnique => !v.is_array(),
+                    // A plugin's entry; plugins never reach rule 4.
+                    MergeMode::Subset => false,
+                })
+        })
+    }
+
     /// [`HostCopy`] of this entry's asset on `snap`. Any differing or
     /// missing location is `Edited`, even when another one is unverifiable.
     pub fn host_copy(&self, snap: &HostSnapshot) -> HostCopy {
@@ -626,5 +680,198 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(subset.host_copy(&snap), HostCopy::Unverified);
+    }
+
+    /// Fix round 1 (coverage): an entry with some file hashes but not all
+    /// cannot vouch for the unhashed file — the copy is unverified.
+    #[test]
+    fn a_partly_hashed_entry_is_unverified() {
+        let entry = ManifestEntry {
+            files: vec!["~/a".into(), "~/b".into()],
+            file_hashes: BTreeMap::from([("~/a".to_string(), sha256_hex(b"a"))]),
+            ..Default::default()
+        };
+        let mut snap = HostSnapshot::default();
+        snap.files.insert("~/a".into(), sha256_hex(b"a"));
+        snap.files.insert("~/b".into(), sha256_hex(b"anything"));
+        assert_eq!(entry.host_copy(&snap), HostCopy::Unverified);
+    }
+
+    /// Fix round 1 (coverage): one location proven edited makes the copy
+    /// edited, whatever another location cannot vouch for — in either order.
+    #[test]
+    fn edited_beats_unverified_in_one_entry() {
+        let entry = ManifestEntry {
+            files: vec!["~/unhashed".into(), "~/hashed".into()],
+            file_hashes: BTreeMap::from([("~/hashed".to_string(), sha256_hex(b"fleet"))]),
+            merges: vec![ManifestMerge {
+                file: "~/.claude/plugins/installed_plugins.json".into(),
+                json_path: vec!["plugins".into(), "sp@mk".into()],
+                mode: MergeMode::Subset,
+                value_hash: "h".into(),
+            }],
+            ..Default::default()
+        };
+        let mut snap = HostSnapshot::default();
+        snap.files.insert("~/unhashed".into(), "x".into());
+        snap.files.insert("~/hashed".into(), sha256_hex(b"person"));
+        assert_eq!(entry.host_copy(&snap), HostCopy::Edited);
+    }
+
+    /// Fix round 1 (coverage): a recorded `AppendUnique` whose array is gone,
+    /// or is no longer an array, was edited on the host.
+    #[test]
+    fn an_append_unique_target_missing_or_not_an_array_is_edited() {
+        let hook = json!({"type": "command", "command": "x"});
+        let entry = ManifestEntry {
+            merges: vec![ManifestMerge {
+                file: "~/.claude/settings.json".into(),
+                json_path: vec!["hooks".into(), "Stop".into()],
+                mode: MergeMode::AppendUnique,
+                value_hash: value_hash(&hook),
+            }],
+            ..Default::default()
+        };
+        let mut snap = HostSnapshot::default();
+        snap.configs
+            .insert("~/.claude/settings.json".into(), json!({"hooks": {}}));
+        assert_eq!(entry.host_copy(&snap), HostCopy::Edited, "missing");
+        snap.configs.insert(
+            "~/.claude/settings.json".into(),
+            json!({"hooks": {"Stop": hook.clone()}}),
+        );
+        assert_eq!(entry.host_copy(&snap), HostCopy::Edited, "not an array");
+        snap.configs.insert(
+            "~/.claude/settings.json".into(),
+            json!({"hooks": {"Stop": [hook]}}),
+        );
+        assert_eq!(entry.host_copy(&snap), HostCopy::Unchanged);
+    }
+
+    /// Fix round 1 (Critical): read against the render about to be written,
+    /// a planned file the entry never recorded that the host already holds
+    /// with other bytes is content fleet never wrote — the copy is edited,
+    /// however untouched the recorded files are.
+    #[test]
+    fn a_foreign_file_where_the_render_adds_one_is_an_edit() {
+        let v1 = plan_with_files(&[("~/.claude/skills/s/SKILL.md", b"v1")]);
+        let entry = Manifest::entry_for("h1", &v1, 1, "personal");
+        let v2 = plan_with_files(&[
+            ("~/.claude/skills/s/SKILL.md", b"v2"),
+            ("~/.claude/skills/s/scripts/go.sh", b"fleet's\n"),
+        ]);
+        let mut snap = HostSnapshot::default();
+        snap.files
+            .insert("~/.claude/skills/s/SKILL.md".into(), sha256_hex(b"v1"));
+        assert_eq!(entry.host_copy(&snap), HostCopy::Unchanged);
+        assert_eq!(
+            entry.host_copy_for(&snap, &v2),
+            HostCopy::Unchanged,
+            "the new file is not on the host yet"
+        );
+
+        snap.files.insert(
+            "~/.claude/skills/s/scripts/go.sh".into(),
+            sha256_hex(b"fleet's\n"),
+        );
+        assert_eq!(
+            entry.host_copy_for(&snap, &v2),
+            HostCopy::Unchanged,
+            "already holds exactly what fleet would write"
+        );
+
+        snap.files.insert(
+            "~/.claude/skills/s/scripts/go.sh".into(),
+            sha256_hex(b"the person's\n"),
+        );
+        assert_eq!(entry.host_copy(&snap), HostCopy::Unchanged);
+        assert_eq!(entry.host_copy_for(&snap, &v2), HostCopy::Edited);
+
+        // A pre-M5 entry cannot vouch for its own file, but the foreign one
+        // is still proof of an edit.
+        let mut old = entry.clone();
+        old.file_hashes.clear();
+        assert_eq!(old.host_copy_for(&snap, &v2), HostCopy::Edited);
+    }
+
+    /// Fix round 1 (Critical, merge variant): a `Set` the entry never
+    /// recorded, at a location the host already holds with another value,
+    /// is an edit. An `AppendUnique` there replaces nothing when the host
+    /// holds an array (it only appends), but replaces whatever else it
+    /// finds, so a non-array there is an edit too.
+    #[test]
+    fn a_foreign_value_where_the_render_adds_a_merge_is_an_edit() {
+        let entry = ManifestEntry {
+            files: vec!["~/f".into()],
+            file_hashes: BTreeMap::from([("~/f".to_string(), sha256_hex(b"f"))]),
+            ..Default::default()
+        };
+        let mut snap = HostSnapshot::default();
+        snap.files.insert("~/f".into(), sha256_hex(b"f"));
+        let set = |value: serde_json::Value| RenderPlan {
+            merges: vec![ConfigMerge {
+                file: "~/.claude.json".into(),
+                json_path: vec!["mcpServers".into(), "fleet2".into()],
+                mode: MergeMode::Set,
+                value,
+            }],
+            ..Default::default()
+        };
+        let mine = json!({"url": "https://example/mcp"});
+        assert_eq!(
+            entry.host_copy_for(&snap, &set(mine.clone())),
+            HostCopy::Unchanged
+        );
+        snap.configs.insert(
+            "~/.claude.json".into(),
+            json!({"mcpServers": {"fleet2": mine.clone()}}),
+        );
+        assert_eq!(
+            entry.host_copy_for(&snap, &set(mine.clone())),
+            HostCopy::Unchanged
+        );
+        snap.configs.insert(
+            "~/.claude.json".into(),
+            json!({"mcpServers": {"fleet2": {"url": "https://person/mcp"}}}),
+        );
+        assert_eq!(entry.host_copy_for(&snap, &set(mine)), HostCopy::Edited);
+
+        let hook = json!({"type": "command", "command": "x"});
+        let append = RenderPlan {
+            merges: vec![ConfigMerge {
+                file: "~/.claude/settings.json".into(),
+                json_path: vec!["hooks".into(), "Stop".into()],
+                mode: MergeMode::AppendUnique,
+                value: hook,
+            }],
+            ..Default::default()
+        };
+        snap.configs.insert(
+            "~/.claude/settings.json".into(),
+            json!({"hooks": {"Stop": [{"type": "command", "command": "theirs"}]}}),
+        );
+        assert_eq!(
+            entry.host_copy_for(&snap, &append),
+            HostCopy::Unchanged,
+            "appending to a person's array keeps every element"
+        );
+        snap.configs.insert(
+            "~/.claude/settings.json".into(),
+            json!({"hooks": {"Stop": "a person's value"}}),
+        );
+        assert_eq!(entry.host_copy_for(&snap, &append), HostCopy::Edited);
+    }
+
+    fn plan_with_files(files: &[(&str, &[u8])]) -> RenderPlan {
+        RenderPlan {
+            files: files
+                .iter()
+                .map(|(path, bytes)| FileWrite {
+                    path: (*path).into(),
+                    bytes: bytes.to_vec(),
+                })
+                .collect(),
+            ..Default::default()
+        }
     }
 }
