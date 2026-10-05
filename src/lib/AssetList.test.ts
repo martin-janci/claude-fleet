@@ -106,3 +106,40 @@ describe('AssetList — one name in two catalogs (Assets M5, PF9)', () => {
     expect(screen.getByTestId('asset-row-acme-skill-s')).toBeTruthy();
   });
 });
+
+describe('AssetList — state counts, needs-person and orphan are Badges (Assets M5, R26)', () => {
+  it('says each state count in words in a toned Badge, and an orphan in a warn Badge', () => {
+    const listing: AssetListing = {
+      ...baseListing(),
+      assets: [
+        {
+          kind: 'skill', name: 's', version: '1', description: 'd', tags: [],
+          hosts: [
+            { host_alias: 'local', harness: 'claude', state: 'in_sync' },
+            { host_alias: 'oci', harness: 'claude', state: 'drifted' },
+            { host_alias: 'trn', harness: 'claude', state: 'missing' },
+          ],
+        },
+      ],
+      unmanaged: [
+        {
+          host_alias: 'oci', harness: 'claude', kind: 'skill', name: 'o', state: 'orphan',
+          catalog_hash: null, host_hash: 'h', scanned_at: 1, managed: true,
+        },
+      ],
+    };
+    render(AssetList, { listing, selected: null, filter: '', onselect: () => {}, onimport: vi.fn() });
+
+    const row = screen.getByTestId('asset-row-skill-s');
+    const badges = Array.from(row.querySelectorAll('.badge')).map((b) => [b.textContent, b.className]);
+    expect(badges).toEqual([
+      ['●1 in sync', expect.stringContaining('ok')],
+      ['◐1 drifted', expect.stringContaining('warn')],
+      ['○1 missing', expect.stringContaining('muted')],
+    ]);
+    const orphan = screen.getByTestId('orphan-badge-oci-claude-skill-o');
+    expect(orphan.className).toContain('badge');
+    expect(orphan.className).toContain('warn');
+    expect(orphan.textContent).toBe('orphan');
+  });
+});

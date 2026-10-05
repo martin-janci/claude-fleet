@@ -267,22 +267,22 @@
   .detail { padding: 10px 14px; overflow: auto; height: 100%; font-size: 13px; }
   .title-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
   .title-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-  .commit { font-size: 11px; color: #16a34a; }
+  .commit { font-size: 11px; color: var(--usage-ok); }
   .sync-btn { font-size: 11px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; background: transparent; color: var(--fg); cursor: pointer; }
-  .sync-btn.danger { color: #e64a4a; border-color: #e64a4a; }
+  .sync-btn.danger { color: var(--usage-crit); border-color: var(--usage-crit); }
   .lint-report { margin: 6px 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; }
   .lint-summary { margin: 0 0 4px; font-weight: 600; }
-  .lint-error { color: #dc2626; margin: 2px 0; font-size: 12px; }
-  .lint-warn { color: #d97706; margin: 2px 0; font-size: 12px; }
+  .lint-error { color: var(--usage-crit); margin: 2px 0; font-size: 12px; }
+  .lint-warn { color: var(--usage-warn); margin: 2px 0; font-size: 12px; }
   .cell-sync { margin-left: 6px; font-size: 10px; padding: 0 4px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--accent); cursor: pointer; }
   h3 { margin: 0 0 4px; font-size: 15px; font-family: ui-monospace, monospace; }
   .kind, .ver { color: var(--fg-muted); font-size: 11px; font-family: system-ui; }
   h4 { margin: 14px 0 6px; font-size: 11px; text-transform: uppercase; color: var(--fg-muted); }
   .desc { margin: 0; } .install-as { margin: 4px 0 0; font-size: 11px; color: var(--fg-muted); } .tags { margin: 4px 0 0; } .tag { border: 1px solid var(--border); border-radius: 8px; padding: 0 6px; font-size: 11px; margin-right: 4px; }
   .matrix { border-collapse: collapse; } .matrix th, .matrix td { text-align: left; padding: 3px 10px 3px 0; border-bottom: 1px solid var(--border); }
-  .state-in-sync { color: #16a34a; } .state-drifted { color: #d97706; } .state-skipped, .state-not-scanned, .state-missing, .state-unsupported, .state-orphan { color: var(--fg-muted); }
+  .state-in-sync { color: var(--usage-ok); } .state-drifted { color: var(--usage-warn); } .state-skipped, .state-not-scanned, .state-missing, .state-unsupported, .state-orphan { color: var(--fg-muted); }
   .tabs { display: flex; gap: 2px; margin-bottom: 6px; } .tabs button { background: none; border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; color: var(--fg-muted); cursor: pointer; } .tabs button.active { color: var(--fg); border-color: var(--accent); }
   .file { margin: 6px 0; } .path { font-family: ui-monospace, monospace; font-size: 12px; color: var(--fg-muted); } .mode { opacity: 0.7; }
   pre { margin: 2px 0 0; padding: 8px; background: var(--bg-pane); border: 1px solid var(--border); border-radius: 4px; overflow: auto; max-height: 320px; font-size: 12px; }
-  .muted { color: var(--fg-muted); } .warn { color: #d97706; margin: 2px 0; } .error { color: #dc2626; }
+  .muted { color: var(--fg-muted); } .warn { color: var(--usage-warn); margin: 2px 0; } .error { color: var(--usage-crit); }
 </style>

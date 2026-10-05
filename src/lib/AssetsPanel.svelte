@@ -514,7 +514,7 @@
   .toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: 12px; }
   .path { color: var(--fg-muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .head { font-family: ui-monospace, monospace; color: var(--fg-muted); }
-  .badge { color: #d97706; }
+  .badge { color: var(--usage-warn); }
   .last-sync { color: var(--fg-muted); font-size: 11px; white-space: nowrap; }
   .repo-status { font-size: 11px; color: var(--fg-muted); margin: 0; padding: 2px 10px; font-family: ui-monospace, monospace; }
   .filter { margin-left: auto; width: 160px; }
@@ -525,8 +525,8 @@
   .body { display: grid; grid-template-columns: 300px 1fr; flex: 1; min-height: 0; }
   .left { border-right: 1px solid var(--border); min-height: 0; overflow: auto; }
   .right { min-height: 0; overflow: auto; }
-  .muted { color: var(--fg-muted); } .empty { padding: 14px; } .error { color: #dc2626; padding: 4px 10px; margin: 0; }
+  .muted { color: var(--fg-muted); } .empty { padding: 14px; } .error { color: var(--usage-crit); padding: 4px 10px; margin: 0; }
   .scan-result { font-size: 12px; padding: 4px 10px; margin: 0; color: var(--fg-muted); }
   .problems { font-size: 12px; margin: 0; padding: 4px 10px 4px 28px; }
-  .primary { background: var(--accent); color: white; border: 0; border-radius: 4px; padding: 6px 10px; }
+  .primary { background: var(--accent); color: var(--accent-fg); border: 0; border-radius: 4px; padding: 6px 10px; }
 </style>

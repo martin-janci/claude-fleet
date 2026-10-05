@@ -38,6 +38,30 @@ describe('SyncPlanDialog', () => {
     expect(screen.getByTestId('plan-action-local-claude-skill-s').textContent).toContain('create');
   });
 
+  it('shows the op and the counts as Badges, toned by what the op does', () => {
+    const p = plan(
+      [hostPlan({ actions: [action({ op: 'overwrite' }), action({ name: 't', op: 'create' })] })],
+      { overwrite: 1, create: 1 },
+    );
+    render(SyncPlanDialog, { plan: p, onclose: () => {}, onapplied: () => {} });
+    const row = screen.getByTestId('plan-action-local-claude-skill-s');
+    expect(row.querySelector('.badge.crit')?.textContent).toBe('overwrite');
+    expect(screen.getByTestId('plan-action-local-claude-skill-t').querySelector('.badge.ok')?.textContent).toBe('create');
+    expect(screen.getByTestId('plan-counts').querySelectorAll('.badge')).toHaveLength(2);
+  });
+
+  it('styles an unverified update reason as a warning note, never as an error', () => {
+    const reason = "the catalog changed; the host copy predates fleet's file hashes, so a host edit cannot be ruled out";
+    const p = plan([hostPlan({ actions: [action({ op: 'update', reason })] })], { update: 1 });
+    render(SyncPlanDialog, { plan: p, onclose: () => {}, onapplied: () => {} });
+    const note = screen.getByTestId('plan-note-local-claude-skill-s');
+    expect(note.textContent).toBe(reason);
+    expect(note.className).toContain('note');
+    expect(note.className).not.toContain('reason');
+    expect(note.className).not.toContain('error');
+    expect(screen.getByTestId('plan-action-local-claude-skill-s').querySelector('.reason')).toBeNull();
+  });
+
   it('renders the Apply button red (danger) when the plan overwrites something', () => {
     const p = plan([hostPlan({ actions: [action({ op: 'overwrite' })] })], { overwrite: 1 });
     render(SyncPlanDialog, { plan: p, onclose: () => {}, onapplied: () => {} });
@@ -92,6 +116,7 @@ describe('SyncPlanDialog', () => {
 
     await waitFor(() => expect(screen.getByTestId('plan-outcome-local-claude-skill-s')).toBeTruthy());
     expect(screen.getByTestId('plan-outcome-local-claude-skill-s').textContent).toContain('done');
+    expect(screen.getByTestId('plan-outcome-local-claude-skill-s').className).toContain('ok');
     expect(screen.getByTestId('plan-restart-local')).toBeTruthy();
 
     const call = invoke.mock.calls.find((c) => c[0] === 'catalog_apply_sync');

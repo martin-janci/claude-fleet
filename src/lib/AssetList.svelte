@@ -1,6 +1,7 @@
 <script lang="ts">
   import { groupByKind, stateCounts, identitiesOf, hostOrder, catalogOf, type AssetListing, type AssetIdentity, type AssetSummary } from './assets';
   import HostStrip from './HostStrip.svelte';
+  import Badge from './Badge.svelte';
 
   let {
     listing,
@@ -55,10 +56,10 @@
       {@const c = stateCounts(a.hosts)}
       {#snippet chips()}
         <span class="chips">
-          {#if c.in_sync}<span class="chip ok">{c.in_sync} in sync</span>{/if}
-          {#if c.drifted}<span class="chip warn">{c.drifted} drifted</span>{/if}
-          {#if c.missing}<span class="chip muted">{c.missing} missing</span>{/if}
-          {#if c.unsupported}<span class="chip muted">{c.unsupported} unsupported</span>{/if}
+          {#if c.in_sync}<Badge tone="ok" glyph="●" label={`${c.in_sync} in sync`} />{/if}
+          {#if c.drifted}<Badge tone="warn" glyph="◐" label={`${c.drifted} drifted`} />{/if}
+          {#if c.missing}<Badge tone="muted" glyph="○" label={`${c.missing} missing`} />{/if}
+          {#if c.unsupported}<Badge tone="muted" glyph="–" label={`${c.unsupported} unsupported`} />{/if}
         </span>
       {/snippet}
       {#if readonly || !isPersonal(a)}
@@ -82,7 +83,7 @@
       <div class="row unmanaged" data-testid={`identity-row-${i.kind}-${i.name}`}>
         <span class="name">{i.name}</span>
         <span class="meta">{i.kind}</span>
-        {#if i.class === 'needs_person'}<span class="badge warn" title={i.reason ?? ''}>{i.reason}</span>{/if}
+        {#if i.class === 'needs_person'}<Badge tone="warn" label={i.reason ?? 'needs a person'} title={i.reason ?? ''} />{/if}
         <HostStrip {order} present={[...new Set(i.hosts.map((h) => h.host_alias))]} odd={oddHosts(i)} />
         {#if !readonly && !internal(i)}
           <button class="link" onclick={() => onimport(i)} title="Import this asset">Import</button>
@@ -99,7 +100,7 @@
     <div class="row unmanaged" data-testid={`unmanaged-row-${r.host_alias}-${r.harness}-${r.kind}-${r.name}`}>
       <span class="name">{r.name}</span>
       <span class="meta">{r.kind} · {r.host_alias}</span>
-      <span class="badge orphan" data-testid={`orphan-badge-${r.host_alias}-${r.harness}-${r.kind}-${r.name}`}>orphan</span>
+      <Badge tone="warn" label="orphan" testid={`orphan-badge-${r.host_alias}-${r.harness}-${r.kind}-${r.name}`} />
     </div>
   {/each}
 </div>
@@ -116,10 +117,6 @@
   .name { flex: 1; font-family: ui-monospace, monospace; }
   .meta { color: var(--fg-muted); font-size: 11px; }
   .chips { display: flex; gap: 4px; }
-  .chip { font-size: 10px; padding: 1px 6px; border-radius: 8px; border: 1px solid var(--border); }
-  .chip.ok { color: var(--usage-ok); } .chip.warn { color: var(--usage-warn); } .chip.muted { color: var(--fg-muted); }
   .link { background: none; border: 0; color: var(--accent); cursor: pointer; font-size: 12px; }
   .link.toggle { display: block; padding: 4px 10px; font-size: 11px; }
-  .badge.orphan { font-size: 10px; padding: 1px 6px; border-radius: 8px; border: 1px solid var(--border); color: var(--usage-warn); }
-  .badge.warn { color: var(--usage-warn); font-size: 10px; padding: 1px 6px; border-radius: 8px; border: 1px solid var(--border); }
 </style>
