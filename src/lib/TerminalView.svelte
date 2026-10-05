@@ -21,7 +21,7 @@
   import { createMouseController } from './terminal_mouse';
   import TransferChip from './TransferChip.svelte';
   import MicToggle from './MicToggle.svelte';
-  import { voiceState, claimVoice, releaseVoice } from './voice';
+  import { voiceState, releaseVoice, followSession, abandonFollow } from './voice';
   import { fitCells } from './terminal_size';
   import { ownsTheFleet } from './hub';
 
@@ -338,11 +338,6 @@
       if (get(voiceState).state !== 'off') void releaseVoice();
       return;
     }
-    // The microphone claim follows the attached session. (A session switch
-    // also runs closeTerm(), so the release lives on the no-selection and
-    // destroy paths only, or it would undo this.)
-    const v = get(voiceState);
-    if (v.state !== 'off' && v.sessionId !== sess.id) void claimVoice(sess.id);
     if (isAttachedTo(sess)) return;
     void openTerm();
   });
@@ -538,6 +533,7 @@
           scheduleAutoReconnect(target.tmux_name, target.host_alias);
         } else {
           openError = `PTY error: ${toIpcError(e).message}`;
+          abandonFollow(sess.id);
         }
         return;
       }
@@ -556,6 +552,9 @@
       currentHost = sess.host_alias;
       ptyOpen = true;
       attachedAt = Date.now();
+      // The microphone claim follows the attached session (closeTerm runs on
+      // every switch, so release lives on the deselect / destroy paths).
+      followSession(sess.id, get(hostByAlias).get(sess.host_alias)?.transport ?? 'ssh');
       // Work graph M7: a person attaching is a touch — it un-archives the
       // session and keeps tidy-up off it for an hour. Not an automatic
       // reconnect. Best-effort: an older hub without the action refuses it.

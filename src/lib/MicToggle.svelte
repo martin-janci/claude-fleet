@@ -1,11 +1,11 @@
 <script lang="ts">
   import type { SessionRow } from './sessions';
-  import { voiceState, claimVoice, releaseVoice } from './voice';
+  import { voiceState, claimVoice, releaseVoice, voiceSupported } from './voice';
   let { session, transport }: { session: SessionRow; transport: 'ssh' | 'agent' } = $props();
   const mine = $derived($voiceState.sessionId === session.id);
   const on = $derived(mine && ($voiceState.state === 'claimed' || $voiceState.state === 'capturing'));
   const title = $derived(
-    transport === 'agent'
+    !voiceSupported(transport)
       ? 'Voice needs an SSH host (agent hosts come later)'
       : mine && $voiceState.error
         ? $voiceState.error
@@ -19,7 +19,7 @@
   }
 </script>
 
-<button class="mic" class:on data-testid="mic-toggle" disabled={transport === 'agent'} {title} onclick={toggle}>
+<button class="mic" class:on data-testid="mic-toggle" disabled={!voiceSupported(transport)} {title} onclick={toggle}>
   🎤{#if mine && $voiceState.state === 'capturing'}<span class="live" data-testid="mic-live"></span>{/if}
 </button>
 {#if on && !$voiceState.tipShown}

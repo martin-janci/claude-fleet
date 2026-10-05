@@ -27,8 +27,25 @@ export function resetVoiceForTest(): void {
   voiceState.set(initial());
 }
 
+/** One rule for "can this host carry a microphone": the toggle's disabled
+ *  state and the follow-the-session effect both read it. */
+export const voiceSupported = (transport: 'ssh' | 'agent'): boolean => transport === 'ssh';
+
+// Every claim / release takes a ticket. A claim that resolves after a newer
+// call must not flip the UI back, and if the newest call was a release it
+// gives the microphone back itself.
+let ticket = 0;
+let lastOp: 'claim' | 'release' = 'release';
+const newestIsRelease = (): boolean => lastOp === 'release';
+
 export async function claimVoice(sessionId: number): Promise<void> {
+  const mine = ++ticket;
+  lastOp = 'claim';
   const r = await invokeCmd<void>('voice_claim', { sessionId });
+  if (mine !== ticket) {
+    if (r.ok && newestIsRelease()) void invokeCmd<void>('voice_release');
+    return;
+  }
   voiceState.update((s) =>
     r.ok
       ? { ...s, sessionId, state: 'claimed', error: null }
@@ -37,8 +54,32 @@ export async function claimVoice(sessionId: number): Promise<void> {
 }
 
 export async function releaseVoice(): Promise<void> {
+  const mine = ++ticket;
+  lastOp = 'release';
   await invokeCmd<void>('voice_release');
+  if (mine !== ticket) return;
   voiceState.update((s) => ({ ...s, state: 'off', error: null }));
+}
+
+/** The terminal attached `sessionId` (on a host of `transport`): the claim
+ *  follows it. Nothing happens while the mic is off. An agent host cannot
+ *  carry one, so it is released; a failed claim is dropped, not retried. */
+export function followSession(sessionId: number, transport: 'ssh' | 'agent'): void {
+  const s = get(voiceState);
+  if (s.state === 'off') return;
+  if (!voiceSupported(transport)) {
+    void releaseVoice();
+  } else if (s.state === 'error') {
+    voiceState.update((v) => ({ ...v, sessionId: null, state: 'off', error: null }));
+  } else if (s.sessionId !== sessionId) {
+    void claimVoice(sessionId);
+  }
+}
+
+/** The attach of `sessionId` failed: a claim held for another session goes. */
+export function abandonFollow(sessionId: number): void {
+  const s = get(voiceState);
+  if (s.state !== 'off' && s.sessionId !== sessionId) void releaseVoice();
 }
 
 /** Follow the backend's `voice:state`. A hub 4001 arrives as `released` with
@@ -62,5 +103,3 @@ export async function startVoiceEvents(): Promise<UnlistenFn> {
     });
   });
 }
-
-export const voiceIsOn = (): boolean => get(voiceState).state !== 'off';
