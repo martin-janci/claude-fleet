@@ -65,11 +65,29 @@ describe('DriftPanel', () => {
     render(DriftPanel, props());
     expect(await screen.findByTestId('drift-note')).toHaveTextContent('The hub is older than this desktop and cannot show this diff yet');
   });
-  it('read-only: the diff without the buttons', async () => {
+  it('read-only (no grant on the catalog): no diff is requested, and no buttons', async () => {
     render(DriftPanel, props({ readOnly: true }));
-    await screen.findByTestId(`drift-file-${P}`);
+    expect(screen.getByTestId('drift-note')).toHaveTextContent('Needs a grant on personal to show the diff.');
+    expect(invoke).not.toHaveBeenCalled();
     expect(screen.queryByTestId('drift-take')).toBeNull();
     expect(screen.queryByTestId('drift-restore')).toBeNull();
+  });
+  it('Take and Restore stay disabled until the diff is read', async () => {
+    let resolve: (v: unknown) => void = () => {};
+    invoke.mockImplementation(() => new Promise((res) => { resolve = res; }));
+    render(DriftPanel, props());
+    expect(screen.getByTestId('drift-take')).toBeDisabled();
+    expect(screen.getByTestId('drift-restore')).toBeDisabled();
+    resolve({ host_alias: 'oci', harness: 'claude', files: [{ path: P, catalog: 'a\n', host: 'b\n' }] });
+    await waitFor(() => expect(screen.getByTestId('drift-take')).toBeEnabled());
+    expect(screen.getByTestId('drift-restore')).toBeEnabled();
+  });
+  it('a diff that could not be read leaves Take and Restore disabled', async () => {
+    invoke.mockRejectedValue({ code: 'E_IO', message: 'oci: cannot read ~/.claude/skills/w/SKILL.md' });
+    render(DriftPanel, props());
+    expect(await screen.findByTestId('drift-note')).toHaveTextContent('Could not read the two copies');
+    expect(screen.getByTestId('drift-take')).toBeDisabled();
+    expect(screen.getByTestId('drift-restore')).toBeDisabled();
   });
   it('a rejected take leaves Restore only', async () => {
     const v = { ...view, items: [{ ...view.items[0], state: 'rejected' as const }, view.items[1]] };
@@ -103,10 +121,10 @@ describe('DriftPanel', () => {
     render(DriftPanel, props());
     expect(await screen.findByTestId(`drift-file-${P}`)).toHaveTextContent('Identical.');
   });
-  it('a binary file says the copies differ', async () => {
+  it('a binary file says it was not compared', async () => {
     answer([{ path: P, binary: true }]);
     render(DriftPanel, props());
-    expect(await screen.findByTestId(`drift-file-${P}`)).toHaveTextContent('Binary file: the copies differ.');
+    expect(await screen.findByTestId(`drift-file-${P}`)).toHaveTextContent('Binary file; not compared.');
   });
   it('a refreshed card does not read the files again', async () => {
     const r = render(DriftPanel, props());

@@ -42,12 +42,24 @@ describe('AssetsInbox', () => {
 
   it('an open card renders as a ChangesetCard with its verbs', async () => {
     const oc = oncard();
-    render(AssetsInbox, props({ oncard: oc }));
+    const view: ChangesetView = { id: 7, kind: 'bootstrap', summary: card.summary, state: 'failed', created_at: 1, commits: {}, undoable: false, items: [
+      { position: 0, grp: 'core', catalog: 'personal', kind: 'skill', name: 'fresh', action: 'import', params: {}, decider: 'rule', state: 'pending' },
+    ] };
+    render(AssetsInbox, props({ oncard: oc, views: { 7: view } }));
     expect(screen.getByTestId('card-7')).toBeInTheDocument();
     await fireEvent.click(screen.getByTestId('card-primary-7'));
     expect(oc.apply).toHaveBeenCalledWith(7, null);
     await fireEvent.click(screen.getByTestId('card-dismiss-7'));
     expect(oc.dismiss).toHaveBeenCalledWith(7);
+  });
+
+  it('before its view loads, a card\'s primary selects it instead of applying', async () => {
+    const oc = oncard();
+    const onselect = vi.fn();
+    render(AssetsInbox, props({ oncard: oc, onselect }));
+    await fireEvent.click(screen.getByTestId('card-primary-7'));
+    expect(oc.apply).not.toHaveBeenCalled();
+    expect(onselect).toHaveBeenCalledWith('card:7');
   });
 
   it('only the selected card carries the primary verb', () => {

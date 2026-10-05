@@ -84,7 +84,7 @@ enum HostFile {
 /// bytes, `==END`; or `==MISSING <rel>`; or `==UNREADABLE <rel>`. The path
 /// reaches the shell only through `shell::quote`.
 fn read_script(rels: &[&str]) -> String {
-    let mut s = String::from("cd \"$HOME\" || exit 1\n");
+    let mut s = String::from("cd \"${HOME:?}\" || exit 1\n");
     for rel in rels {
         s.push_str(&format!(
             "f={}\n\
@@ -345,6 +345,9 @@ mod tests {
     fn the_script_quotes_every_path() {
         let s = read_script(&[".claude/skills/a'b/SKILL.md"]);
         assert!(s.contains(r#"f='.claude/skills/a'\''b/SKILL.md'"#), "{s}");
+        // An unset or empty HOME stops the script instead of reading `cd`'s
+        // fallback directory.
+        assert!(s.starts_with("cd \"${HOME:?}\" || exit 1\n"), "{s}");
     }
 }
 

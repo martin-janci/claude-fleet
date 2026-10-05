@@ -9,7 +9,7 @@
   } from './assets';
   import AssetsWorkspace from './AssetsWorkspace.svelte';
   import {
-    catalogStatuses, keyOf, loadAllLayers, loadCatalogStatuses, loadChangesets, loadLayers, PERSONAL,
+    canWrite, catalogStatuses, keyOf, loadAllLayers, loadCatalogStatuses, loadChangesets, loadLayers, PERSONAL,
     type WorkspaceView,
   } from './assets_workspace';
   import { proposeAndReload } from './assets_cards';
@@ -253,6 +253,9 @@
     } else if (r.command === 'sync') {
       void requestSync({});
     } else {
+      // The hub's propose needs the personal grant (final review minor 6).
+      const ctx = { readOnly: catalogBlocked, remote: $hubStatus.remote, clientName: $hubStatus.client_name, statuses: $catalogStatuses };
+      if (!canWrite(PERSONAL, ctx)) return;
       clearPlan();
       await proposeCards();
     }

@@ -895,6 +895,25 @@ describe('AssetsWorkspace keyboard', () => {
     expect(h.onimport).not.toHaveBeenCalled();
   });
 
+  it('a on an identity a "needs a look" or a Hide card covers selects that card, never applies it', async () => {
+    for (const first of [
+      { ...NEW_VIEW.items[0], grp: 'needs a look', params: { reason: 'carries a secret' } },
+      { ...NEW_VIEW.items[0], grp: 'hidden', action: 'hide' as const },
+    ]) {
+      const v = { ...NEW_VIEW, items: [first] };
+      withCards([NEW_CARD, v]);
+      answerCards([[NEW_CARD, v]]);
+      const h = handlers();
+      const { unmount } = render(AssetsWorkspace, h);
+      await fireEvent.click(screen.getByTestId('inbox-row-identity:skill/fresh'));
+      await fireEvent.keyDown(screen.getByTestId('assets-list'), { key: 'a' });
+      await waitFor(() => expect(screen.getByTestId('card-7').getAttribute('aria-current')).toBe('true'));
+      expect(cardCalls('catalog_apply_changeset')).toHaveLength(0);
+      expect(h.onimport).not.toHaveBeenCalled();
+      unmount();
+    }
+  });
+
   it('⌘↵ with a card selected runs its primary, not Sync', async () => {
     withCards([NEW_CARD, NEW_VIEW]);
     answerCards([[NEW_CARD, NEW_VIEW]]);

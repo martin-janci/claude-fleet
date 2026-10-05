@@ -8,11 +8,13 @@
    *  catalog's layers, grouped by catalog, each with its member count and
    *  footprint (the hosts it reaches). Create / rename / move produce cards
    *  (R5), never direct commits. */
-  let { layers, order, selectedKey, readOnly, busy, onselect, onnew, onpropose }: {
+  let { layers, order, selectedKey, readOnly, canPropose = true, busy, onselect, onnew, onpropose }: {
     layers: Record<string, LayerListing> | null;
     order: string[];
     selectedKey: string | null;
     readOnly: boolean;
+    /** The personal grant, which the hub's propose needs (final review minor 6). */
+    canPropose?: boolean;
     busy: boolean;
     onselect: (key: string) => void;
     onnew: () => void;
@@ -28,7 +30,9 @@
     <span class="sentence">{total} layer{total === 1 ? '' : 's'} across {catalogs.length} catalog{catalogs.length === 1 ? '' : 's'}</span>
     {#if !readOnly}
       <button type="button" class="btn" data-testid="layers-new" disabled={busy} onclick={onnew}>New layer</button>
-      <button type="button" class="btn btn--quiet" data-testid="layers-propose" disabled={busy} onclick={onpropose}>Propose again</button>
+      {#if canPropose}
+        <button type="button" class="btn btn--quiet" data-testid="layers-propose" disabled={busy} onclick={onpropose}>Propose again</button>
+      {/if}
     {/if}
   </div>
   {#if total === 0}

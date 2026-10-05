@@ -1116,6 +1116,11 @@ fn layer_edits(
                 ));
             }
             a.members.retain(|m| m != &member);
+            // The member's override goes with it (final review minor 1);
+            // one the target already holds for it is left as it is.
+            if let Some(o) = a.overrides.remove(&member) {
+                b.overrides.entry(member.clone()).or_insert(o);
+            }
             if !b.members.contains(&member) {
                 b.members.push(member);
             }
@@ -2719,6 +2724,39 @@ mod filter_tests {
                 why: HeldWhy::Unverified,
             }]
         );
+    }
+
+    /// M6 R1 (Task 1 carry): an `Overwrite` of the card's asset with no
+    /// verdict on the host copy is held as `Differs` — it differs, nothing
+    /// more is known; an edited one says so.
+    #[test]
+    fn an_overwrite_without_a_verdict_is_held_as_differs() {
+        let assets = BTreeSet::from(["skill/w".to_string()]);
+        let catalogs = BTreeSet::from(["personal".to_string()]);
+        let mut a = action("w", ActionOp::Overwrite, Some("personal"));
+        let held = |a: &Action| {
+            let hp = HostPlan {
+                host_alias: "oci".into(),
+                harness: "claude".into(),
+                status: "planned".into(),
+                detail: None,
+                actions: vec![a.clone()],
+                snapshot: Default::default(),
+                manifest: Default::default(),
+            };
+            held_by_host_copy(&hp, OpFilter::Additive, &assets, &catalogs)
+        };
+        a.host_copy = None;
+        assert_eq!(
+            held(&a),
+            [HeldLine {
+                kind: "skill".into(),
+                name: "w".into(),
+                why: HeldWhy::Differs,
+            }]
+        );
+        a.host_copy = Some(HostCopy::Edited);
+        assert_eq!(held(&a)[0].why, HeldWhy::Edited);
     }
 
     /// R15: no filter lets a remove, a plugin op, a no-op or a blocked
@@ -5734,6 +5772,48 @@ mod tests {
         assert_eq!(
             subjects(&f.personal_root)[0],
             "fleet: Move skill/w from core to extra in personal"
+        );
+    }
+
+    /// Final review minor 1: a moved member's override goes with it.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_move_member_card_carries_the_members_override() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        f.commit_files(
+            &f.personal_root,
+            f.personal.id,
+            &[(
+                "layers/core.yaml",
+                "kind: layer\nname: core\naxis: context\nmembers:\n- skill/w\n\
+                 overrides:\n  skill/w:\n    version: \"2\"\n",
+            )],
+        );
+        f.add_layer("extra", &[]);
+        let (home, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let v = propose_and_apply(
+            &f,
+            LayerChange::Move {
+                catalog: None,
+                member: "skill/w".into(),
+                layer: "core".into(),
+                to: "extra".into(),
+            },
+            &ssh,
+        )
+        .await;
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        assert!(layer_in(&f, "core").overrides.is_empty());
+        let extra = layer_in(&f, "extra");
+        assert_eq!(extra.members, vec!["skill/w".to_string()]);
+        assert_eq!(
+            extra
+                .overrides
+                .get("skill/w")
+                .and_then(|o| o.get("version")),
+            Some(&serde_yaml::Value::from("2"))
         );
     }
 

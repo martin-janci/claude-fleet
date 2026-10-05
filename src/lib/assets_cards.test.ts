@@ -34,8 +34,11 @@ describe('primaryVerb', () => {
   it('a closed card has no primary', () => {
     expect(primaryVerb(summary({ state: 'applied' }), null)).toBeNull();
   });
-  it('without the full card, falls back to the summary groups', () => {
-    expect(primaryVerb(summary({ kind: 'bootstrap', groups: { core: 4, 'needs a look': 2 } }), null)).toEqual({ label: 'Adopt', apply: true });
+  it('without the full card, a card whose verb depends on its items applies nothing blind', () => {
+    expect(primaryVerb(summary({ kind: 'bootstrap', groups: { core: 4, 'needs a look': 2 } }), null)).toEqual({ label: 'Adopt', apply: false });
+    expect(primaryVerb(summary({ kind: 'new' }), null)).toEqual({ label: 'Adopt', apply: false });
+    expect(primaryVerb(summary({ kind: 'rollout' }), null)).toEqual({ label: 'Roll out', apply: false });
+    expect(primaryVerb(summary({ kind: 'layer' }), null)).toEqual({ label: 'Apply', apply: true });
   });
 });
 

@@ -12,25 +12,29 @@ const CATALOG_ACTIONS = new Set(['import', 'take_host', 'create_layer', 'rename_
 
 export interface Verb { label: string; apply: boolean }
 
+/** The card's one primary verb. Before its view loads, a card whose verb
+ *  depends on its items (bootstrap, new, rollout) offers it without applying:
+ *  the button selects the card instead of applying something unseen. */
 export function primaryVerb(card: ChangesetSummary, view: ChangesetView | null | undefined): Verb | null {
   if (!isOpenCard(card)) return null;
   switch (card.kind) {
     case 'bootstrap': {
-      if (!view) return { label: 'Adopt', apply: true };
+      if (!view) return { label: 'Adopt', apply: false };
       const imports = view.items.filter((i) => i.action === 'import' && i.grp !== NEEDS_A_LOOK && i.state === 'pending');
       const layers = new Set(imports.map((i) => i.grp));
       return { label: `Adopt ${imports.length} as ${layers.size} layer${layers.size === 1 ? '' : 's'}`, apply: true };
     }
     case 'new': {
       const first = view?.items[0];
-      if (!first) return { label: 'Adopt', apply: true };
+      if (!first) return { label: 'Adopt', apply: false };
       if (first.grp === NEEDS_A_LOOK) return { label: 'Review', apply: false };
       if (first.action === 'hide') return { label: 'Hide', apply: true };
       return { label: `Adopt into ${first.grp}`, apply: true };
     }
     case 'rollout': {
       const hosts = new Set((view?.items ?? []).filter((i) => i.state === 'pending').map((i) => i.name));
-      return { label: view ? `Roll out to ${hosts.size} host${hosts.size === 1 ? '' : 's'}` : 'Roll out', apply: true };
+      if (!view) return { label: 'Roll out', apply: false };
+      return { label: `Roll out to ${hosts.size} host${hosts.size === 1 ? '' : 's'}`, apply: true };
     }
     case 'drift':
       return { label: 'Review diff', apply: false };

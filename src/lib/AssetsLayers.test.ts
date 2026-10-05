@@ -37,6 +37,11 @@ describe('AssetsLayers', () => {
     expect(screen.queryByTestId('layers-new')).toBeNull();
     expect(screen.queryByTestId('layers-propose')).toBeNull();
   });
+  it('Propose again needs the personal grant (the hub\'s propose does), whatever else is writable', () => {
+    render(AssetsLayers, props({ canPropose: false }));
+    expect(screen.getByTestId('layers-new')).toBeInTheDocument();
+    expect(screen.queryByTestId('layers-propose')).toBeNull();
+  });
   it('says when nothing is loaded', () => {
     render(AssetsLayers, props({ layers: {} }));
     expect(screen.getByTestId('layers-view')).toHaveTextContent('No layers yet');

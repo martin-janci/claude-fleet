@@ -25,7 +25,7 @@
     loadCatalogStatuses, loadChangesets, parseKey, PERSONAL, proposeLayerChange, unadmitCatalog,
     type ChangesetSummary, type LayerChange, type WorkspaceView,
   } from './assets_workspace';
-  import { coveringNewCard, mergePlans, olderHubWords, primaryVerb, proposeAndReload } from './assets_cards';
+  import { coveringNewCard, mergePlans, NEEDS_A_LOOK, olderHubWords, primaryVerb, proposeAndReload } from './assets_cards';
   import { runCardVerb, type CardVerbs } from './card_actions';
   import { buildInbox, hostOrderOf, keepCard, lastScanOf, sentence } from './assets_inbox';
   import { keep, parseQuery, type QueryRow } from './assets_query';
@@ -348,7 +348,8 @@
   }
   /** "Propose again": the hub re-derives its cards from the hosts as they are. */
   async function proposeAgain() {
-    if (anyBusy) return;
+    // The hub's propose needs the personal grant.
+    if (anyBusy || !canWrite(PERSONAL, ctx)) return;
     cardBusy = 'card';
     let n;
     try {
@@ -491,10 +492,15 @@
       case 'a': {
         if (readOnly || sel?.type !== 'identity' || !listing) break;
         // A New card that covers the identity is the one adopt: apply it
-        // rather than opening Import for the same copy.
+        // rather than opening Import for the same copy. One that needs a
+        // look, or that hides the copy, is not an adopt: `a` selects it.
         const covering = coveringNewCard($changesetSummaries, $cardViews, sel.kind, sel.name);
         if (covering) {
-          if (!anyBusy && cardWritable(covering)) {
+          const first = $cardViews[covering.id]?.items[0];
+          if (!first || first.grp === NEEDS_A_LOOK || first.action === 'hide') {
+            e.preventDefault();
+            select(keyOf({ type: 'card', id: covering.id }));
+          } else if (!anyBusy && cardWritable(covering)) {
             e.preventDefault();
             cardVerbs.apply(covering.id, null);
           }
@@ -682,6 +688,7 @@
           {order}
           {selectedKey}
           readOnly={readOnly || layerCatalogs.length === 0}
+          canPropose={canWrite(PERSONAL, ctx)}
           busy={anyBusy}
           onselect={select}
           onnew={() => (creating = !creating)}
