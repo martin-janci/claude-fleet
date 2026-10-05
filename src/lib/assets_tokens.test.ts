@@ -14,6 +14,7 @@ const GUARDED = [
   'HostStrip.svelte',
   'Badge.svelte',
   'IdentityRow.svelte',
+  'AssetsInbox.svelte',
 ];
 
 const styleOf = (src: string) => src.match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '';
