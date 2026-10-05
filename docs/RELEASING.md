@@ -90,7 +90,11 @@ generated from it.
 
    It tags [fleet-mobile](https://github.com/martin-janci/fleet-mobile)'s
    `main` head `v0.3.0` — refusing if claude-fleet's own `v0.3.0` is not on
-   GitHub yet, if fleet-mobile's CI has not passed on that commit, or if
+   GitHub yet, if that commit's `MIN_HUB_CONTRACT..MAX_HUB_CONTRACT`
+   (`shared/…/net/HubContract.kt`) does not cover the `CONTRACT_REVISION`
+   the claude-fleet tag ships (a hub contract bump needs a fleet-mobile PR
+   first — 0.4.8's phone refused its own hub as "too old"), if fleet-mobile's
+   CI has not passed on that commit, or if
    fleet-mobile already has `v0.3.0` somewhere else — and that tag starts
    fleet-mobile's `release.yml`: test, build, sign with the release key,
    publish a release with the APK. The claude-fleet release body already

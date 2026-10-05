@@ -171,6 +171,11 @@ jobs:
       # Buildkite API on loopback (docs/buildkite.md). A few seconds.
       - name: Buildkite client
         run: bash scripts/buildkite-verify-test.sh
+      # scripts/release-mobile.sh against a fake gh: the phone's
+      # MIN/MAX_HUB_CONTRACT must cover the hub revision it is paired with
+      # (fleet-mobile 0.4.8 shipped at 7 beside a revision-8 hub). A second.
+      - name: release-mobile contract guard
+        run: bash scripts/release-mobile-test.sh
 
   # tools/ag (the agent launcher) against fake claude/codex binaries. macOS
   # runs it under the stock /bin/bash 3.2 — the whole point of ag's

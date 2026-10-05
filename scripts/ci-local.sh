@@ -227,6 +227,9 @@ step bash scripts/verify-test.sh
 # scripts/buildkite-verify.sh against a fake Buildkite API: a few seconds.
 step bash scripts/buildkite-verify-test.sh
 
+# scripts/release-mobile.sh's contract guard against a fake gh: a second.
+step bash scripts/release-mobile-test.sh
+
 # tools/ag (the agent launcher) against fake claude/codex binaries. bash +
 # a few seconds; see .github/workflows/ci.yml's ag job for the matching
 # macOS-under-bash-3.2 leg CI runs that this local step doesn't.

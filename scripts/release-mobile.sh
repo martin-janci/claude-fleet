@@ -14,6 +14,10 @@
 # It refuses, rather than tagging something it cannot vouch for, when:
 #   - claude-fleet has no tag vX.Y.Z on GitHub yet (push it first — the
 #     phone release follows the fleet one, never leads it);
+#   - fleet-mobile's `main` head does not accept the hub wire-contract
+#     revision the claude-fleet tag ships (its MIN/MAX_HUB_CONTRACT must
+#     cover CONTRACT_REVISION) — fleet-mobile 0.4.8 went out at MAX 7
+#     beside a revision-8 hub and refused it as "this app is too old";
 #   - fleet-mobile's CI has not passed on its `main` head;
 #   - fleet-mobile already has vX.Y.Z at a DIFFERENT commit. The same
 #     commit is a no-op, so a re-run after a network hiccup is safe.
@@ -57,6 +61,27 @@ if [[ -n "$EXISTING" ]]; then
   echo "$MOBILE_REPO $TAG already points at main ${HEAD_SHA:0:12}; nothing to do"
   exit 0
 fi
+
+# The phone must accept the hub this release ships. Both numbers are read at
+# the exact refs being paired — the claude-fleet tag and the fleet-mobile
+# commit about to be tagged — never from a local checkout, which can be on
+# any branch. An unreadable number refuses: guessing would be the same
+# silent skew this check exists to stop.
+file_at() { # file_at <repo> <path> <ref>
+  gh api -H "Accept: application/vnd.github.raw" "repos/$1/contents/$2?ref=$3" 2>/dev/null || true
+}
+HUB_REV="$(file_at "$FLEET_REPO" crates/fleet-core/src/wire_contract.rs "$TAG" \
+  | sed -nE 's/^pub const CONTRACT_REVISION: u32 = ([0-9]+);.*/\1/p')"
+[[ "$HUB_REV" =~ ^[0-9]+$ ]] \
+  || die "could not read CONTRACT_REVISION from $FLEET_REPO $TAG (crates/fleet-core/src/wire_contract.rs)"
+MOBILE_CONTRACT="$(file_at "$MOBILE_REPO" shared/src/commonMain/kotlin/dev/claudefleet/mobile/net/HubContract.kt "$HEAD_SHA")"
+MOBILE_MIN="$(sed -nE 's/^const val MIN_HUB_CONTRACT: Int = ([0-9]+).*/\1/p' <<<"$MOBILE_CONTRACT")"
+MOBILE_MAX="$(sed -nE 's/^const val MAX_HUB_CONTRACT: Int = ([0-9]+).*/\1/p' <<<"$MOBILE_CONTRACT")"
+[[ "$MOBILE_MIN" =~ ^[0-9]+$ && "$MOBILE_MAX" =~ ^[0-9]+$ ]] \
+  || die "could not read MIN/MAX_HUB_CONTRACT from $MOBILE_REPO main ${HEAD_SHA:0:12} (shared/…/net/HubContract.kt)"
+((MOBILE_MIN <= HUB_REV && HUB_REV <= MOBILE_MAX)) \
+  || die "$MOBILE_REPO main ${HEAD_SHA:0:12} accepts hub contracts $MOBILE_MIN..$MOBILE_MAX, but claude-fleet $TAG ships hub contract $HUB_REV — the app would refuse its own hub; bump fleet-mobile's HubContract.kt first"
+echo "$MOBILE_REPO main ${HEAD_SHA:0:12}: accepts hub contract $HUB_REV ($MOBILE_MIN..$MOBILE_MAX)"
 
 # The newest CI run for exactly this commit — an older green run on another
 # commit says nothing about this one.
