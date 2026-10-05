@@ -37,6 +37,7 @@ import {
 } from './sessions';
 import { shareSheetFor } from './share';
 import { hubStatus, STANDALONE } from './hub';
+import { hubConnection } from './hub_connection';
 import { resetAccessForTests, setMyGrants } from './access';
 import { session } from './hosts_fixture';
 
@@ -69,6 +70,7 @@ beforeEach(() => {
   // Standalone, which is `own` on every row (`access.ts` rule 1) — the owner's
   // view, which is the only one the sheet's controls are for.
   hubStatus.set({ ...STANDALONE });
+  hubConnection.set({ state: 'standalone' });
   resetAccessForTests();
   sessions.set([ROW]);
   shareSheetFor.set(42);
@@ -202,6 +204,10 @@ describe('ShareSheet', () => {
     // owner's tool, and this is what a revoke ARRIVING while it is open looks
     // like.
     hubStatus.set({ ...STANDALONE, remote: true, url: 'https://fleet.example.com' });
+    // …with the link down as well (F3), because the notice asks the ACCESS
+    // half only: "try again once the hub is back" would promise a grantee
+    // something that will still not be theirs when it is.
+    hubConnection.set({ state: 'offline', attempt: 1, retry_in_secs: 5, reason: 'refused' });
     setMyGrants(9, [{ session_id: 42, level: 'drive' }]);
     render(ShareSheet);
     await settle();
@@ -256,6 +262,37 @@ describe('ShareSheet', () => {
     expect(screen.getByTestId('share-grant-who').textContent).toContain('#2');
     expect((screen.getByTestId('share-revoke') as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByTestId('share-narrow') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  // Multi-user M1, F3: all three writes are `ROUTED_ACTIONS` entries now, so
+  // the sheet asks the live link as well as the access half. A paired desktop
+  // whose hub is unreachable keeps the sheet (the grant list it already read
+  // is still worth showing) but offers no button that would die on the wire.
+  it('disables all three writes while the paired hub is unreachable', async () => {
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://fleet.example.com' });
+    hubConnection.set({ state: 'offline', attempt: 3, retry_in_secs: 5, reason: 'refused' });
+    // The owner, on a paired desktop: `own` on this row, so the sheet renders
+    // its controls and the only thing left to stop a click is the link.
+    setMyGrants(1, []);
+    mockedList.mockResolvedValue({ ok: true, value: [grant({ level: 'drive' })] });
+    render(ShareSheet);
+    await settle();
+    await fireEvent.input(screen.getByTestId('share-person'), { target: { value: 'bea' } });
+    await settle();
+    const confirm = screen.getByTestId('share-confirm') as HTMLButtonElement;
+    const narrow = screen.getByTestId('share-narrow') as HTMLButtonElement;
+    const revoke = screen.getByTestId('share-revoke') as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    expect(narrow.disabled).toBe(true);
+    expect(revoke.disabled).toBe(true);
+    // The sentence is the offline one, not "this session is not yours": the
+    // row IS this person's, and the hub is the problem.
+    for (const b of [confirm, narrow, revoke]) {
+      expect(b.title).toMatch(/unreachable right now/i);
+    }
+    await fireEvent.click(confirm);
+    await settle();
+    expect(mockedShare).not.toHaveBeenCalled();
   });
 
   it('shows a failed read as an error, not as "shared with nobody"', async () => {

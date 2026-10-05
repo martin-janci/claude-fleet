@@ -9718,7 +9718,7 @@ async fn list_hosts_serves_the_unclaimed_count_only_on_a_one_person_fleet() {
 /// have two: `dispatch_task` reads the requester and drives the worker,
 /// `work_link` drives a per-session work write and owns `tidy_apply`'s
 /// kills.
-const SESSION_REACH: &[(&str, &[&str])] = &[
+pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // lifecycle.rs
     ("kill_session", &["Own"]),
     ("move_session", &["Own"]),
@@ -9859,7 +9859,7 @@ const SESSION_REACH: &[(&str, &[&str])] = &[
 /// Session-addressed tools that deliberately gate no single row, with the
 /// reason. A row here is a claim a reviewer can check, not an exemption:
 /// each one has somewhere else the rule is applied.
-const NO_PER_ROW_GATE: &[(&str, &str)] = &[
+pub(super) const NO_PER_ROW_GATE: &[(&str, &str)] = &[
     (
         "list_sessions",
         "choke point 1 (T6): it FILTERS a page through `sees_session_row` \
@@ -10075,7 +10075,7 @@ fn schema_property_names(v: &serde_json::Value, out: &mut std::collections::BTre
 /// `work_link`'s `resume` / `summarize` arms shipped ungated past the first
 /// version of this test. The question "does this tool reach a session?" has
 /// to be asked of the tool's contract instead.
-fn session_addressed_tools() -> std::collections::BTreeMap<String, Vec<String>> {
+pub(super) fn session_addressed_tools() -> std::collections::BTreeMap<String, Vec<String>> {
     FleetTools::tool_router_for_doc()
         .list_all()
         .into_iter()

@@ -58,6 +58,8 @@ mod tests_catalog_admin;
 mod tests_isolation;
 #[cfg(test)]
 mod tests_read_pool;
+#[cfg(test)]
+mod tests_sessions_isolation;
 mod updates;
 mod views;
 

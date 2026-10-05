@@ -360,6 +360,20 @@ export const ROUTED_ACTIONS = [
   'save_work_view',
   'delete_work_view',
   'add_project',
+  // Multi-user M1 (F3): the Share sheet's three writes. They route to the
+  // hub's sharing tools (T13), so a paired desktop can take them while the
+  // live link is up and must not offer them while it is down.
+  //
+  // The milestone's three routed READS are deliberately absent, by this
+  // list's own rule above: `session_access` (the sheet's grant list),
+  // `capture_session` (the watcher's pane snapshot) and `my_grants` have no
+  // control to disable. `my_grants` failing is a different surface again —
+  // `access.ts`'s fail-closed arm, which disables what it cannot vouch for
+  // and says the hub has not told this device who it is, rather than "try
+  // again once connected".
+  'session_share',
+  'session_unshare',
+  'session_narrow',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];

@@ -29,6 +29,7 @@ import { sessions, type SessionRow } from './sessions';
 import { get } from 'svelte/store';
 import { moves, resetMovesForTest, startMove, resolveMoveRun, transferSheetFor } from './moves';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
 import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
 import { shareSheetFor } from './share';
 
@@ -64,6 +65,7 @@ beforeEach(() => {
   // fleet, so the multi-user derivation answers `own` for every row and the
   // panel looks exactly as it did before M1.
   hubStatus.set({ ...STANDALONE });
+  hubConnection.set({ state: 'standalone' });
   resetAccessForTests();
   shareSheetFor.set(null);
 });
@@ -916,6 +918,20 @@ describe('SessionDetails Share… and the per-session action gate (multi-user M1
     await tick();
     expect(dis('share-from-details')).toBe(true);
     expect(screen.getByTestId('share-from-details').title).toMatch(/only the session’s owner/i);
+  });
+
+  it('the owner’s Share… is disabled while the paired hub is unreachable', async () => {
+    // Multi-user M1, F3: `session_share` routes to the hub, so the button
+    // asks the live link as well as the access half. The row IS this
+    // person's, so the sentence must be the offline one — opening a sheet
+    // whose every button then fails is the failure this prevents.
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'offline', attempt: 2, retry_in_secs: 5, reason: 'refused' });
+    setMyGrants(ME, []);
+    render(SessionDetails, { props: { session: mine } });
+    await tick();
+    expect(dis('share-from-details')).toBe(true);
+    expect(screen.getByTestId('share-from-details').title).toMatch(/unreachable right now/i);
   });
 
   it('a driver keeps Send prompt and loses the own-tier actions', async () => {
