@@ -8,6 +8,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.4.8] - 2026-10-05
+
+### Added
+- **hub:** fleet-hub person list | rename | disable
+- **assets-ui:** keyboard for the workspace
+- **assets-ui:** the Assets workspace replaces the twelve-button toolbar
+- **assets-ui:** AssetsWorkspace and AssetsRail — the shell around the Inbox, Library, Inspector and footer
+- **assets-ui:** the footer — a chip per catalog, auto, JobChip and the last sync
+- **assets-ui:** blockedOnSecrets — the producer for the Inbox's blocked predicate
+- **assets-ui:** the Inspector — a tabbed pane over the detail, the editor and History
+- **assets-ui:** AssetDetail takes a section — overview, hosts or source
+- **assets-ui:** the Library — every asset once per catalog, badges, host dots, the token query
+- **assets-ui:** QueryInput, the token filter as a keyboard combobox
+- **assets-ui:** the Inbox — open cards first, then what needs you, in sync folded
+- **assets-ui:** the Inbox model and the sentence header
+- **assets-ui:** the token query with completion and the one keep() every view uses
+- **assets-ui:** workspace stores and loaders, selection keys, scope badge, write rights
+- **assets-ui:** wire types for drift side, catalog and the auto run; one host order and one odd-host parser
+- **assets-ui:** Badge in the Assets lists and plan, tokens instead of literal colours
+- **assets-ui:** Badge, host-dot states and the shared visual vocabulary
+- **assets:** four read-only workspace commands, routed to the hub (R13)
+- **catalog:** asset_history -- the commits that touched one asset, per catalog
+- **assets:** list every catalog's assets, with each catalog's own host states
+- **changesets:** a drift card is only for a copy someone edited
+- **m1:** T13 — desktop commands, capture_session for the watcher, contract 7
+- **catalog:** a drifted managed row says which side moved
+- **store:** the inventory records which side moved (migration 096: drift_side)
+- **m1:** T12 — the sharing tools, Access::HostToken, and the claim path
+- **sync:** the manifest records file hashes, so a plan tells an edited host copy from a stale one
+- **m1:** T11 — long polls re-check access on every wake and before returning
+
+### Changed
+- **m1:** the org-boundary e2e checks assert M1's rule, not the pre-M1 one
+- pin the changesets fixture's harness set and the downloads dir's writers
+- **m1:** matrix cells for main's send_file and list_downloads
+- **m1:** T15 — two people on one hub, end to end in hub-e2e
+- **mcp:** one may_list_every_catalog predicate for list_assets and list_catalogs
+- **m1:** the session isolation matrix, T14; plus F3's share sheet and D1's docs
+- **assets-ui:** IdentityRow, the one unmanaged-identity row, shared by the list and the Inbox
+- **m1:** multi-user foundations — people, ownership, grants, the person gate
+
+### Fixed
+- **m1:** migration 097's owner triggers lost their OR IGNORE on the upsert path
+- **assets-ui:** e keeps an open draft; drifted cells say which side moved
+- **sync:** a moved asset's old copy is deleted automatically only when verified unchanged
+- **m1:** the merge's real breakage — migration versions, the download tier's tables
+- **assets:** catalog chips say where the catalog lives; Secrets waits while busy; Import guards itself; the read-only chip controls its note
+- **assets:** the Inspector keeps an open editor's draft, re-reads History, and never opens an org asset as personal
+- **assets:** cards ignore every token, No matches, Import label, one shared row lead
+- **assets:** only update/overwrite/plugin_update plan reasons read as warnings
+- **assets:** the every-catalog listing is opt-in; a broken checkout has no empty history
+- **sync:** the last sync shown is the newest a person made
+- **changesets:** list answers undoability in one pass; the pass prunes old withdrawn cards
+- **changesets:** rollout decisions order by when they were made (migration 097)
+- **changesets:** names that import as one slug need a look, not a failed card
+- **sync:** an entry that records no location stays unverified against the render
+- **sync:** a card names the updates it held back for their host copy, and never counts that host done
+- **sync:** read the host copy against the render, so a location it adds over a person's content is an edit
+- **m1:** delete the name-keyed owner intent; close the claim primitive
+- **m1:** T9e/T10 — the link-less item hole, honest guard table, remaining scope sites
+
+### Documentation
+- the transcript flake's real cause is an unpinned HOME
+- two more Rust flakes, both with thin margins
+- Assets M5 safety comments match the code
+- Assets M5 — the workspace shell
+- INTEGRATION-REPORT — D5 records the KIND_FENCES classification
+- **m1:** the spec is no longer an unbuilt analysis
+- **m1:** correct the plan's status and the six items T8 recorded as open
+- regenerate the control API reference for the four workspace commands
+- Assets M5 implementation plan (workspace shell, host-copy signal)
+- MERGE-REPORT records the third pass
 ## [0.4.7] - 2026-10-05
 
 ### Changed
@@ -2584,6 +2656,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.4.8]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.8
 [0.4.7]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.7
 [0.4.6]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.6
 [0.4.5]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.5
