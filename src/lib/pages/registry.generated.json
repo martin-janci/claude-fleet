@@ -3996,6 +3996,9 @@
           "type": "text"
         },
         {
+          "badge": {
+            "when": "label"
+          },
           "help": "Whether fleet could read the catalog's repo the last time it looked.",
           "id": "state",
           "label": "State",

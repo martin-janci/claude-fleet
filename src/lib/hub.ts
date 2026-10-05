@@ -194,6 +194,13 @@ const REASONS = {
     'a host’s org is its token’s boundary, set only by the fleet’s administrator — use `fleet-hub org assign-host`',
   assign_tracker_org:
     'which org a tracker belongs to is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub org assign-tracker`',
+  // Asset catalogs (Assets M6, R11): which catalogs exist is the master's
+  // alone (`add_catalog` / `remove_catalog` are `MasterOnly`). Both commands
+  // ROUTE, so this is not a command-named key: Settings → Catalogs shows a
+  // paired desktop this reason (`resourceBlock`), and the commands keep their
+  // routed verdicts.
+  catalog_registry:
+    'which catalogs exist, and who may change them, is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub catalog add` / `remove`, and `fleet-hub client grant`',
 
   // --- things about THIS machine ------------------------------------------
   // (No `terminal` key: the terminal is not blocked by being a hub client.
@@ -272,6 +279,34 @@ export function hubBlock(action: HubAction, status: HubStatus = get(hubStatus)):
   if (!status.remote) return null;
   const where = status.url ?? 'the hub';
   return `${REASONS[action]}. Do it on the hub (${where}).`;
+}
+
+/**
+ * The reason a resource's routed commands share when the hub refuses a client
+ * the whole page: master-only commands that ROUTE (so `REASONS` has no key of
+ * their name).
+ */
+const MASTER_ONLY_RESOURCE_COMMANDS: Readonly<Record<string, HubAction>> = {
+  catalog_add_catalog: 'catalog_registry',
+  catalog_remove_catalog: 'catalog_registry',
+};
+
+/**
+ * Why a resource's page is read-only here, or `null` when it is not: the
+ * reason of its update command, else its create, else its delete — a resource
+ * with no update (Catalogs) is explained by the command a client would reach
+ * for first. `null` in standalone mode, like `hubBlock`.
+ */
+export function resourceBlock(
+  resource: { update?: { command: string }; create?: { command: string }; delete?: { command: string } },
+  status: HubStatus = get(hubStatus),
+): string | null {
+  for (const a of [resource.update, resource.create, resource.delete]) {
+    if (!a) continue;
+    const key = Object.hasOwn(REASONS, a.command) ? (a.command as HubAction) : MASTER_ONLY_RESOURCE_COMMANDS[a.command];
+    if (key) return hubBlock(key, status);
+  }
+  return null;
 }
 
 // ---- offline gating: routed mutations while the live link is down ---------

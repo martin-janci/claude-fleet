@@ -58,6 +58,12 @@ const openRow = () => screen.findByRole('option', { name: /acme/ });
 const show = () => render(ResourcePage, { props: { page, resource } });
 
 describe('Settings → Catalogs', () => {
+  it('shows each catalog’s state in words on its row', async () => {
+    show();
+    const row = await openRow();
+    expect(row.textContent).toContain('Loaded');
+  });
+
   it('lists catalogs with who admits and who is granted', async () => {
     show();
     await fireEvent.click(await openRow());

@@ -582,7 +582,7 @@ const CATALOG: ResourceType = ResourceType {
     empty: "No catalogs yet. Add an org's catalog by its checkout path.",
     fields: &[
         FieldSpec::new("name", "Name", "What hosts, grants and cards call it; fixed once added.", FieldKind::Text { max: 64 }),
-        FieldSpec::new("state", "State", "Whether fleet could read the catalog's repo the last time it looked.", FieldKind::Choice { options: CATALOG_STATES }),
+        FieldSpec::new("state", "State", "Whether fleet could read the catalog's repo the last time it looked.", FieldKind::Choice { options: CATALOG_STATES }).badge(Badge::Label),
         FieldSpec::new("repo_path", "Checkout", "Where the catalog's git repo is on this machine.", FieldKind::Text { max: 512 }),
         FieldSpec::new("remote_url", "Remote", "Its git remote, if any.", FieldKind::Text { max: 512 }),
         FieldSpec::new("org", "Org", "The org whose hosts receive it; none for personal.", FieldKind::Text { max: 128 }),
