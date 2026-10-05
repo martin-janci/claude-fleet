@@ -1315,7 +1315,11 @@ pub(crate) mod routed {
                 hub.route("catalog_add_catalog", &AdminCall::AddCatalog(args))
                     .await
             }
-            None => catalog::catalogs::add_catalog(args, store),
+            None => {
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
+                catalog::catalogs::add_catalog(args, store)
+            }
         }
     }
 
@@ -1329,7 +1333,11 @@ pub(crate) mod routed {
                 hub.route("catalog_remove_catalog", &AdminCall::RemoveCatalog(args))
                     .await
             }
-            None => catalog::catalogs::remove_catalog(&args.name, store),
+            None => {
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
+                catalog::catalogs::remove_catalog(&args.name, store)
+            }
         }
     }
 
